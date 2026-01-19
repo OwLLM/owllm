@@ -52,7 +52,7 @@ models:
     base_model: C:\1_Git\LocaLLM\LLM\models\unsloth__gemma-2-2b-it-bnb-4bit
     adapter_dir: null
     model_type: instruct
-    port: 10506
+    port: 10511
     use_4bit: true
     system_prompt: ''
   nvidia_Llama-3.1-Nemotron-Nano-VL-8B-V1:
@@ -80,7 +80,7 @@ models:
     base_model: C:\1_Git\LocaLLM\LLM\models\elinas__alpaca-30b-lora-int4
     adapter_dir: null
     model_type: base
-    port: 10500
+    port: 10506
     use_4bit: true
     system_prompt: ''
   unsloth_Llama-3.2-11B-Vision-Instruct-bnb-4bit:
@@ -94,6 +94,20 @@ models:
     base_model: C:\1_Git\LocaLLM\LLM\models\deepseek-ai__DeepSeek-Coder-V2-Lite-Instruct
     adapter_dir: null
     model_type: instruct
-    port: 10500
+    port: 10513
+    use_4bit: true
+    system_prompt: ''
+  adapter_20260108_163145:
+    base_model: C:\1_Git\LocaLLM\LLM\fine_tuned\adapter_20260108_163145
+    adapter_dir: null
+    model_type: base
+    port: 10514
+    use_4bit: true
+    system_prompt: ''
+  adapter_20260108_160523:
+    base_model: C:\1_Git\LocaLLM\LLM\fine_tuned\adapter_20260108_160523
+    adapter_dir: null
+    model_type: base
+    port: 10515
     use_4bit: true
     system_prompt: ''

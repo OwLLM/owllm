@@ -543,6 +543,8 @@ class RepairThread(QThread):
             from tqdm import tqdm
             import os
             import requests
+            import threading
+            import time
             from urllib.parse import quote
             
             # Get total size for progress
@@ -567,28 +569,76 @@ class RepairThread(QThread):
                     self.total = total
                     self.downloaded = 0
                     self.signal = signal
-                    self.last_percent = 5
-                    self._fallback_percent = 5
+                    self.last_percent = 2
+                    self._fallback_percent = 2
                     self._fallback_bytes = 0
                 
-                def update(self, n):
-                    self.downloaded += n
-                    if self.total > 0:
-                        percent = int(self.downloaded * 100 / self.total)
-                        percent = max(5, min(percent, 99))
-                        if percent > self.last_percent:
-                            self.last_percent = percent
-                            self.signal.emit(percent)
-                    else:
-                        # Fallback: show "activity" progress even when total size is unknown
-                        self._fallback_bytes += n
-                        # Advance ~1% per ~50MB downloaded (clamped)
-                        if self._fallback_bytes >= 50 * 1024 * 1024 and self._fallback_percent < 99:
-                            self._fallback_bytes = 0
-                            self._fallback_percent += 1
-                            self.signal.emit(self._fallback_percent)
+                def update_percent(self, percent):
+                    if percent is None:
+                        return
+                    percent = max(2, min(int(percent), 99))
+                    if percent > self.last_percent:
+                        self.last_percent = percent
+                        self.signal.emit(percent)
+
+                def update_fallback(self, n):
+                    # Fallback: show "activity" progress even when total size is unknown
+                    self._fallback_bytes += max(0, n)
+                    # Advance ~1% per ~50MB downloaded (clamped)
+                    if self._fallback_bytes >= 50 * 1024 * 1024 and self._fallback_percent < 99:
+                        self._fallback_bytes = 0
+                        self._fallback_percent += 1
+                        self.signal.emit(self._fallback_percent)
             
             tracker = ProgressTracker(total_size, self.progress)
+            
+            # Background monitor to update progress based on bytes on disk
+            monitor_stop = threading.Event()
+            def _dir_size_bytes(path: Path) -> int:
+                total = 0
+                for root, _, files in os.walk(path):
+                    for name in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, name))
+                        except OSError:
+                            continue
+                return total
+            
+            def _monitor_progress(path: Path):
+                last_percent = 2
+                last_bytes = 0
+                # Wait for directory to be created (up to 30 seconds)
+                waited = 0
+                while not path.exists() and waited < 30 and not monitor_stop.is_set():
+                    time.sleep(1)
+                    waited += 1
+                
+                while not monitor_stop.is_set():
+                    if path.exists():
+                        try:
+                            size_bytes = _dir_size_bytes(path)
+                            if total_size > 0:
+                                percent = int((size_bytes / total_size) * 100)
+                                percent = max(2, min(percent, 99))
+                                if percent > last_percent:
+                                    last_percent = percent
+                                    self.progress.emit(percent)
+                            else:
+                                # Fallback: advance when at least 50MB written
+                                if size_bytes - last_bytes >= 50 * 1024 * 1024 and last_percent < 99:
+                                    last_bytes = size_bytes
+                                    last_percent += 1
+                                    self.progress.emit(last_percent)
+                        except Exception:
+                            pass  # Ignore errors during directory scanning
+                    time.sleep(0.5)
+            
+            monitor_thread = threading.Thread(
+                target=_monitor_progress,
+                args=(self.existing_dir,),
+                daemon=True
+            )
+            monitor_thread.start()
             
             class CustomTqdm(tqdm):
                 def __init__(self, *args, **kwargs):
@@ -596,7 +646,12 @@ class RepairThread(QThread):
                 
                 def update(self, n=1):
                     displayed = super().update(n)
-                    tracker.update(n)
+                    total = getattr(self, "total", 0) or 0
+                    current = getattr(self, "n", 0) or 0
+                    if total:
+                        tracker.update_percent((current / total) * 100)
+                    else:
+                        tracker.update_fallback(n)
                     return displayed
             
             # Download with resume_download=True to only fetch missing files
@@ -608,10 +663,15 @@ class RepairThread(QThread):
                 tqdm_class=CustomTqdm
             )
             
+            monitor_stop.set()
+            monitor_thread.join(timeout=2)
             self.progress.emit(100)
             self.finished.emit(str(self.existing_dir))
             
         except Exception as e:
+            monitor_stop.set()
+            if 'monitor_thread' in locals():
+                monitor_thread.join(timeout=2)
             self.error.emit(str(e))
 
 
@@ -633,6 +693,8 @@ class DownloadThread(QThread):
             from tqdm import tqdm
             import os
             import requests
+            import threading
+            import time
             from urllib.parse import quote
             
             # 1. Try to get total size for accurate progress tracking
@@ -657,29 +719,81 @@ class DownloadThread(QThread):
                     self.total = total
                     self.downloaded = 0
                     self.signal = signal
-                    self.last_percent = 5
-                    self._fallback_percent = 5
+                    self.last_percent = 2
+                    self._fallback_percent = 2
                     self._fallback_bytes = 0
                 
-                def update(self, n):
-                    self.downloaded += n
-                    if self.total > 0:
-                        percent = int(self.downloaded * 100 / self.total)
-                        # Clamp and only emit if increased
-                        percent = max(5, min(percent, 99))
-                        if percent > self.last_percent:
-                            self.last_percent = percent
-                            self.signal.emit(percent)
-                    else:
-                        # Fallback: show "activity" progress even when total size is unknown
-                        self._fallback_bytes += n
-                        # Advance ~1% per ~50MB downloaded (clamped)
-                        if self._fallback_bytes >= 50 * 1024 * 1024 and self._fallback_percent < 99:
-                            self._fallback_bytes = 0
-                            self._fallback_percent += 1
-                            self.signal.emit(self._fallback_percent)
+                def update_percent(self, percent):
+                    if percent is None:
+                        return
+                    # Clamp and only emit if increased
+                    percent = max(2, min(int(percent), 99))
+                    if percent > self.last_percent:
+                        self.last_percent = percent
+                        self.signal.emit(percent)
+
+                def update_fallback(self, n):
+                    # Fallback: show "activity" progress even when total size is unknown
+                    self._fallback_bytes += max(0, n)
+                    # Advance ~1% per ~50MB downloaded (clamped)
+                    if self._fallback_bytes >= 50 * 1024 * 1024 and self._fallback_percent < 99:
+                        self._fallback_bytes = 0
+                        self._fallback_percent += 1
+                        self.signal.emit(self._fallback_percent)
 
             tracker = ProgressTracker(total_size, self.progress)
+            
+            # Convert model ID to directory name (e.g., unsloth/model -> unsloth__model)
+            model_slug = self.model_id.replace("/", "__")
+            dest = self.target_dir / model_slug
+            
+            # Background monitor to update progress based on bytes on disk
+            monitor_stop = threading.Event()
+            def _dir_size_bytes(path: Path) -> int:
+                total = 0
+                for root, _, files in os.walk(path):
+                    for name in files:
+                        try:
+                            total += os.path.getsize(os.path.join(root, name))
+                        except OSError:
+                            continue
+                return total
+            
+            def _monitor_progress(path: Path):
+                last_percent = 2
+                last_bytes = 0
+                # Wait for directory to be created (up to 30 seconds)
+                waited = 0
+                while not path.exists() and waited < 30 and not monitor_stop.is_set():
+                    time.sleep(1)
+                    waited += 1
+                
+                while not monitor_stop.is_set():
+                    if path.exists():
+                        try:
+                            size_bytes = _dir_size_bytes(path)
+                            if total_size > 0:
+                                percent = int((size_bytes / total_size) * 100)
+                                percent = max(2, min(percent, 99))
+                                if percent > last_percent:
+                                    last_percent = percent
+                                    self.progress.emit(percent)
+                            else:
+                                # Fallback: advance when at least 50MB written
+                                if size_bytes - last_bytes >= 50 * 1024 * 1024 and last_percent < 99:
+                                    last_bytes = size_bytes
+                                    last_percent += 1
+                                    self.progress.emit(last_percent)
+                        except Exception:
+                            pass  # Ignore errors during directory scanning
+                    time.sleep(0.5)
+            
+            monitor_thread = threading.Thread(
+                target=_monitor_progress,
+                args=(dest,),
+                daemon=True
+            )
+            monitor_thread.start()
             
             # Custom TQDM class that redirects updates to our tracker
             class CustomTqdm(tqdm):
@@ -688,12 +802,13 @@ class DownloadThread(QThread):
                 
                 def update(self, n=1):
                     displayed = super().update(n)
-                    tracker.update(n)
+                    total = getattr(self, "total", 0) or 0
+                    current = getattr(self, "n", 0) or 0
+                    if total:
+                        tracker.update_percent((current / total) * 100)
+                    else:
+                        tracker.update_fallback(n)
                     return displayed
-            
-            # Convert model ID to directory name (e.g., unsloth/model -> unsloth__model)
-            model_slug = self.model_id.replace("/", "__")
-            dest = self.target_dir / model_slug
             
             # Download using the custom tqdm class for real-time updates
             # Note: resume_download is not compatible with local_dir, so we handle it differently
@@ -705,10 +820,15 @@ class DownloadThread(QThread):
                 tqdm_class=CustomTqdm
             )
             
+            monitor_stop.set()
+            monitor_thread.join(timeout=2)
             self.progress.emit(100)
             self.finished.emit(str(dest))  # Return the actual destination path
             
         except Exception as e:
+            monitor_stop.set()
+            if 'monitor_thread' in locals():
+                monitor_thread.join(timeout=2)
             self.error.emit(str(e))
 
 
@@ -2233,6 +2353,20 @@ class MainWindow(QMainWindow):
         # IMPORTANT: store on self for other callbacks (GPU refresh, background detection, etc.)
         self.tabs = tabs
         
+        # Page name constants for reliable tab navigation
+        self.tab_page_names = {
+            "home": "Home",
+            "models": "Models", 
+            "train": "Train",
+            "test": "Test",
+            "logs": "Logs",
+            "server": "Server",
+            "mcp": "MCP",
+            "github_import": "GitHub Import",
+            "environment": "Environment Manager",
+            "info": "Info"
+        }
+        
         tabs.addTab(self._build_home_tab(), "Home")
         tabs.addTab(self._build_models_tab(), "Models")
         tabs.addTab(self._build_train_tab(), "Train")
@@ -2244,19 +2378,19 @@ class MainWindow(QMainWindow):
         tabs.addTab(GitHubImportPage(self), "GitHub Import")
         
         self.env_page = self._build_environment_management_page()
-        self.env_tab_index = tabs.addTab(self.env_page, "Environment Manager")
+        tabs.addTab(self.env_page, "Environment Manager")
         tabs.addTab(self._build_info_tab(), "Info")
         
-        # Connect buttons to tab switching
-        self.home_btn.clicked.connect(lambda: self._switch_tab(tabs, 0))
-        self.download_btn.clicked.connect(lambda: self._switch_tab(tabs, 1))
-        self.train_btn.clicked.connect(lambda: self._switch_tab(tabs, 2))
-        self.test_btn.clicked.connect(lambda: self._switch_tab(tabs, 3))
-        self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, 4))
-        self.server_btn.clicked.connect(lambda: self._switch_tab(tabs, 5))
-        self.mcp_btn.clicked.connect(lambda: self._switch_tab(tabs, 6))
-        self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, self.env_tab_index))
-        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, 8))
+        # Connect buttons to tab switching using page names
+        self.home_btn.clicked.connect(lambda: self._switch_tab(tabs, "home"))
+        self.download_btn.clicked.connect(lambda: self._switch_tab(tabs, "models"))
+        self.train_btn.clicked.connect(lambda: self._switch_tab(tabs, "train"))
+        self.test_btn.clicked.connect(lambda: self._switch_tab(tabs, "test"))
+        self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, "logs"))
+        self.server_btn.clicked.connect(lambda: self._switch_tab(tabs, "server"))
+        self.mcp_btn.clicked.connect(lambda: self._switch_tab(tabs, "mcp"))
+        self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, "environment"))
+        self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, "info"))
         
         # Also connect to tab widget's currentChanged signal to handle programmatic changes
         tabs.currentChanged.connect(self._update_frame_corner_br)
@@ -2553,19 +2687,65 @@ class MainWindow(QMainWindow):
             config["models"] = {}
         
         # Check if model_path matches any existing base_model
+        # Normalize both paths for comparison
+        model_path_normalized = Path(model_path_str).resolve()
+        model_dir_name = model_path_normalized.name
+        model_path_str_normalized = str(model_path_normalized).lower()
+        
+        # First pass: exact path match (highest priority)
         for model_id, model_cfg in config["models"].items():
             existing_base = model_cfg.get("base_model", "")
             if not existing_base:
                 continue
             try:
-                existing_path = Path(existing_base).resolve()
-                if str(existing_path) == model_path_str:
-                    return model_id
-            except Exception:
-                # Skip invalid paths in config
+                existing_path_normalized = Path(existing_base).resolve()
+                if str(model_path_normalized) == str(existing_path_normalized):
+                    return model_id  # Exact match - return immediately
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Path resolution error for {existing_base}: {e}")
                 continue
         
-        # Not found - create new entry with unique model_id and port
+        # Second pass: directory name match (if no exact match found)
+        # Collect all matches, then pick the best one
+        directory_matches = []
+        for model_id, model_cfg in config["models"].items():
+            existing_base = model_cfg.get("base_model", "")
+            if not existing_base:
+                continue
+            try:
+                existing_path_normalized = Path(existing_base).resolve()
+                existing_dir_name = existing_path_normalized.name
+                
+                if model_dir_name == existing_dir_name:
+                    # Additional validation: check if parent directory name matches
+                    if model_path_normalized.parent.name == existing_path_normalized.parent.name:
+                        existing_path_str = str(existing_path_normalized).lower()
+                        # Calculate similarity: count matching path components from the end
+                        # More matching components = better match
+                        model_parts = model_path_str_normalized.split(os.sep)
+                        existing_parts = existing_path_str.split(os.sep)
+                        matching_components = 0
+                        for i in range(1, min(len(model_parts), len(existing_parts)) + 1):
+                            if model_parts[-i] == existing_parts[-i]:
+                                matching_components += 1
+                            else:
+                                break
+                        directory_matches.append((model_id, matching_components, existing_path_str))
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.debug(f"Path resolution error for {existing_base}: {e}")
+                continue
+        
+        # Return the match with the most matching path components
+        if directory_matches:
+            # Sort by matching components (descending), then by path string (for consistency)
+            directory_matches.sort(key=lambda x: (-x[1], x[2]))
+            return directory_matches[0][0]
+        
+        # No match found - create new entry with unique model_id and port
         # Generate model_id from path (sanitize for YAML key)
         model_id = model_path_obj.name.replace("__", "_").replace("/", "_").replace("\\", "_")
         if not model_id or model_id in config["models"]:
@@ -3442,11 +3622,38 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(100, self._rebuild_home_tab)
             
         # Environment Manager tab: refresh requirements when entered
-        elif hasattr(self, "env_tab_index") and index == self.env_tab_index:
+        elif index < self.tabs.count() and self.tabs.tabText(index) == self.tab_page_names.get("environment"):
             self._refresh_requirements_grid()
 
-    def _switch_tab(self, tab_widget: QTabWidget, index: int):
-        """Switch to a tab and update button states"""
+    def _switch_tab(self, tab_widget: QTabWidget, page_identifier):
+        """
+        Switch to a tab by page name or index.
+        
+        Args:
+            tab_widget: The QTabWidget to switch tabs in
+            page_identifier: Either a page name string (e.g., "home", "info") 
+                            or an integer index for backward compatibility
+        """
+        # If page_identifier is a string, find the tab by label
+        if isinstance(page_identifier, str):
+            page_label = self.tab_page_names.get(page_identifier)
+            if page_label:
+                # Find tab index by label
+                for i in range(tab_widget.count()):
+                    if tab_widget.tabText(i) == page_label:
+                        index = i
+                        break
+                else:
+                    # Tab not found, log error and return
+                    print(f"ERROR: Tab with label '{page_label}' not found")
+                    return
+            else:
+                print(f"ERROR: Unknown page name: {page_identifier}")
+                return
+        else:
+            # Backward compatibility: use as index
+            index = page_identifier
+        
         tab_widget.setCurrentIndex(index)
         
         # Update button checked states
@@ -3470,10 +3677,10 @@ class MainWindow(QMainWindow):
     def _open_requirements_tab(self):
         """Navigate to the Environment -> Requirements sub-tab reliably."""
         try:
-            if hasattr(self, "env_page"):
-                env_idx = self.tabs.indexOf(self.env_page)
-                if env_idx != -1:
-                    self._switch_tab(self.tabs, env_idx)
+            # Switch to environment page using page name
+            self._switch_tab(self.tabs, "environment")
+            
+            # Then switch to requirements sub-tab
             if hasattr(self, "env_sub_tabs") and hasattr(self, "requirements_subtab"):
                 req_idx = self.env_sub_tabs.indexOf(self.requirements_subtab)
                 if req_idx != -1:
@@ -4991,6 +5198,25 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.Yes:
             self._log_models(f"🔧 Repairing {model_id}...")
             
+            # Unlock files first (stop any active downloads, kill locking processes)
+            path_obj = Path(model_path)
+            self._unlock_model_files(path_obj, log_callback=lambda m: self._log_models(m))
+            
+            # Clean up .incomplete files that might block repair
+            try:
+                cache_dir = path_obj / ".cache" / "huggingface" / "download"
+                if cache_dir.exists():
+                    incomplete_files = list(cache_dir.rglob("*.incomplete"))
+                    if incomplete_files:
+                        self._log_models(f"Removing {len(incomplete_files)} incomplete download files...")
+                        for incomplete_file in incomplete_files:
+                            try:
+                                incomplete_file.unlink()
+                            except Exception:
+                                pass
+            except Exception as e:
+                self._log_models(f"Warning: Could not clean incomplete files: {e}")
+            
             # Find the card to show progress
             card = None
             for c in self.downloaded_model_cards:
@@ -5048,6 +5274,108 @@ class MainWindow(QMainWindow):
             # Start repair
             thread.start()
 
+    def _unlock_model_files(self, model_path: Path, log_callback=None) -> bool:
+        """
+        Unlock files in a model directory by killing processes that might be using them.
+        Specifically targets:
+        - Active download/repair threads for this model
+        - Python processes running huggingface_hub downloads
+        - Any processes with file handles open in the directory
+        
+        Returns:
+            True if unlocking succeeded or no locks detected, False if unlocking failed
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+            else:
+                self._log_models(msg)
+        
+        log(f"Unlocking files in {model_path.name}...")
+        
+        # 1. Stop any active download/repair threads for this model
+        model_id = model_path.name.replace("__", "/")
+        if hasattr(self, 'active_downloads'):
+            if model_id in self.active_downloads:
+                log("Stopping active download thread...")
+                thread, card = self.active_downloads[model_id]
+                if thread.isRunning():
+                    thread.terminate()
+                    thread.wait(3000)  # Wait up to 3 seconds
+                del self.active_downloads[model_id]
+            
+            # Also check for repair threads (they use a different key format)
+            repair_key = f"repair_{model_id}"
+            if repair_key in self.active_downloads:
+                log("Stopping active repair thread...")
+                thread, card = self.active_downloads[repair_key]
+                if thread.isRunning():
+                    thread.terminate()
+                    thread.wait(3000)
+                del self.active_downloads[repair_key]
+        
+        # 2. Remove .incomplete files that are often locked
+        try:
+            cache_dir = model_path / ".cache" / "huggingface" / "download"
+            if cache_dir.exists():
+                incomplete_files = list(cache_dir.rglob("*.incomplete"))
+                if incomplete_files:
+                    log(f"Removing {len(incomplete_files)} incomplete download files...")
+                    for incomplete_file in incomplete_files:
+                        try:
+                            # Try to remove read-only attribute first
+                            if sys.platform == 'win32':
+                                import subprocess
+                                subprocess.run(['attrib', '-R', str(incomplete_file)], 
+                                             capture_output=True, timeout=2)
+                            incomplete_file.unlink()
+                        except Exception:
+                            pass
+        except Exception as e:
+            log(f"Warning: Could not clean incomplete files: {e}")
+        
+        # 3. On Windows, try to find and kill processes that might be locking files
+        if sys.platform == 'win32':
+            try:
+                import subprocess
+                import time
+                
+                # Find Python processes that might be downloading
+                # Check for processes with the model path in their command line
+                try:
+                    # Use wmic to find processes (more reliable than tasklist for this)
+                    cmd = f'wmic process where "CommandLine like \'%{model_path.name}%\'" get ProcessId /format:value'
+                    result = subprocess.run(
+                        cmd,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=5
+                    )
+                    # Parse PIDs and kill them
+                    for line in result.stdout.split('\n'):
+                        if 'ProcessId=' in line:
+                            try:
+                                pid = int(line.split('=')[1].strip())
+                                if pid:
+                                    log(f"Killing process {pid} that may be locking files...")
+                                    subprocess.run(['taskkill', '/F', '/PID', str(pid)],
+                                                 capture_output=True, timeout=3)
+                            except (ValueError, IndexError):
+                                pass
+                except Exception:
+                    pass
+                
+                # Wait for file handles to be released
+                log("Waiting for file handles to be released...")
+                time.sleep(3)  # Give processes time to release handles
+                
+            except Exception as e:
+                log(f"Warning: Could not check for locking processes: {e}")
+        
+        log("File unlock attempt completed")
+        return True
+    
     def _on_delete_model(self, model_path: str):
         """Delete a downloaded model directory forcefully"""
         path = Path(model_path)
@@ -5079,47 +5407,113 @@ class MainWindow(QMainWindow):
             try:
                 self._log_models(f"🗑️ Deleting model: {model_name}...")
                 
+                # Unlock files first (stop downloads, kill locking processes)
+                self._unlock_model_files(path, log_callback=lambda m: self._log_models(m))
+                
                 # Robust deletion with retries for Windows
                 import time
                 import subprocess
                 
                 success = False
-                for attempt in range(1, 4):
+                for attempt in range(1, 5):  # Increased retries
                     try:
+                        # Before deletion, try to remove .incomplete files first
+                        if path.exists():
+                            cache_dir = path / ".cache" / "huggingface" / "download"
+                            if cache_dir.exists():
+                                try:
+                                    # Remove incomplete files
+                                    for incomplete_file in cache_dir.rglob("*.incomplete"):
+                                        try:
+                                            incomplete_file.unlink()
+                                        except Exception:
+                                            pass
+                                    # Try to remove cache directory
+                                    if cache_dir.exists():
+                                        shutil.rmtree(cache_dir, ignore_errors=True)
+                                except Exception:
+                                    pass
+                        
                         if sys.platform == 'win32':
-                            # Force delete on Windows using cmd
-                            subprocess.run(['cmd', '/c', 'rmdir', '/S', '/Q', str(path)], 
-                                         capture_output=True, timeout=30)
+                            # Force delete on Windows using cmd with retries
+                            result = subprocess.run(
+                                ['cmd', '/c', 'rmdir', '/S', '/Q', str(path)], 
+                                capture_output=True, 
+                                timeout=30
+                            )
+                            # Also try PowerShell method as fallback
+                            if path.exists() and attempt >= 2:
+                                ps_cmd = f'Remove-Item -Path "{path}" -Recurse -Force -ErrorAction SilentlyContinue'
+                                subprocess.run(
+                                    ['powershell', '-Command', ps_cmd],
+                                    capture_output=True,
+                                    timeout=30
+                                )
                         else:
                             shutil.rmtree(path, ignore_errors=True)
                         
                         if not path.exists():
                             success = True
                             break
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        if attempt < 4:
+                            log_msg = f"Deletion attempt {attempt} failed, retrying... ({str(e)[:100]})"
+                            self._log_models(log_msg)
                     
-                    if attempt < 3:
-                        time.sleep(1)
+                    if attempt < 4:
+                        time.sleep(2)  # Longer wait between retries
                 
                 if success:
                     self._log_models(f"✓ Model '{model_name}' deleted successfully.")
                 else:
                     # Final attempt with direct shutil if path still exists
                     if path.exists():
-                        shutil.rmtree(path)
+                        try:
+                            shutil.rmtree(path, ignore_errors=True)
+                        except Exception:
+                            pass
                     
                     if not path.exists():
                         self._log_models(f"✓ Model '{model_name}' deleted successfully.")
                     else:
-                        raise RuntimeError("Directory still exists after multiple deletion attempts.")
+                        # Last resort: try to delete individual files
+                        try:
+                            for item in path.rglob("*"):
+                                try:
+                                    if item.is_file():
+                                        item.unlink()
+                                    elif item.is_dir():
+                                        item.rmdir()
+                                except Exception:
+                                    pass
+                            # Try to remove the directory itself
+                            path.rmdir()
+                        except Exception:
+                            pass
+                        
+                        if path.exists():
+                            raise RuntimeError(
+                                f"Could not delete model directory after multiple attempts.\n"
+                                f"Some files may still be locked by another process.\n"
+                                f"Try closing other applications and restarting the app, then delete again."
+                            )
+                        else:
+                            self._log_models(f"✓ Model '{model_name}' deleted successfully (after cleanup).")
                 
                 # Refresh all local state (Download tab cards + dropdowns)
                 self._refresh_locals()
                     
             except Exception as e:
                 self._log_models(f"❌ Error deleting model: {str(e)}")
-                QMessageBox.critical(self, "Error", f"Could not delete model directory:\n{str(e)}\n\nFiles may be locked by another process.")
+                QMessageBox.critical(
+                    self, "Error", 
+                    f"Could not delete model directory:\n{str(e)}\n\n"
+                    f"Files may be locked by another process.\n"
+                    f"Try:\n"
+                    f"1. Closing other applications\n"
+                    f"2. Restarting this app\n"
+                    f"3. Manually deleting the folder: {model_path}"
+                )
     
     def _on_models_tab_changed(self, index: int):
         """Handle models tab changes - sync custom button states"""
@@ -7082,7 +7476,7 @@ class MainWindow(QMainWindow):
         model_a_header_layout = QVBoxLayout(model_a_header_widget)
         model_a_header_layout.setContentsMargins(0, 0, 0, 0)  # No margins
         model_a_header_layout.setSpacing(6)  # 6 pixels between header and selector
-        self.test_model_a_header = QLabel("🔵 <b>Model A</b> <span style='font-size:10pt;color:#888;'>(Port: -)</span>")
+        self.test_model_a_header = QLabel("🔵 <b>Model A</b> <span style='font-size:16pt;color:#000000;'>(Port: -)</span>")
         self.test_model_a_header.setObjectName("modelAHeader")
         colors = self._get_theme_colors()
         self.test_model_a_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
@@ -7100,7 +7494,7 @@ class MainWindow(QMainWindow):
         model_b_header_layout = QVBoxLayout(model_b_header_widget)
         model_b_header_layout.setContentsMargins(0, 0, 0, 0)  # No margins
         model_b_header_layout.setSpacing(6)  # 6 pixels between header and selector
-        self.test_model_b_header = QLabel("🟢 <b>Model B</b> <span style='font-size:10pt;color:#888;'>(Port: -)</span>")
+        self.test_model_b_header = QLabel("🟢 <b>Model B</b> <span style='font-size:16pt;color:#000000;'>(Port: -)</span>")
         self.test_model_b_header.setObjectName("modelBHeader")
         self.test_model_b_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
         self.themed_widgets["labels"].append(self.test_model_b_header)
@@ -7117,7 +7511,7 @@ class MainWindow(QMainWindow):
         model_c_header_layout = QVBoxLayout(model_c_header_widget)
         model_c_header_layout.setContentsMargins(0, 0, 0, 0)  # No margins
         model_c_header_layout.setSpacing(6)  # 6 pixels between header and selector
-        self.test_model_c_header = QLabel("🟣 <b>Model C</b> <span style='font-size:10pt;color:#888;'>(Port: -)</span>")
+        self.test_model_c_header = QLabel("🟣 <b>Model C</b> <span style='font-size:16pt;color:#000000;'>(Port: -)</span>")
         self.test_model_c_header.setObjectName("modelCHeader")
         self.test_model_c_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
         self.themed_widgets["labels"].append(self.test_model_c_header)
@@ -7442,21 +7836,11 @@ class MainWindow(QMainWindow):
         controls_row = QHBoxLayout()
         controls_row.setSpacing(12)
         
-        # Model selectors
-        controls_row.addWidget(QLabel("Model A:"))
+        # Model selector (single model only)
+        controls_row.addWidget(QLabel("Model:"))
         self.tool_chat_model_a = QComboBox()
         self.tool_chat_model_a.setMinimumWidth(250)
         controls_row.addWidget(self.tool_chat_model_a, 1)
-        
-        controls_row.addWidget(QLabel("Model B:"))
-        self.tool_chat_model_b = QComboBox()
-        self.tool_chat_model_b.setMinimumWidth(250)
-        controls_row.addWidget(self.tool_chat_model_b, 1)
-        
-        controls_row.addWidget(QLabel("Model C:"))
-        self.tool_chat_model_c = QComboBox()
-        self.tool_chat_model_c.setMinimumWidth(250)
-        controls_row.addWidget(self.tool_chat_model_c, 1)
         
         # Enable tools checkbox (always enabled)
         enable_tools_check = QCheckBox("Enable Tools")
@@ -7481,8 +7865,8 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(8)
         
-        # Chat display for multiple models
-        self.tool_chat_display = SynchronizedChatDisplay(num_models=3)
+        # Chat display for single model
+        self.tool_chat_display = SynchronizedChatDisplay(num_models=1)
         self.tool_chat_display.set_theme(self.dark_mode)
         left_layout.addWidget(self.tool_chat_display, 1)
         
@@ -7563,10 +7947,8 @@ class MainWindow(QMainWindow):
         
         layout.addWidget(main_splitter, 1)
         
-        # Initialize tool workers
+        # Initialize tool worker
         self.tool_chat_worker_a = None
-        self.tool_chat_worker_b = None
-        self.tool_chat_worker_c = None
         
         # Load models
         QTimer.singleShot(100, self._load_tool_chat_models)
@@ -7589,22 +7971,20 @@ class MainWindow(QMainWindow):
         return c[:1] if c else "a"
     
     def _load_tool_chat_models(self):
-        """Load available models into tool chat selectors"""
+        """Load available models into tool chat selector"""
         try:
             models = list_local_downloads()
             download_root = get_app_root() / "models"
             
-            for selector in [self.tool_chat_model_a, self.tool_chat_model_b, self.tool_chat_model_c]:
-                selector.clear()
-                if not models:
-                    selector.addItem("(No models downloaded)", None)
-                else:
-                    for model_name in models:
-                        model_path = download_root / model_name
-                        selector.addItem(model_name, str(model_path))
+            self.tool_chat_model_a.clear()
+            if not models:
+                self.tool_chat_model_a.addItem("(No models downloaded)", None)
+            else:
+                for model_name in models:
+                    model_path = download_root / model_name
+                    self.tool_chat_model_a.addItem(model_name, str(model_path))
         except Exception as e:
-            for selector in [self.tool_chat_model_a, self.tool_chat_model_b, self.tool_chat_model_c]:
-                selector.addItem(f"(Error: {e})", None)
+            self.tool_chat_model_a.addItem(f"(Error: {e})", None)
     
     def _clear_tool_chat(self):
         """Clear tool chat history"""
@@ -7614,25 +7994,17 @@ class MainWindow(QMainWindow):
             self.tool_chat_display.add_user_message("=== Chat cleared ===")
     
     def _send_tool_chat_message(self):
-        """Send message and run tool-enabled inference for all selected models"""
+        """Send message and run tool-enabled inference for the selected model"""
         message = self.tool_chat_input.toPlainText().strip()
         if not message:
             return
         
-        # Get selected models
+        # Get selected model
         model_a_path = self.tool_chat_model_a.currentData()
-        model_b_path = self.tool_chat_model_b.currentData()
-        model_c_path = self.tool_chat_model_c.currentData()
         
-        # Check if at least one model is selected
-        has_model = (
-            (model_a_path and model_a_path != "(No models downloaded)") or
-            (model_b_path and model_b_path != "(No models downloaded)") or
-            (model_c_path and model_c_path != "(No models downloaded)")
-        )
-        
-        if not has_model:
-            QMessageBox.warning(self, "No Model", "Please select at least one model.")
+        # Check if model is selected
+        if not model_a_path or model_a_path == "(No models downloaded)":
+            QMessageBox.warning(self, "No Model", "Please select a model.")
             return
         
         # Clear input
@@ -7643,18 +8015,9 @@ class MainWindow(QMainWindow):
         # Display user message
         self.tool_chat_display.add_user_message(message)
         
-        # Start responses for each model
-        if model_a_path and model_a_path != "(No models downloaded)":
-            self.tool_chat_display.start_model_a_response()
-            self._run_tool_chat_inference_a(model_a_path, message)
-        
-        if model_b_path and model_b_path != "(No models downloaded)":
-            self.tool_chat_display.start_model_b_response()
-            self._run_tool_chat_inference_b(model_b_path, message)
-        
-        if model_c_path and model_c_path != "(No models downloaded)":
-            self.tool_chat_display.start_model_c_response()
-            self._run_tool_chat_inference_c(model_c_path, message)
+        # Start response for the model
+        self.tool_chat_display.start_model_a_response()
+        self._run_tool_chat_inference_a(model_a_path, message)
     
     def _run_tool_chat_inference_a(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run tool-enabled inference for Model A in tool chat"""
@@ -7829,7 +8192,11 @@ class MainWindow(QMainWindow):
         self._check_tool_chat_all_finished()
 
     def _on_tool_chat_progress_update(self, which: str, msg: str):
-        """Append progress text to the correct model bubble (tool chat)."""
+        """Append progress text to the model bubble (tool chat - single model only)."""
+        # Only handle model A (single model mode)
+        if which != "a":
+            return
+        
         # Detect environment creation and show progress dialog
         msg_lower = msg.lower()
         env_key = f"_env_dialog_tool_{which}"
@@ -7864,50 +8231,29 @@ class MainWindow(QMainWindow):
                 dialog.set_complete()
                 QTimer.singleShot(1000, lambda: self._close_env_dialog(which, is_tool_chat=True))
         
-        if which == "a":
-            current = getattr(self, "_tool_chat_progress_a", "") or ""
-            current = (current + "\n" + msg).strip() if current else msg
-            self._tool_chat_progress_a = current
-            self.tool_chat_display.update_model_a_response(current)
-        elif which == "b":
-            current = getattr(self, "_tool_chat_progress_b", "") or ""
-            current = (current + "\n" + msg).strip() if current else msg
-            self._tool_chat_progress_b = current
-            self.tool_chat_display.update_model_b_response(current)
-        elif which == "c":
-            current = getattr(self, "_tool_chat_progress_c", "") or ""
-            current = (current + "\n" + msg).strip() if current else msg
-            self._tool_chat_progress_c = current
-            self.tool_chat_display.update_model_c_response(current)
+        # Update progress for model A
+        current = getattr(self, "_tool_chat_progress_a", "") or ""
+        current = (current + "\n" + msg).strip() if current else msg
+        self._tool_chat_progress_a = current
+        self.tool_chat_display.update_model_a_response(current)
     
     def _check_tool_chat_all_finished(self):
-        """Check if all tool chat workers have finished"""
-        all_finished = True
-        
+        """Check if tool chat worker has finished"""
         model_a_path = self.tool_chat_model_a.currentData()
-        model_b_path = self.tool_chat_model_b.currentData()
-        model_c_path = self.tool_chat_model_c.currentData()
         
         if model_a_path and model_a_path != "(No models downloaded)":
             if self.tool_chat_worker_a and self.tool_chat_worker_a.isRunning():
-                all_finished = False
+                return  # Still running
         
-        if model_b_path and model_b_path != "(No models downloaded)":
-            if self.tool_chat_worker_b and self.tool_chat_worker_b.isRunning():
-                all_finished = False
-        
-        if model_c_path and model_c_path != "(No models downloaded)":
-            if self.tool_chat_worker_c and self.tool_chat_worker_c.isRunning():
-                all_finished = False
-        
-        if all_finished:
-            self.tool_chat_input.setEnabled(True)
-            self.tool_chat_send_btn.setEnabled(True)
+        # Worker finished or no model selected
+        self.tool_chat_input.setEnabled(True)
+        self.tool_chat_send_btn.setEnabled(True)
     
     def _check_and_fix_port(self, model_id: str) -> int:
-        """Check if model's port is available, reassign if not"""
+        """Check if model's port is available, reassign if not. Server-aware: checks if our own server is using the port first."""
         import socket
         import yaml
+        import requests
         
         config_path = self.root / "configs" / "llm_backends.yaml"
         if not config_path.exists():
@@ -7922,37 +8268,40 @@ class MainWindow(QMainWindow):
         model_cfg = config["models"][model_id]
         original_port = model_cfg.get("port", 10500)
         
-        # Try to bind to check availability
+        # CRITICAL: ALWAYS check health on the YAML port FIRST (YAML is source of truth)
+        # This prevents reassigning when server is already running on the correct port
+        try:
+            url = f"http://127.0.0.1:{original_port}/health"
+            response = requests.get(url, timeout=2)
+            if response.status_code == 200:
+                data = response.json()
+                status = str(data.get("status", "")).lower().strip()
+                reported_model = str(data.get("model", "")).strip()
+                # If server is healthy and reports the correct model (or generic), reuse it
+                if status in {"ok", "loading"}:
+                    if not reported_model or reported_model in {model_id, "local-llm"}:
+                        # Our server is running and healthy on the YAML port - use it!
+                        return original_port
+        except Exception:
+            # Health check failed - server might not be running yet, continue to check port availability
+            pass
+        
+        # If health check didn't find our server, check if port is available to bind
+        # This is only for starting a NEW server, not for reassigning
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             sock.bind(('127.0.0.1', original_port))
             sock.close()
-            return original_port  # Port is free
+            return original_port  # Port is free, can start new server
         except OSError:
             sock.close()
-            # Port occupied, find alternative
-            for port in range(10500, 10601):
-                try:
-                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    sock.bind(('127.0.0.1', port))
-                    sock.close()
-                    # Update config in memory
-                    model_cfg['port'] = port
-                    # Update YAML file
-                    with open(config_path, 'w', encoding='utf-8') as f:
-                        yaml.safe_dump(config, f, sort_keys=False, default_flow_style=False)
-                    # Log the change (will be shown in chat when inference starts)
-                    print(f"[INFO] Port {original_port} occupied for {model_id}, reassigned to {port}")
-                    return port
-                except OSError:
-                    try:
-                        sock.close()
-                    except:
-                        pass
-                    continue
-            raise RuntimeError(f"No available ports in range 10500-10600 for model '{model_id}'")
+            # Port is bound - this means either:
+            # 1. Our server is starting up (health check might have been too early)
+            # 2. Another process is using the port
+            # DO NOT reassign - return the original port and let server manager handle it
+            # The server manager will check health again and reuse if it's our server
+            return original_port
     
     def _run_side_by_side_test(self) -> None:
         """Run inference on both models simultaneously"""
@@ -9402,65 +9751,83 @@ class MainWindow(QMainWindow):
         
         colors = self._get_theme_colors()
         
-        # Update Model A port
-        model_a_text = self.test_model_a.currentText().strip()
-        port_a = "-"
-        if model_a_text and not model_a_text.startswith("(No models"):
+        def get_port_for_model(combo_box, model_text):
+            """Get port for model selected in combo box"""
+            if not model_text or model_text.startswith("(No models"):
+                return "-"
+            
             try:
-                model_id = self._resolve_model_id_from_path(self.test_model_a.itemData(self.test_model_a.currentIndex()))
-                if model_id:
+                # Get model path from itemData
+                current_idx = combo_box.currentIndex()
+                if current_idx < 0:
+                    return "-"
+                
+                model_path_data = combo_box.itemData(current_idx)
+                if not model_path_data:
+                    return "-"
+                
+                # Resolve model_id from path
+                model_id = self._resolve_model_id_from_path(model_path_data)
+                if not model_id:
+                    # If path resolution failed, try name-based lookup
+                    # Extract clean model name from display text
+                    clean_name = model_text.replace("📦 ", "").replace("🎯 ", "").split(" (")[0]
+                    # Convert to model_id format (org/model -> org__model for lookup)
+                    model_id_candidate = clean_name.replace("/", "__")
+                    
+                    # Try direct lookup first
                     import yaml
                     config_path = self.root / "configs" / "llm_backends.yaml"
                     if config_path.exists():
                         with open(config_path, 'r', encoding='utf-8') as f:
                             config = yaml.safe_load(f) or {}
-                            if model_id in config.get("models", {}):
-                                port_a = config["models"][model_id].get("port", "-")
-            except Exception:
-                pass
+                            if model_id_candidate in config.get("models", {}):
+                                return config["models"][model_id_candidate].get("port", "-")
+                            
+                            # Try partial match (model name in model_id)
+                            for mid, cfg in config.get("models", {}).items():
+                                # Check if model name appears in model_id
+                                name_parts = clean_name.split("/")
+                                if len(name_parts) == 2:
+                                    org, model = name_parts
+                                    if org in mid and model in mid:
+                                        return cfg.get("port", "-")
+                    return "-"
+                
+                # Look up port in config
+                import yaml
+                config_path = self.root / "configs" / "llm_backends.yaml"
+                if config_path.exists():
+                    with open(config_path, 'r', encoding='utf-8') as f:
+                        config = yaml.safe_load(f) or {}
+                        if model_id in config.get("models", {}):
+                            return config["models"][model_id].get("port", "-")
+                
+                return "-"
+            except Exception as e:
+                # Log error instead of silently failing
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to get port for model '{model_text}': {e}")
+                return "-"
         
-        self.test_model_a_header.setText(f"🔵 <b>Model A</b> <span style='font-size:10pt;color:#888;'>(Port: {port_a})</span>")
+        # Update Model A port
+        model_a_text = self.test_model_a.currentText().strip()
+        port_a = get_port_for_model(self.test_model_a, model_a_text)
+        self.test_model_a_header.setText(f"🔵 <b>Model A</b> <span style='font-size:16pt;color:#000000;'>(Port: {port_a})</span>")
         self.test_model_a_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
         
         # Update Model B port
         model_b_text = self.test_model_b.currentText().strip()
-        port_b = "-"
-        if model_b_text and not model_b_text.startswith("(No models"):
-            try:
-                model_id = self._resolve_model_id_from_path(self.test_model_b.itemData(self.test_model_b.currentIndex()))
-                if model_id:
-                    import yaml
-                    config_path = self.root / "configs" / "llm_backends.yaml"
-                    if config_path.exists():
-                        with open(config_path, 'r', encoding='utf-8') as f:
-                            config = yaml.safe_load(f) or {}
-                            if model_id in config.get("models", {}):
-                                port_b = config["models"][model_id].get("port", "-")
-            except Exception:
-                pass
-        
-        self.test_model_b_header.setText(f"🟢 <b>Model B</b> <span style='font-size:10pt;color:#888;'>(Port: {port_b})</span>")
+        port_b = get_port_for_model(self.test_model_b, model_b_text)
+        self.test_model_b_header.setText(f"🟢 <b>Model B</b> <span style='font-size:16pt;color:#000000;'>(Port: {port_b})</span>")
         self.test_model_b_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
         
         # Update Model C port (if visible)
         if hasattr(self, 'test_model_c_header') and hasattr(self, 'test_model_c'):
             model_c_text = self.test_model_c.currentText().strip()
-            port_c = "-"
-            if model_c_text and not model_c_text.startswith("(No models"):
-                try:
-                    model_id = self._resolve_model_id_from_path(self.test_model_c.itemData(self.test_model_c.currentIndex()))
-                    if model_id:
-                        import yaml
-                        config_path = self.root / "configs" / "llm_backends.yaml"
-                        if config_path.exists():
-                            with open(config_path, 'r', encoding='utf-8') as f:
-                                config = yaml.safe_load(f) or {}
-                                if model_id in config.get("models", {}):
-                                    port_c = config["models"][model_id].get("port", "-")
-                except Exception:
-                    pass
-            
-            self.test_model_c_header.setText(f"🟣 <b>Model C</b> <span style='font-size:10pt;color:#888;'>(Port: {port_c})</span>")
+            port_c = get_port_for_model(self.test_model_c, model_c_text)
+            self.test_model_c_header.setText(f"🟣 <b>Model C</b> <span style='font-size:16pt;color:#000000;'>(Port: {port_c})</span>")
             self.test_model_c_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
 
     # ---------------- Info/About tab ----------------

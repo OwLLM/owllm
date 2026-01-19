@@ -87,6 +87,21 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
         try:
             # Use the normalized string path
             tokenizer = AutoTokenizer.from_pretrained(model_path_str)
+            
+            # Immediate validation: check if tokenizer is actually a tokenizer object
+            if tokenizer is None or tokenizer is False:
+                raise RuntimeError(
+                    f"AutoTokenizer.from_pretrained() returned invalid value: {tokenizer!r}\n"
+                    f"Model path: {model_path_str}\n"
+                    f"This may indicate a corrupted model, missing tokenizer files, or a transformers library bug."
+                )
+            if not hasattr(tokenizer, 'pad_token') and not hasattr(tokenizer, 'eos_token'):
+                raise RuntimeError(
+                    f"AutoTokenizer.from_pretrained() returned invalid object (type: {type(tokenizer)}).\n"
+                    f"Expected AutoTokenizer instance, got: {tokenizer!r}\n"
+                    f"Model path: {model_path_str}\n"
+                    f"This may indicate corrupted model files or incompatible transformers version."
+                )
         except Exception as e:
             error_msg = str(e)
             error_lower = error_msg.lower()
@@ -107,6 +122,21 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                 )
             raise
         logging.info("Tokenizer loaded from base model")
+        
+        # Validate tokenizer is actually a tokenizer object
+        if tokenizer is None or tokenizer is False:
+            raise RuntimeError(
+                f"Tokenizer is invalid after loading from base model: {tokenizer!r}\n"
+                f"Model path: {model_path_str}\n"
+                f"This may indicate a corrupted model, missing tokenizer files, or a transformers library bug."
+            )
+        if not hasattr(tokenizer, 'pad_token') and not hasattr(tokenizer, 'eos_token'):
+            raise RuntimeError(
+                f"Tokenizer is not a valid tokenizer object (type: {type(tokenizer)}). "
+                f"Expected AutoTokenizer instance, got: {tokenizer!r}\n"
+                f"Model path: {model_path_str}\n"
+                f"This may indicate corrupted model files or incompatible transformers version."
+            )
         
         # Ensure pad token is set
         if tokenizer.pad_token is None:
@@ -232,18 +262,65 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
         if not isinstance(adapter_dir, str):
             raise ValueError(f"adapter_dir must be a string, got: {type(adapter_dir)} = {adapter_dir!r}")
         tokenizer = AutoTokenizer.from_pretrained(adapter_dir)
+        
+        # Immediate validation: check if tokenizer is actually a tokenizer object
+        if tokenizer is None or tokenizer is False:
+            raise RuntimeError(
+                f"AutoTokenizer.from_pretrained() returned invalid value: {tokenizer!r}\n"
+                f"Adapter dir: {adapter_dir}\n"
+                f"This may indicate a corrupted adapter, missing tokenizer files, or a transformers library bug."
+            )
+        if not hasattr(tokenizer, 'pad_token') and not hasattr(tokenizer, 'eos_token'):
+            raise RuntimeError(
+                f"AutoTokenizer.from_pretrained() returned invalid object (type: {type(tokenizer)}).\n"
+                f"Expected AutoTokenizer instance, got: {tokenizer!r}\n"
+                f"Adapter dir: {adapter_dir}\n"
+                f"This may indicate corrupted adapter files or incompatible transformers version."
+            )
+        
         logging.info("Tokenizer loaded from adapter dir")
     except Exception as e:
         logging.warning(f"Could not load tokenizer from adapter dir: {e}")
         logging.info(f"Loading tokenizer from base model: {model_path_str}")
         try:
             tokenizer = AutoTokenizer.from_pretrained(model_path_str)
+            
+            # Immediate validation: check if tokenizer is actually a tokenizer object
+            if tokenizer is None or tokenizer is False:
+                raise RuntimeError(
+                    f"AutoTokenizer.from_pretrained() returned invalid value: {tokenizer!r}\n"
+                    f"Base model path: {model_path_str}\n"
+                    f"This may indicate a corrupted model, missing tokenizer files, or a transformers library bug."
+                )
+            if not hasattr(tokenizer, 'pad_token') and not hasattr(tokenizer, 'eos_token'):
+                raise RuntimeError(
+                    f"AutoTokenizer.from_pretrained() returned invalid object (type: {type(tokenizer)}).\n"
+                    f"Expected AutoTokenizer instance, got: {tokenizer!r}\n"
+                    f"Base model path: {model_path_str}\n"
+                    f"This may indicate corrupted model files or incompatible transformers version."
+                )
+            
             logging.info("Tokenizer loaded from base model")
         except Exception as e2:
             error_msg = str(e2)
             if "not a string" in error_msg.lower():
                 raise ValueError(f"Invalid model path (not a string): base_model={model_path_str!r} (type: {type(model_path_str)}), adapter_dir={adapter_dir!r} (type: {type(adapter_dir)})")
             raise RuntimeError(f"Failed to load tokenizer from both adapter dir and base model: {e2}")
+    
+    # Validate tokenizer is actually a tokenizer object
+    if tokenizer is None or tokenizer is False:
+        raise RuntimeError(
+            f"Tokenizer is invalid after loading from adapter dir and base model: {tokenizer!r}\n"
+            f"Adapter dir: {adapter_dir}, Base model: {model_path_str}\n"
+            f"This may indicate corrupted files, missing tokenizer files, or a transformers library bug."
+        )
+    if not hasattr(tokenizer, 'pad_token') and not hasattr(tokenizer, 'eos_token'):
+        raise RuntimeError(
+            f"Tokenizer is not a valid tokenizer object (type: {type(tokenizer)}). "
+            f"Expected AutoTokenizer instance, got: {tokenizer!r}\n"
+            f"Adapter dir: {adapter_dir}, Base model: {model_path_str}\n"
+            f"This may indicate corrupted files or incompatible transformers version."
+        )
     
     # Ensure pad token is set
     if tokenizer.pad_token is None:

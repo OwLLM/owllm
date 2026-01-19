@@ -363,6 +363,7 @@ class EnvRegistry:
             _pkg("huggingface-hub", None),
             "transformers==4.51.3",
             "tokenizers==0.21.4",
+            "protobuf",
             _pkg("safetensors", "safetensors>=0.7.0,<0.8.0"),
             _pkg("accelerate", "accelerate>=1.2.0,<1.3.0"),
             _pkg("peft", "peft>=0.13.0,<0.16.0"),
@@ -675,6 +676,77 @@ class EnvRegistry:
             If the active profile expects CUDA torch, this also requires torch.cuda.is_available().
         """
         return self._health_check_env(python_exe, self._get_active_profile_data())
+    
+    def check_missing_packages(self, python_exe: Path, required_packages: list = None) -> list:
+        """
+        Check which required packages are missing from the environment.
+        
+        Args:
+            python_exe: Path to Python executable
+            required_packages: List of package names to check (default: critical inference packages)
+            
+        Returns:
+            List of missing package names (empty if all present)
+        """
+        if required_packages is None:
+            required_packages = ["protobuf", "transformers", "tokenizers", "torch"]
+        
+        # Map package names to their import names (some packages have different import names)
+        import_map = {
+            "protobuf": "google.protobuf",  # protobuf package is imported as google.protobuf
+        }
+        
+        missing = []
+        for pkg in required_packages:
+            try:
+                # Use import name if mapped, otherwise use package name
+                import_name = import_map.get(pkg, pkg)
+                code = f"import {import_name}; print('OK')"
+                result = self._run_python(python_exe, code, timeout=10)
+                if result.returncode != 0 or "OK" not in result.stdout:
+                    missing.append(pkg)
+            except Exception:
+                missing.append(pkg)
+        
+        return missing
+    
+    def auto_install_missing_packages(self, python_exe: Path, packages: list, log_callback=None) -> bool:
+        """
+        Automatically install missing packages in the environment.
+        
+        Args:
+            python_exe: Path to Python executable
+            packages: List of package names to install
+            log_callback: Optional callback for logging
+            
+        Returns:
+            True if all packages installed successfully, False otherwise
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+        
+        for pkg in packages:
+            log(f"Installing missing package: {pkg}...")
+            try:
+                result = subprocess.run(
+                    [str(python_exe), "-m", "pip", "install", pkg],
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                    **self.subprocess_flags
+                )
+                if result.returncode == 0:
+                    log(f"Successfully installed {pkg}")
+                else:
+                    error_output = (result.stderr or result.stdout or "").strip()
+                    log(f"Failed to install {pkg}: {error_output[:200]}")
+                    return False
+            except Exception as e:
+                log(f"Error installing {pkg}: {e}")
+                return False
+        
+        return True
     
     def validate_env_spec(self, env_spec: EnvSpec) -> bool:
         """

@@ -57,7 +57,8 @@ def main():
     if model_cfg.get("system_prompt"):
         os.environ["SYSTEM_PROMPT"] = model_cfg["system_prompt"]
 
-    port = model_cfg.get("port", 9100)
+    # Port can be overridden by environment variable (for auto-reassignment)
+    port = int(os.environ.get("SERVER_PORT", model_cfg.get("port", 9100)))
 
     print(f"Starting LLM server for model: {model_id}")
     print(f"Port: {port}")

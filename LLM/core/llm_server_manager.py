@@ -833,8 +833,59 @@ class LLMServerManager:
                                             f"The model download may be incomplete. Please re-download the model."
                                         )
                                 elif "error" in log_text.lower() and "traceback" in log_text.lower():
-                                    # Extract full error message - look for ImportError specifically
+                                    # Extract full error message - look for specific error types
                                     import re
+                                    
+                                    # Try to extract RuntimeError with full multi-line message
+                                    # When RuntimeError is raised with a multi-line string, it may appear in logs as:
+                                    # 1. Single line with \n characters: "RuntimeError: line1\nline2\nline3"
+                                    # 2. Multiple lines: "RuntimeError: line1\n    line2\n    line3"
+                                    # 3. In traceback format with indentation
+                                    
+                                    # Pattern 1: Look for RuntimeError and capture until next traceback element or end
+                                    runtime_error_match = re.search(
+                                        r'RuntimeError:\s*((?:[^\n]|\n(?!\s*(?:File\s|Traceback|\w+Error:)))+)', 
+                                        log_text, 
+                                        re.MULTILINE
+                                    )
+                                    if runtime_error_match:
+                                        error_msg = runtime_error_match.group(1).strip()
+                                        # Replace literal \n with actual newlines
+                                        error_msg = error_msg.replace('\\n', '\n')
+                                        # Normalize: remove leading whitespace from continuation lines but keep structure
+                                        lines = []
+                                        for line in error_msg.split('\n'):
+                                            stripped = line.strip()
+                                            if stripped:  # Keep non-empty lines
+                                                lines.append(stripped)
+                                        error_msg = '\n'.join(lines)
+                                        
+                                        # If message seems truncated (ends with incomplete sentence), try to get more
+                                        # Look for continuation in the log after the RuntimeError line
+                                        if len(error_msg) < 100 and not error_msg.endswith('.'):
+                                            # Try to find more context - look for lines that might be part of the error
+                                            error_start_idx = log_text.find('RuntimeError:')
+                                            if error_start_idx >= 0:
+                                                # Get next 20 lines after RuntimeError for context
+                                                remaining_log = log_text[error_start_idx:]
+                                                context_lines = remaining_log.split('\n')[:20]
+                                                # Look for lines that look like error message continuation
+                                                continuation = []
+                                                for line in context_lines[1:]:  # Skip the RuntimeError line itself
+                                                    stripped = line.strip()
+                                                    # Stop if we hit a traceback line or another error
+                                                    if any(x in stripped for x in ['File "', 'Traceback', 'Error:', 'Exception:']):
+                                                        break
+                                                    # Include lines that look like error message (not code/file paths)
+                                                    if stripped and not stripped.startswith('File ') and len(stripped) > 10:
+                                                        continuation.append(stripped)
+                                                if continuation:
+                                                    error_msg = error_msg + '\n' + '\n'.join(continuation[:5])  # Limit to 5 more lines
+                                        
+                                        raise RuntimeError(
+                                            f"Server error detected in logs:\nRuntimeError: {error_msg}"
+                                        )
+                                    
                                     # Try to extract ImportError with full message
                                     import_error_match = re.search(r'ImportError:\s*(.+?)(?:\n|$)', log_text, re.MULTILINE | re.DOTALL)
                                     if import_error_match:
@@ -890,15 +941,30 @@ class LLMServerManager:
                                                 f"Please check the server logs for the full error and install the missing package,\n"
                                                 f"or go to the Environment/Requirements tab and run 'Repair Environment'."
                                             )
-                                    # Fallback: extract any error line
+                                    
+                                    # Fallback: extract any error line (but try to get more context)
                                     error_lines = [l.strip() for l in lines if ("Error" in l or "Exception" in l) and l.strip()]
                                     if error_lines:
                                         # Get the last meaningful error line (skip empty or very short ones)
                                         meaningful_errors = [e for e in error_lines if len(e) > 10]
                                         if meaningful_errors:
-                                            raise RuntimeError(
-                                                f"Server error detected in logs:\n{meaningful_errors[-1][:500]}"
-                                            )
+                                            # Try to get the error line plus a few lines of context after it
+                                            last_error_idx = None
+                                            for i, line in enumerate(lines):
+                                                if meaningful_errors[-1] in line:
+                                                    last_error_idx = i
+                                                    break
+                                            if last_error_idx is not None:
+                                                # Get error line plus next 3 lines for context
+                                                context_lines = lines[last_error_idx:last_error_idx+4]
+                                                context = '\n'.join(l.strip() for l in context_lines if l.strip())
+                                                raise RuntimeError(
+                                                    f"Server error detected in logs:\n{context}"
+                                                )
+                                            else:
+                                                raise RuntimeError(
+                                                    f"Server error detected in logs:\n{meaningful_errors[-1]}"
+                                                )
                         except RuntimeError:
                             raise  # Re-raise RuntimeError
                         except Exception:

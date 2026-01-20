@@ -469,10 +469,11 @@ class ServerPage(QWidget):
         QTimer.singleShot(2000, lambda: self.token_edit.setEchoMode(QLineEdit.Password))  # Hide after 2s
     
     def _populate_model_selector(self):
-        """Populate the model selector dropdown with models from llm_backends.yaml"""
+        """Populate the model selector dropdown with READY models from llm_backends.yaml"""
         try:
             import yaml
             from pathlib import Path
+            from core.model_onboarding import get_onboarding_service
             
             config_path = Path(__file__).parent.parent.parent / "configs" / "llm_backends.yaml"
             if not config_path.exists():
@@ -487,11 +488,19 @@ class ServerPage(QWidget):
                 self.llm_model_selector.addItem("(No models configured)", None)
                 return
             
-            # Add all models except "default" (or include it if it's the only one)
+            # Get READY models from onboarding
+            onboarding = get_onboarding_service()
+            ready_models = {entry["model_id"]: entry for entry in onboarding.list_ready_models()}
+            
+            # Add only READY models
             model_items = []
             for model_id, model_cfg in models.items():
                 if model_id == "default" and len(models) > 1:
                     continue  # Skip default if there are other models
+                
+                # Only include if READY
+                if model_id not in ready_models:
+                    continue
                 
                 base_model = model_cfg.get("base_model", "")
                 port = model_cfg.get("port", "?")
@@ -499,9 +508,9 @@ class ServerPage(QWidget):
                 # Extract model name from path
                 if base_model:
                     model_name = Path(base_model).name
-                    display_text = f"{model_name} (Port: {port})"
+                    display_text = f"✓ {model_name} (Port: {port})"
                 else:
-                    display_text = f"{model_id} (Port: {port})"
+                    display_text = f"✓ {model_id} (Port: {port})"
                 
                 model_items.append((display_text, model_id))
             
@@ -510,7 +519,7 @@ class ServerPage(QWidget):
             
             self.llm_model_selector.clear()
             if not model_items:
-                self.llm_model_selector.addItem("(No models configured)", None)
+                self.llm_model_selector.addItem("(No READY models - run onboarding first)", None)
             else:
                 for display_text, model_id in model_items:
                     self.llm_model_selector.addItem(display_text, model_id)

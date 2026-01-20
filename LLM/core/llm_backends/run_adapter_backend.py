@@ -84,16 +84,73 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
         else:
             logging.info(f"Loading local base model: {model_path_str}")
         
+        # Add defensive diagnostics before tokenizer load
         try:
+            import transformers
+            logging.info(f"Transformers version: {transformers.__version__}")
+        except Exception:
+            pass  # Don't fail if version check fails
+        
+        # Pre-flight checks for local paths
+        if is_local_path:
+            if not os.path.exists(model_path_str):
+                raise FileNotFoundError(
+                    f"Model path does not exist: {model_path_str}\n"
+                    f"Please verify the model directory exists and is accessible."
+                )
+            if not os.path.isdir(model_path_str):
+                raise ValueError(
+                    f"Model path is not a directory: {model_path_str}\n"
+                    f"Expected a directory containing model files."
+                )
+            # Check for tokenizer files (optional - some models might not have these)
+            tokenizer_config = os.path.join(model_path_str, "tokenizer_config.json")
+            if not os.path.exists(tokenizer_config):
+                logging.warning(
+                    f"tokenizer_config.json not found at {model_path_str}\n"
+                    f"Tokenizer may still load from other files or HuggingFace cache."
+                )
+        
+        try:
+            logging.info(f"Calling AutoTokenizer.from_pretrained('{model_path_str}')...")
             # Use the normalized string path
-            tokenizer = AutoTokenizer.from_pretrained(model_path_str)
+            # Wrap in try/except to capture ANY exception from transformers
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(model_path_str)
+            except Exception as transformers_ex:
+                # Log the actual exception from transformers BEFORE our validation
+                import traceback
+                logging.error(f"AutoTokenizer.from_pretrained() raised exception: {type(transformers_ex).__name__}: {transformers_ex}")
+                logging.error("Full traceback from transformers:")
+                logging.error(traceback.format_exc())
+                # Re-raise with more context
+                raise RuntimeError(
+                    f"Failed to load tokenizer from '{model_path_str}': {type(transformers_ex).__name__}: {transformers_ex}\n"
+                    f"This is the actual exception from transformers library.\n"
+                    f"Please check the server logs above for the full traceback."
+                ) from transformers_ex
+            
+            # Log what we actually got
+            logging.info(f"AutoTokenizer.from_pretrained() returned: type={type(tokenizer)}, value={tokenizer!r}")
             
             # Immediate validation: check if tokenizer is actually a tokenizer object
             if tokenizer is None or tokenizer is False:
+                # This should NEVER happen - AutoTokenizer.from_pretrained() either returns a tokenizer or raises an exception
+                import traceback
+                logging.error("CRITICAL: AutoTokenizer.from_pretrained() returned False/None without raising exception!")
+                logging.error("This indicates a serious bug. Full context:")
+                logging.error(traceback.format_stack())
                 raise RuntimeError(
                     f"AutoTokenizer.from_pretrained() returned invalid value: {tokenizer!r}\n"
+                    f"Type: {type(tokenizer)}\n"
                     f"Model path: {model_path_str}\n"
-                    f"This may indicate a corrupted model, missing tokenizer files, or a transformers library bug."
+                    f"CRITICAL: This should never happen - transformers library should raise an exception, not return False.\n"
+                    f"This may indicate:\n"
+                    f"  1. A bug in the transformers library\n"
+                    f"  2. Corrupted model files\n"
+                    f"  3. Missing tokenizer files\n"
+                    f"  4. Incompatible transformers version\n"
+                    f"Please check the server logs for the full exception traceback above."
                 )
             if not hasattr(tokenizer, 'pad_token') and not hasattr(tokenizer, 'eos_token'):
                 raise RuntimeError(
@@ -103,6 +160,11 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     f"This may indicate corrupted model files or incompatible transformers version."
                 )
         except Exception as e:
+            # Log full traceback for debugging
+            import traceback
+            logging.error(f"Exception during tokenizer load from '{model_path_str}': {type(e).__name__}: {e}")
+            logging.error("Full traceback:")
+            logging.error(traceback.format_exc())
             error_msg = str(e)
             error_lower = error_msg.lower()
             if "not a string" in error_lower:
@@ -261,36 +323,120 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
         logging.info(f"Loading tokenizer from adapter dir: {adapter_dir}")
         if not isinstance(adapter_dir, str):
             raise ValueError(f"adapter_dir must be a string, got: {type(adapter_dir)} = {adapter_dir!r}")
-        tokenizer = AutoTokenizer.from_pretrained(adapter_dir)
         
-        # Immediate validation: check if tokenizer is actually a tokenizer object
-        if tokenizer is None or tokenizer is False:
-            raise RuntimeError(
-                f"AutoTokenizer.from_pretrained() returned invalid value: {tokenizer!r}\n"
-                f"Adapter dir: {adapter_dir}\n"
-                f"This may indicate a corrupted adapter, missing tokenizer files, or a transformers library bug."
-            )
-        if not hasattr(tokenizer, 'pad_token') and not hasattr(tokenizer, 'eos_token'):
-            raise RuntimeError(
-                f"AutoTokenizer.from_pretrained() returned invalid object (type: {type(tokenizer)}).\n"
-                f"Expected AutoTokenizer instance, got: {tokenizer!r}\n"
-                f"Adapter dir: {adapter_dir}\n"
-                f"This may indicate corrupted adapter files or incompatible transformers version."
-            )
+        # Pre-flight check for adapter dir
+        if os.path.exists(adapter_dir) and os.path.isdir(adapter_dir):
+            tokenizer_config = os.path.join(adapter_dir, "tokenizer_config.json")
+            if not os.path.exists(tokenizer_config):
+                logging.warning(f"tokenizer_config.json not found in adapter dir: {adapter_dir}")
         
-        logging.info("Tokenizer loaded from adapter dir")
-    except Exception as e:
-        logging.warning(f"Could not load tokenizer from adapter dir: {e}")
-        logging.info(f"Loading tokenizer from base model: {model_path_str}")
         try:
-            tokenizer = AutoTokenizer.from_pretrained(model_path_str)
+            logging.info(f"Calling AutoTokenizer.from_pretrained('{adapter_dir}')...")
+            # Wrap in try/except to capture ANY exception from transformers
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(adapter_dir)
+            except Exception as transformers_ex:
+                # Log the actual exception from transformers BEFORE our validation
+                import traceback
+                logging.error(f"AutoTokenizer.from_pretrained() raised exception: {type(transformers_ex).__name__}: {transformers_ex}")
+                logging.error("Full traceback from transformers:")
+                logging.error(traceback.format_exc())
+                # Re-raise with more context
+                raise RuntimeError(
+                    f"Failed to load tokenizer from adapter dir '{adapter_dir}': {type(transformers_ex).__name__}: {transformers_ex}\n"
+                    f"This is the actual exception from transformers library.\n"
+                    f"Please check the server logs above for the full traceback."
+                ) from transformers_ex
+            
+            # Log what we actually got
+            logging.info(f"AutoTokenizer.from_pretrained() returned: type={type(tokenizer)}, value={tokenizer!r}")
             
             # Immediate validation: check if tokenizer is actually a tokenizer object
             if tokenizer is None or tokenizer is False:
+                # This should NEVER happen - AutoTokenizer.from_pretrained() either returns a tokenizer or raises an exception
+                import traceback
+                logging.error("CRITICAL: AutoTokenizer.from_pretrained() returned False/None without raising exception!")
+                logging.error("This indicates a serious bug. Full context:")
+                logging.error(traceback.format_stack())
                 raise RuntimeError(
                     f"AutoTokenizer.from_pretrained() returned invalid value: {tokenizer!r}\n"
+                    f"Type: {type(tokenizer)}\n"
+                    f"Adapter dir: {adapter_dir}\n"
+                    f"CRITICAL: This should never happen - transformers library should raise an exception, not return False.\n"
+                    f"This may indicate:\n"
+                    f"  1. A bug in the transformers library\n"
+                    f"  2. Corrupted adapter files\n"
+                    f"  3. Missing tokenizer files\n"
+                    f"  4. Incompatible transformers version\n"
+                    f"Please check the server logs for the full exception traceback above."
+                )
+            if not hasattr(tokenizer, 'pad_token') and not hasattr(tokenizer, 'eos_token'):
+                raise RuntimeError(
+                    f"AutoTokenizer.from_pretrained() returned invalid object (type: {type(tokenizer)}).\n"
+                    f"Expected AutoTokenizer instance, got: {tokenizer!r}\n"
+                    f"Adapter dir: {adapter_dir}\n"
+                    f"This may indicate corrupted adapter files or incompatible transformers version."
+                )
+            
+            logging.info("Tokenizer loaded from adapter dir")
+        except Exception as tokenizer_ex:
+            # Log full traceback for debugging
+            import traceback
+            logging.error(f"Exception during tokenizer load from adapter dir '{adapter_dir}': {type(tokenizer_ex).__name__}: {tokenizer_ex}")
+            logging.error("Full traceback:")
+            logging.error(traceback.format_exc())
+            raise  # Re-raise to trigger fallback to base model
+            
+    except Exception as e:
+        logging.warning(f"Could not load tokenizer from adapter dir: {type(e).__name__}: {e}")
+        logging.info(f"Loading tokenizer from base model: {model_path_str}")
+        try:
+            # Pre-flight check for base model path
+            if is_local_path:
+                if not os.path.exists(model_path_str):
+                    raise FileNotFoundError(
+                        f"Base model path does not exist: {model_path_str}\n"
+                        f"Failed to load from adapter dir, and base model path is also invalid."
+                    )
+            
+            logging.info(f"Calling AutoTokenizer.from_pretrained('{model_path_str}')...")
+            # Wrap in try/except to capture ANY exception from transformers
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(model_path_str)
+            except Exception as transformers_ex:
+                # Log the actual exception from transformers BEFORE our validation
+                import traceback
+                logging.error(f"AutoTokenizer.from_pretrained() raised exception: {type(transformers_ex).__name__}: {transformers_ex}")
+                logging.error("Full traceback from transformers:")
+                logging.error(traceback.format_exc())
+                # Re-raise with more context
+                raise RuntimeError(
+                    f"Failed to load tokenizer from base model '{model_path_str}': {type(transformers_ex).__name__}: {transformers_ex}\n"
+                    f"This is the actual exception from transformers library.\n"
+                    f"Please check the server logs above for the full traceback."
+                ) from transformers_ex
+            
+            # Log what we actually got
+            logging.info(f"AutoTokenizer.from_pretrained() returned: type={type(tokenizer)}, value={tokenizer!r}")
+            
+            # Immediate validation: check if tokenizer is actually a tokenizer object
+            if tokenizer is None or tokenizer is False:
+                # This should NEVER happen - AutoTokenizer.from_pretrained() either returns a tokenizer or raises an exception
+                import traceback
+                logging.error("CRITICAL: AutoTokenizer.from_pretrained() returned False/None without raising exception!")
+                logging.error("This indicates a serious bug. Full context:")
+                logging.error(traceback.format_stack())
+                raise RuntimeError(
+                    f"AutoTokenizer.from_pretrained() returned invalid value: {tokenizer!r}\n"
+                    f"Type: {type(tokenizer)}\n"
                     f"Base model path: {model_path_str}\n"
-                    f"This may indicate a corrupted model, missing tokenizer files, or a transformers library bug."
+                    f"CRITICAL: This should never happen - transformers library should raise an exception, not return False.\n"
+                    f"This may indicate:\n"
+                    f"  1. A bug in the transformers library\n"
+                    f"  2. Corrupted model files\n"
+                    f"  3. Missing tokenizer files\n"
+                    f"  4. Incompatible transformers version\n"
+                    f"Please check the server logs for the full exception traceback above."
                 )
             if not hasattr(tokenizer, 'pad_token') and not hasattr(tokenizer, 'eos_token'):
                 raise RuntimeError(
@@ -302,10 +448,21 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
             
             logging.info("Tokenizer loaded from base model")
         except Exception as e2:
+            # Log full traceback for debugging
+            import traceback
+            logging.error(f"Exception during tokenizer load from base model '{model_path_str}': {type(e2).__name__}: {e2}")
+            logging.error("Full traceback:")
+            logging.error(traceback.format_exc())
+            
             error_msg = str(e2)
             if "not a string" in error_msg.lower():
                 raise ValueError(f"Invalid model path (not a string): base_model={model_path_str!r} (type: {type(model_path_str)}), adapter_dir={adapter_dir!r} (type: {type(adapter_dir)})")
-            raise RuntimeError(f"Failed to load tokenizer from both adapter dir and base model: {e2}")
+            raise RuntimeError(
+                f"Failed to load tokenizer from both adapter dir and base model.\n"
+                f"Adapter dir error: {type(e).__name__}: {e}\n"
+                f"Base model error: {type(e2).__name__}: {e2}\n"
+                f"Please check the server logs for full tracebacks."
+            )
     
     # Validate tokenizer is actually a tokenizer object
     if tokenizer is None or tokenizer is False:

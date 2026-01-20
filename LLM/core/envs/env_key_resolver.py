@@ -1,14 +1,67 @@
 """
 PHASE 2: Environment Key Resolver
-Maps model requirements to shared environment keys (e.g., "torch-cu121-transformers-bnb").
+Maps model requirements to shared environment keys (e.g., "tf-cu121-t22-base").
 Eliminates per-model environment explosion.
 """
 from pathlib import Path
 from typing import Optional, Dict, Any
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
+
+
+def encode_torch_mm(version: str) -> str:
+    """
+    Encode torch major.minor version to compact format.
+    
+    Examples:
+        "2.5.1+cu121" -> "25"
+        "2.2.0" -> "22"
+        "2.2" -> "22"
+    
+    Rule: take major.minor only, drop everything after + or additional dots.
+    """
+    if not version:
+        return ""
+    
+    # Remove everything after + (build suffix)
+    version = version.split("+")[0]
+    
+    # Extract major.minor
+    parts = version.split(".")
+    if len(parts) >= 2:
+        major = parts[0]
+        minor = parts[1]
+        return f"{major}{minor}"
+    elif len(parts) == 1:
+        # Single number, assume it's major (e.g., "2" -> "20")
+        return f"{parts[0]}0"
+    
+    return ""
+
+
+def decode_torch_mm(encoded: str) -> str:
+    """
+    Decode compact torch version format to major.minor.
+    
+    Examples:
+        "25" -> "2.5"
+        "22" -> "2.2"
+    """
+    if not encoded:
+        return None
+    
+    # Remove 't' prefix if present (from env key like "t22")
+    encoded = encoded.lstrip("t")
+    
+    if len(encoded) >= 2:
+        major = encoded[0]
+        minor = encoded[1]
+        return f"{major}.{minor}"
+    
+    return None
 
 
 class EnvKeyResolver:
@@ -51,108 +104,228 @@ class EnvKeyResolver:
             logger.warning(f"Failed to get active profile: {e}")
             return None
     
+    def _derive_accelerator(self, profile_data: Optional[dict]) -> str:
+        """
+        Derive accelerator from profile_data using priority order.
+        
+        Priority:
+        1) If torch string contains +cu### → use that (cu###)
+        2) Else if profile_data["torch_index"] contains cu### → use it
+        3) Else if profile_data["cuda_version"] exists → map 12.1 → cu121
+        4) Else fallback to "cpu"
+        """
+        if not profile_data:
+            return "cpu"
+        
+        torch_spec = str(profile_data.get("packages", {}).get("torch", ""))
+        torch_index = str(profile_data.get("torch_index", ""))
+        cuda_version = profile_data.get("cuda_version")
+        
+        # Priority 1: torch string contains +cu###
+        if "+cu" in torch_spec:
+            cuda_part = torch_spec.split("+cu")[1]
+            # Extract up to 3 digits (cu121, cu124, etc.)
+            match = re.search(r'^(\d{1,3})', cuda_part)
+            if match:
+                return f"cu{match.group(1)}"
+        
+        # Priority 2: torch_index contains cu###
+        if "/whl/cu" in torch_index:
+            cuda_part = torch_index.split("/whl/cu")[1].split("/")[0]
+            match = re.search(r'^(\d{1,3})', cuda_part)
+            if match:
+                return f"cu{match.group(1)}"
+        
+        # Priority 3: cuda_version exists → map 12.1 → cu121
+        if cuda_version:
+            # Convert "12.1" to "cu121"
+            version_str = str(cuda_version).replace(".", "")
+            if version_str.isdigit() and len(version_str) >= 2:
+                return f"cu{version_str[:3]}"  # Take first 3 digits
+        
+        # Priority 4: fallback to cpu
+        return "cpu"
+    
+    def _derive_torch_major_minor(self, profile_data: Optional[dict]) -> Optional[str]:
+        """
+        Derive torch major.minor from profile_data.
+        
+        Args:
+            profile_data: Profile data dict
+            
+        Returns:
+            Torch version as "2.2" or None
+        """
+        if not profile_data:
+            return None
+        
+        torch_spec = str(profile_data.get("packages", {}).get("torch", ""))
+        if not torch_spec:
+            return None
+        
+        # Remove build suffix (everything after +)
+        version = torch_spec.split("+")[0]
+        
+        # Extract major.minor
+        parts = version.split(".")
+        if len(parts) >= 2:
+            return f"{parts[0]}.{parts[1]}"
+        
+        return None
+    
     def resolve_env_key(
         self,
-        backend: str = "transformers",
-        use_quantization: bool = True,
-        model_path: Optional[str] = None,
+        backend: str,                 # "tf" | "vllm" | "llamacpp"
+        accelerator: Optional[str] = None,  # "cu121" | "rocm61" | "mps" | "cpu"
+        torch_major_minor: Optional[str] = None,   # "2.2"
+        quant: Optional[str] = None,  # "base" | "bnb"
         profile_data: Optional[dict] = None
     ) -> str:
         """
         Resolve environment key from model requirements.
         
         Args:
-            backend: Backend type (transformers, vllm, llamacpp)
-            use_quantization: Whether to use quantization (bitsandbytes)
-            model_path: Optional model path for special cases
+            backend: Backend type ("tf" | "vllm" | "llamacpp")
+            accelerator: Accelerator type (if None, derived from profile_data)
+            torch_major_minor: Torch version as "2.2" (if None, derived from profile_data)
+            quant: Quantization type "base" | "bnb" (defaults to "base")
             profile_data: Optional profile data (if None, auto-detected)
         
         Returns:
-            Environment key string (e.g., "torch-cu121-transformers-bnb")
+            Environment key string (e.g., "tf-cu121-t22-base")
         
         Examples:
-            - torch-cu121-transformers-bnb (CUDA 12.1, transformers + bitsandbytes)
-            - torch-cu124-transformers (CUDA 12.4, transformers only)
-            - torch-cpu-transformers (CPU-only)
-            - vllm-cu121 (vLLM with CUDA 12.1)
-            - llamacpp-cpu (llama.cpp CPU)
+            - tf-cu121-t22-base (transformers, CUDA 12.1, torch 2.2, no quant)
+            - tf-cu121-t22-bnb (transformers, CUDA 12.1, torch 2.2, bitsandbytes)
+            - vllm-cu121 (vLLM, CUDA 12.1, no torch version in name)
+            - llamacpp-cpu (llama.cpp, CPU)
         """
         if profile_data is None:
             profile_data = self.get_active_profile_data()
         
-        # Determine CUDA version from profile
-        cuda_version = "cpu"
-        if profile_data:
-            torch_spec = str(profile_data.get("packages", {}).get("torch", ""))
-            torch_index = str(profile_data.get("torch_index", ""))
-            
-            # Extract CUDA version from torch spec or index URL
-            if "+cu" in torch_spec:
-                # e.g., "2.5.1+cu121" -> "cu121"
-                cuda_part = torch_spec.split("+cu")[1]
-                cuda_version = f"cu{cuda_part[:3]}"  # "cu121"
-            elif "/whl/cu" in torch_index:
-                # e.g., ".../whl/cu121" -> "cu121"
-                cuda_part = torch_index.split("/whl/cu")[1].split("/")[0]
-                cuda_version = f"cu{cuda_part[:3]}"
+        # Derive accelerator if not provided
+        if accelerator is None:
+            accelerator = self._derive_accelerator(profile_data)
         
-        # Build env_key based on backend
-        parts = ["torch", cuda_version]
+        # Handle backend-specific formats
+        if backend == "vllm":
+            # vLLM: vllm-<accelerator> (no torch token)
+            return f"vllm-{accelerator}"
         
-        if backend == "transformers":
-            parts.append("transformers")
-            if use_quantization:
-                parts.append("bnb")  # bitsandbytes
-        elif backend == "vllm":
-            parts.append("vllm")
-        elif backend == "llamacpp":
-            parts = ["llamacpp", cuda_version]
+        if backend == "llamacpp":
+            # llama.cpp: llamacpp-<accelerator_or_cpu>
+            if accelerator == "cpu":
+                return "llamacpp-cpu"
+            return f"llamacpp-{accelerator}"
+        
+        # Transformers (tf): tf-<accelerator>-t<mm>-<quant>
+        # Derive torch_major_minor if not provided
+        if torch_major_minor is None:
+            torch_major_minor = self._derive_torch_major_minor(profile_data)
+        
+        # Default quant to "base"
+        if quant is None:
+            quant = "base"
+        
+        # Encode torch version
+        torch_encoded = encode_torch_mm(torch_major_minor) if torch_major_minor else ""
+        
+        if torch_encoded:
+            env_key = f"tf-{accelerator}-t{torch_encoded}-{quant}"
         else:
-            # Generic backend
-            parts.append(backend)
+            # Fallback if torch version unknown
+            env_key = f"tf-{accelerator}-{quant}"
         
-        env_key = "-".join(parts)
-        logger.debug(f"Resolved env_key: {env_key} (backend={backend}, quant={use_quantization}, cuda={cuda_version})")
+        logger.debug(f"Resolved env_key: {env_key} (backend={backend}, accelerator={accelerator}, torch={torch_major_minor}, quant={quant})")
         return env_key
     
     def parse_env_key(self, env_key: str) -> Dict[str, Any]:
         """
-        Parse environment key back into components.
+        Parse environment key back into components (supports old + new formats).
         
         Args:
-            env_key: Environment key string
+            env_key: Environment key string (old or new format)
         
         Returns:
-            Dict with backend, cuda_version, quantization flags
+            Normalized dict with:
+            - backend: "tf" | "vllm" | "llamacpp"
+            - accelerator: "cu121" | "rocm61" | "mps" | "cpu"
+            - torch_mm: "2.2" | None (decoded)
+            - quant: "base" | "bnb" | None
         
-        Example:
+        Examples:
             parse_env_key("torch-cu121-transformers-bnb") ->
-            {"backend": "transformers", "cuda": "cu121", "quantization": True}
+            {"backend": "tf", "accelerator": "cu121", "torch_mm": None, "quant": "bnb"}
+            
+            parse_env_key("tf-cu121-t22-bnb") ->
+            {"backend": "tf", "accelerator": "cu121", "torch_mm": "2.2", "quant": "bnb"}
         """
         parts = env_key.split("-")
         
         result = {
             "backend": "unknown",
-            "cuda": "cpu",
-            "quantization": False,
-            "framework": "torch"
+            "accelerator": "cpu",
+            "torch_mm": None,
+            "quant": None
         }
         
-        # Parse parts
-        if "llamacpp" in parts:
-            result["framework"] = "llamacpp"
-            result["backend"] = "llamacpp"
-            if any(p.startswith("cu") for p in parts):
-                result["cuda"] = next(p for p in parts if p.startswith("cu"))
-        elif "vllm" in parts:
-            result["backend"] = "vllm"
-            if any(p.startswith("cu") for p in parts):
-                result["cuda"] = next(p for p in parts if p.startswith("cu"))
-        elif "transformers" in parts:
-            result["backend"] = "transformers"
-            if any(p.startswith("cu") for p in parts):
-                result["cuda"] = next(p for p in parts if p.startswith("cu"))
-            result["quantization"] = "bnb" in parts or "quantized" in parts
+        # Detect format: old (torch-*-transformers-*) or new (tf-* or vllm-* or llamacpp-*)
+        is_old_format = "torch" in parts and "transformers" in parts
+        
+        if is_old_format:
+            # Old format: torch-cu121-transformers-bnb or torch-cu121-transformers
+            # Normalize to new format
+            result["backend"] = "tf"
+            
+            # Extract accelerator
+            for p in parts:
+                if p.startswith("cu") or p.startswith("rocm") or p == "mps" or p == "cpu":
+                    result["accelerator"] = p
+                    break
+            
+            # Extract quant
+            if "bnb" in parts:
+                result["quant"] = "bnb"
+            else:
+                # Old transformers without bnb → base
+                result["quant"] = "base"
+            
+            # torch_mm: None for old keys
+            # If env metadata/profile exists, would use profile_data["packages"]["torch"] and convert to major.minor
+            # For now, set to None - compatibility check does not reject on torch_mm
+            result["torch_mm"] = None
+            
+        else:
+            # New format: tf-cu121-t22-base, vllm-cu121, llamacpp-cpu
+            if "llamacpp" in parts:
+                result["backend"] = "llamacpp"
+            elif "vllm" in parts:
+                result["backend"] = "vllm"
+            elif "tf" in parts:
+                result["backend"] = "tf"
+            
+            # Extract accelerator
+            for p in parts:
+                if p.startswith("cu") or p.startswith("rocm") or p == "mps" or p == "cpu":
+                    result["accelerator"] = p
+                    break
+            
+            # Extract torch_mm (encoded as t22, t25, etc.)
+            for p in parts:
+                if p.startswith("t") and len(p) > 1 and p[1:].isdigit():
+                    # Decode: t22 -> "2.2"
+                    decoded = decode_torch_mm(p)
+                    result["torch_mm"] = decoded
+                    break
+            
+            # Extract quant
+            if "bnb" in parts:
+                result["quant"] = "bnb"
+            elif "base" in parts:
+                result["quant"] = "base"
+            else:
+                # Default to base if not specified
+                result["quant"] = "base"
         
         return result
     

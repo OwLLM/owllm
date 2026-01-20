@@ -180,9 +180,13 @@ async def startup_event():
             logger.info("Model loaded successfully!")
         except Exception as e:
             _load_state = "error"
+            # Store both exception type and message separately for better diagnostics
             _load_error = f"{type(e).__name__}: {e}"
             _load_finished_at = time.time()
-            logger.exception("Failed to load model")
+            # Log full exception details including traceback
+            logger.error(f"Failed to load model: {type(e).__name__}")
+            logger.error(f"Exception message: {e}")
+            logger.exception("Full traceback:")
 
     threading.Thread(target=_loader, daemon=True).start()
 
@@ -193,28 +197,67 @@ async def startup_event():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    # Always return 200 once the server is up; indicate readiness in JSON.
-    # This allows the process to be detectable even while the model loads.
+    """Health check endpoint with strict validation"""
+    # Strict health gate: model and tokenizer must be valid objects
+    is_ready = (
+        _load_state == "ready" and
+        model is not None and
+        tokenizer is not None and
+        # Additional validation: ensure tokenizer is actually a tokenizer object
+        hasattr(tokenizer, 'encode') and
+        hasattr(tokenizer, 'decode')
+    )
+    
     payload: Dict[str, Any] = {
-        "status": "ok" if (model is not None and tokenizer is not None and _load_state == "ready") else _load_state,
+        "status": "ok" if is_ready else _load_state,
         "model": model_name,
     }
+    
     if _load_state == "error":
         payload["error"] = _load_error
+        # Include full error details for debugging
+        if _load_error:
+            payload["error_details"] = _load_error
+    
     if _load_started_at:
         payload["loading_seconds"] = round((time.time() - _load_started_at), 1)
+    
+    # If model/tokenizer exist but are invalid, report as error
+    if _load_state == "ready" and not is_ready:
+        payload["status"] = "error"
+        payload["error"] = "Model or tokenizer is invalid (missing required attributes)"
+        payload["model_valid"] = model is not None
+        payload["tokenizer_valid"] = (
+            tokenizer is not None and
+            hasattr(tokenizer, 'encode') and
+            hasattr(tokenizer, 'decode')
+        )
+    
     return payload
 
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest):
-    """Generate text from prompt (native API)"""
-    if model is None or tokenizer is None or _load_state != "ready":
+    """Generate text from prompt (native API) with strict health gate"""
+    # Strict health gate: validate model and tokenizer before inference
+    if _load_state != "ready":
         detail = "Model not ready"
         if _load_state == "error" and _load_error:
             detail = f"Model load failed: {_load_error}"
         raise HTTPException(status_code=503, detail=detail)
+    
+    if model is None or tokenizer is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Model or tokenizer is None. Model load may have failed silently."
+        )
+    
+    # Additional validation: ensure tokenizer is actually a tokenizer object
+    if not (hasattr(tokenizer, 'encode') and hasattr(tokenizer, 'decode')):
+        raise HTTPException(
+            status_code=503,
+            detail=f"Tokenizer is invalid (type: {type(tokenizer)}). Missing required methods (encode/decode)."
+        )
     
     try:
         # Lazy import heavy backend for generation.

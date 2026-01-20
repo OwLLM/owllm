@@ -48,6 +48,8 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
     """
     Run inference using persistent server.
     
+    RUNTIME GATE: Only allows models with onboarding status=READY.
+    
     Args:
         cfg: Inference configuration (must include model_id)
         env: Optional environment variables (unused in server mode)
@@ -57,6 +59,26 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
     """
     from core.llm_server_manager import get_global_server_manager
     from core.inference_client import InferenceClient
+    from core.model_onboarding import get_onboarding_service
+    
+    # RUNTIME GATE: Check onboarding status before attempting server start
+    onboarding = get_onboarding_service()
+    status = onboarding.get_onboarding_status(cfg.model_id)
+    
+    if status is None:
+        raise RuntimeError(
+            f"Model '{cfg.model_id}' has not been onboarded. "
+            f"Please run onboarding first."
+        )
+    
+    if status != "READY":
+        from core.state_store import get_state_store
+        entry = get_state_store().get_onboarding(cfg.model_id)
+        error_msg = entry.get("last_error", "Unknown error") if entry else "Unknown error"
+        raise RuntimeError(
+            f"Model '{cfg.model_id}' is not ready for inference (status={status}). "
+            f"Please complete onboarding or repair the model. Error: {error_msg}"
+        )
     
     # Ensure server is running for this model
     manager = get_global_server_manager()

@@ -113,10 +113,28 @@ class StateStore:
             )
         """)
         
+        # Model onboarding table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS model_onboarding (
+                model_id TEXT PRIMARY KEY,
+                base_model_path TEXT NOT NULL,
+                adapter_dir TEXT,
+                env_key TEXT,
+                backend TEXT,
+                accelerator TEXT,
+                status TEXT NOT NULL,
+                last_error TEXT,
+                healthcheck_log_path TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (model_id) REFERENCES models(model_id)
+            )
+        """)
+        
         # Indexes for common queries
         conn.execute("CREATE INDEX IF NOT EXISTS idx_models_env_key ON models(env_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_servers_status ON servers(status)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_envs_status ON envs(status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_onboarding_status ON model_onboarding(status)")
         
         conn.commit()
         logger.info(f"StateStore initialized at {self.db_path}")
@@ -397,6 +415,97 @@ class StateStore:
         conn = self._get_connection()
         conn.execute("DELETE FROM kv WHERE key = ?", (key,))
         conn.commit()
+    
+    # ========================================================================
+    # MODEL ONBOARDING
+    # ========================================================================
+    
+    def upsert_onboarding(
+        self,
+        model_id: str,
+        base_model_path: str,
+        adapter_dir: Optional[str] = None,
+        env_key: Optional[str] = None,
+        backend: Optional[str] = None,
+        accelerator: Optional[str] = None,
+        status: str = "NEW",
+        last_error: Optional[str] = None,
+        healthcheck_log_path: Optional[str] = None
+    ):
+        """
+        Insert or update model onboarding entry.
+        
+        Args:
+            model_id: Unique model identifier
+            base_model_path: Path to base model files
+            adapter_dir: Optional adapter directory path
+            env_key: Associated environment key
+            backend: Backend type (tf, llamacpp, etc.)
+            accelerator: Accelerator type (cu121, cpu, etc.)
+            status: NEW | BUILDING | READY | BROKEN
+            last_error: Error message if status=BROKEN
+            healthcheck_log_path: Path to health check log file
+        """
+        conn = self._get_connection()
+        now = datetime.utcnow().isoformat()
+        
+        conn.execute("""
+            INSERT INTO model_onboarding (
+                model_id, base_model_path, adapter_dir, env_key, backend, accelerator,
+                status, last_error, healthcheck_log_path, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(model_id) DO UPDATE SET
+                base_model_path=excluded.base_model_path,
+                adapter_dir=excluded.adapter_dir,
+                env_key=excluded.env_key,
+                backend=excluded.backend,
+                accelerator=excluded.accelerator,
+                status=excluded.status,
+                last_error=excluded.last_error,
+                healthcheck_log_path=excluded.healthcheck_log_path,
+                updated_at=excluded.updated_at
+        """, (model_id, base_model_path, adapter_dir, env_key, backend, accelerator,
+              status, last_error, healthcheck_log_path, now))
+        
+        conn.commit()
+        logger.debug(f"Upserted onboarding: {model_id} (status={status})")
+    
+    def get_onboarding(self, model_id: str) -> Optional[Dict[str, Any]]:
+        """Get onboarding entry by model ID."""
+        conn = self._get_connection()
+        row = conn.execute(
+            "SELECT * FROM model_onboarding WHERE model_id = ?",
+            (model_id,)
+        ).fetchone()
+        
+        return dict(row) if row else None
+    
+    def list_onboarding_by_status(self, status: str) -> List[Dict[str, Any]]:
+        """List onboarding entries filtered by status."""
+        conn = self._get_connection()
+        rows = conn.execute(
+            "SELECT * FROM model_onboarding WHERE status = ? ORDER BY model_id",
+            (status,)
+        ).fetchall()
+        
+        return [dict(row) for row in rows]
+    
+    def list_all_onboarding(self) -> List[Dict[str, Any]]:
+        """List all onboarding entries."""
+        conn = self._get_connection()
+        rows = conn.execute(
+            "SELECT * FROM model_onboarding ORDER BY model_id"
+        ).fetchall()
+        
+        return [dict(row) for row in rows]
+    
+    def delete_onboarding(self, model_id: str):
+        """Delete onboarding entry."""
+        conn = self._get_connection()
+        conn.execute("DELETE FROM model_onboarding WHERE model_id = ?", (model_id,))
+        conn.commit()
+        logger.debug(f"Deleted onboarding: {model_id}")
     
     # ========================================================================
     # UTILITIES

@@ -7971,18 +7971,31 @@ class MainWindow(QMainWindow):
         return c[:1] if c else "a"
     
     def _load_tool_chat_models(self):
-        """Load available models into tool chat selector"""
+        """Load available models into tool chat selector - only READY models"""
         try:
+            from core.model_onboarding import get_onboarding_service
+            onboarding = get_onboarding_service()
+            ready_models = onboarding.list_ready_models()
+            
+            # Build mapping of base_model_path -> model_id
+            ready_paths = {entry["base_model_path"]: entry["model_id"] for entry in ready_models}
+            
             models = list_local_downloads()
             download_root = get_app_root() / "models"
             
             self.tool_chat_model_a.clear()
-            if not models:
-                self.tool_chat_model_a.addItem("(No models downloaded)", None)
-            else:
+            ready_count = 0
+            if models:
                 for model_name in models:
                     model_path = download_root / model_name
-                    self.tool_chat_model_a.addItem(model_name, str(model_path))
+                    # Check if this model is READY
+                    model_path_str = str(model_path)
+                    if model_path_str in ready_paths:
+                        self.tool_chat_model_a.addItem(f"✓ {model_name}", str(model_path))
+                        ready_count += 1
+            
+            if ready_count == 0:
+                self.tool_chat_model_a.addItem("(No READY models - run onboarding first)", None)
         except Exception as e:
             self.tool_chat_model_a.addItem(f"(Error: {e})", None)
     
@@ -13983,12 +13996,21 @@ respective package directories or official repositories.
         current_a = self.test_model_a.currentText()
         self.test_model_a.clear()
         
-        # Add base models from models folder
+        # Add base models from models folder - only READY models
+        from core.model_onboarding import get_onboarding_service
+        onboarding = get_onboarding_service()
+        ready_models = onboarding.list_ready_models()
+        ready_paths = {entry["base_model_path"]: entry["model_id"] for entry in ready_models}
+        
         if downloaded_models:
             for model_name in downloaded_models:
-                # Convert directory name to HuggingFace format (org__model -> org/model)
-                display_name = model_name.replace("__", "/")
-                self.test_model_a.addItem(f"📦 {display_name}", str(models_dir / model_name))
+                model_path = models_dir / model_name
+                model_path_str = str(model_path)
+                # Only add if READY
+                if model_path_str in ready_paths:
+                    # Convert directory name to HuggingFace format (org__model -> org/model)
+                    display_name = model_name.replace("__", "/")
+                    self.test_model_a.addItem(f"✓ 📦 {display_name}", str(model_path))
         
         # Add trained adapters (only if they have actual model weights)
         adapter_dir = self.root / "fine_tuned"
@@ -14027,12 +14049,16 @@ respective package directories or official repositories.
         current_b = self.test_model_b.currentText()
         self.test_model_b.clear()
         
-        # Add base models from models folder
+        # Add base models from models folder - only READY models
         if downloaded_models:
             for model_name in downloaded_models:
-                # Convert directory name to HuggingFace format (org__model -> org/model)
-                display_name = model_name.replace("__", "/")
-                self.test_model_b.addItem(f"📦 {display_name}", str(models_dir / model_name))
+                model_path = models_dir / model_name
+                model_path_str = str(model_path)
+                # Only add if READY
+                if model_path_str in ready_paths:
+                    # Convert directory name to HuggingFace format (org__model -> org/model)
+                    display_name = model_name.replace("__", "/")
+                    self.test_model_b.addItem(f"✓ 📦 {display_name}", str(model_path))
         
         # Add trained adapters (only if they have actual model weights)
         if adapter_dir.exists():
@@ -14071,12 +14097,16 @@ respective package directories or official repositories.
             current_c = self.test_model_c.currentText()
             self.test_model_c.clear()
             
-            # Add base models from models folder
+            # Add base models from models folder - only READY models
             if downloaded_models:
                 for model_name in downloaded_models:
-                    # Convert directory name to HuggingFace format (org__model -> org/model)
-                    display_name = model_name.replace("__", "/")
-                    self.test_model_c.addItem(f"📦 {display_name}", str(models_dir / model_name))
+                    model_path = models_dir / model_name
+                    model_path_str = str(model_path)
+                    # Only add if READY
+                    if model_path_str in ready_paths:
+                        # Convert directory name to HuggingFace format (org__model -> org/model)
+                        display_name = model_name.replace("__", "/")
+                        self.test_model_c.addItem(f"✓ 📦 {display_name}", str(model_path))
             
             # Add trained adapters (only if they have actual model weights)
             if adapter_dir.exists():

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, IO
 
 from core.state_store import get_state_store
+from core.envs.env_registry import EnvSpec
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,9 @@ class LLMServerManager:
         Ensure server is running for given model_id, start if needed.
         THREAD SAFE: Uses lock to prevent concurrent starts.
         
+        RUNTIME GATE: Only allows models with onboarding status=READY.
+        Does NOT create or repair environments (onboarding must be done separately).
+        
         Args:
             model_id: Model identifier from config
             log_callback: Optional function to call with log messages
@@ -135,7 +139,7 @@ class LLMServerManager:
             
         Raises:
             ValueError: If model_id not found in config
-            RuntimeError: If port is in use or server fails to start
+            RuntimeError: If model is not READY (onboarding required) or port/server issues
             TimeoutError: If server doesn't become healthy in time
         """
         # THREAD SAFETY: Acquire lock for entire operation
@@ -156,6 +160,26 @@ class LLMServerManager:
                 raise ValueError(
                     f"Model '{model_id}' not found in config. "
                     f"Available: {list(self.config['models'].keys())}"
+                )
+            
+            # RUNTIME GATE: Check onboarding status
+            from core.model_onboarding import get_onboarding_service
+            onboarding = get_onboarding_service()
+            status = onboarding.get_onboarding_status(model_id)
+            
+            if status is None:
+                raise RuntimeError(
+                    f"Model '{model_id}' has not been onboarded. "
+                    f"Please run onboarding first (model download/Add model should trigger this)."
+                )
+            
+            if status != "READY":
+                entry = self.state_store.get_onboarding(model_id)
+                error_msg = entry.get("last_error", "Unknown error") if entry else "Unknown error"
+                raise RuntimeError(
+                    f"Model '{model_id}' is not ready for runtime (status={status}). "
+                    f"Please complete onboarding or repair the model. "
+                    f"Error: {error_msg}"
                 )
             
             # Check for duplicate ports and warn
@@ -674,29 +698,110 @@ class LLMServerManager:
             log(f"Found {len(model_files)} model files, starting server...")
             
             # Get environment for this model
+            # RUNTIME: Use existing env only (no creation/repair in runtime path)
             log(f"Getting environment for model: {base_model}")
-            env_spec = self.env_registry.get_env_for_model(base_model, log_callback=log_callback)
+            
+            # Get onboarding entry to find env_key
+            onboarding_entry = self.state_store.get_onboarding(model_id)
+            if not onboarding_entry:
+                raise RuntimeError(
+                    f"Model '{model_id}' onboarding entry not found. "
+                    f"Please run onboarding first."
+                )
+            
+            env_key = onboarding_entry.get("env_key")
+            if not env_key:
+                raise RuntimeError(
+                    f"Model '{model_id}' has no env_key in onboarding entry. "
+                    f"Please re-run onboarding."
+                )
+            
+            # Get env spec (should already exist from onboarding)
+            python_exe = self.env_registry._get_env_python_executable(env_key)
+            if not python_exe or not python_exe.exists():
+                raise RuntimeError(
+                    f"Environment '{env_key}' for model '{model_id}' not found. "
+                    f"Please re-run onboarding."
+                )
+            
+            env_spec = EnvSpec(
+                key=env_key,
+                python_executable=python_exe,
+                metadata={"env_key": env_key, "status": "READY", "source": "onboarded"}
+            )
             log(f"Using environment: {env_spec.key}")
             log(f"Python executable: {env_spec.python_executable}")
             
-            # Validate environment has all required packages before starting server
-            log("Validating environment dependencies...")
-            missing_packages = self.env_registry.check_missing_packages(env_spec.python_executable)
+            # ENVIRONMENT-FIRST: Comprehensive validation and repair BEFORE model load
+            log("Validating environment dependencies (environment-first approach)...")
+            
+            # Check for critical packages required for ALL models
+            critical_packages = ["protobuf", "transformers", "tokenizers", "torch", "peft", "accelerate"]
+            missing_packages = self.env_registry.check_missing_packages(
+                env_spec.python_executable, 
+                required_packages=critical_packages
+            )
+            
             if missing_packages:
-                log(f"Missing packages detected: {', '.join(missing_packages)}")
-                log("Auto-installing missing packages...")
+                log(f"Missing critical packages detected: {', '.join(missing_packages)}")
+                log("Auto-installing missing packages (this ensures environment is ready)...")
                 if not self.env_registry.auto_install_missing_packages(
                     env_spec.python_executable, 
                     missing_packages, 
                     log_callback=log_callback
                 ):
                     raise RuntimeError(
-                        f"Failed to auto-install required packages: {', '.join(missing_packages)}\n"
-                        f"Please go to the Environment/Requirements tab and run 'Repair Environment'."
+                        f"Environment validation failed: Could not auto-install required packages: {', '.join(missing_packages)}\n"
+                        f"This indicates the environment is not properly configured.\n"
+                        f"Please go to the Environment/Requirements tab and run 'Repair Environment' for {env_spec.key}."
                     )
-                log("Missing packages installed successfully, environment ready")
+                log("Missing packages installed successfully, re-validating...")
+                # Re-check after installation
+                still_missing = self.env_registry.check_missing_packages(
+                    env_spec.python_executable,
+                    required_packages=missing_packages
+                )
+                if still_missing:
+                    raise RuntimeError(
+                        f"Environment repair incomplete: Packages still missing after installation: {', '.join(still_missing)}\n"
+                        f"Please manually repair the environment: {env_spec.key}"
+                    )
+                log("Environment dependencies validated - all critical packages present")
             else:
-                log("Environment dependencies validated - all required packages present")
+                log("Environment dependencies validated - all critical packages present")
+            
+            # Additional health check: verify environment can actually import and use transformers
+            log("Running environment health check...")
+            try:
+                import subprocess
+                health_code = """
+import transformers
+import tokenizers
+import torch
+import peft
+import accelerate
+print('OK')
+"""
+                result = subprocess.run(
+                    [str(env_spec.python_executable), "-c", health_code],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    **self.subprocess_flags
+                )
+                if result.returncode != 0 or "OK" not in result.stdout:
+                    log(f"Environment health check failed. Output: {result.stdout[:200]}")
+                    raise RuntimeError(
+                        f"Environment {env_spec.key} failed health check.\n"
+                        f"Environment may be corrupted. Please repair it in the Environment/Requirements tab."
+                    )
+                log("Environment health check passed")
+            except Exception as e:
+                log(f"Environment health check error: {e}")
+                raise RuntimeError(
+                    f"Environment {env_spec.key} health check failed: {e}\n"
+                    f"Please repair the environment before attempting to load models."
+                )
             
             # Get app root for cwd
             from core.inference import get_app_root
@@ -817,8 +922,8 @@ class LLMServerManager:
                     if log_file_path and os.path.exists(log_file_path):
                         try:
                             with open(log_file_path, 'r', encoding='utf-8', errors='replace') as f:
-                                # Read last 50 lines
-                                lines = f.readlines()[-50:]
+                                # Read last 200 lines to capture full tracebacks
+                                lines = f.readlines()[-200:]
                                 log_text = "".join(lines)
                                 
                                 # Check for common error patterns
@@ -836,15 +941,34 @@ class LLMServerManager:
                                     # Extract full error message - look for specific error types
                                     import re
                                     
+                                    # First, try to extract the full traceback to find the ROOT CAUSE exception
+                                    # Look for the most recent traceback block
+                                    traceback_match = re.search(
+                                        r'(Traceback\s+\(most recent call last\):.*?)(?=\n\S|\Z)',
+                                        log_text,
+                                        re.DOTALL
+                                    )
+                                    if traceback_match:
+                                        full_traceback = traceback_match.group(1)
+                                        # Extract the actual exception from the traceback (last line)
+                                        exception_lines = [l.strip() for l in full_traceback.split('\n') if l.strip() and not l.strip().startswith('File') and not l.strip().startswith('Traceback')]
+                                        if exception_lines:
+                                            root_exception = exception_lines[-1]  # Last non-empty line is usually the exception
+                                            # If we found a root exception that's not our RuntimeError, include it
+                                            if 'RuntimeError:' not in root_exception or 'AutoTokenizer.from_pretrained() returned invalid value' not in root_exception:
+                                                # This is the actual exception - include full traceback in error
+                                                log(f"Root cause exception found in traceback: {root_exception}")
+                                    
                                     # Try to extract RuntimeError with full multi-line message
                                     # When RuntimeError is raised with a multi-line string, it may appear in logs as:
                                     # 1. Single line with \n characters: "RuntimeError: line1\nline2\nline3"
                                     # 2. Multiple lines: "RuntimeError: line1\n    line2\n    line3"
                                     # 3. In traceback format with indentation
                                     
-                                    # Pattern 1: Look for RuntimeError and capture until next traceback element or end
+                                    # Pattern: Look for RuntimeError and capture until next traceback element, log level, or end
+                                    # Stop at: File ", Traceback, INFO:, DEBUG:, WARNING:, ERROR: (new error), or Exception:
                                     runtime_error_match = re.search(
-                                        r'RuntimeError:\s*((?:[^\n]|\n(?!\s*(?:File\s|Traceback|\w+Error:)))+)', 
+                                        r'RuntimeError:\s*((?:[^\n]|\n(?!\s*(?:File\s|Traceback|INFO:|DEBUG:|WARNING:|ERROR:|Exception:|\w+Error:)))+)', 
                                         log_text, 
                                         re.MULTILINE
                                     )
@@ -852,18 +976,27 @@ class LLMServerManager:
                                         error_msg = runtime_error_match.group(1).strip()
                                         # Replace literal \n with actual newlines
                                         error_msg = error_msg.replace('\\n', '\n')
-                                        # Normalize: remove leading whitespace from continuation lines but keep structure
-                                        lines = []
+                                        
+                                        # Filter out any log level lines that might have been captured
+                                        # Remove lines that start with INFO:, DEBUG:, WARNING:, ERROR: (but not our error message)
+                                        filtered_lines = []
                                         for line in error_msg.split('\n'):
                                             stripped = line.strip()
+                                            # Skip log level lines and uvicorn access logs
+                                            if (stripped.startswith('INFO:') or 
+                                                stripped.startswith('DEBUG:') or 
+                                                stripped.startswith('WARNING:') or
+                                                stripped.startswith('ERROR:') or
+                                                'GET /health HTTP/1.1' in stripped or
+                                                'POST /' in stripped):
+                                                continue
                                             if stripped:  # Keep non-empty lines
-                                                lines.append(stripped)
-                                        error_msg = '\n'.join(lines)
+                                                filtered_lines.append(stripped)
                                         
-                                        # If message seems truncated (ends with incomplete sentence), try to get more
-                                        # Look for continuation in the log after the RuntimeError line
+                                        error_msg = '\n'.join(filtered_lines)
+                                        
+                                        # If message seems truncated, try to get more context (but stop at log levels)
                                         if len(error_msg) < 100 and not error_msg.endswith('.'):
-                                            # Try to find more context - look for lines that might be part of the error
                                             error_start_idx = log_text.find('RuntimeError:')
                                             if error_start_idx >= 0:
                                                 # Get next 20 lines after RuntimeError for context
@@ -873,8 +1006,12 @@ class LLMServerManager:
                                                 continuation = []
                                                 for line in context_lines[1:]:  # Skip the RuntimeError line itself
                                                     stripped = line.strip()
-                                                    # Stop if we hit a traceback line or another error
-                                                    if any(x in stripped for x in ['File "', 'Traceback', 'Error:', 'Exception:']):
+                                                    # Stop if we hit a traceback line, log level, or another error
+                                                    if (any(x in stripped for x in ['File "', 'Traceback', 'Error:', 'Exception:']) or
+                                                        stripped.startswith('INFO:') or
+                                                        stripped.startswith('DEBUG:') or
+                                                        'GET /health' in stripped or
+                                                        'POST /' in stripped):
                                                         break
                                                     # Include lines that look like error message (not code/file paths)
                                                     if stripped and not stripped.startswith('File ') and len(stripped) > 10:
@@ -882,8 +1019,12 @@ class LLMServerManager:
                                                 if continuation:
                                                     error_msg = error_msg + '\n' + '\n'.join(continuation[:5])  # Limit to 5 more lines
                                         
+                                        # Include root exception if we found one
+                                        if traceback_match and 'root_exception' in locals() and root_exception:
+                                            error_msg = f"{root_exception}\n\n{error_msg}"
+                                        
                                         raise RuntimeError(
-                                            f"Server error detected in logs:\nRuntimeError: {error_msg}"
+                                            f"Server error detected in logs:\n{error_msg}"
                                         )
                                     
                                     # Try to extract ImportError with full message

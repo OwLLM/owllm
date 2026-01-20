@@ -526,6 +526,40 @@ class SystemDetectThread(QThread):
             self.error.emit(traceback.format_exc())
 
 
+class OnboardingThread(QThread):
+    """Thread for running model onboarding without freezing UI"""
+    progress = Signal(str)  # log message
+    finished = Signal(dict)  # onboarding result
+    error = Signal(str)  # error message
+    
+    def __init__(self, model_id: str, base_model_path: str, adapter_dir: Optional[str] = None):
+        super().__init__()
+        self.model_id = model_id
+        self.base_model_path = base_model_path
+        self.adapter_dir = adapter_dir
+    
+    def run(self):
+        try:
+            from core.model_onboarding import get_onboarding_service
+            
+            def log_callback(msg):
+                self.progress.emit(msg)
+            
+            onboarding = get_onboarding_service()
+            result = onboarding.ensure_model_onboarded(
+                model_id=self.model_id,
+                base_model_path=self.base_model_path,
+                adapter_dir=self.adapter_dir,
+                profile_data=None,  # Auto-detect
+                log_callback=log_callback,
+                allow_repair=True
+            )
+            
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
 class RepairThread(QThread):
     """Thread for repairing/resuming incomplete model downloads"""
     progress = Signal(int)  # 0-100
@@ -4986,6 +5020,9 @@ class MainWindow(QMainWindow):
         self.downloaded_details_tabs.addTab(info_scroll, "📋 Info")
         self.downloaded_info_panel = info_panel  # Store reference
         
+        # Connect tab change signal to load Info content only when tab is actually selected
+        self.downloaded_details_tabs.currentChanged.connect(self._on_details_tab_changed)
+        
         # Environment tab (will be populated on selection)
         env_placeholder = QWidget()
         env_placeholder_layout = QVBoxLayout(env_placeholder)
@@ -5096,6 +5133,10 @@ class MainWindow(QMainWindow):
         models_dir = self.root / "models"
         models_dirs = [models_dir]
         
+        # Get onboarding service for status lookup
+        from core.model_onboarding import get_onboarding_service
+        onboarding = get_onboarding_service()
+        
         row, col = 0, 0
         max_cols = 2  # 2 columns (50/50) to match browse layout
         
@@ -5107,6 +5148,9 @@ class MainWindow(QMainWindow):
                         
                         # Try to extract model ID from directory name (e.g., unsloth__model -> unsloth/model)
                         model_id = model_name.replace("__", "/")
+                        
+                        # Get onboarding status
+                        onboarding_status = onboarding.get_onboarding_status(model_id) or "NEW"
                         
                         # Check if model is complete
                         status = self.model_checker.check_model(model_dir)
@@ -5127,7 +5171,8 @@ class MainWindow(QMainWindow):
                             size, 
                             icons, 
                             is_incomplete=not status.is_complete,
-                            compatibility_badge=compatibility_badge
+                            compatibility_badge=compatibility_badge,
+                            onboarding_status=onboarding_status
                         )
                         card.set_theme(self.dark_mode)
                         card.selected.connect(self._on_model_selected)
@@ -5214,9 +5259,36 @@ class MainWindow(QMainWindow):
         model_name = path.name
         model_id = model_name.replace("__", "/")
         
-        # Show details in the downloaded details panel
-        if hasattr(self, 'downloaded_details_panel'):
-            self._show_model_details(model_id, self.downloaded_details_panel)
+        # Store current model_id for tab change handler
+        self._selected_model_id = model_id
+        self._selected_model_path = model_path
+        
+        # Get onboarding status
+        from core.model_onboarding import get_onboarding_service
+        onboarding = get_onboarding_service()
+        status = onboarding.get_onboarding_status(model_id) or "NEW"
+        
+        # Update/create environment tab content
+        self._update_environment_tab(model_path, model_id, status)
+        
+        # Set default tab based on onboarding status (don't load Info content yet)
+        if hasattr(self, 'downloaded_details_tabs'):
+            if status == "READY":
+                self.downloaded_details_tabs.setCurrentIndex(0)  # Info tab
+                # Info content will load via _on_details_tab_changed
+            else:
+                # Don't load Info tab content when showing Environment tab
+                self.downloaded_details_tabs.setCurrentIndex(1)  # Environment tab
+    
+    def _on_details_tab_changed(self, index: int):
+        """Handle tab change - only load Info content when Info tab is actually selected"""
+        if not hasattr(self, '_selected_model_id'):
+            return
+        
+        # Only load Info tab content when Info tab (index 0) is selected
+        if index == 0 and hasattr(self, 'downloaded_info_panel'):
+            model_id = self._selected_model_id
+            self._show_model_details(model_id, self.downloaded_info_panel)
     
     def _on_repair_model(self, model_path: str):
         """Repair or resume download for an incomplete model"""
@@ -5680,6 +5752,332 @@ class MainWindow(QMainWindow):
         self._refresh_models()
         self._refresh_locals()  # This updates the Train tab dropdown
         self._log_models(f"DEBUG: Refresh complete!")
+    
+    def _update_environment_tab(self, model_path: str, model_id: str, status: str):
+        """Update/create the Environment tab content for selected model"""
+        from core.model_onboarding import get_onboarding_service
+        from core.state_store import get_state_store
+        
+        onboarding = get_onboarding_service()
+        state_store = get_state_store()
+        
+        # Get onboarding entry
+        entry = state_store.get_onboarding(model_id)
+        
+        # Clear existing content
+        if hasattr(self, 'downloaded_env_widget'):
+            # Remove old layout
+            old_layout = self.downloaded_env_widget.layout()
+            if old_layout:
+                while old_layout.count():
+                    item = old_layout.takeAt(0)
+                    if item.widget():
+                        item.widget().deleteLater()
+            else:
+                # Create new layout if needed
+                old_layout = QVBoxLayout(self.downloaded_env_widget)
+                old_layout.setContentsMargins(20, 20, 20, 20)
+                old_layout.setSpacing(15)
+        
+        # Create new content widget
+        env_content = QWidget()
+        env_layout = QVBoxLayout(env_content)
+        env_layout.setContentsMargins(20, 20, 20, 20)
+        env_layout.setSpacing(15)
+        
+        # Status header
+        status_header = QLabel("Environment Status")
+        status_font = QFont()
+        status_font.setPointSize(16)
+        status_font.setBold(True)
+        status_header.setFont(status_font)
+        status_header.setStyleSheet("color: white; margin-bottom: 10px;")
+        env_layout.addWidget(status_header)
+        
+        # Status badge
+        status_badge_layout = QHBoxLayout()
+        if status == "READY":
+            status_label = QLabel("✓ READY")
+            status_label.setStyleSheet("""
+                QLabel {
+                    background: #4CAF50;
+                    color: white;
+                    padding: 8px 16px;
+                    border-radius: 6px;
+                    font-size: 14pt;
+                    font-weight: bold;
+                }
+            """)
+        elif status == "BUILDING":
+            status_label = QLabel("⏳ BUILDING...")
+            status_label.setStyleSheet("""
+                QLabel {
+                    background: #FF9800;
+                    color: white;
+                    padding: 8px 16px;
+                    border-radius: 6px;
+                    font-size: 14pt;
+                    font-weight: bold;
+                }
+            """)
+        elif status == "BROKEN":
+            status_label = QLabel("❌ BROKEN")
+            status_label.setStyleSheet("""
+                QLabel {
+                    background: #f44336;
+                    color: white;
+                    padding: 8px 16px;
+                    border-radius: 6px;
+                    font-size: 14pt;
+                    font-weight: bold;
+                }
+            """)
+        else:  # NEW
+            status_label = QLabel("🆕 NOT ONBOARDED")
+            status_label.setStyleSheet("""
+                QLabel {
+                    background: #888;
+                    color: white;
+                    padding: 8px 16px;
+                    border-radius: 6px;
+                    font-size: 14pt;
+                    font-weight: bold;
+                }
+            """)
+        status_badge_layout.addWidget(status_label)
+        status_badge_layout.addStretch()
+        env_layout.addLayout(status_badge_layout)
+        
+        # Environment details (if entry exists)
+        if entry:
+            details_group = QGroupBox("Environment Details")
+            details_group.setStyleSheet("""
+                QGroupBox {
+                    font-weight: bold;
+                    border: 1px solid rgba(102, 126, 234, 0.3);
+                    border-radius: 6px;
+                    margin-top: 10px;
+                    padding-top: 10px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 5px;
+                }
+            """)
+            details_layout = QVBoxLayout()
+            
+            if entry.get("env_key"):
+                env_key_label = QLabel(f"Environment Key: <b>{entry.get('env_key')}</b>")
+                env_key_label.setStyleSheet("color: #d7dde7; padding: 5px;")
+                details_layout.addWidget(env_key_label)
+            
+            if entry.get("backend"):
+                backend_label = QLabel(f"Backend: <b>{entry.get('backend')}</b>")
+                backend_label.setStyleSheet("color: #d7dde7; padding: 5px;")
+                details_layout.addWidget(backend_label)
+            
+            if entry.get("accelerator"):
+                accel_label = QLabel(f"Accelerator: <b>{entry.get('accelerator')}</b>")
+                accel_label.setStyleSheet("color: #d7dde7; padding: 5px;")
+                details_layout.addWidget(accel_label)
+            
+            details_group.setLayout(details_layout)
+            env_layout.addWidget(details_group)
+        
+        # Error message (if BROKEN)
+        if status == "BROKEN" and entry and entry.get("last_error"):
+            error_group = QGroupBox("Error Details")
+            error_group.setStyleSheet("""
+                QGroupBox {
+                    font-weight: bold;
+                    border: 1px solid rgba(244, 67, 54, 0.3);
+                    border-radius: 6px;
+                    margin-top: 10px;
+                    padding-top: 10px;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    left: 10px;
+                    padding: 0 5px;
+                    color: #f44336;
+                }
+            """)
+            error_layout = QVBoxLayout()
+            error_text = QPlainTextEdit(entry.get("last_error", ""))
+            error_text.setReadOnly(True)
+            error_text.setStyleSheet("""
+                QPlainTextEdit {
+                    background: rgba(244, 67, 54, 0.1);
+                    border: 1px solid rgba(244, 67, 54, 0.2);
+                    border-radius: 4px;
+                    color: #ffcdd2;
+                    font-family: Consolas, monospace;
+                    font-size: 10pt;
+                    padding: 8px;
+                }
+            """)
+            error_layout.addWidget(error_text)
+            error_group.setLayout(error_layout)
+            env_layout.addWidget(error_group)
+        
+        # Health check log link (if available)
+        if entry and entry.get("healthcheck_log_path"):
+            log_path = entry.get("healthcheck_log_path")
+            log_link = QLabel(f'<a href="file:///{log_path}" style="color: #667eea;">📄 View Health Check Log</a>')
+            log_link.setOpenExternalLinks(True)
+            log_link.setStyleSheet("padding: 5px;")
+            env_layout.addWidget(log_link)
+        
+        # Action buttons
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(10)
+        
+        if status != "READY":
+            if status == "BUILDING":
+                action_btn = QPushButton("⏳ Onboarding in Progress...")
+                action_btn.setEnabled(False)
+            else:
+                action_btn = QPushButton("🚀 Start Onboarding" if status == "NEW" else "🔧 Repair Environment")
+                action_btn.setStyleSheet("""
+                    QPushButton {
+                        background: rgba(102, 126, 234, 0.3);
+                        border: 2px solid rgba(102, 126, 234, 0.6);
+                        color: white;
+                        padding: 10px 20px;
+                        border-radius: 6px;
+                        font-size: 12pt;
+                        font-weight: bold;
+                    }
+                    QPushButton:hover {
+                        background: rgba(102, 126, 234, 0.5);
+                        border: 2px solid rgba(102, 126, 234, 0.8);
+                    }
+                    QPushButton:pressed {
+                        background: rgba(102, 126, 234, 0.7);
+                    }
+                """)
+                action_btn.clicked.connect(lambda: self._start_model_onboarding(model_path, model_id))
+            button_layout.addWidget(action_btn)
+        
+        button_layout.addStretch()
+        env_layout.addLayout(button_layout)
+        
+        # Progress log area
+        log_group = QGroupBox("Onboarding Progress")
+        log_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 6px;
+                margin-top: 10px;
+                padding-top: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px;
+            }
+        """)
+        log_layout = QVBoxLayout()
+        self.onboarding_log_display = QPlainTextEdit()
+        self.onboarding_log_display.setReadOnly(True)
+        self.onboarding_log_display.setPlaceholderText("Onboarding progress will appear here...")
+        self.onboarding_log_display.setStyleSheet("""
+            QPlainTextEdit {
+                background: rgba(0, 0, 0, 0.2);
+                border: 1px solid rgba(102, 126, 234, 0.2);
+                border-radius: 4px;
+                color: #d7dde7;
+                font-family: Consolas, monospace;
+                font-size: 10pt;
+                padding: 8px;
+            }
+        """)
+        log_layout.addWidget(self.onboarding_log_display)
+        log_group.setLayout(log_layout)
+        env_layout.addWidget(log_group)
+        
+        env_layout.addStretch()
+        
+        # Replace tab content
+        if self.downloaded_details_tabs.count() > 1:
+            # Remove existing environment tab
+            self.downloaded_details_tabs.removeTab(1)
+        
+        # Create scroll area for new content
+        env_scroll = QScrollArea()
+        env_scroll.setWidgetResizable(True)
+        env_scroll.setFrameShape(QFrame.NoFrame)
+        env_scroll.setWidget(env_content)
+        
+        # Insert new environment tab
+        self.downloaded_details_tabs.insertTab(1, env_scroll, "⚙️ Environment")
+        self.downloaded_env_widget = env_content
+    
+    def _start_model_onboarding(self, model_path: str, model_id: str):
+        """Start onboarding for a model"""
+        # Resolve model_id from path if needed
+        resolved_model_id = self._resolve_model_id_from_path(model_path)
+        
+        # Clear log
+        if hasattr(self, 'onboarding_log_display'):
+            self.onboarding_log_display.clear()
+            self.onboarding_log_display.appendPlainText(f"Starting onboarding for: {resolved_model_id}\n")
+        
+        # Create onboarding thread
+        onboarding_thread = OnboardingThread(resolved_model_id, model_path, None)
+        
+        # Connect signals
+        onboarding_thread.progress.connect(lambda msg: self._on_onboarding_progress(msg))
+        onboarding_thread.finished.connect(lambda result: self._on_onboarding_finished(resolved_model_id, result))
+        onboarding_thread.error.connect(lambda err: self._on_onboarding_error(resolved_model_id, err))
+        
+        # Start thread
+        onboarding_thread.start()
+        
+        # Store reference
+        if not hasattr(self, '_onboarding_threads'):
+            self._onboarding_threads = {}
+        self._onboarding_threads[resolved_model_id] = onboarding_thread
+    
+    def _on_onboarding_progress(self, msg: str):
+        """Handle onboarding progress updates"""
+        if hasattr(self, 'onboarding_log_display'):
+            self.onboarding_log_display.appendPlainText(msg)
+            # Auto-scroll to bottom
+            scrollbar = self.onboarding_log_display.verticalScrollBar()
+            scrollbar.setValue(scrollbar.maximum())
+    
+    def _on_onboarding_finished(self, model_id: str, result: dict):
+        """Handle onboarding completion"""
+        status = result.get("status", "UNKNOWN")
+        if hasattr(self, 'onboarding_log_display'):
+            if status == "READY":
+                self.onboarding_log_display.appendPlainText("\n✅ Onboarding completed successfully!")
+            else:
+                error = result.get("last_error", "Unknown error")
+                self.onboarding_log_display.appendPlainText(f"\n❌ Onboarding failed: {error}")
+        
+        # Refresh models to update badges
+        self._refresh_models()
+        
+        # Update environment tab
+        path = Path(result.get("base_model_path", ""))
+        if path.exists():
+            self._update_environment_tab(str(path), model_id, status)
+        
+        # Switch to Info tab if READY
+        if status == "READY" and hasattr(self, 'downloaded_details_tabs'):
+            self.downloaded_details_tabs.setCurrentIndex(0)
+    
+    def _on_onboarding_error(self, model_id: str, error: str):
+        """Handle onboarding error"""
+        if hasattr(self, 'onboarding_log_display'):
+            self.onboarding_log_display.appendPlainText(f"\n❌ Error: {error}")
+        
+        # Refresh models
+        self._refresh_models()
     
     def _on_repair_complete(self, model_id: str, dest: str, card, progress_bar, repair_key: str):
         """Handle successful repair"""

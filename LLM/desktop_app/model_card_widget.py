@@ -331,13 +331,15 @@ class DownloadedModelCard(QFrame):
     repair_clicked = Signal(str)  # Emits model path
     
     def __init__(self, model_name: str, model_path: str, size: str, icons: str, 
-                 is_incomplete: bool = False, compatibility_badge: dict = None, parent=None):
+                 is_incomplete: bool = False, compatibility_badge: dict = None, 
+                 onboarding_status: str = None, parent=None):
         super().__init__(parent)
         self.model_path = model_path
         self.model_name = model_name
         self.is_incomplete = is_incomplete
         self.is_dark = True
         self.compatibility_badge = compatibility_badge
+        self.onboarding_status = onboarding_status or "NEW"
         
         self.setMinimumHeight(220)
         self.setFrameShape(QFrame.Box)
@@ -414,7 +416,7 @@ class DownloadedModelCard(QFrame):
         top_row.addStretch(1)
         title_stats_layout.addLayout(top_row)
         
-        # Status row (local badge)
+        # Status row (local badge + onboarding status badge)
         status_row = QHBoxLayout()
         status_row.setSpacing(10)
         local_badge = QLabel("💾 Downloaded")
@@ -429,6 +431,57 @@ class DownloadedModelCard(QFrame):
             }
         """)
         status_row.addWidget(local_badge)
+        
+        # Onboarding status badge
+        if self.onboarding_status == "READY":
+            onboarding_badge = QLabel("✓ Ready")
+            onboarding_badge.setStyleSheet("""
+                QLabel {
+                    background: #4CAF50;
+                    color: white;
+                    padding: 4px 10px;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
+        elif self.onboarding_status == "BUILDING":
+            onboarding_badge = QLabel("⏳ Building...")
+            onboarding_badge.setStyleSheet("""
+                QLabel {
+                    background: #FF9800;
+                    color: white;
+                    padding: 4px 10px;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
+        elif self.onboarding_status == "BROKEN":
+            onboarding_badge = QLabel("❌ Broken")
+            onboarding_badge.setStyleSheet("""
+                QLabel {
+                    background: #f44336;
+                    color: white;
+                    padding: 4px 10px;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
+        else:  # NEW or None
+            onboarding_badge = QLabel("🆕 Not Onboarded")
+            onboarding_badge.setStyleSheet("""
+                QLabel {
+                    background: #888;
+                    color: white;
+                    padding: 4px 10px;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }
+            """)
+        status_row.addWidget(onboarding_badge)
         status_row.addStretch(1)
         title_stats_layout.addLayout(status_row)
         

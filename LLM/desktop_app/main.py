@@ -4952,13 +4952,56 @@ class MainWindow(QMainWindow):
         dl_cards_layout.addWidget(downloaded_scroll)
         downloaded_horizontal.addWidget(dl_cards_widget, 2)
         
-        # Right: Model details panel (takes 1/3)
-        self.downloaded_details_panel = ModelDetailsPanel()
+        # Right: Model details tabs (Info/Environment) (takes 1/3)
+        self.downloaded_details_tabs = QTabWidget()
+        self.downloaded_details_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background: rgba(0, 0, 0, 0.1);
+            }
+            QTabBar::tab {
+                background: rgba(102, 126, 234, 0.1);
+                color: #d7dde7;
+                padding: 8px 16px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: rgba(102, 126, 234, 0.3);
+                color: white;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover {
+                background: rgba(102, 126, 234, 0.2);
+            }
+        """)
+        
+        # Info tab
+        info_panel = ModelDetailsPanel()
+        info_scroll = QScrollArea()
+        info_scroll.setWidgetResizable(True)
+        info_scroll.setFrameShape(QFrame.NoFrame)
+        info_scroll.setWidget(info_panel)
+        self.downloaded_details_tabs.addTab(info_scroll, "📋 Info")
+        self.downloaded_info_panel = info_panel  # Store reference
+        
+        # Environment tab (will be populated on selection)
+        env_placeholder = QWidget()
+        env_placeholder_layout = QVBoxLayout(env_placeholder)
+        env_placeholder_layout.setContentsMargins(20, 20, 20, 20)
+        placeholder_label = QLabel("Select a model to view environment status")
+        placeholder_label.setStyleSheet("color: #888; font-size: 12pt;")
+        placeholder_label.setAlignment(Qt.AlignCenter)
+        env_placeholder_layout.addWidget(placeholder_label)
+        self.downloaded_details_tabs.addTab(env_placeholder, "⚙️ Environment")
+        self.downloaded_env_widget = env_placeholder  # Store reference for updates
+        
         dl_details_scroll = QScrollArea()
         dl_details_scroll.setWidgetResizable(True)
         dl_details_scroll.setFrameShape(QFrame.NoFrame)
         dl_details_scroll.setStyleSheet("background: rgba(0, 0, 0, 0.1); border-left: 1px solid rgba(102, 126, 234, 0.2);")
-        dl_details_scroll.setWidget(self.downloaded_details_panel)
+        dl_details_scroll.setWidget(self.downloaded_details_tabs)
         downloaded_horizontal.addWidget(dl_details_scroll, 1)
         
         downloaded_layout.addLayout(downloaded_horizontal)

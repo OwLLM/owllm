@@ -4,6 +4,7 @@ import sys
 import os
 import shutil
 import json
+import subprocess
 from functools import partial
 from datetime import datetime
 from pathlib import Path
@@ -5022,6 +5023,7 @@ class MainWindow(QMainWindow):
         
         # Connect tab change signal to load Info content only when tab is actually selected
         self.downloaded_details_tabs.currentChanged.connect(self._on_details_tab_changed)
+        self._tab_handler_connected = True  # Track connection status
         
         # Environment tab (will be populated on selection)
         env_placeholder = QWidget()
@@ -6000,25 +6002,38 @@ class MainWindow(QMainWindow):
         
         env_layout.addStretch()
         
-        # Replace tab content
-        if self.downloaded_details_tabs.count() > 1:
-            # Remove existing environment tab
-            self.downloaded_details_tabs.removeTab(1)
-        
-        # Create scroll area for new content
-        env_scroll = QScrollArea()
-        env_scroll.setWidgetResizable(True)
-        env_scroll.setFrameShape(QFrame.NoFrame)
-        env_scroll.setWidget(env_content)
-        
-        # Insert new environment tab
-        self.downloaded_details_tabs.insertTab(1, env_scroll, "⚙️ Environment")
-        self.downloaded_env_widget = env_content
+        # Replace tab content (block signals to prevent Info tab from loading)
+        if hasattr(self, 'downloaded_details_tabs'):
+            self.downloaded_details_tabs.blockSignals(True)
+            
+            if self.downloaded_details_tabs.count() > 1:
+                # Remove existing environment tab
+                self.downloaded_details_tabs.removeTab(1)
+            
+            # Create scroll area for new content
+            env_scroll = QScrollArea()
+            env_scroll.setWidgetResizable(True)
+            env_scroll.setFrameShape(QFrame.NoFrame)
+            env_scroll.setWidget(env_content)
+            
+            # Insert new environment tab
+            self.downloaded_details_tabs.insertTab(1, env_scroll, "⚙️ Environment")
+            self.downloaded_env_widget = env_content
+            
+            # Re-enable signals
+            self.downloaded_details_tabs.blockSignals(False)
     
     def _start_model_onboarding(self, model_path: str, model_id: str):
         """Start onboarding for a model"""
         # Resolve model_id from path if needed
         resolved_model_id = self._resolve_model_id_from_path(model_path)
+        
+        # Ensure we're on Environment tab and prevent tab switching during onboarding
+        if hasattr(self, 'downloaded_details_tabs'):
+            # Block signals to prevent Info tab from loading
+            self.downloaded_details_tabs.blockSignals(True)
+            self.downloaded_details_tabs.setCurrentIndex(1)  # Force Environment tab
+            self.downloaded_details_tabs.blockSignals(False)
         
         # Clear log
         if hasattr(self, 'onboarding_log_display'):
@@ -6059,17 +6074,34 @@ class MainWindow(QMainWindow):
                 error = result.get("last_error", "Unknown error")
                 self.onboarding_log_display.appendPlainText(f"\n❌ Onboarding failed: {error}")
         
-        # Refresh models to update badges
-        self._refresh_models()
+        # Ensure we stay on Environment tab (don't let Info tab interrupt)
+        if hasattr(self, 'downloaded_details_tabs'):
+            # Remember current tab index
+            current_index = self.downloaded_details_tabs.currentIndex()
+            
+            # Update environment tab (this will block signals internally to prevent tab changes)
+            path = Path(result.get("base_model_path", ""))
+            if path.exists():
+                self._update_environment_tab(str(path), model_id, status)
+            
+            # Ensure we stay on Environment tab if we were there
+            if current_index == 1:
+                self.downloaded_details_tabs.blockSignals(True)
+                self.downloaded_details_tabs.setCurrentIndex(1)
+                self.downloaded_details_tabs.blockSignals(False)
+        else:
+            # Update environment tab if tabs don't exist
+            path = Path(result.get("base_model_path", ""))
+            if path.exists():
+                self._update_environment_tab(str(path), model_id, status)
         
-        # Update environment tab
-        path = Path(result.get("base_model_path", ""))
-        if path.exists():
-            self._update_environment_tab(str(path), model_id, status)
+        # Update the specific card's badge immediately
+        self._update_model_card_badge(model_id, status)
         
-        # Switch to Info tab if READY
-        if status == "READY" and hasattr(self, 'downloaded_details_tabs'):
-            self.downloaded_details_tabs.setCurrentIndex(0)
+        # Also refresh all models to ensure consistency (with delay to ensure DB write completes)
+        QTimer.singleShot(500, self._refresh_models)
+        
+        # DO NOT automatically switch to Info tab - let user stay on Environment tab to see results
     
     def _on_onboarding_error(self, model_id: str, error: str):
         """Handle onboarding error"""
@@ -12260,10 +12292,10 @@ except Exception as e:
         
         content_splitter.addWidget(right_panel)
         
-        # Set splitter proportions: 20% | 30% | 50% (terminal gets most space)
-        content_splitter.setStretchFactor(0, 2)
-        content_splitter.setStretchFactor(1, 3)
-        content_splitter.setStretchFactor(2, 5)
+        # Set splitter proportions: 1/3 | 1/3 | 1/3 (equal thirds)
+        content_splitter.setStretchFactor(0, 1)
+        content_splitter.setStretchFactor(1, 1)
+        content_splitter.setStretchFactor(2, 1)
         
         main_layout.addWidget(content_splitter, 1)
         
@@ -12305,7 +12337,75 @@ except Exception as e:
                 item.widget().deleteLater()
         
         try:
-            envs = self.env_manager.list_all_environments()
+            # Use EnvRegistry to list environments from .envs/ directory (PHASE 2 shared envs)
+            from core.envs.env_registry import EnvRegistry
+            env_registry = EnvRegistry()
+            
+            envs = []
+            envs_dir = env_registry.envs_dir
+            
+            if envs_dir.exists():
+                for env_dir in sorted(envs_dir.iterdir()):
+                    if not env_dir.is_dir() or env_dir.name.startswith('.'):
+                        continue
+                    
+                    env_key = env_dir.name
+                    venv_path = env_dir / ".venv"
+                    
+                    if not venv_path.exists():
+                        continue
+                    
+                    # Get Python version
+                    python_exe = env_registry._get_env_python_executable(env_key)
+                    python_version = "Unknown"
+                    if python_exe and python_exe.exists():
+                        try:
+                            result = subprocess.run(
+                                [str(python_exe), "--version"],
+                                capture_output=True,
+                                text=True,
+                                timeout=5,
+                                **env_registry.subprocess_flags
+                            )
+                            if result.returncode == 0:
+                                python_version = result.stdout.strip()
+                        except Exception:
+                            pass
+                    
+                    # Get package count (estimate from site-packages)
+                    package_count = 0
+                    if python_exe and python_exe.exists():
+                        try:
+                            site_packages = venv_path / ("Lib" if sys.platform == "win32" else "lib") / "site-packages"
+                            if site_packages.exists():
+                                # Count directories in site-packages (rough estimate)
+                                package_count = len([d for d in site_packages.iterdir() if d.is_dir() and not d.name.endswith('.dist-info')])
+                        except Exception:
+                            pass
+                    
+                    # Get disk usage
+                    disk_usage_mb = 0
+                    try:
+                        total_size = sum(f.stat().st_size for f in env_dir.rglob('*') if f.is_file())
+                        disk_usage_mb = total_size / (1024 * 1024)
+                    except Exception:
+                        pass
+                    
+                    env_info = {
+                        "env_id": env_key,
+                        "path": str(env_dir),
+                        "python_version": python_version,
+                        "package_count": package_count,
+                        "disk_usage_mb": disk_usage_mb,
+                    }
+                    envs.append(env_info)
+            
+            # Also check old environments/ directory for backward compatibility
+            old_envs = self.env_manager.list_all_environments()
+            for old_env in old_envs:
+                # Only add if not already in list (avoid duplicates)
+                if not any(e["env_id"] == old_env.get("env_id") for e in envs):
+                    envs.append(old_env)
             
             if not envs:
                 # Empty state card
@@ -12321,7 +12421,9 @@ except Exception as e:
                 self.env_cards_layout.insertWidget(self.env_cards_layout.count() - 1, card)
                 
         except Exception as e:
+            import traceback
             self._log_to_env_terminal(f"❌ Error: {str(e)}")
+            self._log_to_env_terminal(traceback.format_exc())
             error_label = QLabel(f"Error loading environments:\n{str(e)}")
             error_label.setStyleSheet("""
                 color: #ff6b6b;

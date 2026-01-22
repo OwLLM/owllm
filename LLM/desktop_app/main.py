@@ -45,6 +45,9 @@ from core.python_runtime import PythonRuntimeManager
 _APP_BUILD = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%y%m%d-%H%M%S")
 APP_TITLE = "OWLLM"
 
+# Exit code for restart-and-clean (launcher will handle cleanup and relaunch)
+CLEANUP_AND_RESTART = 42
+
 
 class InstallerThread(QThread):
     """Thread for running smart installer without freezing UI"""
@@ -567,146 +570,142 @@ class RepairThread(QThread):
     finished = Signal(str)  # destination path
     error = Signal(str)     # error message
     
-    def __init__(self, model_id: str, existing_dir: Path):
+    def __init__(self, model_id: str, existing_dir: Path, force_fresh_only: bool = False):
         super().__init__()
         self.model_id = model_id
         self.existing_dir = existing_dir
+        self.force_fresh_only = force_fresh_only
+        import threading
+        self._stop_requested = threading.Event()
+    
+    def request_stop(self) -> None:
+        """Request cooperative stop (best-effort)."""
+        try:
+            self.requestInterruption()
+        except Exception:
+            pass
+        try:
+            self._stop_requested.set()
+        except Exception:
+            pass
     
     def run(self):
         try:
-            from huggingface_hub import snapshot_download
-            from tqdm import tqdm
             import os
-            import requests
-            import threading
-            import time
-            from urllib.parse import quote
+            from core.model_file_utils import download_repo_files
             
-            # Get total size for progress
-            total_size = 0
-            try:
-                self.progress.emit(2)
-                token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
-                headers = {"Authorization": f"Bearer {token}"} if token else {}
-                # Use HF REST API to avoid model_info hangs
-                url = f"https://huggingface.co/api/models/{quote(self.model_id, safe='/')}"
-                resp = requests.get(url, params={"files_metadata": "true"}, headers=headers, timeout=(3.0, 10.0))
-                if resp.ok:
-                    data = resp.json()
-                    siblings = data.get("siblings") or []
-                    total_size = sum(int(s.get("size") or 0) for s in siblings if s.get("size") is not None)
-            except Exception:
-                pass
+            # Get token
+            token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
             
-            # Progress tracker
-            class ProgressTracker:
-                def __init__(self, total, signal):
-                    self.total = total
-                    self.downloaded = 0
-                    self.signal = signal
-                    self.last_percent = 2
-                    self._fallback_percent = 2
-                    self._fallback_bytes = 0
-                
-                def update_percent(self, percent):
-                    if percent is None:
-                        return
-                    percent = max(2, min(int(percent), 99))
-                    if percent > self.last_percent:
-                        self.last_percent = percent
-                        self.signal.emit(percent)
-
-                def update_fallback(self, n):
-                    # Fallback: show "activity" progress even when total size is unknown
-                    self._fallback_bytes += max(0, n)
-                    # Advance ~1% per ~50MB downloaded (clamped)
-                    if self._fallback_bytes >= 50 * 1024 * 1024 and self._fallback_percent < 99:
-                        self._fallback_bytes = 0
-                        self._fallback_percent += 1
-                        self.signal.emit(self._fallback_percent)
+            # Progress callback for real-time updates
+            def progress_callback(bytes_done: int, bytes_total: int):
+                if bytes_total > 0:
+                    percent = int((bytes_done / bytes_total) * 100)
+                    percent = max(2, min(percent, 99))  # Clamp 2-99%
+                    self.progress.emit(percent)
+                else:
+                    # Unknown total - emit based on bytes downloaded (rough estimate)
+                    # ~1% per 50MB
+                    if bytes_done > 0:
+                        estimated_percent = min(2 + int(bytes_done / (50 * 1024 * 1024)), 99)
+                        self.progress.emit(estimated_percent)
             
-            tracker = ProgressTracker(total_size, self.progress)
+            should_cancel = lambda: self._stop_requested.is_set() or self.isInterruptionRequested()
             
-            # Background monitor to update progress based on bytes on disk
-            monitor_stop = threading.Event()
-            def _dir_size_bytes(path: Path) -> int:
-                total = 0
-                for root, _, files in os.walk(path):
-                    for name in files:
-                        try:
-                            total += os.path.getsize(os.path.join(root, name))
-                        except OSError:
-                            continue
-                return total
+            # Start with metadata-only preflight (if missing)
+            self.progress.emit(2)
+            metadata_patterns = [
+                "*.json", "*.txt", "*.md", "*.model", "*.tiktoken",
+                "tokenizer.*", "vocab.*", "merges.txt", "special_tokens_map.json",
+                "config.json", "generation_config.json", "tokenizer.json"
+            ]
             
-            def _monitor_progress(path: Path):
-                last_percent = 2
-                last_bytes = 0
-                # Wait for directory to be created (up to 30 seconds)
-                waited = 0
-                while not path.exists() and waited < 30 and not monitor_stop.is_set():
-                    time.sleep(1)
-                    waited += 1
-                
-                while not monitor_stop.is_set():
-                    if path.exists():
-                        try:
-                            size_bytes = _dir_size_bytes(path)
-                            if total_size > 0:
-                                percent = int((size_bytes / total_size) * 100)
-                                percent = max(2, min(percent, 99))
-                                if percent > last_percent:
-                                    last_percent = percent
-                                    self.progress.emit(percent)
-                            else:
-                                # Fallback: advance when at least 50MB written
-                                if size_bytes - last_bytes >= 50 * 1024 * 1024 and last_percent < 99:
-                                    last_bytes = size_bytes
-                                    last_percent += 1
-                                    self.progress.emit(last_percent)
-                        except Exception:
-                            pass  # Ignore errors during directory scanning
-                    time.sleep(0.5)
+            if self.force_fresh_only:
+                # Force fresh: delete everything and redownload
+                download_repo_files(
+                    repo_id=self.model_id,
+                    dest_dir=self.existing_dir,
+                    token=token,
+                    allow_patterns=None,
+                    resume=False,
+                    timeout_s=900,
+                    max_retries=2,
+                    progress_callback=progress_callback,
+                    should_cancel=should_cancel,
+                    clean_locks=True,
+                    force_fresh=True  # Delete everything first
+                )
+            else:
+                # Try repair with existing files first
+                try:
+                    # Check if metadata exists, download if missing
+                    has_metadata = False
+                    try:
+                        for pattern in metadata_patterns:
+                            import fnmatch
+                            for file in self.existing_dir.rglob("*"):
+                                if fnmatch.fnmatch(file.name, pattern):
+                                    has_metadata = True
+                                    break
+                            if has_metadata:
+                                break
+                    except Exception:
+                        pass
+                    
+                    if not has_metadata:
+                        # Preflight: download metadata first
+                        download_repo_files(
+                            repo_id=self.model_id,
+                            dest_dir=self.existing_dir,
+                            token=token,
+                            allow_patterns=metadata_patterns,
+                            resume=False,
+                            timeout_s=120,
+                            max_retries=2,
+                            progress_callback=progress_callback,
+                            should_cancel=should_cancel,
+                            clean_locks=True
+                        )
+                    
+                    # Download all remaining files (resume=True skips existing files)
+                    download_repo_files(
+                        repo_id=self.model_id,
+                        dest_dir=self.existing_dir,
+                        token=token,
+                        allow_patterns=None,  # Download everything
+                        resume=True,  # CRITICAL: Skip files that already exist
+                        timeout_s=900,  # 15 min per file max for responsiveness
+                        max_retries=2,
+                        progress_callback=progress_callback,
+                        should_cancel=should_cancel,
+                        clean_locks=True  # Force clean locks on repair
+                    )
+                    
+                except Exception as first_error:
+                    # First attempt failed - try force fresh download
+                    import logging
+                    logging.warning(f"Repair failed, attempting force fresh download: {first_error}")
+                    self.progress.emit(5)
+                    
+                    # Force fresh: delete everything and redownload
+                    download_repo_files(
+                        repo_id=self.model_id,
+                        dest_dir=self.existing_dir,
+                        token=token,
+                        allow_patterns=None,
+                        resume=False,
+                        timeout_s=900,
+                        max_retries=2,
+                        progress_callback=progress_callback,
+                        should_cancel=should_cancel,
+                        clean_locks=True,
+                        force_fresh=True  # Delete everything first
+                    )
             
-            monitor_thread = threading.Thread(
-                target=_monitor_progress,
-                args=(self.existing_dir,),
-                daemon=True
-            )
-            monitor_thread.start()
-            
-            class CustomTqdm(tqdm):
-                def __init__(self, *args, **kwargs):
-                    super().__init__(*args, **kwargs)
-                
-                def update(self, n=1):
-                    displayed = super().update(n)
-                    total = getattr(self, "total", 0) or 0
-                    current = getattr(self, "n", 0) or 0
-                    if total:
-                        tracker.update_percent((current / total) * 100)
-                    else:
-                        tracker.update_fallback(n)
-                    return displayed
-            
-            # Download with resume_download=True to only fetch missing files
-            result = snapshot_download(
-                repo_id=self.model_id,
-                local_dir=str(self.existing_dir),
-                local_dir_use_symlinks=False,
-                resume_download=True,  # CRITICAL: Only download missing files
-                tqdm_class=CustomTqdm
-            )
-            
-            monitor_stop.set()
-            monitor_thread.join(timeout=2)
             self.progress.emit(100)
             self.finished.emit(str(self.existing_dir))
             
         except Exception as e:
-            monitor_stop.set()
-            if 'monitor_thread' in locals():
-                monitor_thread.join(timeout=2)
             self.error.emit(str(e))
 
 
@@ -720,150 +719,96 @@ class DownloadThread(QThread):
         super().__init__()
         self.model_id = model_id
         self.target_dir = target_dir
+        import threading
+        self._stop_requested = threading.Event()
+    
+    def request_stop(self) -> None:
+        """Request cooperative stop (best-effort)."""
+        try:
+            self.requestInterruption()
+        except Exception:
+            pass
+        try:
+            self._stop_requested.set()
+        except Exception:
+            pass
     
     def run(self):
         try:
-            # Import here to avoid import errors if not installed
-            from huggingface_hub import snapshot_download
-            from tqdm import tqdm
             import os
-            import requests
-            import threading
-            import time
-            from urllib.parse import quote
+            from core.model_file_utils import download_repo_files
             
-            # 1. Try to get total size for accurate progress tracking
-            total_size = 0
-            try:
-                self.progress.emit(2)
-                token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
-                headers = {"Authorization": f"Bearer {token}"} if token else {}
-                # Use HF REST API to avoid model_info hangs
-                url = f"https://huggingface.co/api/models/{quote(self.model_id, safe='/')}"
-                resp = requests.get(url, params={"files_metadata": "true"}, headers=headers, timeout=(3.0, 10.0))
-                if resp.ok:
-                    data = resp.json()
-                    siblings = data.get("siblings") or []
-                    total_size = sum(int(s.get("size") or 0) for s in siblings if s.get("size") is not None)
-            except Exception:
-                pass
-                
-            # Internal tracker for cumulative progress across all files
-            class ProgressTracker:
-                def __init__(self, total, signal):
-                    self.total = total
-                    self.downloaded = 0
-                    self.signal = signal
-                    self.last_percent = 2
-                    self._fallback_percent = 2
-                    self._fallback_bytes = 0
-                
-                def update_percent(self, percent):
-                    if percent is None:
-                        return
-                    # Clamp and only emit if increased
-                    percent = max(2, min(int(percent), 99))
-                    if percent > self.last_percent:
-                        self.last_percent = percent
-                        self.signal.emit(percent)
-
-                def update_fallback(self, n):
-                    # Fallback: show "activity" progress even when total size is unknown
-                    self._fallback_bytes += max(0, n)
-                    # Advance ~1% per ~50MB downloaded (clamped)
-                    if self._fallback_bytes >= 50 * 1024 * 1024 and self._fallback_percent < 99:
-                        self._fallback_bytes = 0
-                        self._fallback_percent += 1
-                        self.signal.emit(self._fallback_percent)
-
-            tracker = ProgressTracker(total_size, self.progress)
+            # Get token
+            token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
             
             # Convert model ID to directory name (e.g., unsloth/model -> unsloth__model)
             model_slug = self.model_id.replace("/", "__")
             dest = self.target_dir / model_slug
             
-            # Background monitor to update progress based on bytes on disk
-            monitor_stop = threading.Event()
-            def _dir_size_bytes(path: Path) -> int:
-                total = 0
-                for root, _, files in os.walk(path):
-                    for name in files:
-                        try:
-                            total += os.path.getsize(os.path.join(root, name))
-                        except OSError:
-                            continue
-                return total
+            # Progress callback for real-time updates
+            def progress_callback(bytes_done: int, bytes_total: int):
+                if bytes_total > 0:
+                    percent = int((bytes_done / bytes_total) * 100)
+                    percent = max(2, min(percent, 99))  # Clamp 2-99%
+                    self.progress.emit(percent)
+                else:
+                    # Unknown total - emit based on bytes downloaded (rough estimate)
+                    # ~1% per 50MB
+                    if bytes_done > 0:
+                        estimated_percent = min(2 + int(bytes_done / (50 * 1024 * 1024)), 99)
+                        self.progress.emit(estimated_percent)
             
-            def _monitor_progress(path: Path):
-                last_percent = 2
-                last_bytes = 0
-                # Wait for directory to be created (up to 30 seconds)
-                waited = 0
-                while not path.exists() and waited < 30 and not monitor_stop.is_set():
-                    time.sleep(1)
-                    waited += 1
-                
-                while not monitor_stop.is_set():
-                    if path.exists():
-                        try:
-                            size_bytes = _dir_size_bytes(path)
-                            if total_size > 0:
-                                percent = int((size_bytes / total_size) * 100)
-                                percent = max(2, min(percent, 99))
-                                if percent > last_percent:
-                                    last_percent = percent
-                                    self.progress.emit(percent)
-                            else:
-                                # Fallback: advance when at least 50MB written
-                                if size_bytes - last_bytes >= 50 * 1024 * 1024 and last_percent < 99:
-                                    last_bytes = size_bytes
-                                    last_percent += 1
-                                    self.progress.emit(last_percent)
-                        except Exception:
-                            pass  # Ignore errors during directory scanning
-                    time.sleep(0.5)
+            should_cancel = lambda: self._stop_requested.is_set() or self.isInterruptionRequested()
             
-            monitor_thread = threading.Thread(
-                target=_monitor_progress,
-                args=(dest,),
-                daemon=True
-            )
-            monitor_thread.start()
+            # Start with metadata-only preflight
+            self.progress.emit(2)
+            metadata_patterns = [
+                "*.json", "*.txt", "*.md", "*.model", "*.tiktoken",
+                "tokenizer.*", "vocab.*", "merges.txt", "special_tokens_map.json",
+                "config.json", "generation_config.json", "tokenizer.json"
+            ]
             
-            # Custom TQDM class that redirects updates to our tracker
-            class CustomTqdm(tqdm):
-                def __init__(self, *args, **kwargs):
-                    super().__init__(*args, **kwargs)
-                
-                def update(self, n=1):
-                    displayed = super().update(n)
-                    total = getattr(self, "total", 0) or 0
-                    current = getattr(self, "n", 0) or 0
-                    if total:
-                        tracker.update_percent((current / total) * 100)
-                    else:
-                        tracker.update_fallback(n)
-                    return displayed
-            
-            # Download using the custom tqdm class for real-time updates
-            # Note: resume_download is not compatible with local_dir, so we handle it differently
-            result = snapshot_download(
+            # Preflight: download metadata first
+            download_repo_files(
                 repo_id=self.model_id,
-                local_dir=str(dest),
-                local_dir_use_symlinks=False,
-                resume_download=False,  # Not compatible with local_dir
-                tqdm_class=CustomTqdm
+                dest_dir=dest,
+                token=token,
+                allow_patterns=metadata_patterns,
+                resume=False,
+                timeout_s=120,
+                max_retries=2,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel
             )
             
-            monitor_stop.set()
-            monitor_thread.join(timeout=2)
+            # Verify preflight created files
+            try:
+                any_files = any(dest.rglob("*"))
+            except Exception:
+                any_files = False
+            if not any_files:
+                raise RuntimeError(
+                    "Download produced no files after metadata preflight. "
+                    "This usually indicates a stalled connection, blocked download, or authentication issue."
+                )
+            
+            # Download all remaining files
+            download_repo_files(
+                repo_id=self.model_id,
+                dest_dir=dest,
+                token=token,
+                allow_patterns=None,  # Download everything
+                resume=True,  # Skip files that already exist
+                timeout_s=900,  # 15 min per file max for responsiveness
+                max_retries=2,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel
+            )
+            
             self.progress.emit(100)
-            self.finished.emit(str(dest))  # Return the actual destination path
+            self.finished.emit(str(dest))
             
         except Exception as e:
-            monitor_stop.set()
-            if 'monitor_thread' in locals():
-                monitor_thread.join(timeout=2)
             self.error.emit(str(e))
 
 
@@ -5181,6 +5126,8 @@ class MainWindow(QMainWindow):
                         card.delete_clicked.connect(self._on_delete_model)
                         if not status.is_complete:
                             card.repair_clicked.connect(self._on_repair_model)
+                        # Store model_id in card for later updates
+                        card.model_id = model_id
                         self.downloaded_layout.addWidget(card, row, col)
                         self.downloaded_model_cards.append(card)
                         
@@ -5376,8 +5323,8 @@ class MainWindow(QMainWindow):
             # Add progress bar to card layout
             card.layout().addWidget(progress_bar)
             
-            # Create repair thread (reuse DownloadThread but point to existing directory)
-            thread = RepairThread(model_id, path)
+            # Create repair thread (force full clean + fresh download)
+            thread = RepairThread(model_id, path, force_fresh_only=True)
             
             # Mark as active
             repair_key = f"repair_{model_id}"
@@ -5391,6 +5338,87 @@ class MainWindow(QMainWindow):
             # Start repair
             thread.start()
 
+    def request_restart_clean(self, model_dir: Path, reason: str) -> None:
+        """
+        Request app restart with cleanup of a locked model directory.
+        Writes cleanup request to logs/cleanup_request.json and exits with CLEANUP_AND_RESTART code.
+        The launcher will handle deletion and relaunch. If not running via launcher, attempts immediate cleanup.
+        """
+        try:
+            logs_dir = self.root / "logs"
+            logs_dir.mkdir(exist_ok=True)
+            request_file = logs_dir / "cleanup_request.json"
+            
+            request_data = {
+                "model_dir": str(model_dir),
+                "timestamp": datetime.now().isoformat(),
+                "reason": reason
+            }
+            
+            with open(request_file, "w", encoding="utf-8") as f:
+                json.dump(request_data, f, indent=2)
+            
+            self._log_models(f"⚠ Model directory locked. Attempting cleanup for: {model_dir.name}")
+            
+            # Try immediate cleanup first (works even if not running via launcher)
+            from core.model_file_utils import force_clean_model_dir
+            import time
+            
+            # First, try to unlock files (kill processes, etc.)
+            self._log_models("Stopping any processes that might be locking files...")
+            self._unlock_model_files(model_dir, log_callback=lambda m: self._log_models(m))
+            time.sleep(3)  # Give processes time to release handles
+            
+            cleaned = False
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
+                self._log_models(f"Cleanup attempt {attempt}/{max_attempts}...")
+                if force_clean_model_dir(model_dir):
+                    cleaned = True
+                    self._log_models(f"✓ Successfully cleaned {model_dir.name}")
+                    # Delete request file since we succeeded
+                    try:
+                        request_file.unlink()
+                    except Exception:
+                        pass
+                    break
+                if attempt < max_attempts:
+                    self._log_models(f"Attempt {attempt} failed, waiting before retry...")
+                    time.sleep(3)
+            
+            if not cleaned:
+                self._log_models("⚠ Cleanup failed - files still locked. App will restart to retry.")
+                self._log_models("If running directly (not via launcher), please restart the app manually.")
+                
+                # Show message box to user
+                from PySide6.QtWidgets import QMessageBox
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("Model Cleanup Required")
+                msg.setText(f"Model directory '{model_dir.name}' is locked and cannot be deleted.\n\n"
+                           f"The app needs to restart to clean it.\n\n"
+                           f"If you're running via launcher.exe, it will restart automatically.\n"
+                           f"Otherwise, please close and restart the app manually.")
+                msg.setStandardButtons(QMessageBox.Ok)
+                msg.exec()
+            
+            # Exit with special code that launcher recognizes (if running via launcher, it will handle restart)
+            # If not via launcher, cleanup will happen on next startup (we just added that check)
+            app = QApplication.instance()
+            if app:
+                if cleaned:
+                    # Cleanup succeeded - exit normally, app will continue on next run
+                    QTimer.singleShot(500, lambda: app.exit(0))
+                else:
+                    # Cleanup failed - exit with special code (launcher will restart, or user can restart manually)
+                    QTimer.singleShot(500, lambda: app.exit(CLEANUP_AND_RESTART))
+        except Exception as e:
+            self._log_models(f"❌ Failed to request restart-clean: {e}")
+            # Fallback: just exit normally
+            app = QApplication.instance()
+            if app:
+                QTimer.singleShot(500, lambda: app.exit(1))
+    
     def _unlock_model_files(self, model_path: Path, log_callback=None) -> bool:
         """
         Unlock files in a model directory by killing processes that might be using them.
@@ -5417,8 +5445,17 @@ class MainWindow(QMainWindow):
                 log("Stopping active download thread...")
                 thread, card = self.active_downloads[model_id]
                 if thread.isRunning():
-                    thread.terminate()
-                    thread.wait(3000)  # Wait up to 3 seconds
+                    # Ask thread to stop cooperatively first
+                    try:
+                        if hasattr(thread, "request_stop"):
+                            thread.request_stop()
+                    except Exception:
+                        pass
+                    # Give it time to release HuggingFace file locks
+                    thread.wait(10000)  # Wait up to 10 seconds
+                    if thread.isRunning():
+                        thread.terminate()
+                        thread.wait(3000)  # Wait up to 3 seconds
                 del self.active_downloads[model_id]
             
             # Also check for repair threads (they use a different key format)
@@ -5427,8 +5464,15 @@ class MainWindow(QMainWindow):
                 log("Stopping active repair thread...")
                 thread, card = self.active_downloads[repair_key]
                 if thread.isRunning():
-                    thread.terminate()
-                    thread.wait(3000)
+                    try:
+                        if hasattr(thread, "request_stop"):
+                            thread.request_stop()
+                    except Exception:
+                        pass
+                    thread.wait(10000)
+                    if thread.isRunning():
+                        thread.terminate()
+                        thread.wait(3000)
                 del self.active_downloads[repair_key]
         
         # 2. Remove .incomplete files that are often locked
@@ -5766,6 +5810,15 @@ class MainWindow(QMainWindow):
         # Get onboarding entry
         entry = state_store.get_onboarding(model_id)
         
+        # Log resolved model_id and env_key for debugging mismatches
+        if entry:
+            env_key = entry.get("env_key", "N/A")
+            backend = entry.get("backend", "N/A")
+            accelerator = entry.get("accelerator", "N/A")
+            self._log_models(f"Environment tab: model_id={model_id}, env_key={env_key}, backend={backend}, accelerator={accelerator}, status={status}")
+        else:
+            self._log_models(f"Environment tab: model_id={model_id} (no onboarding entry found in StateStore)")
+        
         # Clear existing content
         if hasattr(self, 'downloaded_env_widget'):
             # Remove old layout
@@ -6095,21 +6148,126 @@ class MainWindow(QMainWindow):
             if path.exists():
                 self._update_environment_tab(str(path), model_id, status)
         
-        # Update the specific card's badge immediately
-        self._update_model_card_badge(model_id, status)
+        # Rebuild the specific card deterministically (with delay to ensure DB write completes)
+        QTimer.singleShot(300, lambda: self._rebuild_model_card(model_id, status))
         
-        # Also refresh all models to ensure consistency (with delay to ensure DB write completes)
-        QTimer.singleShot(500, self._refresh_models)
+        # Also refresh all models to ensure consistency (with longer delay as fallback)
+        QTimer.singleShot(1000, self._refresh_models)
         
         # DO NOT automatically switch to Info tab - let user stay on Environment tab to see results
+    
+    def _rebuild_model_card(self, model_id: str, status: str):
+        """Deterministically rebuild a single model card with updated onboarding status"""
+        # Find the card and its position in the grid
+        card_to_replace = None
+        card_row = None
+        card_col = None
+        
+        for card in getattr(self, 'downloaded_model_cards', []):
+            card_model_id = None
+            if hasattr(card, 'model_id'):
+                card_model_id = card.model_id
+            elif hasattr(card, 'model_path'):
+                # Derive model_id from path (same logic as _refresh_models)
+                path = Path(card.model_path)
+                model_name = path.name
+                card_model_id = model_name.replace("__", "/")
+            
+            # Match by model_id
+            if card_model_id == model_id:
+                # Find position in grid layout by iterating
+                for row in range(self.downloaded_layout.rowCount()):
+                    for col in range(self.downloaded_layout.columnCount()):
+                        item = self.downloaded_layout.itemAtPosition(row, col)
+                        if item and item.widget() == card:
+                            card_row, card_col = row, col
+                            break
+                    if card_row is not None:
+                        break
+                
+                card_to_replace = card
+                break
+        
+        if not card_to_replace or card_row is None:
+            # Log mismatch for debugging - show what model_ids exist vs what we're looking for
+            existing_ids = []
+            for card in getattr(self, 'downloaded_model_cards', []):
+                if hasattr(card, 'model_id'):
+                    existing_ids.append(card.model_id)
+                elif hasattr(card, 'model_path'):
+                    path = Path(card.model_path)
+                    existing_ids.append(path.name.replace("__", "/"))
+            self._log_models(f"⚠️ Card not found for model_id: {model_id}")
+            self._log_models(f"   Looking for: {model_id}")
+            self._log_models(f"   Available model_ids: {existing_ids[:5]}..." if len(existing_ids) > 5 else f"   Available model_ids: {existing_ids}")
+            self._log_models(f"   Check Environment tab for resolved model_id and env_key")
+            return
+        
+        # Get fresh data for the card (same logic as _refresh_models)
+        model_path = card_to_replace.model_path
+        path = Path(model_path)
+        model_name = path.name
+        
+        # Get fresh onboarding status from StateStore
+        from core.model_onboarding import get_onboarding_service
+        onboarding = get_onboarding_service()
+        fresh_status = onboarding.get_onboarding_status(model_id) or "NEW"
+        
+        # Get other card data
+        from desktop_app.model_card_widget import DownloadedModelCard
+        from core.capabilities import detect_model_capabilities, get_capability_icons, get_model_size, get_model_compatibility_badge
+        
+        status_check = self.model_checker.check_model(path)
+        
+        if not status_check.is_complete:
+            size = "⚠️ INCOMPLETE"
+            icons = "❌"
+            compatibility_badge = None
+        else:
+            size = get_model_size(str(path))
+            capabilities = detect_model_capabilities(model_name=model_name, model_path=str(path))
+            icons = get_capability_icons(capabilities)
+            compatibility_badge = get_model_compatibility_badge(model_id, model_name, self.user_vram_gb)
+        
+        # Create new card with fresh data
+        new_card = DownloadedModelCard(
+            model_name,
+            str(path),
+            size,
+            icons,
+            is_incomplete=not status_check.is_complete,
+            compatibility_badge=compatibility_badge,
+            onboarding_status=fresh_status
+        )
+        new_card.set_theme(self.dark_mode)
+        new_card.selected.connect(self._on_model_selected)
+        new_card.delete_clicked.connect(self._on_delete_model)
+        if not status_check.is_complete:
+            new_card.repair_clicked.connect(self._on_repair_model)
+        new_card.model_id = model_id
+        
+        # Replace old card with new one in layout
+        self.downloaded_layout.removeWidget(card_to_replace)
+        card_to_replace.deleteLater()
+        self.downloaded_layout.addWidget(new_card, card_row, card_col)
+        
+        # Update the cards list
+        card_index = self.downloaded_model_cards.index(card_to_replace)
+        self.downloaded_model_cards[card_index] = new_card
+        
+        self._log_models(f"✓ Rebuilt card for {model_id} with status {fresh_status}")
+    
     
     def _on_onboarding_error(self, model_id: str, error: str):
         """Handle onboarding error"""
         if hasattr(self, 'onboarding_log_display'):
             self.onboarding_log_display.appendPlainText(f"\n❌ Error: {error}")
         
+        # Rebuild card with BROKEN status
+        QTimer.singleShot(300, lambda: self._rebuild_model_card(model_id, "BROKEN"))
+        
         # Refresh models
-        self._refresh_models()
+        QTimer.singleShot(1000, self._refresh_models)
     
     def _on_repair_complete(self, model_id: str, dest: str, card, progress_bar, repair_key: str):
         """Handle successful repair"""
@@ -6149,7 +6307,70 @@ class MainWindow(QMainWindow):
             progress_bar.setVisible(False)
             progress_bar.deleteLater()
         
-        # Restore repair button
+        # Check if error is due to locked directory (ModelDirLockedError)
+        # Error comes as string from thread, so check for key phrases
+        is_locked_error = (
+            "locked by another process" in error.lower() or
+            "modeldirlockederror" in error.lower() or
+            "cannot clean" in error.lower() and "locked" in error.lower()
+        )
+        
+        if is_locked_error:
+            # Get model directory path from card
+            model_path = Path(card.model_path) if hasattr(card, 'model_path') else None
+            if model_path and model_path.exists():
+                self._log_models(f"⚠ Model directory is locked. Requesting restart-and-clean...")
+                self.request_restart_clean(model_path, f"Repair failed: {error}")
+                return
+        
+        # Auto force-fresh download after a repair crash/failure
+        if not getattr(card, "_force_fresh_attempted", False):
+            card._force_fresh_attempted = True
+            self._log_models(f"↻ Repair failed; forcing fresh download for {model_id}...")
+            
+            # Disable repair button while force-fresh runs
+            if hasattr(card, 'repair_btn'):
+                card.repair_btn.setEnabled(False)
+                card.repair_btn.setText("⏳ Redownloading...")
+            
+            # New progress bar for force-fresh download
+            fresh_bar = QProgressBar()
+            fresh_bar.setMinimum(0)
+            fresh_bar.setMaximum(100)
+            fresh_bar.setValue(0)
+            fresh_bar.setTextVisible(True)
+            fresh_bar.setFormat("Redownloading... %p%")
+            fresh_bar.setStyleSheet("""
+                QProgressBar {
+                    border: none;
+                    border-radius: 4px;
+                    text-align: center;
+                    background-color: #262730;
+                    color: white;
+                    font-weight: bold;
+                    height: 30px;
+                }
+                QProgressBar::chunk {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                        stop:0 #ffa500, stop:1 #ff8c00);
+                    border-radius: 4px;
+                }
+            """)
+            card.layout().addWidget(fresh_bar)
+            
+            # Start force-fresh repair thread
+            path = Path(card.model_path)
+            thread = RepairThread(model_id, path, force_fresh_only=True)
+            fresh_key = f"repair_fresh_{model_id}"
+            self.active_downloads[fresh_key] = (thread, card)
+            
+            thread.progress.connect(lambda p: fresh_bar.setValue(p))
+            thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, fresh_bar, fresh_key))
+            thread.error.connect(lambda err: self._on_repair_error(model_id, err, card, fresh_bar, fresh_key))
+            thread.start()
+            return
+        
+        # Restore repair button if fresh attempt also failed
         if hasattr(card, 'repair_btn'):
             card.repair_btn.setEnabled(True)
             card.repair_btn.setText("🔧 Fix")
@@ -12391,12 +12612,23 @@ except Exception as e:
                     except Exception:
                         pass
                     
+                    # Get associated models from StateStore (source of truth)
+                    from core.state_store import get_state_store
+                    state_store = get_state_store()
+                    associated_models = []
+                    try:
+                        onboarding_entries = state_store.list_onboarding_by_env_key(env_key)
+                        associated_models = [entry.get("model_id", "") for entry in onboarding_entries if entry.get("model_id")]
+                    except Exception as e:
+                        self._log_to_env_terminal(f"⚠️ Could not load associated models for {env_key}: {e}")
+                    
                     env_info = {
                         "env_id": env_key,
                         "path": str(env_dir),
                         "python_version": python_version,
                         "package_count": package_count,
                         "disk_usage_mb": disk_usage_mb,
+                        "associated_models": associated_models,  # Source of truth from StateStore
                     }
                     envs.append(env_info)
             
@@ -12551,11 +12783,26 @@ except Exception as e:
         
         env_id = env_info.get("env_id", "Unknown")
         
-        # Get full details
+        # Get associated models from StateStore (source of truth)
+        from core.state_store import get_state_store
+        state_store = get_state_store()
+        associated_models = []
+        try:
+            onboarding_entries = state_store.list_onboarding_by_env_key(env_id)
+            associated_models = [entry.get("model_id", "") for entry in onboarding_entries if entry.get("model_id")]
+            # Update env_info with fresh data from StateStore
+            env_info["associated_models"] = associated_models
+            self._log_to_env_terminal(f"✅ Found {len(associated_models)} model(s) associated with {env_id}")
+        except Exception as e:
+            self._log_to_env_terminal(f"⚠️ Could not load associated models: {e}")
+        
+        # Get full details (if available from old system)
         try:
             full_info = self.env_manager.get_environment_info(model_id=env_id)
             if full_info:
-                env_info = full_info
+                # Merge but keep StateStore as source of truth for models
+                env_info.update(full_info)
+                env_info["associated_models"] = associated_models  # Override with StateStore data
                 self._log_to_env_terminal(f"✅ Loaded details for: {env_id}")
         except Exception as e:
             self._log_to_env_terminal(f"⚠️ Could not load full details: {e}")
@@ -14715,6 +14962,65 @@ def main() -> int:
     # Setup error logging FIRST before anything else
     logs_dir = get_app_root() / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Check for pending cleanup request (handles case when app is run directly, not via launcher)
+    cleanup_request_file = logs_dir / "cleanup_request.json"
+    if cleanup_request_file.exists():
+        try:
+            with open(cleanup_request_file, "r", encoding="utf-8") as f:
+                cleanup_data = json.load(f)
+            
+            model_dir = Path(cleanup_data.get("model_dir", ""))
+            if model_dir.exists():
+                # Attempt cleanup with timeout (don't hang startup forever)
+                from core.model_file_utils import force_clean_model_dir, kill_processes_locking_directory
+                import time
+                import signal
+                
+                print(f"Performing cleanup for locked model directory: {model_dir}")
+                
+                # Kill locking processes first
+                print("Killing processes that might be locking files...")
+                kill_processes_locking_directory(model_dir)
+                time.sleep(2)
+                
+                # Try cleanup with timeout (max 30 seconds total)
+                deleted = False
+                start_time = time.time()
+                max_time = 30
+                
+                for attempt in range(1, 6):
+                    if time.time() - start_time > max_time:
+                        print(f"⚠ Cleanup timeout after {max_time} seconds")
+                        break
+                    
+                    print(f"Cleanup attempt {attempt}/5...")
+                    if force_clean_model_dir(model_dir):
+                        deleted = True
+                        break
+                    if attempt < 5:
+                        time.sleep(2)
+                
+                if deleted:
+                    print(f"✓ Successfully cleaned model directory: {model_dir}")
+                else:
+                    print(f"⚠ Could not fully delete {model_dir} - some files may still be locked")
+                    print("The app will continue, but you may need to manually delete the directory.")
+                    print("Or restart the app to retry cleanup.")
+            
+            # Delete request file regardless of success (to prevent infinite loops)
+            try:
+                cleanup_request_file.unlink()
+            except Exception:
+                pass
+                
+        except Exception as e:
+            print(f"Error handling cleanup request: {e}")
+            # Delete request file to prevent infinite loops
+            try:
+                cleanup_request_file.unlink()
+            except Exception:
+                pass
     
     # Use timestamped name format: [yymmdd][name][hhmm]
     from datetime import datetime

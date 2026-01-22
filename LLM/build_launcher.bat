@@ -33,6 +33,17 @@ if not exist "%ICO_ICON%" (
     exit /b 1
 )
 
+REM Kill any running launcher.exe processes to unlock the file
+echo.
+echo Checking for running launcher.exe processes...
+taskkill /F /IM launcher.exe >nul 2>&1
+if errorlevel 1 (
+    echo No running launcher.exe found (or already closed)
+) else (
+    echo Closed running launcher.exe processes
+)
+timeout /t 1 /nobreak >nul
+
 REM Copy icon to build directory for windres
 cd /d "%SCRIPT_DIR%"
 copy /Y "%ICO_ICON%" "owl_launcher.ico" >nul

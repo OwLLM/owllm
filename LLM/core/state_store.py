@@ -500,6 +500,16 @@ class StateStore:
         
         return [dict(row) for row in rows]
     
+    def list_onboarding_by_env_key(self, env_key: str) -> List[Dict[str, Any]]:
+        """List all onboarding entries for a specific environment key."""
+        conn = self._get_connection()
+        rows = conn.execute(
+            "SELECT * FROM model_onboarding WHERE env_key = ? ORDER BY model_id",
+            (env_key,)
+        ).fetchall()
+        
+        return [dict(row) for row in rows]
+    
     def delete_onboarding(self, model_id: str):
         """Delete onboarding entry."""
         conn = self._get_connection()

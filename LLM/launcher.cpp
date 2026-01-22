@@ -18,6 +18,15 @@ std::wstring StringToWString(const std::string& str) {
     return wstrTo;
 }
 
+// Helper to convert std::wstring to std::string
+std::string WStringToString(const std::wstring& wstr) {
+    if (wstr.empty()) return std::string();
+    int size_needed = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
+    std::string strTo(size_needed, 0);
+    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], size_needed, NULL, NULL);
+    return strTo;
+}
+
 // Helper to check if file exists
 bool FileExists(const std::wstring& path) {
     DWORD attrib = GetFileAttributesW(path.c_str());
@@ -33,6 +42,125 @@ void EnsureLogsDirectory(const std::wstring& exeDir) {
 // Helper to open log file in Notepad
 void OpenLogInNotepad(const std::wstring& logPath) {
     ShellExecuteW(NULL, L"open", L"notepad.exe", logPath.c_str(), NULL, SW_SHOW);
+}
+
+// Helper to read cleanup request JSON
+bool ReadCleanupRequest(const std::wstring& exeDir, std::wstring& modelDir) {
+    std::wstring requestFile = exeDir + L"\\logs\\cleanup_request.json";
+    if (!FileExists(requestFile)) {
+        return false;
+    }
+    
+    // Simple JSON parsing - look for "model_dir" field
+    // Read entire file to handle multi-line JSON
+    // Convert wstring to string for file operations
+    std::string requestFileStr = WStringToString(requestFile);
+    std::ifstream file(requestFileStr);
+    if (!file.is_open()) {
+        return false;
+    }
+    
+    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+    
+    // Look for "model_dir": "path" pattern (handles both single and multi-line)
+    size_t pos = content.find("\"model_dir\"");
+    if (pos != std::string::npos) {
+        size_t colon = content.find(':', pos);
+        if (colon != std::string::npos) {
+            // Skip whitespace after colon
+            size_t start = colon + 1;
+            while (start < content.length() && (content[start] == ' ' || content[start] == '\t')) {
+                start++;
+            }
+            
+            if (start < content.length() && content[start] == '"') {
+                size_t quote1 = start;
+                size_t quote2 = content.find('"', quote1 + 1);
+                if (quote2 != std::string::npos) {
+                    std::string path = content.substr(quote1 + 1, quote2 - quote1 - 1);
+                    // Convert to wide string
+                    int size_needed = MultiByteToWideChar(CP_UTF8, 0, &path[0], (int)path.size(), NULL, 0);
+                    if (size_needed > 0) {
+                        modelDir.resize(size_needed);
+                        MultiByteToWideChar(CP_UTF8, 0, &path[0], (int)path.size(), &modelDir[0], size_needed);
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    
+    return false;
+}
+
+// Helper to delete directory with retries (Windows)
+bool DeleteDirectoryWithRetries(const std::wstring& dirPath, int maxAttempts = 5) {
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        // Try cmd rmdir first
+        std::wstring cmd = L"cmd /c rmdir /S /Q \"" + dirPath + L"\"";
+        DWORD exitCode = 0;
+        
+        STARTUPINFOW si = {0};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+        si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+        
+        PROCESS_INFORMATION pi = {0};
+        BOOL success = CreateProcessW(
+            NULL,
+            &cmd[0],
+            NULL,
+            NULL,
+            FALSE,
+            CREATE_NO_WINDOW,
+            NULL,
+            NULL,
+            &si,
+            &pi
+        );
+        
+        if (success) {
+            WaitForSingleObject(pi.hProcess, 30000);  // 30 second timeout
+            GetExitCodeProcess(pi.hProcess, &exitCode);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+        
+        // Check if directory still exists
+        DWORD attrib = GetFileAttributesW(dirPath.c_str());
+        if (attrib == INVALID_FILE_ATTRIBUTES || !(attrib & FILE_ATTRIBUTE_DIRECTORY)) {
+            return true;  // Directory deleted
+        }
+        
+        // If not last attempt, try PowerShell as fallback
+        if (attempt >= 2) {
+            std::wstring psCmd = L"powershell -Command \"Remove-Item -Path \\\"" + dirPath + L"\\\" -Recurse -Force -ErrorAction SilentlyContinue\"";
+            STARTUPINFOW psi = {0};
+            psi.cb = sizeof(psi);
+            psi.dwFlags = STARTF_USESTDHANDLES;
+            PROCESS_INFORMATION ppi = {0};
+            if (CreateProcessW(NULL, &psCmd[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &psi, &ppi)) {
+                WaitForSingleObject(ppi.hProcess, 30000);
+                CloseHandle(ppi.hProcess);
+                CloseHandle(ppi.hThread);
+            }
+            
+            attrib = GetFileAttributesW(dirPath.c_str());
+            if (attrib == INVALID_FILE_ATTRIBUTES || !(attrib & FILE_ATTRIBUTE_DIRECTORY)) {
+                return true;
+            }
+        }
+        
+        // Wait before retry
+        if (attempt < maxAttempts) {
+            Sleep(2000);  // 2 second delay
+        }
+    }
+    
+    return false;  // Failed after all attempts
 }
 
 // Helper to check for self-contained Python runtime
@@ -668,6 +796,106 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 
     int exitCode = LaunchPythonApp(exeDir, venvPython, scriptArgs, logFile);
+    
+    // Handle cleanup-and-restart request (exit code 42)
+    const int CLEANUP_AND_RESTART = 42;
+    if (exitCode == CLEANUP_AND_RESTART) {
+        // Read cleanup request
+        std::wstring modelDir;
+        if (ReadCleanupRequest(exeDir, modelDir)) {
+            // Check for loop guard (prevent infinite restarts)
+            std::wstring guardFile = exeDir + L"\\logs\\cleanup_guard.txt";
+            std::string guardFileStr = WStringToString(guardFile);
+            int restartCount = 0;
+            
+            // Read existing count
+            std::ifstream guardIn(guardFileStr);
+            if (guardIn.is_open()) {
+                guardIn >> restartCount;
+                guardIn.close();
+            }
+            
+            const int MAX_RESTART_ATTEMPTS = 2;
+            if (restartCount >= MAX_RESTART_ATTEMPTS) {
+                // Too many restarts - show error
+                std::wstring errorMsg = L"Model directory cleanup failed after " + 
+                    std::to_wstring(MAX_RESTART_ATTEMPTS) + 
+                    L" attempts.\n\n"
+                    L"Directory: " + modelDir + L"\n\n"
+                    L"Files may be locked by:\n"
+                    L"- Antivirus software\n"
+                    L"- Windows Search/Indexer\n"
+                    L"- Another application\n\n"
+                    L"Please close other applications and try again manually.";
+                
+                MessageBoxW(NULL, errorMsg.c_str(), L"Cleanup Failed", MB_OK | MB_ICONERROR);
+                
+                // Delete guard file
+                DeleteFileW(guardFile.c_str());
+                // Delete request file
+                DeleteFileW((exeDir + L"\\logs\\cleanup_request.json").c_str());
+                
+                return 1;
+            }
+            
+            // Increment restart count
+            restartCount++;
+            std::ofstream guardOut(guardFileStr);
+            if (guardOut.is_open()) {
+                guardOut << restartCount;
+                guardOut.close();
+            }
+            
+            // Attempt to delete model directory
+            bool deleted = DeleteDirectoryWithRetries(modelDir, 5);
+            
+            if (deleted) {
+                // Success - delete guard and request files, then relaunch
+                DeleteFileW(guardFile.c_str());
+                DeleteFileW((exeDir + L"\\logs\\cleanup_request.json").c_str());
+                
+                // Small delay to ensure handles are released
+                Sleep(1000);
+                
+                // Relaunch the app
+                return LaunchPythonApp(exeDir, venvPython, scriptArgs, logFile);
+            } else {
+                // Deletion failed - increment count and try again (up to max)
+                if (restartCount < MAX_RESTART_ATTEMPTS) {
+                    // Wait a bit longer and try one more restart
+                    Sleep(3000);
+                    return LaunchPythonApp(exeDir, venvPython, scriptArgs, logFile);
+                } else {
+                    // Max attempts reached - show error
+                    std::wstring errorMsg = L"Could not delete model directory after " + 
+                        std::to_wstring(MAX_RESTART_ATTEMPTS) + 
+                        L" attempts.\n\n"
+                        L"Directory: " + modelDir + L"\n\n"
+                        L"Files are still locked. Please:\n"
+                        L"1. Close antivirus/Windows Search\n"
+                        L"2. Restart your computer\n"
+                        L"3. Manually delete: " + modelDir;
+                    
+                    MessageBoxW(NULL, errorMsg.c_str(), L"Cleanup Failed", MB_OK | MB_ICONERROR);
+                    
+                    // Clean up guard and request files
+                    DeleteFileW(guardFile.c_str());
+                    DeleteFileW((exeDir + L"\\logs\\cleanup_request.json").c_str());
+                    
+                    return 1;
+                }
+            }
+        } else {
+            // No cleanup request found - treat as normal error
+            MessageBoxW(NULL, 
+                L"Cleanup requested but cleanup_request.json not found.\n"
+                L"Application will exit.",
+                L"Cleanup Error", 
+                MB_OK | MB_ICONWARNING);
+            return 1;
+        }
+    }
+    
     if (exitCode != 0) {
         // App failed - try automatic fallback to debug launcher or installer
         std::wstring debugLauncher = exeDir + L"\\LAUNCHER_DEBUG.bat";

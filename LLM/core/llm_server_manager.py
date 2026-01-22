@@ -11,6 +11,7 @@ multiple chat threads access the server manager concurrently.
 """
 import yaml
 import subprocess
+import sys
 import requests
 import time
 import socket
@@ -50,6 +51,17 @@ class LLMServerManager:
         # Import environment registry
         from core.envs.env_registry import EnvRegistry
         self.env_registry = EnvRegistry()
+        
+        # Windows subprocess flags to prevent CMD window flashing
+        self.subprocess_flags = {}
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            self.subprocess_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
         
         # THREAD SAFETY: Lock for all server operations
         # Prevents race conditions when multiple chat threads access manager

@@ -332,7 +332,7 @@ class DownloadedModelCard(QFrame):
     
     def __init__(self, model_name: str, model_path: str, size: str, icons: str, 
                  is_incomplete: bool = False, compatibility_badge: dict = None, 
-                 onboarding_status: str = None, parent=None):
+                 onboarding_status: str = None, env_key: str = None, parent=None):
         super().__init__(parent)
         self.model_path = model_path
         self.model_name = model_name
@@ -340,6 +340,7 @@ class DownloadedModelCard(QFrame):
         self.is_dark = True
         self.compatibility_badge = compatibility_badge
         self.onboarding_status = onboarding_status or "NEW"
+        self.env_key = env_key
         
         self.setMinimumHeight(220)
         self.setFrameShape(QFrame.Box)
@@ -431,6 +432,22 @@ class DownloadedModelCard(QFrame):
             }
         """)
         status_row.addWidget(local_badge)
+        
+        # Environment badge (if env_key exists)
+        if self.env_key:
+            env_badge = QLabel(f"🔧 {self.env_key}")
+            env_badge.setStyleSheet("""
+                QLabel {
+                    background: rgba(102, 126, 234, 0.3);
+                    color: #667eea;
+                    padding: 2px 8px;
+                    border-radius: 3px;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+            """)
+            env_badge.setToolTip(f"Environment: {self.env_key}")
+            status_row.addWidget(env_badge)
         
         # Onboarding status badge
         if self.onboarding_status == "READY":

@@ -118,3 +118,10 @@ models:
     port: 10531
     use_4bit: true
     system_prompt: ''
+  deepseek-ai_deepseek-coder-6.7b-instruct:
+    base_model: C:\1_Git\LocaLLM\LLM\models\deepseek-ai__deepseek-coder-6.7b-instruct
+    adapter_dir: null
+    model_type: instruct
+    port: 10516
+    use_4bit: true
+    system_prompt: ''

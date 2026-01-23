@@ -175,8 +175,8 @@ def kill_processes_locking_directory(dest_dir: Path) -> None:
 
 def force_clean_model_dir(dest_dir: Path) -> bool:
     """
-    Force-clean a model directory by removing locks first, then deleting all files.
-    Returns True if successful, False if files are still locked.
+    AGGRESSIVE force-clean: Delete files individually, kill processes, use Windows tools.
+    Returns True if directory is gone (even if some files failed to delete).
     """
     import shutil
     import time
@@ -187,80 +187,144 @@ def force_clean_model_dir(dest_dir: Path) -> bool:
     if not dest_dir.exists():
         return True
     
-    logger.info(f"Force-cleaning {dest_dir}")
+    logger.info(f"AGGRESSIVE force-cleaning {dest_dir}")
     
-    # FIRST: Kill any processes that might be locking files
-    kill_processes_locking_directory(dest_dir)
-    time.sleep(2)  # Give processes time to release handles
-    
-    # Robust deletion with retries (Windows file locks are common)
-    for attempt in range(1, 5):
+    # STEP 1: Kill ALL Python processes that might be locking (nuclear option)
+    if sys.platform == "win32":
         try:
-            # First: clean all locks/incomplete markers
-            clean_download_locks(dest_dir)
-            
-            # Clear read-only attributes on Windows
-            if sys.platform == "win32" and dest_dir.exists():
-                try:
-                    # attrib is best invoked via cmd for wildcard expansion
-                    subprocess.run(
-                        ["cmd", "/c", "attrib", "-R", f"{dest_dir}\\*", "/S", "/D"],
-                        capture_output=True,
-                        timeout=10
-                    )
-                except Exception:
-                    pass
-            
-            # Wait briefly for locks to release
-            time.sleep(1 if attempt == 1 else 2)
-            
-            # Try Python delete first
-            try:
-                shutil.rmtree(dest_dir, ignore_errors=False)
-            except Exception as e:
-                logger.warning(f"Could not fully delete {dest_dir} on attempt {attempt}: {e}")
-            
-            # Windows-native fallback (often succeeds where shutil doesn't)
-            if sys.platform == "win32" and dest_dir.exists():
-                try:
-                    subprocess.run(
-                        ["cmd", "/c", "rmdir", "/S", "/Q", str(dest_dir)],
-                        capture_output=True,
-                        timeout=30
-                    )
-                except Exception:
-                    pass
-                
-                # PowerShell fallback
-                if dest_dir.exists() and attempt >= 2:
+            # Kill ALL python.exe and pythonw.exe processes (except ourselves)
+            current_pid = os.getpid()
+            result = subprocess.run(
+                ['wmic', 'process', 'where', 'name="python.exe" or name="pythonw.exe"', 'get', 'ProcessId', '/format:list'],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            for line in result.stdout.split('\n'):
+                if 'ProcessId=' in line:
                     try:
-                        ps_cmd = f'Remove-Item -Path "{dest_dir}" -Recurse -Force -ErrorAction SilentlyContinue'
-                        subprocess.run(["powershell", "-Command", ps_cmd], capture_output=True, timeout=30)
-                    except Exception:
+                        pid = int(line.split('=')[1].strip())
+                        if pid != current_pid and pid > 0:
+                            logger.info(f"Killing Python process {pid}")
+                            subprocess.run(['taskkill', '/F', '/PID', str(pid)], capture_output=True, timeout=2)
+                    except (ValueError, IndexError):
                         pass
-            
-            if not dest_dir.exists():
-                logger.info(f"Successfully deleted {dest_dir}")
-                return True
-                
-            # If still exists and not last attempt, kill processes again before retry
-            if attempt < 4 and dest_dir.exists():
-                logger.info(f"Deletion failed on attempt {attempt}, killing locking processes and retrying...")
-                kill_processes_locking_directory(dest_dir)
-                time.sleep(2)  # Wait for handles to release
-        except Exception as e:
-            logger.warning(f"Force-clean attempt {attempt} failed: {e}")
-        
-        # Backoff before retrying
-        if attempt < 4:
             time.sleep(2)
+        except Exception as e:
+            logger.warning(f"Error killing Python processes: {e}")
     
-    # Last resort: best-effort cleanup (don't claim success)
+    # STEP 2: Delete files INDIVIDUALLY (even if some fail) - FAST PATH
+    deleted_count = 0
+    failed_count = 0
+    
+    # FIRST: Try to delete the whole thing with Windows native (fastest)
+    if sys.platform == "win32" and dest_dir.exists():
+        try:
+            logger.info("Trying fast Windows native delete...")
+            result = subprocess.run(
+                ['cmd', '/c', 'rmdir', '/S', '/Q', str(dest_dir)], 
+                capture_output=True, 
+                timeout=15
+            )
+            if not dest_dir.exists():
+                logger.info("✓ Fast delete succeeded!")
+                return True
+        except Exception as e:
+            logger.debug(f"Fast delete failed: {e}")
+    
+    # If fast delete failed, delete files individually
     try:
-        shutil.rmtree(dest_dir, ignore_errors=True)
-    except Exception:
-        pass
-    return not dest_dir.exists()
+        logger.info("Deleting files individually...")
+        total_files = sum(len(files) for root, dirs, files in os.walk(dest_dir))
+        processed = 0
+        
+        # Walk directory and delete files one by one
+        for root, dirs, files in os.walk(dest_dir, topdown=False):
+            # Delete files first
+            for file in files:
+                file_path = Path(root) / file
+                processed += 1
+                if processed % 50 == 0:
+                    logger.info(f"Deleted {processed}/{total_files} files...")
+                
+                try:
+                    # Try direct delete first (fastest)
+                    file_path.unlink()
+                    deleted_count += 1
+                except Exception:
+                    # Try Windows native delete
+                    if sys.platform == "win32":
+                        try:
+                            subprocess.run(['cmd', '/c', 'del', '/F', '/Q', f'"{file_path}"'], 
+                                         shell=True, capture_output=True, timeout=1)
+                            deleted_count += 1
+                        except Exception:
+                            failed_count += 1
+            
+            # Then delete directories
+            for dir_name in dirs:
+                dir_path = Path(root) / dir_name
+                try:
+                    dir_path.rmdir()
+                    deleted_count += 1
+                except Exception:
+                    # Try Windows native
+                    if sys.platform == "win32":
+                        try:
+                            subprocess.run(['cmd', '/c', 'rmdir', '/Q', f'"{dir_path}"'], 
+                                         shell=True, capture_output=True, timeout=1)
+                        except Exception:
+                            pass
+    except Exception as e:
+        logger.warning(f"Error during individual file deletion: {e}")
+    
+    logger.info(f"Deleted {deleted_count} items, {failed_count} failed")
+    
+    # STEP 3: Try to delete the root directory itself
+    if dest_dir.exists():
+        # Kill processes again
+        kill_processes_locking_directory(dest_dir)
+        time.sleep(1)
+        
+        # Try multiple methods
+        methods = [
+            lambda: shutil.rmtree(dest_dir, ignore_errors=True),
+            lambda: subprocess.run(['cmd', '/c', 'rmdir', '/S', '/Q', str(dest_dir)], 
+                                 capture_output=True, timeout=10) if sys.platform == "win32" else None,
+            lambda: subprocess.run(['powershell', '-Command', f'Remove-Item -Path "{dest_dir}" -Recurse -Force -ErrorAction SilentlyContinue'],
+                                 capture_output=True, timeout=10) if sys.platform == "win32" else None,
+        ]
+        
+        for method in methods:
+            if method is None:
+                continue
+            try:
+                method()
+                if not dest_dir.exists():
+                    break
+            except Exception:
+                pass
+    
+    # STEP 4: If still exists, try to rename it (sometimes works when delete doesn't)
+    if dest_dir.exists() and sys.platform == "win32":
+        try:
+            import random
+            temp_name = dest_dir.parent / f"__DELETE_ME_{random.randint(1000, 9999)}"
+            dest_dir.rename(temp_name)
+            # Try to delete the renamed folder
+            subprocess.run(['cmd', '/c', 'rmdir', '/S', '/Q', str(temp_name)], 
+                         capture_output=True, timeout=10)
+        except Exception:
+            pass
+    
+    # Return True if directory is gone (even if we had some failures)
+    result = not dest_dir.exists()
+    if result:
+        logger.info(f"✓ Directory deleted (deleted {deleted_count} items)")
+    else:
+        logger.warning(f"⚠ Directory still exists after aggressive cleanup ({deleted_count} items deleted, {failed_count} failed)")
+    
+    return result
 
 
 def download_repo_files(
@@ -274,7 +338,8 @@ def download_repo_files(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     clean_locks: bool = False,
-    force_fresh: bool = False
+    force_fresh: bool = False,
+    cache_dir: Optional[Path] = None
 ) -> Path:
     """
     Download all files from a Hugging Face repository deterministically, one file at a time.
@@ -285,11 +350,13 @@ def download_repo_files(
         token: Optional Hugging Face token
         allow_patterns: Optional list of filename patterns to download (e.g., ["*.json", "*.safetensors"])
         resume: If True, skip files that already exist locally
-        timeout_s: Per-file download timeout in seconds
+        timeout_s: Per-file download timeout in seconds (unused - kept for compatibility)
         max_retries: Maximum retries per file on failure
         progress_callback: Optional callback(bytes_done, bytes_total) for progress updates
+        should_cancel: Optional callback() -> bool to check if download should be cancelled
         clean_locks: If True, force-clean all lock/incomplete files before starting
         force_fresh: If True, delete everything and redownload from scratch
+        cache_dir: Optional central cache directory for HF downloads (keeps locks out of model folders)
         
     Returns:
         Path to destination directory
@@ -337,8 +404,15 @@ def download_repo_files(
     if not siblings:
         raise RuntimeError(f"No files match patterns {allow_patterns} in {repo_id}")
     
-    # Calculate total size
+    # Calculate total size (use actual file sizes, not API-reported sizes which can be 0)
+    # For progress tracking, we'll track actual downloaded bytes vs estimated total
     total_size = sum(int(s.get("size", 0)) for s in siblings)
+    # If total is 0 (all files report 0), estimate based on file count (rough: ~100MB per weight file)
+    if total_size == 0 and siblings:
+        # Rough estimate: assume weight files are large
+        weight_files = [s for s in siblings if any(s.get("rfilename", "").endswith(ext) for ext in [".safetensors", ".bin", ".pt", ".pth"])]
+        if weight_files:
+            total_size = len(weight_files) * 100 * 1024 * 1024  # Estimate 100MB per weight file
     downloaded_bytes = 0
     
     # Track which files exist locally for resume
@@ -393,32 +467,46 @@ def download_repo_files(
                     logger.info(f"Downloading {rfilename} ({file_size} bytes) - attempt {attempt + 1}/{max_retries}")
                     
                     # Download file (always resumes automatically in newer huggingface_hub)
-                    downloaded_path = hf_hub_download(
-                        repo_id=repo_id,
-                        filename=rfilename,
-                        local_dir=str(dest_dir),
-                        token=token,
-                        force_download=(not resume),  # Only force new download if resume=False
-                        timeout=timeout_s
-                    )
+                    download_kwargs = {
+                        "repo_id": repo_id,
+                        "filename": rfilename,
+                        "local_dir": str(dest_dir),
+                        "token": token,
+                        "force_download": (not resume),  # Only force new download if resume=False
+                    }
+                    # Add cache_dir if provided (keeps locks out of model folder)
+                    if cache_dir:
+                        download_kwargs["cache_dir"] = str(cache_dir)
+                    
+                    downloaded_path = hf_hub_download(**download_kwargs)
                     
                     # Verify file was written
                     if not Path(downloaded_path).exists():
                         raise RuntimeError(f"File {rfilename} was not written to disk")
                     
                     actual_size = Path(downloaded_path).stat().st_size
-                    if actual_size != file_size:
-                        raise RuntimeError(
-                            f"File {rfilename} size mismatch: expected {file_size}, got {actual_size}"
-                        )
                     
-                    downloaded_bytes += file_size
+                    # Size verification: API sometimes reports 0 for text files that have content
+                    # Only verify size if API reported non-zero, or if file is empty when API said 0
+                    if file_size > 0:
+                        # API reported non-zero size - verify it matches
+                        if actual_size != file_size:
+                            raise RuntimeError(
+                                f"File {rfilename} size mismatch: expected {file_size}, got {actual_size}"
+                            )
+                    elif file_size == 0 and actual_size == 0:
+                        # API said 0, file is 0 - that's fine
+                        pass
+                    # If API said 0 but file has content, that's also fine (common for README.md, etc.)
+                    
+                    # Use actual size for progress tracking (more accurate)
+                    downloaded_bytes += actual_size if actual_size > 0 else file_size
                     
                     # Update progress
                     if progress_callback:
                         progress_callback(downloaded_bytes, total_size)
                     
-                    logger.info(f"✓ Downloaded {rfilename} ({file_size} bytes)")
+                    logger.info(f"✓ Downloaded {rfilename} ({actual_size} bytes)")
                     break  # Success, move to next file
                     
                 except Exception as e:

@@ -45,9 +45,6 @@ from core.python_runtime import PythonRuntimeManager
 _APP_BUILD = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%y%m%d-%H%M%S")
 APP_TITLE = "OWLLM"
 
-# Exit code for restart-and-clean (launcher will handle cleanup and relaunch)
-CLEANUP_AND_RESTART = 42
-
 
 class InstallerThread(QThread):
     """Thread for running smart installer without freezing UI"""
@@ -570,11 +567,12 @@ class RepairThread(QThread):
     finished = Signal(str)  # destination path
     error = Signal(str)     # error message
     
-    def __init__(self, model_id: str, existing_dir: Path, force_fresh_only: bool = False):
+    def __init__(self, model_id: str, existing_dir: Path, force_fresh_only: bool = False, cache_dir: Optional[Path] = None):
         super().__init__()
         self.model_id = model_id
         self.existing_dir = existing_dir
         self.force_fresh_only = force_fresh_only
+        self.cache_dir = cache_dir
         import threading
         self._stop_requested = threading.Event()
     
@@ -599,21 +597,27 @@ class RepairThread(QThread):
             
             # Progress callback for real-time updates
             def progress_callback(bytes_done: int, bytes_total: int):
-                if bytes_total > 0:
+                if bytes_total > 0 and bytes_total >= bytes_done:
                     percent = int((bytes_done / bytes_total) * 100)
-                    percent = max(2, min(percent, 99))  # Clamp 2-99%
+                    # Only clamp if we have valid progress (don't force 2% minimum if we're actually at 0%)
+                    if bytes_done > 0:
+                        percent = max(1, min(percent, 99))  # Clamp 1-99% (allow 0% for start)
+                    else:
+                        percent = 0
                     self.progress.emit(percent)
                 else:
                     # Unknown total - emit based on bytes downloaded (rough estimate)
-                    # ~1% per 50MB
+                    # ~1% per 50MB, but start from 0%
                     if bytes_done > 0:
-                        estimated_percent = min(2 + int(bytes_done / (50 * 1024 * 1024)), 99)
-                        self.progress.emit(estimated_percent)
+                        estimated_percent = min(int(bytes_done / (50 * 1024 * 1024)), 99)
+                        self.progress.emit(max(1, estimated_percent))  # At least 1% if we have bytes
+                    else:
+                        self.progress.emit(0)
             
             should_cancel = lambda: self._stop_requested.is_set() or self.isInterruptionRequested()
             
             # Start with metadata-only preflight (if missing)
-            self.progress.emit(2)
+            self.progress.emit(1)
             metadata_patterns = [
                 "*.json", "*.txt", "*.md", "*.model", "*.tiktoken",
                 "tokenizer.*", "vocab.*", "merges.txt", "special_tokens_map.json",
@@ -621,7 +625,86 @@ class RepairThread(QThread):
             ]
             
             if self.force_fresh_only:
-                # Force fresh: delete everything and redownload
+                # DELETE model directory using same robust strategy as Delete button
+                import logging
+                logger = logging.getLogger(__name__)
+                
+                self.progress.emit(5)
+                logger.info(f"Deleting model directory: {self.existing_dir}")
+                
+                # Use the same robust deletion as Delete button
+                from core.model_file_utils import kill_processes_locking_directory
+                import time
+                import subprocess
+                
+                if self.existing_dir.exists():
+                    # Step 1: Kill processes
+                    kill_processes_locking_directory(self.existing_dir)
+                    time.sleep(2)
+                    
+                    # Step 2: Remove .incomplete files
+                    cache_dir = self.existing_dir / ".cache" / "huggingface" / "download"
+                    if cache_dir.exists():
+                        try:
+                            for incomplete_file in cache_dir.rglob("*.incomplete"):
+                                try:
+                                    incomplete_file.unlink()
+                                except Exception:
+                                    pass
+                            shutil.rmtree(cache_dir, ignore_errors=True)
+                        except Exception:
+                            pass
+                    
+                    # Step 3: Robust deletion with retries (same as Delete button)
+                    success = False
+                    for attempt in range(1, 5):
+                        self.progress.emit(5 + (attempt * 3))  # 8, 11, 14, 17%
+                        try:
+                            if sys.platform == 'win32':
+                                # Force delete on Windows using cmd
+                                result = subprocess.run(
+                                    ['cmd', '/c', 'rmdir', '/S', '/Q', str(self.existing_dir)], 
+                                    capture_output=True, 
+                                    timeout=30
+                                )
+                                # PowerShell fallback
+                                if self.existing_dir.exists() and attempt >= 2:
+                                    ps_cmd = f'Remove-Item -Path "{self.existing_dir}" -Recurse -Force -ErrorAction SilentlyContinue'
+                                    subprocess.run(
+                                        ['powershell', '-Command', ps_cmd],
+                                        capture_output=True,
+                                        timeout=30
+                                    )
+                            else:
+                                shutil.rmtree(self.existing_dir, ignore_errors=True)
+                            
+                            if not self.existing_dir.exists():
+                                success = True
+                                logger.info(f"✓ Successfully deleted {self.existing_dir.name}")
+                                break
+                        except Exception as e:
+                            logger.warning(f"Deletion attempt {attempt} failed: {e}")
+                        
+                        if attempt < 4:
+                            time.sleep(2)
+                            kill_processes_locking_directory(self.existing_dir)
+                    
+                    if not success:
+                        # Final attempt
+                        try:
+                            shutil.rmtree(self.existing_dir, ignore_errors=True)
+                        except Exception:
+                            pass
+                        
+                        if self.existing_dir.exists():
+                            raise RuntimeError(
+                                f"Cannot delete {self.existing_dir} - files are locked by another process. "
+                                "Please close other applications and try again."
+                            )
+                
+                # Directory deleted - now download fresh
+                self.progress.emit(25)
+                logger.info(f"Starting FRESH download for {self.model_id}")
                 download_repo_files(
                     repo_id=self.model_id,
                     dest_dir=self.existing_dir,
@@ -633,7 +716,8 @@ class RepairThread(QThread):
                     progress_callback=progress_callback,
                     should_cancel=should_cancel,
                     clean_locks=True,
-                    force_fresh=True  # Delete everything first
+                    force_fresh=False,  # Already cleaned above
+                    cache_dir=self.cache_dir
                 )
             else:
                 # Try repair with existing files first
@@ -664,7 +748,8 @@ class RepairThread(QThread):
                             max_retries=2,
                             progress_callback=progress_callback,
                             should_cancel=should_cancel,
-                            clean_locks=True
+                            clean_locks=True,
+                            cache_dir=self.cache_dir
                         )
                     
                     # Download all remaining files (resume=True skips existing files)
@@ -678,7 +763,8 @@ class RepairThread(QThread):
                         max_retries=2,
                         progress_callback=progress_callback,
                         should_cancel=should_cancel,
-                        clean_locks=True  # Force clean locks on repair
+                        clean_locks=True,  # Force clean locks on repair
+                        cache_dir=self.cache_dir
                     )
                     
                 except Exception as first_error:
@@ -699,7 +785,8 @@ class RepairThread(QThread):
                         progress_callback=progress_callback,
                         should_cancel=should_cancel,
                         clean_locks=True,
-                        force_fresh=True  # Delete everything first
+                        force_fresh=True,  # Delete everything first
+                        cache_dir=self.cache_dir
                     )
             
             self.progress.emit(100)
@@ -715,10 +802,11 @@ class DownloadThread(QThread):
     finished = Signal(str)  # destination path
     error = Signal(str)     # error message
     
-    def __init__(self, model_id: str, target_dir: Path):
+    def __init__(self, model_id: str, target_dir: Path, cache_dir: Optional[Path] = None):
         super().__init__()
         self.model_id = model_id
         self.target_dir = target_dir
+        self.cache_dir = cache_dir
         import threading
         self._stop_requested = threading.Event()
     
@@ -778,17 +866,28 @@ class DownloadThread(QThread):
                 timeout_s=120,
                 max_retries=2,
                 progress_callback=progress_callback,
-                should_cancel=should_cancel
+                should_cancel=should_cancel,
+                cache_dir=self.cache_dir
             )
             
             # Verify preflight created files
             try:
-                any_files = any(dest.rglob("*"))
-            except Exception:
+                all_files = list(dest.rglob("*"))
+                # Filter out cache directories and hidden files
+                real_files = [f for f in all_files if f.is_file() and not any(part.startswith('.') or part == '__pycache__' or part.endswith('.lock') or part.endswith('.incomplete') for part in f.parts)]
+                any_files = len(real_files) > 0
+                if not any_files:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"Preflight created {len(all_files)} items but {len(real_files)} real files in {dest}")
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"ERROR checking preflight files: {e}")
                 any_files = False
             if not any_files:
                 raise RuntimeError(
-                    "Download produced no files after metadata preflight. "
+                    f"Download produced no files after metadata preflight in {dest}. "
                     "This usually indicates a stalled connection, blocked download, or authentication issue."
                 )
             
@@ -802,8 +901,27 @@ class DownloadThread(QThread):
                 timeout_s=900,  # 15 min per file max for responsiveness
                 max_retries=2,
                 progress_callback=progress_callback,
-                should_cancel=should_cancel
+                should_cancel=should_cancel,
+                cache_dir=self.cache_dir
             )
+            
+            # Final verification: ensure we have actual model files
+            try:
+                all_files = list(dest.rglob("*"))
+                real_files = [f for f in all_files if f.is_file() and not any(part.startswith('.') or part == '__pycache__' or part.endswith('.lock') or part.endswith('.incomplete') for part in f.parts)]
+                if len(real_files) == 0:
+                    raise RuntimeError(
+                        f"Download completed but no files found in {dest}. "
+                        "The download may have failed silently or files were saved to a different location."
+                    )
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"✓ Download complete: {len(real_files)} files in {dest}")
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"ERROR in final verification: {e}")
+                raise
             
             self.progress.emit(100)
             self.finished.emit(str(dest))
@@ -1857,6 +1975,9 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(800, 600)  # Allow resizing with reasonable minimum
 
         self.root = get_app_root()
+        # Central HF cache directory (keeps locks out of model folders)
+        self.hf_cache_dir = self.root / "hf_cache"
+        self.hf_cache_dir.mkdir(exist_ok=True)
         self.dark_mode = True  # Start in dark mode
         self.color_theme = "purple"  # Default color theme
         
@@ -5096,13 +5217,50 @@ class MainWindow(QMainWindow):
                         # Try to extract model ID from directory name (e.g., unsloth__model -> unsloth/model)
                         model_id = model_name.replace("__", "/")
                         
+                        # Skip if this model is currently downloading/repairing (don't mark as complete)
+                        is_active_download = False
+                        if hasattr(self, 'active_downloads'):
+                            # Check for download thread
+                            if model_id in self.active_downloads:
+                                is_active_download = True
+                            # Check for repair thread
+                            repair_key = f"repair_{model_id}"
+                            if repair_key in self.active_downloads:
+                                is_active_download = True
+                        
                         # Get onboarding status
                         onboarding_status = onboarding.get_onboarding_status(model_id) or "NEW"
                         
-                        # Check if model is complete
+                        # Get environment key from StateStore
+                        env_key = None
+                        try:
+                            model_entry = self.state_store.get_model(model_id)
+                            if model_entry:
+                                env_key = model_entry.get("env_key")
+                        except Exception as e:
+                            self._log_models(f"Could not get env_key for {model_id}: {e}")
+                        
+                        # Check if model is complete (but mark incomplete if actively downloading)
                         status = self.model_checker.check_model(model_dir)
-                        if not status.is_complete:
-                            size = "⚠️ INCOMPLETE"
+                        
+                        # Additional verification: ensure directory actually has files (not just empty)
+                        has_files = False
+                        try:
+                            # Check if directory has any non-cache files
+                            all_files = list(model_dir.rglob("*"))
+                            # Filter out cache directories and hidden files
+                            real_files = [f for f in all_files if f.is_file() and not any(part.startswith('.') or part == '__pycache__' for part in f.parts)]
+                            has_files = len(real_files) > 0
+                        except Exception:
+                            has_files = False
+                        
+                        is_incomplete = not status.is_complete or is_active_download or not has_files
+                        
+                        if is_incomplete:
+                            if is_active_download:
+                                size = "⏳ Downloading..."
+                            else:
+                                size = "⚠️ INCOMPLETE"
                             icons = "❌"
                             compatibility_badge = None
                         else:
@@ -5117,14 +5275,15 @@ class MainWindow(QMainWindow):
                             str(model_dir), 
                             size, 
                             icons, 
-                            is_incomplete=not status.is_complete,
+                            is_incomplete=is_incomplete,
                             compatibility_badge=compatibility_badge,
-                            onboarding_status=onboarding_status
+                            onboarding_status=onboarding_status,
+                            env_key=env_key
                         )
                         card.set_theme(self.dark_mode)
                         card.selected.connect(self._on_model_selected)
                         card.delete_clicked.connect(self._on_delete_model)
-                        if not status.is_complete:
+                        if is_incomplete:
                             card.repair_clicked.connect(self._on_repair_model)
                         # Store model_id in card for later updates
                         card.model_id = model_id
@@ -5324,7 +5483,8 @@ class MainWindow(QMainWindow):
             card.layout().addWidget(progress_bar)
             
             # Create repair thread (force full clean + fresh download)
-            thread = RepairThread(model_id, path, force_fresh_only=True)
+            # Use central cache to keep locks out of model folder
+            thread = RepairThread(model_id, path, force_fresh_only=True, cache_dir=self.hf_cache_dir)
             
             # Mark as active
             repair_key = f"repair_{model_id}"
@@ -5335,89 +5495,104 @@ class MainWindow(QMainWindow):
             thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key))
             thread.error.connect(lambda err: self._on_repair_error(model_id, err, card, progress_bar, repair_key))
             
+            # Log immediately
+            self._log_models(f"🔧 Starting repair for {model_id}...")
+            self._log_models(f"   Will DELETE and REDOWNLOAD from scratch")
+            
             # Start repair
             thread.start()
+            
+            # Update progress bar immediately
+            progress_bar.setValue(2)
 
     def request_restart_clean(self, model_dir: Path, reason: str) -> None:
         """
-        Request app restart with cleanup of a locked model directory.
-        Writes cleanup request to logs/cleanup_request.json and exits with CLEANUP_AND_RESTART code.
-        The launcher will handle deletion and relaunch. If not running via launcher, attempts immediate cleanup.
+        DEPRECATED - No longer used. Cleanup is done directly in repair flow.
+        Kept for backwards compatibility but does nothing.
         """
-        try:
-            logs_dir = self.root / "logs"
-            logs_dir.mkdir(exist_ok=True)
-            request_file = logs_dir / "cleanup_request.json"
-            
-            request_data = {
-                "model_dir": str(model_dir),
-                "timestamp": datetime.now().isoformat(),
-                "reason": reason
-            }
-            
-            with open(request_file, "w", encoding="utf-8") as f:
-                json.dump(request_data, f, indent=2)
-            
-            self._log_models(f"⚠ Model directory locked. Attempting cleanup for: {model_dir.name}")
-            
-            # Try immediate cleanup first (works even if not running via launcher)
-            from core.model_file_utils import force_clean_model_dir
-            import time
-            
-            # First, try to unlock files (kill processes, etc.)
-            self._log_models("Stopping any processes that might be locking files...")
-            self._unlock_model_files(model_dir, log_callback=lambda m: self._log_models(m))
-            time.sleep(3)  # Give processes time to release handles
-            
-            cleaned = False
-            max_attempts = 3
-            for attempt in range(1, max_attempts + 1):
-                self._log_models(f"Cleanup attempt {attempt}/{max_attempts}...")
-                if force_clean_model_dir(model_dir):
-                    cleaned = True
-                    self._log_models(f"✓ Successfully cleaned {model_dir.name}")
-                    # Delete request file since we succeeded
-                    try:
-                        request_file.unlink()
-                    except Exception:
-                        pass
-                    break
-                if attempt < max_attempts:
-                    self._log_models(f"Attempt {attempt} failed, waiting before retry...")
-                    time.sleep(3)
-            
-            if not cleaned:
-                self._log_models("⚠ Cleanup failed - files still locked. App will restart to retry.")
-                self._log_models("If running directly (not via launcher), please restart the app manually.")
+        # This function is no longer used - cleanup happens directly in RepairThread
+        pass
+    
+    def _delete_model_directory_robust(self, path: Path, log_callback=None) -> bool:
+        """
+        Robustly delete a model directory using the same strategy as Delete button.
+        Returns True if directory is deleted, False otherwise.
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+            else:
+                self._log_models(msg)
+        
+        if not path.exists():
+            return True
+        
+        log(f"Deleting directory: {path.name}")
+        
+        # Unlock files first (stop downloads, kill locking processes)
+        self._unlock_model_files(path, log_callback=log)
+        
+        # Robust deletion with retries for Windows (same as Delete button)
+        import time
+        import subprocess
+        
+        success = False
+        for attempt in range(1, 5):
+            try:
+                # Before deletion, try to remove .incomplete files first
+                if path.exists():
+                    cache_dir = path / ".cache" / "huggingface" / "download"
+                    if cache_dir.exists():
+                        try:
+                            # Remove incomplete files
+                            for incomplete_file in cache_dir.rglob("*.incomplete"):
+                                try:
+                                    incomplete_file.unlink()
+                                except Exception:
+                                    pass
+                            # Try to remove cache directory
+                            if cache_dir.exists():
+                                shutil.rmtree(cache_dir, ignore_errors=True)
+                        except Exception:
+                            pass
                 
-                # Show message box to user
-                from PySide6.QtWidgets import QMessageBox
-                msg = QMessageBox(self)
-                msg.setIcon(QMessageBox.Warning)
-                msg.setWindowTitle("Model Cleanup Required")
-                msg.setText(f"Model directory '{model_dir.name}' is locked and cannot be deleted.\n\n"
-                           f"The app needs to restart to clean it.\n\n"
-                           f"If you're running via launcher.exe, it will restart automatically.\n"
-                           f"Otherwise, please close and restart the app manually.")
-                msg.setStandardButtons(QMessageBox.Ok)
-                msg.exec()
-            
-            # Exit with special code that launcher recognizes (if running via launcher, it will handle restart)
-            # If not via launcher, cleanup will happen on next startup (we just added that check)
-            app = QApplication.instance()
-            if app:
-                if cleaned:
-                    # Cleanup succeeded - exit normally, app will continue on next run
-                    QTimer.singleShot(500, lambda: app.exit(0))
+                if sys.platform == 'win32':
+                    # Force delete on Windows using cmd with retries
+                    result = subprocess.run(
+                        ['cmd', '/c', 'rmdir', '/S', '/Q', str(path)], 
+                        capture_output=True, 
+                        timeout=30
+                    )
+                    # Also try PowerShell method as fallback
+                    if path.exists() and attempt >= 2:
+                        ps_cmd = f'Remove-Item -Path "{path}" -Recurse -Force -ErrorAction SilentlyContinue'
+                        subprocess.run(
+                            ['powershell', '-Command', ps_cmd],
+                            capture_output=True,
+                            timeout=30
+                        )
                 else:
-                    # Cleanup failed - exit with special code (launcher will restart, or user can restart manually)
-                    QTimer.singleShot(500, lambda: app.exit(CLEANUP_AND_RESTART))
-        except Exception as e:
-            self._log_models(f"❌ Failed to request restart-clean: {e}")
-            # Fallback: just exit normally
-            app = QApplication.instance()
-            if app:
-                QTimer.singleShot(500, lambda: app.exit(1))
+                    shutil.rmtree(path, ignore_errors=True)
+                
+                if not path.exists():
+                    success = True
+                    log(f"✓ Directory deleted successfully")
+                    break
+            except Exception as e:
+                if attempt < 4:
+                    log(f"Deletion attempt {attempt} failed, retrying... ({str(e)[:100]})")
+            
+            if attempt < 4:
+                time.sleep(2)
+        
+        if not success and path.exists():
+            # Final attempt with direct shutil
+            try:
+                shutil.rmtree(path, ignore_errors=True)
+            except Exception:
+                pass
+        
+        return not path.exists()
     
     def _unlock_model_files(self, model_path: Path, log_callback=None) -> bool:
         """
@@ -5758,8 +5933,8 @@ class MainWindow(QMainWindow):
         # Add progress bar to card layout
         card.layout().addWidget(progress_bar)
         
-        # Create download thread
-        thread = DownloadThread(model_id, target)
+        # Create download thread with central cache
+        thread = DownloadThread(model_id, target, cache_dir=self.hf_cache_dir)
         
         # Mark as active BEFORE starting
         self.active_downloads[model_id] = (thread, card)
@@ -5775,8 +5950,28 @@ class MainWindow(QMainWindow):
     def _on_download_complete(self, model_id: str, dest: str, card, progress_bar):
         """Handle successful download"""
         self._log_models(f"✓ Downloaded to: {dest}")
-        self._log_models(f"DEBUG: Checking if path exists: {Path(dest).exists()}")
-        self._log_models(f"DEBUG: Directory name: {Path(dest).name}")
+        dest_path = Path(dest)
+        
+        # Verify download actually has files
+        has_files = False
+        try:
+            if dest_path.exists() and dest_path.is_dir():
+                # Check if directory has any non-cache files
+                all_files = list(dest_path.rglob("*"))
+                # Filter out cache directories, hidden files, and lock files
+                real_files = [
+                    f for f in all_files 
+                    if f.is_file() 
+                    and not any(part.startswith('.') or part == '__pycache__' or part.endswith('.lock') or part.endswith('.incomplete') for part in f.parts)
+                ]
+                has_files = len(real_files) > 0
+                self._log_models(f"DEBUG: Found {len(real_files)} files in {dest}")
+        except Exception as e:
+            self._log_models(f"DEBUG: Error checking files: {e}")
+        
+        if not has_files:
+            self._log_models(f"⚠️ WARNING: Download completed but no files found in {dest}")
+            # Don't mark as complete - let repair handle it
         
         # Clean up thread first
         if model_id in self.active_downloads:
@@ -5794,10 +5989,12 @@ class MainWindow(QMainWindow):
         # Don't hide the card - let _refresh_models handle showing it as downloaded
         
         # Refresh both downloaded models list AND train dropdown
-        self._log_models(f"DEBUG: Refreshing models list...")
-        self._refresh_models()
-        self._refresh_locals()  # This updates the Train tab dropdown
-        self._log_models(f"DEBUG: Refresh complete!")
+        # Use QTimer to ensure download thread is fully cleaned up first
+        def refresh_after_download():
+            self._refresh_models()  # This will update the card with correct status
+            self._refresh_locals()  # This updates the Train tab dropdown
+        
+        QTimer.singleShot(500, refresh_after_download)
     
     def _update_environment_tab(self, model_path: str, model_id: str, status: str):
         """Update/create the Environment tab content for selected model"""
@@ -6213,6 +6410,15 @@ class MainWindow(QMainWindow):
         onboarding = get_onboarding_service()
         fresh_status = onboarding.get_onboarding_status(model_id) or "NEW"
         
+        # Get environment key from StateStore
+        env_key = None
+        try:
+            model_entry = self.state_store.get_model(model_id)
+            if model_entry:
+                env_key = model_entry.get("env_key")
+        except Exception:
+            pass
+        
         # Get other card data
         from desktop_app.model_card_widget import DownloadedModelCard
         from core.capabilities import detect_model_capabilities, get_capability_icons, get_model_size, get_model_compatibility_badge
@@ -6237,7 +6443,8 @@ class MainWindow(QMainWindow):
             icons,
             is_incomplete=not status_check.is_complete,
             compatibility_badge=compatibility_badge,
-            onboarding_status=fresh_status
+            onboarding_status=fresh_status,
+            env_key=env_key
         )
         new_card.set_theme(self.dark_mode)
         new_card.selected.connect(self._on_model_selected)
@@ -6286,9 +6493,12 @@ class MainWindow(QMainWindow):
             progress_bar.setVisible(False)
             progress_bar.deleteLater()
         
-        # Refresh models to update status
-        self._refresh_models()
-        self._refresh_locals()
+        # Refresh models to update status (use QTimer to ensure thread cleanup is done)
+        def refresh_after_repair():
+            self._refresh_models()  # This will update the card with correct status and onboarding badge
+            self._refresh_locals()
+        
+        QTimer.singleShot(500, refresh_after_repair)
     
     def _on_repair_error(self, model_id: str, error: str, card, progress_bar, repair_key: str):
         """Handle repair error"""
@@ -6299,7 +6509,10 @@ class MainWindow(QMainWindow):
             thread, _ = self.active_downloads[repair_key]
             if thread.isRunning():
                 thread.quit()
-                thread.wait()
+                thread.wait(5000)  # Wait max 5 seconds
+                if thread.isRunning():
+                    thread.terminate()
+                    thread.wait(2000)
             del self.active_downloads[repair_key]
         
         # Remove progress bar
@@ -6307,8 +6520,7 @@ class MainWindow(QMainWindow):
             progress_bar.setVisible(False)
             progress_bar.deleteLater()
         
-        # Check if error is due to locked directory (ModelDirLockedError)
-        # Error comes as string from thread, so check for key phrases
+        # Check if error is due to locked directory
         is_locked_error = (
             "locked by another process" in error.lower() or
             "modeldirlockederror" in error.lower() or
@@ -6316,14 +6528,29 @@ class MainWindow(QMainWindow):
         )
         
         if is_locked_error:
-            # Get model directory path from card
+            # Show error message - NO AUTOMATIC RESTART
             model_path = Path(card.model_path) if hasattr(card, 'model_path') else None
-            if model_path and model_path.exists():
-                self._log_models(f"⚠ Model directory is locked. Requesting restart-and-clean...")
-                self.request_restart_clean(model_path, f"Repair failed: {error}")
-                return
+            from PySide6.QtWidgets import QMessageBox
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Critical)
+            msg.setWindowTitle("Repair Failed")
+            msg.setText(f"Cannot repair model '{model_id}'\n\n"
+                       f"Directory is locked and cannot be deleted:\n{model_path}\n\n"
+                       f"Please:\n"
+                       f"1. Close all other applications\n"
+                       f"2. Close antivirus/Windows Search\n"
+                       f"3. Manually delete the folder\n"
+                       f"4. Try repair again")
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.exec()
+            
+            # Restore repair button
+            if hasattr(card, 'repair_btn'):
+                card.repair_btn.setEnabled(True)
+                card.repair_btn.setText("🔧 Fix")
+            return
         
-        # Auto force-fresh download after a repair crash/failure
+        # Auto force-fresh download after a repair crash/failure (only once)
         if not getattr(card, "_force_fresh_attempted", False):
             card._force_fresh_attempted = True
             self._log_models(f"↻ Repair failed; forcing fresh download for {model_id}...")
@@ -14963,64 +15190,14 @@ def main() -> int:
     logs_dir = get_app_root() / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     
-    # Check for pending cleanup request (handles case when app is run directly, not via launcher)
+    # Cleanup request file is no longer used - delete it if it exists to prevent old behavior
+    # (Removed restart-loop mechanism - repair now deletes directly)
     cleanup_request_file = logs_dir / "cleanup_request.json"
     if cleanup_request_file.exists():
         try:
-            with open(cleanup_request_file, "r", encoding="utf-8") as f:
-                cleanup_data = json.load(f)
-            
-            model_dir = Path(cleanup_data.get("model_dir", ""))
-            if model_dir.exists():
-                # Attempt cleanup with timeout (don't hang startup forever)
-                from core.model_file_utils import force_clean_model_dir, kill_processes_locking_directory
-                import time
-                import signal
-                
-                print(f"Performing cleanup for locked model directory: {model_dir}")
-                
-                # Kill locking processes first
-                print("Killing processes that might be locking files...")
-                kill_processes_locking_directory(model_dir)
-                time.sleep(2)
-                
-                # Try cleanup with timeout (max 30 seconds total)
-                deleted = False
-                start_time = time.time()
-                max_time = 30
-                
-                for attempt in range(1, 6):
-                    if time.time() - start_time > max_time:
-                        print(f"⚠ Cleanup timeout after {max_time} seconds")
-                        break
-                    
-                    print(f"Cleanup attempt {attempt}/5...")
-                    if force_clean_model_dir(model_dir):
-                        deleted = True
-                        break
-                    if attempt < 5:
-                        time.sleep(2)
-                
-                if deleted:
-                    print(f"✓ Successfully cleaned model directory: {model_dir}")
-                else:
-                    print(f"⚠ Could not fully delete {model_dir} - some files may still be locked")
-                    print("The app will continue, but you may need to manually delete the directory.")
-                    print("Or restart the app to retry cleanup.")
-            
-            # Delete request file regardless of success (to prevent infinite loops)
-            try:
-                cleanup_request_file.unlink()
-            except Exception:
-                pass
-                
-        except Exception as e:
-            print(f"Error handling cleanup request: {e}")
-            # Delete request file to prevent infinite loops
-            try:
-                cleanup_request_file.unlink()
-            except Exception:
-                pass
+            cleanup_request_file.unlink()
+        except Exception:
+            pass
     
     # Use timestamped name format: [yymmdd][name][hhmm]
     from datetime import datetime

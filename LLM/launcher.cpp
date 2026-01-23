@@ -846,13 +846,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 guardOut.close();
             }
             
-            // Attempt to delete model directory
-            bool deleted = DeleteDirectoryWithRetries(modelDir, 5);
+            // Attempt to delete model directory (only once, no retries in launcher)
+            bool deleted = DeleteDirectoryWithRetries(modelDir, 3);
+            
+            // ALWAYS delete request file immediately to prevent loops
+            DeleteFileW((exeDir + L"\\logs\\cleanup_request.json").c_str());
             
             if (deleted) {
-                // Success - delete guard and request files, then relaunch
+                // Success - delete guard file and relaunch
                 DeleteFileW(guardFile.c_str());
-                DeleteFileW((exeDir + L"\\logs\\cleanup_request.json").c_str());
                 
                 // Small delay to ensure handles are released
                 Sleep(1000);
@@ -860,30 +862,23 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 // Relaunch the app
                 return LaunchPythonApp(exeDir, venvPython, scriptArgs, logFile);
             } else {
-                // Deletion failed - increment count and try again (up to max)
-                if (restartCount < MAX_RESTART_ATTEMPTS) {
-                    // Wait a bit longer and try one more restart
-                    Sleep(3000);
-                    return LaunchPythonApp(exeDir, venvPython, scriptArgs, logFile);
-                } else {
-                    // Max attempts reached - show error
-                    std::wstring errorMsg = L"Could not delete model directory after " + 
-                        std::to_wstring(MAX_RESTART_ATTEMPTS) + 
-                        L" attempts.\n\n"
-                        L"Directory: " + modelDir + L"\n\n"
-                        L"Files are still locked. Please:\n"
-                        L"1. Close antivirus/Windows Search\n"
-                        L"2. Restart your computer\n"
-                        L"3. Manually delete: " + modelDir;
-                    
-                    MessageBoxW(NULL, errorMsg.c_str(), L"Cleanup Failed", MB_OK | MB_ICONERROR);
-                    
-                    // Clean up guard and request files
-                    DeleteFileW(guardFile.c_str());
-                    DeleteFileW((exeDir + L"\\logs\\cleanup_request.json").c_str());
-                    
-                    return 1;
-                }
+                // Deletion failed - STOP and show error (don't restart)
+                std::wstring errorMsg = L"Could not delete model directory.\n\n"
+                    L"Directory: " + modelDir + L"\n\n"
+                    L"Files are locked by another process.\n\n"
+                    L"Please:\n"
+                    L"1. Close the app completely\n"
+                    L"2. Close antivirus/Windows Search\n"
+                    L"3. Manually delete: " + modelDir + L"\n"
+                    L"4. Restart the app";
+                
+                MessageBoxW(NULL, errorMsg.c_str(), L"Cleanup Failed", MB_OK | MB_ICONERROR);
+                
+                // Clean up guard file
+                DeleteFileW(guardFile.c_str());
+                
+                // Exit without restarting - break the loop
+                return 1;
             }
         } else {
             // No cleanup request found - treat as normal error

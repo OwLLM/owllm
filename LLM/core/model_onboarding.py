@@ -154,6 +154,18 @@ class ModelOnboardingService:
                 status="READY",
                 healthcheck_log_path=log_path
             )
+
+            # Keep models table in sync (some UI/flows read env_key from here)
+            try:
+                self.state_store.upsert_model(
+                    model_id=model_id,
+                    backend=backend,
+                    model_path=str(base_model_path),
+                    env_key=env_key,
+                    params_json=None
+                )
+            except Exception as e:
+                log(f"[WARN] Could not upsert model env association: {e}")
             
             return {
                 "status": "READY",

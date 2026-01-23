@@ -420,16 +420,34 @@ class DownloadedModelCard(QFrame):
         # Status row (local badge + onboarding status badge)
         status_row = QHBoxLayout()
         status_row.setSpacing(10)
-        local_badge = QLabel("💾 Downloaded")
-        local_badge.setStyleSheet("""
-            QLabel {
-                background: rgba(76, 175, 80, 0.2);
-                color: #4CAF50;
+        # Local status badge should reflect real state (downloading/incomplete/downloaded)
+        badge_text = "💾 Downloaded"
+        bg = "rgba(76, 175, 80, 0.2)"
+        fg = "#4CAF50"
+        try:
+            if self.is_incomplete:
+                # If caller is using the size field to convey downloading, keep it consistent here
+                if isinstance(size, str) and ("Downloading" in size or "⏳" in size):
+                    badge_text = "⏳ Downloading"
+                    bg = "rgba(255, 152, 0, 0.18)"
+                    fg = "#FF9800"
+                else:
+                    badge_text = "⚠️ Incomplete"
+                    bg = "rgba(244, 67, 54, 0.18)"
+                    fg = "#f44336"
+        except Exception:
+            pass
+
+        local_badge = QLabel(badge_text)
+        local_badge.setStyleSheet(f"""
+            QLabel {{
+                background: {bg};
+                color: {fg};
                 padding: 2px 6px;
                 border-radius: 3px;
                 font-size: 10px;
                 font-weight: bold;
-            }
+            }}
         """)
         status_row.addWidget(local_badge)
         

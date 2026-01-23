@@ -125,3 +125,10 @@ models:
     port: 10516
     use_4bit: true
     system_prompt: ''
+  zai-org_GLM-4.7:
+    base_model: C:\1_Git\LocaLLM\LLM\models\zai-org__GLM-4.7
+    adapter_dir: null
+    model_type: base
+    port: 10517
+    use_4bit: true
+    system_prompt: ''

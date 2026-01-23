@@ -825,6 +825,8 @@ class DownloadThread(QThread):
         try:
             import os
             from core.model_file_utils import download_repo_files
+            import logging
+            logger = logging.getLogger(__name__)
             
             # Get token
             token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
@@ -835,21 +837,26 @@ class DownloadThread(QThread):
             
             # Progress callback for real-time updates
             def progress_callback(bytes_done: int, bytes_total: int):
-                if bytes_total > 0:
+                if bytes_total > 0 and bytes_total >= bytes_done:
                     percent = int((bytes_done / bytes_total) * 100)
-                    percent = max(2, min(percent, 99))  # Clamp 2-99%
+                    if bytes_done > 0:
+                        percent = max(1, min(percent, 99))  # Clamp 1-99% (allow 0% at start)
+                    else:
+                        percent = 0
                     self.progress.emit(percent)
                 else:
                     # Unknown total - emit based on bytes downloaded (rough estimate)
-                    # ~1% per 50MB
+                    # ~1% per 50MB, start from 0%
                     if bytes_done > 0:
-                        estimated_percent = min(2 + int(bytes_done / (50 * 1024 * 1024)), 99)
-                        self.progress.emit(estimated_percent)
+                        estimated_percent = min(int(bytes_done / (50 * 1024 * 1024)), 99)
+                        self.progress.emit(max(1, estimated_percent))
+                    else:
+                        self.progress.emit(0)
             
             should_cancel = lambda: self._stop_requested.is_set() or self.isInterruptionRequested()
             
             # Start with metadata-only preflight
-            self.progress.emit(2)
+            self.progress.emit(1)
             metadata_patterns = [
                 "*.json", "*.txt", "*.md", "*.model", "*.tiktoken",
                 "tokenizer.*", "vocab.*", "merges.txt", "special_tokens_map.json",
@@ -870,21 +877,32 @@ class DownloadThread(QThread):
                 cache_dir=self.cache_dir
             )
             
-            # Verify preflight created files
-            try:
-                all_files = list(dest.rglob("*"))
-                # Filter out cache directories and hidden files
-                real_files = [f for f in all_files if f.is_file() and not any(part.startswith('.') or part == '__pycache__' or part.endswith('.lock') or part.endswith('.incomplete') for part in f.parts)]
-                any_files = len(real_files) > 0
-                if not any_files:
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.warning(f"Preflight created {len(all_files)} items but {len(real_files)} real files in {dest}")
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(f"ERROR checking preflight files: {e}")
-                any_files = False
+            def _has_real_files(root: Path) -> bool:
+                # Fast early-exit scan (avoid rglob on huge models)
+                try:
+                    stack = [root]
+                    while stack:
+                        d = stack.pop()
+                        try:
+                            with os.scandir(d) as it:
+                                for entry in it:
+                                    name = entry.name
+                                    if name.startswith(".") or name == "__pycache__":
+                                        continue
+                                    if entry.is_file():
+                                        if name.endswith(".lock") or name.endswith(".incomplete") or name == ".download_in_progress":
+                                            continue
+                                        return True
+                                    if entry.is_dir():
+                                        stack.append(Path(entry.path))
+                        except Exception:
+                            continue
+                except Exception:
+                    return False
+                return False
+
+            # Verify preflight created files (fast)
+            any_files = _has_real_files(dest)
             if not any_files:
                 raise RuntimeError(
                     f"Download produced no files after metadata preflight in {dest}. "
@@ -905,23 +923,13 @@ class DownloadThread(QThread):
                 cache_dir=self.cache_dir
             )
             
-            # Final verification: ensure we have actual model files
-            try:
-                all_files = list(dest.rglob("*"))
-                real_files = [f for f in all_files if f.is_file() and not any(part.startswith('.') or part == '__pycache__' or part.endswith('.lock') or part.endswith('.incomplete') for part in f.parts)]
-                if len(real_files) == 0:
-                    raise RuntimeError(
-                        f"Download completed but no files found in {dest}. "
-                        "The download may have failed silently or files were saved to a different location."
-                    )
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.info(f"✓ Download complete: {len(real_files)} files in {dest}")
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.error(f"ERROR in final verification: {e}")
-                raise
+            # Final verification (fast)
+            if not _has_real_files(dest):
+                raise RuntimeError(
+                    f"Download completed but no files found in {dest}. "
+                    "The download may have failed silently or files were saved to a different location."
+                )
+            logger.info(f"✓ Download complete: files present in {dest}")
             
             self.progress.emit(100)
             self.finished.emit(str(dest))
@@ -2573,6 +2581,113 @@ class MainWindow(QMainWindow):
     def _get_text_color(self) -> str:
         """Get appropriate text color based on theme"""
         return "#262730" if not self.dark_mode else "white"
+
+    def _ensure_onboarding_aliases_for_downloaded_models(self) -> None:
+        """
+        Make sure onboarding entries are keyed by HF model_id (folder name `org__repo` -> `org/repo`).
+        Older flows could write onboarding under synthetic IDs (e.g. created for server ports),
+        which makes Downloaded badges/Test tab appear broken even though environments show associations.
+        """
+        from pathlib import Path
+        try:
+            models_dir = self.root / "models"
+            if not models_dir.exists():
+                return
+
+            # Avoid doing this work repeatedly if model set hasn't changed
+            current_dirs = sorted([d.name for d in models_dir.iterdir() if d.is_dir() and not d.name.startswith(".")])
+            last_dirs = getattr(self, "_onboarding_alias_last_dirs", None)
+            if last_dirs == current_dirs:
+                return
+            self._onboarding_alias_last_dirs = current_dirs
+
+            # Build a lookup by base_model_path -> onboarding entry
+            entries = []
+            try:
+                entries = self.state_store.list_all_onboarding()
+            except Exception:
+                entries = []
+
+            path_map = {}
+            for e in entries:
+                p = e.get("base_model_path")
+                if not p:
+                    continue
+                try:
+                    key = str(Path(p).resolve()).lower()
+                    # Keep the "best" entry if duplicates exist (prefer READY)
+                    existing = path_map.get(key)
+                    if not existing:
+                        path_map[key] = e
+                    else:
+                        if existing.get("status") != "READY" and e.get("status") == "READY":
+                            path_map[key] = e
+                except Exception:
+                    continue
+
+            migrated = 0
+            for dname in current_dirs:
+                model_dir = models_dir / dname
+                hf_model_id = dname.replace("__", "/")
+
+                # If correct key already exists, nothing to do
+                try:
+                    if self.state_store.get_onboarding(hf_model_id):
+                        continue
+                except Exception:
+                    pass
+
+                # Try to find onboarding entry that matches this folder by path
+                try:
+                    key = str(model_dir.resolve()).lower()
+                except Exception:
+                    key = str(model_dir).lower()
+
+                src = path_map.get(key)
+                if not src:
+                    continue
+
+                # Copy onboarding row under correct HF model_id
+                try:
+                    self.state_store.upsert_onboarding(
+                        model_id=hf_model_id,
+                        base_model_path=src.get("base_model_path") or str(model_dir),
+                        adapter_dir=src.get("adapter_dir"),
+                        env_key=src.get("env_key"),
+                        backend=src.get("backend"),
+                        accelerator=src.get("accelerator"),
+                        status=src.get("status") or "NEW",
+                        last_error=src.get("last_error"),
+                        healthcheck_log_path=src.get("healthcheck_log_path"),
+                    )
+                    # Keep models table in sync for any remaining callers
+                    if src.get("env_key"):
+                        try:
+                            self.state_store.upsert_model(
+                                model_id=hf_model_id,
+                                backend=src.get("backend"),
+                                model_path=str(model_dir),
+                                env_key=src.get("env_key"),
+                                params_json=None,
+                            )
+                        except Exception:
+                            pass
+                    migrated += 1
+                except Exception as e:
+                    try:
+                        self._log_models(f"[WARNING] Could not alias onboarding for {hf_model_id}: {e}")
+                    except Exception:
+                        pass
+
+            if migrated:
+                try:
+                    self._log_models(f"🔧 Fixed onboarding IDs for {migrated} downloaded model(s).")
+                except Exception:
+                    pass
+
+        except Exception:
+            # Never allow this to break UI refresh
+            return
     
     def _get_status_color(self, is_ok: bool) -> str:
         """Get appropriate status color based on theme and status"""
@@ -5177,6 +5292,16 @@ class MainWindow(QMainWindow):
     
     def _refresh_models(self) -> None:
         """Refresh all models - curated and downloaded"""
+        # Ensure onboarding rows match downloaded HF model_ids (folder-based).
+        # Older versions could create onboarding entries under synthetic IDs, which breaks badges/Test tab.
+        try:
+            self._ensure_onboarding_aliases_for_downloaded_models()
+        except Exception as e:
+            try:
+                self._log_models(f"[WARNING] Onboarding alias check failed: {e}")
+            except Exception:
+                pass
+
         # Clear existing cards
         while self.downloaded_layout.count():
             item = self.downloaded_layout.takeAt(0)
@@ -5231,26 +5356,45 @@ class MainWindow(QMainWindow):
                         # Get onboarding status
                         onboarding_status = onboarding.get_onboarding_status(model_id) or "NEW"
                         
-                        # Get environment key from StateStore
+                        # Get environment key from onboarding entry (source of truth)
                         env_key = None
                         try:
-                            model_entry = self.state_store.get_model(model_id)
-                            if model_entry:
-                                env_key = model_entry.get("env_key")
+                            onboarding_entry = self.state_store.get_onboarding(model_id)
+                            if onboarding_entry and onboarding_entry.get("env_key"):
+                                env_key = onboarding_entry.get("env_key")
+                            else:
+                                # Fallback if some flows still store env_key on models table
+                                model_entry = self.state_store.get_model(model_id)
+                                if model_entry:
+                                    env_key = model_entry.get("env_key")
                         except Exception as e:
                             self._log_models(f"Could not get env_key for {model_id}: {e}")
                         
                         # Check if model is complete (but mark incomplete if actively downloading)
                         status = self.model_checker.check_model(model_dir)
                         
-                        # Additional verification: ensure directory actually has files (not just empty)
+                        # Additional verification: ensure directory actually has files (fast; avoid rglob)
                         has_files = False
                         try:
-                            # Check if directory has any non-cache files
-                            all_files = list(model_dir.rglob("*"))
-                            # Filter out cache directories and hidden files
-                            real_files = [f for f in all_files if f.is_file() and not any(part.startswith('.') or part == '__pycache__' for part in f.parts)]
-                            has_files = len(real_files) > 0
+                            import os
+                            stack = [model_dir]
+                            while stack and not has_files:
+                                d = stack.pop()
+                                try:
+                                    with os.scandir(d) as it:
+                                        for entry in it:
+                                            name = entry.name
+                                            if name.startswith(".") or name == "__pycache__":
+                                                continue
+                                            if entry.is_file():
+                                                if name.endswith(".lock") or name.endswith(".incomplete") or name == ".download_in_progress":
+                                                    continue
+                                                has_files = True
+                                                break
+                                            if entry.is_dir():
+                                                stack.append(Path(entry.path))
+                                except Exception:
+                                    continue
                         except Exception:
                             has_files = False
                         
@@ -5258,9 +5402,9 @@ class MainWindow(QMainWindow):
                         
                         if is_incomplete:
                             if is_active_download:
-                                size = "⏳ Downloading..."
+                                size = "Downloading..."
                             else:
-                                size = "⚠️ INCOMPLETE"
+                                size = "INCOMPLETE"
                             icons = "❌"
                             compatibility_badge = None
                         else:
@@ -5334,9 +5478,42 @@ class MainWindow(QMainWindow):
             model_slug = model_id.replace("/", "__")
             is_downloaded = False
             for base_dir in models_dirs:
-                if base_dir.exists() and (base_dir / model_slug).exists():
-                    is_downloaded = True
-                    break
+                model_path = base_dir / model_slug
+                if base_dir.exists() and model_path.exists() and model_path.is_dir():
+                    # Treat as downloaded only if it's actually complete and has real files.
+                    # This prevents false "Downloaded" when the directory is empty or a download is in progress.
+                    try:
+                        # If a download is currently active, never mark downloaded yet.
+                        if hasattr(self, "active_downloads") and model_id in self.active_downloads:
+                            continue
+
+                        # If we created a placeholder dir for in-progress downloads, it will have this marker.
+                        if (model_path / ".download_in_progress").exists():
+                            continue
+
+                        status = self.model_checker.check_model(model_path)
+                        if not status.is_complete:
+                            continue
+
+                        all_files = list(model_path.rglob("*"))
+                        real_files = [
+                            f for f in all_files
+                            if f.is_file()
+                            and not any(
+                                part.startswith(".")
+                                or part == "__pycache__"
+                                or part.endswith(".lock")
+                                or part.endswith(".incomplete")
+                                for part in f.parts
+                            )
+                        ]
+                        if len(real_files) == 0:
+                            continue
+
+                        is_downloaded = True
+                        break
+                    except Exception:
+                        continue
             
             capabilities = detect_model_capabilities(model_id=model_id, model_name=name)
             icons = get_capability_icons(capabilities)
@@ -5902,6 +6079,21 @@ class MainWindow(QMainWindow):
         
         self._log_models(f"📥 Downloading {model_id}...")
         target = Path(self.hf_target_dir.text().strip())
+        # Ensure destination folder exists immediately so it appears in Downloaded tab during download
+        try:
+            model_slug = model_id.replace("/", "__")
+            dest_dir = target / model_slug
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            # Marker helps distinguish "created but empty" vs real files during refresh
+            try:
+                (dest_dir / ".download_in_progress").write_text("1", encoding="utf-8")
+            except Exception:
+                pass
+        except Exception as e:
+            self._log_models(f"[WARNING] Could not pre-create destination folder: {e}")
+        
+        # Refresh downloaded tab so the card shows up during download
+        QTimer.singleShot(200, self._refresh_models)
         
         # Hide button after a moment (let user see "Starting...")
         QTimer.singleShot(500, lambda: card.download_btn.setVisible(False))
@@ -5951,27 +6143,57 @@ class MainWindow(QMainWindow):
         """Handle successful download"""
         self._log_models(f"✓ Downloaded to: {dest}")
         dest_path = Path(dest)
+
+        # Remove any in-progress marker
+        try:
+            marker = dest_path / ".download_in_progress"
+            if marker.exists():
+                marker.unlink()
+        except Exception:
+            pass
         
-        # Verify download actually has files
+        def _has_real_files_fast(root: Path) -> bool:
+            # Fast early-exit scan (avoid blocking UI with rglob)
+            import os
+            stack = [root]
+            while stack:
+                d = stack.pop()
+                try:
+                    with os.scandir(d) as it:
+                        for entry in it:
+                            name = entry.name
+                            if name.startswith(".") or name == "__pycache__":
+                                continue
+                            if entry.is_file():
+                                if name.endswith(".lock") or name.endswith(".incomplete") or name == ".download_in_progress":
+                                    continue
+                                return True
+                            if entry.is_dir():
+                                stack.append(Path(entry.path))
+                except Exception:
+                    continue
+            return False
+
+        # Verify download actually has files (fast)
         has_files = False
         try:
-            if dest_path.exists() and dest_path.is_dir():
-                # Check if directory has any non-cache files
-                all_files = list(dest_path.rglob("*"))
-                # Filter out cache directories, hidden files, and lock files
-                real_files = [
-                    f for f in all_files 
-                    if f.is_file() 
-                    and not any(part.startswith('.') or part == '__pycache__' or part.endswith('.lock') or part.endswith('.incomplete') for part in f.parts)
-                ]
-                has_files = len(real_files) > 0
-                self._log_models(f"DEBUG: Found {len(real_files)} files in {dest}")
+            has_files = dest_path.exists() and dest_path.is_dir() and _has_real_files_fast(dest_path)
         except Exception as e:
             self._log_models(f"DEBUG: Error checking files: {e}")
         
         if not has_files:
             self._log_models(f"⚠️ WARNING: Download completed but no files found in {dest}")
             # Don't mark as complete - let repair handle it
+        else:
+            # Auto-start onboarding in the background (silent) so badges/env association update
+            try:
+                entry = self.state_store.get_onboarding(model_id)
+                status = (entry.get("status") if entry else None) or "NEW"
+                # Only kick onboarding if not already READY or BUILDING
+                if status not in ("READY", "BUILDING"):
+                    self._start_model_onboarding_silent(str(dest_path), model_id)
+            except Exception as e:
+                self._log_models(f"[WARNING] Could not start onboarding automatically: {e}")
         
         # Clean up thread first
         if model_id in self.active_downloads:
@@ -6275,20 +6497,38 @@ class MainWindow(QMainWindow):
     
     def _start_model_onboarding(self, model_path: str, model_id: str):
         """Start onboarding for a model"""
-        # Resolve model_id from path if needed
-        resolved_model_id = self._resolve_model_id_from_path(model_path)
+        return self._start_model_onboarding_impl(model_path=model_path, model_id=model_id, focus_ui=True)
+
+    def _start_model_onboarding_silent(self, model_path: str, model_id: str):
+        """Start onboarding for a model without forcing UI tab switches."""
+        return self._start_model_onboarding_impl(model_path=model_path, model_id=model_id, focus_ui=False)
+
+    def _start_model_onboarding_impl(self, model_path: str, model_id: str, focus_ui: bool):
+        """Internal onboarding starter (optionally focuses Environment tab)."""
+        # IMPORTANT: Onboarding status/badges/Test-tab use HF-style model_id keys.
+        # Do NOT use _resolve_model_id_from_path() here (it may create synthetic IDs for servers).
+        extracted = None
+        try:
+            extracted = self._extract_model_id_from_path(model_path)
+        except Exception:
+            extracted = None
+        resolved_model_id = extracted or model_id
+        if not resolved_model_id:
+            resolved_model_id = model_id
         
-        # Ensure we're on Environment tab and prevent tab switching during onboarding
-        if hasattr(self, 'downloaded_details_tabs'):
-            # Block signals to prevent Info tab from loading
-            self.downloaded_details_tabs.blockSignals(True)
-            self.downloaded_details_tabs.setCurrentIndex(1)  # Force Environment tab
-            self.downloaded_details_tabs.blockSignals(False)
+        if focus_ui:
+            # Ensure we're on Environment tab and prevent tab switching during onboarding
+            if hasattr(self, 'downloaded_details_tabs'):
+                # Block signals to prevent Info tab from loading
+                self.downloaded_details_tabs.blockSignals(True)
+                self.downloaded_details_tabs.setCurrentIndex(1)  # Force Environment tab
+                self.downloaded_details_tabs.blockSignals(False)
         
-        # Clear log
-        if hasattr(self, 'onboarding_log_display'):
-            self.onboarding_log_display.clear()
-            self.onboarding_log_display.appendPlainText(f"Starting onboarding for: {resolved_model_id}\n")
+        if focus_ui:
+            # Clear log
+            if hasattr(self, 'onboarding_log_display'):
+                self.onboarding_log_display.clear()
+                self.onboarding_log_display.appendPlainText(f"Starting onboarding for: {resolved_model_id}\n")
         
         # Create onboarding thread
         onboarding_thread = OnboardingThread(resolved_model_id, model_path, None)
@@ -6410,12 +6650,16 @@ class MainWindow(QMainWindow):
         onboarding = get_onboarding_service()
         fresh_status = onboarding.get_onboarding_status(model_id) or "NEW"
         
-        # Get environment key from StateStore
+        # Get environment key from onboarding entry (source of truth)
         env_key = None
         try:
-            model_entry = self.state_store.get_model(model_id)
-            if model_entry:
-                env_key = model_entry.get("env_key")
+            onboarding_entry = self.state_store.get_onboarding(model_id)
+            if onboarding_entry and onboarding_entry.get("env_key"):
+                env_key = onboarding_entry.get("env_key")
+            else:
+                model_entry = self.state_store.get_model(model_id)
+                if model_entry:
+                    env_key = model_entry.get("env_key")
         except Exception:
             pass
         
@@ -6479,6 +6723,15 @@ class MainWindow(QMainWindow):
     def _on_repair_complete(self, model_id: str, dest: str, card, progress_bar, repair_key: str):
         """Handle successful repair"""
         self._log_models(f"✓ Repair complete: {dest}")
+        # Auto-start onboarding in the background (silent) so badges/env association update
+        try:
+            dest_path = Path(dest)
+            entry = self.state_store.get_onboarding(model_id)
+            status = (entry.get("status") if entry else None) or "NEW"
+            if status not in ("READY", "BUILDING"):
+                self._start_model_onboarding_silent(str(dest_path), model_id)
+        except Exception as e:
+            self._log_models(f"[WARNING] Could not start onboarding automatically after repair: {e}")
         
         # Clean up thread
         if repair_key in self.active_downloads:

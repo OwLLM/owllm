@@ -124,12 +124,16 @@ IMPORTANT - File Paths:
 - All paths must be RELATIVE to the workspace root
 - Use forward slashes: LLM/file.txt (not LLM\\file.txt)
 - Do NOT use absolute paths like C:\\ or /home/
-- Examples: "README.md", "LLM/Dios.txt", "docs/guide.md"
+- Examples: "README.md", "docs/guide.md", "path/to/file.txt"
+
+IMPORTANT - When to use tools:
+- Only call a tool if the user explicitly asks you to, or if it is clearly necessary to answer the question.
+- Do NOT call tools for greetings or casual conversation.
 
 Available tools:
 - read_file(path: str) - Read a text file
-  Example: <tool_call>read_file(path="LLM/Dios.txt")</tool_call>
   Example: <tool_call>read_file(path="README.md")</tool_call>
+  Example: <tool_call>read_file(path="docs/guide.md")</tool_call>
 
 - write_file(path: str, content: str) - Write to a file
   Example: <tool_call>write_file(path="output.txt", content="Hello")</tool_call>

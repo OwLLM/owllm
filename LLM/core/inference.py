@@ -63,20 +63,53 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
     
     # RUNTIME GATE: Check onboarding status before attempting server start
     onboarding = get_onboarding_service()
-    status = onboarding.get_onboarding_status(cfg.model_id)
+    # cfg.model_id is a server config key in many UI flows (e.g. "zai-org_GLM-4.7"),
+    # but onboarding is keyed by HF id (e.g. "zai-org/GLM-4.7"). Resolve when needed.
+    onboarding_id = cfg.model_id
+    if "/" not in cfg.model_id:
+        try:
+            from core.state_store import get_state_store
+            if get_state_store().get_onboarding(cfg.model_id) is None:
+                # Prefer cfg.base_model if provided, else read from llm_backends.yaml via server manager config
+                base_model_path = None
+                if cfg.base_model:
+                    base_model_path = str(cfg.base_model)
+                else:
+                    mgr = get_global_server_manager()
+                    try:
+                        mgr._load_config()
+                    except Exception:
+                        pass
+                    if hasattr(mgr, "config") and cfg.model_id in (mgr.config.get("models") or {}):
+                        base_model_path = str((mgr.config["models"][cfg.model_id] or {}).get("base_model", "") or "")
+
+                if base_model_path:
+                    name = Path(base_model_path).name
+                    if "__" in name:
+                        derived = name.replace("__", "/")
+                        if "/" in derived:
+                            onboarding_id = derived
+                    elif "/" not in name and "_" in name:
+                        parts = name.split("_", 1)
+                        if len(parts) == 2:
+                            onboarding_id = f"{parts[0]}/{parts[1]}"
+        except Exception:
+            pass
+
+    status = onboarding.get_onboarding_status(onboarding_id)
     
     if status is None:
         raise RuntimeError(
-            f"Model '{cfg.model_id}' has not been onboarded. "
+            f"Model '{onboarding_id}' has not been onboarded. "
             f"Please run onboarding first."
         )
     
     if status != "READY":
         from core.state_store import get_state_store
-        entry = get_state_store().get_onboarding(cfg.model_id)
+        entry = get_state_store().get_onboarding(onboarding_id)
         error_msg = entry.get("last_error", "Unknown error") if entry else "Unknown error"
         raise RuntimeError(
-            f"Model '{cfg.model_id}' is not ready for inference (status={status}). "
+            f"Model '{onboarding_id}' is not ready for inference (status={status}). "
             f"Please complete onboarding or repair the model. Error: {error_msg}"
         )
     

@@ -379,3 +379,85 @@ def get_model_size(model_path):
     except Exception:
         return "Unknown"
 
+
+def get_cached_model_stats(model_id: str, ttl_hours: int = 24) -> Optional[dict]:
+    """
+    Get cached model stats (downloads, likes) from StateStore.
+    
+    Args:
+        model_id: Hugging Face model ID
+        ttl_hours: Cache TTL in hours (default 24)
+    
+    Returns:
+        Dict with 'downloads', 'likes', 'fetched_at' if cache is fresh, None otherwise
+    """
+    from core.state_store import get_state_store
+    from datetime import datetime, timedelta
+    
+    store = get_state_store()
+    cache_key = f"hf_stats:{model_id}"
+    cached = store.get_kv(cache_key)
+    
+    if not cached:
+        return None
+    
+    try:
+        fetched_at = datetime.fromisoformat(cached.get("fetched_at", ""))
+        age = datetime.utcnow() - fetched_at
+        if age < timedelta(hours=ttl_hours):
+            return cached
+    except Exception:
+        pass
+    
+    return None
+
+
+def set_cached_model_stats(model_id: str, downloads: Optional[int], likes: Optional[int]):
+    """
+    Cache model stats in StateStore.
+    
+    Args:
+        model_id: Hugging Face model ID
+        downloads: Number of downloads (or None)
+        likes: Number of likes (or None)
+    """
+    from core.state_store import get_state_store
+    from datetime import datetime
+    
+    store = get_state_store()
+    cache_key = f"hf_stats:{model_id}"
+    
+    store.set_kv(cache_key, {
+        "downloads": downloads,
+        "likes": likes,
+        "fetched_at": datetime.utcnow().isoformat()
+    })
+
+
+def fetch_model_stats(model_id: str) -> Optional[dict]:
+    """
+    Fetch model stats from Hugging Face API (downloads, likes).
+    Returns None on failure (offline, 404, gated, etc.).
+    
+    Args:
+        model_id: Hugging Face model ID
+    
+    Returns:
+        Dict with 'downloads' and 'likes' (both may be None), or None on error
+    """
+    try:
+        details = get_model_details(model_id)
+        downloads = details.get("downloads")
+        likes = details.get("likes")
+        
+        # Cache the result (even if None, to avoid repeated failed requests)
+        set_cached_model_stats(model_id, downloads, likes)
+        
+        return {
+            "downloads": downloads,
+            "likes": likes
+        }
+    except Exception:
+        # On any error (offline, 404, gated, etc.), return None
+        return None
+

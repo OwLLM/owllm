@@ -599,9 +599,11 @@ class RepairThread(QThread):
             def progress_callback(bytes_done: int, bytes_total: int):
                 if bytes_total > 0 and bytes_total >= bytes_done:
                     percent = int((bytes_done / bytes_total) * 100)
-                    # Only clamp if we have valid progress (don't force 2% minimum if we're actually at 0%)
-                    if bytes_done > 0:
-                        percent = max(1, min(percent, 99))  # Clamp 1-99% (allow 0% for start)
+                    # Allow 100% when bytes_done >= bytes_total (download complete)
+                    if bytes_done >= bytes_total:
+                        percent = 100
+                    elif bytes_done > 0:
+                        percent = max(1, min(percent, 99))  # Clamp 1-99% during download (allow 0% for start)
                     else:
                         percent = 0
                     self.progress.emit(percent)
@@ -839,8 +841,11 @@ class DownloadThread(QThread):
             def progress_callback(bytes_done: int, bytes_total: int):
                 if bytes_total > 0 and bytes_total >= bytes_done:
                     percent = int((bytes_done / bytes_total) * 100)
-                    if bytes_done > 0:
-                        percent = max(1, min(percent, 99))  # Clamp 1-99% (allow 0% at start)
+                    # Allow 100% when bytes_done >= bytes_total (download complete)
+                    if bytes_done >= bytes_total:
+                        percent = 100
+                    elif bytes_done > 0:
+                        percent = max(1, min(percent, 99))  # Clamp 1-99% during download (allow 0% at start)
                     else:
                         percent = 0
                     self.progress.emit(percent)
@@ -1931,6 +1936,39 @@ class RequirementCheckThread(QThread):
 
     def stop(self):
         self._is_running = False
+
+
+class ModelStatsWorker(QThread):
+    """Background worker to fetch model stats (downloads/likes) without blocking UI"""
+    stats_ready = Signal(dict)  # Emits {model_id: {downloads: int|None, likes: int|None}}
+    
+    def __init__(self, model_ids):
+        super().__init__()
+        self.model_ids = model_ids
+    
+    def run(self):
+        """Fetch stats for all model IDs (only fetch stale/missing, cache already applied in UI)"""
+        results = {}
+        from core.models import fetch_model_stats, get_cached_model_stats
+        
+        for model_id in self.model_ids:
+            # Only fetch if cache is stale or missing
+            cached = get_cached_model_stats(model_id)
+            if cached:
+                # Cache is fresh, skip (already shown in UI)
+                continue
+            
+            # Fetch from API
+            stats = fetch_model_stats(model_id)
+            if stats:
+                results[model_id] = stats
+            else:
+                # Even on failure, store None to avoid repeated requests
+                results[model_id] = {"downloads": None, "likes": None}
+        
+        # Only emit if we have new results
+        if results:
+            self.stats_ready.emit(results)
 
 
 class ModelDetailsWorker(QObject):
@@ -5414,6 +5452,10 @@ class MainWindow(QMainWindow):
                             # Get compatibility badge for downloaded models
                             compatibility_badge = get_model_compatibility_badge(model_id, model_name, self.user_vram_gb)
                         
+                        # Get cached stats if available
+                        from core.models import get_cached_model_stats
+                        cached_stats = get_cached_model_stats(model_id)
+                        
                         card = DownloadedModelCard(
                             model_name, 
                             str(model_dir), 
@@ -5431,8 +5473,21 @@ class MainWindow(QMainWindow):
                             card.repair_clicked.connect(self._on_repair_model)
                         # Store model_id in card for later updates
                         card.model_id = model_id
+                        
+                        # Apply cached stats immediately if available
+                        if cached_stats:
+                            card.set_stats(
+                                cached_stats.get("downloads"),
+                                cached_stats.get("likes")
+                            )
+                        
                         self.downloaded_layout.addWidget(card, row, col)
                         self.downloaded_model_cards.append(card)
+                        
+                        # Store card reference for stats updates
+                        if not hasattr(self, '_downloaded_cards_by_id'):
+                            self._downloaded_cards_by_id = {}
+                        self._downloaded_cards_by_id[model_id] = card
                         
                         col += 1
                         if col >= max_cols:
@@ -5521,7 +5576,19 @@ class MainWindow(QMainWindow):
             # Get compatibility badge
             compatibility_badge = get_model_compatibility_badge(model_id, name, self.user_vram_gb)
             
+            # Get cached stats if available
+            from core.models import get_cached_model_stats
+            cached_stats = get_cached_model_stats(model_id)
+            downloads_str = ""
+            likes_str = ""
+            if cached_stats:
+                if cached_stats.get("downloads") is not None:
+                    downloads_str = f"{cached_stats['downloads']:,}"
+                if cached_stats.get("likes") is not None:
+                    likes_str = f"{cached_stats['likes']:,}"
+            
             card = ModelCard(name, model_id, desc, size, icons, is_downloaded, is_new, 
+                           downloads=downloads_str, likes=likes_str,
                            compatibility_badge=compatibility_badge)
             card.set_theme(self.dark_mode)
             card.download_clicked.connect(self._download_curated_model)
@@ -5530,10 +5597,60 @@ class MainWindow(QMainWindow):
             self.curated_layout.addWidget(card, row, col)
             self.model_cards.append(card)
             
+            # Store card reference for stats updates
+            if not hasattr(self, '_model_cards_by_id'):
+                self._model_cards_by_id = {}
+            self._model_cards_by_id[model_id] = card
+            
             col += 1
             if col >= 2:
                 col = 0
                 row += 1
+        
+        # Start background worker to refresh stats for all curated + downloaded models
+        self._refresh_model_stats_background()
+    
+    def _refresh_model_stats_background(self):
+        """Start background worker to fetch/refresh stats for all visible model cards"""
+        # Collect all model IDs from curated and downloaded cards
+        model_ids = []
+        
+        # Curated cards
+        if hasattr(self, '_model_cards_by_id'):
+            model_ids.extend(self._model_cards_by_id.keys())
+        
+        # Downloaded cards
+        if hasattr(self, '_downloaded_cards_by_id'):
+            model_ids.extend(self._downloaded_cards_by_id.keys())
+        
+        if not model_ids:
+            return
+        
+        # Start background worker
+        worker = ModelStatsWorker(model_ids)
+        worker.stats_ready.connect(self._on_stats_ready)
+        worker.start()
+        
+        # Store worker reference to prevent garbage collection
+        if not hasattr(self, '_stats_workers'):
+            self._stats_workers = []
+        self._stats_workers.append(worker)
+    
+    def _on_stats_ready(self, results: dict):
+        """Handle stats update from background worker"""
+        # Update curated cards
+        if hasattr(self, '_model_cards_by_id'):
+            for model_id, stats in results.items():
+                if model_id in self._model_cards_by_id:
+                    card = self._model_cards_by_id[model_id]
+                    card.set_stats(stats.get("downloads"), stats.get("likes"))
+        
+        # Update downloaded cards
+        if hasattr(self, '_downloaded_cards_by_id'):
+            for model_id, stats in results.items():
+                if model_id in self._downloaded_cards_by_id:
+                    card = self._downloaded_cards_by_id[model_id]
+                    card.set_stats(stats.get("downloads"), stats.get("likes"))
     
     def _on_model_selected(self, model_path: str):
         """Handle downloaded model selection"""
@@ -6378,7 +6495,12 @@ class MainWindow(QMainWindow):
                 }
             """)
             error_layout = QVBoxLayout()
-            error_text = QPlainTextEdit(entry.get("last_error", ""))
+            
+            # Format error message based on reason codes
+            raw_error = entry.get("last_error", "")
+            formatted_error = self._format_onboarding_error(raw_error)
+            
+            error_text = QPlainTextEdit(formatted_error)
             error_text.setReadOnly(True)
             error_text.setStyleSheet("""
                 QPlainTextEdit {
@@ -6431,7 +6553,9 @@ class MainWindow(QMainWindow):
                         background: rgba(102, 126, 234, 0.7);
                     }
                 """)
-                action_btn.clicked.connect(lambda: self._start_model_onboarding(model_path, model_id))
+                # Use functools.partial to avoid lambda capture issues
+                from functools import partial
+                action_btn.clicked.connect(partial(self._start_model_onboarding, model_path, model_id))
             button_layout.addWidget(action_btn)
         
         button_layout.addStretch()
@@ -6505,46 +6629,78 @@ class MainWindow(QMainWindow):
 
     def _start_model_onboarding_impl(self, model_path: str, model_id: str, focus_ui: bool):
         """Internal onboarding starter (optionally focuses Environment tab)."""
-        # IMPORTANT: Onboarding status/badges/Test-tab use HF-style model_id keys.
-        # Do NOT use _resolve_model_id_from_path() here (it may create synthetic IDs for servers).
-        extracted = None
         try:
-            extracted = self._extract_model_id_from_path(model_path)
-        except Exception:
+            # Validate inputs
+            if not model_path:
+                raise ValueError("model_path is required")
+            if not Path(model_path).exists():
+                raise ValueError(f"Model path does not exist: {model_path}")
+            
+            # IMPORTANT: Onboarding status/badges/Test-tab use HF-style model_id keys.
+            # Do NOT use _resolve_model_id_from_path() here (it may create synthetic IDs for servers).
             extracted = None
-        resolved_model_id = extracted or model_id
-        if not resolved_model_id:
-            resolved_model_id = model_id
-        
-        if focus_ui:
-            # Ensure we're on Environment tab and prevent tab switching during onboarding
-            if hasattr(self, 'downloaded_details_tabs'):
-                # Block signals to prevent Info tab from loading
-                self.downloaded_details_tabs.blockSignals(True)
-                self.downloaded_details_tabs.setCurrentIndex(1)  # Force Environment tab
-                self.downloaded_details_tabs.blockSignals(False)
-        
-        if focus_ui:
-            # Clear log
+            try:
+                extracted = self._extract_model_id_from_path(model_path)
+            except Exception as e:
+                import logging
+                logging.warning(f"Could not extract model_id from path {model_path}: {e}")
+                extracted = None
+            resolved_model_id = extracted or model_id
+            if not resolved_model_id:
+                resolved_model_id = model_id
+            
+            # Check if already BUILDING to prevent duplicate starts
+            from core.model_onboarding import get_onboarding_service
+            onboarding = get_onboarding_service()
+            current_status = onboarding.get_onboarding_status(resolved_model_id)
+            if current_status == "BUILDING":
+                if hasattr(self, 'onboarding_log_display'):
+                    self.onboarding_log_display.appendPlainText(f"⚠️ Onboarding already in progress for {resolved_model_id}\n")
+                return
+            
+            if focus_ui:
+                # Ensure we're on Environment tab and prevent tab switching during onboarding
+                if hasattr(self, 'downloaded_details_tabs'):
+                    # Block signals to prevent Info tab from loading
+                    self.downloaded_details_tabs.blockSignals(True)
+                    self.downloaded_details_tabs.setCurrentIndex(1)  # Force Environment tab
+                    self.downloaded_details_tabs.blockSignals(False)
+            
+            if focus_ui:
+                # Clear log
+                if hasattr(self, 'onboarding_log_display'):
+                    self.onboarding_log_display.clear()
+                    self.onboarding_log_display.appendPlainText(f"Starting onboarding for: {resolved_model_id}\n")
+                    self.onboarding_log_display.appendPlainText(f"Model path: {model_path}\n\n")
+            
+            # Create onboarding thread
+            onboarding_thread = OnboardingThread(resolved_model_id, model_path, None)
+            
+            # Connect signals
+            onboarding_thread.progress.connect(lambda msg: self._on_onboarding_progress(msg))
+            onboarding_thread.finished.connect(lambda result: self._on_onboarding_finished(resolved_model_id, result))
+            onboarding_thread.error.connect(lambda err: self._on_onboarding_error(resolved_model_id, err))
+            
+            # Start thread
+            onboarding_thread.start()
+            
+            # Store reference
+            if not hasattr(self, '_onboarding_threads'):
+                self._onboarding_threads = {}
+            self._onboarding_threads[resolved_model_id] = onboarding_thread
+            
+            if focus_ui and hasattr(self, 'onboarding_log_display'):
+                self.onboarding_log_display.appendPlainText("✓ Onboarding thread started\n")
+        except Exception as e:
+            import traceback
+            error_msg = f"Failed to start onboarding: {e}\n{traceback.format_exc()}"
             if hasattr(self, 'onboarding_log_display'):
-                self.onboarding_log_display.clear()
-                self.onboarding_log_display.appendPlainText(f"Starting onboarding for: {resolved_model_id}\n")
-        
-        # Create onboarding thread
-        onboarding_thread = OnboardingThread(resolved_model_id, model_path, None)
-        
-        # Connect signals
-        onboarding_thread.progress.connect(lambda msg: self._on_onboarding_progress(msg))
-        onboarding_thread.finished.connect(lambda result: self._on_onboarding_finished(resolved_model_id, result))
-        onboarding_thread.error.connect(lambda err: self._on_onboarding_error(resolved_model_id, err))
-        
-        # Start thread
-        onboarding_thread.start()
-        
-        # Store reference
-        if not hasattr(self, '_onboarding_threads'):
-            self._onboarding_threads = {}
-        self._onboarding_threads[resolved_model_id] = onboarding_thread
+                self.onboarding_log_display.appendPlainText(f"❌ {error_msg}\n")
+            else:
+                import logging
+                logging.error(error_msg)
+            # Also show error dialog
+            QMessageBox.critical(self, "Onboarding Error", f"Failed to start onboarding:\n{error_msg}")
     
     def _on_onboarding_progress(self, msg: str):
         """Handle onboarding progress updates"""
@@ -6590,6 +6746,10 @@ class MainWindow(QMainWindow):
         
         # Also refresh all models to ensure consistency (with longer delay as fallback)
         QTimer.singleShot(1000, self._refresh_models)
+        
+        # Refresh Test tab dropdowns if status is READY (so new models appear)
+        if status == "READY":
+            QTimer.singleShot(1500, self._refresh_locals)  # _refresh_locals updates Test tab dropdowns
         
         # DO NOT automatically switch to Info tab - let user stay on Environment tab to see results
     
@@ -6709,10 +6869,50 @@ class MainWindow(QMainWindow):
         self._log_models(f"✓ Rebuilt card for {model_id} with status {fresh_status}")
     
     
+    def _format_onboarding_error(self, error_msg: str) -> str:
+        """
+        Format onboarding error message to show user-friendly reason codes.
+        
+        Args:
+            error_msg: Raw error message from onboarding
+            
+        Returns:
+            Formatted error message with clear reason codes
+        """
+        if not error_msg:
+            return "Unknown error"
+        
+        # Check for reason codes in error message
+        if "UNSUPPORTED_ARCH" in error_msg or "does not recognize this architecture" in error_msg:
+            return (
+                "❌ Unsupported Model Architecture\n\n"
+                "The model uses an architecture that is not supported by the current Transformers version.\n"
+                "The system will automatically try to upgrade to a newer version or install from source.\n\n"
+                f"Technical details:\n{error_msg[:500]}"
+            )
+        elif "MISSING_PACKAGE" in error_msg or "No module named" in error_msg or "ImportError" in error_msg:
+            return (
+                "❌ Missing Package\n\n"
+                "The model requires a package that is not installed in the environment.\n"
+                "The system will automatically attempt to install missing packages.\n\n"
+                f"Technical details:\n{error_msg[:500]}"
+            )
+        elif "REMOTE_CODE_REQUIRED" in error_msg:
+            return (
+                "❌ Remote Code Required\n\n"
+                "The model requires custom code that must be loaded from the repository.\n"
+                "This is automatically enabled during onboarding.\n\n"
+                f"Technical details:\n{error_msg[:500]}"
+            )
+        else:
+            # Generic error - show first 500 chars
+            return f"❌ Onboarding Failed\n\n{error_msg[:500]}"
+    
     def _on_onboarding_error(self, model_id: str, error: str):
         """Handle onboarding error"""
         if hasattr(self, 'onboarding_log_display'):
-            self.onboarding_log_display.appendPlainText(f"\n❌ Error: {error}")
+            formatted = self._format_onboarding_error(error)
+            self.onboarding_log_display.appendPlainText(f"\n{formatted}")
         
         # Rebuild card with BROKEN status
         QTimer.singleShot(300, lambda: self._rebuild_model_card(model_id, "BROKEN"))
@@ -9151,8 +9351,18 @@ class MainWindow(QMainWindow):
             onboarding = get_onboarding_service()
             ready_models = onboarding.list_ready_models()
             
-            # Build mapping of base_model_path -> model_id
-            ready_paths = {entry["base_model_path"]: entry["model_id"] for entry in ready_models}
+            # Build mapping of normalized base_model_path -> model_id
+            ready_paths = {}
+            for entry in ready_models:
+                base_path = entry.get("base_model_path")
+                if base_path:
+                    # Normalize path for comparison (resolve to absolute, handle case/separators)
+                    try:
+                        normalized = str(Path(base_path).resolve())
+                        ready_paths[normalized] = entry["model_id"]
+                    except Exception:
+                        # Fallback to original if resolve fails
+                        ready_paths[str(base_path)] = entry["model_id"]
             
             models = list_local_downloads()
             download_root = get_app_root() / "models"
@@ -9162,8 +9372,8 @@ class MainWindow(QMainWindow):
             if models:
                 for model_name in models:
                     model_path = download_root / model_name
-                    # Check if this model is READY
-                    model_path_str = str(model_path)
+                    # Normalize path for comparison
+                    model_path_str = str(model_path.resolve())
                     if model_path_str in ready_paths:
                         self.tool_chat_model_a.addItem(f"✓ {model_name}", str(model_path))
                         ready_count += 1
@@ -15270,12 +15480,25 @@ respective package directories or official repositories.
         from core.model_onboarding import get_onboarding_service
         onboarding = get_onboarding_service()
         ready_models = onboarding.list_ready_models()
-        ready_paths = {entry["base_model_path"]: entry["model_id"] for entry in ready_models}
+        
+        # Build mapping of normalized base_model_path -> model_id
+        ready_paths = {}
+        for entry in ready_models:
+            base_path = entry.get("base_model_path")
+            if base_path:
+                # Normalize path for comparison (resolve to absolute, handle case/separators)
+                try:
+                    normalized = str(Path(base_path).resolve())
+                    ready_paths[normalized] = entry["model_id"]
+                except Exception:
+                    # Fallback to original if resolve fails
+                    ready_paths[str(base_path)] = entry["model_id"]
         
         if downloaded_models:
             for model_name in downloaded_models:
                 model_path = models_dir / model_name
-                model_path_str = str(model_path)
+                # Normalize path for comparison
+                model_path_str = str(model_path.resolve())
                 # Only add if READY
                 if model_path_str in ready_paths:
                     # Convert directory name to HuggingFace format (org__model -> org/model)

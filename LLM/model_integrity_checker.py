@@ -79,8 +79,23 @@ class ModelIntegrityChecker:
             if model_dir.name.startswith('.') or model_dir.name == '__pycache__':
                 continue
             
-            status = self.check_model(model_dir)
-            statuses.append(status)
+            # Wrap each model check in try/except to prevent one bad model from crashing the entire scan
+            try:
+                status = self.check_model(model_dir)
+                statuses.append(status)
+            except Exception as e:
+                logger.error(f"Error checking model {model_dir}: {e}", exc_info=True)
+                # Return a ModelStatus indicating the model check failed
+                statuses.append(ModelStatus(
+                    model_path=model_dir,
+                    model_name=model_dir.name,
+                    has_config=False,
+                    has_weights=False,
+                    is_complete=False,
+                    missing_files=[f"Error checking model: {str(e)[:200]}"],
+                    model_id=None,
+                    estimated_size_mb=None
+                ))
         
         return statuses
     
@@ -103,25 +118,76 @@ class ModelIntegrityChecker:
             logger.warning(f"Could not list files in {model_path}: {e}")
             files = []
         
+        # Initialize missing_files list before any branch uses it
+        missing_files: List[str] = []
+        
         # Check for config
         has_config = 'config.json' in files
         
-        # Check for weights
-        has_weights = any(
-            any(f == pattern or f.startswith(pattern.replace('.safetensors', '').replace('.bin', ''))
-                for pattern in self.WEIGHT_PATTERNS)
-            for f in files
-        )
+        # Check for weights - handle both sharded and non-sharded models
+        has_weights = False
+        missing_shards = []
         
-        # Check for sharded models (multiple safetensors files)
-        if not has_weights:
-            has_weights = any('.safetensors' in f or '.bin' in f for f in files)
+        # Check for sharded models first (index.json)
+        index_json = None
+        if 'model.safetensors.index.json' in files:
+            index_json = model_path / 'model.safetensors.index.json'
+        elif 'pytorch_model.bin.index.json' in files:
+            index_json = model_path / 'pytorch_model.bin.index.json'
+        
+        if index_json and index_json.exists():
+            # Sharded model - verify all shards exist
+            try:
+                with open(index_json, 'r', encoding='utf-8') as f:
+                    index_data = json.load(f)
+                    weight_map = index_data.get('weight_map', {})
+                    
+                    if weight_map:
+                        # Extract unique shard filenames from weight_map
+                        shard_files = set()
+                        for layer_name, shard_path in weight_map.items():
+                            # shard_path is like "model-00007-of-00092.safetensors"
+                            shard_files.add(shard_path)
+                        
+                        # Verify each shard file exists
+                        all_shards_present = True
+                        for shard_file in shard_files:
+                            shard_path = model_path / shard_file
+                            if not shard_path.exists():
+                                all_shards_present = False
+                                missing_shards.append(shard_file)
+                        
+                        has_weights = all_shards_present
+                        if not all_shards_present:
+                            missing_files.append(f"missing shard files: {', '.join(missing_shards[:5])}{'...' if len(missing_shards) > 5 else ''}")
+                    else:
+                        # Empty weight_map - treat as incomplete
+                        has_weights = False
+                        missing_files.append("shard index.json has empty weight_map")
+            except Exception as e:
+                logger.warning(f"Failed to parse shard index {index_json}: {e}")
+                # Fall through to non-sharded check
+                index_json = None
+        
+        # Non-sharded models or fallback
+        if not has_weights and not index_json:
+            has_weights = any(
+                any(f == pattern or f.startswith(pattern.replace('.safetensors', '').replace('.bin', ''))
+                    for pattern in self.WEIGHT_PATTERNS)
+                for f in files
+            )
+            
+            # Fallback: check for any safetensors/bin files
+            if not has_weights:
+                has_weights = any('.safetensors' in f or '.bin' in f for f in files)
+            
+            if not has_weights:
+                missing_files.append("model weights (*.safetensors or *.bin)")
             
         # Check for tokenizer
         has_tokenizer = any(t in files for t in self.TOKENIZER_FILES)
         
         # Determine missing files
-        missing_files = []
         for essential in self.ESSENTIAL_FILES:
             if essential not in files:
                 missing_files.append(essential)
@@ -129,10 +195,7 @@ class ModelIntegrityChecker:
         if not has_tokenizer:
             missing_files.append("tokenizer (tokenizer_config.json, tokenizer.json, or tokenizer.model)")
         
-        if not has_weights:
-            missing_files.append("model weights (*.safetensors or *.bin)")
-        
-        # Model is complete if it has config, weights, and tokenizer
+        # Model is complete if it has config, weights (all shards if sharded), and tokenizer
         is_complete = has_config and has_weights and has_tokenizer
         
         # Try to extract model ID from README or config

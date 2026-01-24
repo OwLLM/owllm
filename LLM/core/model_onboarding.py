@@ -12,8 +12,35 @@ from datetime import datetime
 from core.state_store import get_state_store
 from core.envs.model_requirement_detector import detect_model_requirements
 from core.envs.env_registry import EnvRegistry
+from model_integrity_checker import ModelIntegrityChecker
 
 logger = logging.getLogger(__name__)
+
+
+def _get_required_packages_for_requirements(req: Dict[str, Any]) -> List[str]:
+    """
+    Map model requirements to required Python packages.
+    
+    Args:
+        req: Requirements dict from detect_model_requirements
+        
+    Returns:
+        List of required package names
+    """
+    packages = []
+    quantization = req.get("quantization", "none")
+    
+    if quantization == "gptq":
+        # GPTQ models require optimum (and sometimes auto-gptq)
+        packages.append("optimum")
+        # Some GPTQ models may also need auto-gptq, but optimum is the primary requirement
+    elif quantization == "awq":
+        # AWQ models require autoawq or awq
+        packages.append("autoawq")
+    # bnb quantization is handled by the base stack
+    # gguf models use llamacpp backend, not Python packages
+    
+    return packages
 
 
 class ModelOnboardingService:
@@ -77,39 +104,41 @@ class ModelOnboardingService:
             req = detect_model_requirements(base_model_path, adapter_dir)
             log(f"Detected requirements: {req}")
             
-            # Step 2: Resolve env_key (pure, no side effects)
-            env_key, accelerator, backend = self.env_registry.resolve_env_for_model(
+            # Step 2: Resolve stable env_key (pure, no side effects)
+            stable_env_key, accelerator, backend = self.env_registry.resolve_env_for_model(
                 base_model_path,
                 adapter_dir,
-                profile_data
+                profile_data,
+                tier="stable"
             )
-            log(f"Resolved env_key: {env_key} (backend={backend}, accelerator={accelerator})")
+            log(f"Resolved stable env_key: {stable_env_key} (backend={backend}, accelerator={accelerator})")
             
-            # Step 3: Ensure environment exists (creates if missing)
-            log(f"Ensuring environment exists: {env_key}")
-            self.env_registry.ensure_env_exists(env_key, profile_data, log_callback=log_callback)
+            # Step 3: Ensure stable environment exists (creates if missing)
+            log(f"Ensuring stable environment exists: {stable_env_key}")
+            stable_env_spec = self.env_registry.ensure_env_exists(stable_env_key, profile_data, log_callback=log_callback)
+            stable_python_exe = stable_env_spec.python_executable
             
-            # Step 4: Run health check
-            log(f"Running health check for env: {env_key}")
+            # Step 4: Run health check on stable env
+            log(f"Running health check for stable env: {stable_env_key}")
             health_result, log_path = self.env_registry.run_env_health_check(
-                env_key,
+                stable_env_key,
                 profile_data,
                 log_callback=log_callback
             )
             
             # Step 5: Handle health check failure with optional repair
             if health_result.returncode != 0:
-                log(f"Health check failed for {env_key}")
+                log(f"Health check failed for {stable_env_key}")
                 
                 if allow_repair:
                     log("Attempting one-time repair...")
                     try:
-                        self.env_registry.repair_env_once(env_key, profile_data, log_callback=log_callback)
+                        self.env_registry.repair_env_once(stable_env_key, profile_data, log_callback=log_callback)
                         
                         # Re-run health check after repair
                         log("Re-running health check after repair...")
                         health_result, log_path = self.env_registry.run_env_health_check(
-                            env_key,
+                            stable_env_key,
                             profile_data,
                             log_callback=log_callback
                         )
@@ -125,7 +154,7 @@ class ModelOnboardingService:
                         model_id=model_id,
                         base_model_path=base_model_path,
                         adapter_dir=adapter_dir,
-                        env_key=env_key,
+                        env_key=stable_env_key,
                         backend=backend,
                         accelerator=accelerator,
                         status="BROKEN",
@@ -135,20 +164,288 @@ class ModelOnboardingService:
                     
                     return {
                         "status": "BROKEN",
-                        "env_key": env_key,
+                        "env_key": stable_env_key,
                         "backend": backend,
                         "accelerator": accelerator,
                         "last_error": error_msg,
                         "healthcheck_log_path": log_path
                     }
             
-            # Success: mark as READY
-            log(f"Model {model_id} successfully onboarded (env: {env_key})")
+            # Step 6: Run model load probe on stable env
+            log(f"Running model load probe on stable env: {stable_env_key}")
+            probe_success, probe_reason, probe_error = self.env_registry.run_model_load_probe(
+                stable_python_exe,
+                base_model_path,
+                adapter_dir,
+                log_callback=log_callback
+            )
+            
+            final_env_key = stable_env_key
+            final_python_exe = stable_python_exe
+            
+            # Step 7: If probe fails with upgradeable causes, try edge env
+            if not probe_success and probe_reason in ("UNSUPPORTED_ARCH", "MISSING_PACKAGE"):
+                log(f"Model load probe failed: {probe_reason} - {probe_error[:200]}")
+                log("Attempting edge environment fallback...")
+                
+                try:
+                    # Resolve edge env key
+                    edge_env_key, _, _ = self.env_registry.resolve_env_for_model(
+                        base_model_path,
+                        adapter_dir,
+                        profile_data,
+                        tier="edge"
+                    )
+                    
+                    # Create/upgrade edge env
+                    self.env_registry._create_or_upgrade_edge_env(
+                        stable_env_key,
+                        profile_data,
+                        log_callback=log_callback
+                    )
+                    
+                    # Ensure edge env exists and is healthy
+                    edge_env_spec = self.env_registry.ensure_env_exists(edge_env_key, profile_data, log_callback=log_callback)
+                    edge_python_exe = edge_env_spec.python_executable
+                    
+                    # If UNSUPPORTED_ARCH, try installing transformers from source
+                    if probe_reason == "UNSUPPORTED_ARCH":
+                        log("Installing transformers from GitHub source for unsupported architecture...")
+                        self.env_registry._upgrade_edge_env_for_unsupported_arch(edge_python_exe, log_callback=log_callback)
+                    
+                    # If MISSING_PACKAGE, try to auto-install missing packages
+                    if probe_reason == "MISSING_PACKAGE":
+                        log("Attempting to auto-install missing packages...")
+                        # Extract package name from error if possible
+                        missing_packages = []
+                        if probe_error:
+                            # Try to extract package names from common error patterns
+                            import re
+                            patterns = [
+                                r"No module named ['\"]([^'\"]+)['\"]",
+                                r"cannot import name ['\"]([^'\"]+)['\"]",
+                            ]
+                            for pattern in patterns:
+                                matches = re.findall(pattern, probe_error)
+                                missing_packages.extend(matches)
+                        
+                        if missing_packages:
+                            # Remove duplicates and common false positives
+                            missing_packages = list(set([p for p in missing_packages if p not in ["transformers", "torch", "tokenizers"]]))
+                            if missing_packages:
+                                log(f"Installing missing packages: {missing_packages}")
+                                self.env_registry.auto_install_missing_packages(edge_python_exe, missing_packages, log_callback=log_callback)
+                    
+                    # Re-run probe on edge env
+                    log(f"Running model load probe on edge env: {edge_env_key}")
+                    edge_probe_success, edge_probe_reason, edge_probe_error = self.env_registry.run_model_load_probe(
+                        edge_python_exe,
+                        base_model_path,
+                        adapter_dir,
+                        log_callback=log_callback
+                    )
+                    
+                    if edge_probe_success:
+                        log(f"Model load probe passed on edge env: {edge_env_key}")
+                        final_env_key = edge_env_key
+                        final_python_exe = edge_python_exe
+                    else:
+                        # Edge env also failed
+                        error_msg = f"Model load failed on both stable and edge environments. Last error ({edge_probe_reason}): {edge_probe_error[:500]}"
+                        log(f"Model onboarding failed: {error_msg}")
+                        
+                        self.state_store.upsert_onboarding(
+                            model_id=model_id,
+                            base_model_path=base_model_path,
+                            adapter_dir=adapter_dir,
+                            env_key=edge_env_key,
+                            backend=backend,
+                            accelerator=accelerator,
+                            status="BROKEN",
+                            last_error=error_msg,
+                            healthcheck_log_path=log_path
+                        )
+                        
+                        return {
+                            "status": "BROKEN",
+                            "env_key": edge_env_key,
+                            "backend": backend,
+                            "accelerator": accelerator,
+                            "last_error": error_msg,
+                            "healthcheck_log_path": log_path
+                        }
+                except Exception as edge_error:
+                    log(f"Edge environment fallback failed: {edge_error}")
+                    error_msg = f"Stable env probe failed ({probe_reason}), edge fallback failed: {str(edge_error)[:500]}"
+                    
+                    self.state_store.upsert_onboarding(
+                        model_id=model_id,
+                        base_model_path=base_model_path,
+                        adapter_dir=adapter_dir,
+                        env_key=stable_env_key,
+                        backend=backend,
+                        accelerator=accelerator,
+                        status="BROKEN",
+                        last_error=error_msg,
+                        healthcheck_log_path=log_path
+                    )
+                    
+                    return {
+                        "status": "BROKEN",
+                        "env_key": stable_env_key,
+                        "backend": backend,
+                        "accelerator": accelerator,
+                        "last_error": error_msg,
+                        "healthcheck_log_path": log_path
+                    }
+            elif not probe_success:
+                # Probe failed with non-upgradeable reason
+                error_msg = f"Model load probe failed ({probe_reason}): {probe_error[:500]}"
+                log(f"Model onboarding failed: {error_msg}")
+                
+                self.state_store.upsert_onboarding(
+                    model_id=model_id,
+                    base_model_path=base_model_path,
+                    adapter_dir=adapter_dir,
+                    env_key=stable_env_key,
+                    backend=backend,
+                    accelerator=accelerator,
+                    status="BROKEN",
+                    last_error=error_msg,
+                    healthcheck_log_path=log_path
+                )
+                
+                return {
+                    "status": "BROKEN",
+                    "env_key": stable_env_key,
+                    "backend": backend,
+                    "accelerator": accelerator,
+                    "last_error": error_msg,
+                    "healthcheck_log_path": log_path
+                }
+            else:
+                log(f"Model load probe passed on stable env: {stable_env_key}")
+            
+            # Step 8: Run shard-complete integrity check
+            log(f"Running shard-complete integrity check for model: {model_id}")
+            integrity_checker = ModelIntegrityChecker()
+            integrity_status = integrity_checker.check_model(Path(base_model_path))
+            
+            if not integrity_status.is_complete:
+                error_msg = f"Model integrity check failed. Missing: {', '.join(integrity_status.missing_files)}"
+                log(f"Model onboarding failed: {error_msg}")
+                
+                self.state_store.upsert_onboarding(
+                    model_id=model_id,
+                    base_model_path=base_model_path,
+                    adapter_dir=adapter_dir,
+                    env_key=final_env_key,
+                    backend=backend,
+                    accelerator=accelerator,
+                    status="BROKEN",
+                    last_error=error_msg,
+                    healthcheck_log_path=log_path
+                )
+                
+                return {
+                    "status": "BROKEN",
+                    "env_key": final_env_key,
+                    "backend": backend,
+                    "accelerator": accelerator,
+                    "last_error": error_msg,
+                    "healthcheck_log_path": log_path
+                }
+            
+            log(f"Shard-complete integrity check passed")
+            
+            # Step 9: Run dependency probe (check for model-specific packages)
+            log(f"Running dependency probe for model-specific packages")
+            required_packages = _get_required_packages_for_requirements(req)
+            
+            if required_packages:
+                log(f"Checking for required packages: {required_packages}")
+                missing_packages = self.env_registry.check_missing_packages(
+                    final_python_exe,
+                    required_packages
+                )
+                
+                if missing_packages:
+                    log(f"Missing packages detected: {missing_packages}. Auto-installing...")
+                    install_success = self.env_registry.auto_install_missing_packages(
+                        final_python_exe,
+                        missing_packages,
+                        log_callback=log_callback
+                    )
+                    
+                    if not install_success:
+                        error_msg = f"Failed to install required packages: {', '.join(missing_packages)}"
+                        log(f"Model onboarding failed: {error_msg}")
+                        
+                        self.state_store.upsert_onboarding(
+                            model_id=model_id,
+                            base_model_path=base_model_path,
+                            adapter_dir=adapter_dir,
+                            env_key=final_env_key,
+                            backend=backend,
+                            accelerator=accelerator,
+                            status="BROKEN",
+                            last_error=error_msg,
+                            healthcheck_log_path=log_path
+                        )
+                        
+                        return {
+                            "status": "BROKEN",
+                            "env_key": final_env_key,
+                            "backend": backend,
+                            "accelerator": accelerator,
+                            "last_error": error_msg,
+                            "healthcheck_log_path": log_path
+                        }
+                    
+                    # Re-verify packages after installation
+                    still_missing = self.env_registry.check_missing_packages(
+                        final_python_exe,
+                        missing_packages
+                    )
+                    
+                    if still_missing:
+                        error_msg = f"Packages still missing after installation: {', '.join(still_missing)}"
+                        log(f"Model onboarding failed: {error_msg}")
+                        
+                        self.state_store.upsert_onboarding(
+                            model_id=model_id,
+                            base_model_path=base_model_path,
+                            adapter_dir=adapter_dir,
+                            env_key=final_env_key,
+                            backend=backend,
+                            accelerator=accelerator,
+                            status="BROKEN",
+                            last_error=error_msg,
+                            healthcheck_log_path=log_path
+                        )
+                        
+                        return {
+                            "status": "BROKEN",
+                            "env_key": final_env_key,
+                            "backend": backend,
+                            "accelerator": accelerator,
+                            "last_error": error_msg,
+                            "healthcheck_log_path": log_path
+                        }
+                    
+                    log(f"Successfully installed and verified packages: {missing_packages}")
+                else:
+                    log(f"All required packages already present: {required_packages}")
+            else:
+                log(f"No model-specific packages required")
+            
+            # Success: mark as READY (all checks passed)
+            log(f"Model {model_id} successfully onboarded (env: {final_env_key})")
             self.state_store.upsert_onboarding(
                 model_id=model_id,
                 base_model_path=base_model_path,
                 adapter_dir=adapter_dir,
-                env_key=env_key,
+                env_key=final_env_key,
                 backend=backend,
                 accelerator=accelerator,
                 status="READY",
@@ -161,7 +458,7 @@ class ModelOnboardingService:
                     model_id=model_id,
                     backend=backend,
                     model_path=str(base_model_path),
-                    env_key=env_key,
+                    env_key=final_env_key,
                     params_json=None
                 )
             except Exception as e:
@@ -169,7 +466,7 @@ class ModelOnboardingService:
             
             return {
                 "status": "READY",
-                "env_key": env_key,
+                "env_key": final_env_key,
                 "backend": backend,
                 "accelerator": accelerator,
                 "healthcheck_log_path": log_path

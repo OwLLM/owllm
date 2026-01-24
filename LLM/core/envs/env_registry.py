@@ -386,6 +386,166 @@ class EnvRegistry:
         if log_callback:
             log_callback(f"Health check command: {cmd}")
         return result
+    
+    def run_model_load_probe(
+        self,
+        python_exe: Path,
+        model_path: str,
+        adapter_dir: Optional[str] = None,
+        log_callback=None
+    ) -> tuple[bool, Optional[str], Optional[str]]:
+        """
+        Probe whether the environment can actually load the model.
+        Runs inside the environment to validate model architecture support.
+        
+        Args:
+            python_exe: Python executable in the environment
+            model_path: Path to base model directory
+            adapter_dir: Optional adapter directory
+            
+        Returns:
+            Tuple of (success: bool, reason_code: Optional[str], error_message: Optional[str])
+            reason_code: UNSUPPORTED_ARCH | MISSING_PACKAGE | REMOTE_CODE_REQUIRED | OTHER | None
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+        
+        # Build probe code that attempts to load model config and validate architecture
+        # Escape paths for Python string
+        model_path_escaped = str(model_path).replace("\\", "\\\\").replace('"', '\\"')
+        adapter_dir_escaped = str(adapter_dir).replace("\\", "\\\\").replace('"', '\\"') if adapter_dir else None
+        
+        probe_code = f"""
+import sys
+import json
+from pathlib import Path
+
+model_path = Path(r"{model_path_escaped}")
+adapter_dir = {f'Path(r"{adapter_dir_escaped}")' if adapter_dir else 'None'}
+
+try:
+    # Step 1: Try to load config
+    config_path = model_path / "config.json"
+    if not config_path.exists():
+        print("ERROR: config.json not found")
+        sys.exit(1)
+    
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+    
+    model_type = config.get("model_type", "unknown")
+    print(f"MODEL_TYPE: {{model_type}}")
+    
+    # Step 2: Try AutoConfig.from_pretrained
+    try:
+        from transformers import AutoConfig
+        cfg = AutoConfig.from_pretrained(str(model_path), trust_remote_code=True)
+        print("AUTOCONFIG: OK")
+    except Exception as e:
+        error_str = str(e)
+        if "does not recognize this architecture" in error_str or "model type" in error_str.lower():
+            print("REASON: UNSUPPORTED_ARCH")
+            print(f"ERROR: {{error_str}}")
+            sys.exit(1)
+        elif "ModuleNotFoundError" in str(type(e).__name__) or "ImportError" in str(type(e).__name__):
+            print("REASON: MISSING_PACKAGE")
+            print(f"ERROR: {{error_str}}")
+            sys.exit(1)
+        else:
+            print("REASON: OTHER")
+            print(f"ERROR: {{error_str}}")
+            sys.exit(1)
+    
+    # Step 3: Try AutoTokenizer (lightweight check)
+    try:
+        from transformers import AutoTokenizer
+        tokenizer = AutoTokenizer.from_pretrained(str(model_path), trust_remote_code=True)
+        print("TOKENIZER: OK")
+    except Exception as e:
+        error_str = str(e)
+        if "ModuleNotFoundError" in str(type(e).__name__) or "ImportError" in str(type(e).__name__):
+            print("REASON: MISSING_PACKAGE")
+            print(f"ERROR: {{error_str}}")
+            sys.exit(1)
+        # Tokenizer errors are often non-fatal, log but continue
+        print(f"TOKENIZER_WARNING: {{error_str}}")
+    
+    # Step 4: Try lightweight model class resolution (meta device, no allocation)
+    try:
+        from transformers import AutoModelForCausalLM
+        # Just check if the class can be resolved, don't actually load weights
+        model_class = AutoModelForCausalLM
+        print("MODEL_CLASS: OK")
+    except Exception as e:
+        error_str = str(e)
+        if "ModuleNotFoundError" in str(type(e).__name__) or "ImportError" in str(type(e).__name__):
+            print("REASON: MISSING_PACKAGE")
+            print(f"ERROR: {{error_str}}")
+            sys.exit(1)
+        print(f"MODEL_CLASS_WARNING: {{error_str}}")
+    
+    print("PROBE: SUCCESS")
+    sys.exit(0)
+    
+except Exception as e:
+    error_str = str(e)
+    print(f"REASON: OTHER")
+    print(f"ERROR: {{error_str}}")
+    sys.exit(1)
+"""
+        
+        cmd = [str(python_exe), "-c", probe_code]
+        log(f"Running model load probe: {cmd[0]} -c <code>")
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,  # Longer timeout for model loading
+            **self.subprocess_flags
+        )
+        
+        if result.returncode == 0:
+            return True, None, None
+        
+        # Parse output to extract reason code
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        combined = stdout + "\n" + stderr
+        
+        reason_code = None
+        error_msg = combined.strip()
+        
+        if "REASON: UNSUPPORTED_ARCH" in combined:
+            reason_code = "UNSUPPORTED_ARCH"
+            # Extract the actual error message
+            for line in combined.splitlines():
+                if line.startswith("ERROR:"):
+                    error_msg = line.replace("ERROR:", "").strip()
+                    break
+        elif "REASON: MISSING_PACKAGE" in combined:
+            reason_code = "MISSING_PACKAGE"
+            for line in combined.splitlines():
+                if line.startswith("ERROR:"):
+                    error_msg = line.replace("ERROR:", "").strip()
+                    break
+        elif "REASON: REMOTE_CODE_REQUIRED" in combined:
+            reason_code = "REMOTE_CODE_REQUIRED"
+            for line in combined.splitlines():
+                if line.startswith("ERROR:"):
+                    error_msg = line.replace("ERROR:", "").strip()
+                    break
+        else:
+            reason_code = "OTHER"
+            # Use the last meaningful error line
+            for line in reversed(combined.splitlines()):
+                if line.strip() and not line.startswith("REASON:"):
+                    error_msg = line.strip()
+                    break
+        
+        log(f"Model load probe failed: {reason_code} - {error_msg[:200]}")
+        return False, reason_code, error_msg
 
     def _collect_pip_debug_info(self, pip_exe: Path) -> dict:
         pip_version = subprocess.run(
@@ -577,19 +737,40 @@ class EnvRegistry:
                 return f"{name}{v}"
             return f"{name}=={v}"
         
-        minimal_specs = [
-            _pkg("numpy", "numpy==1.26.4"),
-            _pkg("huggingface-hub", None),
-            "transformers==4.51.3",
-            "tokenizers==0.21.4",
-            "protobuf",
-            _pkg("safetensors", "safetensors>=0.7.0,<0.8.0"),
-            _pkg("accelerate", "accelerate>=1.2.0,<1.3.0"),
-            _pkg("peft", "peft>=0.13.0,<0.16.0"),
-            _pkg("sentencepiece", "sentencepiece==0.2.0"),
-            _pkg("pyyaml", "pyyaml>=6.0.0,<7.0.0"),
-            _pkg("requests", "requests>=2.31.0,<3.0.0"),
-        ]
+        # Check if this is an edge env (upgrade packages) or stable (pin versions)
+        parsed = self.env_key_resolver.parse_env_key(env_key) if env_key else {}
+        is_edge = parsed.get("tier") == "edge"
+        
+        if is_edge:
+            # Edge env: use latest versions (upgrade)
+            minimal_specs = [
+                _pkg("numpy", "numpy"),
+                _pkg("huggingface-hub", None),
+                "transformers",  # Latest
+                "tokenizers",  # Latest
+                "protobuf",
+                _pkg("safetensors", "safetensors"),
+                _pkg("accelerate", "accelerate"),
+                _pkg("peft", "peft"),
+                _pkg("sentencepiece", "sentencepiece"),
+                _pkg("pyyaml", "pyyaml"),
+                _pkg("requests", "requests"),
+            ]
+        else:
+            # Stable env: pin versions
+            minimal_specs = [
+                _pkg("numpy", "numpy==1.26.4"),
+                _pkg("huggingface-hub", None),
+                "transformers==4.51.3",
+                "tokenizers==0.21.4",
+                "protobuf",
+                _pkg("safetensors", "safetensors>=0.7.0,<0.8.0"),
+                _pkg("accelerate", "accelerate>=1.2.0,<1.3.0"),
+                _pkg("peft", "peft>=0.13.0,<0.16.0"),
+                _pkg("sentencepiece", "sentencepiece==0.2.0"),
+                _pkg("pyyaml", "pyyaml>=6.0.0,<7.0.0"),
+                _pkg("requests", "requests>=2.31.0,<3.0.0"),
+            ]
         
         # Conditionally install bitsandbytes ONLY if env_key indicates bnb
         # Do not use substring matching like 'bnb' in env_key anywhere
@@ -623,6 +804,169 @@ class EnvRegistry:
                 err = (r.stderr or r.stdout or "").strip()
                 log(f"Warning: Failed to install {spec}: {err[:500]}")
 
+    def _create_or_upgrade_edge_env(
+        self,
+        stable_env_key: str,
+        profile_data: dict,
+        log_callback=None
+    ) -> Path:
+        """
+        Create edge environment from stable environment.
+        If stable env exists, copies it and upgrades packages. Otherwise creates new edge env.
+        
+        Args:
+            stable_env_key: Stable environment key (e.g., "tf-cu121-t22-base-stable")
+            profile_data: Hardware profile data
+            log_callback: Optional log callback
+        
+        Returns:
+            Path to edge environment directory
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+        
+        # Derive edge env key
+        parsed = self.env_key_resolver.parse_env_key(stable_env_key)
+        edge_env_key = self.env_key_resolver.resolve_env_key(
+            backend=parsed["backend"],
+            accelerator=parsed["accelerator"],
+            torch_major_minor=parsed.get("torch_mm"),
+            quant=parsed.get("quant"),
+            profile_data=profile_data,
+            tier="edge"
+        )
+        
+        log(f"Creating/upgrading edge environment: {edge_env_key} from {stable_env_key}")
+        
+        # Check if edge env already exists
+        edge_python_exe = self._get_env_python_executable(edge_env_key)
+        edge_env_state = self.state_store.get_env(edge_env_key)
+        
+        if edge_python_exe and edge_python_exe.exists() and edge_env_state and edge_env_state.get('status') == 'READY':
+            log(f"Edge environment {edge_env_key} already exists, upgrading packages...")
+            # Upgrade key packages to latest
+            upgrade_packages = [
+                "transformers",
+                "tokenizers",
+                "accelerate",
+                "safetensors",
+                "peft",
+                "huggingface-hub"
+            ]
+            for pkg in upgrade_packages:
+                log(f"Upgrading {pkg} to latest...")
+                subprocess.run(
+                    [str(edge_python_exe), "-m", "pip", "install", "--upgrade", pkg],
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
+                    **self.subprocess_flags
+                )
+            
+            # Try installing transformers from GitHub if still needed (will be handled by probe)
+            return self.envs_dir / edge_env_key
+        
+        # Check if stable env exists to copy from
+        stable_python_exe = self._get_env_python_executable(stable_env_key)
+        stable_env_path = self.envs_dir / stable_env_key
+        
+        if stable_python_exe and stable_python_exe.exists() and stable_env_path.exists():
+            log(f"Copying stable environment {stable_env_key} to create edge environment...")
+            # Copy stable env to edge
+            edge_env_path = self.envs_dir / edge_env_key
+            if edge_env_path.exists():
+                self._rmtree_windows_safe(edge_env_path)
+            
+            if sys.platform == 'win32':
+                shutil.copytree(stable_env_path, edge_env_path, dirs_exist_ok=True)
+            else:
+                shutil.copytree(stable_env_path, edge_env_path)
+            
+            edge_python_exe = self._get_env_python_executable(edge_env_key)
+            if edge_python_exe and edge_python_exe.exists():
+                # Upgrade packages in copied env
+                log("Upgrading packages to latest versions...")
+                upgrade_packages = [
+                    "transformers",
+                    "tokenizers",
+                    "accelerate",
+                    "safetensors",
+                    "peft",
+                    "huggingface-hub"
+                ]
+                for pkg in upgrade_packages:
+                    log(f"Upgrading {pkg}...")
+                    subprocess.run(
+                        [str(edge_python_exe), "-m", "pip", "install", "--upgrade", pkg],
+                        capture_output=True,
+                        text=True,
+                        timeout=900,
+                        **self.subprocess_flags
+                    )
+                
+                # Update StateStore
+                torch_version, cuda_available = self._get_torch_info(edge_python_exe)
+                self.state_store.upsert_env(
+                    env_key=edge_env_key,
+                    python_path=str(edge_python_exe),
+                    torch_version=torch_version,
+                    cuda_version=profile_data.get("cuda_version", "cpu"),
+                    backend="transformers",
+                    status="READY"
+                )
+                
+                return edge_env_path
+        
+        # If no stable env to copy from, create edge env from scratch
+        log(f"Creating new edge environment {edge_env_key}...")
+        self._atomic_create_env(edge_env_key, profile_data, log_callback=log_callback)
+        return self.envs_dir / edge_env_key
+    
+    def _upgrade_edge_env_for_unsupported_arch(
+        self,
+        python_exe: Path,
+        log_callback=None
+    ) -> bool:
+        """
+        Upgrade edge environment with transformers from GitHub source for unsupported architectures.
+        
+        Args:
+            python_exe: Python executable in edge environment
+            log_callback: Optional log callback
+        
+        Returns:
+            True if upgrade succeeded
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+        
+        # Prefer VCS install (requires `git`), but fall back to GitHub zip (no git needed).
+        candidates = [
+            ("git", "git+https://github.com/huggingface/transformers.git"),
+            ("zip", "https://github.com/huggingface/transformers/archive/refs/heads/main.zip"),
+        ]
+
+        for kind, spec in candidates:
+            log(f"Upgrading transformers from {kind} source: {spec}")
+            result = subprocess.run(
+                [str(python_exe), "-m", "pip", "install", "--upgrade", spec],
+                capture_output=True,
+                text=True,
+                timeout=900,
+                **self.subprocess_flags
+            )
+
+            if result.returncode == 0:
+                log(f"Successfully installed transformers from {kind} source")
+                return True
+
+            err = (result.stderr or result.stdout or "").strip()
+            log(f"Failed transformers install ({kind}): {err[:800]}")
+
+        return False
+    
     def _run_python(self, python_exe: Path, code: str, timeout: int = 30) -> subprocess.CompletedProcess:
         return subprocess.run(
             [str(python_exe), "-c", code],
@@ -783,7 +1127,8 @@ class EnvRegistry:
         self,
         model_path: str,
         adapter_dir: Optional[str] = None,
-        profile_data: Optional[dict] = None
+        profile_data: Optional[dict] = None,
+        tier: str = "stable"
     ) -> tuple[str, str, str]:
         """
         Pure function: resolve env_key, accelerator, backend for a model (no side effects).
@@ -792,6 +1137,7 @@ class EnvRegistry:
             model_path: Path to base model
             adapter_dir: Optional adapter directory
             profile_data: Hardware profile data (if None, auto-detected)
+            tier: Environment capability tier "stable" | "edge" (defaults to "stable")
         
         Returns:
             Tuple of (env_key, accelerator, backend)
@@ -816,13 +1162,14 @@ class EnvRegistry:
             backend = "tf"
             quant = "bnb" if req["needs_bnb"] else "base"
         
-        # Resolve env_key
+        # Resolve env_key with tier
         env_key = self.env_key_resolver.resolve_env_key(
             backend=backend,
             accelerator=accelerator,
             torch_major_minor=None,
             quant=quant,
-            profile_data=profile_data
+            profile_data=profile_data,
+            tier=tier
         )
         
         return env_key, accelerator, backend
@@ -1048,13 +1395,14 @@ class EnvRegistry:
             backend = "tf"  # vllm chosen by policy elsewhere
             quant = "bnb" if req["needs_bnb"] else "base"
         
-        # Resolve env_key using new format
+        # Resolve env_key using new format (default to stable tier)
         env_key = self.env_key_resolver.resolve_env_key(
             backend=backend,
             accelerator=accelerator,
             torch_major_minor=None,  # Will be derived from profile_data
             quant=quant,
-            profile_data=profile_data
+            profile_data=profile_data,
+            tier="stable"  # Default to stable for get_env_for_model
         )
         
         log(f"Resolved env_key: {env_key}")

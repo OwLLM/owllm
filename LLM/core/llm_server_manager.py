@@ -133,6 +133,97 @@ class LLMServerManager:
                 return p
             p += 1
         return None
+
+    def _extract_package_from_importerror(self, error_msg: str) -> Optional[str]:
+        """
+        Extract package name from ImportError message.
+        
+        Args:
+            error_msg: ImportError message text
+            
+        Returns:
+            Package name if detected, None otherwise
+        """
+        error_lower = error_msg.lower()
+        
+        # Known package mappings
+        if "optimum" in error_lower or "gptq" in error_lower:
+            return "optimum"
+        elif "autoawq" in error_lower or ("awq" in error_lower and "auto" in error_lower):
+            return "autoawq"
+        elif "protobuf" in error_lower or "google.protobuf" in error_lower:
+            return "protobuf"
+        elif "bitsandbytes" in error_lower or "bnb" in error_lower:
+            return "bitsandbytes"
+        
+        # Try to extract module name from common patterns
+        import re
+        patterns = [
+            r"cannot import name ['\"]([^'\"]+)['\"]",
+            r"No module named ['\"]([^'\"]+)['\"]",
+            r"cannot import ['\"]([^'\"]+)['\"]",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, error_msg, re.IGNORECASE)
+            if match:
+                module_name = match.group(1)
+                # Map common import names to package names
+                if "optimum" in module_name.lower():
+                    return "optimum"
+                elif "awq" in module_name.lower():
+                    return "autoawq"
+                elif "protobuf" in module_name.lower() or "google.protobuf" in module_name.lower():
+                    return "protobuf"
+                elif "bitsandbytes" in module_name.lower() or "bnb" in module_name.lower():
+                    return "bitsandbytes"
+                # Return the first part of the module name as package name
+                package_name = module_name.split(".")[0]
+                if package_name and len(package_name) > 2:
+                    return package_name
+        
+        return None
+    
+    def _resolve_onboarding_id(self, model_id: str, model_cfg: Optional[dict] = None) -> str:
+        """
+        Resolve the onboarding key for a server config model_id.
+
+        - Onboarding is keyed by HF-style ids (org/repo).
+        - Server config keys are often filesystem-safe or UI-safe ids (e.g. org_repo).
+
+        Strategy:
+        - If model_id already looks like HF id (contains '/'), use it.
+        - Else, derive from model_cfg['base_model'] folder name:
+          - org__repo -> org/repo
+          - legacy org_repo -> org/repo
+        - Else, fall back to model_id.
+        """
+        if "/" in (model_id or ""):
+            return model_id
+
+        base_model_path = ""
+        try:
+            if isinstance(model_cfg, dict):
+                base_model_path = str(model_cfg.get("base_model", "") or "")
+        except Exception:
+            base_model_path = ""
+
+        if base_model_path:
+            try:
+                name = Path(base_model_path).name
+            except Exception:
+                name = base_model_path
+
+            if "__" in name:
+                derived = name.replace("__", "/")
+                if "/" in derived:
+                    return derived
+
+            if "/" not in name and "_" in name:
+                parts = name.split("_", 1)
+                if len(parts) == 2:
+                    return f"{parts[0]}/{parts[1]}"
+
+        return model_id
     
     def ensure_server_running(self, model_id: str, log_callback=None) -> str:
         """
@@ -174,28 +265,37 @@ class LLMServerManager:
                     f"Available: {list(self.config['models'].keys())}"
                 )
             
+            model_cfg = self.config["models"][model_id]
+
             # RUNTIME GATE: Check onboarding status
             from core.model_onboarding import get_onboarding_service
             onboarding = get_onboarding_service()
-            status = onboarding.get_onboarding_status(model_id)
+            onboarding_id = model_id
+            try:
+                # Only remap if there isn't already an onboarding row for the config key.
+                if "/" not in model_id and self.state_store.get_onboarding(model_id) is None:
+                    onboarding_id = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+            except Exception:
+                onboarding_id = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+
+            status = onboarding.get_onboarding_status(onboarding_id)
             
             if status is None:
                 raise RuntimeError(
-                    f"Model '{model_id}' has not been onboarded. "
+                    f"Model '{onboarding_id}' has not been onboarded. "
                     f"Please run onboarding first (model download/Add model should trigger this)."
                 )
             
             if status != "READY":
-                entry = self.state_store.get_onboarding(model_id)
+                entry = self.state_store.get_onboarding(onboarding_id)
                 error_msg = entry.get("last_error", "Unknown error") if entry else "Unknown error"
                 raise RuntimeError(
-                    f"Model '{model_id}' is not ready for runtime (status={status}). "
+                    f"Model '{onboarding_id}' is not ready for runtime (status={status}). "
                     f"Please complete onboarding or repair the model. "
                     f"Error: {error_msg}"
                 )
             
             # Check for duplicate ports and warn
-            model_cfg = self.config["models"][model_id]
             preferred_port = model_cfg.get("port", 10500)
             duplicate_models = [
                 mid for mid, cfg in self.config["models"].items()
@@ -713,18 +813,20 @@ class LLMServerManager:
             # RUNTIME: Use existing env only (no creation/repair in runtime path)
             log(f"Getting environment for model: {base_model}")
             
-            # Get onboarding entry to find env_key
-            onboarding_entry = self.state_store.get_onboarding(model_id)
+            # Get onboarding entry to find env_key.
+            # IMPORTANT: onboarding is keyed by HF id (org/repo), not the server config key.
+            onboarding_id = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+            onboarding_entry = self.state_store.get_onboarding(onboarding_id)
             if not onboarding_entry:
                 raise RuntimeError(
-                    f"Model '{model_id}' onboarding entry not found. "
+                    f"Model '{onboarding_id}' onboarding entry not found. "
                     f"Please run onboarding first."
                 )
             
             env_key = onboarding_entry.get("env_key")
             if not env_key:
                 raise RuntimeError(
-                    f"Model '{model_id}' has no env_key in onboarding entry. "
+                    f"Model '{onboarding_id}' has no env_key in onboarding entry. "
                     f"Please re-run onboarding."
                 )
             
@@ -732,7 +834,7 @@ class LLMServerManager:
             python_exe = self.env_registry._get_env_python_executable(env_key)
             if not python_exe or not python_exe.exists():
                 raise RuntimeError(
-                    f"Environment '{env_key}' for model '{model_id}' not found. "
+                    f"Environment '{env_key}' for model '{onboarding_id}' not found. "
                     f"Please re-run onboarding."
                 )
             
@@ -942,13 +1044,69 @@ print('OK')
                                 if "FileNotFoundError" in log_text or "No such file" in log_text:
                                     # Extract model path from error
                                     import re
-                                    match = re.search(r'No such file.*?([^\s]+\.safetensors)', log_text)
+                                    match = re.search(r'No such file.*?([^\s]+\.(?:safetensors|bin))', log_text)
                                     if match:
                                         missing_file = match.group(1)
-                                        raise RuntimeError(
-                                            f"Model file missing: {missing_file}\n"
-                                            f"The model download may be incomplete. Please re-download the model."
-                                        )
+                                        
+                                        # Auto-heal: Trigger repair/download for missing shard
+                                        log(f"Auto-healing: Missing shard file detected: {missing_file}")
+                                        log("Triggering automatic repair to download missing shard...")
+                                        
+                                        try:
+                                            # Get model path from config
+                                            model_path = Path(base_model)
+                                            
+                                            # Extract model ID for repair
+                                            onboarding_id = self._resolve_onboarding_id(model_id, model_cfg)
+                                            
+                                            # Import repair functionality
+                                            from core.model_file_utils import download_repo_files
+                                            from core.models import get_hf_token
+                                            
+                                            log(f"Repairing model {onboarding_id} to fetch missing shard: {missing_file}")
+                                            
+                                            # Download missing files (resume=True will skip existing files)
+                                            token = get_hf_token()
+                                            download_repo_files(
+                                                repo_id=onboarding_id,
+                                                dest_dir=model_path,
+                                                token=token,
+                                                allow_patterns=None,  # Download everything
+                                                resume=True,  # Skip existing files
+                                                timeout_s=900,
+                                                max_retries=2,
+                                                progress_callback=None,
+                                                should_cancel=None,
+                                                clean_locks=True,
+                                                cache_dir=None
+                                            )
+                                            
+                                            log("Missing shard downloaded successfully, restarting server...")
+                                            
+                                            # Kill the failed server process and restart
+                                            if model_id in self.running_servers:
+                                                process, log_file, _ = self.running_servers[model_id]
+                                                try:
+                                                    process.kill()
+                                                    process.wait(timeout=5)
+                                                except Exception:
+                                                    pass
+                                                if log_file:
+                                                    log_file.close()
+                                                del self.running_servers[model_id]
+                                            
+                                            # Restart server with missing shard now downloaded
+                                            time.sleep(2)  # Brief wait for port release
+                                            # Recursively call _start_server to restart
+                                            return self._start_server(model_id, log_callback=log_callback)
+                                            
+                                        except Exception as repair_error:
+                                            log(f"Auto-repair failed: {repair_error}")
+                                            raise RuntimeError(
+                                                f"Model file missing: {missing_file}\n"
+                                                f"Auto-repair attempt failed: {repair_error}\n"
+                                                f"Please manually repair the model download."
+                                            )
                                 elif "error" in log_text.lower() and "traceback" in log_text.lower():
                                     # Extract full error message - look for specific error types
                                     import re
@@ -1043,22 +1201,25 @@ print('OK')
                                     import_error_match = re.search(r'ImportError:\s*(.+?)(?:\n|$)', log_text, re.MULTILINE | re.DOTALL)
                                     if import_error_match:
                                         error_msg = import_error_match.group(1).strip()
-                                        # Check if it's protobuf or other missing dependency - auto-install it
-                                        if "protobuf" in error_msg.lower():
-                                            log("Detected missing protobuf dependency, installing automatically...")
+                                        
+                                        # Auto-heal: Detect and install missing packages
+                                        package_name = self._extract_package_from_importerror(error_msg)
+                                        
+                                        if package_name:
+                                            log(f"Detected missing {package_name} dependency, installing automatically...")
                                             try:
                                                 # Get the environment for this model
                                                 env_spec = self.env_registry.get_env_for_model(base_model, log_callback=log_callback)
                                                 python_exe = env_spec.python_executable
                                                 
-                                                # Install protobuf using the registry's auto-install method
-                                                log(f"Installing protobuf in {env_spec.key}...")
+                                                # Install package using the registry's auto-install method
+                                                log(f"Installing {package_name} in {env_spec.key}...")
                                                 if self.env_registry.auto_install_missing_packages(
                                                     python_exe, 
-                                                    ["protobuf"], 
+                                                    [package_name], 
                                                     log_callback=log_callback
                                                 ):
-                                                    log("protobuf installed successfully, restarting server...")
+                                                    log(f"{package_name} installed successfully, restarting server...")
                                                     # Kill the failed server process and restart
                                                     if model_id in self.running_servers:
                                                         process, log_file, _ = self.running_servers[model_id]
@@ -1070,20 +1231,20 @@ print('OK')
                                                         if log_file:
                                                             log_file.close()
                                                         del self.running_servers[model_id]
-                                                    # Restart server with protobuf now installed
+                                                    # Restart server with package now installed
                                                     time.sleep(2)  # Brief wait for port release
                                                     # Recursively call _start_server to restart
                                                     return self._start_server(model_id, log_callback=log_callback)
                                                 else:
                                                     raise RuntimeError(
-                                                        f"Failed to auto-install protobuf in environment {env_spec.key}.\n"
+                                                        f"Failed to auto-install {package_name} in environment {env_spec.key}.\n"
                                                         f"Please go to the Environment/Requirements tab and run 'Repair Environment' for this model's environment."
                                                     )
                                             except RuntimeError:
                                                 raise  # Re-raise RuntimeError as-is
                                             except Exception as e:
                                                 raise RuntimeError(
-                                                    f"Error during protobuf auto-installation: {e}\n"
+                                                    f"Error during {package_name} auto-installation: {e}\n"
                                                     f"Please go to the Environment/Requirements tab and run 'Repair Environment'."
                                                 )
                                         else:

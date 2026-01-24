@@ -132,3 +132,10 @@ models:
     port: 10517
     use_4bit: true
     system_prompt: ''
+  TheBloke_deepseek-coder-33B-instruct-GPTQ:
+    base_model: C:\1_Git\LocaLLM\LLM\models\TheBloke__deepseek-coder-33B-instruct-GPTQ
+    adapter_dir: null
+    model_type: instruct
+    port: 10518
+    use_4bit: true
+    system_prompt: ''

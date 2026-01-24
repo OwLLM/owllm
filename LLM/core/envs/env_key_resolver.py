@@ -179,7 +179,8 @@ class EnvKeyResolver:
         accelerator: Optional[str] = None,  # "cu121" | "rocm61" | "mps" | "cpu"
         torch_major_minor: Optional[str] = None,   # "2.2"
         quant: Optional[str] = None,  # "base" | "bnb"
-        profile_data: Optional[dict] = None
+        profile_data: Optional[dict] = None,
+        tier: str = "stable"  # "stable" | "edge"
     ) -> str:
         """
         Resolve environment key from model requirements.
@@ -190,15 +191,17 @@ class EnvKeyResolver:
             torch_major_minor: Torch version as "2.2" (if None, derived from profile_data)
             quant: Quantization type "base" | "bnb" (defaults to "base")
             profile_data: Optional profile data (if None, auto-detected)
+            tier: Environment capability tier "stable" | "edge" (defaults to "stable")
         
         Returns:
-            Environment key string (e.g., "tf-cu121-t22-base")
+            Environment key string (e.g., "tf-cu121-t22-base-stable" or "tf-cu121-t22-base-edge")
         
         Examples:
-            - tf-cu121-t22-base (transformers, CUDA 12.1, torch 2.2, no quant)
-            - tf-cu121-t22-bnb (transformers, CUDA 12.1, torch 2.2, bitsandbytes)
-            - vllm-cu121 (vLLM, CUDA 12.1, no torch version in name)
-            - llamacpp-cpu (llama.cpp, CPU)
+            - tf-cu121-t22-base-stable (transformers, CUDA 12.1, torch 2.2, no quant, stable packages)
+            - tf-cu121-t22-base-edge (transformers, CUDA 12.1, torch 2.2, no quant, latest packages)
+            - tf-cu121-t22-bnb-stable (transformers, CUDA 12.1, torch 2.2, bitsandbytes, stable)
+            - vllm-cu121-stable (vLLM, CUDA 12.1, stable)
+            - llamacpp-cpu-stable (llama.cpp, CPU, stable)
         """
         if profile_data is None:
             profile_data = self.get_active_profile_data()
@@ -209,16 +212,16 @@ class EnvKeyResolver:
         
         # Handle backend-specific formats
         if backend == "vllm":
-            # vLLM: vllm-<accelerator> (no torch token)
-            return f"vllm-{accelerator}"
+            # vLLM: vllm-<accelerator>-<tier>
+            return f"vllm-{accelerator}-{tier}"
         
         if backend == "llamacpp":
-            # llama.cpp: llamacpp-<accelerator_or_cpu>
+            # llama.cpp: llamacpp-<accelerator_or_cpu>-<tier>
             if accelerator == "cpu":
-                return "llamacpp-cpu"
-            return f"llamacpp-{accelerator}"
+                return f"llamacpp-cpu-{tier}"
+            return f"llamacpp-{accelerator}-{tier}"
         
-        # Transformers (tf): tf-<accelerator>-t<mm>-<quant>
+        # Transformers (tf): tf-<accelerator>-t<mm>-<quant>-<tier>
         # Derive torch_major_minor if not provided
         if torch_major_minor is None:
             torch_major_minor = self._derive_torch_major_minor(profile_data)
@@ -231,12 +234,12 @@ class EnvKeyResolver:
         torch_encoded = encode_torch_mm(torch_major_minor) if torch_major_minor else ""
         
         if torch_encoded:
-            env_key = f"tf-{accelerator}-t{torch_encoded}-{quant}"
+            env_key = f"tf-{accelerator}-t{torch_encoded}-{quant}-{tier}"
         else:
             # Fallback if torch version unknown
-            env_key = f"tf-{accelerator}-{quant}"
+            env_key = f"tf-{accelerator}-{quant}-{tier}"
         
-        logger.debug(f"Resolved env_key: {env_key} (backend={backend}, accelerator={accelerator}, torch={torch_major_minor}, quant={quant})")
+        logger.debug(f"Resolved env_key: {env_key} (backend={backend}, accelerator={accelerator}, torch={torch_major_minor}, quant={quant}, tier={tier})")
         return env_key
     
     def parse_env_key(self, env_key: str) -> Dict[str, Any]:
@@ -252,6 +255,7 @@ class EnvKeyResolver:
             - accelerator: "cu121" | "rocm61" | "mps" | "cpu"
             - torch_mm: "2.2" | None (decoded)
             - quant: "base" | "bnb" | None
+            - tier: "stable" | "edge" | None
         
         Examples:
             parse_env_key("torch-cu121-transformers-bnb") ->
@@ -266,7 +270,8 @@ class EnvKeyResolver:
             "backend": "unknown",
             "accelerator": "cpu",
             "torch_mm": None,
-            "quant": None
+            "quant": None,
+            "tier": "stable"  # Default to stable for backward compatibility
         }
         
         # Detect format: old (torch-*-transformers-*) or new (tf-* or vllm-* or llamacpp-*)
@@ -294,9 +299,10 @@ class EnvKeyResolver:
             # If env metadata/profile exists, would use profile_data["packages"]["torch"] and convert to major.minor
             # For now, set to None - compatibility check does not reject on torch_mm
             result["torch_mm"] = None
+            # Old format doesn't have tier, default to stable
             
         else:
-            # New format: tf-cu121-t22-base, vllm-cu121, llamacpp-cpu
+            # New format: tf-cu121-t22-base-stable, vllm-cu121-edge, llamacpp-cpu-stable
             if "llamacpp" in parts:
                 result["backend"] = "llamacpp"
             elif "vllm" in parts:
@@ -326,6 +332,10 @@ class EnvKeyResolver:
             else:
                 # Default to base if not specified
                 result["quant"] = "base"
+            
+            # Extract tier (last part if it's "stable" or "edge")
+            if parts and parts[-1] in ("stable", "edge"):
+                result["tier"] = parts[-1]
         
         return result
     

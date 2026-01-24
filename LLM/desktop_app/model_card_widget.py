@@ -1,8 +1,10 @@
 """Custom widget for displaying model cards with rich visual design"""
 from __future__ import annotations
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QScrollArea, QSizePolicy, QGridLayout
-from PySide6.QtCore import Qt, Signal, QUrl
-from PySide6.QtGui import QFont, QPixmap, QMouseEvent
+from PySide6.QtCore import Qt, Signal, QUrl, QTimer, QPointF
+from PySide6.QtGui import QFont, QPixmap, QMouseEvent, QPainter, QPen, QBrush, QColor, QTransform, QPolygonF
+from typing import Optional
+import math
 try:
     from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
     NETWORK_AVAILABLE = True
@@ -117,17 +119,31 @@ class ModelCard(QFrame):
         top_row.addStretch(1)
         title_stats_layout.addLayout(top_row)
         
-        # Stats row (likes/downloads)
+        # Stats row (likes/downloads) - always create labels, hide if no data
         stats_row = QHBoxLayout()
         stats_row.setSpacing(15)
+        
+        self.dl_stat = QLabel()
+        self.dl_stat.setStyleSheet("color: #888; font-size: 11px;")
+        stats_row.addWidget(self.dl_stat)
+        
+        self.like_stat = QLabel()
+        self.like_stat.setStyleSheet("color: #888; font-size: 11px;")
+        stats_row.addWidget(self.like_stat)
+        
+        # Set initial stats if provided
         if downloads:
-            dl_stat = QLabel(f"📥 {downloads} downloads")
-            dl_stat.setStyleSheet("color: #888; font-size: 11px;")
-            stats_row.addWidget(dl_stat)
+            self.dl_stat.setText(f"📥 {downloads} downloads")
+            self.dl_stat.setVisible(True)
+        else:
+            self.dl_stat.setVisible(False)
+        
         if likes:
-            like_stat = QLabel(f"❤️ {likes} likes")
-            like_stat.setStyleSheet("color: #888; font-size: 11px;")
-            stats_row.addWidget(like_stat)
+            self.like_stat.setText(f"❤️ {likes} likes")
+            self.like_stat.setVisible(True)
+        else:
+            self.like_stat.setVisible(False)
+        
         stats_row.addStretch(1)
         title_stats_layout.addLayout(stats_row)
         
@@ -321,6 +337,26 @@ class ModelCard(QFrame):
         """Update theme"""
         self.is_dark = dark_mode
         self._apply_style()
+    
+    def set_stats(self, downloads: Optional[int], likes: Optional[int]):
+        """
+        Update stats display (downloads/likes).
+        
+        Args:
+            downloads: Number of downloads (or None to hide)
+            likes: Number of likes (or None to hide)
+        """
+        if downloads is not None:
+            self.dl_stat.setText(f"📥 {downloads:,} downloads")
+            self.dl_stat.setVisible(True)
+        else:
+            self.dl_stat.setVisible(False)
+        
+        if likes is not None:
+            self.like_stat.setText(f"❤️ {likes:,} likes")
+            self.like_stat.setVisible(True)
+        else:
+            self.like_stat.setVisible(False)
 
 
 class DownloadedModelCard(QFrame):
@@ -417,6 +453,25 @@ class DownloadedModelCard(QFrame):
         top_row.addStretch(1)
         title_stats_layout.addLayout(top_row)
         
+        # Stats row (likes/downloads) - always create labels, hide if no data
+        stats_row = QHBoxLayout()
+        stats_row.setSpacing(15)
+        
+        self.dl_stat = QLabel()
+        self.dl_stat.setStyleSheet("color: #888; font-size: 11px;")
+        stats_row.addWidget(self.dl_stat)
+        
+        self.like_stat = QLabel()
+        self.like_stat.setStyleSheet("color: #888; font-size: 11px;")
+        stats_row.addWidget(self.like_stat)
+        
+        # Initially hide stats (will be populated via set_stats)
+        self.dl_stat.setVisible(False)
+        self.like_stat.setVisible(False)
+        
+        stats_row.addStretch(1)
+        title_stats_layout.addLayout(stats_row)
+        
         # Status row (local badge + onboarding status badge)
         status_row = QHBoxLayout()
         status_row.setSpacing(10)
@@ -467,19 +522,10 @@ class DownloadedModelCard(QFrame):
             env_badge.setToolTip(f"Environment: {self.env_key}")
             status_row.addWidget(env_badge)
         
-        # Onboarding status badge
+        # Onboarding status badge (only show if NOT READY - READY uses ribbon)
         if self.onboarding_status == "READY":
-            onboarding_badge = QLabel("✓ Ready")
-            onboarding_badge.setStyleSheet("""
-                QLabel {
-                    background: #4CAF50;
-                    color: white;
-                    padding: 4px 10px;
-                    border-radius: 4px;
-                    font-size: 11px;
-                    font-weight: bold;
-                }
-            """)
+            # Don't show inline badge for READY - use ribbon instead
+            pass
         elif self.onboarding_status == "BUILDING":
             onboarding_badge = QLabel("⏳ Building...")
             onboarding_badge.setStyleSheet("""
@@ -492,6 +538,7 @@ class DownloadedModelCard(QFrame):
                     font-weight: bold;
                 }
             """)
+            status_row.addWidget(onboarding_badge)
         elif self.onboarding_status == "BROKEN":
             onboarding_badge = QLabel("❌ Broken")
             onboarding_badge.setStyleSheet("""
@@ -504,6 +551,7 @@ class DownloadedModelCard(QFrame):
                     font-weight: bold;
                 }
             """)
+            status_row.addWidget(onboarding_badge)
         else:  # NEW or None
             onboarding_badge = QLabel("🆕 Not Onboarded")
             onboarding_badge.setStyleSheet("""
@@ -516,7 +564,7 @@ class DownloadedModelCard(QFrame):
                     font-weight: bold;
                 }
             """)
-        status_row.addWidget(onboarding_badge)
+            status_row.addWidget(onboarding_badge)
         status_row.addStretch(1)
         title_stats_layout.addLayout(status_row)
         
@@ -605,7 +653,18 @@ class DownloadedModelCard(QFrame):
         button_layout.addStretch(1)
         layout.addLayout(button_layout)
         
+        # Create READY ribbon overlay (only shown when onboarding_status == "READY")
+        self.ready_ribbon = None
+        if self.onboarding_status == "READY":
+            self.ready_ribbon = RibbonWidget("READY", parent=self)
+            self.ready_ribbon.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self.ready_ribbon.raise_()  # Ensure it's on top
+        
         self._apply_style()
+        
+        # Position ribbon after initial layout
+        if self.ready_ribbon:
+            QTimer.singleShot(0, self._update_ribbon_position)
     
     def _set_model_icon(self, model_name, icon_label):
         """Set a visual icon based on model family"""
@@ -698,10 +757,112 @@ class DownloadedModelCard(QFrame):
         self.is_dark = dark_mode
         self._apply_style()
     
+    def set_stats(self, downloads: Optional[int], likes: Optional[int]):
+        """
+        Update stats display (downloads/likes).
+        
+        Args:
+            downloads: Number of downloads (or None to hide)
+            likes: Number of likes (or None to hide)
+        """
+        if downloads is not None:
+            self.dl_stat.setText(f"📥 {downloads:,} downloads")
+            self.dl_stat.setVisible(True)
+        else:
+            self.dl_stat.setVisible(False)
+        
+        if likes is not None:
+            self.like_stat.setText(f"❤️ {likes:,} likes")
+            self.like_stat.setVisible(True)
+        else:
+            self.like_stat.setVisible(False)
+    
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.selected.emit(self.model_path)
         super().mousePressEvent(event)
+    
+    def resizeEvent(self, event):
+        """Update ribbon position on resize"""
+        super().resizeEvent(event)
+        if hasattr(self, 'ready_ribbon') and self.ready_ribbon:
+            self._update_ribbon_position()
+    
+    def _update_ribbon_position(self):
+        """Position ribbon at bottom-right corner"""
+        if not hasattr(self, 'ready_ribbon') or not self.ready_ribbon:
+            return
+        ribbon_size = 120
+        self.ready_ribbon.setGeometry(
+            self.width() - ribbon_size,
+            self.height() - ribbon_size,
+            ribbon_size,
+            ribbon_size
+        )
+
+
+class RibbonWidget(QWidget):
+    """Diagonal ribbon widget for bottom-right corner overlay"""
+    
+    def __init__(self, text: str = "READY", parent=None):
+        super().__init__(parent)
+        self.text = text
+        self.setFixedSize(120, 120)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+    
+    def paintEvent(self, event):
+        """Draw diagonal ribbon with text"""
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        
+        # Ribbon dimensions
+        width = self.width()
+        height = self.height()
+        
+        # Create diagonal ribbon path (bottom-right corner)
+        # Points for a diagonal ribbon shape going from bottom-right to top-left
+        ribbon_points = [
+            QPointF(width, height),  # Bottom-right corner
+            QPointF(width - 50, height),  # Bottom edge
+            QPointF(width - 100, height - 50),  # Inner corner
+            QPointF(width - 50, height - 100),  # Top edge
+        ]
+        
+        # Draw ribbon background (green for READY)
+        painter.setBrush(QBrush(QColor(76, 175, 80)))  # #4CAF50
+        painter.setPen(QPen(QColor(60, 140, 60), 2))
+        
+        # Create polygon for ribbon
+        polygon = QPolygonF(ribbon_points)
+        painter.drawPolygon(polygon)
+        
+        # Draw text rotated diagonally
+        painter.save()
+        
+        # Calculate rotation center and angle
+        center_x = width - 50
+        center_y = height - 50
+        angle = -45  # Diagonal from top-left to bottom-right
+        
+        # Translate to center, rotate, then translate back
+        painter.translate(center_x, center_y)
+        painter.rotate(angle)
+        painter.translate(-center_x, -center_y)
+        
+        # Draw text
+        painter.setPen(QPen(QColor(255, 255, 255)))  # White text
+        font = QFont()
+        font.setPointSize(11)
+        font.setBold(True)
+        painter.setFont(font)
+        
+        # Center text
+        text_rect = painter.fontMetrics().boundingRect(self.text)
+        text_x = center_x - text_rect.width() / 2
+        text_y = center_y + text_rect.height() / 4
+        painter.drawText(int(text_x), int(text_y), self.text)
+        
+        painter.restore()
 
 
 class ModelDetailsPanel(QWidget):

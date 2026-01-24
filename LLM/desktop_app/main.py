@@ -13201,10 +13201,14 @@ except Exception as e:
         self.installer_thread.start()
 
     def _on_installer_task_finished(self, success):
-        for card in self.package_cards.values(): 
+        for card in self.package_cards.values():
             card.setEnabled(True)
         msg = "✅ Task completed successfully!" if success else "❌ Task failed. Check log for details."
         self.requirements_log.append(f"\n<b>{msg}</b>")
+
+        # Clear forced environment issue on success
+        if success:
+            self._clear_forced_environment_issue()
 
         # If repair/install failed, show a popup with the actual reason + direct buttons.
         if not success:
@@ -13217,10 +13221,13 @@ except Exception as e:
                     "Click '🔧 Repair Environment' to retry (safe), or '🗑️ Rebuild Environment' for a clean reinstall (destructive).",
                     details=tail or None
                 ))
+                # Don't refresh immediately - let the user see the error details first
+                # The popup will handle retries, and refresh will happen on successful retry
+                return
             except Exception:
                 pass
 
-        # Force refresh requirements grid to show updated package status
+        # Force refresh requirements grid to show updated package status (only on success)
         self.requirements_log.append("<b>Refreshing package status...</b>")
         # Clear package cards cache and selected packages to force fresh check
         self.package_cards = {}

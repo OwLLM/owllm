@@ -652,12 +652,12 @@ class InstallerV2:
                 self.log("\n🎯 Using hardware-adaptive repair")
                 from core.profile_selector import ProfileSelector
                 from setup_state import SetupStateManager
-                
+
                 # Get hardware profile (with user-selected GPU if any)
                 setup_state = SetupStateManager()
                 selected_gpu_index = setup_state.get_selected_gpu_index()
                 hw_profile = detector.get_hardware_profile(selected_gpu_index=selected_gpu_index)
-                
+
                 # Select optimal profile (with user override if any)
                 selector = ProfileSelector(self.compat_matrix_path)
                 override_profile = setup_state.get_selected_profile()
@@ -672,11 +672,16 @@ class InstallerV2:
                         self.log(f"  No binary packages in profile")
                     cuda_config = self._extract_cuda_config(package_versions.get("torch", ""))
                 except Exception as e:
-                    raise ValueError(f"Profile selection failed: {str(e)}")
+                    self.log(f"⚠ Profile selection failed: {str(e)}")
+                    self.log("  Falling back to legacy fixed-version repair")
+                    cuda_config = self._determine_cuda_config(results)
+                    package_versions = None
+                    binary_packages = None
             else:
                 self.log("\n⚠ Using legacy fixed-version repair")
                 cuda_config = self._determine_cuda_config(results)
                 package_versions = None
+                binary_packages = None
             
             self.log(f"\n✓ Target configuration: {cuda_config}")
             
@@ -690,17 +695,31 @@ class InstallerV2:
 
             python_version = (sys.version_info.major, sys.version_info.minor)
             success, error = wheelhouse_mgr.prepare_wheelhouse(
-                cuda_config, 
+                cuda_config,
                 python_version,
                 package_versions,
                 binary_packages if self.use_adaptive else None,  # Pass binary packages if using profile
                 force_redownload=False  # Will auto-detect mismatches and redownload only if needed
             )
-            
+
             if not success:
                 self.log(f"\n✗ Wheelhouse preparation failed:")
                 self.log(f"  {error}")
-                return False
+                self.log("  Attempting forced redownload...")
+
+                # Try again with force_redownload=True
+                success, error = wheelhouse_mgr.prepare_wheelhouse(
+                    cuda_config,
+                    python_version,
+                    package_versions,
+                    binary_packages if self.use_adaptive else None,
+                    force_redownload=True  # Force complete redownload
+                )
+
+                if not success:
+                    self.log(f"\n✗ Forced wheelhouse redownload also failed:")
+                    self.log(f"  {error}")
+                    return False
             
             self.log("\n✓ Wheelhouse ready and validated")
             

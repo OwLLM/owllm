@@ -590,10 +590,80 @@ class RepairThread(QThread):
     def run(self):
         try:
             import os
+            import logging
+            import threading
+            import time
             from core.model_file_utils import download_repo_files
+            
+            # Initialize logger and watchdog variables
+            logger = logging.getLogger(__name__)
+            stall_detected = threading.Event()
+            watchdog_stop = threading.Event()
             
             # Get token
             token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+            
+            # Stall watchdog: monitor .incomplete file growth
+            def stall_watchdog():
+                """Monitor download cache for stalled .incomplete files"""
+                last_size = 0
+                last_check_time = time.time()
+                stall_timeout = 15 * 60  # 15 minutes without growth = stalled
+                
+                while not watchdog_stop.is_set() and not stall_detected.is_set():
+                    try:
+                        # Check cache directory for .incomplete files
+                        cache_dirs = []
+                        if self.cache_dir and self.cache_dir.exists():
+                            cache_dirs.append(self.cache_dir)
+                        # Also check model-local cache
+                        model_cache = self.existing_dir / ".cache" / "huggingface" / "download"
+                        if model_cache.exists():
+                            cache_dirs.append(model_cache)
+                        
+                        current_size = 0
+                        newest_incomplete = None
+                        newest_mtime = 0
+                        
+                        for cache_dir in cache_dirs:
+                            try:
+                                for incomplete_file in cache_dir.rglob("*.incomplete"):
+                                    try:
+                                        stat = incomplete_file.stat()
+                                        if stat.st_mtime > newest_mtime:
+                                            newest_mtime = stat.st_mtime
+                                            newest_incomplete = incomplete_file
+                                            current_size = stat.st_size
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                continue
+                        
+                        if newest_incomplete and newest_incomplete.exists():
+                            if current_size > last_size:
+                                # File is growing - reset timer
+                                last_size = current_size
+                                last_check_time = time.time()
+                            else:
+                                # File not growing - check if timeout exceeded
+                                elapsed = time.time() - last_check_time
+                                if elapsed > stall_timeout:
+                                    logger.warning(f"Stall detected: {newest_incomplete.name} hasn't grown in {elapsed/60:.1f} minutes")
+                                    stall_detected.set()
+                                    return
+                        else:
+                            # No incomplete files - reset
+                            last_size = 0
+                            last_check_time = time.time()
+                        
+                        time.sleep(30)  # Check every 30 seconds
+                    except Exception as e:
+                        logger.debug(f"Watchdog error: {e}")
+                        time.sleep(30)
+            
+            # Start watchdog thread
+            watchdog_thread = threading.Thread(target=stall_watchdog, daemon=True)
+            watchdog_thread.start()
             
             # Progress callback for real-time updates
             def progress_callback(bytes_done: int, bytes_total: int):
@@ -635,8 +705,6 @@ class RepairThread(QThread):
             
             if self.force_fresh_only:
                 # DELETE model directory using same robust strategy as Delete button
-                import logging
-                logger = logging.getLogger(__name__)
                 
                 self.progress.emit(5)
                 logger.info(f"Deleting model directory: {self.existing_dir}")
@@ -888,10 +956,18 @@ class RepairThread(QThread):
                     finally:
                         watchdog_stop.set()
             
+            # Ensure watchdog is stopped
+            watchdog_stop.set()
+            
             self.progress.emit(100)
             self.finished.emit(str(self.existing_dir))
             
         except Exception as e:
+            # Ensure watchdog is stopped even on error
+            try:
+                watchdog_stop.set()
+            except Exception:
+                pass
             self.error.emit(str(e))
 
 

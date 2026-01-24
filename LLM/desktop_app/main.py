@@ -566,6 +566,7 @@ class RepairThread(QThread):
     progress = Signal(int)  # 0-100
     finished = Signal(str)  # destination path
     error = Signal(str)     # error message
+    status = Signal(str)    # current status message (e.g., "Downloading model-00035-of-00061.bin (35/61)")
     
     def __init__(self, model_id: str, existing_dir: Path, force_fresh_only: bool = False, cache_dir: Optional[Path] = None):
         super().__init__()
@@ -692,8 +693,12 @@ class RepairThread(QThread):
             def status_callback(filename: str, file_idx: int, total_files: int, attempt: int):
                 import logging
                 logger = logging.getLogger(__name__)
-                logger.info(f"Downloading {filename} ({file_idx}/{total_files}) - attempt {attempt}")
-                # Could emit a signal here if we want to show in UI, but logging is sufficient for now
+                status_msg = f"Downloading {filename} ({file_idx}/{total_files})"
+                if attempt > 1:
+                    status_msg += f" - attempt {attempt}"
+                logger.info(status_msg)
+                # Emit status signal for UI display
+                self.status.emit(status_msg)
             
             # Start with metadata-only preflight (if missing)
             self.progress.emit(1)
@@ -800,28 +805,9 @@ class RepairThread(QThread):
                     )
                 except Exception as download_error:
                     if stall_detected.is_set():
-                        logger.warning(f"Download stalled, cleaning locks and retrying...")
-                        from core.model_file_utils import clean_download_locks
-                        clean_download_locks(self.existing_dir)
-                        if self.cache_dir:
-                            clean_download_locks(self.cache_dir)
-                        # Retry once
-                        stall_detected.clear()
-                        download_repo_files(
-                            repo_id=self.model_id,
-                            dest_dir=self.existing_dir,
-                            token=token,
-                            allow_patterns=None,
-                            resume=False,
-                            timeout_s=900,
-                            max_retries=2,
-                            progress_callback=progress_callback,
-                            status_callback=status_callback,
-                            should_cancel=should_cancel,
-                            clean_locks=True,
-                            force_fresh=False,
-                            cache_dir=self.cache_dir
-                        )
+                        # Stall detected - propagate as error so UI can prompt for fallback
+                        watchdog_stop.set()
+                        raise RuntimeError(f"Download stalled: no progress for 15+ minutes. The download may be stuck due to network issues or server problems.") from download_error
                     else:
                         raise
                 finally:
@@ -878,83 +864,19 @@ class RepairThread(QThread):
                         )
                     except Exception as download_error:
                         if stall_detected.is_set():
-                            logger.warning(f"Download stalled, cleaning locks and retrying...")
-                            from core.model_file_utils import clean_download_locks
-                            clean_download_locks(self.existing_dir)
-                            if self.cache_dir:
-                                clean_download_locks(self.cache_dir)
-                            # Retry once
-                            stall_detected.clear()
-                            download_repo_files(
-                                repo_id=self.model_id,
-                                dest_dir=self.existing_dir,
-                                token=token,
-                                allow_patterns=None,
-                                resume=True,
-                                timeout_s=900,
-                                max_retries=2,
-                                progress_callback=progress_callback,
-                                status_callback=status_callback,
-                                should_cancel=should_cancel,
-                                clean_locks=True,
-                                cache_dir=self.cache_dir
-                            )
+                            # Stall detected - propagate as error so UI can prompt for fallback
+                            watchdog_stop.set()
+                            raise RuntimeError(f"Download stalled: no progress for 15+ minutes. The download may be stuck due to network issues or server problems.") from download_error
                         else:
                             raise
                     finally:
                         watchdog_stop.set()
                     
                 except Exception as first_error:
-                    # First attempt failed - try force fresh download
+                    # Resume failed - propagate error to UI so it can ask user
                     import logging
-                    logging.warning(f"Repair failed, attempting force fresh download: {first_error}")
-                    self.progress.emit(5)
-                    
-                    # Force fresh: delete everything and redownload
-                    try:
-                        download_repo_files(
-                            repo_id=self.model_id,
-                            dest_dir=self.existing_dir,
-                            token=token,
-                            allow_patterns=None,
-                            resume=False,
-                            timeout_s=900,
-                            max_retries=2,
-                            progress_callback=progress_callback,
-                            status_callback=status_callback,
-                            should_cancel=lambda: should_cancel() or stall_detected.is_set(),
-                            clean_locks=True,
-                            force_fresh=True,  # Delete everything first
-                            cache_dir=self.cache_dir
-                        )
-                    except Exception as download_error:
-                        if stall_detected.is_set():
-                            logger.warning(f"Download stalled, cleaning locks and retrying...")
-                            from core.model_file_utils import clean_download_locks
-                            clean_download_locks(self.existing_dir)
-                            if self.cache_dir:
-                                clean_download_locks(self.cache_dir)
-                            # Retry once
-                            stall_detected.clear()
-                            download_repo_files(
-                                repo_id=self.model_id,
-                                dest_dir=self.existing_dir,
-                                token=token,
-                                allow_patterns=None,
-                                resume=False,
-                                timeout_s=900,
-                                max_retries=2,
-                                progress_callback=progress_callback,
-                                status_callback=status_callback,
-                                should_cancel=should_cancel,
-                                clean_locks=True,
-                                force_fresh=True,
-                                cache_dir=self.cache_dir
-                            )
-                        else:
-                            raise
-                    finally:
-                        watchdog_stop.set()
+                    logging.warning(f"Resume repair failed: {first_error}")
+                    raise  # Let UI handle the fallback decision
             
             # Ensure watchdog is stopped
             watchdog_stop.set()
@@ -968,6 +890,15 @@ class RepairThread(QThread):
                 watchdog_stop.set()
             except Exception:
                 pass
+            # Debug: Log to file to confirm error.emit is called
+            try:
+                log_path = Path(__file__).parent.parent / "logs" / "repair_debug.log"
+                log_path.parent.mkdir(exist_ok=True)
+                with open(log_path, "a") as f:
+                    f.write(f"\n[{__import__('datetime').datetime.now()}] RepairThread.run() emitting error\n")
+                    f.write(f"  error: {str(e)[:200]}\n")
+            except Exception:
+                pass
             self.error.emit(str(e))
 
 
@@ -976,6 +907,7 @@ class DownloadThread(QThread):
     progress = Signal(int)  # 0-100
     finished = Signal(str)  # destination path
     error = Signal(str)     # error message
+    status = Signal(str)    # current status message (e.g., "Downloading model-00035-of-00061.bin (35/61)")
     
     def __init__(self, model_id: str, target_dir: Path, cache_dir: Optional[Path] = None):
         super().__init__()
@@ -1037,7 +969,12 @@ class DownloadThread(QThread):
             def status_callback(filename: str, file_idx: int, total_files: int, attempt: int):
                 import logging
                 logger = logging.getLogger(__name__)
-                logger.info(f"Downloading {filename} ({file_idx}/{total_files}) - attempt {attempt}")
+                status_msg = f"Downloading {filename} ({file_idx}/{total_files})"
+                if attempt > 1:
+                    status_msg += f" - attempt {attempt}"
+                logger.info(status_msg)
+                # Emit status signal for UI display
+                self.status.emit(status_msg)
             
             # Start with metadata-only preflight
             self.progress.emit(1)
@@ -5879,6 +5816,16 @@ class MainWindow(QMainWindow):
     
     def _on_repair_model(self, model_path: str):
         """Repair or resume download for an incomplete model"""
+        # Debug: Log to file immediately when repair button is clicked
+        try:
+            log_path = Path(__file__).parent.parent / "logs" / "repair_debug.log"
+            log_path.parent.mkdir(exist_ok=True)
+            with open(log_path, "a") as f:
+                f.write(f"\n[{__import__('datetime').datetime.now()}] _on_repair_model called\n")
+                f.write(f"  model_path: {model_path}\n")
+        except Exception as e:
+            pass
+        
         path = Path(model_path)
         model_name = path.name
         
@@ -5894,7 +5841,8 @@ class MainWindow(QMainWindow):
             
         reply = QMessageBox.question(self, "Repair Model", 
                                     f"Do you want to repair/resume downloading '{model_id}'?\n\n"
-                                    "This will only fetch missing files and won't redownload existing large weights.",
+                                    "This will fetch missing files without deleting existing ones.\n"
+                                    "If repair fails, you'll be prompted to delete and redownload.",
                                     QMessageBox.Yes | QMessageBox.No)
         
         if reply == QMessageBox.Yes:
@@ -5961,9 +5909,14 @@ class MainWindow(QMainWindow):
             # Add progress bar to card layout
             card.layout().addWidget(progress_bar)
             
-            # Create repair thread (force full clean + fresh download)
+            # Add status label to show current shard being downloaded
+            status_label = QLabel("Preparing repair...")
+            status_label.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
+            card.layout().addWidget(status_label)
+            
+            # Create repair thread (resume-first, non-destructive)
             # Use central cache to keep locks out of model folder
-            thread = RepairThread(model_id, path, force_fresh_only=True, cache_dir=self.hf_cache_dir)
+            thread = RepairThread(model_id, path_obj, force_fresh_only=False, cache_dir=self.hf_cache_dir)
             
             # Mark as active
             repair_key = f"repair_{model_id}"
@@ -5971,12 +5924,31 @@ class MainWindow(QMainWindow):
             
             # Connect signals
             thread.progress.connect(lambda p: progress_bar.setValue(p))
-            thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key))
-            thread.error.connect(lambda err: self._on_repair_error(model_id, err, card, progress_bar, repair_key))
+            thread.status.connect(lambda msg: status_label.setText(msg))
+            thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key, status_label))
+            # Store repair info so we can look it up when error signal is received
+            if not hasattr(self, '_repair_info'):
+                self._repair_info = {}
+            self._repair_info[repair_key] = {
+                'model_id': model_id, 'card': card, 'progress_bar': progress_bar,
+                'status_label': status_label, 'model_path': path_obj
+            }
+            # Simple lambda that looks up the info
+            thread.error.connect(lambda err, rk=repair_key: self._handle_repair_error(rk, err))
             
             # Log immediately
             self._log_models(f"🔧 Starting repair for {model_id}...")
-            self._log_models(f"   Will DELETE and REDOWNLOAD from scratch")
+            self._log_models(f"   Will resume/fetch missing files (non-destructive)")
+            
+            # Debug: Log to file
+            try:
+                log_path = Path(__file__).parent.parent / "logs" / "repair_debug.log"
+                log_path.parent.mkdir(exist_ok=True)
+                with open(log_path, "a") as f:
+                    f.write(f"\n[{__import__('datetime').datetime.now()}] Starting repair thread for {model_id}\n")
+                    f.write(f"  repair_key: {repair_key}\n")
+            except Exception:
+                pass
             
             # Start repair
             thread.start()
@@ -7105,7 +7077,7 @@ class MainWindow(QMainWindow):
         # Refresh models
         QTimer.singleShot(1000, self._refresh_models)
     
-    def _on_repair_complete(self, model_id: str, dest: str, card, progress_bar, repair_key: str):
+    def _on_repair_complete(self, model_id: str, dest: str, card, progress_bar, repair_key: str, status_label=None):
         """Handle successful repair"""
         self._log_models(f"✓ Repair complete: {dest}")
         # Auto-start onboarding in the background (silent) so badges/env association update
@@ -7126,10 +7098,13 @@ class MainWindow(QMainWindow):
                 thread.wait()
             del self.active_downloads[repair_key]
         
-        # Remove progress bar
+        # Remove progress bar and status label
         if progress_bar:
             progress_bar.setVisible(False)
             progress_bar.deleteLater()
+        if status_label:
+            status_label.setVisible(False)
+            status_label.deleteLater()
         
         # Refresh models to update status (use QTimer to ensure thread cleanup is done)
         def refresh_after_repair():
@@ -7138,9 +7113,53 @@ class MainWindow(QMainWindow):
         
         QTimer.singleShot(500, refresh_after_repair)
     
-    def _on_repair_error(self, model_id: str, error: str, card, progress_bar, repair_key: str):
-        """Handle repair error"""
-        self._log_models(f"✗ Error repairing {model_id}: {error}")
+    def _handle_repair_error(self, repair_key: str, error: str):
+        """Handle repair error signal - looks up stored info and delegates to the actual handler"""
+        # Debug: Log to file since pythonw has no console
+        try:
+            log_path = Path(__file__).parent.parent / "logs" / "repair_debug.log"
+            log_path.parent.mkdir(exist_ok=True)
+            with open(log_path, "a") as f:
+                f.write(f"\n[{__import__('datetime').datetime.now()}] _handle_repair_error called\n")
+                f.write(f"  repair_key: {repair_key}\n")
+                f.write(f"  error: {error[:100]}\n")
+        except Exception:
+            pass
+        
+        # Look up the stored repair info
+        if not hasattr(self, '_repair_info') or repair_key not in self._repair_info:
+            self._log_models(f"Error: Repair info not found for key {repair_key}")
+            return
+        
+        info = self._repair_info[repair_key]
+        model_id = info['model_id']
+        card = info['card']
+        progress_bar = info['progress_bar']
+        status_label = info['status_label']
+        model_path = info['model_path']
+        
+        # Clean up stored info
+        del self._repair_info[repair_key]
+        
+        # Use QTimer to ensure dialog runs on the main thread event loop
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: self._show_repair_error_dialog(model_id, card, progress_bar, repair_key, status_label, model_path, error))
+
+    def _show_repair_error_dialog(self, model_id: str, card, progress_bar, repair_key: str, status_label, model_path: Path, error: str):
+        """Actually show the repair error dialog - called via QTimer to ensure main thread"""
+        # Debug: Log to file
+        try:
+            log_path = Path(__file__).parent.parent / "logs" / "repair_debug.log"
+            with open(log_path, "a") as f:
+                f.write(f"[{__import__('datetime').datetime.now()}] _show_repair_error_dialog called\n")
+        except Exception:
+            pass
+        
+        self._log_models(f"Error repairing {model_id}: {error}")
+        
+        # Update status label to show error occurred (immediate visual feedback)
+        if status_label:
+            status_label.setText(f"Repair failed - asking...")
         
         # Clean up thread
         if repair_key in self.active_downloads:
@@ -7148,6 +7167,135 @@ class MainWindow(QMainWindow):
             if thread.isRunning():
                 thread.quit()
                 thread.wait(5000)  # Wait max 5 seconds
+                if thread.isRunning():
+                    thread.terminate()
+                    thread.wait(2000)
+            del self.active_downloads[repair_key]
+        
+        # Check if error is due to locked directory (no fallback for this)
+        is_locked_error = (
+            "locked by another process" in error.lower() or
+            "modeldirlockederror" in error.lower() or
+            "cannot clean" in error.lower() and "locked" in error.lower()
+        )
+        
+        if is_locked_error:
+            # Remove progress bar and status label
+            if progress_bar:
+                progress_bar.setVisible(False)
+                progress_bar.deleteLater()
+            if status_label:
+                status_label.setVisible(False)
+                status_label.deleteLater()
+            
+            # Re-enable repair button
+            if hasattr(card, 'repair_btn'):
+                card.repair_btn.setEnabled(True)
+                card.repair_btn.setText("🔧 Repair")
+            
+            # Show error message - NO AUTOMATIC RESTART
+            from PySide6.QtWidgets import QMessageBox
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Critical)
+            msg.setWindowTitle("Repair Failed")
+            msg.setText(f"Cannot repair model '{model_id}'\n\n"
+                       f"Directory is locked and cannot be deleted:\n{model_path}\n\n"
+                       f"Please:\n"
+                       f"1. Close all other applications\n"
+                       f"2. Close antivirus/Windows Search\n"
+                       f"3. Manually delete the folder\n"
+                       f"4. Try repair again")
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.exec()
+            return
+        
+        # For other errors (stall, network failure, etc.), prompt for delete+redownload fallback
+        from PySide6.QtWidgets import QMessageBox
+
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle("Repair Failed")
+        msg_box.setText(f"Repair failed or stalled for '{model_id}':\n\n{error[:200]}\n\n"
+                       f"Do you want to delete and redownload from scratch?\n\n"
+                       f"This will permanently delete the local model folder and re-download everything.")
+        msg_box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg_box.setDefaultButton(QMessageBox.No)
+        msg_box.setIcon(QMessageBox.Question)
+        msg_box.setModal(True)
+
+        # Ensure dialog is visible and active
+        if hasattr(self, 'activateWindow'):
+            self.activateWindow()
+            self.raise_()
+        msg_box.show()
+        msg_box.raise_()
+        msg_box.activateWindow()
+        reply = msg_box.exec()
+        
+        if reply == QMessageBox.Yes:
+            # User chose delete+redownload fallback
+            self._log_models(f"🔄 Starting delete+redownload fallback for {model_id}...")
+            
+            # Update status label
+            if status_label:
+                status_label.setText("Deleting and redownloading...")
+            
+            # Unlock files first
+            self._unlock_model_files(model_path, log_callback=lambda m: self._log_models(m))
+            
+            # Clean up .incomplete files
+            try:
+                cache_dir = model_path / ".cache" / "huggingface" / "download"
+                if cache_dir.exists():
+                    incomplete_files = list(cache_dir.rglob("*.incomplete"))
+                    if incomplete_files:
+                        self._log_models(f"Removing {len(incomplete_files)} incomplete download files...")
+                        for incomplete_file in incomplete_files:
+                            try:
+                                incomplete_file.unlink()
+                            except Exception:
+                                pass
+            except Exception as e:
+                self._log_models(f"Warning: Could not clean incomplete files: {e}")
+            
+            # Create new repair thread with force_fresh_only=True
+            thread = RepairThread(model_id, model_path, force_fresh_only=True, cache_dir=self.hf_cache_dir)
+            
+            # Mark as active
+            self.active_downloads[repair_key] = (thread, card)
+            
+            # Connect signals
+            thread.progress.connect(lambda p: progress_bar.setValue(p))
+            thread.status.connect(lambda msg: status_label.setText(msg) if status_label else None)
+            thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key, status_label))
+            thread.error.connect(lambda err: self._on_repair_error(model_id, err, card, progress_bar, repair_key))
+            
+            # Start repair
+            thread.start()
+            progress_bar.setValue(2)
+        else:
+            # User declined - just clean up UI and re-enable repair button
+            if progress_bar:
+                progress_bar.setVisible(False)
+                progress_bar.deleteLater()
+            if status_label:
+                status_label.setVisible(False)
+                status_label.deleteLater()
+            
+            # Re-enable repair button
+            if hasattr(card, 'repair_btn'):
+                card.repair_btn.setEnabled(True)
+                card.repair_btn.setText("🔧 Repair")
+    
+    def _on_repair_error(self, model_id: str, error: str, card, progress_bar, repair_key: str):
+        """Handle repair error (legacy - used for delete+redownload fallback errors)"""
+        self._log_models(f"✗ Error repairing {model_id}: {error}")
+        
+        # Clean up thread
+        if repair_key in self.active_downloads:
+            thread, _ = self.active_downloads[repair_key]
+            if thread.isRunning():
+                thread.quit()
+                thread.wait(5000)
                 if thread.isRunning():
                     thread.terminate()
                     thread.wait(2000)

@@ -792,7 +792,8 @@ class DownloadedModelCard(QFrame):
         """Position ribbon at bottom-right corner"""
         if not hasattr(self, 'ready_ribbon') or not self.ready_ribbon:
             return
-        ribbon_size = 120
+        # Keep it small so it reads as a corner triangle, not a banner
+        ribbon_size = getattr(self.ready_ribbon, "ribbon_size", 86) or 86
         self.ready_ribbon.setGeometry(
             self.width() - ribbon_size,
             self.height() - ribbon_size,
@@ -807,11 +808,15 @@ class RibbonWidget(QWidget):
     def __init__(self, text: str = "READY", parent=None):
         super().__init__(parent)
         self.text = text
-        self.setFixedSize(120, 120)
+        # A "corner triangle" badge: keep a square widget and draw a triangle in it.
+        self.ribbon_size = 86
+        self.setFixedSize(self.ribbon_size, self.ribbon_size)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAutoFillBackground(False)
     
     def paintEvent(self, event):
-        """Draw diagonal ribbon with text"""
+        """Draw bottom-right corner triangle with diagonal text"""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         
@@ -819,30 +824,28 @@ class RibbonWidget(QWidget):
         width = self.width()
         height = self.height()
         
-        # Create diagonal ribbon path (bottom-right corner)
-        # Points for a diagonal ribbon shape going from bottom-right to top-left
-        ribbon_points = [
-            QPointF(width, height),  # Bottom-right corner
-            QPointF(width - 50, height),  # Bottom edge
-            QPointF(width - 100, height - 50),  # Inner corner
-            QPointF(width - 50, height - 100),  # Top edge
+        # Bottom-right right-triangle covering the corner.
+        # Right angle is at (width, height) and diagonal runs from (width, 0) to (0, height).
+        triangle_points = [
+            QPointF(width, height),  # bottom-right
+            QPointF(width, 0),       # top-right
+            QPointF(0, height),      # bottom-left
         ]
         
-        # Draw ribbon background (green for READY)
+        # Draw triangle background (green for READY)
         painter.setBrush(QBrush(QColor(76, 175, 80)))  # #4CAF50
-        painter.setPen(QPen(QColor(60, 140, 60), 2))
+        painter.setPen(QPen(QColor(60, 140, 60), 1))
         
-        # Create polygon for ribbon
-        polygon = QPolygonF(ribbon_points)
+        polygon = QPolygonF(triangle_points)
         painter.drawPolygon(polygon)
         
         # Draw text rotated diagonally
         painter.save()
         
-        # Calculate rotation center and angle
-        center_x = width - 50
-        center_y = height - 50
-        angle = -45  # Diagonal from top-left to bottom-right
+        # Center at triangle centroid for stable positioning
+        center_x = (2 * width) / 3.0
+        center_y = (2 * height) / 3.0
+        angle = -45  # Align with the diagonal edge
         
         # Translate to center, rotate, then translate back
         painter.translate(center_x, center_y)
@@ -852,7 +855,7 @@ class RibbonWidget(QWidget):
         # Draw text
         painter.setPen(QPen(QColor(255, 255, 255)))  # White text
         font = QFont()
-        font.setPointSize(11)
+        font.setPointSize(10)
         font.setBold(True)
         painter.setFont(font)
         

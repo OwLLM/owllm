@@ -157,9 +157,39 @@ class ModelIntegrityChecker:
                                 all_shards_present = False
                                 missing_shards.append(shard_file)
                         
-                        has_weights = all_shards_present
-                        if not all_shards_present:
-                            missing_files.append(f"missing shard files: {', '.join(missing_shards[:5])}{'...' if len(missing_shards) > 5 else ''}")
+                        if all_shards_present:
+                            has_weights = True
+                        else:
+                            # Shards are missing from index - but check for ALTERNATIVE weight formats
+                            # Some repos have both sharded .bin AND single .safetensors files
+                            # If any large weight files exist in alternative format, consider it complete
+                            alternative_weights = [f for f in files if (
+                                (f.endswith('.safetensors') or f.endswith('.pt')) and
+                                not f.endswith('.index.json') and
+                                not f.startswith('.')  # Skip hidden files
+                            )]
+                            if alternative_weights:
+                                # Check if alternative files are reasonably large (>100MB = likely real weights)
+                                large_alternatives = []
+                                for alt_file in alternative_weights:
+                                    try:
+                                        alt_size = (model_path / alt_file).stat().st_size
+                                        if alt_size > 100 * 1024 * 1024:  # > 100MB
+                                            large_alternatives.append(alt_file)
+                                    except Exception:
+                                        pass
+                                
+                                if large_alternatives:
+                                    # Has alternative weight format - consider complete
+                                    has_weights = True
+                                    logger.info(f"Model {model_path.name} has alternative weights: {large_alternatives[:3]}")
+                                else:
+                                    # Small files only - not real weights
+                                    has_weights = False
+                                    missing_files.append(f"missing shard files: {', '.join(missing_shards[:5])}{'...' if len(missing_shards) > 5 else ''}")
+                            else:
+                                has_weights = False
+                                missing_files.append(f"missing shard files: {', '.join(missing_shards[:5])}{'...' if len(missing_shards) > 5 else ''}")
                     else:
                         # Empty weight_map - treat as incomplete
                         has_weights = False

@@ -31,9 +31,8 @@ def _get_required_packages_for_requirements(req: Dict[str, Any]) -> List[str]:
     quantization = req.get("quantization", "none")
     
     if quantization == "gptq":
-        # GPTQ models require optimum (and sometimes auto-gptq)
-        packages.append("optimum")
-        # Some GPTQ models may also need auto-gptq, but optimum is the primary requirement
+        # GPTQ models require optimum and auto-gptq
+        packages.extend(["optimum", "auto-gptq"])
     elif quantization == "awq":
         # AWQ models require autoawq or awq
         packages.append("autoawq")
@@ -358,19 +357,65 @@ class ModelOnboardingService:
             
             log(f"Shard-complete integrity check passed")
             
-            # Step 9: Run dependency probe (check for model-specific packages)
-            log(f"Running dependency probe for model-specific packages")
+            # Step 9: Check for model-specific extra dependencies
+            log(f"Checking for model-specific extra dependencies")
             required_packages = _get_required_packages_for_requirements(req)
             
             if required_packages:
-                log(f"Checking for required packages: {required_packages}")
+                log(f"Model requires extra packages: {required_packages}")
+                log(f"Enforcing per-model isolation for extra dependencies.")
+                
+                # Resolve dedicated env key
+                dedicated_env_key = self.env_registry.env_key_resolver.resolve_dedicated_env_key(final_env_key, model_id)
+                log(f"Resolved dedicated env_key: {dedicated_env_key}")
+                
+                # Create dedicated env by copying the current final env (stable or edge)
+                try:
+                    self.env_registry._create_dedicated_env(
+                        dedicated_env_key, 
+                        final_env_key, 
+                        profile_data, 
+                        log_callback=log_callback
+                    )
+                    # Update final env to the dedicated one
+                    final_env_key = dedicated_env_key
+                    final_python_exe = self.env_registry._get_env_python_executable(final_env_key)
+                    if not final_python_exe or not final_python_exe.exists():
+                        raise RuntimeError(f"Dedicated environment Python not found: {final_python_exe}")
+                except Exception as dedicated_error:
+                    log(f"Failed to create dedicated environment: {dedicated_error}")
+                    error_msg = f"Failed to create isolated environment for model-specific dependencies: {dedicated_error}"
+                    
+                    self.state_store.upsert_onboarding(
+                        model_id=model_id,
+                        base_model_path=base_model_path,
+                        adapter_dir=adapter_dir,
+                        env_key=final_env_key,
+                        backend=backend,
+                        accelerator=accelerator,
+                        status="BROKEN",
+                        last_error=error_msg,
+                        healthcheck_log_path=log_path
+                    )
+                    
+                    return {
+                        "status": "BROKEN",
+                        "env_key": final_env_key,
+                        "backend": backend,
+                        "accelerator": accelerator,
+                        "last_error": error_msg,
+                        "healthcheck_log_path": log_path
+                    }
+
+                # Step 10: Run dependency probe (install model-specific packages into dedicated env)
+                log(f"Installing required packages into dedicated environment: {required_packages}")
                 missing_packages = self.env_registry.check_missing_packages(
                     final_python_exe,
                     required_packages
                 )
                 
                 if missing_packages:
-                    log(f"Missing packages detected: {missing_packages}. Auto-installing...")
+                    log(f"Missing packages detected in dedicated env: {missing_packages}. Installing...")
                     install_success = self.env_registry.auto_install_missing_packages(
                         final_python_exe,
                         missing_packages,
@@ -378,7 +423,7 @@ class ModelOnboardingService:
                     )
                     
                     if not install_success:
-                        error_msg = f"Failed to install required packages: {', '.join(missing_packages)}"
+                        error_msg = f"Failed to install required packages in dedicated environment: {', '.join(missing_packages)}"
                         log(f"Model onboarding failed: {error_msg}")
                         
                         self.state_store.upsert_onboarding(
@@ -409,7 +454,7 @@ class ModelOnboardingService:
                     )
                     
                     if still_missing:
-                        error_msg = f"Packages still missing after installation: {', '.join(still_missing)}"
+                        error_msg = f"Packages still missing after installation in dedicated env: {', '.join(still_missing)}"
                         log(f"Model onboarding failed: {error_msg}")
                         
                         self.state_store.upsert_onboarding(
@@ -433,11 +478,11 @@ class ModelOnboardingService:
                             "healthcheck_log_path": log_path
                         }
                     
-                    log(f"Successfully installed and verified packages: {missing_packages}")
+                    log(f"Successfully installed and verified packages in dedicated env: {missing_packages}")
                 else:
-                    log(f"All required packages already present: {required_packages}")
+                    log(f"All required packages already present in dedicated env: {required_packages}")
             else:
-                log(f"No model-specific packages required")
+                log(f"No model-specific packages required (shared environment is sufficient)")
             
             # Success: mark as READY (all checks passed)
             log(f"Model {model_id} successfully onboarded (env: {final_env_key})")

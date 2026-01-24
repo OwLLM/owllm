@@ -890,15 +890,6 @@ class RepairThread(QThread):
                 watchdog_stop.set()
             except Exception:
                 pass
-            # Debug: Log to file to confirm error.emit is called
-            try:
-                log_path = Path(__file__).parent.parent / "logs" / "repair_debug.log"
-                log_path.parent.mkdir(exist_ok=True)
-                with open(log_path, "a") as f:
-                    f.write(f"\n[{__import__('datetime').datetime.now()}] RepairThread.run() emitting error\n")
-                    f.write(f"  error: {str(e)[:200]}\n")
-            except Exception:
-                pass
             self.error.emit(str(e))
 
 
@@ -5591,6 +5582,7 @@ class MainWindow(QMainWindow):
                         card.set_theme(self.dark_mode)
                         card.selected.connect(self._on_model_selected)
                         card.delete_clicked.connect(self._on_delete_model)
+                        card.dedicated_env_clicked.connect(self._on_create_dedicated_env)
                         if is_incomplete:
                             card.repair_clicked.connect(self._on_repair_model)
                         # Store model_id in card for later updates
@@ -5816,16 +5808,6 @@ class MainWindow(QMainWindow):
     
     def _on_repair_model(self, model_path: str):
         """Repair or resume download for an incomplete model"""
-        # Debug: Log to file immediately when repair button is clicked
-        try:
-            log_path = Path(__file__).parent.parent / "logs" / "repair_debug.log"
-            log_path.parent.mkdir(exist_ok=True)
-            with open(log_path, "a") as f:
-                f.write(f"\n[{__import__('datetime').datetime.now()}] _on_repair_model called\n")
-                f.write(f"  model_path: {model_path}\n")
-        except Exception as e:
-            pass
-        
         path = Path(model_path)
         model_name = path.name
         
@@ -5940,21 +5922,40 @@ class MainWindow(QMainWindow):
             self._log_models(f"🔧 Starting repair for {model_id}...")
             self._log_models(f"   Will resume/fetch missing files (non-destructive)")
             
-            # Debug: Log to file
-            try:
-                log_path = Path(__file__).parent.parent / "logs" / "repair_debug.log"
-                log_path.parent.mkdir(exist_ok=True)
-                with open(log_path, "a") as f:
-                    f.write(f"\n[{__import__('datetime').datetime.now()}] Starting repair thread for {model_id}\n")
-                    f.write(f"  repair_key: {repair_key}\n")
-            except Exception:
-                pass
-            
             # Start repair
             thread.start()
             
             # Update progress bar immediately
             progress_bar.setValue(2)
+
+    def _on_create_dedicated_env(self, model_path: str):
+        """Manually trigger creation of a dedicated environment for a model"""
+        path = Path(model_path)
+        model_name = path.name
+        
+        # Try to extract model ID
+        status = self.model_checker.check_model(path)
+        model_id = status.model_id
+        
+        if not model_id:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Dedicated Environment", 
+                                f"Could not determine HuggingFace Model ID for: {model_name}\n\n"
+                                "You may need to re-onboard it manually.")
+            return
+            
+        from PySide6.QtWidgets import QMessageBox
+        reply = QMessageBox.question(self, "Dedicated Environment", 
+                                    f"Do you want to create a dedicated isolated environment for '{model_id}'?\n\n"
+                                    "This will ensure this model's dependencies (like 'optimum' for GPTQ) "
+                                    "never interfere with other models.\n\n"
+                                    "This involves copying the base environment and may take a minute.",
+                                    QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self._log_models(f"🛡️ Creating dedicated environment for {model_id}...")
+            # Run onboarding which will now detect extras or can be forced to use dedicated env
+            self._start_model_onboarding(str(path), model_id)
 
     def request_restart_clean(self, model_dir: Path, reason: str) -> None:
         """
@@ -7010,6 +7011,7 @@ class MainWindow(QMainWindow):
         new_card.set_theme(self.dark_mode)
         new_card.selected.connect(self._on_model_selected)
         new_card.delete_clicked.connect(self._on_delete_model)
+        new_card.dedicated_env_clicked.connect(self._on_create_dedicated_env)
         if not status_check.is_complete:
             new_card.repair_clicked.connect(self._on_repair_model)
         new_card.model_id = model_id
@@ -7115,17 +7117,6 @@ class MainWindow(QMainWindow):
     
     def _handle_repair_error(self, repair_key: str, error: str):
         """Handle repair error signal - looks up stored info and delegates to the actual handler"""
-        # Debug: Log to file since pythonw has no console
-        try:
-            log_path = Path(__file__).parent.parent / "logs" / "repair_debug.log"
-            log_path.parent.mkdir(exist_ok=True)
-            with open(log_path, "a") as f:
-                f.write(f"\n[{__import__('datetime').datetime.now()}] _handle_repair_error called\n")
-                f.write(f"  repair_key: {repair_key}\n")
-                f.write(f"  error: {error[:100]}\n")
-        except Exception:
-            pass
-        
         # Look up the stored repair info
         if not hasattr(self, '_repair_info') or repair_key not in self._repair_info:
             self._log_models(f"Error: Repair info not found for key {repair_key}")
@@ -7147,14 +7138,6 @@ class MainWindow(QMainWindow):
 
     def _show_repair_error_dialog(self, model_id: str, card, progress_bar, repair_key: str, status_label, model_path: Path, error: str):
         """Actually show the repair error dialog - called via QTimer to ensure main thread"""
-        # Debug: Log to file
-        try:
-            log_path = Path(__file__).parent.parent / "logs" / "repair_debug.log"
-            with open(log_path, "a") as f:
-                f.write(f"[{__import__('datetime').datetime.now()}] _show_repair_error_dialog called\n")
-        except Exception:
-            pass
-        
         self._log_models(f"Error repairing {model_id}: {error}")
         
         # Update status label to show error occurred (immediate visual feedback)

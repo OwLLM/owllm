@@ -365,6 +365,7 @@ class DownloadedModelCard(QFrame):
     selected = Signal(str)
     delete_clicked = Signal(str)  # Emits model path
     repair_clicked = Signal(str)  # Emits model path
+    dedicated_env_clicked = Signal(str)  # Emits model path
     
     def __init__(self, model_name: str, model_path: str, size: str, icons: str, 
                  is_incomplete: bool = False, compatibility_badge: dict = None, 
@@ -639,6 +640,16 @@ class DownloadedModelCard(QFrame):
             self.repair_btn.clicked.connect(lambda: self.repair_clicked.emit(self.model_path))
             self.repair_btn.setStyleSheet(button_style)
             button_layout.addWidget(self.repair_btn)
+        
+        # Dedicated Env button (only for READY models that don't already have one)
+        if self.onboarding_status == "READY" and "--dedicated--" not in (self.env_key or ""):
+            self.dedicated_btn = QPushButton("🛡️ Isolation")
+            self.dedicated_btn.setToolTip("Create a dedicated isolated environment for this model's dependencies")
+            self.dedicated_btn.setMinimumHeight(35)
+            self.dedicated_btn.setCursor(Qt.ArrowCursor)
+            self.dedicated_btn.clicked.connect(lambda: self.dedicated_env_clicked.emit(self.model_path))
+            self.dedicated_btn.setStyleSheet(button_style)
+            button_layout.addWidget(self.dedicated_btn)
         
         # Delete button
         self.delete_btn = QPushButton("🗑️ Delete")

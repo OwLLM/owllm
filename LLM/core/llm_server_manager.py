@@ -858,27 +858,40 @@ class LLMServerManager:
             
             if missing_packages:
                 log(f"Missing critical packages detected: {', '.join(missing_packages)}")
-                log("Auto-installing missing packages (this ensures environment is ready)...")
-                if not self.env_registry.auto_install_missing_packages(
-                    env_spec.python_executable, 
-                    missing_packages, 
-                    log_callback=log_callback
-                ):
-                    raise RuntimeError(
-                        f"Environment validation failed: Could not auto-install required packages: {', '.join(missing_packages)}\n"
-                        f"This indicates the environment is not properly configured.\n"
-                        f"Please go to the Environment/Requirements tab and run 'Repair Environment' for {env_spec.key}."
+                
+                # Check if this is a dedicated environment
+                is_dedicated = "--dedicated--" in env_spec.key
+                
+                if is_dedicated:
+                    log("Auto-installing missing packages into dedicated environment...")
+                    if not self.env_registry.auto_install_missing_packages(
+                        env_spec.python_executable, 
+                        missing_packages, 
+                        log_callback=log_callback
+                    ):
+                        raise RuntimeError(
+                            f"Environment validation failed: Could not auto-install required packages: {', '.join(missing_packages)}\n"
+                            f"This indicates the environment is not properly configured.\n"
+                            f"Please go to the Environment/Requirements tab and run 'Repair Environment' for {env_spec.key}."
+                        )
+                    log("Missing packages installed successfully, re-validating...")
+                    # Re-check after installation
+                    still_missing = self.env_registry.check_missing_packages(
+                        env_spec.python_executable,
+                        required_packages=missing_packages
                     )
-                log("Missing packages installed successfully, re-validating...")
-                # Re-check after installation
-                still_missing = self.env_registry.check_missing_packages(
-                    env_spec.python_executable,
-                    required_packages=missing_packages
-                )
-                if still_missing:
+                    if still_missing:
+                        raise RuntimeError(
+                            f"Environment repair incomplete: Packages still missing after installation: {', '.join(still_missing)}\n"
+                            f"Please manually repair the environment: {env_spec.key}"
+                        )
+                else:
+                    # Shared environment: DO NOT auto-install model-specific dependencies
+                    # This enforces the invariant that shared envs stay clean
                     raise RuntimeError(
-                        f"Environment repair incomplete: Packages still missing after installation: {', '.join(still_missing)}\n"
-                        f"Please manually repair the environment: {env_spec.key}"
+                        f"Missing critical packages in shared environment '{env_spec.key}': {', '.join(missing_packages)}\n"
+                        "LocaLLM will not auto-install into shared environments to avoid breaking other models.\n"
+                        "Please click '🛡️ Isolation' on the model card to create a dedicated environment."
                     )
                 log("Environment dependencies validated - all critical packages present")
             else:
@@ -887,7 +900,6 @@ class LLMServerManager:
             # Additional health check: verify environment can actually import and use transformers
             log("Running environment health check...")
             try:
-                import subprocess
                 health_code = """
 import transformers
 import tokenizers
@@ -1047,66 +1059,10 @@ print('OK')
                                     match = re.search(r'No such file.*?([^\s]+\.(?:safetensors|bin))', log_text)
                                     if match:
                                         missing_file = match.group(1)
-                                        
-                                        # Auto-heal: Trigger repair/download for missing shard
-                                        log(f"Auto-healing: Missing shard file detected: {missing_file}")
-                                        log("Triggering automatic repair to download missing shard...")
-                                        
-                                        try:
-                                            # Get model path from config
-                                            model_path = Path(base_model)
-                                            
-                                            # Extract model ID for repair
-                                            onboarding_id = self._resolve_onboarding_id(model_id, model_cfg)
-                                            
-                                            # Import repair functionality
-                                            from core.model_file_utils import download_repo_files
-                                            from core.models import get_hf_token
-                                            
-                                            log(f"Repairing model {onboarding_id} to fetch missing shard: {missing_file}")
-                                            
-                                            # Download missing files (resume=True will skip existing files)
-                                            token = get_hf_token()
-                                            download_repo_files(
-                                                repo_id=onboarding_id,
-                                                dest_dir=model_path,
-                                                token=token,
-                                                allow_patterns=None,  # Download everything
-                                                resume=True,  # Skip existing files
-                                                timeout_s=900,
-                                                max_retries=2,
-                                                progress_callback=None,
-                                                should_cancel=None,
-                                                clean_locks=True,
-                                                cache_dir=None
-                                            )
-                                            
-                                            log("Missing shard downloaded successfully, restarting server...")
-                                            
-                                            # Kill the failed server process and restart
-                                            if model_id in self.running_servers:
-                                                process, log_file, _ = self.running_servers[model_id]
-                                                try:
-                                                    process.kill()
-                                                    process.wait(timeout=5)
-                                                except Exception:
-                                                    pass
-                                                if log_file:
-                                                    log_file.close()
-                                                del self.running_servers[model_id]
-                                            
-                                            # Restart server with missing shard now downloaded
-                                            time.sleep(2)  # Brief wait for port release
-                                            # Recursively call _start_server to restart
-                                            return self._start_server(model_id, log_callback=log_callback)
-                                            
-                                        except Exception as repair_error:
-                                            log(f"Auto-repair failed: {repair_error}")
-                                            raise RuntimeError(
-                                                f"Model file missing: {missing_file}\n"
-                                                f"Auto-repair attempt failed: {repair_error}\n"
-                                                f"Please manually repair the model download."
-                                            )
+                                        raise RuntimeError(
+                                            f"Model file missing: {missing_file}\n"
+                                            f"Please run 'Repair Model' in the Downloaded Models tab."
+                                        )
                                 elif "error" in log_text.lower() and "traceback" in log_text.lower():
                                     # Extract full error message - look for specific error types
                                     import re
@@ -1201,59 +1157,20 @@ print('OK')
                                     import_error_match = re.search(r'ImportError:\s*(.+?)(?:\n|$)', log_text, re.MULTILINE | re.DOTALL)
                                     if import_error_match:
                                         error_msg = import_error_match.group(1).strip()
-                                        
-                                        # Auto-heal: Detect and install missing packages
                                         package_name = self._extract_package_from_importerror(error_msg)
                                         
                                         if package_name:
-                                            log(f"Detected missing {package_name} dependency, installing automatically...")
-                                            try:
-                                                # Get the environment for this model
-                                                env_spec = self.env_registry.get_env_for_model(base_model, log_callback=log_callback)
-                                                python_exe = env_spec.python_executable
-                                                
-                                                # Install package using the registry's auto-install method
-                                                log(f"Installing {package_name} in {env_spec.key}...")
-                                                if self.env_registry.auto_install_missing_packages(
-                                                    python_exe, 
-                                                    [package_name], 
-                                                    log_callback=log_callback
-                                                ):
-                                                    log(f"{package_name} installed successfully, restarting server...")
-                                                    # Kill the failed server process and restart
-                                                    if model_id in self.running_servers:
-                                                        process, log_file, _ = self.running_servers[model_id]
-                                                        try:
-                                                            process.kill()
-                                                            process.wait(timeout=5)
-                                                        except Exception:
-                                                            pass
-                                                        if log_file:
-                                                            log_file.close()
-                                                        del self.running_servers[model_id]
-                                                    # Restart server with package now installed
-                                                    time.sleep(2)  # Brief wait for port release
-                                                    # Recursively call _start_server to restart
-                                                    return self._start_server(model_id, log_callback=log_callback)
-                                                else:
-                                                    raise RuntimeError(
-                                                        f"Failed to auto-install {package_name} in environment {env_spec.key}.\n"
-                                                        f"Please go to the Environment/Requirements tab and run 'Repair Environment' for this model's environment."
-                                                    )
-                                            except RuntimeError:
-                                                raise  # Re-raise RuntimeError as-is
-                                            except Exception as e:
-                                                raise RuntimeError(
-                                                    f"Error during {package_name} auto-installation: {e}\n"
-                                                    f"Please go to the Environment/Requirements tab and run 'Repair Environment'."
-                                                )
+                                            raise RuntimeError(
+                                                f"Model requires extra package '{package_name}' which is not installed in the current environment.\n"
+                                                f"To fix this, please go to the Downloaded Models tab and run 'Repair Model' for '{model_id}'.\n"
+                                                f"This will create a dedicated isolated environment for this model."
+                                            )
                                         else:
                                             # Generic ImportError - provide helpful context
                                             raise RuntimeError(
                                                 f"ImportError in server: {error_msg[:500]}\n"
                                                 f"This usually indicates a missing Python package in the model's environment.\n"
-                                                f"Please check the server logs for the full error and install the missing package,\n"
-                                                f"or go to the Environment/Requirements tab and run 'Repair Environment'."
+                                                f"Please run 'Repair Model' for this model to create a dedicated environment with all dependencies."
                                             )
                                     
                                     # Fallback: extract any error line (but try to get more context)
@@ -1376,11 +1293,23 @@ print('OK')
                         if status == "error":
                             error_msg = data.get("error", "Unknown error")
                             log(f"Server reports error status: {error_msg}")
+                            
+                            # Check for missing dependencies in /health error
+                            if isinstance(error_msg, str) and "importerror" in error_msg.lower():
+                                pkg = self._extract_package_from_importerror(error_msg)
+                                if pkg:
+                                    raise RuntimeError(
+                                        f"Model requires extra package '{pkg}' which is not installed in the current environment.\n"
+                                        f"To fix this, please go to the Downloaded Models tab and run 'Repair Model' for '{model_id}'.\n"
+                                        f"This will create a dedicated isolated environment for this model."
+                                    )
+                            
                             # Get model path for error message
                             model_path = model_cfg.get("base_model", "unknown")
                             raise RuntimeError(
                                 f"Server failed to load model: {error_msg}\n"
-                                f"Check model files are complete in: {model_path}"
+                                f"Check model files are complete in: {model_path}\n"
+                                f"You may need to run 'Repair Model' to fix dependencies or missing files."
                             )
                         
                         if status == "ok":
@@ -1417,12 +1346,16 @@ print('OK')
                             return
                         # Still loading; keep waiting
                         last_error = f"Server up, model status={status}"
-                    except Exception:
+                    except Exception as e:
+                        if isinstance(e, RuntimeError):
+                            raise
                         # If JSON parsing fails, assume not ready yet.
                         last_error = "Server up, invalid /health JSON"
             except requests.exceptions.RequestException as e:
                 last_error = str(e)
             except Exception as e:
+                if isinstance(e, RuntimeError):
+                    raise
                 last_error = str(e)
             
             time.sleep(2)

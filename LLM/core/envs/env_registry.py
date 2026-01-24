@@ -922,6 +922,94 @@ except Exception as e:
         log(f"Creating new edge environment {edge_env_key}...")
         self._atomic_create_env(edge_env_key, profile_data, log_callback=log_callback)
         return self.envs_dir / edge_env_key
+
+    def _create_dedicated_env(
+        self,
+        dedicated_env_key: str,
+        base_env_key: str,
+        profile_data: dict,
+        log_callback=None
+    ) -> Path:
+        """
+        Create a dedicated environment for a specific model by copying a base environment.
+        
+        Args:
+            dedicated_env_key: The new dedicated environment key
+            base_env_key: The shared environment key to copy from
+            profile_data: Hardware profile data
+            log_callback: Optional log callback
+            
+        Returns:
+            Path to the new dedicated environment directory
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+            import logging
+            logging.info(msg)
+            
+        log(f"Creating dedicated environment: {dedicated_env_key} from {base_env_key}")
+        
+        # Check if dedicated env already exists
+        dedicated_python_exe = self._get_env_python_executable(dedicated_env_key)
+        dedicated_env_state = self.state_store.get_env(dedicated_env_key)
+        
+        if dedicated_python_exe and dedicated_python_exe.exists() and dedicated_env_state and dedicated_env_state.get('status') == 'READY':
+            log(f"Dedicated environment {dedicated_env_key} already exists and is READY.")
+            return self.envs_dir / dedicated_env_key
+            
+        # Check if base env exists to copy from
+        base_python_exe = self._get_env_python_executable(base_env_key)
+        base_env_path = self.envs_dir / base_env_key
+        
+        if not (base_python_exe and base_python_exe.exists() and base_env_path.exists()):
+            log(f"Base environment {base_env_key} not found, creating it first...")
+            self.ensure_env_exists(base_env_key, profile_data, log_callback=log_callback)
+            base_env_path = self.envs_dir / base_env_key
+            base_python_exe = self._get_env_python_executable(base_env_key)
+            
+        log(f"Copying base environment {base_env_key} to {dedicated_env_key}...")
+        dedicated_env_path = self.envs_dir / dedicated_env_key
+        if dedicated_env_path.exists():
+            self._rmtree_windows_safe(dedicated_env_path)
+            
+        # Mark as CREATING in StateStore
+        self.state_store.upsert_env(
+            env_key=dedicated_env_key,
+            status="CREATING"
+        )
+        
+        try:
+            if sys.platform == 'win32':
+                shutil.copytree(base_env_path, dedicated_env_path, dirs_exist_ok=True)
+            else:
+                shutil.copytree(base_env_path, dedicated_env_path)
+                
+            dedicated_python_exe = self._get_env_python_executable(dedicated_env_key)
+            if not (dedicated_python_exe and dedicated_python_exe.exists()):
+                raise RuntimeError(f"Failed to create dedicated environment: {dedicated_python_exe} not found after copy")
+                
+            # Update StateStore
+            torch_version, cuda_available = self._get_torch_info(dedicated_python_exe)
+            self.state_store.upsert_env(
+                env_key=dedicated_env_key,
+                python_path=str(dedicated_python_exe),
+                torch_version=torch_version,
+                cuda_version=profile_data.get("cuda_version", "cpu"),
+                backend="transformers",
+                status="READY"
+            )
+            
+            log(f"Dedicated environment {dedicated_env_key} ready!")
+            return dedicated_env_path
+        except Exception as e:
+            # Mark as FAILED in StateStore
+            self.state_store.upsert_env(
+                env_key=dedicated_env_key,
+                status="FAILED",
+                last_error=str(e)[:500]
+            )
+            raise RuntimeError(f"Failed to create dedicated environment {dedicated_env_key}: {e}")
     
     def _upgrade_edge_env_for_unsupported_arch(
         self,

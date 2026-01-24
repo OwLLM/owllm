@@ -352,26 +352,32 @@ class EnvKeyResolver:
         Example:
             "torch-cu121-transformers-bnb" -> "Transformers + Quantization (CUDA 12.1)"
         """
-        info = self.parse_env_key(env_key)
+        # Check if it's a dedicated environment
+        is_dedicated = "--dedicated--" in env_key
+        actual_key = env_key.split("--dedicated--")[0] if is_dedicated else env_key
+        
+        info = self.parse_env_key(actual_key)
         
         # Build display name
         parts = []
         
-        if info["backend"] == "transformers":
+        if info["backend"] == "tf":
             parts.append("Transformers")
-            if info["quantization"]:
-                parts.append("+ Quantization")
         elif info["backend"] == "vllm":
             parts.append("vLLM")
         elif info["backend"] == "llamacpp":
             parts.append("llama.cpp")
         else:
-            parts.append(info["backend"].title())
+            parts.append(str(info["backend"]).title())
+            
+        # Add quant info
+        if info.get("quant") == "bnb":
+            parts.append("+ bnb")
         
-        # Add CUDA info
-        cuda = info["cuda"]
-        if cuda != "cpu":
-            cuda_ver = cuda.replace("cu", "")
+        # Add accelerator info
+        accel = info["accelerator"]
+        if accel != "cpu":
+            cuda_ver = accel.replace("cu", "")
             if len(cuda_ver) == 3:
                 # "121" -> "12.1"
                 cuda_display = f"{cuda_ver[0:2]}.{cuda_ver[2]}"
@@ -380,5 +386,32 @@ class EnvKeyResolver:
             parts.append(f"(CUDA {cuda_display})")
         else:
             parts.append("(CPU)")
+            
+        display_name = " ".join(parts)
+        if is_dedicated:
+            display_name = f"Dedicated: {display_name}"
+            
+        return display_name
+
+    def resolve_dedicated_env_key(self, base_env_key: str, model_id: str) -> str:
+        """
+        Resolve a dedicated environment key for a specific model.
         
-        return " ".join(parts)
+        Args:
+            base_env_key: The shared environment key to base it on
+            model_id: HuggingFace model ID or directory name
+            
+        Returns:
+            Sanitized dedicated environment key
+        """
+        # Sanitize model_id for use in folder name
+        # Replace / and \ with __
+        sanitized_id = model_id.replace("/", "__").replace("\\", "__")
+        # Remove non-alnum except - and _
+        sanitized_id = re.sub(r'[^a-zA-Z0-9\-_]', '', sanitized_id)
+        
+        # Cap length to avoid Windows path issues (max 64 chars for the model part)
+        if len(sanitized_id) > 64:
+            sanitized_id = sanitized_id[:64]
+            
+        return f"{base_env_key}--dedicated--{sanitized_id}"

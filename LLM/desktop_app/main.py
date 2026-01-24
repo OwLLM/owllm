@@ -618,6 +618,13 @@ class RepairThread(QThread):
             
             should_cancel = lambda: self._stop_requested.is_set() or self.isInterruptionRequested()
             
+            # Status callback to show current file being downloaded
+            def status_callback(filename: str, file_idx: int, total_files: int, attempt: int):
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"Downloading {filename} ({file_idx}/{total_files}) - attempt {attempt}")
+                # Could emit a signal here if we want to show in UI, but logging is sufficient for now
+            
             # Start with metadata-only preflight (if missing)
             self.progress.emit(1)
             metadata_patterns = [
@@ -707,20 +714,50 @@ class RepairThread(QThread):
                 # Directory deleted - now download fresh
                 self.progress.emit(25)
                 logger.info(f"Starting FRESH download for {self.model_id}")
-                download_repo_files(
-                    repo_id=self.model_id,
-                    dest_dir=self.existing_dir,
-                    token=token,
-                    allow_patterns=None,
-                    resume=False,
-                    timeout_s=900,
-                    max_retries=2,
-                    progress_callback=progress_callback,
-                    should_cancel=should_cancel,
-                    clean_locks=True,
-                    force_fresh=False,  # Already cleaned above
-                    cache_dir=self.cache_dir
-                )
+                try:
+                    download_repo_files(
+                        repo_id=self.model_id,
+                        dest_dir=self.existing_dir,
+                        token=token,
+                        allow_patterns=None,
+                        resume=False,
+                        timeout_s=900,
+                        max_retries=2,
+                        progress_callback=progress_callback,
+                        status_callback=status_callback,
+                        should_cancel=lambda: should_cancel() or stall_detected.is_set(),
+                        clean_locks=True,
+                        force_fresh=False,  # Already cleaned above
+                        cache_dir=self.cache_dir
+                    )
+                except Exception as download_error:
+                    if stall_detected.is_set():
+                        logger.warning(f"Download stalled, cleaning locks and retrying...")
+                        from core.model_file_utils import clean_download_locks
+                        clean_download_locks(self.existing_dir)
+                        if self.cache_dir:
+                            clean_download_locks(self.cache_dir)
+                        # Retry once
+                        stall_detected.clear()
+                        download_repo_files(
+                            repo_id=self.model_id,
+                            dest_dir=self.existing_dir,
+                            token=token,
+                            allow_patterns=None,
+                            resume=False,
+                            timeout_s=900,
+                            max_retries=2,
+                            progress_callback=progress_callback,
+                            status_callback=status_callback,
+                            should_cancel=should_cancel,
+                            clean_locks=True,
+                            force_fresh=False,
+                            cache_dir=self.cache_dir
+                        )
+                    else:
+                        raise
+                finally:
+                    watchdog_stop.set()
             else:
                 # Try repair with existing files first
                 try:
@@ -749,25 +786,55 @@ class RepairThread(QThread):
                             timeout_s=120,
                             max_retries=2,
                             progress_callback=progress_callback,
+                            status_callback=status_callback,
                             should_cancel=should_cancel,
                             clean_locks=True,
                             cache_dir=self.cache_dir
                         )
                     
                     # Download all remaining files (resume=True skips existing files)
-                    download_repo_files(
-                        repo_id=self.model_id,
-                        dest_dir=self.existing_dir,
-                        token=token,
-                        allow_patterns=None,  # Download everything
-                        resume=True,  # CRITICAL: Skip files that already exist
-                        timeout_s=900,  # 15 min per file max for responsiveness
-                        max_retries=2,
-                        progress_callback=progress_callback,
-                        should_cancel=should_cancel,
-                        clean_locks=True,  # Force clean locks on repair
-                        cache_dir=self.cache_dir
-                    )
+                    try:
+                        download_repo_files(
+                            repo_id=self.model_id,
+                            dest_dir=self.existing_dir,
+                            token=token,
+                            allow_patterns=None,  # Download everything
+                            resume=True,  # CRITICAL: Skip files that already exist
+                            timeout_s=900,  # 15 min per file max for responsiveness
+                            max_retries=2,
+                            progress_callback=progress_callback,
+                            status_callback=status_callback,
+                            should_cancel=lambda: should_cancel() or stall_detected.is_set(),
+                            clean_locks=True,  # Force clean locks on repair
+                            cache_dir=self.cache_dir
+                        )
+                    except Exception as download_error:
+                        if stall_detected.is_set():
+                            logger.warning(f"Download stalled, cleaning locks and retrying...")
+                            from core.model_file_utils import clean_download_locks
+                            clean_download_locks(self.existing_dir)
+                            if self.cache_dir:
+                                clean_download_locks(self.cache_dir)
+                            # Retry once
+                            stall_detected.clear()
+                            download_repo_files(
+                                repo_id=self.model_id,
+                                dest_dir=self.existing_dir,
+                                token=token,
+                                allow_patterns=None,
+                                resume=True,
+                                timeout_s=900,
+                                max_retries=2,
+                                progress_callback=progress_callback,
+                                status_callback=status_callback,
+                                should_cancel=should_cancel,
+                                clean_locks=True,
+                                cache_dir=self.cache_dir
+                            )
+                        else:
+                            raise
+                    finally:
+                        watchdog_stop.set()
                     
                 except Exception as first_error:
                     # First attempt failed - try force fresh download
@@ -776,20 +843,50 @@ class RepairThread(QThread):
                     self.progress.emit(5)
                     
                     # Force fresh: delete everything and redownload
-                    download_repo_files(
-                        repo_id=self.model_id,
-                        dest_dir=self.existing_dir,
-                        token=token,
-                        allow_patterns=None,
-                        resume=False,
-                        timeout_s=900,
-                        max_retries=2,
-                        progress_callback=progress_callback,
-                        should_cancel=should_cancel,
-                        clean_locks=True,
-                        force_fresh=True,  # Delete everything first
-                        cache_dir=self.cache_dir
-                    )
+                    try:
+                        download_repo_files(
+                            repo_id=self.model_id,
+                            dest_dir=self.existing_dir,
+                            token=token,
+                            allow_patterns=None,
+                            resume=False,
+                            timeout_s=900,
+                            max_retries=2,
+                            progress_callback=progress_callback,
+                            status_callback=status_callback,
+                            should_cancel=lambda: should_cancel() or stall_detected.is_set(),
+                            clean_locks=True,
+                            force_fresh=True,  # Delete everything first
+                            cache_dir=self.cache_dir
+                        )
+                    except Exception as download_error:
+                        if stall_detected.is_set():
+                            logger.warning(f"Download stalled, cleaning locks and retrying...")
+                            from core.model_file_utils import clean_download_locks
+                            clean_download_locks(self.existing_dir)
+                            if self.cache_dir:
+                                clean_download_locks(self.cache_dir)
+                            # Retry once
+                            stall_detected.clear()
+                            download_repo_files(
+                                repo_id=self.model_id,
+                                dest_dir=self.existing_dir,
+                                token=token,
+                                allow_patterns=None,
+                                resume=False,
+                                timeout_s=900,
+                                max_retries=2,
+                                progress_callback=progress_callback,
+                                status_callback=status_callback,
+                                should_cancel=should_cancel,
+                                clean_locks=True,
+                                force_fresh=True,
+                                cache_dir=self.cache_dir
+                            )
+                        else:
+                            raise
+                    finally:
+                        watchdog_stop.set()
             
             self.progress.emit(100)
             self.finished.emit(str(self.existing_dir))
@@ -860,6 +957,12 @@ class DownloadThread(QThread):
             
             should_cancel = lambda: self._stop_requested.is_set() or self.isInterruptionRequested()
             
+            # Status callback to show current file being downloaded
+            def status_callback(filename: str, file_idx: int, total_files: int, attempt: int):
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"Downloading {filename} ({file_idx}/{total_files}) - attempt {attempt}")
+            
             # Start with metadata-only preflight
             self.progress.emit(1)
             metadata_patterns = [
@@ -878,6 +981,7 @@ class DownloadThread(QThread):
                 timeout_s=120,
                 max_retries=2,
                 progress_callback=progress_callback,
+                status_callback=status_callback,
                 should_cancel=should_cancel,
                 cache_dir=self.cache_dir
             )
@@ -924,6 +1028,7 @@ class DownloadThread(QThread):
                 timeout_s=900,  # 15 min per file max for responsiveness
                 max_retries=2,
                 progress_callback=progress_callback,
+                status_callback=status_callback,
                 should_cancel=should_cancel,
                 cache_dir=self.cache_dir
             )
@@ -2049,6 +2154,10 @@ class MainWindow(QMainWindow):
         if splash:
             splash.update_progress(5, "Initializing model checker", "")
         self.model_checker = ModelIntegrityChecker()
+        
+        # State store for runtime state (onboarding, models, servers)
+        from core.state_store import get_state_store
+        self.state_store = get_state_store()
         
         # Environment manager for per-model isolated environments
         self.env_manager = EnvironmentManager(self.root)

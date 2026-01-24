@@ -336,6 +336,7 @@ def download_repo_files(
     timeout_s: int = 300,
     max_retries: int = 3,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    status_callback: Optional[Callable[[str, int, int, int], None]] = None,
     should_cancel: Optional[Callable[[], bool]] = None,
     clean_locks: bool = False,
     force_fresh: bool = False,
@@ -353,6 +354,7 @@ def download_repo_files(
         timeout_s: Per-file download timeout in seconds (unused - kept for compatibility)
         max_retries: Maximum retries per file on failure
         progress_callback: Optional callback(bytes_done, bytes_total) for progress updates
+        status_callback: Optional callback(filename, file_idx, total_files, attempt) called before each file download
         should_cancel: Optional callback() -> bool to check if download should be cancelled
         clean_locks: If True, force-clean all lock/incomplete files before starting
         force_fresh: If True, delete everything and redownload from scratch
@@ -444,7 +446,12 @@ def download_repo_files(
     last_file = None
     last_error = None
     
+    # Count files that will actually be downloaded (excluding existing ones if resume=True)
+    files_to_download = [s for s in siblings_sorted if not (resume and s.get("rfilename", "") in existing_files)]
+    total_files = len(files_to_download)
+    
     try:
+        file_idx = 0
         for idx, sib in enumerate(siblings_sorted):
             if should_cancel and should_cancel():
                 raise RuntimeError("Download cancelled")
@@ -455,6 +462,7 @@ def download_repo_files(
             if resume and rfilename in existing_files:
                 continue
             
+            file_idx += 1  # Track position in files_to_download
             last_file = rfilename
             local_path = dest_dir / rfilename
             local_path.parent.mkdir(parents=True, exist_ok=True)
@@ -464,6 +472,11 @@ def download_repo_files(
                 try:
                     if should_cancel and should_cancel():
                         raise RuntimeError("Download cancelled")
+                    
+                    # Call status callback before downloading
+                    if status_callback:
+                        status_callback(rfilename, file_idx, total_files, attempt + 1)
+                    
                     logger.info(f"Downloading {rfilename} ({file_size} bytes) - attempt {attempt + 1}/{max_retries}")
                     
                     # Download file (always resumes automatically in newer huggingface_hub)

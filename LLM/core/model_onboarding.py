@@ -504,7 +504,7 @@ class ModelOnboardingService:
                     backend=backend,
                     model_path=str(base_model_path),
                     env_key=final_env_key,
-                    params_json=None
+                    params=None
                 )
             except Exception as e:
                 log(f"[WARN] Could not upsert model env association: {e}")

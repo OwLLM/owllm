@@ -6619,6 +6619,9 @@ class MainWindow(QMainWindow):
             if entry.get("env_key"):
                 env_key_label = QLabel(f"Environment Key: <b>{entry.get('env_key')}</b>")
                 env_key_label.setStyleSheet("color: #d7dde7; padding: 5px;")
+                env_key_label.setWordWrap(True)
+                env_key_label.setMinimumWidth(0)
+                env_key_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
                 details_layout.addWidget(env_key_label)
             
             if entry.get("backend"):
@@ -13738,6 +13741,9 @@ except Exception as e:
         
         env_name = QLabel(env_info.get("env_id", "Unknown"))
         env_name.setStyleSheet("font-size: 11pt; font-weight: bold; color: white; background: transparent; border: none;")
+        env_name.setWordWrap(True)
+        env_name.setMinimumWidth(0)
+        env_name.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         header_layout.addWidget(env_name, 1)
         
         layout.addLayout(header_layout)

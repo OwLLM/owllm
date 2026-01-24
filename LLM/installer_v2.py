@@ -178,7 +178,9 @@ class InstallerV2:
                 self.log("-" * 60)
                 
                 wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
-                
+                # Route wheelhouse logs to GUI
+                wheelhouse_mgr.log = self.log
+
                 python_version = (sys.version_info.major, sys.version_info.minor)
                 success, error = wheelhouse_mgr.prepare_wheelhouse(
                     cuda_config, 
@@ -220,6 +222,9 @@ class InstallerV2:
                 python_exe = None
             
             installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
+            # Route installer logs to GUI
+            installer.log = self.log
+
             success, error = installer.install(cuda_config, package_versions=package_versions, binary_packages=binary_packages if self.use_adaptive else None, allow_destroy=allow_destroy)
             
             if not success:
@@ -520,6 +525,8 @@ class InstallerV2:
             # Install packages into this model's environment
             python_runtime = self.python_runtime_manager.get_python_runtime("3.12")
             installer = ImmutableInstaller(venv_path, self.wheelhouse, self.manifest_path, python_executable=python_runtime)
+            # Route installer logs to GUI
+            installer.log = self.log
             success, error = installer.install(
                 cuda_config,
                 package_versions=package_versions,
@@ -676,8 +683,11 @@ class InstallerV2:
             # PHASE 1: Prepare wheelhouse (ALWAYS - includes validation)
             self.log("\nPHASE 1: Wheelhouse Preparation & Validation")
             self.log("-" * 60)
-            
+
             wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
+            # Route wheelhouse logs to GUI
+            wheelhouse_mgr.log = self.log
+
             python_version = (sys.version_info.major, sys.version_info.minor)
             success, error = wheelhouse_mgr.prepare_wheelhouse(
                 cuda_config, 
@@ -703,6 +713,9 @@ class InstallerV2:
             python_exe = getattr(self, '_python_executable', None)
             python_exe = Path(python_exe) if python_exe else None
             installer = ImmutableInstaller(self.venv, self.wheelhouse, self.manifest_path, python_executable=python_exe)
+            # Route installer logs to GUI
+            installer.log = self.log
+
             self.log("  Engine initialized. Executing install pass...")
             # Pass binary_packages so they get installed during repair
             binary_packages_to_pass = binary_packages if self.use_adaptive else None

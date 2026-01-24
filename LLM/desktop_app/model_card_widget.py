@@ -521,6 +521,9 @@ class DownloadedModelCard(QFrame):
                 }
             """)
             env_badge.setToolTip(f"Environment: {self.env_key}")
+            env_badge.setWordWrap(True)
+            env_badge.setMinimumWidth(0)
+            env_badge.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             status_row.addWidget(env_badge)
         
         # Onboarding status badge (only show if NOT READY - READY uses ribbon)

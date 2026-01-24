@@ -1162,8 +1162,8 @@ print('OK')
                                         if package_name:
                                             raise RuntimeError(
                                                 f"Model requires extra package '{package_name}' which is not installed in the current environment.\n"
-                                                f"To fix this, please go to the Downloaded Models tab and run 'Repair Model' for '{model_id}'.\n"
-                                                f"This will create a dedicated isolated environment for this model."
+                                                f"To fix this, please go to the Downloaded Models tab and click 'Isolation' for '{model_id}',\n"
+                                                f"or re-run onboarding. This will create a dedicated isolated environment for this model."
                                             )
                                         else:
                                             # Generic ImportError - provide helpful context
@@ -1300,8 +1300,8 @@ print('OK')
                                 if pkg:
                                     raise RuntimeError(
                                         f"Model requires extra package '{pkg}' which is not installed in the current environment.\n"
-                                        f"To fix this, please go to the Downloaded Models tab and run 'Repair Model' for '{model_id}'.\n"
-                                        f"This will create a dedicated isolated environment for this model."
+                                        f"To fix this, please go to the Downloaded Models tab and click 'Isolation' for '{model_id}',\n"
+                                        f"or re-run onboarding. This will create a dedicated isolated environment for this model."
                                     )
                             
                             # Get model path for error message

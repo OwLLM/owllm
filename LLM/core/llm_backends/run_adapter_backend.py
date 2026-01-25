@@ -1007,5 +1007,12 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
     # Debug: Check if output is empty
     if not text_clean:
         logging.warning(f"Empty generation. Input tokens: {input_len}, Total tokens: {len(out[0])}, New tokens: {len(gen_ids)}")
-    
+        # Do not silently return empty output; propagate to server/UI so it is visible.
+        raise RuntimeError(
+            "Empty generation: model produced no visible output. "
+            "This can happen if generation produced 0 new tokens or only special tokens, "
+            "or if generation stopped immediately. Try increasing max_new_tokens, "
+            "changing the prompt, or using a smaller model."
+        )
+
     return text_clean

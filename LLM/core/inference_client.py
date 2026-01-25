@@ -90,7 +90,19 @@ class InferenceClient:
         
         text = result["text"]
         logger.debug(f"Generated text length: {len(text)} chars")
-        
+
+        # Never treat an empty response as success. This typically means:
+        # - generation failed but server returned "" (bug)
+        # - model immediately stopped / produced 0 tokens
+        # - OOM/other runtime error was swallowed upstream
+        if text is None or str(text).strip() == "":
+            raise RuntimeError(
+                "Model returned an empty response. "
+                "This is not a valid completion. "
+                "If this is a large model, it may have run out of VRAM or immediately stopped generation. "
+                "Check the server logs and try a smaller model or lower max_new_tokens."
+            )
+
         return text
     
     def health_check(self) -> bool:

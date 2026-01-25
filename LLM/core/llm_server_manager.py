@@ -1567,6 +1567,72 @@ print('OK')
                     status="STOPPED",
                     stopped_at=datetime.utcnow().isoformat()
                 )
+                return
+
+            # Fallback: server may be running but NOT tracked in running_servers.
+            # This happens when we "reuse" an already-running server found via /health.
+            # In that case we still need a way to force-stop it (by PID or by port).
+            try:
+                server_state = self.state_store.get_server(model_id) or {}
+            except Exception:
+                server_state = {}
+
+            pid = server_state.get("pid")
+            port = server_state.get("port")
+
+            logger.info(f"Shutting down untracked server '{model_id}' (pid={pid}, port={port})")
+
+            # 1) Try killing by PID if known
+            killed_any = False
+            if pid:
+                try:
+                    if os.name == "nt":
+                        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=10)
+                    else:
+                        try:
+                            os.kill(int(pid), 15)
+                        except Exception:
+                            pass
+                        try:
+                            os.kill(int(pid), 9)
+                        except Exception:
+                            pass
+                    killed_any = True
+                    logger.info(f"Killed server PID {pid} for '{model_id}'")
+                except Exception as e:
+                    logger.warning(f"Failed to kill PID {pid} for '{model_id}': {e}")
+
+            # 2) If PID missing (or kill failed), try killing by port (Windows only)
+            if (not killed_any) and port and os.name == "nt":
+                try:
+                    result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=10)
+                    pids_to_kill: set[str] = set()
+                    port_str = f":{int(port)}"
+                    for line in (result.stdout or "").splitlines():
+                        # Typical line: TCP    127.0.0.1:10500    0.0.0.0:0    LISTENING    12345
+                        if ("LISTENING" in line) and (port_str in line):
+                            parts = line.split()
+                            if parts and parts[-1].isdigit():
+                                pids_to_kill.add(parts[-1])
+                    for found_pid in sorted(pids_to_kill):
+                        subprocess.run(["taskkill", "/F", "/PID", found_pid], capture_output=True, timeout=10)
+                        logger.info(f"Killed PID {found_pid} on port {port} for '{model_id}'")
+                        killed_any = True
+                except Exception as e:
+                    logger.warning(f"Failed to kill by port {port} for '{model_id}': {e}")
+
+            # 3) Update StateStore regardless (best-effort)
+            try:
+                from datetime import datetime
+                self.state_store.upsert_server(
+                    model_id=model_id,
+                    pid=None,
+                    port=0,
+                    status="STOPPED",
+                    stopped_at=datetime.utcnow().isoformat()
+                )
+            except Exception:
+                pass
     
     def shutdown_all(self):
         """Shutdown all running servers"""

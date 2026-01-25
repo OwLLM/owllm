@@ -272,6 +272,9 @@ async def generate(request: GenerateRequest):
     try:
         # Lazy import heavy backend for generation.
         from core.llm_backends.run_adapter_backend import generate_text
+        
+        logger.debug(f"Generation request: prompt_len={len(request.prompt)}, max_tokens={request.max_new_tokens}, temp={request.temperature}")
+        
         # Call generation function
         text = generate_text(
             tokenizer=tokenizer,
@@ -283,12 +286,31 @@ async def generate(request: GenerateRequest):
             system_prompt=system_prompt
         )
         
+        logger.debug(f"generate_text returned: type={type(text)}, len={len(str(text)) if text else 0}, text_preview={repr(str(text)[:100]) if text else 'None'}")
+        
+        # Safety check: Never return empty text (generate_text should raise, but double-check)
+        if not text or not str(text).strip():
+            error_msg = f"generate_text returned empty text (this should not happen - it should raise RuntimeError). Type: {type(text)}, Value: {repr(text)}"
+            logger.error(error_msg)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Generation returned empty output. {error_msg} This indicates the server code may need to be restarted to pick up error handling fixes."
+            )
+        
         # Return ONLY the clean text
         return GenerateResponse(text=text)
         
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        logger.error(f"Generation failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+        error_type = type(e).__name__
+        error_msg = str(e)
+        logger.error(f"Generation failed: {error_type}: {error_msg}")
+        import traceback
+        logger.error(traceback.format_exc())
+        # Ensure we always raise HTTPException, never return empty text
+        raise HTTPException(status_code=500, detail=f"Generation failed: {error_type}: {error_msg}")
 
 @app.post("/debug_generate", response_model=DebugGenerateResponse)
 async def debug_generate(request: GenerateRequest):

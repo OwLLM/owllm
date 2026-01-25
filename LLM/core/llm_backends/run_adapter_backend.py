@@ -998,6 +998,13 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
     
     # Return only newly generated tokens (exclude prompt)
     gen_ids = out[0][input_len:]
+    
+    # Detailed diagnostics for empty generation
+    num_new_tokens = len(gen_ids)
+    total_tokens = len(out[0])
+    
+    # Decode with and without special tokens for diagnostics
+    text_with_specials = tokenizer.decode(gen_ids, skip_special_tokens=False)
     text = tokenizer.decode(gen_ids, skip_special_tokens=True)
     
     # If the model still somehow included the prompt, remove it
@@ -1006,13 +1013,52 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
     
     # Debug: Check if output is empty
     if not text_clean:
-        logging.warning(f"Empty generation. Input tokens: {input_len}, Total tokens: {len(out[0])}, New tokens: {len(gen_ids)}")
+        # Get token IDs for diagnostics
+        gen_token_ids = gen_ids.tolist() if hasattr(gen_ids, 'tolist') else list(gen_ids)
+        eos_id = tokenizer.eos_token_id
+        pad_id = tokenizer.pad_token_id
+        
+        # Count special tokens in output
+        special_count = 0
+        if eos_id is not None:
+            special_count += gen_token_ids.count(int(eos_id))
+        if pad_id is not None and pad_id != eos_id:
+            special_count += gen_token_ids.count(int(pad_id))
+        
+        # Build detailed error message
+        error_details = [
+            f"Input tokens: {input_len}",
+            f"Total output tokens: {total_tokens}",
+            f"New tokens generated: {num_new_tokens}",
+            f"Special tokens in output: {special_count}",
+        ]
+        
+        if num_new_tokens == 0:
+            error_details.append("Generation produced 0 new tokens (model stopped immediately)")
+        elif num_new_tokens > 0:
+            error_details.append(f"Decoded with specials: {repr(text_with_specials[:200])}")
+            error_details.append(f"Decoded without specials: {repr(text[:200])}")
+            if eos_id is not None and eos_id in gen_token_ids:
+                error_details.append(f"Output contains EOS token (ID: {eos_id})")
+            if pad_id is not None and pad_id in gen_token_ids:
+                error_details.append(f"Output contains PAD token (ID: {pad_id})")
+        
+        logging.error(f"Empty generation detected. {' | '.join(error_details)}")
+        
         # Do not silently return empty output; propagate to server/UI so it is visible.
         raise RuntimeError(
-            "Empty generation: model produced no visible output. "
-            "This can happen if generation produced 0 new tokens or only special tokens, "
-            "or if generation stopped immediately. Try increasing max_new_tokens, "
-            "changing the prompt, or using a smaller model."
+            f"Empty generation: model produced no visible output.\n\n"
+            f"Diagnostics:\n" + "\n".join(f"  • {detail}" for detail in error_details) + "\n\n"
+            f"Possible causes:\n"
+            f"  • Generation produced 0 new tokens (model stopped immediately)\n"
+            f"  • All output tokens were special tokens (EOS/PAD) that were stripped\n"
+            f"  • Model ran out of VRAM and silently failed\n"
+            f"  • Tokenizer/template issue causing immediate stopping\n\n"
+            f"Try:\n"
+            f"  • Increasing max_new_tokens (current: {max_new_tokens})\n"
+            f"  • Changing the prompt\n"
+            f"  • Using a smaller model\n"
+            f"  • Checking server logs for CUDA OOM errors"
         )
 
     return text_clean

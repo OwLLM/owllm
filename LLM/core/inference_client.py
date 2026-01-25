@@ -10,6 +10,32 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
+class EmptyModelResponseError(RuntimeError):
+    """
+    Raised when the server returns HTTP 200 but an empty {"text": ""} payload.
+    This is never a valid completion; it's typically a server-side bug or a stale server process.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        server_url: str,
+        status_code: Optional[int],
+        response_json: Optional[dict],
+        prompt_len: int,
+        max_new_tokens: int,
+        temperature: float,
+    ):
+        super().__init__(message)
+        self.server_url = server_url
+        self.status_code = status_code
+        self.response_json = response_json
+        self.prompt_len = prompt_len
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+
+
 class InferenceClient:
     """HTTP client for LLM inference server"""
     
@@ -74,6 +100,23 @@ class InferenceClient:
                 f"Generation request timed out after {self.timeout_seconds}s. "
                 f"Model may be too slow or unresponsive."
             )
+        except requests.exceptions.HTTPError as e:
+            # Extract error detail from FastAPI error response
+            error_detail = None
+            try:
+                error_json = response.json()
+                if "detail" in error_json:
+                    error_detail = str(error_json["detail"])
+            except Exception:
+                pass
+            
+            # Use server's error detail if available, otherwise use the HTTP error message
+            if error_detail:
+                logger.error(f"Generation failed: {error_detail}")
+                raise RuntimeError(error_detail) from e
+            else:
+                logger.error(f"Generation request failed: {e}")
+                raise RuntimeError(f"Server returned {response.status_code}: {str(e)}") from e
         except requests.exceptions.RequestException as e:
             logger.error(f"Generation request failed: {e}")
             raise
@@ -86,21 +129,48 @@ class InferenceClient:
         
         # Extract text from response
         if "text" not in result:
+            logger.error(f"Server response missing 'text' field. Full response: {result}")
             raise ValueError(f"Server response missing 'text' field: {result}")
         
         text = result["text"]
         logger.debug(f"Generated text length: {len(text)} chars")
 
         # Never treat an empty response as success. This typically means:
-        # - generation failed but server returned "" (bug)
+        # - generation failed but server returned "" (bug - server should raise HTTPException)
         # - model immediately stopped / produced 0 tokens
         # - OOM/other runtime error was swallowed upstream
         if text is None or str(text).strip() == "":
-            raise RuntimeError(
-                "Model returned an empty response. "
-                "This is not a valid completion. "
-                "If this is a large model, it may have run out of VRAM or immediately stopped generation. "
-                "Check the server logs and try a smaller model or lower max_new_tokens."
+            # Log the full response for debugging
+            logger.error(f"Server returned empty text. Full response: {result}")
+            logger.error(f"Request was: prompt length={len(prompt)}, max_new_tokens={max_new_tokens}, temperature={temperature}")
+            
+            # Check if server returned 200 OK (bug) vs 500 (expected)
+            status_code = getattr(response, 'status_code', None)
+            # IMPORTANT: don't use .format() with function calls in placeholders.
+            # Build the message explicitly to avoid KeyError like "{len(prompt)}".
+            error_msg = (
+                "Model returned an empty response. This is not a valid completion.\n\n"
+                "This indicates the model produced no output. Possible causes:\n"
+                "  • Model stopped generation immediately (0 new tokens)\n"
+                "  • All output tokens were special tokens (EOS/PAD) that were stripped\n"
+                "  • Model ran out of VRAM and silently failed\n"
+                "  • Tokenizer/template issue causing immediate stopping\n\n"
+                "If you recently updated the code, make sure the persistent server process restarted.\n"
+                "A server running old code can incorrectly return HTTP 200 with {\"text\": \"\"}.\n\n"
+                f"Diagnostics:\n"
+                f"  • request: prompt_len={len(prompt)}, max_new_tokens={max_new_tokens}, temperature={temperature}\n"
+                f"  • server_status={status_code}\n"
+                f"  • raw_response={result}\n"
+            )
+            
+            raise EmptyModelResponseError(
+                error_msg,
+                server_url=self.base_url,
+                status_code=status_code,
+                response_json=result if isinstance(result, dict) else None,
+                prompt_len=len(prompt),
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
             )
 
         return text

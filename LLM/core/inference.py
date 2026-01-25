@@ -58,7 +58,7 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
         Generated text from the model
     """
     from core.llm_server_manager import get_global_server_manager
-    from core.inference_client import InferenceClient
+    from core.inference_client import InferenceClient, EmptyModelResponseError
     from core.model_onboarding import get_onboarding_service
     
     # RUNTIME GATE: Check onboarding status before attempting server start
@@ -119,11 +119,31 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
     
     # Call persistent server via HTTP
     client = InferenceClient(server_url)
-    return client.generate(
-        prompt=cfg.prompt,
-        max_new_tokens=cfg.max_new_tokens,
-        temperature=cfg.temperature
-    )
+    try:
+        return client.generate(
+            prompt=cfg.prompt,
+            max_new_tokens=cfg.max_new_tokens,
+            temperature=cfg.temperature
+        )
+    except EmptyModelResponseError as e:
+        # Self-heal: this specific case means server returned 200 OK with {"text": ""}.
+        # That is almost always a stale/bad server process. Restart once and retry.
+        if log_callback:
+            log_callback("⚠️ Server returned HTTP 200 with empty text. Restarting server and retrying once...")
+        try:
+            manager.shutdown_server(cfg.model_id)
+        except Exception:
+            # Best-effort restart; ignore shutdown errors and continue.
+            pass
+
+        # Start (or reuse) server again, then retry once.
+        server_url = manager.ensure_server_running(cfg.model_id, log_callback=log_callback)
+        client = InferenceClient(server_url)
+        return client.generate(
+            prompt=cfg.prompt,
+            max_new_tokens=cfg.max_new_tokens,
+            temperature=cfg.temperature
+        )
 
 
 def run_inference_with_tools(

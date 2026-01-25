@@ -988,6 +988,51 @@ except Exception as e:
             dedicated_python_exe = self._get_env_python_executable(dedicated_env_key)
             if not (dedicated_python_exe and dedicated_python_exe.exists()):
                 raise RuntimeError(f"Failed to create dedicated environment: {dedicated_python_exe} not found after copy")
+            
+            # CRITICAL: Verify torch was copied successfully
+            log("Verifying torch installation in dedicated environment...")
+            missing_critical = self.check_missing_packages(dedicated_python_exe, ["torch", "transformers"])
+            if missing_critical:
+                log(f"WARNING: Critical packages missing after copy: {missing_critical}")
+                log("Attempting to reinstall missing packages...")
+                # Get the accelerator and backend info from the base env
+                parsed = self.env_key_resolver.parse_env_key(base_env_key)
+                accelerator = parsed.get("accelerator", "cpu")
+                
+                # Install torch with the correct CUDA version
+                if accelerator.startswith("cu"):
+                    torch_index_url = f"https://download.pytorch.org/whl/{accelerator}"
+                    for pkg in missing_critical:
+                        log(f"Installing {pkg} with CUDA support...")
+                        result = subprocess.run(
+                            [str(dedicated_python_exe), "-m", "pip", "install", pkg, "--index-url", torch_index_url],
+                            capture_output=True,
+                            text=True,
+                            timeout=600,
+                            **self.subprocess_flags
+                        )
+                        if result.returncode != 0:
+                            error = (result.stderr or result.stdout or "").strip()[:500]
+                            raise RuntimeError(f"Failed to install {pkg} in dedicated env: {error}")
+                else:
+                    for pkg in missing_critical:
+                        log(f"Installing {pkg}...")
+                        result = subprocess.run(
+                            [str(dedicated_python_exe), "-m", "pip", "install", pkg],
+                            capture_output=True,
+                            text=True,
+                            timeout=600,
+                            **self.subprocess_flags
+                        )
+                        if result.returncode != 0:
+                            error = (result.stderr or result.stdout or "").strip()[:500]
+                            raise RuntimeError(f"Failed to install {pkg} in dedicated env: {error}")
+                
+                # Re-verify
+                still_missing = self.check_missing_packages(dedicated_python_exe, ["torch", "transformers"])
+                if still_missing:
+                    raise RuntimeError(f"Failed to install critical packages in dedicated env: {still_missing}")
+                log("Successfully installed missing critical packages")
                 
             # Update StateStore
             torch_version, cuda_available = self._get_torch_info(dedicated_python_exe)

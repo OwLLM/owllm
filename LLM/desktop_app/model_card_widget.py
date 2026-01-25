@@ -647,7 +647,18 @@ class DownloadedModelCard(QFrame):
         # Dedicated Env button (only for READY models that don't already have one)
         if self.onboarding_status == "READY" and "--dedicated--" not in (self.env_key or ""):
             self.dedicated_btn = QPushButton("🛡️ Isolation")
-            self.dedicated_btn.setToolTip("Create a dedicated isolated environment for this model's dependencies")
+            self.dedicated_btn.setToolTip(
+                "Create Dedicated Isolated Environment\n\n"
+                "This creates a separate Python environment exclusively for this model.\n\n"
+                "Use when:\n"
+                "• Model needs special packages (e.g., auto-gptq, optimum)\n"
+                "• You want to avoid conflicts with other models\n"
+                "• Model requires different package versions\n\n"
+                "The system will:\n"
+                "1. Copy the base environment\n"
+                "2. Install model-specific dependencies\n"
+                "3. Isolate this model from shared environments"
+            )
             self.dedicated_btn.setMinimumHeight(35)
             self.dedicated_btn.setCursor(Qt.ArrowCursor)
             self.dedicated_btn.clicked.connect(lambda: self.dedicated_env_clicked.emit(self.model_path))

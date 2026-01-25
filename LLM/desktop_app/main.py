@@ -6881,6 +6881,10 @@ class MainWindow(QMainWindow):
                 error = result.get("last_error", "Unknown error")
                 self.onboarding_log_display.appendPlainText(f"\n❌ Onboarding failed: {error}")
         
+        # Refresh the environment list to show newly created dedicated environments
+        if hasattr(self, '_refresh_environment_list'):
+            QTimer.singleShot(500, self._refresh_environment_list)
+        
         # Ensure we stay on Environment tab (don't let Info tab interrupt)
         if hasattr(self, 'downloaded_details_tabs'):
             # Remember current tab index

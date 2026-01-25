@@ -233,7 +233,9 @@ class ModelOnboardingService:
                             missing_packages = list(set([p for p in missing_packages if p not in ["transformers", "torch", "tokenizers"]]))
                             if missing_packages:
                                 log(f"Installing missing packages: {missing_packages}")
-                                self.env_registry.auto_install_missing_packages(edge_python_exe, missing_packages, log_callback=log_callback)
+                                success, error = self.env_registry.auto_install_missing_packages(edge_python_exe, missing_packages, log_callback=log_callback)
+                                if not success:
+                                    log(f"Failed to install missing packages: {error}")
                     
                     # Re-run probe on edge env
                     log(f"Running model load probe on edge env: {edge_env_key}")
@@ -416,14 +418,14 @@ class ModelOnboardingService:
                 
                 if missing_packages:
                     log(f"Missing packages detected in dedicated env: {missing_packages}. Installing...")
-                    install_success = self.env_registry.auto_install_missing_packages(
+                    install_success, install_error = self.env_registry.auto_install_missing_packages(
                         final_python_exe,
                         missing_packages,
                         log_callback=log_callback
                     )
                     
                     if not install_success:
-                        error_msg = f"Failed to install required packages in dedicated environment: {', '.join(missing_packages)}"
+                        error_msg = f"Failed to install required packages in dedicated environment: {', '.join(missing_packages)}\n\nDetailed error:\n{install_error}"
                         log(f"Model onboarding failed: {error_msg}")
                         
                         self.state_store.upsert_onboarding(

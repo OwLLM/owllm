@@ -1394,7 +1394,9 @@ except Exception as e:
         )
         if missing:
             log(f"Installing missing packages: {missing}")
-            self.auto_install_missing_packages(python_exe, missing, log_callback=log_callback)
+            success, error = self.auto_install_missing_packages(python_exe, missing, log_callback=log_callback)
+            if not success:
+                log(f"Failed to install missing packages: {error}")
         
         # Check for CUDA torch mismatch
         parsed = self.env_key_resolver.parse_env_key(env_key)
@@ -1650,7 +1652,7 @@ except Exception as e:
         
         return missing
     
-    def auto_install_missing_packages(self, python_exe: Path, packages: list, log_callback=None) -> bool:
+    def auto_install_missing_packages(self, python_exe: Path, packages: list, log_callback=None) -> tuple[bool, str]:
         """
         Automatically install missing packages in the environment.
         
@@ -1660,12 +1662,15 @@ except Exception as e:
             log_callback: Optional callback for logging
             
         Returns:
-            True if all packages installed successfully, False otherwise
+            Tuple of (success: bool, error_details: str)
+            - success: True if all packages installed successfully, False otherwise
+            - error_details: Empty string if success, detailed error message if failed
         """
         def log(msg):
             if log_callback:
                 log_callback(msg)
         
+        errors = []
         for pkg in packages:
             log(f"Installing missing package: {pkg}...")
             try:
@@ -1680,13 +1685,18 @@ except Exception as e:
                     log(f"Successfully installed {pkg}")
                 else:
                     error_output = (result.stderr or result.stdout or "").strip()
-                    log(f"Failed to install {pkg}: {error_output[:200]}")
-                    return False
+                    # Expand to 2000 chars to capture full pip error
+                    truncated_error = error_output[:2000]
+                    log(f"Failed to install {pkg}: {truncated_error}")
+                    errors.append(f"Package '{pkg}' failed:\n{truncated_error}")
+                    return False, "\n\n".join(errors)
             except Exception as e:
-                log(f"Error installing {pkg}: {e}")
-                return False
+                error_msg = f"Exception installing {pkg}: {str(e)}"
+                log(error_msg)
+                errors.append(error_msg)
+                return False, "\n\n".join(errors)
         
-        return True
+        return True, ""
     
     def validate_env_spec(self, env_spec: EnvSpec) -> bool:
         """

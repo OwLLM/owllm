@@ -864,14 +864,16 @@ class LLMServerManager:
                 
                 if is_dedicated:
                     log("Auto-installing missing packages into dedicated environment...")
-                    if not self.env_registry.auto_install_missing_packages(
+                    install_success, install_error = self.env_registry.auto_install_missing_packages(
                         env_spec.python_executable, 
                         missing_packages, 
                         log_callback=log_callback
-                    ):
+                    )
+                    if not install_success:
                         raise RuntimeError(
                             f"Environment validation failed: Could not auto-install required packages: {', '.join(missing_packages)}\n"
                             f"This indicates the environment is not properly configured.\n"
+                            f"Detailed error:\n{install_error}"
                             f"Please go to the Environment/Requirements tab and run 'Repair Environment' for {env_spec.key}."
                         )
                     log("Missing packages installed successfully, re-validating...")

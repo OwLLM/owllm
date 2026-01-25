@@ -5943,19 +5943,16 @@ class MainWindow(QMainWindow):
                                 f"Could not determine HuggingFace Model ID for: {model_name}\n\n"
                                 "You may need to re-onboard it manually.")
             return
-            
-        from PySide6.QtWidgets import QMessageBox
-        reply = QMessageBox.question(self, "Dedicated Environment", 
-                                    f"Do you want to create a dedicated isolated environment for '{model_id}'?\n\n"
-                                    "This will ensure this model's dependencies (like 'optimum' for GPTQ) "
-                                    "never interfere with other models.\n\n"
-                                    "This involves copying the base environment and may take a minute.",
-                                    QMessageBox.Yes | QMessageBox.No)
         
-        if reply == QMessageBox.Yes:
-            self._log_models(f"🛡️ Creating dedicated environment for {model_id}...")
-            # Run onboarding which will now detect extras or can be forced to use dedicated env
-            self._start_model_onboarding(str(path), model_id)
+        # Ensure the Environment tab + onboarding log exist (user may click from card without selecting it first)
+        try:
+            self._on_model_selected(str(path))
+        except Exception:
+            pass
+        
+        # Just do it - no confirmation dialog
+        self._log_models(f"🛡️ (Re)building isolated environment for {model_id}...")
+        self._start_model_onboarding(str(path), model_id)
 
     def request_restart_clean(self, model_dir: Path, reason: str) -> None:
         """
@@ -6990,7 +6987,8 @@ class MainWindow(QMainWindow):
         
         # Get other card data
         from desktop_app.model_card_widget import DownloadedModelCard
-        from core.capabilities import detect_model_capabilities, get_capability_icons, get_model_size, get_model_compatibility_badge
+        from core.models import detect_model_capabilities, get_capability_icons, get_model_size
+        from core.model_compatibility import get_model_compatibility_badge
         
         status_check = self.model_checker.check_model(path)
         

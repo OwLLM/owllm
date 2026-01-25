@@ -10,6 +10,7 @@ import sys
 import json
 from typing import Optional
 import subprocess
+import os
 import uuid
 import shutil
 
@@ -954,8 +955,68 @@ except Exception as e:
         dedicated_python_exe = self._get_env_python_executable(dedicated_env_key)
         dedicated_env_state = self.state_store.get_env(dedicated_env_key)
         
-        if dedicated_python_exe and dedicated_python_exe.exists() and dedicated_env_state and dedicated_env_state.get('status') == 'READY':
-            log(f"Dedicated environment {dedicated_env_key} already exists and is READY.")
+        if dedicated_python_exe and dedicated_python_exe.exists() and dedicated_env_state:
+            log(f"Dedicated environment {dedicated_env_key} already exists.")
+            
+            # ALWAYS verify torch/transformers exist, even in existing environments
+            # This is critical for BROKEN environments where installation failed
+            log("Verifying critical packages in existing dedicated environment...")
+            missing_critical = self.check_missing_packages(dedicated_python_exe, ["torch", "transformers"])
+            if missing_critical:
+                log(f"WARNING: Critical packages missing: {missing_critical}")
+                log("Attempting to reinstall missing packages...")
+                # Get the accelerator and backend info from the base env
+                parsed = self.env_key_resolver.parse_env_key(base_env_key)
+                accelerator = parsed.get("accelerator", "cpu")
+                
+                # Install torch with the correct CUDA version
+                if accelerator.startswith("cu"):
+                    torch_index_url = f"https://download.pytorch.org/whl/{accelerator}"
+                    for pkg in missing_critical:
+                        log(f"Installing {pkg} with CUDA support...")
+                        result = subprocess.run(
+                            [str(dedicated_python_exe), "-m", "pip", "install", pkg, "--index-url", torch_index_url],
+                            capture_output=True,
+                            text=True,
+                            timeout=600,
+                            **self.subprocess_flags
+                        )
+                        if result.returncode != 0:
+                            error = (result.stderr or result.stdout or "").strip()[:500]
+                            raise RuntimeError(f"Failed to install {pkg} in existing dedicated env: {error}")
+                else:
+                    for pkg in missing_critical:
+                        log(f"Installing {pkg}...")
+                        result = subprocess.run(
+                            [str(dedicated_python_exe), "-m", "pip", "install", pkg],
+                            capture_output=True,
+                            text=True,
+                            timeout=600,
+                            **self.subprocess_flags
+                        )
+                        if result.returncode != 0:
+                            error = (result.stderr or result.stdout or "").strip()[:500]
+                            raise RuntimeError(f"Failed to install {pkg} in existing dedicated env: {error}")
+                
+                # Re-verify
+                still_missing = self.check_missing_packages(dedicated_python_exe, ["torch", "transformers"])
+                if still_missing:
+                    raise RuntimeError(f"Failed to install critical packages in existing dedicated env: {still_missing}")
+                log("Successfully installed missing critical packages in existing environment")
+            else:
+                log("Critical packages verified OK in existing dedicated environment")
+            
+            # Update state store to ensure it's marked READY
+            torch_version, cuda_available = self._get_torch_info(dedicated_python_exe)
+            self.state_store.upsert_env(
+                env_key=dedicated_env_key,
+                python_path=str(dedicated_python_exe),
+                torch_version=torch_version,
+                cuda_version=profile_data.get("cuda_version", "cpu"),
+                backend="transformers",
+                status="READY"
+            )
+            
             return self.envs_dir / dedicated_env_key
             
         # Check if base env exists to copy from
@@ -1681,6 +1742,7 @@ except Exception as e:
         # Map package names to their import names (some packages have different import names)
         import_map = {
             "protobuf": "google.protobuf",  # protobuf package is imported as google.protobuf
+            "auto-gptq": "auto_gptq",        # PyPI name uses hyphen; import uses underscore
         }
         
         missing = []
@@ -1719,19 +1781,87 @@ except Exception as e:
         for pkg in packages:
             log(f"Installing missing package: {pkg}...")
             try:
+                pkg_norm = (pkg or "").strip().lower()
+                pip_cmd = [str(python_exe), "-m", "pip", "install", pkg]
+                timeout_s = 300
+                env = None
+                
+                # Some packages (notably auto-gptq) require torch to be importable during build.
+                # pip's default build isolation creates a temporary build env without torch,
+                # causing "No module named 'torch'" even when torch is installed in the target env.
+                if pkg_norm.startswith("auto-gptq"):
+                    pip_cmd += ["--no-build-isolation"]
+                    timeout_s = 1200
+
+                    # auto-gptq builds a CUDA extension; ensure a CUDA toolchain is available.
+                    # We use NVIDIA's pip-distributed NVCC/runtime packages to avoid requiring a system CUDA install.
+                    try:
+                        venv_root = python_exe.parent.parent  # ...\.venv
+                        site_packages = venv_root / "Lib" / "site-packages" if sys.platform == "win32" else venv_root / "lib" / "python"  # fallback
+                        cuda_nvcc_root = site_packages / "nvidia" / "cuda_nvcc"
+                        cuda_runtime_root = site_packages / "nvidia" / "cuda_runtime"
+
+                        if not cuda_nvcc_root.exists():
+                            # Infer CUDA major from env_key (cu121 -> cu12)
+                            env_key = python_exe.parent.parent.parent.name  # ...\.envs\<env_key>
+                            parsed = {}
+                            try:
+                                parsed = self.env_key_resolver.parse_env_key(env_key)
+                            except Exception:
+                                parsed = {}
+                            accelerator = (parsed.get("accelerator") or "").lower()
+                            nvcc_pkg = "nvidia-cuda-nvcc-cu12" if accelerator.startswith("cu12") or accelerator.startswith("cu121") or accelerator.startswith("cu124") else "nvidia-cuda-nvcc-cu11"
+                            runtime_pkg = "nvidia-cuda-runtime-cu12" if nvcc_pkg.endswith("cu12") else "nvidia-cuda-runtime-cu11"
+
+                            log(f"auto-gptq requires CUDA toolchain; installing {runtime_pkg} and {nvcc_pkg}...")
+                            toolchain_cmd = [str(python_exe), "-m", "pip", "install", runtime_pkg, nvcc_pkg]
+                            toolchain_res = subprocess.run(
+                                toolchain_cmd,
+                                capture_output=True,
+                                text=True,
+                                timeout=1200,
+                                **self.subprocess_flags
+                            )
+                            if toolchain_res.returncode != 0:
+                                tool_err = (toolchain_res.stderr or toolchain_res.stdout or "").strip()[:8000]
+                                raise RuntimeError(f"Failed to install CUDA toolchain packages: {tool_err}")
+
+                        # Set CUDA_HOME/CUDA_PATH for this install attempt
+                        if cuda_nvcc_root.exists():
+                            env = os.environ.copy()
+                            env.setdefault("CUDA_HOME", str(cuda_nvcc_root))
+                            env.setdefault("CUDA_PATH", str(cuda_nvcc_root))
+                            nvcc_bin = str(cuda_nvcc_root / "bin")
+                            env["PATH"] = nvcc_bin + os.pathsep + env.get("PATH", "")
+                    except Exception as cuda_setup_err:
+                        log(f"WARNING: Could not prepare CUDA toolchain for auto-gptq: {cuda_setup_err}")
+
                 result = subprocess.run(
-                    [str(python_exe), "-m", "pip", "install", pkg],
+                    pip_cmd,
                     capture_output=True,
                     text=True,
-                    timeout=300,
+                    timeout=timeout_s,
+                    env=env,
                     **self.subprocess_flags
                 )
                 if result.returncode == 0:
                     log(f"Successfully installed {pkg}")
                 else:
                     error_output = (result.stderr or result.stdout or "").strip()
-                    # Expand to 2000 chars to capture full pip error
-                    truncated_error = error_output[:2000]
+                    # Persist full pip output for post-mortem debugging
+                    full_log_path = None
+                    try:
+                        log_dir = self.env_manager.root_dir / "logs" / "pip_install"
+                        log_dir.mkdir(parents=True, exist_ok=True)
+                        full_log_path = log_dir / f"pip_install_{pkg_norm.replace('/', '_').replace(':','_')}_{uuid.uuid4().hex}.log"
+                        full_log_path.write_text(error_output, encoding="utf-8", errors="replace")
+                    except Exception:
+                        full_log_path = None
+
+                    # Keep UI logs readable but include a pointer to full output
+                    truncated_error = error_output[:8000]
+                    if full_log_path:
+                        truncated_error = f"{truncated_error}\n\n[full pip output saved to]\n{full_log_path}"
                     log(f"Failed to install {pkg}: {truncated_error}")
                     errors.append(f"Package '{pkg}' failed:\n{truncated_error}")
                     return False, "\n\n".join(errors)

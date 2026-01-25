@@ -644,21 +644,50 @@ class DownloadedModelCard(QFrame):
             self.repair_btn.setStyleSheet(button_style)
             button_layout.addWidget(self.repair_btn)
         
-        # Dedicated Env button (only for READY models that don't already have one)
-        if self.onboarding_status == "READY" and "--dedicated--" not in (self.env_key or ""):
-            self.dedicated_btn = QPushButton("🛡️ Isolation")
-            self.dedicated_btn.setToolTip(
-                "Create Dedicated Isolated Environment\n\n"
-                "This creates a separate Python environment exclusively for this model.\n\n"
-                "Use when:\n"
-                "• Model needs special packages (e.g., auto-gptq, optimum)\n"
-                "• You want to avoid conflicts with other models\n"
-                "• Model requires different package versions\n\n"
-                "The system will:\n"
-                "1. Copy the base environment\n"
-                "2. Install model-specific dependencies\n"
-                "3. Isolate this model from shared environments"
-            )
+        # Dedicated Env button logic:
+        # - For READY models: only show if they don't have a dedicated env yet
+        # - For BROKEN models: always show (they may need to retry installation in their dedicated env)
+        has_dedicated = "--dedicated--" in (self.env_key or "")
+        
+        if self.onboarding_status == "BROKEN":
+            # BROKEN models always show Isolation button to retry installation
+            should_show = True
+        elif self.onboarding_status == "READY":
+            # READY models only show if they don't have a dedicated env yet
+            should_show = not has_dedicated
+        else:
+            should_show = False
+        
+        if should_show:
+            # Button text changes based on context
+            if self.onboarding_status == "BROKEN" and has_dedicated:
+                button_text = "🔄 Retry"
+                tooltip_text = (
+                    "Retry Installation in Dedicated Environment\n\n"
+                    "This model has a dedicated environment but installation failed.\n\n"
+                    "This will retry:\n"
+                    "• Installing missing packages (e.g., auto-gptq, optimum)\n"
+                    "• Verifying all dependencies are present\n"
+                    "• Fixing the BROKEN status"
+                )
+            else:
+                button_text = "🛡️ Isolation"
+                tooltip_text = (
+                    "Create Dedicated Isolated Environment\n\n"
+                    "This creates a separate Python environment exclusively for this model.\n\n"
+                    "Use when:\n"
+                    "• Model needs special packages (e.g., auto-gptq, optimum)\n"
+                    "• You want to avoid conflicts with other models\n"
+                    "• Model requires different package versions\n"
+                    "• Model is BROKEN due to missing dependencies\n\n"
+                    "The system will:\n"
+                    "1. Copy the base environment\n"
+                    "2. Install model-specific dependencies\n"
+                    "3. Isolate this model from shared environments"
+                )
+            
+            self.dedicated_btn = QPushButton(button_text)
+            self.dedicated_btn.setToolTip(tooltip_text)
             self.dedicated_btn.setMinimumHeight(35)
             self.dedicated_btn.setCursor(Qt.ArrowCursor)
             self.dedicated_btn.clicked.connect(lambda: self.dedicated_env_clicked.emit(self.model_path))

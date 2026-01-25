@@ -22,10 +22,9 @@ IS_WINDOWS = platform.system() == "Windows"
 # Check for optional dependencies early
 try:
     from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
-    from peft import PeftModel
 except ImportError as e:
     logging.error(f"Missing required package: {e}")
-    logging.error("Please run: pip install transformers peft")
+    logging.error("Please run: pip install transformers")
     raise
 
 
@@ -258,6 +257,57 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
         else:
             # No 4-bit: use FP16 on CUDA/CPU
             if IS_WINDOWS and use_4bit and not bnb_ok:
+                # IMPORTANT:
+                # GPTQ models are already quantized and should NOT fall back to FP16 just because
+                # bitsandbytes is unavailable on Windows. Use auto-gptq to load them.
+                try:
+                    is_gptq = os.path.exists(os.path.join(model_path_str, "quantize_config.json")) or os.path.exists(
+                        os.path.join(model_path_str, "quantize_config.json".replace("-", "_"))
+                    )
+                except Exception:
+                    is_gptq = False
+
+                if is_gptq:
+                    logging.info("Windows detected - GPTQ quantized model detected, using auto-gptq loader")
+                    try:
+                        from auto_gptq import AutoGPTQForCausalLM
+
+                        # Heuristic: prefer safetensors if present
+                        use_safetensors = False
+                        try:
+                            for fn in os.listdir(model_path_str):
+                                if fn.lower().endswith(".safetensors"):
+                                    use_safetensors = True
+                                    break
+                        except Exception:
+                            use_safetensors = False
+
+                        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                        model = AutoGPTQForCausalLM.from_quantized(
+                            model_name_or_path=model_path_str,
+                            device=device,
+                            device_map="auto" if torch.cuda.is_available() else None,
+                            low_cpu_mem_usage=True,
+                            use_triton=False,
+                            # Transformers >=4.50 uses a newer LlamaAttention implementation that is not compatible
+                            # with auto-gptq's fused attention/mlp injection. Disable these injections.
+                            inject_fused_attention=False,
+                            inject_fused_mlp=False,
+                            use_safetensors=use_safetensors,
+                            trust_remote_code=True,
+                        )
+                        return tokenizer, model
+                    except Exception as gptq_ex:
+                        logging.error(f"auto-gptq load failed: {type(gptq_ex).__name__}: {gptq_ex}")
+                        # IMPORTANT: Do not fall back to FP16 for GPTQ models.
+                        # FP16 fallback triggers Transformers' GPTQ quantizer path (optimum.gptq), which is broken
+                        # on Windows without gptqmodel. Surface the real auto-gptq failure instead.
+                        raise RuntimeError(
+                            "Failed to load GPTQ model with auto-gptq. "
+                            "This model is GPTQ-quantized and cannot be safely loaded via FP16 fallback on Windows. "
+                            f"Underlying error: {type(gptq_ex).__name__}: {gptq_ex}"
+                        )
+
                 logging.info("Windows detected - bitsandbytes not available, falling back to FP16")
             else:
                 logging.info("Loading without quantization")
@@ -517,6 +567,14 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
     # treat adapter_dir as a merged model and load directly.
     try:
         # Prefer local-only loading to avoid treating the path as an HF repo id
+        # Import peft lazily so base-model loads don't fail when peft/transformers versions differ.
+        try:
+            from peft import PeftModel  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                f"Adapter loading requires 'peft' but it could not be imported: {e}\n"
+                f"Please install/repair the environment to include a compatible peft+transformers pair."
+            )
         model = PeftModel.from_pretrained(base, adapter_dir, local_files_only=True)
         logging.info("Adapter attached successfully")
         return tokenizer, model
@@ -844,17 +902,25 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
         else:
             formatted_prompt = prompt
     
-    # For instruct models using chat templates, we often want add_special_tokens=False
-    # because the template (like Gemma, Llama 3) already includes the BOS token.
-    # For base models, we almost always want add_special_tokens=True.
-    add_specials = True
-    if model_type == "instruct":
-        # Check if the formatted prompt already starts with a common BOS token or template start
-        # This is a heuristic to avoid double BOS tokens.
-        if formatted_prompt.startswith("<|begin_of_text|>") or formatted_prompt.startswith("<bos>") or formatted_prompt.startswith("<s>"):
-            add_specials = False
+    # Tokenization strategy:
+    # - Instruct/chat templates should generally NOT add special tokens again.
+    #   Some tokenizers add an EOS token when add_special_tokens=True, and if the
+    #   *last input token is EOS* then HF generation will produce 0 new tokens.
+    # - Base models usually should add specials (BOS) for best results.
+    add_specials = (model_type != "instruct")
     
     inputs = tokenizer(formatted_prompt, return_tensors="pt", add_special_tokens=add_specials)
+    # Safety: if the tokenizer (or template) still caused the prompt to end with EOS,
+    # trim it so generation isn't considered "already finished".
+    try:
+        eos_id = tokenizer.eos_token_id
+        if eos_id is not None and inputs.get("input_ids") is not None and inputs["input_ids"].shape[1] > 0:
+            if int(inputs["input_ids"][0, -1].item()) == int(eos_id):
+                inputs["input_ids"] = inputs["input_ids"][:, :-1]
+                if "attention_mask" in inputs and inputs["attention_mask"] is not None and inputs["attention_mask"].shape[1] > 0:
+                    inputs["attention_mask"] = inputs["attention_mask"][:, :-1]
+    except Exception:
+        pass
     inputs = {k: v.to(device) for k, v in inputs.items()}
     
     input_len = inputs["input_ids"].shape[1]
@@ -888,10 +954,47 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
         try:
             out = model.generate(**inputs, **gen_kwargs)
         except Exception as e:
+            # Never silently return empty output; propagate so the UI can show the real failure.
             logging.error(f"Generation failed: {e}")
             import traceback
             logging.error(traceback.format_exc())
-            return ""
+            try:
+                # Best-effort cleanup after CUDA OOM so subsequent attempts can work.
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            # Improve common CUDA OOM into a concise actionable error.
+            try:
+                msg = str(e)
+                if torch.cuda.is_available() and ("out of memory" in msg.lower() or "cuda out of memory" in msg.lower()):
+                    gpu_idx = None
+                    try:
+                        if hasattr(device, "type") and device.type == "cuda":
+                            gpu_idx = int(device.index) if device.index is not None else None
+                    except Exception:
+                        gpu_idx = None
+                    if gpu_idx is None:
+                        try:
+                            gpu_idx = int(torch.cuda.current_device())
+                        except Exception:
+                            gpu_idx = 0
+                    total_gb = None
+                    try:
+                        total_gb = torch.cuda.get_device_properties(gpu_idx).total_memory / (1024**3)
+                    except Exception:
+                        total_gb = None
+                    extra = f"GPU {gpu_idx}" + (f" ({total_gb:.1f} GB)" if total_gb else "")
+                    raise RuntimeError(
+                        f"CUDA out of memory during generation on {extra}. "
+                        f"This GPTQ 33B model typically requires ~18.5GB VRAM for inference. "
+                        f"Use a smaller model or ensure more VRAM/offloading is available."
+                    ) from e
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+            raise
     
     # Return only newly generated tokens (exclude prompt)
     gen_ids = out[0][input_len:]

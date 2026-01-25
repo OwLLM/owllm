@@ -67,6 +67,16 @@ class GenerateRequest(BaseModel):
 class GenerateResponse(BaseModel):
     text: str
 
+class DebugGenerateResponse(BaseModel):
+    status: str
+    formatted_prompt_head: str = ""
+    input_len: int = 0
+    output_len: int = 0
+    gen_len: int = 0
+    decoded_skip_special: str = ""
+    decoded_raw: str = ""
+    notes: List[str] = Field(default_factory=list)
+
 
 # ============================================================================
 # OpenAI-Compatible API Models
@@ -279,6 +289,93 @@ async def generate(request: GenerateRequest):
     except Exception as e:
         logger.error(f"Generation failed: {e}")
         raise HTTPException(status_code=500, detail=f"Generation failed: {str(e)}")
+
+@app.post("/debug_generate", response_model=DebugGenerateResponse)
+async def debug_generate(request: GenerateRequest):
+    """
+    Debug endpoint to diagnose 'empty reply' issues.
+    Returns token lengths and decoded outputs (truncated).
+    """
+    if _load_state != "ready" or model is None or tokenizer is None:
+        detail = "Model not ready"
+        if _load_state == "error" and _load_error:
+            detail = f"Model load failed: {_load_error}"
+        return DebugGenerateResponse(status=detail)
+
+    notes: List[str] = []
+    try:
+        # Build prompt similarly to generate_text()
+        if model_type == "instruct":
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": request.prompt})
+            try:
+                formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            except Exception as e:
+                notes.append(f"apply_chat_template_failed: {type(e).__name__}: {e}")
+                formatted_prompt = (system_prompt + "\n\n" if system_prompt else "") + request.prompt
+            add_specials = False
+        else:
+            formatted_prompt = (system_prompt + "\n\n" if system_prompt else "") + request.prompt
+            add_specials = True
+
+        inputs = tokenizer(formatted_prompt, return_tensors="pt", add_special_tokens=add_specials)
+        # Trim EOS if present at end (see generate_text)
+        try:
+            eos_id = tokenizer.eos_token_id
+            if eos_id is not None and int(inputs["input_ids"][0, -1].item()) == int(eos_id):
+                notes.append("trimmed_trailing_eos")
+                inputs["input_ids"] = inputs["input_ids"][:, :-1]
+                if "attention_mask" in inputs:
+                    inputs["attention_mask"] = inputs["attention_mask"][:, :-1]
+        except Exception:
+            pass
+
+        import torch
+        device = next(model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+        input_len = int(inputs["input_ids"].shape[1])
+
+        gen_kwargs = {
+            "max_new_tokens": request.max_new_tokens,
+            "pad_token_id": tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
+            "eos_token_id": tokenizer.eos_token_id,
+            "use_cache": True,
+        }
+        if request.temperature > 0:
+            gen_kwargs["do_sample"] = True
+            gen_kwargs["temperature"] = request.temperature
+        else:
+            gen_kwargs["do_sample"] = False
+
+        with torch.no_grad():
+            out = model.generate(**inputs, **gen_kwargs)
+
+        output_len = int(out.shape[1])
+        gen_ids = out[0][input_len:]
+        gen_len = int(gen_ids.shape[0])
+        decoded_skip = tokenizer.decode(gen_ids, skip_special_tokens=True)
+        decoded_raw = tokenizer.decode(gen_ids, skip_special_tokens=False)
+
+        if gen_len == 0:
+            notes.append("gen_len_zero")
+        if decoded_skip.strip() == "":
+            notes.append("decoded_skip_empty")
+
+        return DebugGenerateResponse(
+            status="ok",
+            formatted_prompt_head=formatted_prompt[:600],
+            input_len=input_len,
+            output_len=output_len,
+            gen_len=gen_len,
+            decoded_skip_special=decoded_skip[:800],
+            decoded_raw=decoded_raw[:800],
+            notes=notes,
+        )
+    except Exception as e:
+        logger.exception("debug_generate failed")
+        return DebugGenerateResponse(status=f"error: {type(e).__name__}: {e}", notes=notes)
 
 
 # ============================================================================

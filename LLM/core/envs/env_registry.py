@@ -1298,7 +1298,8 @@ except Exception as e:
         
         try:
             # Check basic imports (more lenient than new env health check)
-            code = "import torch, transformers, peft, accelerate\n"
+            # NOTE: peft is only required when using adapters. Old env health should not require it.
+            code = "import torch, transformers, accelerate\n"
             
             # If CUDA profile, verify CUDA is available
             if profile_data:
@@ -1782,9 +1783,51 @@ except Exception as e:
             log(f"Installing missing package: {pkg}...")
             try:
                 pkg_norm = (pkg or "").strip().lower()
-                pip_cmd = [str(python_exe), "-m", "pip", "install", pkg]
+                # Prefer calling the venv pip directly (more reliable and avoids PATH issues)
+                pip_exe = self._get_env_pip_executable(python_exe) or Path(str(python_exe))
+                if str(pip_exe).endswith("python.exe") or str(pip_exe).endswith("python"):
+                    # Fallback if pip executable not found
+                    pip_cmd = [str(python_exe), "-m", "pip", "install", pkg]
+                else:
+                    pip_cmd = [str(pip_exe), "install", pkg]
                 timeout_s = 300
                 env = None
+
+                # Deterministic repair for known core packages:
+                # - use pinned specs for stable envs
+                # - avoid dependency resolution churn by using --no-deps where safe
+                # This prevents "it was there before, now it's gone" behavior caused by pip upgrading/downgrading.
+                try:
+                    env_key = python_exe.parent.parent.parent.name  # ...\.envs\<env_key>\.venv\Scripts\python.exe
+                except Exception:
+                    env_key = ""
+                parsed_env = {}
+                try:
+                    parsed_env = self.env_key_resolver.parse_env_key(env_key) if env_key else {}
+                except Exception:
+                    parsed_env = {}
+                is_edge = (parsed_env.get("tier") == "edge")
+
+                pinned_map_stable = {
+                    "transformers": "transformers==4.51.3",
+                    "tokenizers": "tokenizers==0.21.4",
+                    "accelerate": "accelerate>=1.2.0,<1.3.0",
+                    "peft": "peft>=0.13.0,<0.16.0",
+                    "safetensors": "safetensors>=0.7.0,<0.8.0",
+                }
+                # Keep protobuf unpinned (many packages depend on it, and pinning can backfire)
+                if not is_edge and pkg_norm in pinned_map_stable:
+                    spec = pinned_map_stable[pkg_norm]
+                    if str(pip_exe).endswith("python.exe") or str(pip_exe).endswith("python"):
+                        pip_cmd = [str(python_exe), "-m", "pip", "install", "--upgrade", "--no-deps", spec]
+                    else:
+                        pip_cmd = [str(pip_exe), "install", "--upgrade", "--no-deps", spec]
+                elif is_edge and pkg_norm in {"transformers", "tokenizers", "accelerate", "peft", "safetensors"}:
+                    # Edge envs intentionally track latest; still avoid dependency churn.
+                    if str(pip_exe).endswith("python.exe") or str(pip_exe).endswith("python"):
+                        pip_cmd = [str(python_exe), "-m", "pip", "install", "--upgrade", "--no-deps", pkg_norm]
+                    else:
+                        pip_cmd = [str(pip_exe), "install", "--upgrade", "--no-deps", pkg_norm]
                 
                 # Some packages (notably auto-gptq) require torch to be importable during build.
                 # pip's default build isolation creates a temporary build env without torch,

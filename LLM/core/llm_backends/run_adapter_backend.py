@@ -204,6 +204,55 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
             tokenizer.pad_token = tokenizer.eos_token
             logging.info(f"Set pad_token to eos_token: {tokenizer.eos_token}")
         
+        # Detect GPTQ models early.
+        # GPTQ models must be loaded with auto-gptq; they should NOT go through bitsandbytes 4-bit or FP16 fallback.
+        is_gptq = False
+        try:
+            is_gptq = (
+                os.path.exists(os.path.join(model_path_str, "quantize_config.json"))
+                or os.path.exists(os.path.join(model_path_str, "quantize_config.json".replace("-", "_")))
+            )
+        except Exception:
+            is_gptq = False
+
+        if is_gptq:
+            logging.info("GPTQ quantized model detected, using auto-gptq loader (bypassing bitsandbytes/FP16 paths)")
+            try:
+                from auto_gptq import AutoGPTQForCausalLM
+
+                # Heuristic: prefer safetensors if present
+                use_safetensors = False
+                try:
+                    for fn in os.listdir(model_path_str):
+                        if fn.lower().endswith(".safetensors"):
+                            use_safetensors = True
+                            break
+                except Exception:
+                    use_safetensors = False
+
+                device = "cuda:0" if torch.cuda.is_available() else "cpu"
+                model = AutoGPTQForCausalLM.from_quantized(
+                    model_name_or_path=model_path_str,
+                    device=device,
+                    device_map="auto" if torch.cuda.is_available() else None,
+                    low_cpu_mem_usage=True,
+                    use_triton=False,
+                    # Transformers >=4.50 uses a newer LlamaAttention implementation that is not compatible
+                    # with auto-gptq's fused attention/mlp injection. Disable these injections.
+                    inject_fused_attention=False,
+                    inject_fused_mlp=False,
+                    use_safetensors=use_safetensors,
+                    trust_remote_code=True,
+                )
+                return tokenizer, model
+            except Exception as gptq_ex:
+                logging.error(f"auto-gptq load failed: {type(gptq_ex).__name__}: {gptq_ex}")
+                raise RuntimeError(
+                    "Failed to load GPTQ model with auto-gptq. "
+                    "This model is GPTQ-quantized and cannot be safely loaded via bitsandbytes 4-bit or FP16 fallback. "
+                    f"Underlying error: {type(gptq_ex).__name__}: {gptq_ex}"
+                ) from gptq_ex
+
         # Load base model
         # Previously we disabled bitsandbytes on Windows unconditionally.
         # Now: enable 4-bit on Windows when bitsandbytes is importable (we install/fix it in our environment).

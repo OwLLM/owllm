@@ -849,8 +849,25 @@ class LLMServerManager:
             # ENVIRONMENT-FIRST: Comprehensive validation and repair BEFORE model load
             log("Validating environment dependencies (environment-first approach)...")
             
-            # Check for critical packages required for ALL models
-            critical_packages = ["protobuf", "transformers", "tokenizers", "torch", "peft", "accelerate"]
+            # Check for critical packages.
+            # IMPORTANT: Do NOT require peft unless we're actually using an adapter.
+            # Requiring peft for *all* models causes pointless installs in dedicated envs
+            # (and risks version conflicts for models that don't use adapters).
+            adapter_dir = None
+            try:
+                adapter_dir = onboarding_entry.get("adapter_dir") or None
+            except Exception:
+                adapter_dir = None
+            if not adapter_dir:
+                try:
+                    adapter_dir = (self.config.get("models", {}).get(model_id, {}) or {}).get("adapter_dir") or None
+                except Exception:
+                    adapter_dir = None
+            needs_peft = bool(adapter_dir)
+
+            critical_packages = ["protobuf", "transformers", "tokenizers", "torch", "accelerate"]
+            if needs_peft:
+                critical_packages.append("peft")
             missing_packages = self.env_registry.check_missing_packages(
                 env_spec.python_executable, 
                 required_packages=critical_packages
@@ -902,14 +919,11 @@ class LLMServerManager:
             # Additional health check: verify environment can actually import and use transformers
             log("Running environment health check...")
             try:
-                health_code = """
-import transformers
-import tokenizers
-import torch
-import peft
-import accelerate
-print('OK')
-"""
+                # Keep this check aligned with critical_packages (peft is optional unless adapters are used).
+                health_imports = ["transformers", "tokenizers", "torch", "accelerate"]
+                if needs_peft:
+                    health_imports.append("peft")
+                health_code = "\n".join([f"import {m}" for m in health_imports] + ["print('OK')"])
                 result = subprocess.run(
                     [str(env_spec.python_executable), "-c", health_code],
                     capture_output=True,
@@ -1212,8 +1226,10 @@ print('OK')
                 if process.poll() is not None:
                     # Process died - read log file for error details
                     log_output = ""
+                    log_file_path_for_user = None
                     if model_id in self.running_servers:
                         _, log_file_handle, log_file_path = self.running_servers[model_id]
+                        log_file_path_for_user = log_file_path
                         
                         # Close and flush log file
                         try:
@@ -1241,13 +1257,8 @@ print('OK')
                         
                         # Clean up
                         del self.running_servers[model_id]
-                        
-                        # Delete log file after reading
-                        try:
-                            if log_file_path and os.path.exists(log_file_path):
-                                os.remove(log_file_path)
-                        except Exception:
-                            pass
+                        # IMPORTANT: Do NOT delete the startup log on failure.
+                        # Users need the full file to diagnose native crashes (e.g. 0xC0000005).
                     
                     # PHASE 1: Record failure in StateStore
                     self.state_store.upsert_server(
@@ -1256,19 +1267,21 @@ print('OK')
                         port=port,
                         status="FAILED",
                         stopped_at=datetime.utcnow().isoformat(),
-                        last_error=f"Process died during startup (exit code {process.returncode})"
+                        last_error=(
+                            f"Process died during startup (exit code {process.returncode}). "
+                            f"Startup log: {log_file_path_for_user or 'N/A'}"
+                        )[:500]
                     )
                     
-                    # Get environment info if available
-                    env_info = "unknown"
+                    # Use the actual command we launched (more reliable than re-deriving env info).
+                    cmd = getattr(process, "args", None)
+                    cmd_str = " ".join(str(x) for x in cmd) if isinstance(cmd, (list, tuple)) else str(cmd or "unknown")
+                    python_info = "unknown"
                     script_info = "unknown"
                     try:
-                        from core.inference import get_app_root
-                        app_root = get_app_root()
-                        launcher_script = app_root / "scripts" / "llm_server_start.py"
-                        script_info = str(launcher_script)
-                        env_spec = self.env_registry.get_env_for_model(base_model, log_callback=None)
-                        env_info = str(env_spec.python_executable)
+                        if isinstance(cmd, (list, tuple)) and len(cmd) >= 2:
+                            python_info = str(cmd[0])
+                            script_info = str(cmd[1])
                     except Exception:
                         pass
                     
@@ -1276,9 +1289,11 @@ print('OK')
                         f"Server process for '{model_id}' died during startup.\n"
                         f"Exit code: {process.returncode}\n"
                         f"Port: {port}\n"
-                        f"Python: {env_info}\n"
+                        f"Python: {python_info}\n"
                         f"Script: {script_info}\n"
-                        f"\nServer output:\n{log_output if log_output else '(no output captured)'}"
+                        f"Command: {cmd_str}\n"
+                        f"Startup log (full): {log_file_path_for_user or 'N/A'}\n"
+                        f"\nServer output (tail):\n{log_output if log_output else '(no output captured)'}"
                     )
                     logger.error(error_msg)
                     raise RuntimeError(error_msg)

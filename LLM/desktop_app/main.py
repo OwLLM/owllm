@@ -428,7 +428,7 @@ class ToolInferenceWorker(QThread):
                 else:
                     self.tool_result_received.emit(tool_name, result, False, self.model_column)
             
-            self.progress_update.emit("[INFO] Starting server (this may take several minutes on first run)...")
+            self.progress_update.emit("[INFO] Preparing inference...")
             
             # Run inference
             final_output, tool_log = run_inference_with_tools(
@@ -10478,8 +10478,8 @@ class MainWindow(QMainWindow):
     
     def _run_inference_a_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model A with tool calling support (non-blocking)"""
-        # Show starting message
-        start_msg = "[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)"
+        # Show starting message (actual server status comes from log_callback)
+        start_msg = "[INFO] Preparing tool-enabled inference..."
         self._tool_progress_a = start_msg
         self.chat_display.update_model_a_response(self._tool_progress_a)
         
@@ -10819,7 +10819,7 @@ class MainWindow(QMainWindow):
     
     def _run_inference_b_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model B with tool calling support (non-blocking)"""
-        start_msg = "[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)"
+        start_msg = "[INFO] Preparing tool-enabled inference..."
         self._tool_progress_b = start_msg
         self.chat_display.update_model_b_response(self._tool_progress_b)
 
@@ -11082,8 +11082,7 @@ class MainWindow(QMainWindow):
     
     def _run_inference_c_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model C with tool calling support (non-blocking)"""
-        self.chat_display.update_model_c_response("[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)")
-        start_msg = "[INFO] Starting tool-enabled inference...\n(This may take several minutes on first run)"
+        start_msg = "[INFO] Preparing tool-enabled inference..."
         self._tool_progress_c = start_msg
         self.chat_display.update_model_c_response(self._tool_progress_c)
 

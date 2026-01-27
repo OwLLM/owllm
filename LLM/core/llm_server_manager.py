@@ -322,6 +322,20 @@ class LLMServerManager:
                     log(f"Server '{model_id}' process died, restarting")
                     del self.running_servers[model_id]
             
+            # Fast-path: if something is already healthy on our preferred port, reuse it
+            # without logging "Starting server..." or calling _start_server
+            try:
+                r = requests.get(f"http://127.0.0.1:{preferred_port}/health", timeout=2)
+                if r.status_code == 200:
+                    data = r.json()
+                    if (str(data.get("model", "")).strip() == model_id and
+                            str(data.get("status", "")).lower().strip() == "ok"):
+                        log(f"Server already running on port {preferred_port}, reusing it")
+                        self.state_store.upsert_server(model_id, None, preferred_port, "RUNNING")
+                        return self._get_server_url(model_id)
+            except Exception:
+                pass  # Fall through to _start_server
+            
             # Start new server
             self._start_server(model_id, log_callback=log_callback)
             return self._get_server_url(model_id)

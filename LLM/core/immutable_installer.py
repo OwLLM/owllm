@@ -2037,7 +2037,10 @@ try:
     ok1 = installer._bootstrap_cuda_libs(sys.executable)
     ok2 = installer._patch_triton_runtime_build(sys.executable)
     ok3 = installer._patch_triton_windows_utils(sys.executable)
-    print(\"OK\" if (ok1 and ok2 and ok3) else f\"PARTIAL:{ok1},{ok2},{ok3}\")
+    # IMPORTANT: this code string is embedded inside an outer f-string in the installer.
+    # Avoid inner f-strings / braces here, otherwise the outer f-string will try to
+    # interpolate {ok1} at string-construction time (NameError).
+    print(\"OK\" if (ok1 and ok2 and ok3) else (\"PARTIAL:%s,%s,%s\" % (ok1, ok2, ok3)))
 except Exception as e:
     print(f\"ERROR:{e}\")
 """

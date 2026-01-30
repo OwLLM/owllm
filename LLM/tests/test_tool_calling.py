@@ -37,16 +37,40 @@ That's the answer.'''
 
 
 def test_tool_registry():
-    """Test tool registry imports"""
-    try:
-        from tool_server.tool_registry import ToolRegistry
-        
-        registry = ToolRegistry()
-        tools = registry.list_tools()
-        
-        assert isinstance(tools, list)
-    except ImportError:
-        pytest.skip("Tool registry not available")
+    """Test tool registry imports and list_tools."""
+    from tool_server.registry import ToolRegistry
+    from tool_server.discovery import discover_tools
+
+    discover_tools()
+    registry = ToolRegistry()
+    tools = registry.list_tools()
+    assert isinstance(tools, list)
+
+
+def test_tool_failure_propagation():
+    """Handlers that return {'error': ...} must become top-level ok=false so the tool loop can react."""
+    from pathlib import Path
+    from tool_server.registry import ToolRegistry
+    from tool_server.discovery import discover_tools
+    from tool_server.server import ToolContext
+
+    discover_tools()
+    registry = ToolRegistry()
+    root = Path(__file__).parent.parent
+    ctx = ToolContext(
+        root=root,
+        token="",
+        allow_shell=False,
+        allow_write=False,
+        allow_git=True,
+        allow_network=False,
+        enabled_tools={},
+    )
+
+    # read_file on missing path: handler returns {"error": "File not found"} -> registry must return ok=false
+    out = registry.call_tool("read_file", {"path": "nonexistent_file_xyz_123.txt"}, ctx)
+    assert out.get("ok") is False, "read_file on missing path must yield ok=false"
+    assert "error" in out and out["error"], "error message must be present"
 
 
 @pytest.mark.skipif(True, reason="Requires running tool server")

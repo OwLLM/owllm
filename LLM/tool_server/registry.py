@@ -100,8 +100,16 @@ class ToolRegistry:
         
         # Call the handler
         try:
-            result = spec.handler(context, **args)
-            return {"ok": True, "result": result}
+            raw = spec.handler(context, **args)
+            # Normalize handler output so top-level ok/error is reliable for the tool loop
+            if isinstance(raw, dict):
+                if "ok" in raw and isinstance(raw.get("ok"), bool):
+                    if raw["ok"]:
+                        return {"ok": True, "result": raw.get("result", raw)}
+                    return {"ok": False, "error": raw.get("error", "Tool reported failure")}
+                if "error" in raw and raw["error"]:
+                    return {"ok": False, "error": str(raw["error"])}
+            return {"ok": True, "result": raw}
         except Exception as e:
             return {"ok": False, "error": str(e)}
     

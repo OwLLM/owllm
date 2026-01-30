@@ -176,6 +176,7 @@ class InstallerV2:
             if not skip_wheelhouse:
                 self.log("\nPHASE 1: Wheelhouse Preparation")
                 self.log("-" * 60)
+                self.log(f"  Wheelhouse path: {self.wheelhouse}")
                 
                 wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
                 # Route wheelhouse logs to GUI
@@ -688,6 +689,7 @@ class InstallerV2:
             # PHASE 1: Prepare wheelhouse (ALWAYS - includes validation)
             self.log("\nPHASE 1: Wheelhouse Preparation & Validation")
             self.log("-" * 60)
+            self.log(f"  Wheelhouse path: {self.wheelhouse}")
 
             wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
             # Route wheelhouse logs to GUI
@@ -857,17 +859,45 @@ class InstallerV2:
         cuda_info = results.get("cuda", {})
         if cuda_info.get("found"):
             gpus = cuda_info.get("gpus", [])
-            self.log(f"  CUDA: {cuda_info.get('version')} with {len(gpus)} GPU(s)")
+            cuda_ver = cuda_info.get("version")
+            driver_ver = cuda_info.get("driver_version")
+            cuda_label = cuda_ver if (cuda_ver and str(cuda_ver) != "None") else "Unknown"
+            if driver_ver:
+                cuda_label = f"{cuda_label} (driver {driver_ver})"
+            self.log(f"  CUDA: {cuda_label} with {len(gpus)} GPU(s)")
             for i, gpu in enumerate(gpus):
-                self.log(f"    GPU {i}: {gpu.get('name')} ({gpu.get('memory_mb', 0)} MB)")
+                # system_detector.py stores GPU memory under "memory" (often like "4096 MiB").
+                # Older logs used "memory_mb" which may be absent; fall back to parsing "memory".
+                mem_mb = gpu.get("memory_mb", 0)
+                if not mem_mb:
+                    mem_str = gpu.get("memory")
+                    try:
+                        import re
+                        m = re.search(r"(\d+)", str(mem_str))
+                        if m:
+                            mem_mb = int(m.group(1))
+                    except Exception:
+                        mem_mb = 0
+                cc = gpu.get("compute_capability")
+                cc_str = f", CC {cc}" if cc else ""
+                self.log(f"    GPU {i}: {gpu.get('name')} ({mem_mb} MB{cc_str})")
         else:
             self.log("  CUDA: Not detected")
         
         # Hardware
         hw_info = results.get("hardware", {})
-        cpu = hw_info.get("cpu", "Unknown")
-        ram_gb = hw_info.get("ram_gb", 0)
-        self.log(f"  CPU: {cpu}")
+        cpu_name = hw_info.get("cpu_name") or "Unknown CPU"
+        cpu_dict = hw_info.get("cpu", {}) or {}
+        cpu_cores = cpu_dict.get("cores")
+        cpu_arch = cpu_dict.get("architecture")
+        cpu_extra = []
+        if cpu_cores:
+            cpu_extra.append(f"{cpu_cores} cores")
+        if cpu_arch:
+            cpu_extra.append(str(cpu_arch))
+        cpu_suffix = f" ({', '.join(cpu_extra)})" if cpu_extra else ""
+        ram_gb = hw_info.get("ram_gb", 0) or 0
+        self.log(f"  CPU: {cpu_name}{cpu_suffix}")
         self.log(f"  RAM: {ram_gb:.1f} GB")
     
     def _determine_cuda_config(self, detection_results: dict) -> str:

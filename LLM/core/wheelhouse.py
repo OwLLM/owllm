@@ -5,6 +5,7 @@ Part of the Immutable Installer system
 """
 
 import sys
+import os
 import json
 import subprocess
 import hashlib
@@ -1126,11 +1127,67 @@ class WheelhouseManager:
         Returns:
             Tuple of (success: bool, error_message: str)
         """
+        # Fast-path: if the requested wheel is already present in the wheelhouse,
+        # do NOT hit the network again. This avoids repeated downloads on repair/retry.
+        try:
+            spec = str(package or "").strip()
+            # Basic parse: name + requirement (we primarily care about == exact pins)
+            name = None
+            req = None
+            if "==" in spec:
+                name, req = spec.split("==", 1)
+                name = name.strip()
+                req = "==" + req.strip()
+            elif any(op in spec for op in [">=", "<=", "!=", ">", "<"]):
+                # Try to extract name prefix for range specs (e.g. "transformers>=4.51,<4.60")
+                m = re.match(r"^([A-Za-z0-9_.-]+)\s*(.*)$", spec)
+                if m:
+                    name = m.group(1).strip()
+                    req = m.group(2).strip()
+                    if req and not req.startswith(("==", ">=", "<=", ">", "<", "!=")):
+                        req = None
+            else:
+                # Bare name; can't reason about version
+                name = None
+                req = None
+
+            if name:
+                present_versions = self._get_all_wheel_versions(name)
+                if present_versions:
+                    if req and req.startswith("=="):
+                        expected = req[2:].strip()
+                        # If expected includes local version tag (e.g. +cu118), require exact match.
+                        if "+" in expected:
+                            if expected in present_versions:
+                                self.log(f"  {name}=={expected} already in wheelhouse (skip download)")
+                                return True, ""
+                        else:
+                            # Match by base version for normal wheels
+                            for v in present_versions:
+                                if str(v).split("+")[0].split("-")[0] == expected:
+                                    self.log(f"  {name}=={expected} already in wheelhouse (skip download)")
+                                    return True, ""
+                    elif req:
+                        # Range spec: if ANY present wheel version satisfies it, skip download.
+                        for v in present_versions:
+                            if self._validate_wheel_against_requirement(name, str(v), req):
+                                self.log(f"  {name}{req} already satisfied in wheelhouse (skip download)")
+                                return True, ""
+        except Exception:
+            # Never fail download due to optimization logic
+            pass
+
         cmd = [
             sys.executable, "-m", "pip", "download",
             "--dest", str(self.wheelhouse),
             "--no-cache-dir"  # Critical: don't use cache
         ]
+
+        # Make network behavior more reliable on slow/proxied machines.
+        # NOTE: pip's own network timeout is separate from our subprocess timeout below.
+        pip_net_timeout = int(os.getenv("PIP_DOWNLOAD_TIMEOUT_SECONDS", "120"))
+        pip_retries = int(os.getenv("PIP_DOWNLOAD_RETRIES", "20"))
+        cmd.extend(["--timeout", str(pip_net_timeout), "--retries", str(pip_retries)])
         
         if index_url:
             cmd.extend(["--index-url", index_url])
@@ -1149,11 +1206,13 @@ class WheelhouseManager:
         cmd.append(package)
         
         try:
+            # Torch wheels can be very large; allow longer downloads on slow links.
+            download_timeout = int(os.getenv("WHEELHOUSE_PIP_DOWNLOAD_TIMEOUT_SECONDS", "1800"))
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=600,  # 10 minutes max per package
+                timeout=download_timeout,
                 **self.subprocess_flags
             )
             
@@ -1164,7 +1223,14 @@ class WheelhouseManager:
             return True, ""
             
         except subprocess.TimeoutExpired:
-            return False, f"Download timeout for {package}"
+            return False, (
+                f"Download timeout for {package}.\n"
+                f"This usually means slow/blocked internet, proxy/SSL inspection, or AV scanning large wheels.\n\n"
+                f"Fix options:\n"
+                f"  1) Recommended: pre-seed the wheelhouse on a machine with good internet, then rerun with --skip-wheelhouse.\n"
+                f"  2) If behind a proxy: configure HTTP(S)_PROXY for pip.\n"
+                f"  3) Increase timeouts: set WHEELHOUSE_PIP_DOWNLOAD_TIMEOUT_SECONDS (subprocess) and/or PIP_DOWNLOAD_TIMEOUT_SECONDS.\n"
+            )
         except Exception as e:
             return False, str(e)
     

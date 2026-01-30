@@ -930,7 +930,8 @@ class SystemDetector:
             "all_gpus": cuda_info.get("gpus", []),
             "cpu_arch": hardware_info.get("cpu", {}).get("architecture", "unknown"),
             "cpu_cores": hardware_info.get("cpu", {}).get("cores", 0),
-            "ram_gb": hardware_info.get("ram", {}).get("total_gb", 0),
+            # detect_hardware() stores RAM at top-level "ram_gb"
+            "ram_gb": hardware_info.get("ram_gb", 0) or 0,
             "os": sys.platform,
             "python_version": python_info.get("version", "unknown")
         }

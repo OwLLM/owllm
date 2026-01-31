@@ -205,11 +205,23 @@ class PythonRuntimeManager:
                 )
             
             # Run get-pip.py
+            # Windows subprocess flags to prevent CMD window flashing
+            subprocess_flags = {}
+            if sys.platform == 'win32':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                subprocess_flags = {
+                    'startupinfo': startupinfo,
+                    'creationflags': subprocess.CREATE_NO_WINDOW
+                }
+
             result = subprocess.run(
                 [str(python_exe), str(get_pip_path)],
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=300,
+                **subprocess_flags
             )
             
             if result.returncode == 0:
@@ -241,7 +253,18 @@ if __name__ == "__main__":
     if python_exe:
         print(f"Python runtime ready at: {python_exe}")
         # Test Python
-        result = subprocess.run([str(python_exe), "--version"], capture_output=True, text=True)
+        # Windows subprocess flags to prevent CMD window flashing
+        subprocess_flags = {}
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            subprocess_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
+            
+        result = subprocess.run([str(python_exe), "--version"], capture_output=True, text=True, **subprocess_flags)
         print(f"Python version: {result.stdout.strip()}")
     else:
         print("Failed to get Python runtime")

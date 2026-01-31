@@ -45,6 +45,17 @@ from core.python_runtime import PythonRuntimeManager
 _APP_BUILD = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%y%m%d-%H%M%S")
 APP_TITLE = "OWLLM"
 
+# Windows subprocess flags to prevent CMD window flashing
+SUBPROCESS_FLAGS = {}
+if sys.platform == 'win32':
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    SUBPROCESS_FLAGS = {
+        'startupinfo': startupinfo,
+        'creationflags': subprocess.CREATE_NO_WINDOW
+    }
+
 
 class InstallerThread(QThread):
     """Thread for running smart installer without freezing UI"""
@@ -213,6 +224,7 @@ class PipPackageThread(QThread):
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
+                **SUBPROCESS_FLAGS
             )
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -486,7 +498,7 @@ print(\"OK\")
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+                **SUBPROCESS_FLAGS,
             )
             assert proc.stdout is not None
             for line in proc.stdout:
@@ -747,7 +759,8 @@ class RepairThread(QThread):
                                 result = subprocess.run(
                                     ['cmd', '/c', 'rmdir', '/S', '/Q', str(self.existing_dir)], 
                                     capture_output=True, 
-                                    timeout=30
+                                    timeout=30,
+                                    **SUBPROCESS_FLAGS
                                 )
                                 # PowerShell fallback
                                 if self.existing_dir.exists() and attempt >= 2:
@@ -755,7 +768,8 @@ class RepairThread(QThread):
                                     subprocess.run(
                                         ['powershell', '-Command', ps_cmd],
                                         capture_output=True,
-                                        timeout=30
+                                        timeout=30,
+                                        **SUBPROCESS_FLAGS
                                     )
                             else:
                                 shutil.rmtree(self.existing_dir, ignore_errors=True)
@@ -1967,7 +1981,7 @@ class RequirementCheckThread(QThread):
                 capture_output=True,
                 text=True,
                 timeout=15,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                **SUBPROCESS_FLAGS
             )
             if result.returncode == 0:
                 pkgs = json.loads(result.stdout)
@@ -2615,7 +2629,7 @@ class MainWindow(QMainWindow):
         
         # Page name constants for reliable tab navigation
         self.tab_page_names = {
-            "home": "Home",
+            "home": "🏠 Home",
             "models": "Models", 
             "train": "Train",
             "test": "Test",
@@ -2627,7 +2641,7 @@ class MainWindow(QMainWindow):
             "info": "Info"
         }
         
-        tabs.addTab(self._build_home_tab(), "Home")
+        tabs.addTab(self._build_home_tab(), "🏠 Home")
         tabs.addTab(self._build_models_tab(), "Models")
         tabs.addTab(self._build_train_tab(), "Train")
         tabs.addTab(self._build_test_tab(), "Test")
@@ -4157,7 +4171,7 @@ class MainWindow(QMainWindow):
                     [str(run_installer_bat)],
                     cwd=str(app_dir),
                     shell=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    **SUBPROCESS_FLAGS
                 )
                 # Close main app - installer will handle everything
                 self.close()
@@ -4173,7 +4187,7 @@ class MainWindow(QMainWindow):
                 subprocess.Popen(
                     [python_exe, str(installer_gui)],
                     cwd=str(app_dir),
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    **SUBPROCESS_FLAGS
                 )
                 # Close main app - installer will handle everything
                 self.close()
@@ -4268,11 +4282,11 @@ class MainWindow(QMainWindow):
         if launcher_exe.exists():
             # Launch using launcher.exe
             import subprocess
-            subprocess.Popen([str(launcher_exe)], cwd=str(app_dir))
+            subprocess.Popen([str(launcher_exe)], cwd=str(app_dir), **SUBPROCESS_FLAGS)
         else:
             # Fallback: restart with python
             python = sys.executable
-            subprocess.Popen([python, "-m", "desktop_app.main"], cwd=str(app_dir))
+            subprocess.Popen([python, "-m", "desktop_app.main"], cwd=str(app_dir), **SUBPROCESS_FLAGS)
         
         # Close current instance
         QApplication.quit()
@@ -6010,7 +6024,8 @@ class MainWindow(QMainWindow):
                     result = subprocess.run(
                         ['cmd', '/c', 'rmdir', '/S', '/Q', str(path)], 
                         capture_output=True, 
-                        timeout=30
+                        timeout=30,
+                        **SUBPROCESS_FLAGS
                     )
                     # Also try PowerShell method as fallback
                     if path.exists() and attempt >= 2:
@@ -6018,7 +6033,8 @@ class MainWindow(QMainWindow):
                         subprocess.run(
                             ['powershell', '-Command', ps_cmd],
                             capture_output=True,
-                            timeout=30
+                            timeout=30,
+                            **SUBPROCESS_FLAGS
                         )
                 else:
                     shutil.rmtree(path, ignore_errors=True)
@@ -6112,7 +6128,7 @@ class MainWindow(QMainWindow):
                             if sys.platform == 'win32':
                                 import subprocess
                                 subprocess.run(['attrib', '-R', str(incomplete_file)], 
-                                             capture_output=True, timeout=2)
+                                             capture_output=True, timeout=2, **SUBPROCESS_FLAGS)
                             incomplete_file.unlink()
                         except Exception:
                             pass
@@ -6135,7 +6151,8 @@ class MainWindow(QMainWindow):
                         shell=True,
                         capture_output=True,
                         text=True,
-                        timeout=5
+                        timeout=5,
+                        **SUBPROCESS_FLAGS
                     )
                     # Parse PIDs and kill them
                     for line in result.stdout.split('\n'):
@@ -6145,7 +6162,7 @@ class MainWindow(QMainWindow):
                                 if pid:
                                     log(f"Killing process {pid} that may be locking files...")
                                     subprocess.run(['taskkill', '/F', '/PID', str(pid)],
-                                                 capture_output=True, timeout=3)
+                                                 capture_output=True, timeout=3, **SUBPROCESS_FLAGS)
                             except (ValueError, IndexError):
                                 pass
                 except Exception:
@@ -9581,6 +9598,9 @@ class MainWindow(QMainWindow):
         input_label = QLabel("<b>💬 Type your message:</b>")
         input_layout.addWidget(input_label)
         
+        # Single column input row
+        input_row = QHBoxLayout()
+        
         self.tool_chat_input = QTextEdit()
         self.tool_chat_input.setPlaceholderText("Type your message here...")
         self.tool_chat_input.setMinimumHeight(90)
@@ -9595,17 +9615,20 @@ class MainWindow(QMainWindow):
                 font-size: 11pt;
             }
         """)
-        input_layout.addWidget(self.tool_chat_input)
+        input_row.addWidget(self.tool_chat_input, 1)
         
-        send_layout = QHBoxLayout()
-        send_layout.addStretch()
-        
+        # Buttons column
+        btn_col = QVBoxLayout()
         self.tool_chat_send_btn = QPushButton("📤 Send")
         self.tool_chat_send_btn.setMinimumWidth(120)
+        self.tool_chat_send_btn.setMinimumHeight(40)
         self.tool_chat_send_btn.clicked.connect(self._send_tool_chat_message)
-        send_layout.addWidget(self.tool_chat_send_btn)
+        btn_col.addWidget(self.tool_chat_send_btn)
         
-        input_layout.addLayout(send_layout)
+        btn_col.addStretch()
+        input_row.addLayout(btn_col)
+        
+        input_layout.addLayout(input_row)
         left_layout.addWidget(input_frame)
         
         main_splitter.addWidget(left_widget)
@@ -11594,7 +11617,7 @@ else:
                     capture_output=True,
                     text=True,
                     timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    **SUBPROCESS_FLAGS
                 )
                 return result.returncode == 0 and 'OK' in result.stdout
                 
@@ -11617,7 +11640,7 @@ except Exception:
                     capture_output=True,
                     text=True,
                     timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    **SUBPROCESS_FLAGS
                 )
                 if not (result.returncode == 0 and 'OK' in result.stdout):
                     return False
@@ -11632,7 +11655,7 @@ except Exception:
                     path_result = subprocess.run(
                         [target_python, "-c", get_path_code],
                         capture_output=True, text=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                        **SUBPROCESS_FLAGS
                     )
                     if path_result.returncode == 0:
                         platlib = Path(path_result.stdout.strip())
@@ -11651,7 +11674,7 @@ except Exception:
                             ver_result = subprocess.run(
                                 [target_python, "-c", ver_code],
                                 capture_output=True, text=True,
-                                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                                **SUBPROCESS_FLAGS
                             )
                             pyver = ver_result.stdout.strip() if ver_result.returncode == 0 else ""
                             if pyver:
@@ -11683,7 +11706,7 @@ except Exception:
                     path_result = subprocess.run(
                         [target_python, "-c", get_path_code],
                         capture_output=True, text=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                        **SUBPROCESS_FLAGS
                     )
                     if path_result.returncode == 0:
                         platlib = Path(path_result.stdout.strip())
@@ -11711,7 +11734,7 @@ except Exception:
                     capture_output=True,
                     text=True,
                     timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    **SUBPROCESS_FLAGS
                 )
                 return result.returncode == 0 and 'OK' in result.stdout
                 
@@ -11741,7 +11764,7 @@ except Exception as e:
                     capture_output=True,
                     text=True,
                     timeout=15,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    **SUBPROCESS_FLAGS
                 )
                 # Check for BROKEN in output (may have warnings before it)
                 output = result.stdout.strip()
@@ -11782,7 +11805,7 @@ except Exception as e:
                     capture_output=True,
                     text=True,
                     timeout=15,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+                    **SUBPROCESS_FLAGS
                 )
                 # Check for BROKEN in output (may have warnings before it)
                 output = result.stdout.strip()
@@ -13530,6 +13553,9 @@ except Exception as e:
         
         content_splitter.addWidget(right_panel)
         
+        # Set absolute 1/3 ratio by setting sizes
+        QTimer.singleShot(0, lambda: content_splitter.setSizes([1000, 1000, 1000]))
+        
         # Set splitter proportions: 1/3 | 1/3 | 1/3 (equal thirds)
         content_splitter.setStretchFactor(0, 1)
         content_splitter.setStretchFactor(1, 1)
@@ -13843,6 +13869,7 @@ except Exception as e:
         
         name_label = QLabel(f"📦 {env_id}")
         name_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: white; background: transparent; border: none;")
+        name_label.setWordWrap(True)
         header_layout.addWidget(name_label)
         
         python_ver = env_info.get("python_version", "Unknown")
@@ -13912,7 +13939,7 @@ except Exception as e:
         env_path = env_info.get("path", "N/A")
         path_label = QLabel(f"📁 Path: {env_path}")
         path_label.setWordWrap(True)
-        path_label.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 9pt; background: transparent; border: none;")
+        path_label.setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 9pt; background: transparent; border: none; word-break: break-all;")
         info_layout.addWidget(path_label)
         
         # Associated models list

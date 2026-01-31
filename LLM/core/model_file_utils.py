@@ -13,6 +13,18 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Windows subprocess flags to prevent CMD window flashing
+SUBPROCESS_FLAGS = {}
+if sys.platform == 'win32':
+    import subprocess
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    SUBPROCESS_FLAGS = {
+        'startupinfo': startupinfo,
+        'creationflags': subprocess.CREATE_NO_WINDOW
+    }
+
 
 class ModelDirLockedError(RuntimeError):
     """Raised when a model directory cannot be deleted because files are locked by another process."""
@@ -96,7 +108,7 @@ def clean_download_locks(dest_dir: Path) -> None:
                     try:
                         if sys.platform == "win32":
                             # Clear read-only attribute if present
-                            subprocess.run(["attrib", "-R", str(lockfile)], capture_output=True, timeout=2)
+                            subprocess.run(["attrib", "-R", str(lockfile)], capture_output=True, timeout=2, **SUBPROCESS_FLAGS)
                         lockfile.unlink(missing_ok=True)
                         logger.debug(f"Removed {lockfile.name}")
                     except Exception as e:
@@ -105,7 +117,7 @@ def clean_download_locks(dest_dir: Path) -> None:
                         time.sleep(0.5)
                         try:
                             if sys.platform == "win32":
-                                subprocess.run(["attrib", "-R", str(lockfile)], capture_output=True, timeout=2)
+                                subprocess.run(["attrib", "-R", str(lockfile)], capture_output=True, timeout=2, **SUBPROCESS_FLAGS)
                             lockfile.unlink(missing_ok=True)
                         except Exception:
                             pass
@@ -138,7 +150,8 @@ def kill_processes_locking_directory(dest_dir: Path) -> None:
                 shell=True,
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                **SUBPROCESS_FLAGS
             )
             
             # Parse PIDs and kill them
@@ -198,7 +211,8 @@ def force_clean_model_dir(dest_dir: Path) -> bool:
                 ['wmic', 'process', 'where', 'name="python.exe" or name="pythonw.exe"', 'get', 'ProcessId', '/format:list'],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                **SUBPROCESS_FLAGS
             )
             for line in result.stdout.split('\n'):
                 if 'ProcessId=' in line:
@@ -206,7 +220,7 @@ def force_clean_model_dir(dest_dir: Path) -> bool:
                         pid = int(line.split('=')[1].strip())
                         if pid != current_pid and pid > 0:
                             logger.info(f"Killing Python process {pid}")
-                            subprocess.run(['taskkill', '/F', '/PID', str(pid)], capture_output=True, timeout=2)
+                            subprocess.run(['taskkill', '/F', '/PID', str(pid)], capture_output=True, timeout=2, **SUBPROCESS_FLAGS)
                     except (ValueError, IndexError):
                         pass
             time.sleep(2)
@@ -224,7 +238,8 @@ def force_clean_model_dir(dest_dir: Path) -> bool:
             result = subprocess.run(
                 ['cmd', '/c', 'rmdir', '/S', '/Q', str(dest_dir)], 
                 capture_output=True, 
-                timeout=15
+                timeout=15,
+                **SUBPROCESS_FLAGS
             )
             if not dest_dir.exists():
                 logger.info("✓ Fast delete succeeded!")
@@ -256,7 +271,7 @@ def force_clean_model_dir(dest_dir: Path) -> bool:
                     if sys.platform == "win32":
                         try:
                             subprocess.run(['cmd', '/c', 'del', '/F', '/Q', f'"{file_path}"'], 
-                                         shell=True, capture_output=True, timeout=1)
+                                         shell=True, capture_output=True, timeout=1, **SUBPROCESS_FLAGS)
                             deleted_count += 1
                         except Exception:
                             failed_count += 1
@@ -272,7 +287,7 @@ def force_clean_model_dir(dest_dir: Path) -> bool:
                     if sys.platform == "win32":
                         try:
                             subprocess.run(['cmd', '/c', 'rmdir', '/Q', f'"{dir_path}"'], 
-                                         shell=True, capture_output=True, timeout=1)
+                                         shell=True, capture_output=True, timeout=1, **SUBPROCESS_FLAGS)
                         except Exception:
                             pass
     except Exception as e:
@@ -290,9 +305,9 @@ def force_clean_model_dir(dest_dir: Path) -> bool:
         methods = [
             lambda: shutil.rmtree(dest_dir, ignore_errors=True),
             lambda: subprocess.run(['cmd', '/c', 'rmdir', '/S', '/Q', str(dest_dir)], 
-                                 capture_output=True, timeout=10) if sys.platform == "win32" else None,
+                                 capture_output=True, timeout=10, **SUBPROCESS_FLAGS) if sys.platform == "win32" else None,
             lambda: subprocess.run(['powershell', '-Command', f'Remove-Item -Path "{dest_dir}" -Recurse -Force -ErrorAction SilentlyContinue'],
-                                 capture_output=True, timeout=10) if sys.platform == "win32" else None,
+                                 capture_output=True, timeout=10, **SUBPROCESS_FLAGS) if sys.platform == "win32" else None,
         ]
         
         for method in methods:
@@ -313,7 +328,7 @@ def force_clean_model_dir(dest_dir: Path) -> bool:
             dest_dir.rename(temp_name)
             # Try to delete the renamed folder
             subprocess.run(['cmd', '/c', 'rmdir', '/S', '/Q', str(temp_name)], 
-                         capture_output=True, timeout=10)
+                         capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
         except Exception:
             pass
     

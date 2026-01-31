@@ -10,6 +10,17 @@ import subprocess
 from pathlib import Path
 import time
 
+# Windows subprocess flags to prevent CMD window flashing
+SUBPROCESS_FLAGS = {}
+if sys.platform == 'win32':
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    SUBPROCESS_FLAGS = {
+        'startupinfo': startupinfo,
+        'creationflags': subprocess.CREATE_NO_WINDOW
+    }
+
 def log(message):
     """Print log message"""
     try:
@@ -84,7 +95,7 @@ def check_venv_health(venv_python):
             capture_output=True,
             text=True,
             timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            **SUBPROCESS_FLAGS
         )
         if result.returncode != 0:
             log("Venv Python check failed")
@@ -96,7 +107,7 @@ def check_venv_health(venv_python):
             capture_output=True,
             text=True,
             timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            **SUBPROCESS_FLAGS
         )
         if result.returncode != 0 or "OK" not in result.stdout:
             log("PySide6 check failed - dependencies broken")
@@ -123,7 +134,7 @@ def run_dependency_check(venv_python):
             capture_output=True,
             text=True,
             timeout=30,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            **SUBPROCESS_FLAGS
         )
         
         # Print output for debugging
@@ -156,7 +167,7 @@ def launch_installer():
             subprocess.Popen(
                 [str(run_installer_bat)],
                 cwd=str(llm_dir),
-                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == 'win32' else 0
+                **SUBPROCESS_FLAGS
             )
             return True
         except Exception as e:
@@ -170,7 +181,8 @@ def launch_installer():
             # Use system Python to launch installer
             subprocess.Popen(
                 [sys.executable, str(installer_gui)],
-                cwd=str(llm_dir)
+                cwd=str(llm_dir),
+                **SUBPROCESS_FLAGS
             )
             return True
         except Exception as e:
@@ -192,7 +204,7 @@ def launch_app(venv_python):
             cwd=str(llm_dir),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
+            **SUBPROCESS_FLAGS
         )
         
         # Wait a moment to see if it crashes immediately

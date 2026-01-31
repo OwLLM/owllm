@@ -13,13 +13,26 @@ import sys
 
 def get_zombie_servers():
     """Find all Python processes listening on ports 105xx"""
+    # Windows subprocess flags to prevent CMD window flashing
+    subprocess_flags = {}
+    if sys.platform == 'win32':
+        import subprocess
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = subprocess.SW_HIDE
+        subprocess_flags = {
+            'startupinfo': startupinfo,
+            'creationflags': subprocess.CREATE_NO_WINDOW
+        }
+
     try:
         # Get netstat output
         result = subprocess.run(
             ['netstat', '-ano'],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
+            **subprocess_flags
         )
         
         if result.returncode != 0:
@@ -54,7 +67,18 @@ def kill_processes(pids):
     try:
         # Kill all at once
         cmd = ['taskkill', '/F'] + [arg for pid in pids for arg in ['/PID', pid]]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        # Windows subprocess flags to prevent CMD window flashing
+        subprocess_flags = {}
+        if sys.platform == 'win32':
+            import subprocess
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            subprocess_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, **subprocess_flags)
         
         print(result.stdout)
         

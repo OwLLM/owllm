@@ -50,6 +50,17 @@ class InstallerV2:
         # Initialize environment manager for per-model isolated environments
         self.env_manager = EnvironmentManager(self.root)
         
+        # Windows subprocess flags to prevent CMD window flashing
+        self.subprocess_flags = {}
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            self.subprocess_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
+        
         # Verify manifest exists and load it
         if not self.manifest_path.exists():
             raise FileNotFoundError(f"Manifest not found: {self.manifest_path}")
@@ -134,7 +145,8 @@ class InstallerV2:
                                 ["cmd", "/c", "mklink", "/J", str(self.venv), str(venv_path)],
                                 capture_output=True,
                                 text=True,
-                                timeout=30
+                                timeout=30,
+                                **self.subprocess_flags
                             )
                         else:
                             os.symlink(str(venv_path), str(self.venv))

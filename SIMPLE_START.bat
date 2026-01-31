@@ -51,22 +51,7 @@ if not exist ".venv\Scripts\python.exe" (
 REM Launch the application
 echo Launching GUI...
 echo.
-.venv\Scripts\python.exe -m desktop_app.main
-
-if errorlevel 1 (
-    echo.
-    echo ================================================================
-    echo [ERROR] Application crashed or failed to start!
-    echo ================================================================
-    echo.
-    echo Troubleshooting:
-    echo 1. Check if antivirus is blocking Python
-    echo 2. Try running as Administrator
-    echo 3. Check logs in: LLM\logs\
-    echo.
-    pause
-    exit /b 1
-)
+start "" .venv\Scripts\pythonw.exe -m desktop_app.main
 
 exit /b 0
 

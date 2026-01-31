@@ -9,6 +9,19 @@ import json
 from pathlib import Path
 from datetime import datetime
 
+import subprocess
+
+# Windows subprocess flags to prevent CMD window flashing
+SUBPROCESS_FLAGS = {}
+if sys.platform == 'win32':
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = subprocess.SW_HIDE
+    SUBPROCESS_FLAGS = {
+        'startupinfo': startupinfo,
+        'creationflags': subprocess.CREATE_NO_WINDOW
+    }
+
 def print_section(title):
     """Print section header"""
     print("\n" + "=" * 60)
@@ -155,7 +168,8 @@ def check_venv():
                 [str(python_exe), "--version"],
                 capture_output=True,
                 text=True,
-                timeout=5
+                timeout=5,
+                **SUBPROCESS_FLAGS
             )
             if result.returncode == 0:
                 print(f"  Version: {result.stdout.strip()}")
@@ -265,7 +279,8 @@ def check_packages():
                 [str(python_exe), "-c", f"import {pkg}; print({pkg}.__version__)"],
                 capture_output=True,
                 text=True,
-                timeout=10
+                timeout=10,
+                **SUBPROCESS_FLAGS
             )
             if result.returncode == 0:
                 version = result.stdout.strip()

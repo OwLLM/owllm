@@ -376,30 +376,119 @@ class ServerPage(QWidget):
 
         # Control buttons
         llm_btn_layout = QHBoxLayout()
-        llm_btn_layout.setSpacing(4)
+        llm_btn_layout.setSpacing(10) # Increased spacing
         
         self.llm_start_btn = QPushButton("▶ Start")
+        self.llm_start_btn.setMinimumHeight(45) # Increased height
+        self.llm_start_btn.setCursor(Qt.PointingHandCursor)
+        self.llm_start_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #4CAF50, stop:1 #388E3C);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 11pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #66BB6A, stop:1 #43A047);
+            }
+            QPushButton:pressed {
+                background: #2E7D32;
+            }
+            QPushButton:disabled {
+                background: rgba(255, 255, 255, 0.1);
+                color: rgba(255, 255, 255, 0.3);
+            }
+        """)
         self.llm_start_btn.clicked.connect(self._start_llm_server)
         llm_btn_layout.addWidget(self.llm_start_btn)
         
         self.llm_stop_btn = QPushButton("⏹ Stop")
-        self.llm_stop_btn.clicked.connect(self._stop_llm_server)
+        self.llm_stop_btn.setMinimumHeight(45) # Increased height
+        self.llm_stop_btn.setCursor(Qt.PointingHandCursor)
+        self.llm_stop_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #f44336, stop:1 #d32f2f);
+                color: white;
+                border: none;
+                border-radius: 8px;
+                font-size: 11pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #ef5350, stop:1 #e53935);
+            }
+            QPushButton:pressed {
+                background: #c62828;
+            }
+            QPushButton:disabled {
+                background: rgba(255, 255, 255, 0.1);
+                color: rgba(255, 255, 255, 0.3);
+            }
+        """)
         self.llm_stop_btn.setEnabled(False)
+        self.llm_stop_btn.clicked.connect(self._stop_llm_server)
         llm_btn_layout.addWidget(self.llm_stop_btn)
         
         llm_server_layout.addLayout(llm_btn_layout)
         
-        # Copy and help buttons
+        # Copy and help buttons in the same line
+        secondary_btn_layout = QHBoxLayout()
+        secondary_btn_layout.setSpacing(10)
+        
         self.copy_api_btn = QPushButton("📋 Copy API URL")
+        self.copy_api_btn.setMinimumHeight(42)
+        self.copy_api_btn.setCursor(Qt.PointingHandCursor)
+        self.copy_api_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+                font-size: 10pt;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+            }
+            QPushButton:disabled {
+                color: rgba(255, 255, 255, 0.2);
+            }
+        """)
         self.copy_api_btn.setToolTip("Copy for Cursor/VS Code")
         self.copy_api_btn.clicked.connect(self._copy_api_url)
         self.copy_api_btn.setEnabled(False)
-        llm_server_layout.addWidget(self.copy_api_btn)
+        secondary_btn_layout.addWidget(self.copy_api_btn, 1) # Added stretch factor
         
         help_btn = QPushButton("📖 Setup Guide")
+        help_btn.setMinimumHeight(42)
+        help_btn.setCursor(Qt.PointingHandCursor)
+        help_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #667eea;
+                border: 1px solid #667eea;
+                border-radius: 8px;
+                font-size: 10pt;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: rgba(102, 126, 234, 0.1);
+                border: 1px solid #7a8efc;
+                color: #7a8efc;
+            }
+        """)
         help_btn.setToolTip("How to use with Cursor/VS Code")
         help_btn.clicked.connect(self._show_llm_api_help)
-        llm_server_layout.addWidget(help_btn)
+        secondary_btn_layout.addWidget(help_btn, 1) # Added stretch factor
+        
+        llm_server_layout.addLayout(secondary_btn_layout)
         
         # Status timer
         self.llm_status_timer = QTimer()
@@ -421,9 +510,28 @@ class ServerPage(QWidget):
 
         # Clear button in horizontal layout to ensure it's fully visible
         clear_btn_layout = QHBoxLayout()
-        clear_btn_layout.setContentsMargins(0, 0, 0, 0)
-        clear_btn = QPushButton("🗑️ Clear")
-        clear_btn.setFixedWidth(100)  # Fixed width instead of max to ensure visibility
+        clear_btn_layout.setContentsMargins(5, 5, 5, 5)
+        clear_btn = QPushButton("🗑️ Clear Log") # More descriptive
+        clear_btn.setFixedWidth(140)  # Increased further for length
+        clear_btn.setMinimumHeight(40) # Increased height
+        clear_btn.setCursor(Qt.PointingHandCursor)
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.08);
+                color: rgba(255, 255, 255, 0.7);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 6px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.15);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.3);
+            }
+            QPushButton:pressed {
+                background: rgba(255, 255, 255, 0.05);
+            }
+        """)
         clear_btn.clicked.connect(self.log_text.clear)
         clear_btn_layout.addWidget(clear_btn)
         clear_btn_layout.addStretch()  # Push button to the left

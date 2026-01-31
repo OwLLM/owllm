@@ -3045,10 +3045,10 @@ if errorlevel 1 (
             cuda_lib = triton_lib_dir / "cuda.lib"
             
             self.log("  Generating nvcuda.def...")
-            subprocess.run([str(gendef), str(nvcuda_dll)], cwd=str(triton_lib_dir), capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+            subprocess.run([str(gendef), str(nvcuda_dll)], cwd=str(triton_lib_dir), capture_output=True, **self.subprocess_flags)
             
             self.log("  Building libcuda.a (MinGW format)...")
-            subprocess.run([str(dlltool), "-d", "nvcuda.def", "-l", "libcuda.a", "-D", "nvcuda.dll"], cwd=str(triton_lib_dir), capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+            subprocess.run([str(dlltool), "-d", "nvcuda.def", "-l", "libcuda.a", "-D", "nvcuda.dll"], cwd=str(triton_lib_dir), capture_output=True, **self.subprocess_flags)
             
             import shutil
             shutil.copy2(libcuda_a, cuda_lib)
@@ -3065,7 +3065,7 @@ if errorlevel 1 (
                     self.log(f"Bootstrapping Python import library from {python_dll}...")
                     py_def = triton_lib_dir / "python.def"
                     py_lib = triton_lib_dir / f"libpython{pyver}.dll.a"
-                    subprocess.run([str(gendef), str(python_dll)], cwd=str(triton_lib_dir), capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0)
+                    subprocess.run([str(gendef), str(python_dll)], cwd=str(triton_lib_dir), capture_output=True, **self.subprocess_flags)
                     # gendef writes <dllname>.def (e.g. python312.def). normalize to python.def if needed.
                     generated_def = triton_lib_dir / f"python{pyver}.def"
                     if generated_def.exists():
@@ -3074,7 +3074,7 @@ if errorlevel 1 (
                         [str(dlltool), "-d", py_def.name, "-l", py_lib.name, "-D", python_dll.name],
                         cwd=str(triton_lib_dir),
                         capture_output=True,
-                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0,
+                        **self.subprocess_flags,
                     )
                     if py_lib.exists():
                         self.log(f"✓ Python import library ready: {py_lib.name}")

@@ -146,6 +146,17 @@ def _ensure_bootstrap():
         else:
             project_root = llm_dir
         
+        # Windows subprocess flags to prevent CMD window flashing
+        bootstrap_flags = {}
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            bootstrap_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
+        
         bootstrap_venv = project_root / "bootstrap" / ".venv"
         bootstrap_python = bootstrap_venv / "Scripts" / "python.exe" if platform.system() == "Windows" else bootstrap_venv / "bin" / "python"
         
@@ -164,7 +175,8 @@ def _ensure_bootstrap():
                             ["py", py_arg, "-c", "import sys; print(sys.executable)"],
                             capture_output=True,
                             text=True,
-                            timeout=5
+                            timeout=5,
+                            **bootstrap_flags
                         )
                         if result.returncode == 0:
                             system_python = result.stdout.strip()
@@ -180,7 +192,8 @@ def _ensure_bootstrap():
                             [py_cmd, "-c", "import sys; print(sys.executable)"],
                             capture_output=True,
                             text=True,
-                            timeout=5
+                            timeout=5,
+                            **bootstrap_flags
                         )
                         if result.returncode == 0:
                             system_python = result.stdout.strip()
@@ -198,7 +211,8 @@ def _ensure_bootstrap():
                 subprocess.run(
                     [system_python, "-m", "venv", str(bootstrap_venv)],
                     check=True,
-                    timeout=60
+                    timeout=60,
+                    **bootstrap_flags
                 )
                 print("Bootstrap venv created.", file=sys.stderr)
             except Exception as e:
@@ -216,7 +230,8 @@ def _ensure_bootstrap():
                     check=True,
                     timeout=300,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL,
+                    **bootstrap_flags
                 )
                 # Install requirements
                 subprocess.run(
@@ -224,7 +239,8 @@ def _ensure_bootstrap():
                     check=True,
                     timeout=600,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL,
+                    **bootstrap_flags
                 )
                 print("Installer dependencies installed.", file=sys.stderr)
             except Exception as e:
@@ -237,7 +253,8 @@ def _ensure_bootstrap():
         try:
             subprocess.Popen(
                 [str(bootstrap_python), str(installer_script)],
-                cwd=str(llm_dir)
+                cwd=str(llm_dir),
+                **bootstrap_flags
             )
         except Exception as e:
             print(f"ERROR: Failed to relaunch installer: {e}", file=sys.stderr)
@@ -310,6 +327,17 @@ class InstallerGUI:
         self.checklist_thread = None
         self.installing = False
         self._root_destroyed = False
+        
+        # Windows subprocess flags to prevent CMD window flashing
+        self.subprocess_flags = {}
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            self.subprocess_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
         
         # Track if root is destroyed
         self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
@@ -976,10 +1004,19 @@ class InstallerGUI:
                 return
             
             # Launch main app
+            # Windows subprocess flags to prevent CMD window flashing
+            subprocess_kwargs = {}
+            if sys.platform == 'win32':
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo.wShowWindow = subprocess.SW_HIDE
+                subprocess_kwargs['startupinfo'] = startupinfo
+                subprocess_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            
             subprocess.Popen(
                 [python_exe_str, "-m", "desktop_app.main"],
                 cwd=script_dir,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                **subprocess_kwargs
             )
             
             # Close installer GUI

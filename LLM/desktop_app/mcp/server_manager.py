@@ -21,6 +21,17 @@ class MCPServerManager:
             servers_dir = base_dir / "mcp_servers"
         self.servers_dir = Path(servers_dir)
         
+        # Windows subprocess flags
+        self.subprocess_flags = {}
+        if platform.system().lower() == 'windows':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            self.subprocess_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
+        
         # Create directories with error handling to avoid blocking
         try:
             self.servers_dir.mkdir(parents=True, exist_ok=True)
@@ -56,14 +67,16 @@ class MCPServerManager:
                     ["npm", "install", "-g", package_name],
                     capture_output=True,
                     text=True,
-                    timeout=300
+                    timeout=300,
+                    **self.subprocess_flags
                 )
                 if result.returncode == 0:
                     # Find global install location
                     which_result = subprocess.run(
                         ["npm", "list", "-g", package_name, "--depth=0"],
                         capture_output=True,
-                        text=True
+                        text=True,
+                        **self.subprocess_flags
                     )
                     install_path = None  # Global installs don't have a local path
                     return True, f"Successfully installed {package_name} globally", install_path
@@ -88,7 +101,8 @@ class MCPServerManager:
                     cwd=install_dir,
                     capture_output=True,
                     text=True,
-                    timeout=300
+                    timeout=300,
+                    **self.subprocess_flags
                 )
                 
                 if result.returncode == 0:
@@ -140,7 +154,8 @@ class MCPServerManager:
                     [shutil.which("python") or shutil.which("python3"), "-m", "venv", str(venv_path)],
                     capture_output=True,
                     text=True,
-                    timeout=60
+                    timeout=60,
+                    **self.subprocess_flags
                 )
                 if result.returncode != 0:
                     return False, f"Failed to create virtual environment: {result.stderr}", None
@@ -150,7 +165,8 @@ class MCPServerManager:
                 [str(pip_exe), "install", package_name],
                 capture_output=True,
                 text=True,
-                timeout=300
+                timeout=300,
+                **self.subprocess_flags
             )
             
             if result.returncode == 0:
@@ -222,7 +238,8 @@ class MCPServerManager:
                     cwd=clone_path,
                     capture_output=True,
                     text=True,
-                    timeout=120
+                    timeout=120,
+                    **self.subprocess_flags
                 )
                 if result.returncode != 0:
                     return False, f"git pull failed: {result.stderr}", None
@@ -236,7 +253,8 @@ class MCPServerManager:
                     cmd,
                     capture_output=True,
                     text=True,
-                    timeout=300
+                    timeout=300,
+                    **self.subprocess_flags
                 )
                 
                 if result.returncode != 0:
@@ -248,7 +266,8 @@ class MCPServerManager:
                     ["git", "checkout", branch],
                     cwd=clone_path,
                     capture_output=True,
-                    text=True
+                    text=True,
+                    **self.subprocess_flags
                 )
                 # Non-fatal if branch doesn't exist
             

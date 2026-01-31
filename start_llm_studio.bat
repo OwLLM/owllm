@@ -18,12 +18,7 @@ echo Starting LLM Fine-tuning Studio...
 echo.
 
 REM Launch the desktop app
-call .venv\Scripts\activate.bat
-python -m desktop_app.main
+start "" .venv\Scripts\pythonw.exe -m desktop_app.main
 
-if errorlevel 1 (
-    echo.
-    echo ERROR: Failed to start application
-    pause
-)
+exit /b 0
 

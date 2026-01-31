@@ -553,10 +553,10 @@ class LLMServerManager:
                                 # If we have PID, try to kill it
                                 if pid:
                                     try:
-                                    if os.name == 'nt':  # Windows
-                                        subprocess.run(['taskkill', '/F', '/PID', str(pid)], 
-                                                     capture_output=True, timeout=5, **self.subprocess_flags)
-                                    else:  # Unix
+                                        if os.name == 'nt':  # Windows
+                                            subprocess.run(['taskkill', '/F', '/PID', str(pid)], 
+                                                         capture_output=True, timeout=5, **self.subprocess_flags)
+                                        else:  # Unix
                                             os.kill(pid, 9)
                                         log(f"Killed server process PID {pid}")
                                         time.sleep(2)  # Wait for port to be released
@@ -582,10 +582,10 @@ class LLMServerManager:
                                                     parts = line.split()
                                                     if len(parts) >= 5:
                                                         found_pid = parts[-1]
-                                                if found_pid.isdigit():
-                                                    subprocess.run(['taskkill', '/F', '/PID', found_pid],
-                                                                 capture_output=True, timeout=5, **self.subprocess_flags)
-                                                    log(f"Killed process {found_pid} on port {port}")
+                                                        if found_pid.isdigit():
+                                                            subprocess.run(['taskkill', '/F', '/PID', found_pid],
+                                                                         capture_output=True, timeout=5, **self.subprocess_flags)
+                                                            log(f"Killed process {found_pid} on port {port}")
                                                             time.sleep(2)
                                                             break
                                         except Exception:
@@ -789,10 +789,10 @@ class LLMServerManager:
                                 parts = line.split()
                                 if len(parts) >= 5:
                                     found_pid = parts[-1]
-                                                if found_pid.isdigit():
-                                                    subprocess.run(['taskkill', '/F', '/PID', found_pid],
-                                                                 capture_output=True, timeout=5, **self.subprocess_flags)
-                                                    log(f"Killed process {found_pid} on port {port}")
+                                    if found_pid.isdigit():
+                                        subprocess.run(['taskkill', '/F', '/PID', found_pid],
+                                                     capture_output=True, timeout=5, **self.subprocess_flags)
+                                        log(f"Killed process {found_pid} on port {port}")
                                         time.sleep(2)  # Wait for port release
                                         break
                 except Exception as e:

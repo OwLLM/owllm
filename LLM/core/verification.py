@@ -200,21 +200,60 @@ print("AutoConfig: OK")
         Returns:
             Tuple of (success: bool, error_message: str)
         """
-        code = """
+        code = r"""
+import os
 import sys
+from pathlib import Path
+
+def _print_diag():
+    print(f"python={sys.executable}")
+    print(f"version={sys.version}")
+    print(f"platform={sys.platform}")
+
 try:
-    import PySide6.QtCore
+    # Ensure the package directories are registered for DLL resolution on Windows.
+    # This mitigates PATH pollution / conflicting Qt DLLs on some machines.
+    import PySide6
+    pyside_dir = Path(PySide6.__file__).resolve().parent
+    print(f"pyside_dir={pyside_dir}")
+
+    try:
+        import shiboken6
+        shiboken_dir = Path(shiboken6.__file__).resolve().parent
+        print(f"shiboken_dir={shiboken_dir}")
+    except Exception as e:
+        shiboken_dir = None
+        print(f"shiboken_import_error={e!r}")
+
+    if sys.platform == "win32":
+        try:
+            os.add_dll_directory(str(pyside_dir))
+        except Exception as e:
+            print(f"add_dll_directory_pyside_failed={e!r}")
+        if shiboken_dir:
+            try:
+                os.add_dll_directory(str(shiboken_dir))
+            except Exception as e:
+                print(f"add_dll_directory_shiboken_failed={e!r}")
+
+    # Now try importing QtCore
+    import PySide6.QtCore  # noqa: F401
     print("PySide6.QtCore: OK")
     sys.exit(0)
+
 except ImportError as e:
+    _print_diag()
     error_msg = str(e)
-    if "shiboken" in error_msg.lower() or "does not exist" in error_msg:
+    if "shiboken" in error_msg.lower() or "does not exist" in error_msg.lower():
         print(f"ERROR: PySide6/shiboken6 import failed: {error_msg}", file=sys.stderr)
     else:
         print(f"ERROR: PySide6 import error: {error_msg}", file=sys.stderr)
     sys.exit(1)
+
 except Exception as e:
-    print(f"ERROR: PySide6 check failed: {str(e)}", file=sys.stderr)
+    _print_diag()
+    # Common on Windows when a dependent DLL loads but is missing an entry point.
+    print(f"ERROR: PySide6 check failed: {e}", file=sys.stderr)
     sys.exit(1)
 """
         

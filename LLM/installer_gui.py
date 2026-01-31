@@ -14,6 +14,7 @@ from tkinter import (
     Tk, ttk, Frame, Label, Button, Text, Scrollbar, Checkbutton, 
     StringVar, BooleanVar, messagebox
 )
+from typing import Optional, Tuple
 
 # ============================================================================
 # ACTIVE ENV RESOLUTION (env_key /.envs) - used by GUI for launch/checklist
@@ -94,6 +95,22 @@ def _get_active_env_python() -> tuple[str | None, str | None]:
     else:
         python_exe = venv_dir / "bin" / "python"
     return (str(python_exe) if python_exe.exists() else None), None
+
+
+def _format_bytes(num_bytes: Optional[float]) -> str:
+    if num_bytes is None:
+        return ""
+    try:
+        n = float(num_bytes)
+    except Exception:
+        return ""
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if n < 1024.0 or unit == "TB":
+            if unit == "B":
+                return f"{int(n)} {unit}"
+            return f"{n:.2f} {unit}"
+        n /= 1024.0
+    return ""
 
 
 # ============================================================================
@@ -405,12 +422,20 @@ class InstallerGUI:
         progress_frame.grid_columnconfigure(0, weight=1)
         
         Label(progress_frame, text="Progress:", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w")
+
+        # Overall progress (0-100)
         self.progress_var = StringVar(value="Ready")
         self.progress_label = Label(progress_frame, textvariable=self.progress_var, anchor="w")
         self.progress_label.grid(row=1, column=0, sticky="ew", pady=(5, 0))
-        
-        self.progress_bar = ttk.Progressbar(progress_frame, mode="indeterminate")
+        self.progress_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100)
         self.progress_bar.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+
+        # Current download progress (0-100)
+        self.download_var = StringVar(value="Download: idle")
+        self.download_label = Label(progress_frame, textvariable=self.download_var, anchor="w")
+        self.download_label.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self.download_bar = ttk.Progressbar(progress_frame, mode="determinate", maximum=100)
+        self.download_bar.grid(row=4, column=0, sticky="ew", pady=(5, 0))
         
         # Row 5: Log label
         log_label = Label(main_frame, text="Installation Log:", font=("Arial", 10, "bold"))
@@ -765,8 +790,14 @@ class InstallerGUI:
         self.installing = True
         self.install_button.config(state="disabled")
         self.launch_button.config(state="disabled")
-        self.progress_bar.start()
-        self.progress_var.set("Installing...")
+        # Reset bars
+        try:
+            self.progress_bar["value"] = 0
+            self.download_bar["value"] = 0
+        except Exception:
+            pass
+        self.progress_var.set("Starting...")
+        self.download_var.set("Download: idle")
         self.log_text.delete(1.0, "end")
         self._log("Starting installation/repair process...")
         
@@ -903,7 +934,7 @@ class InstallerGUI:
             try:
                 if not self._root_destroyed:
                     write_log("Root not destroyed, cleaning up GUI...")
-                    self._safe_after(self.progress_bar.stop)
+                    # determinate bars: ensure UI is responsive and re-enable buttons
                     self._safe_after(self.install_button.config, {"state": "normal"})
                     self.installing = False
                     self._safe_after(self._populate_checklist) # Refresh checklist one last time

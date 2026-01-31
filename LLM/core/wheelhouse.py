@@ -48,6 +48,10 @@ class WheelhouseManager:
         
         self.wheelhouse = wheelhouse_dir
         self.wheelhouse.mkdir(parents=True, exist_ok=True)
+
+        # Optional callback for progress reporting (GUI).
+        # Expected signature: callback(dict_event)
+        self.progress_callback = None
         
         # Windows subprocess flags to prevent CMD window flashing
         self.subprocess_flags = {}
@@ -73,6 +77,21 @@ class WheelhouseManager:
                 # Last resort: ASCII only
                 ascii_message = message.encode('ascii', 'replace').decode('ascii')
                 print(f"[WHEELHOUSE] {ascii_message}")
+
+    def _emit_overall(self, phase: str, completed: int, total: int, message: str = ""):
+        cb = getattr(self, "progress_callback", None)
+        if not cb:
+            return
+        try:
+            cb({
+                "kind": "overall",
+                "phase": phase,  # "wheelhouse"
+                "completed": int(completed),
+                "total": int(total) if total else 0,
+                "message": str(message or ""),
+            })
+        except Exception:
+            pass
     
     def _extract_version_from_wheel(self, wheel_path: Path) -> Optional[str]:
         """
@@ -1204,6 +1223,9 @@ class WheelhouseManager:
             "--dest", str(self.wheelhouse),
             "--no-cache-dir"  # Critical: don't use cache
         ]
+        # Use an ASCII progress bar so we can parse progress reliably.
+        # (Still works even if caller doesn't parse it.)
+        cmd.extend(["--progress-bar", "ascii"])
 
         # Make network behavior more reliable on slow/proxied machines.
         # NOTE: pip's own network timeout is separate from our subprocess timeout below.
@@ -1230,18 +1252,104 @@ class WheelhouseManager:
         try:
             # Torch wheels can be very large; allow longer downloads on slow links.
             download_timeout = int(os.getenv("WHEELHOUSE_PIP_DOWNLOAD_TIMEOUT_SECONDS", "1800"))
-            result = subprocess.run(
+            # Stream output so UI can show progress (stderr carries pip progress).
+            proc = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=download_timeout,
+                bufsize=1,
                 **self.subprocess_flags
             )
-            
-            if result.returncode != 0:
-                error_msg = result.stderr or result.stdout
-                return False, error_msg[:500]  # Truncate long errors
-            
+
+            # Helpers to parse progress lines like: " 45%|#####...| 1.20G/3.00G"
+            import re
+
+            def _to_bytes(val: float, unit: str) -> float:
+                unit = (unit or "").strip().lower()
+                mult = 1.0
+                if unit in ("kb", "kib", "k"):
+                    mult = 1024.0
+                elif unit in ("mb", "mib", "m"):
+                    mult = 1024.0 ** 2
+                elif unit in ("gb", "gib", "g"):
+                    mult = 1024.0 ** 3
+                elif unit in ("tb", "tib", "t"):
+                    mult = 1024.0 ** 4
+                return float(val) * mult
+
+            percent_re = re.compile(r"(\d{1,3})%")
+            size_re = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGTP]?B)\s*/\s*(\d+(?:\.\d+)?)\s*([KMGTP]?B)", re.IGNORECASE)
+
+            def _emit_download_progress(percent=None, downloaded=None, total=None):
+                cb = getattr(self, "progress_callback", None)
+                if not cb:
+                    return
+                try:
+                    cb({
+                        "kind": "download",
+                        "package": str(package),
+                        "percent": percent,
+                        "downloaded_bytes": downloaded,
+                        "total_bytes": total,
+                    })
+                except Exception:
+                    pass
+
+            # Read stderr in chunks; pip often uses carriage returns for progress updates.
+            stderr_buf = ""
+            stdout_lines = []
+            try:
+                while True:
+                    # Drain stdout lines (important for error context)
+                    if proc.stdout:
+                        line = proc.stdout.readline()
+                        if line:
+                            stdout_lines.append(line)
+                    if proc.stderr:
+                        chunk = proc.stderr.read(256)
+                        if chunk:
+                            stderr_buf += chunk
+                            # Split by carriage return or newline
+                            parts = re.split(r"[\r\n]+", stderr_buf)
+                            stderr_buf = parts[-1]  # keep tail
+                            for p in parts[:-1]:
+                                p = p.strip()
+                                if not p:
+                                    continue
+                                m_pct = percent_re.search(p)
+                                pct = int(m_pct.group(1)) if m_pct else None
+                                m_sz = size_re.search(p)
+                                dl = tot = None
+                                if m_sz:
+                                    dl = _to_bytes(float(m_sz.group(1)), m_sz.group(2))
+                                    tot = _to_bytes(float(m_sz.group(3)), m_sz.group(4))
+                                if pct is not None or (dl is not None and tot is not None):
+                                    _emit_download_progress(percent=pct, downloaded=dl, total=tot)
+                    rc = proc.poll()
+                    if rc is not None:
+                        break
+            finally:
+                # Ensure process streams closed
+                try:
+                    if proc.stdout:
+                        proc.stdout.close()
+                except Exception:
+                    pass
+                try:
+                    if proc.stderr:
+                        proc.stderr.close()
+                except Exception:
+                    pass
+
+            if proc.returncode != 0:
+                # Best-effort collect remaining stderr tail
+                err_tail = (stderr_buf or "")
+                error_msg = err_tail or "".join(stdout_lines)
+                return False, str(error_msg)[:500]
+
+            # Mark completion
+            _emit_download_progress(percent=100)
             return True, ""
             
         except subprocess.TimeoutExpired:

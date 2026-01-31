@@ -1,9 +1,0 @@
-{
-  "install_complete": true,
-  "install_timestamp": "2026-01-31T14:18:05.607604",
-  "cuda_config": "cu118",
-  "verification_passed": true,
-  "python_version": "3.12.7",
-  "installer_level": "InstallerV2",
-  "venv_path": "D:\\1_GitHome\\LLM-Studio\\LLM\\.venv"
-}

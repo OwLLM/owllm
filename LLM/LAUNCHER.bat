@@ -41,30 +41,7 @@ if errorlevel 1 (
 
 :python_found
 
-REM Check if first-time setup has been completed
-if not exist ".setup_complete" (
-    REM Create venv if needed (silently)
-    if not exist .venv (
-        "%PYTHON_EXE%" -m venv .venv >nul 2>&1
-    )
-    
-    REM Activate venv and install PySide6 (silently)
-    if exist .venv\Scripts\activate.bat (
-        call .venv\Scripts\activate.bat >nul 2>&1
-        python -m pip install --quiet --upgrade pip >nul 2>&1
-        python -m pip install --quiet PySide6 >nul 2>&1
-    )
-    
-    REM Launch setup wizard GUI (no console)
-    start "" pythonw.exe first_run_setup.py
-    exit /b 0
-)
+REM Call LAUNCHER.py which has all the new state management and resume logic
+"%PYTHON_EXE%" LAUNCHER.py
 
-REM Normal app launch (no console)
-if exist .venv\Scripts\pythonw.exe (
-    start "" .venv\Scripts\pythonw.exe -m desktop_app.main
-) else (
-    start "" python -m desktop_app.main
-)
-
-exit
+exit /b %ERRORLEVEL%

@@ -80,6 +80,10 @@ class ImmutableInstaller:
                 'startupinfo': startupinfo,
                 'creationflags': subprocess.CREATE_NO_WINDOW
             }
+
+        # Track auto-heal attempts per missing requirement to avoid infinite loops.
+        # Key: normalized requirement string (lowercase, hyphenated).
+        self._autoheal_attempts: Dict[str, int] = {}
     
     def log(self, message: str):
         """Log message to console with encoding safety"""
@@ -391,13 +395,21 @@ class ImmutableInstaller:
             self.log("[STEP] PHASE 5: Clearing Python bytecode cache")
             self._clear_pycache()
             
+            # PHASE 5.5: Save preliminary installation state
+            # This ensures state file exists even if verification fails
+            self.log("[STEP] PHASE 5.5: Saving preliminary installation state")
+            self._save_install_state(cuda_config, verification_passed=False)
+            self.log("  ✓ Preliminary state saved (verification pending)")
+            
             # PHASE 6: Verification (two-phase: always run at end, not per-package)
             self.log("[STEP] PHASE 6: Verifying installation")
             # Always run verification - it will report which tests failed if any
             # This ensures we catch issues even after partial installs
+            verification_passed = True
             try:
                 self._verify_installation(venv_python)
             except InstallationFailed as e:
+                verification_passed = False
                 if should_resume and packages_to_install:
                     # In repair mode, log the failure but don't fail the entire operation
                     # User can run repair again or use Rebuild if needed
@@ -406,6 +418,14 @@ class ImmutableInstaller:
                 else:
                     # In full install mode, verification failure is critical
                     raise
+            
+            # PHASE 7: Save installation state
+            self.log("[STEP] PHASE 7: Updating installation state with verification result")
+            self._save_install_state(cuda_config, verification_passed)
+            if verification_passed:
+                self.log("  ✓ Installation state updated - verification PASSED")
+            else:
+                self.log("  ✓ Installation state updated - verification FAILED (but packages installed)")
             
             self.log("=" * 60)
             self.log("✓ Installation complete")
@@ -447,7 +467,14 @@ class ImmutableInstaller:
                                 
                                 # Clear cache and verify
                                 self._clear_pycache()
-                                self._verify_installation(venv_python)
+                                verification_passed = True
+                                try:
+                                    self._verify_installation(venv_python)
+                                except InstallationFailed:
+                                    verification_passed = False
+                                
+                                # Save state after retry success
+                                self._save_install_state(cuda_config, verification_passed)
                                 
                                 self.log("=" * 60)
                                 self.log("✓ Installation complete (after version conflict fix)")
@@ -1039,6 +1066,17 @@ class ImmutableInstaller:
             self.log(f"  ✓ Installation complete: {installed_count} installed, {skipped_count} skipped (already installed)")
         else:
             self.log(f"  ✓ All packages installed ({installed_count} total)")
+        
+        # Force metadata cache refresh to ensure packages are immediately discoverable
+        # This helps prevent "package not found" errors when checking versions right after install
+        try:
+            import importlib.metadata
+            if hasattr(importlib.metadata, 'distributions'):
+                # Trigger metadata cache reload by iterating distributions
+                _ = list(importlib.metadata.distributions())
+                self.log("  ✓ Metadata cache refreshed")
+        except Exception as e:
+            self.log(f"  ⚠ Could not refresh metadata cache: {e}")
     
     def _install_binary_package(self, venv_python: Path, wheel_path: Path, force_reinstall: bool = False) -> Tuple[bool, str]:
         """
@@ -1056,8 +1094,8 @@ class ImmutableInstaller:
             str(venv_python), "-m", "pip", "install",
             "--no-index",  # Critical: offline only
             "--find-links", str(self.wheelhouse),
-            "--no-cache-dir",
-            "--no-deps",  # Critical: prevent pip from resolving dependencies
+            "--no-cache-dir"
+            # NO --no-deps: All packages are explicitly listed in profiles
         ]
         
         if force_reinstall:
@@ -1113,39 +1151,14 @@ class ImmutableInstaller:
             "--no-index",  # Critical: offline only
             "--find-links", str(self.wheelhouse),
             "--no-cache-dir"
+            # NO --no-deps: All packages are explicitly listed in profiles
         ]
         
-        # Add --no-deps only if not explicitly overridden in install_args
-        # Some packages (like requests) need their dependencies installed
-        use_no_deps = True
-        
-        # Packages that need their dependencies installed (not --no-deps)
-        # These packages have dependencies that must be installed from the wheelhouse
-        packages_needing_deps = ["requests", "urllib3", "certifi", "charset-normalizer", "idna", "jinja2", "markupsafe", "peft", "tqdm", "colorama"]
-        
-        # First check if package needs dependencies (this takes priority unless explicitly overridden)
-        if package_name in packages_needing_deps:
-            use_no_deps = False  # These packages need their dependencies
-            self.log(f"    [DEBUG] {package_name} will install WITH dependencies (not --no-deps)")
-        
-        # Then check if install_args explicitly overrides this
+        # Add additional args from install_args (like --force-reinstall)
         if install_args:
-            # Check if install_args explicitly requests --no-deps
-            if "--no-deps" in install_args:
-                use_no_deps = True  # Explicitly requested, override package default
-                self.log(f"    [DEBUG] {package_name} forced to use --no-deps via install_args")
-            # Check if install_args explicitly disables --no-deps
-            elif any(arg in install_args for arg in ["--no-deps=false", "--with-deps"]):
-                use_no_deps = False  # Explicitly disabled
-        
-        if use_no_deps:
-            cmd.append("--no-deps")  # Default: prevent pip from resolving dependencies online
-        
-        # Add additional args (like --force-reinstall)
-        # BUT: Never add install_args if they're already in cmd (avoid duplicates)
-        for arg in install_args:
-            if arg not in cmd and arg != "--no-deps":  # Don't add --no-deps if we already handled it
-                cmd.append(arg)
+            for arg in install_args:
+                if arg not in cmd:
+                    cmd.append(arg)
         
         # Add package specifier
         # Handle version ranges (e.g., ">=0.21.0,<0.24.0") and exact versions
@@ -1172,36 +1185,86 @@ class ImmutableInstaller:
                 # Check if this is a "missing wheel" error (from versions: none)
                 # This means the package isn't in wheelhouse and pip can't query online
                 if "from versions: none" in error or "No matching distribution found" in error:
-                    # Try to extract package name from error
-                    missing_pkg = self._extract_missing_package_from_error(error, package_name)
-                    if missing_pkg:
-                        self.log(f"  ⚠ Missing wheel detected: {missing_pkg}")
-                        self.log(f"  🔧 Attempting to download {missing_pkg} into wheelhouse...")
+                    # Try to extract missing requirement (name + spec) from error.
+                    missing_req = self._extract_missing_package_from_error(error, package_name)
+                    if missing_req:
+                        attempt_key = str(missing_req).strip().lower().replace("_", "-")
+                        attempt_count = self._autoheal_attempts.get(attempt_key, 0) + 1
+                        self._autoheal_attempts[attempt_key] = attempt_count
+
+                        # Hard cap to prevent infinite loops.
+                        if attempt_count > 2:
+                            # Best-effort: include what wheel versions we see for the missing package.
+                            wheelhouse_versions_msg = ""
+                            try:
+                                from core.wheelhouse import WheelhouseManager
+                                wheelhouse_mgr_tmp = WheelhouseManager(self.manifest_path, self.wheelhouse)
+                                name_only_tmp = str(missing_req)
+                                for op in ["==", ">=", "<=", "!=", "~=", ">", "<"]:
+                                    if op in name_only_tmp:
+                                        name_only_tmp = name_only_tmp.split(op, 1)[0]
+                                        break
+                                name_only_tmp = name_only_tmp.strip()
+                                present_tmp = wheelhouse_mgr_tmp._get_all_wheel_versions(name_only_tmp)
+                                wheelhouse_versions_msg = f"\nWheelhouse versions for {name_only_tmp}: {present_tmp}"
+                            except Exception:
+                                pass
+                            return False, (
+                                f"Auto-heal retry limit reached for missing requirement: {missing_req}\n"
+                                f"Package being installed: {package_name}{version_spec}\n"
+                                f"Wheelhouse: {self.wheelhouse}\n"
+                                f"{wheelhouse_versions_msg}\n"
+                                f"pip error (truncated): {error_str}"
+                            )
+
+                        self.log(f"  ⚠ Missing wheel detected: {missing_req}")
+                        self.log(f"  🔧 Attempting to download {missing_req} into wheelhouse...")
                         
                         # Try to repair wheelhouse by downloading missing package
                         from core.wheelhouse import WheelhouseManager
                         wheelhouse_mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
                         python_version = (sys.version_info.major, sys.version_info.minor)
+
+                        # Best-effort: log what versions are currently in wheelhouse for this package.
+                        try:
+                            name_only = str(missing_req)
+                            for op in ["==", ">=", "<=", "!=", "~=", ">", "<"]:
+                                if op in name_only:
+                                    name_only = name_only.split(op, 1)[0]
+                                    break
+                            name_only = name_only.strip()
+                            present_versions = wheelhouse_mgr._get_all_wheel_versions(name_only)
+                            if present_versions:
+                                self.log(f"  ⓘ Wheelhouse currently has {name_only} versions: {present_versions}")
+                            else:
+                                self.log(f"  ⓘ Wheelhouse currently has no wheels for {name_only}")
+                        except Exception:
+                            pass
                         
-                        download_success, download_error = wheelhouse_mgr.download_missing_package(
-                            missing_pkg, python_version
-                        )
+                        download_success, download_error = wheelhouse_mgr.download_missing_package(missing_req, python_version)
                         
                         if download_success:
-                            self.log(f"  ✓ Downloaded {missing_pkg} into wheelhouse")
+                            self.log(f"  ✓ Downloaded {missing_req} into wheelhouse")
                             self.log(f"  🔄 Retrying installation of {package_name}...")
                             # Retry the install now that wheelhouse has the missing package
                             return self._install_single_package(venv_python, package_name, version_spec, install_args)
                         else:
-                            self.log(f"  ⚠ Wheelhouse repair failed for {missing_pkg}: {download_error}")
+                            self.log(f"  ⚠ Wheelhouse repair failed for {missing_req}: {download_error}")
                             # If wheelhouse repair failed, try safe online fallback for pure-python deps
-                            if self._is_safe_for_online_fallback(missing_pkg):
-                                self.log(f"  🌐 Attempting safe online fallback for {missing_pkg} (pure-python package)...")
+                            missing_name = str(missing_req)
+                            for op in ["==", ">=", "<=", "!=", "~=", ">", "<"]:
+                                if op in missing_name:
+                                    missing_name = missing_name.split(op, 1)[0]
+                                    break
+                            missing_name = missing_name.strip()
+
+                            if self._is_safe_for_online_fallback(missing_name):
+                                self.log(f"  🌐 Attempting safe online fallback for {missing_name} (pure-python package)...")
                                 # Temporarily allow online index for this pure-python package
                                 fallback_cmd = [
                                     str(venv_python), "-m", "pip", "install",
                                     "--no-cache-dir",
-                                    missing_pkg  # Let pip resolve version
+                                    missing_name  # Let pip resolve version
                                 ]
                                 fallback_result = subprocess.run(
                                     fallback_cmd,
@@ -1211,13 +1274,13 @@ class ImmutableInstaller:
                                     **self.subprocess_flags
                                 )
                                 if fallback_result.returncode == 0:
-                                    self.log(f"  ✓ Online fallback succeeded for {missing_pkg}")
+                                    self.log(f"  ✓ Online fallback succeeded for {missing_name}")
                                     self.log(f"  🔄 Retrying installation of {package_name}...")
                                     # Retry original package install
                                     return self._install_single_package(venv_python, package_name, version_spec, install_args)
                                 else:
                                     fallback_error = fallback_result.stderr or fallback_result.stdout
-                                    self.log(f"  ✗ Online fallback failed for {missing_pkg}: {fallback_error[:200]}")
+                                    self.log(f"  ✗ Online fallback failed for {missing_name}: {fallback_error[:200]}")
                     
                 return False, error_str
             
@@ -1230,28 +1293,81 @@ class ImmutableInstaller:
     
     def _extract_missing_package_from_error(self, error_text: str, current_package: str) -> Optional[str]:
         """
-        Extract missing package name from pip error message.
+        Extract missing package requirement from pip error message.
+        
+        IMPORTANT: Return the full requirement (name + version spec) when present,
+        e.g. "huggingface-hub>=0.34.0,<1.0" rather than just "huggingface-hub".
         
         Examples:
         - "ERROR: Could not find a version that satisfies the requirement networkx (from torch) (from versions: none)"
         - "ERROR: No matching distribution found for networkx"
+        - "ERROR: Could not find a version that satisfies the requirement huggingface-hub>=0.34.0,<1.0 (from transformers) (from versions: none)"
+        - "ERROR: No matching distribution found for huggingface-hub>=0.34.0,<1.0"
         """
         import re
-        # Pattern 1: "Could not find a version that satisfies the requirement X (from Y)"
-        match = re.search(r"requirement (\w+(?:[-_]\w+)*)", error_text, re.IGNORECASE)
+        cur_norm = current_package.lower().replace("_", "-").strip()
+
+        def _normalize_req(req: str) -> str:
+            # Drop any trailing context like " (from ...)" if present.
+            req = (req or "").strip()
+            # Drop environment markers (e.g., '; extra == \"http\"') because wheelhouse operates
+            # on base requirements; markers depend on the caller context and can break parsing.
+            if ";" in req:
+                req = req.split(";", 1)[0].strip()
+            if "(" in req:
+                req = req.split("(", 1)[0].strip()
+            # Defensive: remove trailing semicolons if any remain
+            req = req.rstrip(";").strip()
+            return req
+
+        def _split_name_and_spec(req: str) -> Tuple[str, str]:
+            """
+            Best-effort parse of 'name[spec]' without requiring packaging.
+            Returns (normalized_name, spec_tail).
+            """
+            req = (req or "").strip()
+            # Find first operator char that would start a spec.
+            ops = ["==", ">=", "<=", "!=", "~=", ">", "<"]
+            idx = None
+            for op in ops:
+                i = req.find(op)
+                if i != -1:
+                    idx = i if idx is None else min(idx, i)
+            if idx is None:
+                name = req
+                spec = ""
+            else:
+                name = req[:idx].strip()
+                spec = req[idx:].strip()
+            return name.lower().replace("_", "-"), spec
+
+        # Pattern 1: "Could not find a version that satisfies the requirement <REQ> ..."
+        # Capture up to first whitespace or ')' and then strip any "(from ...)".
+        match = re.search(r"requirement\s+([^\s\)]+)", error_text, re.IGNORECASE)
         if match:
-            pkg = match.group(1).lower().replace("_", "-")
-            # Don't return the current package we're trying to install
-            if pkg != current_package.lower().replace("_", "-"):
-                return pkg
-        
-        # Pattern 2: "No matching distribution found for X"
-        match = re.search(r"distribution found for (\w+(?:[-_]\w+)*)", error_text, re.IGNORECASE)
+            req = _normalize_req(match.group(1))
+            name_norm, _ = _split_name_and_spec(req)
+            if name_norm and name_norm != cur_norm:
+                # Normalize only the name part; keep the original spec tail if present.
+                # We return the full requirement string (name + spec) for version-aware healing.
+                if name_norm != req.lower().replace("_", "-"):
+                    # If original differs only by underscores/case, rebuild safely:
+                    # replace only the name prefix, keep spec as-is.
+                    _, spec = _split_name_and_spec(req)
+                    return f"{name_norm}{spec}" if spec else name_norm
+                return req
+
+        # Pattern 2: "No matching distribution found for <REQ>"
+        match = re.search(r"distribution found for\s+([^\s\)]+)", error_text, re.IGNORECASE)
         if match:
-            pkg = match.group(1).lower().replace("_", "-")
-            if pkg != current_package.lower().replace("_", "-"):
-                return pkg
-        
+            req = _normalize_req(match.group(1))
+            name_norm, _ = _split_name_and_spec(req)
+            if name_norm and name_norm != cur_norm:
+                if name_norm != req.lower().replace("_", "-"):
+                    _, spec = _split_name_and_spec(req)
+                    return f"{name_norm}{spec}" if spec else name_norm
+                return req
+
         return None
     
     def _is_safe_for_online_fallback(self, package_name: str) -> bool:
@@ -1578,10 +1694,24 @@ except Exception as e:
             Tuple of (is_installed: bool, version_matches: bool, is_broken: bool)
             If check_functionality is False, is_broken will always be False
         """
-        # For binary packages, use the import name (module name) instead of package name
-        import_name = package_name
-        if package_name == "triton-windows":
-            import_name = "triton"  # Package name is triton-windows but module is triton
+        # Package name mappings (pip name -> import name / metadata name)
+        # Many packages use hyphens in pip but underscores in imports
+        PACKAGE_NAME_MAP = {
+            # Binary packages with different names
+            "triton-windows": "triton",
+            "mamba-ssm": "mamba_ssm",
+            
+            # Packages with hyphen/underscore differences
+            "huggingface-hub": "huggingface_hub",
+            "typing-extensions": "typing_extensions",
+            "open-clip-torch": "open_clip_torch",
+            
+            # PySide6 packages (keep as-is, but listed for completeness)
+            "PySide6-Essentials": "PySide6.Essentials",
+            "PySide6-Addons": "PySide6.Addons",
+        }
+        
+        import_name = PACKAGE_NAME_MAP.get(package_name, package_name)
         
         is_broken = False
         
@@ -1625,14 +1755,30 @@ except ImportError:
     from importlib_metadata import version, PackageNotFoundError
 
 try:
-    # Try package name first, then import name for binary packages
-    try:
-        installed_ver = version('{package_name}')
-    except PackageNotFoundError:
-        installed_ver = version('{check_package_name}')
-    print(installed_ver)
-except PackageNotFoundError:
-    print('NOT_FOUND')
+    # Try multiple name variants: pip name, import name, and normalized versions
+    # Packages like huggingface-hub can be found as huggingface_hub or huggingface-hub
+    names_to_try = ['{package_name}']
+    if '{check_package_name}' != '{package_name}':
+        names_to_try.append('{check_package_name}')
+    # Also try normalized version (replace - with _)
+    normalized = '{package_name}'.replace('-', '_')
+    if normalized not in names_to_try:
+        names_to_try.append(normalized)
+    
+    installed_ver = None
+    for name in names_to_try:
+        try:
+            installed_ver = version(name)
+            break
+        except PackageNotFoundError:
+            continue
+    
+    if installed_ver is None:
+        print('NOT_FOUND')
+    else:
+        print(installed_ver)
+except Exception as e:
+    print(f'ERROR: {{e}}')
 """
             result = subprocess.run(
                 [str(venv_python), "-c", code],
@@ -1883,6 +2029,44 @@ except PackageNotFoundError:
         
         if cleared_count > 0:
             self.log(f"  ✓ Cleared {cleared_count} cache files/directories")
+    
+    def _save_install_state(self, cuda_config: str, verification_passed: bool):
+        """
+        Save installation state to JSON file for resume capability.
+        This allows the system to know that installation completed successfully
+        and avoid unnecessary repairs on next launch.
+        
+        Args:
+            cuda_config: CUDA configuration used (e.g., 'cu124')
+            verification_passed: Whether verification tests passed
+        """
+        try:
+            state = {
+                "install_complete": True,
+                "install_timestamp": datetime.now().isoformat(),
+                "cuda_config": cuda_config,
+                "package_versions": self.profile_versions or {},
+                "binary_packages": list(self.binary_packages.keys()) if self.binary_packages else [],
+                "verification_passed": verification_passed,
+                "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+                "venv_path": str(self.venv_path)
+            }
+            
+            # Save to .install_state.json in LLM directory
+            state_file = self.venv_path.parent / ".install_state.json"
+            with open(state_file, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2)
+            
+            self.log(f"  ✓ Installation state saved to {state_file.name}")
+            
+            # Also create marker file for backwards compatibility
+            marker = self.venv_path.parent / ".setup_complete"
+            marker.touch()
+            self.log(f"  ✓ Setup complete marker created")
+            
+        except Exception as e:
+            self.log(f"  ⚠ Warning: Could not save installation state: {e}")
+            # Don't fail the installation just because state save failed
     
     def _patch_triton_windows_utils(self, venv_python: Path):
         """

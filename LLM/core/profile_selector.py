@@ -219,7 +219,9 @@ class ProfileSelector:
     def _get_package_versions(self, profile_name: str) -> Dict[str, str]:
         """
         Get complete package version dictionary for a profile.
-        Combines profile-specific and common packages.
+        Profile JSON files are the single source of truth. We load packages from
+        `LLM/profiles/<profile_name>.json` and then fill missing entries from
+        compatibility_matrix common_packages (without overriding profile pins).
         
         Returns:
             Dict of {package_name: exact_version}
@@ -227,14 +229,24 @@ class ProfileSelector:
         if profile_name not in self.profiles:
             raise ValueError(f"Profile '{profile_name}' not found in compatibility matrix")
         
-        profile = self.profiles[profile_name]
-        
-        # Start with profile-specific packages
-        versions = dict(profile["packages"])
-        
-        # Add common packages
-        versions.update(self.common_packages)
-        
+        # Prefer loading from the profile JSON file (source of truth).
+        versions: Dict[str, str] = {}
+        try:
+            llm_dir = Path(__file__).parent.parent
+            profile_path = llm_dir / "profiles" / f"{profile_name}.json"
+            if profile_path.exists():
+                data = json.loads(profile_path.read_text(encoding="utf-8"))
+                versions = dict(data.get("packages", {}) or {})
+        except Exception:
+            # Fall back to matrix packages if profile JSON can't be read.
+            profile = self.profiles[profile_name]
+            versions = dict(profile.get("packages", {}) or {})
+
+        # Fill missing keys from common packages without overriding profile pins.
+        for k, v in (self.common_packages or {}).items():
+            if k not in versions:
+                versions[k] = v
+
         return versions
     
     def _get_binary_packages(self, profile_name: str) -> Dict[str, Dict]:
@@ -247,10 +259,19 @@ class ProfileSelector:
         if profile_name not in self.profiles:
             raise ValueError(f"Profile '{profile_name}' not found in compatibility matrix")
         
+        # Prefer profile JSON file (source of truth).
+        try:
+            llm_dir = Path(__file__).parent.parent
+            profile_path = llm_dir / "profiles" / f"{profile_name}.json"
+            if profile_path.exists():
+                data = json.loads(profile_path.read_text(encoding="utf-8"))
+                bp = data.get("binary_packages", {})
+                return bp if isinstance(bp, dict) else {}
+        except Exception:
+            pass
+
         profile = self.profiles[profile_name]
-        
-        # Return binary_packages if present, otherwise empty dict
-        return profile.get("binary_packages", {})
+        return profile.get("binary_packages", {}) or {}
     
     def get_profile_description(self, profile_name: str) -> str:
         """Get human-readable description of a profile"""

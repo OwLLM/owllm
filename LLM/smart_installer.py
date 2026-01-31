@@ -2427,16 +2427,24 @@ if errorlevel 1 (
             python_info = self.detection_results.get("python", {}) if self.detection_results else {}
             python_executable = python_info.get("executable") or sys.executable
         
-        # Try to use venv Python if available
-        venv_python = None
-        venv_path = Path(python_executable).parent.parent if python_executable else None
-        if venv_path and (venv_path / "Scripts" / "python.exe").exists() if sys.platform == "win32" else (venv_path / "bin" / "python").exists():
-            if sys.platform == "win32":
-                venv_python = str(venv_path / "Scripts" / "python.exe")
-            else:
-                venv_python = str(venv_path / "bin" / "python")
+        # CRITICAL: Always use the TARGET venv Python, not bootstrap Python
+        # The target venv is where packages are actually installed
+        script_dir = Path(__file__).parent
+        target_venv = script_dir / ".venv"
         
-        check_python = venv_python or python_executable or sys.executable
+        if sys.platform == "win32":
+            target_venv_python = target_venv / "Scripts" / "python.exe"
+        else:
+            target_venv_python = target_venv / "bin" / "python"
+        
+        # If target venv exists, ALWAYS use it (ignore python_executable parameter)
+        if target_venv_python.exists():
+            check_python = str(target_venv_python)
+            self.log(f"Using target venv Python: {check_python}")
+        else:
+            # Fallback to provided Python or current Python
+            check_python = python_executable or sys.executable
+            self.log(f"Target venv not found, using: {check_python}")
         
         # Run detection if not already done
         if not self.detection_results:
@@ -2512,8 +2520,12 @@ if errorlevel 1 (
                 )
                 if result.returncode == 0:
                     return result.stdout.strip()
+                else:
+                    # Log why import failed
+                    self.log(f"⚠ {module_name} import failed (exit {result.returncode}): {result.stderr[:200]}")
                 return None
-            except:
+            except Exception as e:
+                self.log(f"⚠ {module_name} import error: {str(e)[:200]}")
                 return None
         
         torchvision_ver = check_import_version("torchvision")
@@ -2581,72 +2593,6 @@ if errorlevel 1 (
             checklist.append({
                 "component": "Triton (Windows)",
                 "version": "any",  # Accept any installed version
-                "status": "missing",
-                "status_text": "✗ Not Installed"
-            })
-        
-        # Mamba SSM - verify using SIMPLE import (check if package is importable)
-        def check_mamba_ssm_installed():
-            """Check if mamba_ssm is installed"""
-            try:
-                result = subprocess.run(
-                    [check_python, "-c", "import mamba_ssm; print(mamba_ssm.__version__)"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    **self.subprocess_flags
-                )
-                if result.returncode == 0:
-                    return result.stdout.strip()
-                return None
-            except:
-                return None
-        
-        mamba_ver = check_mamba_ssm_installed()
-        if mamba_ver:
-            checklist.append({
-                "component": "Mamba SSM",
-                "version": "any",
-                "status": "installed",
-                "status_text": f"✓ Installed ({mamba_ver})"
-            })
-        else:
-            checklist.append({
-                "component": "Mamba SSM",
-                "version": "any",
-                "status": "missing",
-                "status_text": "✗ Not Installed"
-            })
-        
-        # Causal Conv1D - verify using SIMPLE import
-        def check_causal_conv1d_installed():
-            """Check if causal_conv1d is installed"""
-            try:
-                result = subprocess.run(
-                    [check_python, "-c", "import causal_conv1d; print(causal_conv1d.__version__)"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    **self.subprocess_flags
-                )
-                if result.returncode == 0:
-                    return result.stdout.strip()
-                return None
-            except:
-                return None
-        
-        causal_ver = check_causal_conv1d_installed()
-        if causal_ver:
-            checklist.append({
-                "component": "Causal Conv1D",
-                "version": "any",
-                "status": "installed",
-                "status_text": f"✓ Installed ({causal_ver})"
-            })
-        else:
-            checklist.append({
-                "component": "Causal Conv1D",
-                "version": "any",
                 "status": "missing",
                 "status_text": "✗ Not Installed"
             })

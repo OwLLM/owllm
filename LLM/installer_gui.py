@@ -16,6 +16,87 @@ from tkinter import (
 )
 
 # ============================================================================
+# ACTIVE ENV RESOLUTION (env_key /.envs) - used by GUI for launch/checklist
+# ============================================================================
+def _derive_env_key_from_package_versions(package_versions: dict) -> str:
+    """
+    Align with EnvKeyResolver format: tf-<accelerator>-t<mm>-base-stable
+    """
+    from core.envs.env_key_resolver import encode_torch_mm
+
+    torch_spec = str((package_versions or {}).get("torch", "")).strip()
+    accelerator = "cpu"
+    if "+cu" in torch_spec:
+        cuda_part = torch_spec.split("+cu", 1)[1]
+        digits = "".join([c for c in cuda_part if c.isdigit()])[:3]
+        if digits:
+            accelerator = f"cu{digits}"
+
+    torch_mm = ""
+    if torch_spec:
+        base = torch_spec.split("+", 1)[0]
+        parts = base.split(".")
+        if len(parts) >= 2:
+            torch_mm = f"{parts[0]}.{parts[1]}"
+    t_enc = encode_torch_mm(torch_mm) if torch_mm else ""
+    if t_enc:
+        return f"tf-{accelerator}-t{t_enc}-base-stable"
+    return f"tf-{accelerator}-base-stable"
+
+
+def _get_active_env_python() -> tuple[str | None, str | None]:
+    """
+    Returns (python_exe_path, env_key) for the active hardware profile environment.
+    Falls back to legacy LLM/.venv if env_key resolution fails.
+    """
+    llm_dir = Path(__file__).parent
+    try:
+        from system_detector import SystemDetector
+        from core.profile_selector import ProfileSelector
+        from setup_state import SetupStateManager
+
+        setup_state = SetupStateManager()
+        selected_gpu_index = setup_state.get_selected_gpu_index()
+        override_profile = setup_state.get_selected_profile()
+
+        detector = SystemDetector()
+        hw_profile = detector.get_hardware_profile(selected_gpu_index=selected_gpu_index)
+
+        matrix_path = llm_dir / "metadata" / "compatibility_matrix.json"
+        selector = ProfileSelector(matrix_path)
+        _profile_name, package_versions, _warnings, _binary = selector.select_profile(
+            hw_profile, override_profile_id=override_profile
+        )
+
+        env_key = _derive_env_key_from_package_versions(package_versions)
+        env_dir = llm_dir / ".envs" / env_key
+        venv_dir = env_dir / ".venv"
+        if sys.platform == "win32":
+            python_exe = venv_dir / "Scripts" / "python.exe"
+            pythonw_exe = venv_dir / "Scripts" / "pythonw.exe"
+            if pythonw_exe.exists():
+                return str(pythonw_exe), env_key
+            if python_exe.exists():
+                return str(python_exe), env_key
+        else:
+            python_exe = venv_dir / "bin" / "python"
+            if python_exe.exists():
+                return str(python_exe), env_key
+    except Exception:
+        pass
+
+    # Legacy fallback
+    venv_dir = llm_dir / ".venv"
+    if sys.platform == "win32":
+        python_exe = venv_dir / "Scripts" / "pythonw.exe"
+        if not python_exe.exists():
+            python_exe = venv_dir / "Scripts" / "python.exe"
+    else:
+        python_exe = venv_dir / "bin" / "python"
+    return (str(python_exe) if python_exe.exists() else None), None
+
+
+# ============================================================================
 # HARD BOOTSTRAP GUARD - MUST BE FIRST
 # ============================================================================
 def _ensure_bootstrap():
@@ -26,9 +107,14 @@ def _ensure_bootstrap():
     current_exe = Path(sys.executable).resolve()
     current_exe_str = str(current_exe)
     
-    # Check if running from LLM\.venv (case-insensitive, handle both / and \)
+    # Check if running from a target venv (LLM/.venv OR LLM/.envs/<env_key>/.venv)
     current_exe_normalized = current_exe_str.replace('\\', '/').lower()
-    if '/llm/.venv/' in current_exe_normalized or '\\llm\\.venv\\' in current_exe_str.lower():
+    if (
+        '/llm/.venv/' in current_exe_normalized
+        or '/llm/.envs/' in current_exe_normalized
+        or '\\llm\\.venv\\' in current_exe_str.lower()
+        or '\\llm\\.envs\\' in current_exe_str.lower()
+    ):
         # CRITICAL: Running from target venv - must relaunch from bootstrap
         print("=" * 60, file=sys.stderr)
         print("CRITICAL: Installer launched from target venv:", file=sys.stderr)
@@ -389,20 +475,14 @@ class InstallerGUI:
         results = self.detector.detection_results
         info_lines = []
         
-        # Target app venv (THIS is what we install/repair)
-        llm_dir = Path(__file__).parent
-        venv_path = llm_dir / ".venv"
-        if sys.platform == "win32":
-            target_python = venv_path / "Scripts" / "python.exe"
-            target_pythonw = venv_path / "Scripts" / "pythonw.exe"
+        # Target app env (THIS is what we install/repair): env_key venv preferred
+        target_python_str, env_key = _get_active_env_python()
+        if env_key:
+            info_lines.append(f"✓ Target env_key: {env_key}")
+        if target_python_str:
+            info_lines.append(f"✓ Target venv: {target_python_str}")
         else:
-            target_python = venv_path / "bin" / "python"
-            target_pythonw = venv_path / "bin" / "python"
-        
-        if target_python.exists():
-            info_lines.append(f"✓ Target venv: {target_python}")
-        else:
-            info_lines.append(f"✗ Target venv Python missing: {target_python}")
+            info_lines.append("✗ Target venv Python missing (run Install/Repair)")
         
         # Python
         python_info = results.get("python", {})
@@ -464,16 +544,8 @@ class InstallerGUI:
                 import traceback
                 self._log(traceback.format_exc())
             
-            # Determine which Python to use for checking
-            venv_path = Path(__file__).parent / ".venv"
-            check_python = None
-            if venv_path.exists():
-                if sys.platform == "win32":
-                    venv_python = venv_path / "Scripts" / "python.exe"
-                else:
-                    venv_python = venv_path / "bin" / "python"
-                if venv_python.exists():
-                    check_python = str(venv_python)
+            # Determine which Python to use for checking (env_key venv preferred)
+            check_python, _env_key = _get_active_env_python()
             
             if not check_python:
                 # Make it explicit in the UI log so it doesn't look like "everything is missing"
@@ -772,39 +844,12 @@ class InstallerGUI:
             
             try:
                 # Check if venv exists to determine if we should repair or install
-                venv_path = Path(__file__).parent / ".venv"
-                venv_exists = venv_path.exists()
-                
-                if venv_exists:
-                    # Check if venv Python exists and is valid
-                    if sys.platform == 'win32':
-                        venv_python = venv_path / "Scripts" / "python.exe"
-                    else:
-                        venv_python = venv_path / "bin" / "python"
-                    
-                    if venv_python.exists():
-                        write_log("Venv exists - using repair mode (only fix broken packages)")
-                        self._safe_after(self._log, "Starting repair (fixing broken packages only)...")
-                        
-                        # Use repair mode - only fixes broken/missing packages
-                        success = installer_v2.repair()
-                        
-                        write_log(f"InstallerV2.repair() returned: {success}")
-                    else:
-                        # Venv directory exists but Python is missing - do full install
-                        write_log("Venv directory exists but Python missing - using full install")
-                        self._safe_after(self._log, "Starting full installation...")
-                        success = installer_v2.install()
-                        write_log(f"InstallerV2.install() returned: {success}")
-                else:
-                    # No venv - do full installation
-                    write_log("No venv found - using full installation")
-                    self._safe_after(self._log, "Starting full installation...")
-                    
-                    # Run installation
-                    success = installer_v2.install()
-                    
-                    write_log(f"InstallerV2.install() returned: {success}")
+                # Always run repair: it will create the correct env_key env if missing,
+                # and only install missing/broken packages if it already exists.
+                write_log("Starting repair (auto-detect env_key; differential install)...")
+                self._safe_after(self._log, "Starting repair (auto-detecting missing/broken packages)...")
+                success = installer_v2.repair()
+                write_log(f"InstallerV2.repair() returned: {success}")
             finally:
                 # Restore original print
                 builtins.print = original_print
@@ -889,16 +934,9 @@ class InstallerGUI:
         try:
             import subprocess
             script_dir = Path(__file__).parent
-            # Always launch using the TARGET venv (not bootstrap)
-            venv_path = script_dir / ".venv"
-            if sys.platform == "win32":
-                python_exe = venv_path / "Scripts" / "pythonw.exe"
-                if not python_exe.exists():
-                    python_exe = venv_path / "Scripts" / "python.exe"
-            else:
-                python_exe = venv_path / "bin" / "python"
-            
-            if not python_exe.exists():
+            # Always launch using the ACTIVE env_key venv (not bootstrap)
+            python_exe_str, _env_key = _get_active_env_python()
+            if not python_exe_str:
                 messagebox.showerror(
                     "Cannot Launch",
                     "Target virtual environment is missing or broken.\n\n"
@@ -908,7 +946,7 @@ class InstallerGUI:
             
             # Launch main app
             subprocess.Popen(
-                [str(python_exe), "-m", "desktop_app.main"],
+                [python_exe_str, "-m", "desktop_app.main"],
                 cwd=script_dir,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )

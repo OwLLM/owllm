@@ -1,0 +1,9 @@
+{
+  "install_complete": true,
+  "install_timestamp": "2026-01-31T15:05:57.870288",
+  "cuda_config": "cu118",
+  "verification_passed": true,
+  "python_version": "3.10.0",
+  "installer_level": "InstallerV2",
+  "venv_path": "D:\\1_GitHome\\LLM-Studio\\LLM\\.envs\\tf-cu118-t25-base-stable\\.venv"
+}

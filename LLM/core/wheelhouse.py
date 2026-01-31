@@ -237,6 +237,12 @@ class WheelhouseManager:
         validation_errors = []
         packages_to_remove = []  # Track which packages need wheel removal
         
+        self.log("Starting wheelhouse validation...")
+        if package_versions:
+            self.log(f"  Mode: Profile-based (validating {len(package_versions)} packages)")
+        else:
+            self.log("  Mode: Manifest-based")
+        
         if package_versions:
             # Profile-based mode: validate against exact profile versions
             # Also check if wheels satisfy flexible requirements from manifest if they exist
@@ -249,6 +255,7 @@ class WheelhouseManager:
                     if not wheel_versions:
                         # Wheel missing - will be downloaded in prepare phase
                         # Don't add error - this is expected after removing wrong versions
+                        self.log(f"  {pkg_name}: No wheel found (expected {expected_version}) - will download")
                         continue
 
                     # Normalize profile versions into a SpecifierSet (supports exact, ranges, and wildcards like "12.6.*")
@@ -265,7 +272,7 @@ class WheelhouseManager:
                             spec = SpecifierSet(spec_str)
                             matching_versions = [
                                 v for v in wheel_versions
-                                if spec.contains(pkg_version.parse(str(v).split("+")[0]))
+                                if spec.contains(pkg_version.parse(str(v)))
                             ]
 
                             if not matching_versions:
@@ -273,12 +280,18 @@ class WheelhouseManager:
                                 validation_errors.append(
                                     f"{pkg_name}: wheel version(s) {wheel_versions} do not satisfy {spec_str}"
                                 )
+                                self.log(f"  {pkg_name}: INVALID - found {wheel_versions}, expected {spec_str}")
                             elif len(matching_versions) < len(wheel_versions):
                                 # Remove non-matching versions to keep wheelhouse deterministic
+                                self.log(f"  {pkg_name}: Removing non-matching versions from {wheel_versions}")
                                 for wheel_ver in wheel_versions:
                                     if wheel_ver not in matching_versions:
+                                        self.log(f"    - Removing {wheel_ver} (doesn't match {spec_str})")
                                         self._remove_package_wheels(pkg_name, specific_version=wheel_ver)
                                 wheel_versions = self._get_all_wheel_versions(pkg_name)
+                                self.log(f"  {pkg_name}: OK - keeping {matching_versions}")
+                            else:
+                                self.log(f"  {pkg_name}: OK - {wheel_versions[0]} satisfies {spec_str}")
                         except Exception as e:
                             self.log(f"  ⚠ Could not validate version spec {expected_version} for {pkg_name}: {e}")
                     else:
@@ -288,6 +301,9 @@ class WheelhouseManager:
                             validation_errors.append(
                                 f"{pkg_name}: wheel version(s) {wheel_versions} do not include expected {expected_version}"
                             )
+                            self.log(f"  {pkg_name}: INVALID - found {wheel_versions}, expected exact {expected_version}")
+                        else:
+                            self.log(f"  {pkg_name}: OK - exact match {expected_version}")
         else:
             # Manifest-based mode: validate against requirements from dependencies.json
             deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
@@ -315,11 +331,15 @@ class WheelhouseManager:
                 
                 if not wheel_version:
                     validation_errors.append(f"{pkg_name}: wheel not found")
+                    self.log(f"  {pkg_name}: MISSING - expected {version_spec}")
                     continue
                 
                 # Validate wheel version against requirement
                 if not self._validate_wheel_against_requirement(pkg_name, wheel_version, version_spec):
                     validation_errors.append(f"{pkg_name}: wheel version {wheel_version} does not satisfy {version_spec}")
+                    self.log(f"  {pkg_name}: INVALID - found {wheel_version}, expected {version_spec}")
+                else:
+                    self.log(f"  {pkg_name}: OK - {wheel_version} satisfies {version_spec}")
         
         # Remove wrong version wheels BEFORE returning
         if packages_to_remove:
@@ -329,9 +349,11 @@ class WheelhouseManager:
                 self._remove_package_wheels(pkg_name)
         
         if validation_errors:
+            self.log(f"Validation result: FAILED ({len(validation_errors)} error(s))")
             error_msg = "Wheelhouse validation failed:\n  " + "\n  ".join(validation_errors)
             return False, error_msg
         
+        self.log("Validation result: SUCCESS - all wheels satisfy requirements")
         return True, ""
     
     def _validate_dependency_compatibility(self, package_versions: dict = None) -> Tuple[bool, str]:
@@ -1239,7 +1261,7 @@ class WheelhouseManager:
         Download a missing package into wheelhouse (for auto-heal during install).
         
         Args:
-            package_name: Package name (e.g., "networkx")
+            package_name: Package name OR full requirement (e.g., "networkx" or "huggingface-hub>=0.34.0,<1.0")
             python_version: Optional Python version tuple (e.g., (3, 12))
         
         Returns:
@@ -1247,47 +1269,106 @@ class WheelhouseManager:
         """
         if python_version is None:
             python_version = (sys.version_info.major, sys.version_info.minor)
+
+        # Parse requirement into (name, spec). Spec may be empty.
+        req_str = str(package_name or "").strip()
+        # Strip environment markers like '; extra == \"http\"' which can appear in pip errors.
+        # We only download the base requirement into wheelhouse.
+        if ";" in req_str:
+            req_str = req_str.split(";", 1)[0].strip()
+        req_str = req_str.rstrip(";").strip()
+        name_only = req_str
+        spec_tail = ""
+        for op in ["==", ">=", "<=", "!=", "~=", ">", "<"]:
+            if op in req_str:
+                parts = req_str.split(op, 1)
+                name_only = parts[0].strip()
+                spec_tail = op + parts[1].strip()
+                break
+
+        # Normalize to pip-style hyphen names for wheelhouse matching.
+        name_norm = name_only.lower().replace("_", "-").strip()
+        full_req = f"{name_only}{spec_tail}".strip()
         
-        # Check if already in wheelhouse
-        wheel_files = list(self.wheelhouse.glob(f"{package_name.replace('-', '_')}-*.whl"))
-        if not wheel_files:
-            wheel_files = list(self.wheelhouse.glob(f"{package_name}-*.whl"))
-        
-        if wheel_files:
-            self.log(f"  {package_name} already in wheelhouse")
-            return True, ""
+        # If a spec is provided, ensure wheelhouse actually satisfies it.
+        # Otherwise, keep legacy behavior (any wheel present means "already in wheelhouse").
+        try:
+            present_versions = self._get_all_wheel_versions(name_only)
+        except Exception:
+            present_versions = []
+
+        if spec_tail:
+            for v in present_versions:
+                try:
+                    if self._validate_wheel_against_requirement(name_only, str(v), spec_tail):
+                        self.log(f"  {name_norm}{spec_tail} already satisfied in wheelhouse")
+                        return True, ""
+                except Exception:
+                    continue
+        else:
+            # Check if any wheel exists
+            wheel_files = list(self.wheelhouse.glob(f"{name_only.replace('-', '_')}-*.whl"))
+            if not wheel_files:
+                wheel_files = list(self.wheelhouse.glob(f"{name_only}-*.whl"))
+            if wheel_files:
+                self.log(f"  {name_only} already in wheelhouse")
+                return True, ""
         
         # Check blacklist
         blacklist = set(pkg.lower().replace("_", "-") for pkg in self.manifest.get("global_blacklist", []))
-        if package_name.lower().replace("_", "-") in blacklist:
-            return False, f"Package {package_name} is blacklisted"
+        if name_norm in blacklist:
+            return False, f"Package {name_only} is blacklisted"
         
         # Never allow online fallback for torch/GPU packages
         forbidden_patterns = ["torch", "triton", "bitsandbytes", "nvidia-", "cuda"]
-        if any(pattern in package_name.lower() for pattern in forbidden_patterns):
-            return False, f"Package {package_name} requires special index (not available via online fallback)"
+        if any(pattern in name_norm for pattern in forbidden_patterns):
+            return False, f"Package {name_only} requires special index (not available via online fallback)"
         
-        self.log(f"  Downloading missing package: {package_name} (with dependencies)")
+        self.log(f"  Downloading missing package: {full_req} (with dependencies)")
         success, error = self._download_wheel(
-            package=package_name,  # Let pip resolve latest compatible version
+            package=full_req if full_req else name_only,  # Let pip resolve latest compatible version (within spec if provided)
             index_url=None,  # Use PyPI
             no_deps=False,  # Download dependencies too (closure)
             python_version=python_version
         )
         
         if success:
-            self.log(f"  ✓ Successfully downloaded {package_name} and its dependencies into wheelhouse")
+            self.log(f"  ✓ Successfully downloaded {full_req if full_req else name_only} and its dependencies into wheelhouse")
         
         if success:
             # Verify no blacklisted packages were pulled in
             verify_success, verify_error = self._verify_no_blacklist()
             if not verify_success:
                 # Remove the package we just downloaded if it pulled in blacklisted deps
-                for wheel in self.wheelhouse.glob(f"{package_name.replace('-', '_')}-*.whl"):
+                for wheel in self.wheelhouse.glob(f"{name_only.replace('-', '_')}-*.whl"):
                     wheel.unlink()
-                for wheel in self.wheelhouse.glob(f"{package_name}-*.whl"):
+                for wheel in self.wheelhouse.glob(f"{name_only}-*.whl"):
                     wheel.unlink()
-                return False, f"Downloaded {package_name} but it pulled in blacklisted dependencies: {verify_error}"
+                return False, f"Downloaded {name_only} but it pulled in blacklisted dependencies: {verify_error}"
+
+            # If we downloaded due to a version requirement, remove wheels that do not satisfy it (replace-old behavior).
+            if spec_tail:
+                removed = 0
+                try:
+                    pkg_norm = name_only.lower().replace("_", "-")
+                    for wheel in list(self.wheelhouse.glob("*.whl")):
+                        wheel_name_parts = wheel.stem.split("-")
+                        if len(wheel_name_parts) < 2:
+                            continue
+                        wheel_pkg = wheel_name_parts[0].lower().replace("_", "-")
+                        if wheel_pkg != pkg_norm:
+                            continue
+                        ver = self._extract_version_from_wheel(wheel)
+                        if not ver:
+                            continue
+                        if not self._validate_wheel_against_requirement(name_only, str(ver), spec_tail):
+                            wheel.unlink()
+                            removed += 1
+                    if removed:
+                        self.log(f"  ✓ Removed {removed} non-matching {name_norm} wheel(s) after download")
+                except Exception as e:
+                    # Never fail install because cleanup failed; installer will surface the real error if any.
+                    self.log(f"  WARNING: Could not remove non-matching wheels for {name_norm}{spec_tail}: {e}")
         
         return success, error
     

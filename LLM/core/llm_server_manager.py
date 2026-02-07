@@ -1301,6 +1301,15 @@ class LLMServerManager:
                     except Exception:
                         pass
                     
+                    hint = ""
+                    if process.returncode == 3221225477:  # 0xC0000005 ACCESS_VIOLATION
+                        log_lower = (log_output or "").lower()
+                        if "gptq" in log_lower or "auto_gptq" in log_lower or "cuda extension not installed" in log_lower:
+                            hint = (
+                                "\n\nHINT: This crash (exit 0xC0000005) often occurs with GPTQ models when auto-gptq's "
+                                "CUDA extension is not properly built. The app will attempt a repair on next Repair/Re-onboard. "
+                                "See the full startup log path above for details. If repair fails: use a non-GPTQ variant (BnB 4-bit or GGUF)."
+                            )
                     error_msg = (
                         f"Server process for '{model_id}' died during startup.\n"
                         f"Exit code: {process.returncode}\n"
@@ -1310,6 +1319,7 @@ class LLMServerManager:
                         f"Command: {cmd_str}\n"
                         f"Startup log (full): {log_file_path_for_user or 'N/A'}\n"
                         f"\nServer output (tail):\n{log_output if log_output else '(no output captured)'}"
+                        f"{hint}"
                     )
                     logger.error(error_msg)
                     raise RuntimeError(error_msg)

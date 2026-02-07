@@ -169,8 +169,8 @@ class SynchronizedChatDisplay(QWidget):
         # Apply scrollbar styling
         self._apply_scrollbar_style()
     
-    def _create_message_row(self, bubble_a: ChatBubble, bubble_b: ChatBubble, bubble_c: ChatBubble = None, is_user: bool = False):
-        """Create a row containing Model A, Model B, and optionally Model C bubbles side by side"""
+    def _create_message_row(self, bubble_a: ChatBubble, bubble_b: ChatBubble = None, bubble_c: ChatBubble = None, is_user: bool = False):
+        """Create a row containing Model A, optionally Model B, and optionally Model C bubbles side by side"""
         row = QWidget()
         row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         row_layout = QHBoxLayout(row)
@@ -225,25 +225,23 @@ class SynchronizedChatDisplay(QWidget):
             
             return container
         
-        # Left column (Model A) - equal stretch to maintain ratio
+        # Left column (Model A) - always present
         left_container = create_column_container(bubble_a, is_user)
-        row_layout.addWidget(left_container, 1)  # Equal stretch factor = 1
+        row_layout.addWidget(left_container, 1)
         
-        # Middle column (Model B) - equal stretch to maintain ratio
-        right_container = create_column_container(bubble_b, is_user)
-        row_layout.addWidget(right_container, 1)  # Equal stretch factor = 1
+        # Middle column (Model B) - only if num_models >= 2
+        if self.num_models >= 2 and bubble_b is not None:
+            right_container = create_column_container(bubble_b, is_user)
+            row_layout.addWidget(right_container, 1)
         
-        # Third column (Model C) - only if num_models == 3, equal stretch
+        # Third column (Model C) - only if num_models == 3
         if self.num_models == 3 and bubble_c is not None:
             center_container = create_column_container(bubble_c, is_user)
-            row_layout.addWidget(center_container, 1)  # Equal stretch factor = 1
+            row_layout.addWidget(center_container, 1)
         
-        # CRITICAL: Explicitly set stretch factors to ensure equal widths
-        # This forces columns to maintain 33/33/33 or 50/50 ratio regardless of content
-        row_layout.setStretch(0, 1)  # Column A
-        row_layout.setStretch(1, 1)  # Column B
-        if self.num_models == 3 and bubble_c is not None:
-            row_layout.setStretch(2, 1)  # Column C
+        # Set stretch factors for equal widths
+        for i in range(row_layout.count()):
+            row_layout.setStretch(i, 1)
         
         return row
     
@@ -254,12 +252,14 @@ class SynchronizedChatDisplay(QWidget):
         self.current_row_b_bubble = None
         self.current_row_c_bubble = None
         
-        # Create user bubbles for all models
+        # Create user bubbles for visible models only
         bubble_a = ChatBubble(text, is_user=True)
         bubble_a.set_theme(self.is_dark)
         
-        bubble_b = ChatBubble(text, is_user=True)
-        bubble_b.set_theme(self.is_dark)
+        bubble_b = None
+        if self.num_models >= 2:
+            bubble_b = ChatBubble(text, is_user=True)
+            bubble_b.set_theme(self.is_dark)
         
         bubble_c = None
         if self.num_models == 3:
@@ -276,18 +276,20 @@ class SynchronizedChatDisplay(QWidget):
         self._scroll_to_bottom()
     
     def _ensure_response_row_exists(self):
-        """Ensure a response row exists with all three bubbles, creating it if needed"""
+        """Ensure a response row exists with bubbles for visible models, creating it if needed"""
         if self.current_row_a_bubble is None and self.current_row_b_bubble is None and self.current_row_c_bubble is None:
-            # No row exists yet, create one with all empty placeholders
+            # No row exists yet, create one with empty placeholders for visible models
             bubble_a = ChatBubble("", is_user=False)
             bubble_a.set_theme(self.is_dark)
             bubble_a.setVisible(False)
             self.current_row_a_bubble = bubble_a
             
-            bubble_b = ChatBubble("", is_user=False)
-            bubble_b.set_theme(self.is_dark)
-            bubble_b.setVisible(False)
-            self.current_row_b_bubble = bubble_b
+            bubble_b = None
+            if self.num_models >= 2:
+                bubble_b = ChatBubble("", is_user=False)
+                bubble_b.set_theme(self.is_dark)
+                bubble_b.setVisible(False)
+                self.current_row_b_bubble = bubble_b
             
             bubble_c = None
             if self.num_models == 3:
@@ -296,7 +298,7 @@ class SynchronizedChatDisplay(QWidget):
                 bubble_c.setVisible(False)
                 self.current_row_c_bubble = bubble_c
             
-            # Create row with all bubbles
+            # Create row with bubbles for visible models
             row = self._create_message_row(bubble_a, bubble_b, bubble_c, is_user=False)
             self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
     
@@ -310,6 +312,8 @@ class SynchronizedChatDisplay(QWidget):
     
     def start_model_b_response(self):
         """Add thinking placeholder for Model B in the shared response row"""
+        if self.num_models < 2:
+            return
         self._ensure_response_row_exists()
         if self.current_row_b_bubble:
             self.current_row_b_bubble.update_text("Thinking...")
@@ -337,6 +341,8 @@ class SynchronizedChatDisplay(QWidget):
     
     def update_model_b_response(self, text: str):
         """Update Model B's current response"""
+        if self.num_models < 2:
+            return
         if not self.current_row_b_bubble:
             self._ensure_response_row_exists()
         if self.current_row_b_bubble:
@@ -403,16 +409,16 @@ class SynchronizedChatDisplay(QWidget):
         # Add to appropriate column
         self._ensure_response_row_exists()
         
-        if column.lower() == "a" and self.current_row_a_bubble:
+        if column.lower() == "a" and self.current_row_a_bubble is not None:
             self.current_row_a_bubble.update_text(text)
             self.current_row_a_bubble.setVisible(True)
             # Apply tool call styling
             self.current_row_a_bubble.setStyleSheet(bubble.styleSheet())
-        elif column.lower() == "b" and self.current_row_b_bubble:
+        elif column.lower() == "b" and self.num_models >= 2 and self.current_row_b_bubble is not None:
             self.current_row_b_bubble.update_text(text)
             self.current_row_b_bubble.setVisible(True)
             self.current_row_b_bubble.setStyleSheet(bubble.styleSheet())
-        elif column.lower() == "c" and self.current_row_c_bubble:
+        elif column.lower() == "c" and self.num_models == 3 and self.current_row_c_bubble is not None:
             self.current_row_c_bubble.update_text(text)
             self.current_row_c_bubble.setVisible(True)
             self.current_row_c_bubble.setStyleSheet(bubble.styleSheet())
@@ -441,14 +447,16 @@ class SynchronizedChatDisplay(QWidget):
         
         text = f"{status_icon} Tool Result ({status_text})\n\n{result_str}"
         
-        # Create new row for tool result
+        # Create new row for tool result - only create bubbles for visible columns
         bubble_a = ChatBubble("", is_user=False)
         bubble_a.set_theme(self.is_dark)
         bubble_a.setVisible(False)
         
-        bubble_b = ChatBubble("", is_user=False)
-        bubble_b.set_theme(self.is_dark)
-        bubble_b.setVisible(False)
+        bubble_b = None
+        if self.num_models >= 2:
+            bubble_b = ChatBubble("", is_user=False)
+            bubble_b.set_theme(self.is_dark)
+            bubble_b.setVisible(False)
         
         bubble_c = None
         if self.num_models == 3:
@@ -489,11 +497,11 @@ class SynchronizedChatDisplay(QWidget):
             bubble_a.update_text(text)
             bubble_a.setVisible(True)
             bubble_a.setStyleSheet(result_style)
-        elif column.lower() == "b":
+        elif column.lower() == "b" and bubble_b is not None:
             bubble_b.update_text(text)
             bubble_b.setVisible(True)
             bubble_b.setStyleSheet(result_style)
-        elif column.lower() == "c" and bubble_c:
+        elif column.lower() == "c" and bubble_c is not None:
             bubble_c.update_text(text)
             bubble_c.setVisible(True)
             bubble_c.setStyleSheet(result_style)

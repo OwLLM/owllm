@@ -9794,7 +9794,9 @@ class MainWindow(QMainWindow):
         self.tool_chat_worker_a.inference_finished.connect(self._on_tool_chat_finished_a)
         self.tool_chat_worker_a.inference_failed.connect(
             lambda error, col: (self.tool_chat_display.update_model_a_response(error),
-                                self._close_env_dialog("a", is_tool_chat=True))
+                                self._close_env_dialog("a", is_tool_chat=True),
+                                self.tool_chat_input.setEnabled(True),
+                                self.tool_chat_send_btn.setEnabled(True))
         )
         self.tool_chat_worker_a.start()
     
@@ -9832,7 +9834,9 @@ class MainWindow(QMainWindow):
         self.tool_chat_worker_b.inference_finished.connect(self._on_tool_chat_finished_b)
         self.tool_chat_worker_b.inference_failed.connect(
             lambda error, col: (self.tool_chat_display.update_model_b_response(error),
-                                self._close_env_dialog("b", is_tool_chat=True))
+                                self._close_env_dialog("b", is_tool_chat=True),
+                                self.tool_chat_input.setEnabled(True),
+                                self.tool_chat_send_btn.setEnabled(True))
         )
         self.tool_chat_worker_b.start()
     
@@ -9870,7 +9874,9 @@ class MainWindow(QMainWindow):
         self.tool_chat_worker_c.inference_finished.connect(self._on_tool_chat_finished_c)
         self.tool_chat_worker_c.inference_failed.connect(
             lambda error, col: (self.tool_chat_display.update_model_c_response(error),
-                                self._close_env_dialog("c", is_tool_chat=True))
+                                self._close_env_dialog("c", is_tool_chat=True),
+                                self.tool_chat_input.setEnabled(True),
+                                self.tool_chat_send_btn.setEnabled(True))
         )
         self.tool_chat_worker_c.start()
     

@@ -1170,6 +1170,32 @@ except Exception as e:
             **self.subprocess_flags
         )
 
+    def _verify_autogptq_cuda_kernels(self, python_exe: Path) -> tuple[bool, str]:
+        """
+        Verify auto-gptq CUDA kernels load. If "CUDA extension not installed" appears,
+        model startup will crash with 0xC0000005.
+        Returns (success: bool, error_message: str).
+        """
+        verify_code = """
+import sys
+try:
+    from auto_gptq.nn_modules.qlinear import qlinear_cuda_old
+except Exception as e:
+    print('IMPORT_ERROR:', e, file=sys.stderr)
+    sys.exit(2)
+sys.exit(0)
+"""
+        try:
+            r = self._run_python(python_exe, verify_code, timeout=30)
+            out = (r.stdout or "") + (r.stderr or "")
+            if "CUDA extension not installed" in out:
+                return False, "auto-gptq reports 'CUDA extension not installed'. Reinstall from pre-built wheels or use a different model."
+            if r.returncode == 0:
+                return True, ""
+            return False, f"Verification failed (exit {r.returncode}): {out[:500]}"
+        except Exception as e:
+            return False, str(e)
+
     def _env_needs_cuda_torch(self, python_exe: Path, profile_data: Optional[dict]) -> bool:
         """
         Return True if the active profile expects CUDA torch, but this env does not have CUDA torch.
@@ -1829,55 +1855,38 @@ except Exception as e:
                     else:
                         pip_cmd = [str(pip_exe), "install", "--upgrade", "--no-deps", pkg_norm]
                 
-                # Some packages (notably auto-gptq) require torch to be importable during build.
-                # pip's default build isolation creates a temporary build env without torch,
-                # causing "No module named 'torch'" even when torch is installed in the target env.
+                # GPTQ: install from HuggingFace pre-built CUDA wheels to avoid source-build crashes.
+                # Source builds often leave "CUDA extension not installed" and cause 0xC0000005.
                 if pkg_norm.startswith("auto-gptq"):
-                    pip_cmd += ["--no-build-isolation"]
-                    timeout_s = 1200
-
-                    # auto-gptq builds a CUDA extension; ensure a CUDA toolchain is available.
-                    # We use NVIDIA's pip-distributed NVCC/runtime packages to avoid requiring a system CUDA install.
-                    try:
-                        venv_root = python_exe.parent.parent  # ...\.venv
-                        site_packages = venv_root / "Lib" / "site-packages" if sys.platform == "win32" else venv_root / "lib" / "python"  # fallback
-                        cuda_nvcc_root = site_packages / "nvidia" / "cuda_nvcc"
-                        cuda_runtime_root = site_packages / "nvidia" / "cuda_runtime"
-
-                        if not cuda_nvcc_root.exists():
-                            # Infer CUDA major from env_key (cu121 -> cu12)
-                            env_key = python_exe.parent.parent.parent.name  # ...\.envs\<env_key>
-                            parsed = {}
-                            try:
-                                parsed = self.env_key_resolver.parse_env_key(env_key)
-                            except Exception:
-                                parsed = {}
-                            accelerator = (parsed.get("accelerator") or "").lower()
-                            nvcc_pkg = "nvidia-cuda-nvcc-cu12" if accelerator.startswith("cu12") or accelerator.startswith("cu121") or accelerator.startswith("cu124") else "nvidia-cuda-nvcc-cu11"
-                            runtime_pkg = "nvidia-cuda-runtime-cu12" if nvcc_pkg.endswith("cu12") else "nvidia-cuda-runtime-cu11"
-
-                            log(f"auto-gptq requires CUDA toolchain; installing {runtime_pkg} and {nvcc_pkg}...")
-                            toolchain_cmd = [str(python_exe), "-m", "pip", "install", runtime_pkg, nvcc_pkg]
-                            toolchain_res = subprocess.run(
-                                toolchain_cmd,
-                                capture_output=True,
-                                text=True,
-                                timeout=1200,
-                                **self.subprocess_flags
-                            )
-                            if toolchain_res.returncode != 0:
-                                tool_err = (toolchain_res.stderr or toolchain_res.stdout or "").strip()[:8000]
-                                raise RuntimeError(f"Failed to install CUDA toolchain packages: {tool_err}")
-
-                        # Set CUDA_HOME/CUDA_PATH for this install attempt
-                        if cuda_nvcc_root.exists():
-                            env = os.environ.copy()
-                            env.setdefault("CUDA_HOME", str(cuda_nvcc_root))
-                            env.setdefault("CUDA_PATH", str(cuda_nvcc_root))
-                            nvcc_bin = str(cuda_nvcc_root / "bin")
-                            env["PATH"] = nvcc_bin + os.pathsep + env.get("PATH", "")
-                    except Exception as cuda_setup_err:
-                        log(f"WARNING: Could not prepare CUDA toolchain for auto-gptq: {cuda_setup_err}")
+                    accelerator = (parsed_env.get("accelerator") or "").lower()
+                    if not accelerator or accelerator == "cpu":
+                        # Infer from profile if env key lacks accelerator
+                        profile = self._get_active_profile_data()
+                        if profile:
+                            torch_spec = str(profile.get("packages", {}).get("torch", ""))
+                            if "+cu124" in torch_spec:
+                                accelerator = "cu124"
+                            elif "+cu121" in torch_spec or "+cu12" in torch_spec:
+                                accelerator = "cu121"
+                            elif "+cu118" in torch_spec or "+cu11" in torch_spec:
+                                accelerator = "cu118"
+                            else:
+                                accelerator = "cu121"
+                        else:
+                            accelerator = "cu121"
+                    # Map to HF wheel index (cu121, cu118, cu124)
+                    cu_tag = "cu121" if "cu121" in accelerator or (accelerator.startswith("cu12") and "cu124" not in accelerator) else ("cu124" if "cu124" in accelerator else "cu118")
+                    hf_index = f"https://huggingface.github.io/autogptq-index/whl/{cu_tag}/"
+                    log(f"Installing auto-gptq from pre-built CUDA wheels (index: {cu_tag})...")
+                    pip_cmd = [str(python_exe), "-m", "pip", "install", "--upgrade", "auto-gptq", "--extra-index-url", hf_index]
+                    timeout_s = 600
+                    # Uninstall first to avoid mixed source/wheel state
+                    subprocess.run(
+                        [str(python_exe), "-m", "pip", "uninstall", "-y", "auto-gptq", "auto_gptq"],
+                        capture_output=True,
+                        timeout=60,
+                        **self.subprocess_flags
+                    )
 
                 result = subprocess.run(
                     pip_cmd,
@@ -1889,6 +1898,16 @@ except Exception as e:
                 )
                 if result.returncode == 0:
                     log(f"Successfully installed {pkg}")
+                    # GPTQ: verify CUDA kernels load (no "CUDA extension not installed" = crash path)
+                    if pkg_norm.startswith("auto-gptq"):
+                        verify_ok, verify_err = self._verify_autogptq_cuda_kernels(python_exe)
+                        if not verify_ok:
+                            errors.append(
+                                f"auto-gptq installed but CUDA kernels failed verification. "
+                                f"Model startup would crash (0xC0000005). {verify_err}"
+                            )
+                            return False, "\n\n".join(errors)
+                        log("auto-gptq CUDA extension verified OK")
                 else:
                     error_output = (result.stderr or result.stdout or "").strip()
                     # Persist full pip output for post-mortem debugging

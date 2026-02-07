@@ -1,5 +1,5 @@
 {
-  "execution_mode": "http",
+  "execution_mode": "native",
   "host": "0.0.0.0",
   "port": 8763,
   "token": "-_GsVShVXOcethzEQBsLI-MmdNqdClTvbti4kVP2u1Q",

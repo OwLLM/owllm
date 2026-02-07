@@ -15,18 +15,17 @@ Your LLM server now provides an **OpenAI-compatible API** that can be used with:
 
 The server starts automatically when you use tool-enabled chat, or you can start it manually:
 
-**Default Configuration:**
-- **Model**: Phi-4 (4-bit quantized)
-- **Base URL**: `http://127.0.0.1:10500`
-- **Model Name**: `local-llm`
+**Configuration (per model in Server page):**
+- **Base URL**: `http://127.0.0.1:<port>/v1` (port from `llm_backends.yaml`, shown in Server page)
+- **Model Name**: the model ID you selected (e.g. `unsloth_gemma-2-2b-it-bnb-4bit`); or run `GET http://127.0.0.1:<port>/v1/models` to see it
 
 ### 2. Configure Your External Tool
 
 Use these settings:
 ```
-Base URL: http://127.0.0.1:10500/v1
+Base URL: http://127.0.0.1:<port>/v1
 API Key: any-text-works (not validated)
-Model: local-llm
+Model: <model_id> (from dropdown or /v1/models)
 ```
 
 ---
@@ -41,9 +40,9 @@ Model: local-llm
 ### Step 2: Add Custom OpenAI Endpoint
 1. Find **"OpenAI API Settings"**
 2. Set:
-   - **Base URL**: `http://127.0.0.1:10500/v1`
+   - **Base URL**: `http://127.0.0.1:<port>/v1` (from Server page / Copy API URL)
    - **API Key**: `sk-local` (any string works)
-   - **Model**: `local-llm`
+   - **Model**: the model ID you started (e.g. from dropdown; or run `GET .../v1/models`)
 
 ### Step 3: Test It
 1. Open a file in Cursor

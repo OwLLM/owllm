@@ -231,7 +231,7 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     use_safetensors = False
 
                 device = "cuda:0" if torch.cuda.is_available() else "cpu"
-                model = AutoGPTQForCausalLM.from_quantized(
+                gptq_kwargs = dict(
                     model_name_or_path=model_path_str,
                     device=device,
                     device_map="auto" if torch.cuda.is_available() else None,
@@ -244,6 +244,17 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     use_safetensors=use_safetensors,
                     trust_remote_code=True,
                 )
+                # When CUDA extension is not installed, ExLLaMA kernels can crash (0xC0000005 on Windows).
+                # Disable them to use the stable PyTorch fallback path.
+                gptq_kwargs["disable_exllama"] = True
+                gptq_kwargs["disable_exllamav2"] = True
+                try:
+                    model = AutoGPTQForCausalLM.from_quantized(**gptq_kwargs)
+                except TypeError:
+                    # Older auto-gptq may not support disable_exllama/disable_exllamav2
+                    gptq_kwargs.pop("disable_exllama", None)
+                    gptq_kwargs.pop("disable_exllamav2", None)
+                    model = AutoGPTQForCausalLM.from_quantized(**gptq_kwargs)
                 return tokenizer, model
             except Exception as gptq_ex:
                 logging.error(f"auto-gptq load failed: {type(gptq_ex).__name__}: {gptq_ex}")
@@ -332,19 +343,25 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                             use_safetensors = False
 
                         device = "cuda:0" if torch.cuda.is_available() else "cpu"
-                        model = AutoGPTQForCausalLM.from_quantized(
+                        gptq_kwargs = dict(
                             model_name_or_path=model_path_str,
                             device=device,
                             device_map="auto" if torch.cuda.is_available() else None,
                             low_cpu_mem_usage=True,
                             use_triton=False,
-                            # Transformers >=4.50 uses a newer LlamaAttention implementation that is not compatible
-                            # with auto-gptq's fused attention/mlp injection. Disable these injections.
                             inject_fused_attention=False,
                             inject_fused_mlp=False,
                             use_safetensors=use_safetensors,
                             trust_remote_code=True,
                         )
+                        gptq_kwargs["disable_exllama"] = True
+                        gptq_kwargs["disable_exllamav2"] = True
+                        try:
+                            model = AutoGPTQForCausalLM.from_quantized(**gptq_kwargs)
+                        except TypeError:
+                            gptq_kwargs.pop("disable_exllama", None)
+                            gptq_kwargs.pop("disable_exllamav2", None)
+                            model = AutoGPTQForCausalLM.from_quantized(**gptq_kwargs)
                         return tokenizer, model
                     except Exception as gptq_ex:
                         logging.error(f"auto-gptq load failed: {type(gptq_ex).__name__}: {gptq_ex}")

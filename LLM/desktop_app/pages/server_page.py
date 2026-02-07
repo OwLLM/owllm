@@ -345,6 +345,7 @@ class ServerPage(QWidget):
         
         self.llm_model_selector = QComboBox()
         self.llm_model_selector.setToolTip("Select which model to run for the OpenAI-compatible API")
+        self.llm_model_selector.currentIndexChanged.connect(self._on_llm_model_selection_changed)
         self._populate_model_selector()
         llm_server_layout.addWidget(self.llm_model_selector)
         
@@ -464,7 +465,32 @@ class ServerPage(QWidget):
         self.copy_api_btn.setToolTip("Copy for Cursor/VS Code")
         self.copy_api_btn.clicked.connect(self._copy_api_url)
         self.copy_api_btn.setEnabled(False)
-        secondary_btn_layout.addWidget(self.copy_api_btn, 1) # Added stretch factor
+        secondary_btn_layout.addWidget(self.copy_api_btn, 1)
+        
+        self.copy_model_btn = QPushButton("📋 Copy Model Name")
+        self.copy_model_btn.setMinimumHeight(42)
+        self.copy_model_btn.setCursor(Qt.PointingHandCursor)
+        self.copy_model_btn.setStyleSheet("""
+            QPushButton {
+                background: rgba(255, 255, 255, 0.1);
+                color: white;
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 8px;
+                font-size: 10pt;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.2);
+                border: 1px solid rgba(255, 255, 255, 0.3);
+            }
+            QPushButton:disabled {
+                color: rgba(255, 255, 255, 0.2);
+            }
+        """)
+        self.copy_model_btn.setToolTip("Copy model ID for Cursor Model field")
+        self.copy_model_btn.clicked.connect(self._copy_model_name)
+        self.copy_model_btn.setEnabled(False)
+        secondary_btn_layout.addWidget(self.copy_model_btn, 1)
         
         help_btn = QPushButton("📖 Setup Guide")
         help_btn.setMinimumHeight(42)
@@ -544,6 +570,9 @@ class ServerPage(QWidget):
         cols.addWidget(left_col, 1)
         cols.addWidget(right_col, 1)
         layout.addLayout(cols)
+        
+        # Sync Copy Model Name button state with initial selection
+        QTimer.singleShot(0, self._on_llm_model_selection_changed)
     
     def _initialize_config(self):
         """Initialize config manager and load config (deferred)."""
@@ -575,6 +604,11 @@ class ServerPage(QWidget):
         self.token_edit.setText(token)
         self.token_edit.setEchoMode(QLineEdit.Normal)  # Show it briefly
         QTimer.singleShot(2000, lambda: self.token_edit.setEchoMode(QLineEdit.Password))  # Hide after 2s
+    
+    def _on_llm_model_selection_changed(self):
+        """Enable/disable Copy Model Name based on selection"""
+        if hasattr(self, 'copy_model_btn'):
+            self.copy_model_btn.setEnabled(self.llm_model_selector.currentData() is not None)
     
     def _populate_model_selector(self):
         """Populate the model selector dropdown with READY models from llm_backends.yaml"""
@@ -1301,15 +1335,27 @@ class ServerPage(QWidget):
                 f"OpenAI-compatible API URL copied to clipboard:\n\n"
                 f"{api_url}\n\n"
                 f"Use this in Cursor, VS Code, Continue, etc.\n"
-                f"Model name: local-llm\n"
+                f"Model name: {selected_model_id}\n"
                 f"API Key: (any text works)"
             )
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to copy URL: {e}")
     
+    def _copy_model_name(self):
+        """Copy model ID to clipboard for Cursor Model field"""
+        selected_model_id = self.llm_model_selector.currentData()
+        if selected_model_id is None:
+            QMessageBox.warning(self, "Error", "No model selected.")
+            return
+        clipboard = QApplication.clipboard()
+        clipboard.setText(selected_model_id)
+        QMessageBox.information(self, "Model Name Copied", f"Model ID copied to clipboard:\n{selected_model_id}")
+    
     def _show_llm_api_help(self):
         """Show help dialog for using LLM API with external tools"""
-        help_text = """
+        selected_model_id = self.llm_model_selector.currentData() if hasattr(self, 'llm_model_selector') else None
+        model_hint = f"<code>{selected_model_id}</code>" if selected_model_id else "the selected model ID (dropdown above, or from <code>GET .../v1/models</code>)"
+        help_text = f"""
 <h3>Using Your Local LLM with External Tools</h3>
 
 <p><b>Your LLM server provides an OpenAI-compatible API that works with:</b></p>
@@ -1323,13 +1369,13 @@ class ServerPage(QWidget):
 
 <h4>Quick Setup for Cursor:</h4>
 <ol>
-  <li><b>Start the LLM Server</b> (click "Start LLM Server" button above)</li>
-  <li><b>Copy the API URL</b> (click "Copy API URL for Cursor" button)</li>
+  <li><b>Start the LLM Server</b> (click "▶ Start" above)</li>
+  <li><b>Copy the API URL</b> (click "Copy API URL" button)</li>
   <li><b>Open Cursor Settings</b> (Ctrl+,)</li>
   <li><b>Find OpenAI API settings</b></li>
-  <li><b>Set Base URL</b> to the copied URL</li>
-  <li><b>Set API Key</b> to any text (e.g., "sk-local")</li>
-  <li><b>Set Model</b> to "local-llm"</li>
+  <li><b>Set Base URL</b> to the copied URL (e.g. <code>http://127.0.0.1:10500/v1</code>)</li>
+  <li><b>Set API Key</b> to any text (e.g. "sk-local")</li>
+  <li><b>Set Model</b> to {model_hint}</li>
 </ol>
 
 <h4>Benefits:</h4>

@@ -53,6 +53,10 @@ def main():
     
     os.environ["MODEL_TYPE"] = model_cfg.get("model_type", "base")
     os.environ["USE_4BIT"] = str(model_cfg.get("use_4bit", True)).lower()
+
+    # GPTQ backend: "auto-gptq" (default) or "exllamav2" when explicitly selected
+    if model_cfg.get("gptq_backend") == "exllamav2":
+        os.environ["USE_EXLLAMAV2_GPTQ"] = "true"
     
     if model_cfg.get("system_prompt"):
         os.environ["SYSTEM_PROMPT"] = model_cfg["system_prompt"]

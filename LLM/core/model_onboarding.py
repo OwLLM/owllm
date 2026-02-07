@@ -17,12 +17,30 @@ from model_integrity_checker import ModelIntegrityChecker
 logger = logging.getLogger(__name__)
 
 
-def _get_required_packages_for_requirements(req: Dict[str, Any]) -> List[str]:
+def _get_gptq_backend_for_model(model_id: str) -> str:
+    """Read gptq_backend from llm_backends.yaml for a model. Default: auto-gptq."""
+    try:
+        from pathlib import Path
+        from core.models import get_app_root
+        import yaml
+        config_path = get_app_root() / "configs" / "llm_backends.yaml"
+        if not config_path.exists():
+            return "auto-gptq"
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        model_cfg = (cfg or {}).get("models", {}).get(model_id, {})
+        return "exllamav2" if model_cfg.get("gptq_backend") == "exllamav2" else "auto-gptq"
+    except Exception:
+        return "auto-gptq"
+
+
+def _get_required_packages_for_requirements(req: Dict[str, Any], model_id: Optional[str] = None) -> List[str]:
     """
     Map model requirements to required Python packages.
     
     Args:
         req: Requirements dict from detect_model_requirements
+        model_id: Optional model ID to check gptq_backend preference in config
         
     Returns:
         List of required package names
@@ -31,8 +49,11 @@ def _get_required_packages_for_requirements(req: Dict[str, Any]) -> List[str]:
     quantization = req.get("quantization", "none")
     
     if quantization == "gptq":
-        # GPTQ models require optimum and auto-gptq
-        packages.extend(["optimum", "auto-gptq"])
+        gptq_backend = _get_gptq_backend_for_model(model_id or "") if model_id else "auto-gptq"
+        if gptq_backend == "exllamav2":
+            packages.append("exllamav2")
+        else:
+            packages.extend(["optimum", "auto-gptq"])
     elif quantization == "awq":
         # AWQ models require autoawq or awq
         packages.append("autoawq")
@@ -361,7 +382,7 @@ class ModelOnboardingService:
             
             # Step 9: Check for model-specific extra dependencies
             log(f"Checking for model-specific extra dependencies")
-            required_packages = _get_required_packages_for_requirements(req)
+            required_packages = _get_required_packages_for_requirements(req, model_id)
             
             if required_packages:
                 log(f"Model requires extra packages: {required_packages}")
@@ -483,6 +504,33 @@ class ModelOnboardingService:
                     log(f"Successfully installed and verified packages in dedicated env: {missing_packages}")
                 else:
                     log(f"All required packages already present in dedicated env: {required_packages}")
+                    # GPTQ: verify CUDA kernels when auto-gptq was pre-installed (no install = no verification in auto_install)
+                    if "auto-gptq" in required_packages:
+                        log("Verifying auto-gptq CUDA kernels...")
+                        verify_ok, verify_err = self.env_registry._verify_autogptq_cuda_kernels(final_python_exe)
+                        if not verify_ok:
+                            error_msg = f"auto-gptq CUDA kernels failed verification. Model startup would crash (0xC0000005). {verify_err}"
+                            log(f"Model onboarding failed: {error_msg}")
+                            self.state_store.upsert_onboarding(
+                                model_id=model_id,
+                                base_model_path=base_model_path,
+                                adapter_dir=adapter_dir,
+                                env_key=final_env_key,
+                                backend=backend,
+                                accelerator=accelerator,
+                                status="BROKEN",
+                                last_error=error_msg,
+                                healthcheck_log_path=log_path
+                            )
+                            return {
+                                "status": "BROKEN",
+                                "env_key": final_env_key,
+                                "backend": backend,
+                                "accelerator": accelerator,
+                                "last_error": error_msg,
+                                "healthcheck_log_path": log_path
+                            }
+                        log("auto-gptq CUDA extension verified OK")
             else:
                 log(f"No model-specific packages required (shared environment is sufficient)")
             

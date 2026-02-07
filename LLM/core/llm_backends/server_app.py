@@ -53,6 +53,9 @@ _load_error: str = ""
 _load_started_at: float = 0.0
 _load_finished_at: float = 0.0
 
+# GPTQ backend selection: "auto-gptq" (default) or "exllamav2" when USE_EXLLAMAV2_GPTQ=true
+_gptq_backend: str = "auto-gptq"
+
 
 # ============================================================================
 # Native API Models
@@ -169,14 +172,34 @@ async def startup_event():
     logger.info(f"Model name: {model_name}")
     logger.info(f"Quantization (4-bit): {use_4bit}")
 
+    # GPTQ backend selection: ExLlamaV2 when USE_EXLLAMAV2_GPTQ=true and model is GPTQ (no adapter)
+    use_exllamav2_gptq = os.environ.get("USE_EXLLAMAV2_GPTQ", "").lower() in ("true", "1", "yes")
+    is_gptq = False
+    try:
+        from pathlib import Path
+        base_path = Path(base_model)
+        if base_path.exists() and base_path.is_dir():
+            is_gptq = (base_path / "quantize_config.json").exists()
+    except Exception:
+        pass
+    # ExLlamaV2 does not support adapters; use auto-gptq when adapter_dir is set
+    gptq_backend = "exllamav2" if (
+        use_exllamav2_gptq and is_gptq and not adapter_dir
+    ) else "auto-gptq"
+    if is_gptq:
+        logger.info(f"GPTQ model detected; backend: {gptq_backend}")
+
     def _loader():
-        nonlocal base_model, adapter_dir, use_4bit
-        global tokenizer, model
+        nonlocal base_model, adapter_dir, use_4bit, gptq_backend
+        global tokenizer, model, _gptq_backend
         global _load_state, _load_error, _load_finished_at
+        _gptq_backend = gptq_backend
         try:
             logger.info("Background model load started...")
-            # Lazy import heavy backend inside background thread.
-            from core.llm_backends.run_adapter_backend import load_model
+            if gptq_backend == "exllamav2":
+                from core.llm_backends.exllama_backend import load_model
+            else:
+                from core.llm_backends.run_adapter_backend import load_model
             tok, mdl = load_model(
                 base_model=base_model,
                 adapter_dir=adapter_dir,
@@ -270,9 +293,12 @@ async def generate(request: GenerateRequest):
         )
     
     try:
-        # Lazy import heavy backend for generation.
-        from core.llm_backends.run_adapter_backend import generate_text
-        
+        # Use the same backend that loaded the model
+        if _gptq_backend == "exllamav2":
+            from core.llm_backends.exllama_backend import generate_text
+        else:
+            from core.llm_backends.run_adapter_backend import generate_text
+
         logger.debug(f"Generation request: prompt_len={len(request.prompt)}, max_tokens={request.max_new_tokens}, temp={request.temperature}")
         
         # Call generation function
@@ -323,6 +349,9 @@ async def debug_generate(request: GenerateRequest):
         if _load_state == "error" and _load_error:
             detail = f"Model load failed: {_load_error}"
         return DebugGenerateResponse(status=detail)
+
+    if _gptq_backend == "exllamav2":
+        return DebugGenerateResponse(status="ExLlamaV2 backend: debug_generate not implemented")
 
     notes: List[str] = []
     try:
@@ -451,9 +480,12 @@ async def chat_completions(request: ChatCompletionRequest):
         prompt_parts.append("Assistant:")
         
         full_prompt = "\n\n".join(prompt_parts)
-        
-        # Lazy import heavy backend for generation.
-        from core.llm_backends.run_adapter_backend import generate_text
+
+        # Use the same backend that loaded the model
+        if _gptq_backend == "exllamav2":
+            from core.llm_backends.exllama_backend import generate_text
+        else:
+            from core.llm_backends.run_adapter_backend import generate_text
         # Generate response
         generated_text = generate_text(
             tokenizer=tokenizer,

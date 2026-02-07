@@ -392,13 +392,15 @@ class ModelOnboardingService:
                 dedicated_env_key = self.env_registry.env_key_resolver.resolve_dedicated_env_key(final_env_key, model_id)
                 log(f"Resolved dedicated env_key: {dedicated_env_key}")
                 
-                # Create dedicated env by copying the current final env (stable or edge)
+                # Create dedicated env by copying the current final env (stable or edge).
+                # For GPTQ (auto-gptq): creates fresh with Python 3.11 instead of copying.
                 try:
                     self.env_registry._create_dedicated_env(
-                        dedicated_env_key, 
-                        final_env_key, 
-                        profile_data, 
-                        log_callback=log_callback
+                        dedicated_env_key,
+                        final_env_key,
+                        profile_data,
+                        log_callback=log_callback,
+                        required_packages=required_packages,
                     )
                     # Update final env to the dedicated one
                     final_env_key = dedicated_env_key

@@ -77,12 +77,73 @@ class EnvRegistry:
     def _get_active_profile_data(self) -> Optional[dict]:
         """Get active hardware profile data (delegates to resolver)"""
         return self.env_key_resolver.get_active_profile_data()
+
+    def _get_base_python_for_env(self, env_key: str, required_packages: Optional[list] = None, log_callback=None) -> Optional[Path]:
+        """
+        Single source of truth for base Python when creating envs.
+        GPTQ needs Python 3.11 (cp311) for auto-gptq wheels; otherwise use default.
+        """
+        def log(msg: str):
+            if log_callback:
+                log_callback(msg)
+            import logging
+            logging.info(msg)
+
+        required_packages = required_packages or []
+        needs_gptq = any(p and "auto-gptq" in str(p).lower() for p in required_packages)
+        if not needs_gptq:
+            return None
+
+        root_dir = self.env_manager.root_dir
+        try:
+            from core.python_runtime import PythonRuntimeManager
+            mgr = PythonRuntimeManager(root_dir)
+            py311 = mgr.get_python_runtime("3.11")
+            if py311 and py311.exists():
+                log(f"Using bundled Python 3.11 for GPTQ env: {py311}")
+                return py311
+        except Exception as e:
+            log(f"[WARN] Could not get bundled Python 3.11 for GPTQ: {e}")
+        return None
+
+    def _find_windows_python(self, version: str, log_callback=None) -> Optional[Path]:
+        """
+        Try to locate a specific Python version on Windows via the py launcher.
+        Returns python.exe path or None.
+        """
+        if sys.platform != "win32":
+            return None
+
+        def log(msg: str):
+            if log_callback:
+                log_callback(msg)
+            import logging
+            logging.info(msg)
+
+        try:
+            r = subprocess.run(
+                ["py", f"-{version}", "-c", "import sys; print(sys.executable)"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags,
+            )
+            if r.returncode != 0:
+                return None
+            exe = (r.stdout or "").strip().splitlines()[-1].strip()
+            p = Path(exe)
+            if p.exists():
+                return p
+        except Exception as e:
+            log(f"[WARN] Could not resolve Python {version} via py launcher: {e}")
+        return None
     
     def _atomic_create_env(
         self,
         env_key: str,
         profile_data: dict,
-        log_callback=None
+        log_callback=None,
+        base_python_exe: Optional[Path] = None,
     ) -> Path:
         """
         PHASE 2: Atomically create environment with health checks.
@@ -123,10 +184,13 @@ class EnvRegistry:
         try:
             log(f"Creating environment in temp location: {tmp_dir}")
             
-            # Create venv
+            # Create venv (optionally using a specific base Python)
             venv_path = tmp_dir / ".venv"
+            creator_python = base_python_exe or Path(sys.executable)
+            if base_python_exe:
+                log(f"Using base Python for venv creation: {creator_python}")
             result = subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_path), "--clear"],
+                [str(creator_python), "-m", "venv", str(venv_path), "--clear"],
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -929,16 +993,20 @@ except Exception as e:
         dedicated_env_key: str,
         base_env_key: str,
         profile_data: dict,
-        log_callback=None
+        log_callback=None,
+        required_packages: Optional[list] = None,
     ) -> Path:
         """
         Create a dedicated environment for a specific model by copying a base environment.
+        For GPTQ (when required_packages includes auto-gptq): delete and recreate fresh
+        with Python 3.11 via _atomic_create_env instead of copying.
         
         Args:
             dedicated_env_key: The new dedicated environment key
             base_env_key: The shared environment key to copy from
             profile_data: Hardware profile data
             log_callback: Optional log callback
+            required_packages: Model-specific packages (e.g. auto-gptq); used to detect GPTQ.
             
         Returns:
             Path to the new dedicated environment directory
@@ -949,6 +1017,43 @@ except Exception as e:
             import logging
             logging.info(msg)
             
+        required_packages = required_packages or []
+        needs_fresh_gptq = any(p and "auto-gptq" in str(p).lower() for p in required_packages)
+
+        if needs_fresh_gptq:
+            log(f"GPTQ: creating dedicated env fresh with Python 3.11 (no copy)")
+            dedicated_env_path = self.envs_dir / dedicated_env_key
+            if dedicated_env_path.exists():
+                log(f"Removing existing dedicated env for fresh GPTQ build")
+                self._rmtree_windows_safe(dedicated_env_path)
+            base_python_exe = self._get_base_python_for_env(dedicated_env_key, required_packages, log_callback)
+            if not base_python_exe or not base_python_exe.exists():
+                base_python_exe = self._find_windows_python("3.11", log_callback=log_callback)
+            if not base_python_exe or not base_python_exe.exists():
+                raise RuntimeError(
+                    "GPTQ requires Python 3.11 for auto-gptq wheels; bundled Python 3.11 not available. "
+                    "Install Python 3.11 and ensure it is discoverable via 'py -3.11' on Windows."
+                )
+            self._atomic_create_env(
+                dedicated_env_key, profile_data,
+                log_callback=log_callback,
+                base_python_exe=base_python_exe
+            )
+            dedicated_python_exe = self._get_env_python_executable(dedicated_env_key)
+            if not (dedicated_python_exe and dedicated_python_exe.exists()):
+                raise RuntimeError(f"Failed to create dedicated GPTQ environment: {dedicated_env_key}")
+            torch_version, _ = self._get_torch_info(dedicated_python_exe)
+            self.state_store.upsert_env(
+                env_key=dedicated_env_key,
+                python_path=str(dedicated_python_exe),
+                torch_version=torch_version,
+                cuda_version=profile_data.get("cuda_version", "cpu"),
+                backend="transformers",
+                status="READY"
+            )
+            log(f"Dedicated GPTQ environment {dedicated_env_key} ready!")
+            return self.envs_dir / dedicated_env_key
+
         log(f"Creating dedicated environment: {dedicated_env_key} from {base_env_key}")
         
         # Check if dedicated env already exists
@@ -1939,6 +2044,53 @@ sys.exit(0)
                     truncated_error = error_output[:8000]
                     if full_log_path:
                         truncated_error = f"{truncated_error}\n\n[full pip output saved to]\n{full_log_path}"
+                    # GPTQ: if no wheels exist for current Python (common on 3.12),
+                    # recreate the env with Python 3.11 (if available) and retry.
+                    if pkg_norm.startswith("auto-gptq") and (
+                        "No matching distribution found for auto-gptq" in error_output
+                        or "Could not find a version that satisfies the requirement auto-gptq" in error_output
+                    ):
+                        log("auto-gptq wheel not available for current Python. Attempting env rebuild with Python 3.11...")
+                        profile = self._get_active_profile_data()
+                        py311 = self._get_base_python_for_env(env_key, ["auto-gptq"], log_callback=log_callback)
+                        if not py311:
+                            py311 = self._find_windows_python("3.11", log_callback=log_callback)
+                        if profile and py311:
+                            try:
+                                self._atomic_create_env(env_key, profile, log_callback=log_callback, base_python_exe=py311)
+                                rebuilt_python = self._get_env_python_executable(env_key)
+                                if not rebuilt_python or not rebuilt_python.exists():
+                                    raise RuntimeError(f"Rebuilt env python not found: {rebuilt_python}")
+
+                                # Retry wheel-only install in rebuilt env
+                                retry_cmd = [
+                                    str(rebuilt_python), "-m", "pip", "install", "--upgrade",
+                                    "--only-binary", ":all:", "--prefer-binary",
+                                    "auto-gptq", "--extra-index-url", hf_index
+                                ]
+                                retry = subprocess.run(
+                                    retry_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=600,
+                                    **self.subprocess_flags
+                                )
+                                retry_out = (retry.stdout or "") + (retry.stderr or "")
+                                if retry.returncode != 0:
+                                    raise RuntimeError(retry_out.strip()[:8000])
+
+                                verify_ok, verify_err = self._verify_autogptq_cuda_kernels(rebuilt_python)
+                                if not verify_ok:
+                                    raise RuntimeError(verify_err)
+
+                                log("auto-gptq installed and verified after Python 3.11 env rebuild.")
+                                return True, ""
+                            except Exception as rebuild_err:
+                                log(f"Python 3.11 rebuild+install failed: {rebuild_err}")
+                                # fall through to standard error return below
+                        else:
+                            log("Python 3.11 not available (or profile missing); cannot rebuild env for auto-gptq wheels.")
+
                     log(f"Failed to install {pkg}: {truncated_error}")
                     errors.append(f"Package '{pkg}' failed:\n{truncated_error}")
                     return False, "\n\n".join(errors)

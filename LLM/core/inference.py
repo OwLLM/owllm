@@ -138,9 +138,12 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
         status = result.get("status")
         if status != "READY":
             error_msg = result.get("last_error", "Unknown error")
+            log_path = result.get("healthcheck_log_path", "")
+            log_suffix = f"\nStartup log: {log_path}" if log_path else ""
             raise RuntimeError(
                 f"Model '{onboarding_id}' is not ready after automatic onboarding/repair (status={status}). "
-                f"Error: {error_msg}"
+                f"App is repairing/recreating the model environment automatically. "
+                f"Error: {error_msg}{log_suffix}"
             )
     
     # Ensure server is running for this model

@@ -1474,8 +1474,43 @@ sys.exit(0)
             timeout=30,
         )
         if verify.returncode != 0:
+            stderr = (verify.stderr or "").strip()
+            stdout = (verify.stdout or "").strip()
+
+            # Provide actionable Windows diagnostics for common torch import failures
+            hint = ""
+            try:
+                low = (stderr or stdout).lower()
+                if "winerror 1455" in low or "os error 1455" in low or "paging file is too small" in low:
+                    hint = (
+                        "\n\nHint: Windows virtual memory (paging file) is too small (WinError 1455). "
+                        "Increase paging file size and reboot, then retry onboarding."
+                    )
+                elif "winerror 126" in low or "the specified module could not be found" in low:
+                    hint = (
+                        "\n\nHint: This is usually a missing Microsoft Visual C++ runtime DLL (WinError 126). "
+                        "Install the Microsoft Visual C++ Redistributable 2015-2022 (x64), then retry.\n"
+                        "Repo helper: run 'LLM\\install_vcredist.ps1'."
+                    )
+                elif "winerror 193" in low or "is not a valid win32 application" in low:
+                    hint = (
+                        "\n\nHint: WinError 193 often indicates a 32/64-bit mismatch or corrupted wheel. "
+                        "Recreate the environment and ensure you're installing x64 wheels."
+                    )
+                elif "_load_dll_libraries" in low and "torch\\__init__.py" in low:
+                    hint = (
+                        "\n\nHint: Torch failed while loading its DLL dependencies. "
+                        "If this is Windows, install the Microsoft Visual C++ Redistributable 2015-2022 (x64) "
+                        "and reboot, then retry."
+                    )
+            except Exception:
+                hint = ""
+
             raise RuntimeError(
-                f"Per-model env torch verification failed.\nSTDOUT:\n{verify.stdout}\nSTDERR:\n{verify.stderr}"
+                "Per-model env torch verification failed.\n"
+                f"Python: {python_exe}\n"
+                f"STDOUT:\n{stdout}\n"
+                f"STDERR:\n{stderr}{hint}"
             )
     
     def _check_old_env_health(self, python_exe: Path, profile_data: Optional[dict]) -> bool:

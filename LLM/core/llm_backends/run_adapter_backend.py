@@ -264,6 +264,58 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     f"Underlying error: {type(gptq_ex).__name__}: {gptq_ex}"
                 ) from gptq_ex
 
+        # Windows: Transformers allocator warmup can request a huge contiguous CUDA allocation and fail with OOM
+        # even when the model would otherwise fit. Make it best-effort: if warmup OOMs, continue without warmup.
+        def _patch_transformers_allocator_warmup() -> None:
+            try:
+                import transformers.modeling_utils as modeling_utils  # type: ignore
+                if not hasattr(modeling_utils, "caching_allocator_warmup"):
+                    return
+                orig = modeling_utils.caching_allocator_warmup
+
+                def _wrapped(*args, **kwargs):
+                    try:
+                        return orig(*args, **kwargs)
+                    except Exception as e:
+                        msg = str(e).lower()
+                        if "out of memory" in msg or "cuda out of memory" in msg:
+                            logging.warning(
+                                "Transformers caching_allocator_warmup hit OOM; continuing without warmup "
+                                "(model may still load successfully)."
+                            )
+                            return None
+                        raise
+
+                modeling_utils.caching_allocator_warmup = _wrapped
+            except Exception:
+                return
+
+        if IS_WINDOWS:
+            _patch_transformers_allocator_warmup()
+
+        def _is_windows_paging_file_too_small(ex: Exception) -> bool:
+            if not IS_WINDOWS:
+                return False
+            try:
+                if isinstance(ex, OSError) and getattr(ex, "winerror", None) == 1455:
+                    return True
+            except Exception:
+                pass
+            msg = str(ex).lower()
+            return ("paging file is too small" in msg) or ("os error 1455" in msg) or ("winerror 1455" in msg)
+
+        def _raise_windows_paging_file_help(ex: Exception) -> None:
+            raise RuntimeError(
+                "Windows virtual memory (paging file) is too small to load this model (WinError 1455).\n"
+                "This typically happens when safetensors memory-maps large checkpoint shards.\n\n"
+                "Fix:\n"
+                "- Increase your paging file size (System Properties → Advanced → Performance → Settings → Advanced → Virtual memory)\n"
+                "- Prefer 'System managed size' or set a larger custom size\n"
+                "- Ensure you have enough free disk space on the drive hosting the paging file\n"
+                "- Reboot Windows after changing the paging file\n\n"
+                f"Underlying error: {type(ex).__name__}: {ex}"
+            ) from ex
+
         # Load base model
         # Previously we disabled bitsandbytes on Windows unconditionally.
         # Now: enable 4-bit on Windows when bitsandbytes is importable (we install/fix it in our environment).
@@ -304,16 +356,26 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     logging.error("Note: These packages are difficult to install manually on Windows and require CUDA toolkit compilation.")
                     raise RuntimeError("Missing dependency: causal_conv1d/mamba_ssm. These should be installed automatically by the installer. Please run the installer again or use a different model.")
                 raise
-            except Exception:
+            except Exception as e:
+                if _is_windows_paging_file_too_small(e):
+                    _raise_windows_paging_file_help(e)
                 # Fallback to non-quantized
-                logging.warning("4-bit loading failed, falling back to FP16")
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_path_str,
-                    torch_dtype=torch.float16,
-                    device_map="cuda",
-                    low_cpu_mem_usage=True,
-                    trust_remote_code=True,
-                )
+                # IMPORTANT: log the underlying cause; otherwise "re-onboarding did nothing" is impossible to debug.
+                logging.warning(f"4-bit loading failed ({type(e).__name__}: {e}), falling back to FP16")
+                logging.exception("4-bit loading exception details:")
+                try:
+                    model = AutoModelForCausalLM.from_pretrained(
+                        model_path_str,
+                        torch_dtype=torch.float16,
+                        # Use auto device map to avoid large contiguous allocations when memory is fragmented.
+                        device_map="auto",
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
+                    )
+                except Exception as fp16_ex:
+                    if _is_windows_paging_file_too_small(fp16_ex):
+                        _raise_windows_paging_file_help(fp16_ex)
+                    raise
         else:
             # No 4-bit: use FP16 on CUDA/CPU
             if IS_WINDOWS and use_4bit and not bnb_ok:
@@ -406,6 +468,10 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     logging.error("If they are missing, please run the installer again or use a model that doesn't require Mamba/SSM.")
                     logging.error("Note: These packages are difficult to install manually on Windows and require CUDA toolkit compilation.")
                     raise RuntimeError("Missing dependency: causal_conv1d/mamba_ssm. These should be installed automatically by the installer. Please run the installer again or use a different model.")
+                raise
+            except Exception as e:
+                if _is_windows_paging_file_too_small(e):
+                    _raise_windows_paging_file_help(e)
                 raise
         
         return tokenizer, model

@@ -9509,7 +9509,28 @@ class MainWindow(QMainWindow):
         self.test_model_b_settings = model_b_page
         self.test_model_c_settings = model_c_page
         
-        right_layout.addWidget(self.test_model_settings_stack)
+        right_layout.addWidget(self.test_model_settings_stack, 0)
+
+        # Logs panel (right column). Keep chat bubbles for real model replies only.
+        log_title = QLabel("Logs")
+        log_title.setStyleSheet("color: white; font-weight: bold; font-size: 11pt;")
+        right_layout.addWidget(log_title)
+
+        self.test_chat_log_display = QTextEdit()
+        self.test_chat_log_display.setReadOnly(True)
+        self.test_chat_log_display.setMinimumHeight(180)
+        self.test_chat_log_display.setStyleSheet("""
+            QTextEdit {
+                background: rgba(20, 20, 30, 0.8);
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 8px;
+                color: #cccccc;
+                padding: 10px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 9pt;
+            }
+        """)
+        right_layout.addWidget(self.test_chat_log_display, 1)
 
         # Add columns to main layout
         # Use stretch factors to maintain ratio: left takes most space, right gets what it needs
@@ -9766,7 +9787,8 @@ class MainWindow(QMainWindow):
             model_id = self._resolve_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id: {e}"
-            self.tool_chat_display.update_model_a_response(error_msg)
+            self._append_tool_chat_log(error_msg)
+            self.tool_chat_display.update_model_a_response("[ERROR] Failed to start. See logs on the right.")
             self.tool_chat_input.setEnabled(True)
             self.tool_chat_send_btn.setEnabled(True)
             return
@@ -9793,7 +9815,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_chat_worker_a.inference_finished.connect(self._on_tool_chat_finished_a)
         self.tool_chat_worker_a.inference_failed.connect(
-            lambda error, col: (self.tool_chat_display.update_model_a_response(error),
+            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
+                                self._append_tool_chat_log(error),
+                                self.tool_chat_display.update_model_a_response("[ERROR] Failed. See logs on the right."),
                                 self._close_env_dialog("a", is_tool_chat=True),
                                 self.tool_chat_input.setEnabled(True),
                                 self.tool_chat_send_btn.setEnabled(True))
@@ -9806,7 +9830,8 @@ class MainWindow(QMainWindow):
             model_id = self._resolve_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id: {e}"
-            self.tool_chat_display.update_model_b_response(error_msg)
+            self._append_tool_chat_log(error_msg)
+            self.tool_chat_display.update_model_b_response("[ERROR] Failed to start. See logs on the right.")
             self.tool_chat_input.setEnabled(True)
             self.tool_chat_send_btn.setEnabled(True)
             return
@@ -9833,7 +9858,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_chat_worker_b.inference_finished.connect(self._on_tool_chat_finished_b)
         self.tool_chat_worker_b.inference_failed.connect(
-            lambda error, col: (self.tool_chat_display.update_model_b_response(error),
+            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
+                                self._append_tool_chat_log(error),
+                                self.tool_chat_display.update_model_b_response("[ERROR] Failed. See logs on the right."),
                                 self._close_env_dialog("b", is_tool_chat=True),
                                 self.tool_chat_input.setEnabled(True),
                                 self.tool_chat_send_btn.setEnabled(True))
@@ -9846,7 +9873,8 @@ class MainWindow(QMainWindow):
             model_id = self._resolve_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id: {e}"
-            self.tool_chat_display.update_model_c_response(error_msg)
+            self._append_tool_chat_log(error_msg)
+            self.tool_chat_display.update_model_c_response("[ERROR] Failed to start. See logs on the right.")
             self.tool_chat_input.setEnabled(True)
             self.tool_chat_send_btn.setEnabled(True)
             return
@@ -9873,7 +9901,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_chat_worker_c.inference_finished.connect(self._on_tool_chat_finished_c)
         self.tool_chat_worker_c.inference_failed.connect(
-            lambda error, col: (self.tool_chat_display.update_model_c_response(error),
+            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
+                                self._append_tool_chat_log(error),
+                                self.tool_chat_display.update_model_c_response("[ERROR] Failed. See logs on the right."),
                                 self._close_env_dialog("c", is_tool_chat=True),
                                 self.tool_chat_input.setEnabled(True),
                                 self.tool_chat_send_btn.setEnabled(True))
@@ -9939,7 +9969,7 @@ class MainWindow(QMainWindow):
         self._check_tool_chat_all_finished()
 
     def _on_tool_chat_progress_update(self, which: str, msg: str):
-        """Append progress text to the model bubble (tool chat - single model only)."""
+        """Append progress text to the right log panel (tool chat)."""
         # Only handle model A (single model mode)
         if which != "a":
             return
@@ -9978,11 +10008,8 @@ class MainWindow(QMainWindow):
                 dialog.set_complete()
                 QTimer.singleShot(1000, lambda: self._close_env_dialog(which, is_tool_chat=True))
         
-        # Update progress for model A
-        current = getattr(self, "_tool_chat_progress_a", "") or ""
-        current = (current + "\n" + msg).strip() if current else msg
-        self._tool_chat_progress_a = current
-        self.tool_chat_display.update_model_a_response(current)
+        # Keep chat bubbles clean: write progress to the right-side log only.
+        self._append_tool_chat_log(msg)
     
     def _check_tool_chat_all_finished(self):
         """Check if tool chat worker has finished"""
@@ -10507,17 +10534,17 @@ class MainWindow(QMainWindow):
     
     def _run_inference_a_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model A with tool calling support (non-blocking)"""
-        # Show starting message (actual server status comes from log_callback)
-        start_msg = "[INFO] Preparing tool-enabled inference..."
-        self._tool_progress_a = start_msg
-        self.chat_display.update_model_a_response(self._tool_progress_a)
+        # Logs go to right column; keep chat bubbles for real model replies only.
+        self._tool_progress_a = ""
+        self._append_test_chat_log("[A] [INFO] Preparing tool-enabled inference...")
         
         # Resolve model_id from model_path
         try:
             model_id = self._resolve_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
-            self.chat_display.update_model_a_response(error_msg)
+            self._append_test_chat_log(f"[A] {error_msg}")
+            self.chat_display.update_model_a_response("[ERROR] Failed to start. See logs on the right.")
             return
         
         # FIX: Auto-inject tool system prompt if not provided
@@ -10553,7 +10580,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_worker_a.inference_finished.connect(self._on_tool_inference_finished_a)
         self.tool_worker_a.inference_failed.connect(
-            lambda error, col: (self.chat_display.update_model_a_response(error),
+            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
+                                self._append_test_chat_log(f"[A] {error}"),
+                                self.chat_display.update_model_a_response("[ERROR] Failed. See logs on the right."),
                                 self._close_env_dialog("a", is_tool_chat=False))
         )
         
@@ -10582,9 +10611,133 @@ class MainWindow(QMainWindow):
         if dialog:
             dialog.close()
             setattr(self, env_key, None)
+
+    def _extract_first_log_path_from_error(self, error_text: str) -> str:
+        try:
+            import re
+            m = re.search(r"(?:Startup log|Onboarding log):\s*(.+)", error_text or "", re.IGNORECASE)
+            if not m:
+                return ""
+            # Take first line only
+            return (m.group(1) or "").strip().splitlines()[0].strip()
+        except Exception:
+            return ""
+
+    def _should_offer_reonboard_popup(self, error_text: str) -> bool:
+        low = (error_text or "").lower()
+        # Only show when we have strong evidence this is an onboarding-state problem,
+        # not a random runtime exception.
+        has_log_pointer = ("startup log:" in low) or ("onboarding log:" in low)
+        markers = [
+            "please re-onboard/repair",
+            "please re-onboard",
+            "re-onboard/repair",
+            "not ready for chat",
+            "has not been onboarded yet",
+            "marked broken",
+        ]
+        return has_log_pointer and any(m in low for m in markers)
+
+    def _append_tool_chat_log(self, text: str) -> None:
+        """Append to Tool Chat right-side log panel."""
+        try:
+            if hasattr(self, "tool_chat_log_display") and self.tool_chat_log_display:
+                self.tool_chat_log_display.append(str(text))
+        except Exception:
+            pass
+
+    def _append_test_chat_log(self, text: str) -> None:
+        """Append to Test Chat right-side log panel."""
+        try:
+            if hasattr(self, "test_chat_log_display") and self.test_chat_log_display:
+                self.test_chat_log_display.append(str(text))
+        except Exception:
+            pass
+
+    def _maybe_show_reonboard_popup(self, error_text: str, model_id: str, model_path: str = "") -> None:
+        """
+        Show a popup prompting the user to re-onboard when a model isn't actually READY.
+        This is intentionally UI-only (no automatic repairs during chat).
+        """
+        if not self._should_offer_reonboard_popup(error_text):
+            return
+
+        from pathlib import Path
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+
+        log_path = self._extract_first_log_path_from_error(error_text)
+        log_exists = bool(log_path) and Path(log_path).exists()
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Model needs onboarding")
+        msg.setIcon(QMessageBox.Warning)
+        msg.setText(f"Model '{model_id}' is not ready to use.")
+        msg.setInformativeText("Please re-onboard/repair the model environment, then retry.")
+        msg.setDetailedText(error_text)
+
+        btn_reonboard = msg.addButton("Re-onboard now", QMessageBox.AcceptRole)
+        btn_open_models = msg.addButton("Open Models page", QMessageBox.ActionRole)
+        btn_open_log = None
+        if log_exists:
+            btn_open_log = msg.addButton("Open log", QMessageBox.ActionRole)
+        msg.addButton(QMessageBox.Close)
+
+        msg.exec()
+        clicked = msg.clickedButton()
+
+        if clicked == btn_open_log and log_exists:
+            try:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(log_path))))
+            except Exception:
+                pass
+            return
+
+        if clicked == btn_open_models or clicked == btn_reonboard:
+            # Navigate to Models -> Downloaded and select the model
+            try:
+                self._switch_tab(self.tabs, "models")
+                if hasattr(self, "models_content_tabs"):
+                    self.models_content_tabs.setCurrentIndex(1)  # Downloaded
+                if model_path:
+                    self._on_model_selected(model_path)
+            except Exception:
+                pass
+
+        if clicked == btn_reonboard:
+            # Start onboarding focused on Environment tab
+            try:
+                if model_path:
+                    self._start_model_onboarding(model_path, model_id)
+            except Exception:
+                pass
+
+    def prompt_reonboard_server_model(self, server_model_id: str) -> None:
+        """
+        Called by other pages (e.g. Server tab) to bring the user to the onboarding UI
+        for a given server config model_id.
+        """
+        try:
+            import yaml
+            from pathlib import Path
+            cfg_path = self.root / "configs" / "llm_backends.yaml"
+            cfg = {}
+            if cfg_path.exists():
+                cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+            base_model = ((cfg.get("models") or {}).get(server_model_id) or {}).get("base_model") or ""
+            if not base_model:
+                return
+            model_path = str(Path(base_model))
+            self._maybe_show_reonboard_popup(
+                error_text=f"Model '{server_model_id}' requires re-onboarding.",
+                model_id=server_model_id,
+                model_path=model_path,
+            )
+        except Exception:
+            return
     
     def _on_tool_progress_update(self, which: str, msg: str):
-        """Append progress text to the correct model bubble (test chat)."""
+        """Append progress text to the right log panel (test chat)."""
         # Detect environment creation and show progress dialog
         msg_lower = msg.lower()
         env_key = f"_env_dialog_{which}"
@@ -10619,21 +10772,8 @@ class MainWindow(QMainWindow):
                 dialog.set_complete()
                 QTimer.singleShot(1000, lambda: self._close_env_dialog(which, is_tool_chat=False))
         
-        if which == "a":
-            current = getattr(self, "_tool_progress_a", "") or ""
-            current = (current + "\n" + msg).strip() if current else msg
-            self._tool_progress_a = current
-            self.chat_display.update_model_a_response(current)
-        elif which == "b":
-            current = getattr(self, "_tool_progress_b", "") or ""
-            current = (current + "\n" + msg).strip() if current else msg
-            self._tool_progress_b = current
-            self.chat_display.update_model_b_response(current)
-        elif which == "c":
-            current = getattr(self, "_tool_progress_c", "") or ""
-            current = (current + "\n" + msg).strip() if current else msg
-            self._tool_progress_c = current
-            self.chat_display.update_model_c_response(current)
+        prefix = (which or "?").upper()
+        self._append_test_chat_log(f"[{prefix}] {msg}")
     
     def _run_inference_b(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model B using QProcess"""
@@ -10848,16 +10988,16 @@ class MainWindow(QMainWindow):
     
     def _run_inference_b_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model B with tool calling support (non-blocking)"""
-        start_msg = "[INFO] Preparing tool-enabled inference..."
-        self._tool_progress_b = start_msg
-        self.chat_display.update_model_b_response(self._tool_progress_b)
+        self._tool_progress_b = ""
+        self._append_test_chat_log("[B] [INFO] Preparing tool-enabled inference...")
 
         # Resolve model_id from model_path
         try:
             model_id = self._resolve_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
-            self.chat_display.update_model_b_response(error_msg)
+            self._append_test_chat_log(f"[B] {error_msg}")
+            self.chat_display.update_model_b_response("[ERROR] Failed to start. See logs on the right.")
             return
 
         # FIX: Auto-inject tool system prompt if not provided
@@ -10890,7 +11030,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_worker_b.inference_finished.connect(self._on_tool_inference_finished_b)
         self.tool_worker_b.inference_failed.connect(
-            lambda error, col: (self.chat_display.update_model_b_response(error),
+            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
+                                self._append_test_chat_log(f"[B] {error}"),
+                                self.chat_display.update_model_b_response("[ERROR] Failed. See logs on the right."),
                                 self._close_env_dialog("b", is_tool_chat=False))
         )
         
@@ -11111,16 +11253,16 @@ class MainWindow(QMainWindow):
     
     def _run_inference_c_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model C with tool calling support (non-blocking)"""
-        start_msg = "[INFO] Preparing tool-enabled inference..."
-        self._tool_progress_c = start_msg
-        self.chat_display.update_model_c_response(self._tool_progress_c)
+        self._tool_progress_c = ""
+        self._append_test_chat_log("[C] [INFO] Preparing tool-enabled inference...")
 
         # Resolve model_id from model_path
         try:
             model_id = self._resolve_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
-            self.chat_display.update_model_c_response(error_msg)
+            self._append_test_chat_log(f"[C] {error_msg}")
+            self.chat_display.update_model_c_response("[ERROR] Failed to start. See logs on the right.")
             return
 
         # FIX: Auto-inject tool system prompt if not provided
@@ -11153,7 +11295,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_worker_c.inference_finished.connect(self._on_tool_inference_finished_c)
         self.tool_worker_c.inference_failed.connect(
-            lambda error, col: (self.chat_display.update_model_c_response(error),
+            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
+                                self._append_test_chat_log(f"[C] {error}"),
+                                self.chat_display.update_model_c_response("[ERROR] Failed. See logs on the right."),
                                 self._close_env_dialog("c", is_tool_chat=False))
         )
         
@@ -11489,6 +11633,11 @@ class MainWindow(QMainWindow):
         """Clear both chat histories"""
         self.chat_display.clear()
         self.test_prompt.clear()
+        try:
+            if hasattr(self, "test_chat_log_display") and self.test_chat_log_display:
+                self.test_chat_log_display.clear()
+        except Exception:
+            pass
     
     def _update_model_header_ports(self) -> None:
         """Update port display in Model A/B/C headers based on selected models"""

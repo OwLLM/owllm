@@ -98,53 +98,34 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
 
     status = onboarding.get_onboarding_status(onboarding_id)
     
-    # Autonomous behavior: if onboarding is missing or not READY, attempt to onboard/repair once.
-    if status is None or status != "READY":
-        if log_callback:
-            log_callback(f"Model '{onboarding_id}' not ready (status={status}). Attempting automatic onboarding/repair...")
-
-        # Derive base_model_path + adapter_dir for onboarding
-        base_model_path = None
-        adapter_dir = None
-        try:
-            if cfg.base_model:
-                base_model_path = str(cfg.base_model)
-            else:
-                mgr = get_global_server_manager()
-                try:
-                    mgr._load_config()
-                except Exception:
-                    pass
-                if hasattr(mgr, "config") and cfg.model_id in (mgr.config.get("models") or {}):
-                    base_model_path = str((mgr.config["models"][cfg.model_id] or {}).get("base_model", "") or "")
-                    adapter_dir = (mgr.config["models"][cfg.model_id] or {}).get("adapter_dir") or None
-        except Exception:
-            base_model_path = base_model_path or None
-            adapter_dir = adapter_dir or None
-
-        if not base_model_path:
-            raise RuntimeError(
-                f"Model '{onboarding_id}' is not ready (status={status}) and base_model_path could not be resolved for auto-repair."
-            )
-
-        result = onboarding.ensure_model_onboarded(
-            model_id=onboarding_id,
-            base_model_path=base_model_path,
-            adapter_dir=adapter_dir,
-            profile_data=None,
-            log_callback=log_callback,
-            allow_repair=True
+    # Runtime policy: DO NOT repair/onboard during chat.
+    # If the model is not READY, instruct the user to explicitly re-onboard/repair.
+    if status is None:
+        raise RuntimeError(
+            f"Model '{onboarding_id}' has not been onboarded yet (status=None).\n"
+            f"Please run onboarding/repair for this model before chatting."
         )
-        status = result.get("status")
-        if status != "READY":
-            error_msg = result.get("last_error", "Unknown error")
-            log_path = result.get("healthcheck_log_path", "")
-            log_suffix = f"\nStartup log: {log_path}" if log_path else ""
-            raise RuntimeError(
-                f"Model '{onboarding_id}' is not ready after automatic onboarding/repair (status={status}). "
-                f"App is repairing/recreating the model environment automatically. "
-                f"Error: {error_msg}{log_suffix}"
-            )
+
+    if status != "READY":
+        last_error = ""
+        log_path = ""
+        try:
+            from core.state_store import get_state_store
+            entry = get_state_store().get_onboarding(onboarding_id) or {}
+            last_error = str(entry.get("last_error") or "")
+            log_path = str(entry.get("healthcheck_log_path") or "")
+        except Exception:
+            pass
+
+        msg = (
+            f"Model '{onboarding_id}' is not ready for chat (status={status}).\n"
+            f"Please re-onboard/repair this model from the UI before chatting."
+        )
+        if last_error:
+            msg += f"\n\nLast error:\n{last_error}"
+        if log_path:
+            msg += f"\n\nOnboarding log: {log_path}"
+        raise RuntimeError(msg)
     
     # Ensure server is running for this model
     manager = get_global_server_manager()

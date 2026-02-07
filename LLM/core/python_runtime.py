@@ -67,6 +67,12 @@ class PythonRuntimeManager:
         
         # Check if already exists
         if python_exe.exists():
+            # Ensure pip and virtualenv are available (embeddable runtime lacks stdlib venv)
+            try:
+                self._ensure_pip(python_dir, python_exe)
+                self._ensure_virtualenv(python_dir, python_exe)
+            except Exception:
+                pass
             return python_exe
         
         # Download and extract
@@ -83,6 +89,9 @@ class PythonRuntimeManager:
         
         # Install pip if not present
         self._ensure_pip(python_dir, python_exe)
+
+        # Embeddable Python does not include stdlib `venv`. We use `virtualenv` to create isolated envs.
+        self._ensure_virtualenv(python_dir, python_exe)
         
         # Clean up zip file
         if zip_path.exists():
@@ -230,6 +239,53 @@ class PythonRuntimeManager:
                 print(f"[PYTHON-RUNTIME] WARNING: Pip installation had issues: {result.stderr[:200]}")
         except Exception as e:
             print(f"[PYTHON-RUNTIME] WARNING: Could not install pip: {e}")
+
+    def _ensure_virtualenv(self, python_dir: Path, python_exe: Path):
+        """Ensure virtualenv is installed in Python runtime.
+
+        The embeddable Python distribution does not ship the stdlib `venv` module, so we
+        rely on `virtualenv` to create isolated environments.
+        """
+        # Windows subprocess flags to prevent CMD window flashing
+        subprocess_flags = {}
+        if sys.platform == 'win32':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = subprocess.SW_HIDE
+            subprocess_flags = {
+                'startupinfo': startupinfo,
+                'creationflags': subprocess.CREATE_NO_WINDOW
+            }
+
+        try:
+            probe = subprocess.run(
+                [str(python_exe), "-c", "import virtualenv; print('OK')"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                **subprocess_flags
+            )
+            if probe.returncode == 0 and "OK" in (probe.stdout or ""):
+                return
+        except Exception:
+            pass
+
+        print(f"[PYTHON-RUNTIME] Installing virtualenv...")
+        try:
+            result = subprocess.run(
+                [str(python_exe), "-m", "pip", "install", "--upgrade", "virtualenv", "-q"],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                **subprocess_flags
+            )
+            if result.returncode == 0:
+                print(f"[PYTHON-RUNTIME] virtualenv installed successfully")
+            else:
+                err = (result.stderr or result.stdout or "").strip()
+                print(f"[PYTHON-RUNTIME] WARNING: virtualenv installation had issues: {err[:200]}")
+        except Exception as e:
+            print(f"[PYTHON-RUNTIME] WARNING: Could not install virtualenv: {e}")
 
 
 def get_python_runtime(version: str = "3.12", root_dir: Path = None) -> Optional[Path]:

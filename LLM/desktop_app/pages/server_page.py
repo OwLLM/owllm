@@ -1126,6 +1126,9 @@ class ServerPage(QWidget):
             if selected_model_id is None:
                 QMessageBox.warning(self, "No Model Selected", "Please select a model from the dropdown.")
                 return
+
+            # Remember last attempted model id for error dialogs
+            self._last_llm_model_id = selected_model_id
             
             self.llm_start_btn.setEnabled(False)
             self.llm_start_btn.setText("⏳ Starting...")
@@ -1231,14 +1234,42 @@ class ServerPage(QWidget):
             if line.strip():
                 self._append_log(f"[LLM]   {line}")
         
-        # Show error dialog with full details
+        # Show error dialog with action to re-onboard when not truly READY/BROKEN
+        low = (error or "").lower()
+        needs_onboarding = any(
+            m in low for m in [
+                "please re-onboard/repair",
+                "re-onboard/repair",
+                "not ready for chat",
+                "has not been onboarded yet",
+                "marked broken",
+            ]
+        )
+
         msg = QMessageBox(self)
         msg.setWindowTitle("LLM Server Error")
         msg.setIcon(QMessageBox.Warning)
         msg.setText("Failed to start LLM server")
+        if needs_onboarding:
+            msg.setInformativeText("This model needs onboarding/repair before it can be used.")
         msg.setDetailedText(error)
-        msg.setStandardButtons(QMessageBox.Ok)
+
+        btn_reonboard = None
+        if needs_onboarding:
+            btn_reonboard = msg.addButton("Re-onboard model", QMessageBox.AcceptRole)
+            msg.addButton("Open Models page", QMessageBox.ActionRole)
+        msg.addButton(QMessageBox.Ok)
+
         msg.exec()
+
+        if needs_onboarding and msg.clickedButton() == btn_reonboard:
+            try:
+                parent = self.parent()
+                model_id = getattr(self, "_last_llm_model_id", None)
+                if parent and model_id and hasattr(parent, "prompt_reonboard_server_model"):
+                    parent.prompt_reonboard_server_model(model_id)
+            except Exception:
+                pass
     
     def _update_llm_server_status(self):
         """Periodically check LLM server status"""

@@ -189,8 +189,38 @@ class EnvRegistry:
             creator_python = base_python_exe or Path(sys.executable)
             if base_python_exe:
                 log(f"Using base Python for venv creation: {creator_python}")
+            # NOTE: Python embeddable distributions can lack stdlib `venv` on Windows.
+            # Fall back to `virtualenv` for self-contained isolated environments.
+            create_cmd = [str(creator_python), "-m", "venv", str(venv_path), "--clear"]
+            try:
+                probe = subprocess.run(
+                    [str(creator_python), "-c", "import venv; print('OK')"],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    **self.subprocess_flags
+                )
+                has_venv = probe.returncode == 0 and "OK" in (probe.stdout or "")
+            except Exception:
+                has_venv = False
+
+            if not has_venv:
+                log("Base Python lacks stdlib venv; using virtualenv to create isolated environment.")
+                # Best-effort: ensure virtualenv is installed in the creator runtime
+                try:
+                    subprocess.run(
+                        [str(creator_python), "-m", "pip", "install", "--upgrade", "virtualenv", "-q"],
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        **self.subprocess_flags
+                    )
+                except Exception:
+                    pass
+                create_cmd = [str(creator_python), "-m", "virtualenv", str(venv_path), "--clear"]
+
             result = subprocess.run(
-                [str(creator_python), "-m", "venv", str(venv_path), "--clear"],
+                create_cmd,
                 capture_output=True,
                 text=True,
                 timeout=120,
@@ -198,7 +228,8 @@ class EnvRegistry:
             )
             
             if result.returncode != 0:
-                raise RuntimeError(f"Failed to create venv: {result.stderr}")
+                err = (result.stderr or result.stdout or "").strip()
+                raise RuntimeError(f"Failed to create venv: {err}")
             
             # Get Python executable
             if sys.platform == 'win32':
@@ -265,7 +296,7 @@ class EnvRegistry:
                 # Fix 2: missing core inference packages
                 missing = self.check_missing_packages(
                     python_exe,
-                    required_packages=["transformers", "safetensors", "tokenizers", "accelerate"]
+                    required_packages=["transformers", "safetensors", "tokenizers", "accelerate", "typing_extensions"]
                 )
                 if missing:
                     log(f"Missing core packages detected: {missing}")
@@ -277,6 +308,22 @@ class EnvRegistry:
                         force_reinstall=True,
                     )
                     fix_attempted = True
+
+                # Fix 3: server stack import failures due to old typing_extensions (pydantic_core expects Sentinel)
+                combined = ((health_result.stdout or "") + "\n" + (health_result.stderr or ""))
+                if ("cannot import name 'sentinel' from 'typing_extensions'" in combined.lower()) or ("no module named 'typing_extensions'" in combined.lower()):
+                    log("Detected typing_extensions incompatibility; upgrading typing_extensions...")
+                    try:
+                        subprocess.run(
+                            [str(pip_exe), "install", "--upgrade", "typing_extensions>=4.12.2,<5.0.0"],
+                            capture_output=True,
+                            text=True,
+                            timeout=300,
+                            **self.subprocess_flags
+                        )
+                        fix_attempted = True
+                    except Exception as e:
+                        log(f"Failed to upgrade typing_extensions: {e}")
 
                 if fix_attempted:
                     log("Re-running health check after fixes...")
@@ -419,6 +466,19 @@ class EnvRegistry:
             "import sys",
             "print('PYTHON_EXE', sys.executable)",
             "print('PYTHON_VERSION', sys.version)",
+            # Server stack: if these imports fail, the model is not truly READY (server can't start).
+            "import typing_extensions",
+            "print('typing_extensions_file', getattr(typing_extensions, '__file__', ''))",
+            "from typing_extensions import Sentinel",
+            "print('typing_extensions.Sentinel', Sentinel)",
+            "import pydantic",
+            "import pydantic_core",
+            "import fastapi",
+            "import uvicorn",
+            "print('pydantic.__version__', getattr(pydantic, '__version__', ''))",
+            "print('pydantic_core.__version__', getattr(pydantic_core, '__version__', ''))",
+            "print('fastapi.__version__', getattr(fastapi, '__version__', ''))",
+            "print('uvicorn.__version__', getattr(uvicorn, '__version__', ''))",
             "import torch",
             "import transformers",
             "print('torch.__version__', torch.__version__)",
@@ -809,6 +869,7 @@ except Exception as e:
         if is_edge:
             # Edge env: use latest versions (upgrade)
             minimal_specs = [
+                "typing_extensions>=4.12.2,<5.0.0",
                 _pkg("numpy", "numpy"),
                 _pkg("huggingface-hub", None),
                 "transformers",  # Latest
@@ -824,6 +885,7 @@ except Exception as e:
         else:
             # Stable env: pin versions
             minimal_specs = [
+                "typing_extensions>=4.12.2,<5.0.0",
                 _pkg("numpy", "numpy==1.26.4"),
                 _pkg("huggingface-hub", None),
                 "transformers==4.51.3",

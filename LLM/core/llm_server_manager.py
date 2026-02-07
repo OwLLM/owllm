@@ -824,6 +824,10 @@ class LLMServerManager:
                 )
             
             log(f"Found {len(model_files)} model files, starting server...")
+
+            # App root for logs and launcher script
+            from core.inference import get_app_root
+            app_root = get_app_root()
             
             # Get environment for this model
             # RUNTIME: Use existing env only (no creation/repair in runtime path)
@@ -895,40 +899,51 @@ class LLMServerManager:
                 # Check if this is a dedicated environment
                 is_dedicated = "--dedicated--" in env_spec.key
                 
+                # Runtime policy: DO NOT install/repair during chat startup.
+                # If a READY model is missing critical packages, it is not actually READY.
+                from datetime import datetime
+                log_dir = app_root / "logs" / "server_startup"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                safe_model_id = model_id.replace("/", "__").replace("\\", "__")
+                preflight_log_path = log_dir / f"{safe_model_id}_{timestamp}_env_preflight.log"
+                try:
+                    preflight_log_path.write_text(
+                        f"Missing critical packages in env '{env_spec.key}': {', '.join(missing_packages)}\n",
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except Exception:
+                    pass
+
+                try:
+                    self.state_store.upsert_onboarding(
+                        model_id=onboarding_id,
+                        base_model_path=str(model_path),
+                        adapter_dir=adapter_dir,
+                        env_key=env_spec.key,
+                        status="BROKEN",
+                        last_error=(
+                            f"Missing critical packages in environment '{env_spec.key}': {', '.join(missing_packages)}\n"
+                            f"Startup log: {preflight_log_path}"
+                        )[:2000],
+                    )
+                except Exception:
+                    pass
+
                 if is_dedicated:
-                    log("Auto-installing missing packages into dedicated environment...")
-                    install_success, install_error = self.env_registry.auto_install_missing_packages(
-                        env_spec.python_executable, 
-                        missing_packages, 
-                        log_callback=log_callback
+                    raise RuntimeError(
+                        f"Model environment is missing critical packages: {', '.join(missing_packages)}\n"
+                        f"The model has been marked BROKEN. Please re-onboard/repair this model before chatting.\n"
+                        f"Startup log: {preflight_log_path}"
                     )
-                    if not install_success:
-                        raise RuntimeError(
-                            f"Environment validation failed: Could not auto-install required packages: {', '.join(missing_packages)}\n"
-                            f"This indicates the environment is not properly configured.\n"
-                            f"Detailed error:\n{install_error}"
-                            f"Please go to the Environment/Requirements tab and run 'Repair Environment' for {env_spec.key}."
-                        )
-                    log("Missing packages installed successfully, re-validating...")
-                    # Re-check after installation
-                    still_missing = self.env_registry.check_missing_packages(
-                        env_spec.python_executable,
-                        required_packages=missing_packages
-                    )
-                    if still_missing:
-                        raise RuntimeError(
-                            f"Environment repair incomplete: Packages still missing after installation: {', '.join(still_missing)}\n"
-                            f"Please manually repair the environment: {env_spec.key}"
-                        )
                 else:
-                    # Shared environment: DO NOT auto-install model-specific dependencies
-                    # This enforces the invariant that shared envs stay clean
                     raise RuntimeError(
                         f"Missing critical packages in shared environment '{env_spec.key}': {', '.join(missing_packages)}\n"
-                        "LocaLLM will not auto-install into shared environments to avoid breaking other models.\n"
-                        "Please click '🛡️ Isolation' on the model card to create a dedicated environment."
+                        "Please re-onboard the model to create/refresh its dedicated environment, "
+                        "or click '🛡️ Isolation' on the model card.\n"
+                        f"Startup log: {preflight_log_path}"
                     )
-                log("Environment dependencies validated - all critical packages present")
             else:
                 log("Environment dependencies validated - all critical packages present")
             
@@ -962,96 +977,54 @@ class LLMServerManager:
                 )
 
             # GPTQ-specific: prevent native crash by verifying auto-gptq CUDA kernels.
-            # On failure: mark BROKEN, trigger autonomous repair, retry once.
-            from core.inference import get_app_root
-            app_root = get_app_root()
+            # Runtime policy: DO NOT repair during chat startup. If preflight fails, mark BROKEN and instruct re-onboarding.
             use_exllamav2_gptq = False
-            for gptq_attempt in range(2):
-                try:
-                    is_gptq_model = False
+            is_gptq_model = False
+            try:
+                is_gptq_model = (model_path / "quantize_config.json").exists()
+            except Exception:
+                is_gptq_model = False
+
+            if is_gptq_model:
+                ok, err = self.env_registry._verify_autogptq_cuda_kernels(env_spec.python_executable)
+                if not ok:
+                    from datetime import datetime
+                    log_dir = app_root / "logs" / "server_startup"
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                    safe_model_id = model_id.replace("/", "__").replace("\\", "__")
+                    preflight_log_path = log_dir / f"{safe_model_id}_{timestamp}_gptq_preflight.log"
                     try:
-                        is_gptq_model = (model_path / "quantize_config.json").exists()
+                        preflight_log_path.write_text(
+                            f"GPTQ preflight failed for env '{env_spec.key}'.\n\n{err}\n",
+                            encoding="utf-8",
+                            errors="replace",
+                        )
                     except Exception:
-                        is_gptq_model = False
+                        pass
 
-                    if is_gptq_model:
-                        if needs_peft:
-                            log("GPTQ model with adapter detected; keeping auto-gptq backend (ExLlamaV2 unsupported with adapters).")
-                        else:
-                            ok, err = self.env_registry._verify_autogptq_cuda_kernels(env_spec.python_executable)
-                            if not ok:
-                                log(f"auto-gptq CUDA kernels not usable ({err}). Attempting automatic repair (wheel-only)...")
-                                install_success, install_error = self.env_registry.auto_install_missing_packages(
-                                    env_spec.python_executable,
-                                    ["auto-gptq"],
-                                    log_callback=log_callback
-                                )
-                                if install_success:
-                                    ok, err = self.env_registry._verify_autogptq_cuda_kernels(env_spec.python_executable)
-                                else:
-                                    log(f"auto-gptq repair install failed: {install_error}")
-
-                            if not ok:
-                                raise RuntimeError(
-                                    "GPTQ cannot start: auto-gptq CUDA kernels are unavailable after automatic repair.\n"
-                                    f"Details: {err}\n"
-                                    "This usually means your current Python is not supported by available auto-gptq wheels.\n"
-                                    "The app will rebuild the env with Python 3.11 when available; if that still failed, "
-                                    "please ensure Python 3.11 is installed and discoverable via the Windows 'py' launcher (py -3.11)."
-                                )
-                    break
-                except Exception as e:
-                    err_str = str(e).lower()
-                    is_gptq_failure = "gptq" in err_str or "auto-gptq" in err_str or "auto_gptq" in err_str
-                    if is_gptq_failure and gptq_attempt == 0:
-                        log("GPTQ preflight failed; marking BROKEN and triggering autonomous repair...")
-                        from datetime import datetime
-                        log_dir = app_root / "logs" / "server_startup"
-                        log_dir.mkdir(parents=True, exist_ok=True)
-                        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                        safe_model_id = model_id.replace("/", "__").replace("\\", "__")
-                        preflight_log_path = log_dir / f"{safe_model_id}_{timestamp}_preflight.log"
-                        try:
-                            with open(preflight_log_path, 'w', encoding='utf-8', errors='replace') as f:
-                                f.write(str(e))
-                        except Exception:
-                            pass
+                    try:
                         self.state_store.upsert_onboarding(
                             model_id=onboarding_id,
                             base_model_path=str(model_path),
                             adapter_dir=adapter_dir,
+                            env_key=env_spec.key,
                             status="BROKEN",
-                            last_error=f"{e}\n\nStartup log: {preflight_log_path}"
+                            last_error=(
+                                "GPTQ preflight failed: auto-gptq CUDA kernels are unavailable.\n"
+                                f"Details: {err}\n"
+                                f"Startup log: {preflight_log_path}"
+                            )[:2000],
                         )
-                        from core.model_onboarding import ModelOnboardingService
-                        onboarding_svc = ModelOnboardingService()
-                        result = onboarding_svc.ensure_model_onboarded(
-                            model_id=onboarding_id,
-                            base_model_path=str(model_path),
-                            adapter_dir=adapter_dir,
-                            allow_repair=True,
-                            log_callback=log_callback
-                        )
-                        if result.get("status") != "READY":
-                            raise RuntimeError(
-                                f"GPTQ environment preflight/repair failed: {e}\n"
-                                f"Auto repair did not succeed: {result.get('last_error', 'unknown')}"
-                            )
-                        onboarding_entry = self.state_store.get_onboarding(onboarding_id)
-                        env_key = onboarding_entry.get("env_key")
-                        if not env_key:
-                            raise RuntimeError("Onboarding repair succeeded but env_key is missing")
-                        python_exe = self.env_registry._get_env_python_executable(env_key)
-                        if not python_exe or not python_exe.exists():
-                            raise RuntimeError(f"Environment '{env_key}' not found after repair")
-                        env_spec = EnvSpec(
-                            key=env_key,
-                            python_executable=python_exe,
-                            metadata={"env_key": env_key, "status": "READY", "source": "onboarded"}
-                        )
-                        log("Autonomous repair completed; retrying server start...")
-                        continue
-                    raise RuntimeError(f"GPTQ environment preflight/repair failed: {e}")
+                    except Exception:
+                        pass
+
+                    raise RuntimeError(
+                        "GPTQ cannot start: auto-gptq CUDA kernels are unavailable.\n"
+                        f"Details: {err}\n"
+                        "The model has been marked BROKEN. Please re-onboard/repair this model before chatting.\n"
+                        f"Startup log: {preflight_log_path}"
+                    )
             
             # Construct launcher script path
             launcher_script = app_root / "scripts" / "llm_server_start.py"
@@ -1089,6 +1062,9 @@ class LLMServerManager:
             # CRITICAL: Pass port via environment variable so auto-reassignment works
             env = os.environ.copy()
             env['SERVER_PORT'] = str(port)
+            # Reduce CUDA allocator fragmentation issues.
+            # NOTE: expandable_segments is not supported on Windows builds (PyTorch warns). Use max_split_size_mb instead.
+            env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
             if use_exllamav2_gptq:
                 env["USE_EXLLAMAV2_GPTQ"] = "true"
             subprocess_kwargs = {
@@ -1183,7 +1159,7 @@ class LLMServerManager:
                                         missing_file = match.group(1)
                                         raise RuntimeError(
                                             f"Model file missing: {missing_file}\n"
-                                            f"App is repairing/recreating the model environment automatically. "
+                                            f"Please re-onboard/repair this model (Downloaded Models tab), then retry.\n"
                                             f"Startup log: {log_file_path}"
                                         )
                                 elif "error" in log_text.lower() and "traceback" in log_text.lower():
@@ -1293,7 +1269,7 @@ class LLMServerManager:
                                             raise RuntimeError(
                                                 f"ImportError in server: {error_msg[:500]}\n"
                                                 f"This usually indicates a missing Python package in the model's environment.\n"
-                                                f"App is repairing/recreating the model environment automatically. "
+                                                f"Please re-onboard/repair this model (or click '🛡️ Isolation'), then retry.\n"
                                                 f"Startup log: {log_file_path}"
                                             )
                                     
@@ -1399,8 +1375,8 @@ class LLMServerManager:
                         if "gptq" in log_lower or "auto_gptq" in log_lower or "cuda extension not installed" in log_lower:
                             hint = (
                                 "\n\nHINT: This crash (exit 0xC0000005) often occurs with GPTQ models when auto-gptq's "
-                                "CUDA extension is not properly built. App is repairing/recreating the model environment automatically. "
-                                "See the full startup log path above for details. If repair fails: use a non-GPTQ variant (BnB 4-bit or GGUF)."
+                                "CUDA extension is not properly built. Please re-onboard/repair the model, then retry. "
+                                "See the full startup log path above for details. If it keeps failing: use a non-GPTQ variant (BnB 4-bit or GGUF)."
                             )
                     error_msg = (
                         f"Server process for '{model_id}' died during startup.\n"
@@ -1447,7 +1423,7 @@ class LLMServerManager:
                             raise RuntimeError(
                                 f"Server failed to load model: {error_msg}\n"
                                 f"Check model files are complete in: {model_path}\n"
-                                f"App is repairing/recreating the model environment automatically. "
+                                f"Please re-onboard/repair this model, then retry.\n"
                                 f"Startup log: {log_path_for_error or 'N/A'}"
                             )
                         

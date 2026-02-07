@@ -6894,6 +6894,8 @@ class MainWindow(QMainWindow):
             else:
                 error = result.get("last_error", "Unknown error")
                 self.onboarding_log_display.appendPlainText(f"\n❌ Onboarding failed: {error}")
+                if "REBOOT_REQUIRED_VC" in (error or ""):
+                    QTimer.singleShot(300, self._show_vcredist_reboot_prompt)
         
         # Refresh the environment list to show newly created dedicated environments
         if hasattr(self, '_refresh_environment_list'):
@@ -7085,16 +7087,56 @@ class MainWindow(QMainWindow):
                 "This is automatically enabled during onboarding.\n\n"
                 f"Technical details:\n{error_msg[:500]}"
             )
+        elif "REBOOT_REQUIRED_VC" in error_msg:
+            return (
+                "❌ Onboarding Failed (VC++ runtime)\n\n"
+                "The Microsoft Visual C++ Redistributable was installed, but a Windows reboot may be required "
+                "for it to take effect. Please restart your PC, then retry onboarding for this model.\n\n"
+                f"Technical details:\n{error_msg[:800]}"
+            )
         else:
             # Generic error - show first 500 chars
             return f"❌ Onboarding Failed\n\n{error_msg[:500]}"
     
+    def _show_vcredist_reboot_prompt(self):
+        """Show popup when VC++ was installed and reboot is recommended (REBOOT_REQUIRED_VC)."""
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Restart required")
+        msg.setIcon(QMessageBox.Information)
+        msg.setText("Visual C++ Redistributable was installed.")
+        msg.setInformativeText(
+            "A Windows restart may be required for PyTorch to load correctly. "
+            "Restart your PC, then retry model onboarding."
+        )
+        btn_later = msg.addButton("Restart later", QMessageBox.AcceptRole)
+        btn_help = msg.addButton("Open reboot instructions", QMessageBox.ActionRole)
+        btn_reboot = msg.addButton("Restart now", QMessageBox.ActionRole)
+        msg.setDefaultButton(btn_later)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked == btn_help:
+            try:
+                QDesktopServices.openUrl(QUrl("https://support.microsoft.com/en-us/windows/restart-your-pc-8932b879-4f5c-b2e7-4a46-b8d7f899f2c2"))
+            except Exception:
+                pass
+        elif clicked == btn_reboot:
+            try:
+                import subprocess
+                subprocess.Popen(["shutdown", "/r", "/t", "10", "/c", "LLM Studio: restarting for VC++ runtime"], creationflags=subprocess.CREATE_NO_WINDOW)
+            except Exception:
+                pass
+
     def _on_onboarding_error(self, model_id: str, error: str):
         """Handle onboarding error"""
         if hasattr(self, 'onboarding_log_display'):
             formatted = self._format_onboarding_error(error)
             self.onboarding_log_display.appendPlainText(f"\n{formatted}")
         
+        if "REBOOT_REQUIRED_VC" in (error or ""):
+            QTimer.singleShot(300, self._show_vcredist_reboot_prompt)
+
         # Rebuild card with BROKEN status
         QTimer.singleShot(300, lambda: self._rebuild_model_card(model_id, "BROKEN"))
         

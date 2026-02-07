@@ -120,5 +120,23 @@ def test_cuda_torch_in_gpu_env(env_registry):
             assert cuda_ok, f"Environment {env['env_key']} has torch but CUDA not available"
 
 
+def test_is_torch_vcredist_failure_detection(env_registry):
+    """_is_torch_vcredist_failure identifies VC++/DLL-related torch import failures (Windows)."""
+    # Positive: WinError 126
+    assert env_registry._is_torch_vcredist_failure("winerror 126: the specified module could not be found")
+    assert env_registry._is_torch_vcredist_failure("OSError: [WinError 126]")
+    # Positive: generic DLL not found
+    assert env_registry._is_torch_vcredist_failure("the specified module could not be found")
+    # Positive: torch _load_dll_libraries
+    assert env_registry._is_torch_vcredist_failure(
+        "File \"...\\torch\\__init__.py\", line 245, in _load_dll_libraries"
+    )
+    # Negative: other errors
+    assert not env_registry._is_torch_vcredist_failure("winerror 1455 paging file")
+    assert not env_registry._is_torch_vcredist_failure("No module named 'foo'")
+    assert not env_registry._is_torch_vcredist_failure("")
+    assert not env_registry._is_torch_vcredist_failure("CUDA out of memory")
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

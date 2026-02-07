@@ -1337,6 +1337,17 @@ except Exception as e:
             **self.subprocess_flags
         )
 
+    def _is_torch_vcredist_failure(self, stderr_stdout: str) -> bool:
+        """True if torch verification failure looks like missing VC++ runtime (WinError 126 / DLL load)."""
+        if not stderr_stdout:
+            return False
+        low = stderr_stdout.lower()
+        return (
+            "winerror 126" in low
+            or "the specified module could not be found" in low
+            or ("_load_dll_libraries" in low and "torch" in low and "__init__.py" in low)
+        )
+
     def _verify_autogptq_cuda_kernels(self, python_exe: Path) -> tuple[bool, str]:
         """
         Verify auto-gptq CUDA kernels load. If "CUDA extension not installed" appears,
@@ -1476,11 +1487,54 @@ sys.exit(0)
         if verify.returncode != 0:
             stderr = (verify.stderr or "").strip()
             stdout = (verify.stdout or "").strip()
+            low = (stderr or stdout).lower()
 
-            # Provide actionable Windows diagnostics for common torch import failures
+            # Windows-only: auto-fix missing VC++ runtime (WinError 126 / DLL load failure)
+            vcredist_installer_ran = False
+            local_dll_used = False
+            if sys.platform == "win32" and self._is_torch_vcredist_failure(low):
+                root_dir = self.env_manager.root_dir
+                try:
+                    from core.runtime_manager import RuntimeManager
+                    rm = RuntimeManager(root_dir)
+                    # 1) Prefer local runtime DLLs: set PATH for this process so child subprocess inherits it
+                    dll_dir = rm.get_vcredist_dlls()
+                    if dll_dir:
+                        local_dll_used = rm.setup_local_path()
+                    if local_dll_used:
+                        log("Per-model env: using local VC++ runtime DLLs, re-running torch verification...")
+                    verify2 = self._run_python(
+                        python_exe,
+                        "import torch; print(torch.__version__); assert torch.cuda.is_available(); print('OK')",
+                        timeout=30,
+                    )
+                    if verify2.returncode == 0:
+                        return  # success
+                    stderr = (verify2.stderr or "").strip()
+                    stdout = (verify2.stdout or "").strip()
+                    low = (stderr or stdout).lower()
+                    verify = verify2
+                    # 2) Try system-wide VC++ installer
+                    log("Per-model env: local DLLs did not fix torch import; installing VC++ Redistributable...")
+                    vcredist_installer_ran = rm.install_vcredist_system()
+                    if vcredist_installer_ran:
+                        log("Per-model env: VC++ installer completed; re-running torch verification...")
+                    verify3 = self._run_python(
+                        python_exe,
+                        "import torch; print(torch.__version__); assert torch.cuda.is_available(); print('OK')",
+                        timeout=30,
+                    )
+                    if verify3.returncode == 0:
+                        return  # success
+                    verify = verify3
+                    stderr = (verify.stderr or "").strip()
+                    stdout = (verify.stdout or "").strip()
+                except Exception as e:
+                    log(f"Per-model env: VC++ auto-fix error (non-fatal): {e}")
+
+            # Build failure message with diagnostics
             hint = ""
             try:
-                low = (stderr or stdout).lower()
                 if "winerror 1455" in low or "os error 1455" in low or "paging file is too small" in low:
                     hint = (
                         "\n\nHint: Windows virtual memory (paging file) is too small (WinError 1455). "
@@ -1506,12 +1560,21 @@ sys.exit(0)
             except Exception:
                 hint = ""
 
-            raise RuntimeError(
+            msg = (
                 "Per-model env torch verification failed.\n"
                 f"Python: {python_exe}\n"
                 f"STDOUT:\n{stdout}\n"
-                f"STDERR:\n{stderr}{hint}"
+                f"STDERR:\n{stderr}"
             )
+            if local_dll_used:
+                msg += "\n[Attempted: local VC++ DLL path was used; verification still failed.]"
+            if vcredist_installer_ran:
+                msg += (
+                    "\n\n[VC++ Redistributable was installed. Windows reboot may be required for DLLs to take effect.]"
+                    "\nREBOOT_REQUIRED_VC: Retry onboarding after rebooting."
+                )
+            msg += hint
+            raise RuntimeError(msg)
     
     def _check_old_env_health(self, python_exe: Path, profile_data: Optional[dict]) -> bool:
         """

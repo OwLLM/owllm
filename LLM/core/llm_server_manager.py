@@ -960,6 +960,60 @@ class LLMServerManager:
                     f"Environment {env_spec.key} health check failed: {e}\n"
                     f"Please repair the environment before attempting to load models."
                 )
+
+            # GPTQ-specific: prevent native crash by verifying auto-gptq CUDA kernels
+            # and repairing (reinstalling from HF wheel index) before launching the server.
+            use_exllamav2_gptq = False
+            try:
+                is_gptq_model = False
+                try:
+                    is_gptq_model = (model_path / "quantize_config.json").exists()
+                except Exception:
+                    is_gptq_model = False
+
+                if is_gptq_model:
+                    if needs_peft:
+                        log("GPTQ model with adapter detected; keeping auto-gptq backend (ExLlamaV2 unsupported with adapters).")
+                    else:
+                        ok, err = self.env_registry._verify_autogptq_cuda_kernels(env_spec.python_executable)
+                        if not ok:
+                            log(f"auto-gptq CUDA kernels not usable ({err}). Attempting automatic repair (wheel-only)...")
+                            install_success, install_error = self.env_registry.auto_install_missing_packages(
+                                env_spec.python_executable,
+                                ["auto-gptq"],
+                                log_callback=log_callback
+                            )
+                            if install_success:
+                                ok, err = self.env_registry._verify_autogptq_cuda_kernels(env_spec.python_executable)
+                            else:
+                                # Wheel not available for this Python/CUDA combo (e.g. Python 3.12),
+                                # or install failed for another reason. Fall back rather than hard failing.
+                                log(f"auto-gptq repair install failed: {install_error}")
+
+                        if not ok and not needs_peft:
+                            # Fallback: ExLlamaV2 backend (more stable on Windows; avoids auto-gptq CUDA extension path)
+                            log(f"auto-gptq CUDA still not usable ({err}). Falling back to ExLlamaV2 backend...")
+                            ex_success, ex_error = self.env_registry.auto_install_missing_packages(
+                                env_spec.python_executable,
+                                ["exllamav2"],
+                                log_callback=log_callback
+                            )
+                            if not ex_success:
+                                raise RuntimeError(
+                                    "GPTQ cannot start: auto-gptq CUDA kernels are unavailable and ExLlamaV2 fallback install failed.\n"
+                                    f"{ex_error}"
+                                )
+                            use_exllamav2_gptq = True
+                            log("ExLlamaV2 installed; server will start with ExLlamaV2 GPTQ backend.")
+                        elif not ok and needs_peft:
+                            # No fallback available when adapters are in use.
+                            raise RuntimeError(
+                                "GPTQ cannot start: auto-gptq CUDA kernels are unavailable and this model uses an adapter "
+                                "(ExLlamaV2 backend does not support adapters)."
+                            )
+            except Exception as e:
+                # If GPTQ preflight fails, treat as hard failure before launching a process that can native-crash.
+                raise RuntimeError(f"GPTQ environment preflight/repair failed: {e}")
             
             # Get app root for cwd
             from core.inference import get_app_root
@@ -1001,6 +1055,8 @@ class LLMServerManager:
             # CRITICAL: Pass port via environment variable so auto-reassignment works
             env = os.environ.copy()
             env['SERVER_PORT'] = str(port)
+            if use_exllamav2_gptq:
+                env["USE_EXLLAMAV2_GPTQ"] = "true"
             subprocess_kwargs = {
                 'cwd': str(app_root),
                 # Capture output to log file during startup for debugging

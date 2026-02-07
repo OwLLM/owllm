@@ -1178,7 +1178,10 @@ except Exception as e:
         """
         verify_code = """
 import sys
+import logging
+logging.basicConfig(level=logging.WARNING)
 try:
+    import auto_gptq  # noqa: F401
     from auto_gptq.nn_modules.qlinear import qlinear_cuda_old
 except Exception as e:
     print('IMPORT_ERROR:', e, file=sys.stderr)
@@ -1878,7 +1881,15 @@ sys.exit(0)
                     cu_tag = "cu121" if "cu121" in accelerator or (accelerator.startswith("cu12") and "cu124" not in accelerator) else ("cu124" if "cu124" in accelerator else "cu118")
                     hf_index = f"https://huggingface.github.io/autogptq-index/whl/{cu_tag}/"
                     log(f"Installing auto-gptq from pre-built CUDA wheels (index: {cu_tag})...")
-                    pip_cmd = [str(python_exe), "-m", "pip", "install", "--upgrade", "auto-gptq", "--extra-index-url", hf_index]
+                    # CRITICAL: never fall back to sdist/source builds (they require NVCC/torch-in-build-env and are fragile on Windows).
+                    # If a wheel isn't available for this Python/CUDA combo, we want a fast, explicit failure we can handle upstream.
+                    pip_cmd = [
+                        str(python_exe), "-m", "pip", "install", "--upgrade",
+                        "--only-binary", ":all:",
+                        "--prefer-binary",
+                        "auto-gptq",
+                        "--extra-index-url", hf_index
+                    ]
                     timeout_s = 600
                     # Uninstall first to avoid mixed source/wheel state
                     subprocess.run(
@@ -1902,9 +1913,13 @@ sys.exit(0)
                     if pkg_norm.startswith("auto-gptq"):
                         verify_ok, verify_err = self._verify_autogptq_cuda_kernels(python_exe)
                         if not verify_ok:
+                            pip_cmd_str = " ".join(str(x) for x in pip_cmd)
                             errors.append(
                                 f"auto-gptq installed but CUDA kernels failed verification. "
-                                f"Model startup would crash (0xC0000005). {verify_err}"
+                                f"Model startup would crash (0xC0000005).\n\n"
+                                f"env_key: {env_key}\n"
+                                f"pip_cmd: {pip_cmd_str}\n"
+                                f"verify_error: {verify_err}"
                             )
                             return False, "\n\n".join(errors)
                         log("auto-gptq CUDA extension verified OK")

@@ -10869,12 +10869,13 @@ class MainWindow(QMainWindow):
             pass
 
     def _on_m2m_error(self, message: str, model_id: str = "", model_key: str = ""):
-        # Replace "Thinking..." with the error in the bubble so user sees what failed
+        # Chat area is for chat only: do NOT dump error/log details into the conversation.
+        # Replace "Thinking..." with a minimal failure notice; full details go to the log panel.
         if model_key and hasattr(self, "m2m_chat_display") and self.m2m_chat_display:
             key = (model_key or "a").lower()[:1]
             if hasattr(self.m2m_chat_display, "finish_m2m_turn"):
-                self.m2m_chat_display.finish_m2m_turn(key, message or "Error.")
-        # Always mirror error into the right-side log panel (user expects errors/logs there too)
+                self.m2m_chat_display.finish_m2m_turn(key, "[ERROR] Failed. See logs on the right.")
+        # Always mirror full error into the right-side log panel
         try:
             self._append_m2m_log(f"[ERROR] {message or 'Unknown error'}")
         except Exception:
@@ -11961,6 +11962,7 @@ class MainWindow(QMainWindow):
         msg.setDetailedText(error_text)
 
         btn_reonboard = msg.addButton("Re-onboard now", QMessageBox.AcceptRole)
+        btn_repair = msg.addButton("Repair model files", QMessageBox.ActionRole)
         btn_open_models = msg.addButton("Open Models page", QMessageBox.ActionRole)
         btn_open_log = None
         if log_exists:
@@ -11975,6 +11977,22 @@ class MainWindow(QMainWindow):
                 QDesktopServices.openUrl(QUrl.fromLocalFile(str(Path(log_path))))
             except Exception:
                 pass
+            return
+
+        if clicked == btn_repair:
+            # Repair the model download (purge cache + force redownload path); onboarding alone won't fix bad shards.
+            try:
+                if model_path:
+                    self._on_repair_model(model_path)
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Repair Model",
+                        "Cannot repair because model_path is empty.\n\n"
+                        "Open Models tab, select the model, then click Repair on the card.",
+                    )
+            except Exception as e:
+                QMessageBox.critical(self, "Repair Model", f"Failed to start repair:\n{e}")
             return
 
         if clicked == btn_open_models or clicked == btn_reonboard:

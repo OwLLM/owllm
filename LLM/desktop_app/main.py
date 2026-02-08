@@ -2998,14 +2998,16 @@ class MainWindow(QMainWindow):
 
         return None
     
-    def _resolve_model_id_from_path(self, model_path: str) -> str:
+    def _resolve_model_id_from_path(self, model_path: str, allow_create: bool = True) -> str:
         """
         Resolve model_id from model_path by checking llm_backends.yaml config.
         If model_path matches a base_model in config, returns that model_id.
-        Otherwise, creates a new config entry with unique model_id and port.
+        If allow_create is True and no match exists, creates a new config entry.
+        If allow_create is False and no match exists, raises ValueError (caller should show reonboard popup).
         
         Args:
             model_path: Local model path
+            allow_create: If False, do not create new config entries (use for chat/M2M/tool flows).
             
         Returns:
             model_id string that can be used with LLM server manager
@@ -3025,6 +3027,12 @@ class MainWindow(QMainWindow):
         # Load config
         config_path = self.root / "configs" / "llm_backends.yaml"
         if not config_path.exists():
+            if not allow_create:
+                # Derive a display model_id from folder name for popup
+                hf_id = model_path_obj.name.replace("__", "/")
+                raise ValueError(
+                    f"Model at {model_path_str} is not in config. Please add and onboard it from the Models tab (e.g. select the model and run onboarding)."
+                )
             # Config doesn't exist, create it with default entry
             config_path.parent.mkdir(parents=True, exist_ok=True)
             import socket
@@ -3133,7 +3141,13 @@ class MainWindow(QMainWindow):
             directory_matches.sort(key=lambda x: (-x[1], x[2]))
             return directory_matches[0][0]
         
-        # No match found - create new entry with unique model_id and port
+        # No match found
+        if not allow_create:
+            raise ValueError(
+                f"Model at {model_path_str} is not in config. Please onboard it from the Models tab (Downloaded → select model → Environment / Onboarding)."
+            )
+        
+        # Create new entry with unique model_id and port
         # Generate model_id from path (sanitize for YAML key)
         model_id = model_path_obj.name.replace("__", "_").replace("/", "_").replace("\\", "_")
         if not model_id or model_id in config["models"]:
@@ -9596,7 +9610,7 @@ class MainWindow(QMainWindow):
         self.themed_widgets["labels"].append(self.test_model_a_header)
         model_a_header_layout.addWidget(self.test_model_a_header)
         self.test_model_a = QComboBox()
-        self.test_model_a.setEditable(True)
+        self.test_model_a.setEditable(False)  # Selection-only: READY models from Models tab
         self.test_model_a.currentTextChanged.connect(self._update_model_header_ports)
         model_a_header_layout.addWidget(self.test_model_a)
         headers_layout.addWidget(model_a_header_widget, 1)
@@ -9613,7 +9627,7 @@ class MainWindow(QMainWindow):
         self.themed_widgets["labels"].append(self.test_model_b_header)
         model_b_header_layout.addWidget(self.test_model_b_header)
         self.test_model_b = QComboBox()
-        self.test_model_b.setEditable(True)
+        self.test_model_b.setEditable(False)  # Selection-only: READY models from Models tab
         self.test_model_b.currentTextChanged.connect(self._update_model_header_ports)
         model_b_header_layout.addWidget(self.test_model_b)
         headers_layout.addWidget(model_b_header_widget, 1)
@@ -9630,7 +9644,7 @@ class MainWindow(QMainWindow):
         self.themed_widgets["labels"].append(self.test_model_c_header)
         model_c_header_layout.addWidget(self.test_model_c_header)
         self.test_model_c = QComboBox()
-        self.test_model_c.setEditable(True)
+        self.test_model_c.setEditable(False)  # Selection-only: READY models from Models tab
         self.test_model_c.currentTextChanged.connect(self._update_model_header_ports)
         model_c_header_layout.addWidget(self.test_model_c)
         headers_layout.addWidget(model_c_header_widget, 1)
@@ -9986,6 +10000,7 @@ class MainWindow(QMainWindow):
         # Model selector (single model only)
         controls_row.addWidget(QLabel("Model:"))
         self.tool_chat_model_a = QComboBox()
+        self.tool_chat_model_a.setEditable(False)  # Selection-only: READY models from Models tab
         self.tool_chat_model_a.setMinimumWidth(250)
         controls_row.addWidget(self.tool_chat_model_a, 1)
         
@@ -10209,7 +10224,7 @@ class MainWindow(QMainWindow):
             self.themed_widgets["labels"].append(self.m2m_model_a_header)
         m2m_a_header_layout.addWidget(self.m2m_model_a_header)
         self.m2m_model_a = QComboBox()
-        self.m2m_model_a.setEditable(True)
+        self.m2m_model_a.setEditable(False)  # Selection-only: READY models from Models tab
         self.m2m_model_a.currentTextChanged.connect(self._update_m2m_model_header_ports)
         m2m_a_header_layout.addWidget(self.m2m_model_a)
         headers_layout.addWidget(m2m_a_header_widget, 1)
@@ -10226,7 +10241,7 @@ class MainWindow(QMainWindow):
             self.themed_widgets["labels"].append(self.m2m_model_b_header)
         m2m_b_header_layout.addWidget(self.m2m_model_b_header)
         self.m2m_model_b = QComboBox()
-        self.m2m_model_b.setEditable(True)
+        self.m2m_model_b.setEditable(False)  # Selection-only: READY models from Models tab
         self.m2m_model_b.currentTextChanged.connect(self._update_m2m_model_header_ports)
         m2m_b_header_layout.addWidget(self.m2m_model_b)
         headers_layout.addWidget(m2m_b_header_widget, 1)
@@ -10243,7 +10258,7 @@ class MainWindow(QMainWindow):
             self.themed_widgets["labels"].append(self.m2m_model_c_header)
         m2m_c_header_layout.addWidget(self.m2m_model_c_header)
         self.m2m_model_c = QComboBox()
-        self.m2m_model_c.setEditable(True)
+        self.m2m_model_c.setEditable(False)  # Selection-only: READY models from Models tab
         self.m2m_model_c.currentTextChanged.connect(self._update_m2m_model_header_ports)
         m2m_c_header_layout.addWidget(self.m2m_model_c)
         headers_layout.addWidget(m2m_c_header_widget, 1)
@@ -10720,6 +10735,7 @@ class MainWindow(QMainWindow):
             return
         use_three = self.m2m_model_count_3.isChecked()
         model_ids = []
+        paths_by_key = {}
         for combo, key in [(self.m2m_model_a, "a"), (self.m2m_model_b, "b"), (self.m2m_model_c if use_three else None, "c")]:
             if combo is None:
                 break
@@ -10727,14 +10743,18 @@ class MainWindow(QMainWindow):
             if not path or (isinstance(path, str) and path.startswith("(")):
                 QMessageBox.warning(self, "Model To Model", f"Please select a valid model for {key.upper()}.")
                 return
+            paths_by_key[key] = str(path) if path else ""
             try:
-                model_id = self._resolve_model_id_from_path(path)
+                model_id = self._resolve_model_id_from_path(path, allow_create=False)
             except Exception as e:
+                derived_id = Path(path).name.replace("__", "/") if path else ""
+                self._maybe_show_reonboard_popup(str(e), derived_id, str(path) if path else "")
                 QMessageBox.warning(self, "Model To Model", f"Could not resolve model for {key.upper()}: {e}")
                 return
             model_ids.append((key, model_id))
         if not model_ids:
             return
+        self._m2m_active_paths = paths_by_key
         max_turns = self.m2m_max_turns.value()
 
         # Per-model settings (same UI as Test right panel)
@@ -10853,19 +10873,21 @@ class MainWindow(QMainWindow):
             self._append_m2m_log(f"[ERROR] {message or 'Unknown error'}")
         except Exception:
             pass
-        # If this looks like a load/repair failure and we have model_id, show reonboard popup (Open Models + Repair)
-        low = (message or "").lower()
-        repair_markers = [
-            "re-onboard", "repair", "server failed to load", "check model files",
-            "size mismatch", "state_dict", "please re-onboard",
-        ]
-        if model_id and any(m in low for m in repair_markers):
-            # Refresh models list so card shows BROKEN (server_manager already set status)
+        # Refresh models list so card shows BROKEN when server_manager set status
+        if model_id:
             try:
                 self._refresh_models()
             except Exception:
                 pass
-            model_path = ""
+        # Resolve model_path: prefer stored M2M selection, then onboarding/config
+        model_path = ""
+        if model_key:
+            try:
+                paths = getattr(self, "_m2m_active_paths", None) or {}
+                model_path = paths.get((model_key or "a").lower()[:1], "") or ""
+            except Exception:
+                pass
+        if not model_path and model_id:
             try:
                 entry = self.state_store.get_onboarding(model_id)
                 if entry:
@@ -10878,9 +10900,11 @@ class MainWindow(QMainWindow):
                         model_path = ((cfg.get("models") or {}).get(model_id) or {}).get("base_model") or ""
             except Exception:
                 pass
+        # Unified repair popup (same as Test/Tool): show when we have model_id or model_path
+        if model_id or model_path:
             self._maybe_show_reonboard_popup(
                 error_text=message or "",
-                model_id=model_id,
+                model_id=model_id or (Path(model_path).name.replace("__", "/") if model_path else ""),
                 model_path=model_path or "",
             )
         else:
@@ -10997,13 +11021,15 @@ class MainWindow(QMainWindow):
     def _run_tool_chat_inference_a(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run tool-enabled inference for Model A in tool chat"""
         try:
-            model_id = self._resolve_model_id_from_path(model_path)
+            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id: {e}"
             self._append_tool_chat_log(error_msg)
             self.tool_chat_display.update_model_a_response("[ERROR] Failed to start. See logs on the right.")
             self.tool_chat_input.setEnabled(True)
             self.tool_chat_send_btn.setEnabled(True)
+            derived_id = Path(model_path).name.replace("__", "/") if model_path else ""
+            self._maybe_show_reonboard_popup(str(e), derived_id, model_path or "")
             return
         
         # FIX: Auto-inject tool system prompt if not provided
@@ -11040,13 +11066,15 @@ class MainWindow(QMainWindow):
     def _run_tool_chat_inference_b(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run tool-enabled inference for Model B in tool chat"""
         try:
-            model_id = self._resolve_model_id_from_path(model_path)
+            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id: {e}"
             self._append_tool_chat_log(error_msg)
             self.tool_chat_display.update_model_b_response("[ERROR] Failed to start. See logs on the right.")
             self.tool_chat_input.setEnabled(True)
             self.tool_chat_send_btn.setEnabled(True)
+            derived_id = Path(model_path).name.replace("__", "/") if model_path else ""
+            self._maybe_show_reonboard_popup(str(e), derived_id, model_path or "")
             return
         
         # FIX: Auto-inject tool system prompt if not provided
@@ -11083,13 +11111,15 @@ class MainWindow(QMainWindow):
     def _run_tool_chat_inference_c(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run tool-enabled inference for Model C in tool chat"""
         try:
-            model_id = self._resolve_model_id_from_path(model_path)
+            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id: {e}"
             self._append_tool_chat_log(error_msg)
             self.tool_chat_display.update_model_c_response("[ERROR] Failed to start. See logs on the right.")
             self.tool_chat_input.setEnabled(True)
             self.tool_chat_send_btn.setEnabled(True)
+            derived_id = Path(model_path).name.replace("__", "/") if model_path else ""
+            self._maybe_show_reonboard_popup(str(e), derived_id, model_path or "")
             return
         
         # FIX: Auto-inject tool system prompt if not provided
@@ -11764,13 +11794,15 @@ class MainWindow(QMainWindow):
         self._tool_progress_a = ""
         self._append_test_chat_log("[A] [INFO] Preparing tool-enabled inference...")
         
-        # Resolve model_id from model_path
+        # Resolve model_id from model_path (no synthetic config creation in chat)
         try:
-            model_id = self._resolve_model_id_from_path(model_path)
+            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
             self._append_test_chat_log(f"[A] {error_msg}")
             self.chat_display.update_model_a_response("[ERROR] Failed to start. See logs on the right.")
+            derived_id = Path(model_path).name.replace("__", "/") if model_path else ""
+            self._maybe_show_reonboard_popup(str(e), derived_id, model_path or "")
             return
         
         # Auto-inject tool system prompt if not provided (unless caller disables injection)
@@ -11863,18 +11895,26 @@ class MainWindow(QMainWindow):
 
     def _should_offer_reonboard_popup(self, error_text: str) -> bool:
         low = (error_text or "").lower()
-        # Only show when we have strong evidence this is an onboarding-state problem,
-        # not a random runtime exception.
-        has_log_pointer = ("startup log:" in low) or ("onboarding log:" in low)
+        # Show for any runtime/onboarding failure so user always gets Re-onboard / Open Models.
         markers = [
             "please re-onboard/repair",
             "please re-onboard",
             "re-onboard/repair",
+            "re-onboard",
             "not ready for chat",
-            "has not been onboarded yet",
+            "not ready for runtime",
+            "has not been onboarded",
             "marked broken",
+            "missing critical packages",
+            "server failed to load model",
+            "check model files",
+            "size mismatch",
+            "state_dict",
+            "is not in config",
+            "onboarding",
+            "repair",
         ]
-        return has_log_pointer and any(m in low for m in markers)
+        return any(m in low for m in markers)
 
     def _append_tool_chat_log(self, text: str) -> None:
         """Append to Tool Chat right-side log panel."""
@@ -12229,13 +12269,15 @@ class MainWindow(QMainWindow):
         self._tool_progress_b = ""
         self._append_test_chat_log("[B] [INFO] Preparing tool-enabled inference...")
 
-        # Resolve model_id from model_path
+        # Resolve model_id from model_path (no synthetic config creation in chat)
         try:
-            model_id = self._resolve_model_id_from_path(model_path)
+            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
             self._append_test_chat_log(f"[B] {error_msg}")
             self.chat_display.update_model_b_response("[ERROR] Failed to start. See logs on the right.")
+            derived_id = Path(model_path).name.replace("__", "/") if model_path else ""
+            self._maybe_show_reonboard_popup(str(e), derived_id, model_path or "")
             return
 
         # Auto-inject tool system prompt if not provided (unless caller disables injection)
@@ -12505,13 +12547,15 @@ class MainWindow(QMainWindow):
         self._tool_progress_c = ""
         self._append_test_chat_log("[C] [INFO] Preparing tool-enabled inference...")
 
-        # Resolve model_id from model_path
+        # Resolve model_id from model_path (no synthetic config creation in chat)
         try:
-            model_id = self._resolve_model_id_from_path(model_path)
+            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
             self._append_test_chat_log(f"[C] {error_msg}")
             self.chat_display.update_model_c_response("[ERROR] Failed to start. See logs on the right.")
+            derived_id = Path(model_path).name.replace("__", "/") if model_path else ""
+            self._maybe_show_reonboard_popup(str(e), derived_id, model_path or "")
             return
 
         # Auto-inject tool system prompt if not provided (unless caller disables injection)

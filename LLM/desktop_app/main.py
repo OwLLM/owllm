@@ -10762,6 +10762,11 @@ class MainWindow(QMainWindow):
         self.m2m_stop_resume_btn.setChecked(False)
         self.m2m_stop_resume_btn.setText("⏹ Stop")
         self.m2m_start_btn.setEnabled(False)
+        try:
+            if hasattr(self, "m2m_chat_log_display") and self.m2m_chat_log_display:
+                self.m2m_chat_log_display.clear()
+        except Exception:
+            pass
         self.m2m_chat_display.add_user_message(seed)
         try:
             if not hasattr(self, "_m2m_history") or self._m2m_history is None:
@@ -10783,6 +10788,7 @@ class MainWindow(QMainWindow):
         self.m2m_worker.turn_finished.connect(self._on_m2m_turn_finished)
         self.m2m_worker.finished_signal.connect(self._on_m2m_finished)
         self.m2m_worker.error_signal.connect(self._on_m2m_error)
+        self.m2m_worker.log_signal.connect(self._append_m2m_log)
         self.m2m_worker.start()
 
     def _on_m2m_turn_started(self, model_key: str):
@@ -10828,7 +10834,20 @@ class MainWindow(QMainWindow):
         self.m2m_stop_resume_btn.setText("⏹ Stop")
         self.m2m_worker = None
 
-    def _on_m2m_error(self, message: str, model_id: str = ""):
+    def _append_m2m_log(self, text: str) -> None:
+        """Append a line to the Model-to-Model log box (thread-safe via signal)."""
+        try:
+            if hasattr(self, "m2m_chat_log_display") and self.m2m_chat_log_display:
+                self.m2m_chat_log_display.append((text or "").strip())
+        except Exception:
+            pass
+
+    def _on_m2m_error(self, message: str, model_id: str = "", model_key: str = ""):
+        # Replace "Thinking..." with the error in the bubble so user sees what failed
+        if model_key and hasattr(self, "m2m_chat_display") and self.m2m_chat_display:
+            key = (model_key or "a").lower()[:1]
+            if hasattr(self.m2m_chat_display, "finish_m2m_turn"):
+                self.m2m_chat_display.finish_m2m_turn(key, message or "Error.")
         # If this looks like a load/repair failure and we have model_id, show reonboard popup (Open Models + Repair)
         low = (message or "").lower()
         repair_markers = [

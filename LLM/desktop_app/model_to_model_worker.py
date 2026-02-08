@@ -14,7 +14,8 @@ class ModelToModelWorker(QThread):
     turn_started = Signal(str)   # model_key "a", "b", "c"
     turn_finished = Signal(str, str)  # model_key, text
     finished_signal = Signal()
-    error_signal = Signal(str, str)  # message, model_id (so UI can offer repair / open Models)
+    error_signal = Signal(str, str, str)  # message, model_id, model_key (so UI can replace Thinking and offer repair)
+    log_signal = Signal(str)  # log line for M2M log box (thread-safe)
 
     def __init__(
         self,
@@ -49,12 +50,12 @@ class ModelToModelWorker(QThread):
         try:
             from core.inference import run_inference, InferenceConfig
         except Exception as e:
-            self.error_signal.emit(f"Failed to import inference: {e}", "")
+            self.error_signal.emit(f"Failed to import inference: {e}", "", "")
             self.finished_signal.emit()
             return
 
         if not self.model_ids or not self.model_keys or len(self.model_ids) != len(self.model_keys):
-            self.error_signal.emit("Model list and keys length mismatch.", "")
+            self.error_signal.emit("Model list and keys length mismatch.", "", "")
             self.finished_signal.emit()
             return
 
@@ -117,16 +118,17 @@ class ModelToModelWorker(QThread):
                     max_new_tokens=max_tokens,
                     temperature=temp,
                 )
-                text = run_inference(cfg)
+                log_cb = lambda msg: self.log_signal.emit(msg)
+                text = run_inference(cfg, log_callback=log_cb)
             except Exception as e:
-                self.error_signal.emit(f"Model {model_key.upper()} error: {e}", model_id)
+                self.error_signal.emit(f"Model {model_key.upper()} error: {e}", model_id, model_key)
                 self.finished_signal.emit()
                 return
 
             text = _trim_single_turn(text or "", model_key)
 
             if not text:
-                self.error_signal.emit(f"Model {model_key.upper()} returned empty response.", "")
+                self.error_signal.emit(f"Model {model_key.upper()} returned empty response.", "", model_key)
                 self.finished_signal.emit()
                 return
 

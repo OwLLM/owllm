@@ -9428,10 +9428,16 @@ class MainWindow(QMainWindow):
         sub_tabs.addTab(test_page, "🧪 Test")
         sub_tabs.addTab(tool_chat_page, "🔧 Tool Chat")
         sub_tabs.addTab(model_to_model_page, "Model To Model")
-        
+        sub_tabs.currentChanged.connect(self._on_test_sub_tab_changed)
+
         layout.addWidget(sub_tabs)
-        
+
         return w
+
+    def _on_test_sub_tab_changed(self, index: int) -> None:
+        """When user switches to Model To Model (index 2), ensure settings stack is built."""
+        if index == 2:
+            self._ensure_m2m_settings_built()
     
     def _lazy_load_test_sub_page(self, index: int):
         """Lazy-load test sub-page when tab is first accessed"""
@@ -10083,7 +10089,7 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_model_to_model_sub_tab(self) -> QWidget:
-        """Build the Model To Model sub-tab: full clone of Test layout (left chat + right panel), automated turn-taking."""
+        """Build the Model To Model sub-tab: EXACT clone of Test layout, except automated turn-taking."""
         from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
 
         w = QWidget()
@@ -10091,14 +10097,16 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(15)
 
+        # LEFT COLUMN (3/4 width) - identical structure to Test
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.setSpacing(15)
         self.m2m_left_layout = left_layout
 
+        # Title + model count selector (same look/placement as Test)
         title_row = QHBoxLayout()
-        m2m_title = QLabel("Model To Model - Side-by-Side Chat")
+        m2m_title = QLabel("🧪 Test Models - Side-by-Side Chat")
         m2m_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
         title_row.addWidget(m2m_title)
         title_row.addStretch(1)
@@ -10113,32 +10121,52 @@ class MainWindow(QMainWindow):
         self.m2m_model_count_3.setTristate(False)
         self.m2m_model_count_3.toggled.connect(self._on_m2m_model_count_3_toggled)
         title_row.addWidget(self.m2m_model_count_3)
-        title_row.addSpacing(20)
-        title_row.addWidget(QLabel("Max turns:"))
+        left_layout.addLayout(title_row)
+
+        # Hardware Settings and Tool Calling side by side (same as Test)
+        settings_row = QHBoxLayout()
+        settings_row.setSpacing(15)
+
+        gpu_frame = QGroupBox("⚙️ Hardware Settings")
+        gpu_layout = QVBoxLayout(gpu_frame)
+
+        gpus = self._get_filtered_gpus()
+        gpus = self._sort_gpus_by_memory(gpus)
+        gpu_row = QHBoxLayout()
+        gpu_row.addWidget(QLabel("GPU for Inference:"))
+        self.m2m_gpu_select = QComboBox()
+        self.m2m_gpu_index_map = []
+        if gpus:
+            for idx, gpu in enumerate(gpus):
+                gpu_name = gpu.get("name", f"GPU {idx}")
+                vram = gpu.get("memory", "N/A")
+                orig_idx = gpu.get("_orig_index", idx)
+                self.m2m_gpu_select.addItem(f"GPU {orig_idx}: {gpu_name} ({vram})")
+                self.m2m_gpu_index_map.append(orig_idx)
+            info_text = f"✅ {len(gpus)} GPU(s) detected - select one for inference"
+        else:
+            self.m2m_gpu_select.addItem("No GPUs available - CPU mode")
+            self.m2m_gpu_select.setEnabled(False)
+            info_text = "⚠️ No GPUs detected (CPU mode)"
+        gpu_row.addWidget(self.m2m_gpu_select, 1)
+        gpu_layout.addLayout(gpu_row)
+        self.m2m_gpu_info = QLabel(info_text)
+        self.m2m_gpu_info.setStyleSheet("color: #888; padding: 5px; font-size: 10pt;")
+        self.m2m_gpu_info.setWordWrap(True)
+        gpu_layout.addWidget(self.m2m_gpu_info)
+        settings_row.addWidget(gpu_frame, 2)
+
+        conv_frame = QGroupBox("🔁 Conversation")
+        conv_layout = QHBoxLayout(conv_frame)
+        conv_layout.addWidget(QLabel("Max turns:"))
         self.m2m_max_turns = QSpinBox()
         self.m2m_max_turns.setRange(1, 200)
         self.m2m_max_turns.setValue(20)
         self.m2m_max_turns.setMinimumWidth(60)
-        title_row.addWidget(self.m2m_max_turns)
-        title_row.addWidget(QLabel("Temp:"))
-        self.m2m_temperature = QDoubleSpinBox()
-        self.m2m_temperature.setRange(0.0, 2.0)
-        self.m2m_temperature.setSingleStep(0.1)
-        self.m2m_temperature.setValue(0.7)
-        self.m2m_temperature.setMinimumWidth(60)
-        title_row.addWidget(self.m2m_temperature)
-        title_row.addWidget(QLabel("Max tokens:"))
-        self.m2m_max_new_tokens = QSpinBox()
-        self.m2m_max_new_tokens.setRange(32, 10000)
-        self.m2m_max_new_tokens.setValue(10000)
-        self.m2m_max_new_tokens.setMinimumWidth(70)
-        title_row.addWidget(self.m2m_max_new_tokens)
-        left_layout.addLayout(title_row)
+        conv_layout.addWidget(self.m2m_max_turns)
+        settings_row.addWidget(conv_frame, 1)
 
-        m2m_info = QLabel("Models take turns replying to each other. Enter a topic below and click Start.")
-        m2m_info.setStyleSheet("color: #888; padding: 5px; font-size: 9pt;")
-        m2m_info.setWordWrap(True)
-        left_layout.addWidget(m2m_info)
+        left_layout.addLayout(settings_row)
 
         headers_layout = QHBoxLayout()
         headers_layout.setContentsMargins(0, 0, 0, 0)
@@ -10200,35 +10228,47 @@ class MainWindow(QMainWindow):
 
         left_layout.addLayout(headers_layout)
 
+        # SYNCHRONIZED CHAT DISPLAY (same placement as Test)
         self.m2m_chat_display = SynchronizedChatDisplay(num_models=2)
         self.m2m_chat_display.set_theme(getattr(self, "dark_mode", True))
         left_layout.addWidget(self.m2m_chat_display, 1)
 
+        # Shared prompt input area (BOTTOM) - identical layout as Test
         prompt_layout = QVBoxLayout()
-        prompt_layout.addWidget(QLabel("<b>💬 Topic / initial prompt:</b>"))
+        prompt_layout.addWidget(QLabel("<b>💬 Type your message:</b>"))
         input_row = QHBoxLayout()
         self.m2m_prompt = QTextEdit()
-        self.m2m_prompt.setPlaceholderText("Enter a topic or initial prompt to start the model-to-model conversation...")
+        self.m2m_prompt.setPlaceholderText("Type your message here...")
         self.m2m_prompt.setMinimumHeight(90)
         self.m2m_prompt.setMaximumHeight(90)
+        self.m2m_prompt.textChanged.connect(self._m2m_update_token_count)
         input_row.addWidget(self.m2m_prompt, 1)
+
         btn_column = QVBoxLayout()
         btn_column.setSpacing(8)
         self.m2m_start_btn = QPushButton("▶ Start")
         self.m2m_start_btn.clicked.connect(self._start_m2m_conversation)
         self.m2m_start_btn.setMinimumHeight(40)
-        self.m2m_start_btn.setStyleSheet("QPushButton { font-size: 12pt; font-weight: bold; }")
+        self.m2m_start_btn.setStyleSheet("""
+            QPushButton {
+                font-size: 12pt;
+                font-weight: bold;
+            }
+        """)
         btn_column.addWidget(self.m2m_start_btn)
+
         self.m2m_stop_resume_btn = QPushButton("⏹ Stop")
         self.m2m_stop_resume_btn.setCheckable(True)
         self.m2m_stop_resume_btn.clicked.connect(self._m2m_stop_resume)
         self.m2m_stop_resume_btn.setEnabled(False)
         self.m2m_stop_resume_btn.setMinimumHeight(40)
         btn_column.addWidget(self.m2m_stop_resume_btn)
+
         self.m2m_clear_btn = QPushButton("🗑️ Clear")
         self.m2m_clear_btn.clicked.connect(self._clear_m2m_chat)
         self.m2m_clear_btn.setMinimumHeight(40)
         btn_column.addWidget(self.m2m_clear_btn)
+
         input_row.addLayout(btn_column)
         prompt_layout.addLayout(input_row)
         left_layout.addLayout(prompt_layout)
@@ -10240,6 +10280,7 @@ class MainWindow(QMainWindow):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(12)
 
+        # Model A/B selector buttons at top (same as Test)
         model_selector_layout = QHBoxLayout()
         model_selector_layout.setSpacing(5)
         self.m2m_model_a_btn = QPushButton("🔵 A")
@@ -10252,18 +10293,28 @@ class MainWindow(QMainWindow):
         self.m2m_model_c_btn = QPushButton("🟣 C")
         self.m2m_model_c_btn.setCheckable(True)
         self.m2m_model_c_btn.clicked.connect(lambda: self._m2m_switch_model_settings(2))
-        self.m2m_model_c_btn.setVisible(False)
+        self.m2m_model_c_btn.setVisible(True)  # Visible by default (3 models) like Test
         model_selector_layout.addWidget(self.m2m_model_a_btn)
         model_selector_layout.addWidget(self.m2m_model_b_btn)
         model_selector_layout.addWidget(self.m2m_model_c_btn)
         right_layout.addLayout(model_selector_layout)
 
+        # Stacked widget for Model A, Model B, and Model C settings (lazy-loaded on first show)
         self.m2m_model_settings_stack = QStackedWidget()
-        for _ in ("A", "B", "C"):
-            page = QWidget()
-            pl = QVBoxLayout(page)
-            pl.addWidget(QLabel("Shared parameters are in the title row (Max turns, Temp, Max tokens)."))
-            self.m2m_model_settings_stack.addWidget(page)
+        self._m2m_settings_built = False
+        for _ in range(3):
+            ph = QWidget()
+            ph_layout = QVBoxLayout(ph)
+            ph_label = QLabel("Loading...")
+            ph_label.setStyleSheet("color: #888;")
+            ph_layout.addStretch(1)
+            ph_layout.addWidget(ph_label, 0, Qt.AlignCenter)
+            ph_layout.addStretch(1)
+            self.m2m_model_settings_stack.addWidget(ph)
+        self.m2m_model_a_settings = None
+        self.m2m_model_b_settings = None
+        self.m2m_model_c_settings = None
+
         right_layout.addWidget(self.m2m_model_settings_stack, 0)
 
         log_title = QLabel("Logs")
@@ -10294,6 +10345,189 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._load_m2m_models)
         return w
 
+    def _create_m2m_model_settings_page(self, model_name: str) -> QWidget:
+        """Build one M2M right-panel settings page (used for lazy-loaded stack)."""
+        page = QWidget()
+        page.setObjectName("modelSettingsPage")
+        if model_name == "A":
+            page.setStyleSheet("QWidget#modelSettingsPage { background-color: rgba(0, 100, 200, 0.6); }")
+        elif model_name == "B":
+            page.setStyleSheet("QWidget#modelSettingsPage { background-color: rgba(0, 200, 100, 0.6); }")
+        else:
+            page.setStyleSheet("QWidget#modelSettingsPage { background-color: rgba(155, 89, 182, 0.6); }")
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        scroll_content = QWidget()
+        scroll_layout = QVBoxLayout(scroll_content)
+        scroll_layout.setContentsMargins(10, 10, 10, 10)
+        scroll_layout.setSpacing(12)
+
+        template_group = QGroupBox("📋 Instruction Templates")
+        template_layout = QVBoxLayout(template_group)
+        template_row = QHBoxLayout()
+        template_select = QComboBox()
+        template_select.addItems(["None", "Alpaca", "Vicuna", "ChatML", "Llama-2", "Custom"])
+        self._load_saved_instructions_into_combo(template_select)
+        system_prompt = QTextEdit()
+        system_prompt.setPlaceholderText("Enter system instructions...")
+        system_prompt.setMinimumHeight(200)
+        system_prompt.setMaximumHeight(300)
+        template_select.currentTextChanged.connect(lambda t: self._apply_instruction_template(t, system_prompt))
+        template_row.addWidget(template_select, 1)
+        save_btn = QPushButton("💾 Save")
+        save_btn.setToolTip("Save current system prompt as a custom instruction")
+        save_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select))
+        template_row.addWidget(save_btn)
+        template_layout.addLayout(template_row)
+        scroll_layout.addWidget(template_group)
+
+        system_group = QGroupBox("📝 System Prompt")
+        system_layout = QVBoxLayout(system_group)
+        system_layout.addWidget(system_prompt)
+        scroll_layout.addWidget(system_group)
+
+        params_group = QGroupBox("⚙️ Generation Parameters")
+        params_layout = QVBoxLayout(params_group)
+        params_layout.setSpacing(5)
+        temp_layout = QHBoxLayout()
+        temp_layout.addStretch(1)
+        temp_layout.addWidget(QLabel("Temperature:"))
+        temp_label = QLabel("0.7")
+        temp_label.setMinimumWidth(40)
+        temp_layout.addWidget(temp_label)
+        temperature = QDoubleSpinBox()
+        temperature.setRange(0.0, 2.0)
+        temperature.setSingleStep(0.1)
+        temperature.setValue(0.7)
+        temperature.setDecimals(1)
+        temperature.setMinimumWidth(80)
+        temperature.valueChanged.connect(lambda v: temp_label.setText(f"{v:.1f}"))
+        temp_layout.addWidget(temperature)
+        params_layout.addLayout(temp_layout)
+
+        max_tokens_layout = QHBoxLayout()
+        max_tokens_layout.addStretch(1)
+        max_tokens_layout.addWidget(QLabel("Max Tokens:"))
+
+        def format_max_tokens(value):
+            if value < 1000:
+                return str(value)
+            if value < 1000000:
+                return f"{value // 1000}K" if value % 1000 == 0 else f"{value / 1000:.1f}K".rstrip('0').rstrip('.')
+            return f"{value // 1000000}M" if value % 1000000 == 0 else f"{value / 1000000:.1f}M".rstrip('0').rstrip('.')
+
+        max_tokens_label = QLabel(format_max_tokens(10000))
+        max_tokens_label.setMinimumWidth(40)
+        max_tokens_layout.addWidget(max_tokens_label)
+        max_tokens = QSpinBox()
+        max_tokens.setRange(1, 999999999)
+        max_tokens.setSingleStep(32)
+        max_tokens.setValue(10000)
+        max_tokens.setMinimumWidth(80)
+        max_tokens.valueChanged.connect(lambda v: max_tokens_label.setText(format_max_tokens(v)))
+        max_tokens_layout.addWidget(max_tokens)
+        params_layout.addLayout(max_tokens_layout)
+
+        top_p_layout = QHBoxLayout()
+        top_p_layout.addStretch(1)
+        top_p_layout.addWidget(QLabel("Top-p:"))
+        top_p_label = QLabel("0.9")
+        top_p_label.setMinimumWidth(40)
+        top_p_layout.addWidget(top_p_label)
+        top_p = QDoubleSpinBox()
+        top_p.setRange(0.0, 1.0)
+        top_p.setSingleStep(0.05)
+        top_p.setValue(0.9)
+        top_p.setDecimals(2)
+        top_p.setMinimumWidth(80)
+        top_p.valueChanged.connect(lambda v: top_p_label.setText(f"{v:.2f}"))
+        top_p_layout.addWidget(top_p)
+        params_layout.addLayout(top_p_layout)
+
+        rep_pen_layout = QHBoxLayout()
+        rep_pen_layout.addStretch(1)
+        rep_pen_layout.addWidget(QLabel("Repetition Penalty:"))
+        rep_pen_label = QLabel("1.0")
+        rep_pen_label.setMinimumWidth(40)
+        rep_pen_layout.addWidget(rep_pen_label)
+        repetition_penalty = QDoubleSpinBox()
+        repetition_penalty.setRange(0.0, 2.0)
+        repetition_penalty.setSingleStep(0.1)
+        repetition_penalty.setValue(1.0)
+        repetition_penalty.setDecimals(1)
+        repetition_penalty.setMinimumWidth(80)
+        repetition_penalty.valueChanged.connect(lambda v: rep_pen_label.setText(f"{v:.1f}"))
+        rep_pen_layout.addWidget(repetition_penalty)
+        params_layout.addLayout(rep_pen_layout)
+        scroll_layout.addWidget(params_group)
+
+        token_count = QLabel("Tokens: 0")
+        token_count.setStyleSheet("color: #888; font-size: 10pt;")
+        scroll_layout.addWidget(token_count)
+        scroll_layout.addStretch(1)
+        scroll.setWidget(scroll_content)
+
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(scroll)
+        setattr(page, "system_prompt", system_prompt)
+        setattr(page, "temperature", temperature)
+        setattr(page, "max_tokens", max_tokens)
+        setattr(page, "top_p", top_p)
+        setattr(page, "repetition_penalty", repetition_penalty)
+        setattr(page, "template_select", template_select)
+        setattr(page, "token_count", token_count)
+        return page
+
+    def _ensure_m2m_settings_built(self) -> None:
+        """Build M2M right-panel settings pages on first show (lazy-load to reduce startup cost)."""
+        if getattr(self, "_m2m_settings_built", False):
+            return
+        if not hasattr(self, "m2m_model_settings_stack") or self.m2m_model_settings_stack.count() != 3:
+            return
+        self._m2m_settings_built = True
+        # Remove placeholder widgets
+        for _ in range(3):
+            w = self.m2m_model_settings_stack.widget(0)
+            self.m2m_model_settings_stack.removeWidget(w)
+            w.deleteLater()
+        m2m_a_page = self._create_m2m_model_settings_page("A")
+        m2m_b_page = self._create_m2m_model_settings_page("B")
+        m2m_c_page = self._create_m2m_model_settings_page("C")
+        m2m_a_page.system_prompt.textChanged.connect(lambda: self._m2m_update_token_count_for_page(m2m_a_page))
+        m2m_b_page.system_prompt.textChanged.connect(lambda: self._m2m_update_token_count_for_page(m2m_b_page))
+        m2m_c_page.system_prompt.textChanged.connect(lambda: self._m2m_update_token_count_for_page(m2m_c_page))
+        self.m2m_model_settings_stack.addWidget(m2m_a_page)
+        self.m2m_model_settings_stack.addWidget(m2m_b_page)
+        self.m2m_model_settings_stack.addWidget(m2m_c_page)
+        self.m2m_model_a_settings = m2m_a_page
+        self.m2m_model_b_settings = m2m_b_page
+        self.m2m_model_c_settings = m2m_c_page
+        self.m2m_model_settings_stack.setCurrentIndex(0)
+        self._m2m_update_token_count()
+
+    def _m2m_update_token_count(self) -> None:
+        if not hasattr(self, "m2m_model_settings_stack"):
+            return
+        current_page = self.m2m_model_settings_stack.currentWidget()
+        self._m2m_update_token_count_for_page(current_page)
+
+    def _m2m_update_token_count_for_page(self, current_page=None) -> None:
+        if current_page is None or not hasattr(current_page, "token_count"):
+            return
+        system_prompt = ""
+        if hasattr(current_page, "system_prompt"):
+            system_prompt = current_page.system_prompt.toPlainText().strip()
+        user_prompt = ""
+        if hasattr(self, "m2m_prompt"):
+            user_prompt = self.m2m_prompt.toPlainText().strip()
+        total_text = system_prompt + "\n" + user_prompt if system_prompt and user_prompt else (system_prompt or user_prompt)
+        estimated_tokens = len(total_text) // 4
+        current_page.token_count.setText(f"Tokens: ~{estimated_tokens}")
+
     def _m2m_switch_model_settings(self, index: int):
         if index == 0:
             self.m2m_model_a_btn.setChecked(True)
@@ -10310,6 +10544,7 @@ class MainWindow(QMainWindow):
             self.m2m_model_b_btn.setChecked(False)
             self.m2m_model_c_btn.setChecked(True)
             self.m2m_model_settings_stack.setCurrentIndex(2)
+        self._m2m_update_token_count()
 
     def _on_m2m_model_count_2_toggled(self, checked: bool) -> None:
         if checked:
@@ -10384,6 +10619,18 @@ class MainWindow(QMainWindow):
             return
         colors = self._get_theme_colors()
 
+        # Parse YAML once per call
+        import yaml
+        config_path = self.root / "configs" / "llm_backends.yaml"
+        config = {}
+        if config_path.exists():
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+            except Exception:
+                config = {}
+        models_cfg = config.get("models", {})
+
         def get_port(combo, text):
             if not text or text.startswith("(No models"):
                 return "-"
@@ -10397,13 +10644,8 @@ class MainWindow(QMainWindow):
                 model_id = self._resolve_model_id_from_path(path)
                 if not model_id:
                     return "-"
-                import yaml
-                config_path = self.root / "configs" / "llm_backends.yaml"
-                if config_path.exists():
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        config = yaml.safe_load(f) or {}
-                        if model_id in config.get("models", {}):
-                            return config["models"][model_id].get("port", "-")
+                if model_id in models_cfg:
+                    return models_cfg[model_id].get("port", "-")
                 return "-"
             except Exception:
                 return "-"
@@ -10429,6 +10671,7 @@ class MainWindow(QMainWindow):
 
     def _start_m2m_conversation(self):
         """Start the model-to-model conversation (worker started here; wiring in display todo)."""
+        self._ensure_m2m_settings_built()
         seed = (self.m2m_prompt.toPlainText() or "").strip()
         if not seed:
             QMessageBox.warning(self, "Model To Model", "Please enter a topic or initial prompt.")
@@ -10451,8 +10694,27 @@ class MainWindow(QMainWindow):
         if not model_ids:
             return
         max_turns = self.m2m_max_turns.value()
-        temperature = self.m2m_temperature.value()
-        max_new_tokens = self.m2m_max_new_tokens.value()
+
+        # Per-model settings (same UI as Test right panel)
+        sys_prompts = {}
+        temps = {}
+        tokens = {}
+        try:
+            if hasattr(self, "m2m_model_a_settings"):
+                sys_prompts["a"] = self.m2m_model_a_settings.system_prompt.toPlainText().strip()
+                temps["a"] = float(self.m2m_model_a_settings.temperature.value())
+                tokens["a"] = int(self.m2m_model_a_settings.max_tokens.value())
+            if hasattr(self, "m2m_model_b_settings"):
+                sys_prompts["b"] = self.m2m_model_b_settings.system_prompt.toPlainText().strip()
+                temps["b"] = float(self.m2m_model_b_settings.temperature.value())
+                tokens["b"] = int(self.m2m_model_b_settings.max_tokens.value())
+            if hasattr(self, "m2m_model_c_settings"):
+                sys_prompts["c"] = self.m2m_model_c_settings.system_prompt.toPlainText().strip()
+                temps["c"] = float(self.m2m_model_c_settings.temperature.value())
+                tokens["c"] = int(self.m2m_model_c_settings.max_tokens.value())
+        except Exception:
+            pass
+
         self.m2m_paused = False
         self.m2m_stop_resume_btn.setEnabled(True)
         self.m2m_stop_resume_btn.setChecked(False)
@@ -10465,8 +10727,9 @@ class MainWindow(QMainWindow):
             model_ids=[m[1] for m in model_ids],
             model_keys=[m[0] for m in model_ids],
             max_turns=max_turns,
-            temperature=temperature,
-            max_new_tokens=max_new_tokens,
+            system_prompts=sys_prompts,
+            temperatures=temps,
+            max_new_tokens=tokens,
         )
         self.m2m_worker.turn_started.connect(self._on_m2m_turn_started)
         self.m2m_worker.turn_finished.connect(self._on_m2m_turn_finished)
@@ -12501,69 +12764,54 @@ class MainWindow(QMainWindow):
         """Update port display in Model A/B/C headers based on selected models"""
         if not hasattr(self, 'test_model_a_header'):
             return
-        
+
         colors = self._get_theme_colors()
-        
+
+        # Parse YAML once per call
+        import yaml
+        config_path = self.root / "configs" / "llm_backends.yaml"
+        config = {}
+        if config_path.exists():
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f) or {}
+            except Exception:
+                config = {}
+        models_cfg = config.get("models", {})
+
         def get_port_for_model(combo_box, model_text):
-            """Get port for model selected in combo box"""
+            """Get port for model selected in combo box (uses pre-loaded models_cfg)."""
             if not model_text or model_text.startswith("(No models"):
                 return "-"
-            
             try:
-                # Get model path from itemData
                 current_idx = combo_box.currentIndex()
                 if current_idx < 0:
                     return "-"
-                
                 model_path_data = combo_box.itemData(current_idx)
                 if not model_path_data:
                     return "-"
-                
-                # Resolve model_id from path
                 model_id = self._resolve_model_id_from_path(model_path_data)
                 if not model_id:
-                    # If path resolution failed, try name-based lookup
-                    # Extract clean model name from display text
-                    clean_name = model_text.replace("📦 ", "").replace("🎯 ", "").split(" (")[0]
-                    # Convert to model_id format (org/model -> org__model for lookup)
+                    clean_name = model_text.replace("✓ 📦 ", "").replace("🎯 ", "").split(" (")[0].strip()
                     model_id_candidate = clean_name.replace("/", "__")
-                    
-                    # Try direct lookup first
-                    import yaml
-                    config_path = self.root / "configs" / "llm_backends.yaml"
-                    if config_path.exists():
-                        with open(config_path, 'r', encoding='utf-8') as f:
-                            config = yaml.safe_load(f) or {}
-                            if model_id_candidate in config.get("models", {}):
-                                return config["models"][model_id_candidate].get("port", "-")
-                            
-                            # Try partial match (model name in model_id)
-                            for mid, cfg in config.get("models", {}).items():
-                                # Check if model name appears in model_id
-                                name_parts = clean_name.split("/")
-                                if len(name_parts) == 2:
-                                    org, model = name_parts
-                                    if org in mid and model in mid:
-                                        return cfg.get("port", "-")
+                    if model_id_candidate in models_cfg:
+                        return models_cfg[model_id_candidate].get("port", "-")
+                    name_parts = clean_name.split("/")
+                    if len(name_parts) == 2:
+                        org, model = name_parts
+                        for mid, cfg in models_cfg.items():
+                            if org in mid and model in mid:
+                                return cfg.get("port", "-")
                     return "-"
-                
-                # Look up port in config
-                import yaml
-                config_path = self.root / "configs" / "llm_backends.yaml"
-                if config_path.exists():
-                    with open(config_path, 'r', encoding='utf-8') as f:
-                        config = yaml.safe_load(f) or {}
-                        if model_id in config.get("models", {}):
-                            return config["models"][model_id].get("port", "-")
-                
+                if model_id in models_cfg:
+                    return models_cfg[model_id].get("port", "-")
                 return "-"
             except Exception as e:
-                # Log error instead of silently failing
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.warning(f"Failed to get port for model '{model_text}': {e}")
                 return "-"
-        
+
         # Update Model A port
         model_a_text = self.test_model_a.currentText().strip()
         port_a = get_port_for_model(self.test_model_a, model_a_text)
@@ -16800,39 +17048,67 @@ respective package directories or official repositories.
                 self.test_gpu_info.setText("⚠️ No GPUs detected (CPU mode)")
 
             self.test_gpu_select.blockSignals(False)
-    
+
+        # Model To Model tab GPU selector (same format as build: orig_index, vram, index map)
+        if hasattr(self, "m2m_gpu_select") and hasattr(self, "m2m_gpu_info"):
+            self.m2m_gpu_select.blockSignals(True)
+            self.m2m_gpu_select.clear()
+            self.m2m_gpu_index_map = []
+
+            if gpus:
+                for idx, gpu in enumerate(gpus):
+                    gpu_name = gpu.get("name", f"GPU {idx}")
+                    vram = gpu.get("memory", "N/A")
+                    orig_idx = gpu.get("_orig_index", idx)
+                    self.m2m_gpu_select.addItem(f"GPU {orig_idx}: {gpu_name} ({vram})")
+                    self.m2m_gpu_index_map.append(orig_idx)
+                self.m2m_gpu_select.setEnabled(True)
+                self.m2m_gpu_info.setText(f"✅ {len(gpus)} GPU(s) detected - select one for inference")
+            else:
+                self.m2m_gpu_select.addItem("No GPUs available - CPU mode")
+                self.m2m_gpu_select.setEnabled(False)
+                self.m2m_gpu_info.setText("⚠️ No GPUs detected (CPU mode)")
+
+            self.m2m_gpu_select.blockSignals(False)
+
     def _fill_model_combo(self, combo, downloaded_models, models_dir, ready_paths, adapter_dir):
         """Populate a model combo from downloaded_models + adapters (READY only). Reuses data from _refresh_locals to avoid duplicate filesystem scan."""
         current = combo.currentText()
-        combo.clear()
-        if downloaded_models:
-            for model_name in downloaded_models:
-                model_path = models_dir / model_name
-                model_path_str = str(model_path.resolve())
-                if model_path_str in ready_paths:
-                    display_name = model_name.replace("__", "/")
-                    combo.addItem(f"✓ 📦 {display_name}", str(model_path))
-        if adapter_dir.exists():
-            trained_adapters = []
-            for d in adapter_dir.iterdir():
-                if not d.is_dir():
-                    continue
-                has_weights = any([
-                    (d / "adapter_model.safetensors").exists(),
-                    (d / "adapter_model.bin").exists(),
-                    (d / "pytorch_model.bin").exists(),
-                    (d / "model.safetensors").exists()
-                ])
-                if has_weights:
-                    trained_adapters.append(d)
-            for adapter_path in sorted(trained_adapters):
-                combo.addItem(f"🎯 {adapter_path.name} (adapter)", str(adapter_path))
-        if combo.count() == 0:
-            combo.addItem("(No models available - download from Models tab)")
-        if current and current != "None":
-            idx = combo.findText(current)
-            if idx >= 0:
-                combo.setCurrentIndex(idx)
+        combo.blockSignals(True)
+        combo.setUpdatesEnabled(False)
+        try:
+            combo.clear()
+            if downloaded_models:
+                for model_name in downloaded_models:
+                    model_path = models_dir / model_name
+                    model_path_str = str(model_path.resolve())
+                    if model_path_str in ready_paths:
+                        display_name = model_name.replace("__", "/")
+                        combo.addItem(f"✓ 📦 {display_name}", str(model_path))
+            if adapter_dir.exists():
+                trained_adapters = []
+                for d in adapter_dir.iterdir():
+                    if not d.is_dir():
+                        continue
+                    has_weights = any([
+                        (d / "adapter_model.safetensors").exists(),
+                        (d / "adapter_model.bin").exists(),
+                        (d / "pytorch_model.bin").exists(),
+                        (d / "model.safetensors").exists()
+                    ])
+                    if has_weights:
+                        trained_adapters.append(d)
+                for adapter_path in sorted(trained_adapters):
+                    combo.addItem(f"🎯 {adapter_path.name} (adapter)", str(adapter_path))
+            if combo.count() == 0:
+                combo.addItem("(No models available - download from Models tab)")
+            if current and current != "None":
+                idx = combo.findText(current)
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+        finally:
+            combo.setUpdatesEnabled(True)
+            combo.blockSignals(False)
 
     def _refresh_locals(self) -> None:
         # Refresh downloaded models display

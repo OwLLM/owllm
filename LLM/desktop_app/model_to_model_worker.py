@@ -22,8 +22,9 @@ class ModelToModelWorker(QThread):
         model_ids: list[str],
         model_keys: list[str],
         max_turns: int = 20,
-        temperature: float = 0.7,
-        max_new_tokens: int = 10000,
+        system_prompts: dict[str, str] | None = None,
+        temperatures: dict[str, float] | None = None,
+        max_new_tokens: dict[str, int] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -31,8 +32,9 @@ class ModelToModelWorker(QThread):
         self.model_ids = list(model_ids) if model_ids else []
         self.model_keys = list(model_keys) if model_keys else []
         self.max_turns = max(1, int(max_turns))
-        self.temperature = float(temperature)
-        self.max_new_tokens = int(max_new_tokens)
+        self.system_prompts = dict(system_prompts or {})
+        self.temperatures = dict(temperatures or {})
+        self.max_new_tokens = dict(max_new_tokens or {})
         self._paused = False
         self._pause_event = threading.Event()  # set when paused so we can wait on it
 
@@ -86,17 +88,21 @@ class ModelToModelWorker(QThread):
             model_id = self.model_ids[speaker_idx]
             model_key = self.model_keys[speaker_idx]
             speaker_label = f"Model {model_key.upper()}"
+            sys_prompt = (self.system_prompts.get(model_key) or "").strip()
+            temp = float(self.temperatures.get(model_key, 0.7))
+            max_tokens = int(self.max_new_tokens.get(model_key, 10000))
+            prefix = f"{sys_prompt}\n\n" if sys_prompt else ""
 
             if history_lines:
                 conv = "\n\n".join(history_lines)
-                prompt = (
+                prompt = prefix + (
                     f"You are {speaker_label}. Reply only with your single message; do not write for other models.\n\n"
                     f"{topic_line}\n\n"
                     f"Conversation so far:\n{conv}\n\n"
                     f"{speaker_label}:"
                 )
             else:
-                prompt = (
+                prompt = prefix + (
                     f"You are {speaker_label}. Reply only with your single message; do not write for other models.\n\n"
                     f"{topic_line}\n\n"
                     f"{speaker_label}:"
@@ -108,8 +114,8 @@ class ModelToModelWorker(QThread):
                 cfg = InferenceConfig(
                     prompt=prompt,
                     model_id=model_id,
-                    max_new_tokens=self.max_new_tokens,
-                    temperature=self.temperature,
+                    max_new_tokens=max_tokens,
+                    temperature=temp,
                 )
                 text = run_inference(cfg)
             except Exception as e:

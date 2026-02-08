@@ -1448,12 +1448,23 @@ class LLMServerManager:
                             log_path_for_error = None
                             if model_id in self.running_servers:
                                 _, _, log_path_for_error = self.running_servers[model_id]
-                            raise RuntimeError(
+                            full_error = (
                                 f"Server failed to load model: {error_msg}\n"
                                 f"Check model files are complete in: {model_path}\n"
                                 f"Please re-onboard/repair this model, then retry.\n"
                                 f"Startup log: {log_path_for_error or 'N/A'}"
                             )
+                            # Mark model BROKEN so Models page shows Repair button and card reflects failure
+                            try:
+                                self.state_store.upsert_onboarding(
+                                    model_id=model_id,
+                                    base_model_path=str(model_path),
+                                    status="BROKEN",
+                                    last_error=error_msg or full_error[:500],
+                                )
+                            except Exception:
+                                pass
+                            raise RuntimeError(full_error)
                         
                         if status == "ok":
                             elapsed = time.time() - start_time

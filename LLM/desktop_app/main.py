@@ -10817,8 +10817,34 @@ class MainWindow(QMainWindow):
         self.m2m_stop_resume_btn.setText("⏹ Stop")
         self.m2m_worker = None
 
-    def _on_m2m_error(self, message: str):
-        QMessageBox.critical(self, "Model To Model", message or "An error occurred.")
+    def _on_m2m_error(self, message: str, model_id: str = ""):
+        # If this looks like a load/repair failure and we have model_id, show reonboard popup (Open Models + Repair)
+        low = (message or "").lower()
+        repair_markers = [
+            "re-onboard", "repair", "server failed to load", "check model files",
+            "size mismatch", "state_dict", "please re-onboard",
+        ]
+        if model_id and any(m in low for m in repair_markers):
+            model_path = ""
+            try:
+                entry = self.state_store.get_onboarding(model_id)
+                if entry:
+                    model_path = entry.get("base_model_path") or ""
+                if not model_path:
+                    import yaml
+                    cfg_path = self.root / "configs" / "llm_backends.yaml"
+                    if cfg_path.exists():
+                        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                        model_path = ((cfg.get("models") or {}).get(model_id) or {}).get("base_model") or ""
+            except Exception:
+                pass
+            self._maybe_show_reonboard_popup(
+                error_text=message or "",
+                model_id=model_id,
+                model_path=model_path or "",
+            )
+        else:
+            QMessageBox.critical(self, "Model To Model", message or "An error occurred.")
         self.m2m_start_btn.setEnabled(True)
         self.m2m_stop_resume_btn.setEnabled(False)
         self.m2m_worker = None

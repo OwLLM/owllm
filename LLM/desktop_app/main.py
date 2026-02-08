@@ -6116,9 +6116,10 @@ class MainWindow(QMainWindow):
             # Add progress bar to card layout
             card.layout().addWidget(progress_bar)
             
-            # Add status label to show current shard being downloaded
+            # Add status label to show current step (purge, downloading file X/Y, etc.)
             status_label = QLabel("Preparing repair...")
-            status_label.setStyleSheet("color: #888; font-size: 11px; padding: 4px;")
+            status_label.setStyleSheet("color: #ccc; font-size: 11pt; padding: 6px;")
+            status_label.setWordWrap(True)
             card.layout().addWidget(status_label)
             
             # Create repair thread (resume-first, non-destructive)
@@ -7362,6 +7363,7 @@ class MainWindow(QMainWindow):
             dest_path = Path(dest)
             entry = self.state_store.get_onboarding(model_id)
             status = (entry.get("status") if entry else None) or "NEW"
+            # Only set READY again via onboarding; if still BROKEN/NEW, run onboarding (probe will set READY or BROKEN)
             if status not in ("READY", "BUILDING"):
                 self._start_model_onboarding_silent(str(dest_path), model_id)
         except Exception as e:
@@ -9760,16 +9762,20 @@ class MainWindow(QMainWindow):
             self._load_saved_instructions_into_combo(template_select)
             template_select.currentTextChanged.connect(lambda t: self._apply_instruction_template(t, system_prompt))
             template_row.addWidget(template_select, 1)
-            
-            # Save button (overwrites selected 💾 Name if any)
+            # Save / Save as in one column, smaller text to fit right column
+            save_col = QVBoxLayout()
+            save_col.setSpacing(4)
             save_btn = QPushButton("💾 Save")
+            save_btn.setStyleSheet("QPushButton { font-size: 9pt; }")
             save_btn.setToolTip("Save current system prompt as a custom instruction (overwrites selected saved instruction)")
             save_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select, force_prompt=False))
-            template_row.addWidget(save_btn)
+            save_col.addWidget(save_btn)
             save_as_btn = QPushButton("Save as…")
+            save_as_btn.setStyleSheet("QPushButton { font-size: 9pt; }")
             save_as_btn.setToolTip("Save current system prompt under a new name")
             save_as_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select, force_prompt=True))
-            template_row.addWidget(save_as_btn)
+            save_col.addWidget(save_as_btn)
+            template_row.addLayout(save_col)
             template_layout.addLayout(template_row)
             
             scroll_layout.addWidget(template_group)
@@ -10011,7 +10017,7 @@ class MainWindow(QMainWindow):
         left_layout.setSpacing(8)
         
         # Chat display for single model
-        self.tool_chat_display = SynchronizedChatDisplay(num_models=1)
+        self.tool_chat_display = SynchronizedChatDisplay(num_models=1, colorize_model_replies=True)
         self.tool_chat_display.set_theme(self.dark_mode)
         left_layout.addWidget(self.tool_chat_display, 1)
         
@@ -10247,7 +10253,7 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(headers_layout)
 
         # SYNCHRONIZED CHAT DISPLAY (same placement as Test)
-        self.m2m_chat_display = SynchronizedChatDisplay(num_models=2)
+        self.m2m_chat_display = SynchronizedChatDisplay(num_models=2, colorize_model_replies=True)
         self.m2m_chat_display.set_theme(getattr(self, "dark_mode", True))
         left_layout.addWidget(self.m2m_chat_display, 1)
 
@@ -10262,37 +10268,36 @@ class MainWindow(QMainWindow):
         self.m2m_prompt.textChanged.connect(self._m2m_update_token_count)
         input_row.addWidget(self.m2m_prompt, 1)
 
-        btn_column = QVBoxLayout()
-        btn_column.setSpacing(8)
+        # 4 buttons in 2 columns: [Start, Stop] [Clear, Save]
+        btn_grid = QWidget()
+        btn_layout = QHBoxLayout(btn_grid)
+        btn_layout.setSpacing(8)
+        col1 = QVBoxLayout()
+        col1.setSpacing(8)
         self.m2m_start_btn = QPushButton("▶ Start")
         self.m2m_start_btn.clicked.connect(self._start_m2m_conversation)
         self.m2m_start_btn.setMinimumHeight(40)
-        self.m2m_start_btn.setStyleSheet("""
-            QPushButton {
-                font-size: 12pt;
-                font-weight: bold;
-            }
-        """)
-        btn_column.addWidget(self.m2m_start_btn)
-
+        self.m2m_start_btn.setStyleSheet("QPushButton { font-size: 12pt; font-weight: bold; }")
+        col1.addWidget(self.m2m_start_btn)
         self.m2m_stop_resume_btn = QPushButton("⏹ Stop")
         self.m2m_stop_resume_btn.setCheckable(True)
         self.m2m_stop_resume_btn.clicked.connect(self._m2m_stop_resume)
         self.m2m_stop_resume_btn.setEnabled(False)
         self.m2m_stop_resume_btn.setMinimumHeight(40)
-        btn_column.addWidget(self.m2m_stop_resume_btn)
-
+        col1.addWidget(self.m2m_stop_resume_btn)
+        btn_layout.addLayout(col1)
+        col2 = QVBoxLayout()
+        col2.setSpacing(8)
         self.m2m_clear_btn = QPushButton("🗑️ Clear")
         self.m2m_clear_btn.clicked.connect(self._clear_m2m_chat)
         self.m2m_clear_btn.setMinimumHeight(40)
-        btn_column.addWidget(self.m2m_clear_btn)
-
+        col2.addWidget(self.m2m_clear_btn)
         self.m2m_save_btn = QPushButton("💾 Save")
         self.m2m_save_btn.clicked.connect(self._save_m2m_chat)
         self.m2m_save_btn.setMinimumHeight(40)
-        btn_column.addWidget(self.m2m_save_btn)
-
-        input_row.addLayout(btn_column)
+        col2.addWidget(self.m2m_save_btn)
+        btn_layout.addLayout(col2)
+        input_row.addWidget(btn_grid)
         prompt_layout.addLayout(input_row)
         left_layout.addLayout(prompt_layout)
 
@@ -10400,14 +10405,20 @@ class MainWindow(QMainWindow):
         system_prompt.setMaximumHeight(300)
         template_select.currentTextChanged.connect(lambda t: self._apply_instruction_template(t, system_prompt))
         template_row.addWidget(template_select, 1)
+        # Save / Save as in one column, smaller text to fit right column
+        save_col = QVBoxLayout()
+        save_col.setSpacing(4)
         save_btn = QPushButton("💾 Save")
+        save_btn.setStyleSheet("QPushButton { font-size: 9pt; }")
         save_btn.setToolTip("Save current system prompt as a custom instruction (overwrites selected saved instruction)")
         save_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select, force_prompt=False))
-        template_row.addWidget(save_btn)
+        save_col.addWidget(save_btn)
         save_as_btn = QPushButton("Save as…")
+        save_as_btn.setStyleSheet("QPushButton { font-size: 9pt; }")
         save_as_btn.setToolTip("Save current system prompt under a new name")
         save_as_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select, force_prompt=True))
-        template_row.addWidget(save_as_btn)
+        save_col.addWidget(save_as_btn)
+        template_row.addLayout(save_col)
         template_layout.addLayout(template_row)
         scroll_layout.addWidget(template_group)
 
@@ -10614,7 +10625,7 @@ class MainWindow(QMainWindow):
                 self.m2m_left_layout.removeWidget(old_display)
                 old_display.setParent(None)
                 old_display.deleteLater()
-                self.m2m_chat_display = SynchronizedChatDisplay(num_models=3)
+                self.m2m_chat_display = SynchronizedChatDisplay(num_models=3, colorize_model_replies=True)
                 self.m2m_chat_display.set_theme(self.dark_mode)
                 if index >= 0:
                     self.m2m_left_layout.insertWidget(index, self.m2m_chat_display, 1)
@@ -10634,7 +10645,7 @@ class MainWindow(QMainWindow):
                 self.m2m_left_layout.removeWidget(old_display)
                 old_display.setParent(None)
                 old_display.deleteLater()
-                self.m2m_chat_display = SynchronizedChatDisplay(num_models=2)
+                self.m2m_chat_display = SynchronizedChatDisplay(num_models=2, colorize_model_replies=True)
                 self.m2m_chat_display.set_theme(self.dark_mode)
                 if index >= 0:
                     self.m2m_left_layout.insertWidget(index, self.m2m_chat_display, 1)
@@ -10825,6 +10836,11 @@ class MainWindow(QMainWindow):
             "size mismatch", "state_dict", "please re-onboard",
         ]
         if model_id and any(m in low for m in repair_markers):
+            # Refresh models list so card shows BROKEN (server_manager already set status)
+            try:
+                self._refresh_models()
+            except Exception:
+                pass
             model_path = ""
             try:
                 entry = self.state_store.get_onboarding(model_id)

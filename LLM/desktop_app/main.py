@@ -9671,6 +9671,11 @@ class MainWindow(QMainWindow):
         self.test_clear_btn.setMinimumHeight(40)
         btn_column.addWidget(self.test_clear_btn)
 
+        self.test_save_btn = QPushButton("💾 Save")
+        self.test_save_btn.clicked.connect(self._save_test_chat)
+        self.test_save_btn.setMinimumHeight(40)
+        btn_column.addWidget(self.test_save_btn)
+
         input_row.addLayout(btn_column)
         prompt_layout.addLayout(input_row)
         left_layout.addLayout(prompt_layout)
@@ -9980,6 +9985,10 @@ class MainWindow(QMainWindow):
         clear_btn = QPushButton("🗑️ Clear")
         clear_btn.clicked.connect(lambda: self._clear_tool_chat())
         controls_row.addWidget(clear_btn)
+
+        save_btn = QPushButton("💾 Save")
+        save_btn.clicked.connect(self._save_tool_chat)
+        controls_row.addWidget(save_btn)
         
         layout.addLayout(controls_row)
         
@@ -10268,6 +10277,11 @@ class MainWindow(QMainWindow):
         self.m2m_clear_btn.clicked.connect(self._clear_m2m_chat)
         self.m2m_clear_btn.setMinimumHeight(40)
         btn_column.addWidget(self.m2m_clear_btn)
+
+        self.m2m_save_btn = QPushButton("💾 Save")
+        self.m2m_save_btn.clicked.connect(self._save_m2m_chat)
+        self.m2m_save_btn.setMinimumHeight(40)
+        btn_column.addWidget(self.m2m_save_btn)
 
         input_row.addLayout(btn_column)
         prompt_layout.addLayout(input_row)
@@ -10668,6 +10682,10 @@ class MainWindow(QMainWindow):
         """Clear Model To Model conversation display."""
         if hasattr(self, 'm2m_chat_display'):
             self.m2m_chat_display.clear()
+        try:
+            self._m2m_history = []
+        except Exception:
+            pass
 
     def _start_m2m_conversation(self):
         """Start the model-to-model conversation (worker started here; wiring in display todo)."""
@@ -10721,6 +10739,12 @@ class MainWindow(QMainWindow):
         self.m2m_stop_resume_btn.setText("⏹ Stop")
         self.m2m_start_btn.setEnabled(False)
         self.m2m_chat_display.add_user_message(seed)
+        try:
+            if not hasattr(self, "_m2m_history") or self._m2m_history is None:
+                self._m2m_history = []
+            self._m2m_history.append(("seed", seed))
+        except Exception:
+            pass
         from desktop_app.model_to_model_worker import ModelToModelWorker
         self.m2m_worker = ModelToModelWorker(
             seed=seed,
@@ -10767,6 +10791,12 @@ class MainWindow(QMainWindow):
                 self.m2m_chat_display.update_model_b_response(text or "")
             elif key == "c":
                 self.m2m_chat_display.update_model_c_response(text or "")
+        try:
+            if not hasattr(self, "_m2m_history") or self._m2m_history is None:
+                self._m2m_history = []
+            self._m2m_history.append((key, text or ""))
+        except Exception:
+            pass
 
     def _on_m2m_finished(self):
         self.m2m_start_btn.setEnabled(True)
@@ -10848,6 +10878,10 @@ class MainWindow(QMainWindow):
             self.tool_chat_display.clear()
             self.tool_chat_log_display.clear()
             self.tool_chat_display.add_user_message("=== Chat cleared ===")
+        try:
+            self._tool_chat_history = []
+        except Exception:
+            pass
     
     def _send_tool_chat_message(self):
         """Send message and run tool-enabled inference for the selected model"""
@@ -10870,6 +10904,12 @@ class MainWindow(QMainWindow):
         
         # Display user message
         self.tool_chat_display.add_user_message(message)
+        try:
+            if not hasattr(self, "_tool_chat_history") or self._tool_chat_history is None:
+                self._tool_chat_history = []
+            self._tool_chat_history.append(("user", message))
+        except Exception:
+            pass
         
         # Start response for the model
         self.tool_chat_display.start_model_a_response()
@@ -11030,6 +11070,12 @@ class MainWindow(QMainWindow):
             text += f"\n\n[Tools Used: {len(tool_log)}]"
         self._tool_chat_progress_a = text
         self.tool_chat_display.update_model_a_response(text)
+        try:
+            if not hasattr(self, "_tool_chat_history") or self._tool_chat_history is None:
+                self._tool_chat_history = []
+            self._tool_chat_history.append(("assistant", text))
+        except Exception:
+            pass
         self._check_tool_chat_all_finished()
     
     def _on_tool_chat_finished_b(self, final_output: str, tool_log: list, model_column: str):
@@ -13001,6 +13047,176 @@ class MainWindow(QMainWindow):
                     self.test_prompt.setEnabled(True)
             except Exception:
                 pass
+
+    def _save_text_via_dialog(self, default_name: str, text: str) -> None:
+        try:
+            from datetime import datetime
+            default = default_name or f"chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+        except Exception:
+            default = default_name or "chat.md"
+        try:
+            from PySide6.QtWidgets import QFileDialog
+            from pathlib import Path
+            start_dir = None
+            try:
+                logs_dir = Path(getattr(self, "root", Path.cwd())) / "logs"
+                start_dir = str(logs_dir) if logs_dir.exists() else str(Path.cwd())
+            except Exception:
+                start_dir = ""
+            path, _ = QFileDialog.getSaveFileName(self, "Save Chat", str(Path(start_dir) / default), "Markdown (*.md);;Text (*.txt);;All Files (*)")
+            if not path:
+                return
+            with open(path, "w", encoding="utf-8", errors="replace") as f:
+                f.write(text or "")
+        except Exception as e:
+            try:
+                QMessageBox.critical(self, "Save Chat", f"Failed to save chat: {e}")
+            except Exception:
+                pass
+
+    def _save_test_chat(self) -> None:
+        """Save Test side-by-side chat (per-model transcripts) to a file."""
+        try:
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            ts = ""
+
+        def page_info(page):
+            try:
+                template = getattr(page, "template_select", None)
+                template_name = str(template.currentText() or "").strip() if template else "None"
+                sysw = getattr(page, "system_prompt", None)
+                sys_text = sysw.toPlainText().strip() if sysw else ""
+                return template_name, sys_text
+            except Exception:
+                return "None", ""
+
+        a_t, a_sys = page_info(getattr(self, "test_model_a_settings", None))
+        b_t, b_sys = page_info(getattr(self, "test_model_b_settings", None))
+        c_t, c_sys = page_info(getattr(self, "test_model_c_settings", None))
+
+        turns = getattr(self, "_test_chat_turns", {"a": [], "b": [], "c": []}) or {"a": [], "b": [], "c": []}
+        lines = []
+        lines.append("# Test Chat Export")
+        if ts:
+            lines.append(f"- Saved: {ts}")
+        try:
+            lines.append(f"- Model A: {self.test_model_a.currentText().strip()}")
+            lines.append(f"- Model B: {self.test_model_b.currentText().strip()}")
+            if hasattr(self, "test_model_c"):
+                lines.append(f"- Model C: {self.test_model_c.currentText().strip()}")
+        except Exception:
+            pass
+        lines.append("")
+
+        def render_model(name: str, key: str, template_name: str, sys_text: str):
+            lines.append(f"## {name}")
+            lines.append(f"- Template: `{template_name}`")
+            if sys_text:
+                lines.append("")
+                lines.append("### System prompt")
+                lines.append("```")
+                lines.append(sys_text)
+                lines.append("```")
+            lines.append("")
+            lines.append("### Conversation")
+            for u, a in (turns.get(key) or []):
+                lines.append(f"**User:** {u}")
+                lines.append("")
+                lines.append(f"**Assistant:** {a}")
+                lines.append("")
+
+        render_model("Model A", "a", a_t, a_sys)
+        render_model("Model B", "b", b_t, b_sys)
+        if getattr(self, "test_model_count_3", None) is not None:
+            # Save Model C too (even if empty) when present
+            render_model("Model C", "c", c_t, c_sys)
+
+        try:
+            log_text = self.test_chat_log_display.toPlainText().strip() if hasattr(self, "test_chat_log_display") else ""
+            if log_text:
+                lines.append("## Logs")
+                lines.append("```")
+                lines.append(log_text)
+                lines.append("```")
+        except Exception:
+            pass
+
+        self._save_text_via_dialog("test_chat.md", "\n".join(lines).strip() + "\n")
+
+    def _save_tool_chat(self) -> None:
+        """Save Tool Chat transcript + tool log to a file."""
+        try:
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            ts = ""
+        hist = getattr(self, "_tool_chat_history", []) or []
+        lines = ["# Tool Chat Export"]
+        if ts:
+            lines.append(f"- Saved: {ts}")
+        try:
+            lines.append(f"- Model: {self.tool_chat_model_a.currentText().strip()}")
+        except Exception:
+            pass
+        lines.append("")
+        lines.append("## Conversation")
+        for role, txt in hist:
+            if role == "user":
+                lines.append(f"**User:** {txt}")
+            else:
+                lines.append(f"**Assistant:** {txt}")
+            lines.append("")
+        try:
+            log_text = self.tool_chat_log_display.toPlainText().strip() if hasattr(self, "tool_chat_log_display") else ""
+            if log_text:
+                lines.append("## Tool Execution Log")
+                lines.append("```")
+                lines.append(log_text)
+                lines.append("```")
+        except Exception:
+            pass
+        self._save_text_via_dialog("tool_chat.md", "\n".join(lines).strip() + "\n")
+
+    def _save_m2m_chat(self) -> None:
+        """Save Model-to-Model transcript (seed + per-turn replies) to a file."""
+        try:
+            from datetime import datetime
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            ts = ""
+        hist = getattr(self, "_m2m_history", []) or []
+        lines = ["# Model To Model Export"]
+        if ts:
+            lines.append(f"- Saved: {ts}")
+        try:
+            lines.append(f"- Model A: {self.m2m_model_a.currentText().strip()}")
+            lines.append(f"- Model B: {self.m2m_model_b.currentText().strip()}")
+            if hasattr(self, "m2m_model_c") and self.m2m_model_count_3.isChecked():
+                lines.append(f"- Model C: {self.m2m_model_c.currentText().strip()}")
+            lines.append(f"- Max turns: {self.m2m_max_turns.value()}")
+        except Exception:
+            pass
+        lines.append("")
+        lines.append("## Conversation")
+        for who, txt in hist:
+            if who == "seed":
+                lines.append(f"**Seed:** {txt}")
+                lines.append("")
+            else:
+                lines.append(f"**Model {str(who).upper()}:** {txt}")
+                lines.append("")
+        try:
+            log_text = self.m2m_chat_log_display.toPlainText().strip() if hasattr(self, "m2m_chat_log_display") else ""
+            if log_text:
+                lines.append("## Logs")
+                lines.append("```")
+                lines.append(log_text)
+                lines.append("```")
+        except Exception:
+            pass
+        self._save_text_via_dialog("model_to_model.md", "\n".join(lines).strip() + "\n")
     
     def _update_model_header_ports(self) -> None:
         """Update port display in Model A/B/C headers based on selected models"""

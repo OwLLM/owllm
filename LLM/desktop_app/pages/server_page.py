@@ -13,7 +13,7 @@ from PySide6.QtCore import QThread, Signal, Qt, QUrl, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QCheckBox, QTextEdit, QFileDialog, QGroupBox, QFrame, QMessageBox, QApplication,
-    QGridLayout, QRadioButton, QComboBox, QListWidget, QListWidgetItem
+    QGridLayout, QRadioButton, QComboBox, QListWidget, QListWidgetItem, QButtonGroup
 )
 from PySide6.QtGui import QDesktopServices, QClipboard
 
@@ -258,20 +258,64 @@ class ServerPage(QWidget):
         mode_group = QGroupBox("Tool Execution Mode")
         mode_layout = QVBoxLayout()
         mode_layout.setSpacing(6)
-        
-        self.mode_native_radio = QRadioButton("Native (Direct Python - Faster, Local Only)")
-        self.mode_http_radio = QRadioButton("HTTP (Network-capable, Remote Access)")
-        
-        # Info labels
+
+        # Two side-by-side selectable buttons (exclusive)
+        buttons_row = QHBoxLayout()
+        buttons_row.setSpacing(8)
+
+        self.mode_native_radio = QPushButton("Native")
+        self.mode_native_radio.setCheckable(True)
+        self.mode_native_radio.setToolTip("Direct Python execution (faster, local only). No HTTP server needed.")
+
+        self.mode_http_radio = QPushButton("HTTP")
+        self.mode_http_radio.setCheckable(True)
+        self.mode_http_radio.setToolTip("HTTP server mode (network-capable). Can expose to LAN and works with remote.")
+
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_group.addButton(self.mode_native_radio)
+        self._mode_group.addButton(self.mode_http_radio)
+
+        btn_style = """
+            QPushButton {
+                background: rgba(255, 255, 255, 0.08);
+                color: rgba(255, 255, 255, 0.85);
+                border: 1px solid rgba(255, 255, 255, 0.18);
+                border-radius: 8px;
+                padding: 10px 12px;
+                font-weight: 700;
+                min-height: 36px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 255, 255, 0.14);
+                border: 1px solid rgba(255, 255, 255, 0.28);
+            }
+            QPushButton:checked {
+                background: rgba(102, 126, 234, 0.35);
+                border: 1px solid rgba(102, 126, 234, 0.9);
+                color: white;
+            }
+        """
+        self.mode_native_radio.setStyleSheet(btn_style)
+        self.mode_http_radio.setStyleSheet(btn_style)
+
+        buttons_row.addWidget(self.mode_native_radio, 1)
+        buttons_row.addWidget(self.mode_http_radio, 1)
+        mode_layout.addLayout(buttons_row)
+
+        # Small side-by-side info labels under the buttons
+        info_grid = QGridLayout()
+        info_grid.setHorizontalSpacing(8)
+        info_grid.setVerticalSpacing(4)
         native_info = QLabel("• No port conflicts\n• Faster execution\n• No server needed")
-        native_info.setStyleSheet("font-size: 9pt; color: #888; margin-left: 20px;")
+        native_info.setStyleSheet("font-size: 9pt; color: #888;")
+        native_info.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         http_info = QLabel("• Can expose to network\n• Works with remote servers\n• MCP protocol compatible")
-        http_info.setStyleSheet("font-size: 9pt; color: #888; margin-left: 20px;")
-        
-        mode_layout.addWidget(self.mode_native_radio)
-        mode_layout.addWidget(native_info)
-        mode_layout.addWidget(self.mode_http_radio)
-        mode_layout.addWidget(http_info)
+        http_info.setStyleSheet("font-size: 9pt; color: #888;")
+        http_info.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        info_grid.addWidget(native_info, 0, 0)
+        info_grid.addWidget(http_info, 0, 1)
+        mode_layout.addLayout(info_grid)
         
         mode_group.setLayout(mode_layout)
         tool_server_layout.addWidget(mode_group)

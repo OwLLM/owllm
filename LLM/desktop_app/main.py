@@ -9756,11 +9756,15 @@ class MainWindow(QMainWindow):
             template_select.currentTextChanged.connect(lambda t: self._apply_instruction_template(t, system_prompt))
             template_row.addWidget(template_select, 1)
             
-            # Save button
+            # Save button (overwrites selected 💾 Name if any)
             save_btn = QPushButton("💾 Save")
-            save_btn.setToolTip("Save current system prompt as a custom instruction")
-            save_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select))
+            save_btn.setToolTip("Save current system prompt as a custom instruction (overwrites selected saved instruction)")
+            save_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select, force_prompt=False))
             template_row.addWidget(save_btn)
+            save_as_btn = QPushButton("Save as…")
+            save_as_btn.setToolTip("Save current system prompt under a new name")
+            save_as_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select, force_prompt=True))
+            template_row.addWidget(save_as_btn)
             template_layout.addLayout(template_row)
             
             scroll_layout.addWidget(template_group)
@@ -10392,9 +10396,13 @@ class MainWindow(QMainWindow):
         template_select.currentTextChanged.connect(lambda t: self._apply_instruction_template(t, system_prompt))
         template_row.addWidget(template_select, 1)
         save_btn = QPushButton("💾 Save")
-        save_btn.setToolTip("Save current system prompt as a custom instruction")
-        save_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select))
+        save_btn.setToolTip("Save current system prompt as a custom instruction (overwrites selected saved instruction)")
+        save_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select, force_prompt=False))
         template_row.addWidget(save_btn)
+        save_as_btn = QPushButton("Save as…")
+        save_as_btn.setToolTip("Save current system prompt under a new name")
+        save_as_btn.clicked.connect(lambda: self._save_custom_instruction(system_prompt, template_select, force_prompt=True))
+        template_row.addWidget(save_as_btn)
         template_layout.addLayout(template_row)
         scroll_layout.addWidget(template_group)
 
@@ -12739,76 +12747,85 @@ class MainWindow(QMainWindow):
         for name in sorted(saved_instructions.keys()):
             combo.addItem(f"💾 {name}")
     
-    def _save_custom_instruction(self, system_prompt_widget: QTextEdit, template_combo: QComboBox) -> None:
-        """Save the current system prompt as a custom instruction"""
+    def _save_custom_instruction(self, system_prompt_widget: QTextEdit, template_combo: QComboBox, force_prompt: bool = False) -> None:
+        """Save the current system prompt as a custom instruction. If force_prompt is False and a saved instruction (💾 Name) is selected, overwrite that name; otherwise or if force_prompt is True, prompt for name (Save As)."""
         current_text = system_prompt_widget.toPlainText().strip()
-        
+
         if not current_text:
             QMessageBox.warning(self, "Save Instruction", "Please enter some text in the System Prompt field before saving.")
             return
-        
-        # Get name from user
-        name, ok = QInputDialog.getText(
-            self,
-            "Save Custom Instruction",
-            "Enter a name for this instruction:",
-            text=""
-        )
-        
-        if not ok or not name.strip():
-            return
-        
-        name = name.strip()
-        
-        # Check if name already exists
-        saved_instructions = self._load_saved_instructions_dict()
-        if name in saved_instructions:
-            reply = QMessageBox.question(
+
+        name = None
+        if not force_prompt:
+            current = (template_combo.currentText() or "").strip()
+            if current.startswith("💾 "):
+                name = current[2:].strip()
+        if name is None or force_prompt:
+            name, ok = QInputDialog.getText(
                 self,
-                "Overwrite Instruction",
-                f"An instruction named '{name}' already exists. Do you want to overwrite it?",
-                QMessageBox.Yes | QMessageBox.No
+                "Save As..." if force_prompt else "Save Custom Instruction",
+                "Enter a name for this instruction:",
+                text=name or ""
             )
-            if reply != QMessageBox.Yes:
+            if not ok or not (name or "").strip():
                 return
-        
-        # Save the instruction
+            name = name.strip()
+            saved_instructions = self._load_saved_instructions_dict()
+            if name in saved_instructions:
+                reply = QMessageBox.question(
+                    self,
+                    "Overwrite Instruction",
+                    f"An instruction named '{name}' already exists. Do you want to overwrite it?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+        else:
+            saved_instructions = self._load_saved_instructions_dict()
+
         saved_instructions[name] = current_text
         instructions_file = self._get_saved_instructions_file()
-        
+
         try:
             with open(instructions_file, 'w', encoding='utf-8') as f:
                 json.dump(saved_instructions, f, indent=2, ensure_ascii=False)
-            
-            # Reload this dropdown
-            self._load_saved_instructions_into_combo(template_combo)
-            
-            # Select the newly saved instruction
-            index = template_combo.findText(f"💾 {name}")
-            if index >= 0:
-                template_combo.setCurrentIndex(index)
-            
-            # Also reload other template dropdowns (Model A and Model B)
-            if hasattr(self, 'test_model_settings_stack'):
-                for i in range(self.test_model_settings_stack.count()):
-                    page = self.test_model_settings_stack.widget(i)
-                    if page and hasattr(page, 'template_select'):
-                        # Clear and reload
-                        combo = getattr(page, 'template_select')
-                        # Remove custom items (keep built-in)
-                        items_to_remove = []
-                        for j in range(combo.count()):
-                            text = combo.itemText(j)
-                            if text.startswith("💾 "):
-                                items_to_remove.append(j)
-                        for j in reversed(items_to_remove):
-                            combo.removeItem(j)
-                        # Add all saved instructions
-                        self._load_saved_instructions_into_combo(combo)
-            
+
+            self._refresh_all_instruction_template_combos(template_combo, name)
             QMessageBox.information(self, "Saved", f"Instruction '{name}' has been saved successfully!")
         except IOError as e:
             QMessageBox.critical(self, "Save Error", f"Failed to save instruction: {str(e)}")
+
+    def _refresh_all_instruction_template_combos(self, current_combo: QComboBox, select_name: str = None) -> None:
+        """Reload saved-instruction items in all instruction template dropdowns (Test and M2M stacks) and optionally select the given name."""
+        def refresh_combo(combo):
+            if combo is None:
+                return
+            items_to_remove = []
+            for j in range(combo.count()):
+                if (combo.itemText(j) or "").strip().startswith("💾 "):
+                    items_to_remove.append(j)
+            for j in reversed(items_to_remove):
+                combo.removeItem(j)
+            self._load_saved_instructions_into_combo(combo)
+            if select_name:
+                idx = combo.findText(f"💾 {select_name}")
+                if idx >= 0:
+                    combo.setCurrentIndex(idx)
+
+        refresh_combo(current_combo)
+
+        if hasattr(self, 'test_model_settings_stack'):
+            for i in range(self.test_model_settings_stack.count()):
+                page = self.test_model_settings_stack.widget(i)
+                if page and hasattr(page, 'template_select'):
+                    refresh_combo(getattr(page, 'template_select'))
+
+        if hasattr(self, 'm2m_model_settings_stack') and getattr(self, '_m2m_settings_built', False):
+            for i in range(self.m2m_model_settings_stack.count()):
+                page = self.m2m_model_settings_stack.widget(i)
+                if page and hasattr(page, 'template_select'):
+                    refresh_combo(getattr(page, 'template_select'))
     
     def _clear_test_chat(self) -> None:
         """Clear both chat histories"""

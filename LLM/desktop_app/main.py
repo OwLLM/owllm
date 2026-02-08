@@ -722,6 +722,11 @@ class RepairThread(QThread):
                 "config.json", "generation_config.json", "tokenizer.json"
             ]
             
+            # Purge HF cache entry for this model so corrupted same-size shards are not reused
+            self.status.emit(f"Purging HF cache for {self.model_id}...")
+            from core.model_file_utils import purge_hf_repo_cache
+            purge_hf_repo_cache(self.model_id, cache_dir=self.cache_dir)
+            
             if self.force_fresh_only:
                 # DELETE model directory using same robust strategy as Delete button
                 
@@ -862,14 +867,14 @@ class RepairThread(QThread):
                             cache_dir=self.cache_dir
                         )
                     
-                    # Download all remaining files (resume=True skips existing files)
+                    # Download all files (resume=False so corrupted same-size shards are replaced)
                     try:
                         download_repo_files(
                             repo_id=self.model_id,
                             dest_dir=self.existing_dir,
                             token=token,
                             allow_patterns=None,  # Download everything
-                            resume=True,  # CRITICAL: Skip files that already exist
+                            resume=False,  # Force redownload so corrupted shards are replaced
                             timeout_s=900,  # 15 min per file max for responsiveness
                             max_retries=2,
                             progress_callback=progress_callback,
@@ -6042,9 +6047,9 @@ class MainWindow(QMainWindow):
             return
             
         reply = QMessageBox.question(self, "Repair Model", 
-                                    f"Do you want to repair/resume downloading '{model_id}'?\n\n"
-                                    "This will fetch missing files without deleting existing ones.\n"
-                                    "If repair fails, you'll be prompted to delete and redownload.",
+                                    f"Do you want to repair '{model_id}'?\n\n"
+                                    "This will purge the model's Hugging Face cache entry and redownload files "
+                                    "(replacing any corrupted or missing shards). If repair fails, you'll be prompted to delete and redownload.",
                                     QMessageBox.Yes | QMessageBox.No)
         
         if reply == QMessageBox.Yes:
@@ -6140,7 +6145,7 @@ class MainWindow(QMainWindow):
             
             # Log immediately
             self._log_models(f"🔧 Starting repair for {model_id}...")
-            self._log_models(f"   Will resume/fetch missing files (non-destructive)")
+            self._log_models(f"   Purging HF cache and redownloading files (replacing corrupted shards)")
             
             # Start repair
             thread.start()

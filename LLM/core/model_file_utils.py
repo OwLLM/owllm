@@ -186,6 +186,112 @@ def kill_processes_locking_directory(dest_dir: Path) -> None:
         logger.warning(f"Error killing locking processes: {e}")
 
 
+def purge_hf_repo_cache(repo_id: str, cache_dir: Optional[Path] = None) -> bool:
+    """
+    Purge the Hugging Face cache entry for a specific repo_id.
+    Used during model repair so corrupted same-size shards are not reused.
+
+    HF cache layout: <cache_base>/models--<namespace>--<repo-name>/ (refs/, blobs/, snapshots/).
+    If cache_dir is the app root (e.g. LLM/hf_cache), we check both cache_dir and cache_dir/hub.
+
+    Args:
+        repo_id: Hugging Face repo ID (e.g. "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit").
+        cache_dir: Optional cache root (e.g. app's hf_cache). If None, uses HF_HUB_CACHE or default.
+
+    Returns:
+        True if the entry was purged or did not exist; False if purge failed (best-effort, does not raise).
+    """
+    import shutil
+    import subprocess
+
+    repo_id = (repo_id or "").strip()
+    if not repo_id:
+        return True
+
+    folder_name = f"models--{repo_id.replace('/', '--')}"
+
+    # Resolve cache base directory
+    if cache_dir is not None:
+        cache_dir = Path(cache_dir)
+        # Check both direct (cache_dir/models--...) and hub subdir (cache_dir/hub/models--...)
+        candidates = [
+            cache_dir / folder_name,
+            cache_dir / "hub" / folder_name,
+        ]
+    else:
+        base = os.environ.get("HF_HUB_CACHE") or os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+        candidates = [Path(base) / folder_name]
+
+    entry_path = None
+    for c in candidates:
+        if c.exists():
+            entry_path = c
+            break
+
+    if entry_path is None:
+        logger.debug(f"HF cache entry not found for {repo_id} (checked {[str(p) for p in candidates]})")
+        return True
+
+    logger.info(f"Purging HF cache entry for {repo_id}: {entry_path}")
+
+    try:
+        if sys.platform == "win32":
+            kill_processes_locking_directory(entry_path)
+            time.sleep(1)
+            try:
+                subprocess.run(
+                    ["attrib", "-R", str(entry_path), "/S", "/D"],
+                    capture_output=True,
+                    timeout=10,
+                    **SUBPROCESS_FLAGS
+                )
+            except Exception:
+                pass
+            for attempt in range(3):
+                try:
+                    subprocess.run(
+                        ["cmd", "/c", "rmdir", "/S", "/Q", str(entry_path)],
+                        capture_output=True,
+                        timeout=15,
+                        **SUBPROCESS_FLAGS
+                    )
+                    if not entry_path.exists():
+                        logger.info(f"Purged HF cache entry: {folder_name}")
+                        return True
+                    if attempt >= 1:
+                        subprocess.run(
+                            ["powershell", "-Command", f'Remove-Item -Path "{entry_path}" -Recurse -Force -ErrorAction SilentlyContinue'],
+                            capture_output=True,
+                            timeout=15,
+                            **SUBPROCESS_FLAGS
+                        )
+                        if not entry_path.exists():
+                            logger.info(f"Purged HF cache entry: {folder_name}")
+                            return True
+                    time.sleep(1)
+                except Exception as e:
+                    logger.debug(f"Purge attempt {attempt + 1} failed: {e}")
+            try:
+                shutil.rmtree(entry_path, ignore_errors=True)
+                if not entry_path.exists():
+                    logger.info(f"Purged HF cache entry: {folder_name}")
+                    return True
+            except Exception:
+                pass
+        else:
+            shutil.rmtree(entry_path, ignore_errors=True)
+            if not entry_path.exists():
+                logger.info(f"Purged HF cache entry: {folder_name}")
+                return True
+    except Exception as e:
+        logger.warning(f"Error purging HF cache for {repo_id}: {e}")
+
+    if entry_path.exists():
+        logger.warning(f"Could not fully purge cache entry: {entry_path} (files may be locked)")
+        return False
+    return True
+
+
 def force_clean_model_dir(dest_dir: Path) -> bool:
     """
     AGGRESSIVE force-clean: Delete files individually, kill processes, use Windows tools.

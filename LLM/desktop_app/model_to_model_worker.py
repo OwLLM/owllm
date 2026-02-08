@@ -23,7 +23,7 @@ class ModelToModelWorker(QThread):
         model_keys: list[str],
         max_turns: int = 20,
         temperature: float = 0.7,
-        max_new_tokens: int = 512,
+        max_new_tokens: int = 10000,
         parent=None,
     ):
         super().__init__(parent)
@@ -58,10 +58,23 @@ class ModelToModelWorker(QThread):
 
         n = len(self.model_ids)
         history_lines = []
-        prompt_prefix = "The following is a conversation between models. Continue the discussion.\n\nTopic or initial prompt:\n" + self.seed
+        topic_line = "Topic or initial prompt:\n" + self.seed
+
+        def _trim_single_turn(raw: str, this_key: str) -> str:
+            """Keep only this model's reply: strip leading 'Model X:', truncate at next 'Model Y:'."""
+            s = (raw or "").strip()
+            this_label = f"Model {this_key.upper()}:"
+            if s.startswith(this_label):
+                s = s[len(this_label):].lstrip()
+            for other in ("Model A:", "Model B:", "Model C:"):
+                if other == this_label:
+                    continue
+                idx = s.find(other)
+                if idx >= 0:
+                    s = s[:idx].rstrip()
+            return s.strip()
 
         for turn in range(self.max_turns):
-            # Wait if paused
             while self._paused and not self.isInterruptionRequested():
                 self._pause_event.clear()
                 self._pause_event.wait(timeout=0.5)
@@ -72,12 +85,22 @@ class ModelToModelWorker(QThread):
             speaker_idx = turn % n
             model_id = self.model_ids[speaker_idx]
             model_key = self.model_keys[speaker_idx]
+            speaker_label = f"Model {model_key.upper()}"
 
-            # Build prompt: prefix + conversation so far
             if history_lines:
-                prompt = prompt_prefix + "\n\n" + "\n\n".join(history_lines)
+                conv = "\n\n".join(history_lines)
+                prompt = (
+                    f"You are {speaker_label}. Reply only with your single message; do not write for other models.\n\n"
+                    f"{topic_line}\n\n"
+                    f"Conversation so far:\n{conv}\n\n"
+                    f"{speaker_label}:"
+                )
             else:
-                prompt = prompt_prefix
+                prompt = (
+                    f"You are {speaker_label}. Reply only with your single message; do not write for other models.\n\n"
+                    f"{topic_line}\n\n"
+                    f"{speaker_label}:"
+                )
 
             self.turn_started.emit(model_key)
 
@@ -94,11 +117,8 @@ class ModelToModelWorker(QThread):
                 self.finished_signal.emit()
                 return
 
-            if text is None:
-                text = ""
-            text = (text or "").strip()
+            text = _trim_single_turn(text or "", model_key)
 
-            # Empty output => treat as error and stop (safety)
             if not text:
                 self.error_signal.emit(f"Model {model_key.upper()} returned empty response.")
                 self.finished_signal.emit()

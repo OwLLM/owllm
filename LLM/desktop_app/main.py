@@ -3579,6 +3579,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """
         When user clicks the window X:
+        0) if any server is running, ask user to confirm closing all servers and processes
         1) trigger server stop
         2) wait for server to actually stop (or timeout)
         3) clean up all threads
@@ -3588,6 +3589,46 @@ class MainWindow(QMainWindow):
         if getattr(self, "_shutdown_in_progress", False):
             event.accept()
             return
+
+        # Check if any LLM server is running; if so, ask user to confirm
+        try:
+            from core.llm_server_manager import get_global_server_manager
+            manager = get_global_server_manager()
+            has_running = False
+            for model_id, (proc, _, _) in list(manager.running_servers.items()):
+                if proc is not None and proc.poll() is None:
+                    has_running = True
+                    break
+            if has_running:
+                reply = QMessageBox.question(
+                    self,
+                    "Close Application",
+                    "Some servers are running. Do you want to close all servers and processes and exit?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    event.ignore()
+                    return
+        except Exception as e:
+            print(f"[DEBUG] Error checking running servers: {e}")
+
+        # Clean up all running LLM server processes immediately so they are not left behind
+        try:
+            from core.llm_server_manager import get_global_server_manager
+            import threading
+            manager = get_global_server_manager()
+            if manager.running_servers:
+                def _shutdown_servers():
+                    try:
+                        manager.shutdown_all()
+                    except Exception as e:
+                        print(f"[DEBUG] Error shutting down LLM servers: {e}")
+                t = threading.Thread(target=_shutdown_servers, daemon=True)
+                t.start()
+                t.join(timeout=5)
+        except Exception as e:
+            print(f"[DEBUG] Error cleaning up server processes: {e}")
 
         print("[DEBUG] closeEvent triggered - shutting down...")
         server_page = getattr(self, "server_page", None)
@@ -5408,11 +5449,17 @@ class MainWindow(QMainWindow):
         gpu_layout.addWidget(QLabel("🎮 GPU VRAM:"))
         self.gpu_vram_label = QLabel(f"{self.user_vram_gb:.0f}GB")
         self.gpu_vram_label.setStyleSheet("background: transparent; border: none; font-weight: bold; color: #667eea;")
+        self.gpu_vram_label.setToolTip("Total VRAM from nvidia-smi. Shows live free when refreshed.")
         gpu_layout.addWidget(self.gpu_vram_label)
         self.gpu_vram_change_btn = QPushButton("Change")
         self.gpu_vram_change_btn.setMaximumWidth(70)
         self.gpu_vram_change_btn.clicked.connect(self._change_gpu_vram)
         gpu_layout.addWidget(self.gpu_vram_change_btn)
+        self.gpu_vram_free_btn = QPushButton("Free VRAM")
+        self.gpu_vram_free_btn.setMaximumWidth(85)
+        self.gpu_vram_free_btn.setToolTip("Stop all running LLM servers immediately to free GPU memory.")
+        self.gpu_vram_free_btn.clicked.connect(self._free_vram_now)
+        gpu_layout.addWidget(self.gpu_vram_free_btn)
         bottom_row.addWidget(gpu_frame)
         
         # Download path config
@@ -5739,7 +5786,14 @@ class MainWindow(QMainWindow):
         
         # Start background worker to refresh stats for all curated + downloaded models
         self._refresh_model_stats_background()
-    
+
+        # Update GPU VRAM label with live usage (total and free)
+        if hasattr(self, "_update_gpu_vram_display"):
+            try:
+                self._update_gpu_vram_display()
+            except Exception:
+                pass
+
     def _refresh_model_stats_background(self):
         """Start background worker to fetch/refresh stats for all visible model cards"""
         # Collect all model IDs from curated and downloaded cards
@@ -7705,6 +7759,7 @@ class MainWindow(QMainWindow):
     def _detect_gpu_vram(self) -> float:
         """
         Detect GPU VRAM from system or load from config override.
+        Uses live nvidia-smi data (get_gpu_memory_usage) for the selected GPU when possible.
         Returns VRAM in GB, defaults to 24GB (RTX 4090) if detection fails.
         """
         # Try to load manual override from config
@@ -7717,8 +7772,31 @@ class MainWindow(QMainWindow):
                         return float(config["vram_gb"])
             except Exception:
                 pass  # Fall through to auto-detection
-        
-        # Auto-detect from system
+
+        # Auto-detect from live VRAM usage (nvidia-smi) for selected GPU
+        try:
+            detector = SystemDetector()
+            usage = detector.get_gpu_memory_usage()
+            if usage:
+                # Use selected GPU index from config, else 0
+                gpu_index = 0
+                if config_path.exists():
+                    try:
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            cfg = json.load(f)
+                            indices = cfg.get("selected_gpu_indices") or cfg.get("gpu_indices")
+                            if indices and len(indices) > 0:
+                                gpu_index = int(indices[0]) if indices[0] is not None else 0
+                    except Exception:
+                        pass
+                if gpu_index < len(usage):
+                    total_mb = usage[gpu_index].get("total_mb", 0)
+                    if total_mb > 0:
+                        return round(total_mb / 1024.0, 1)
+        except Exception:
+            pass
+
+        # Fallback: hardware profile (total from detect_all)
         try:
             detector = SystemDetector()
             hardware_profile = detector.get_hardware_profile()
@@ -7727,10 +7805,94 @@ class MainWindow(QMainWindow):
                 return float(vram_gb)
         except Exception:
             pass  # Fall through to default
-        
+
         # Default to 24GB (RTX 4090) if detection fails
         return 24.0
     
+    def _free_vram_now(self) -> None:
+        """Stop all running LLM servers immediately to free GPU memory."""
+        try:
+            from core.llm_server_manager import get_global_server_manager
+            manager = get_global_server_manager()
+            # Capture any known server PIDs from StateStore first (best-effort)
+            pids_to_kill = set()
+            try:
+                for st in ("RUNNING", "STARTING"):
+                    for row in (manager.state_store.list_servers(status=st) or []):
+                        pid = row.get("pid")
+                        if pid:
+                            try:
+                                pids_to_kill.add(int(pid))
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            # First attempt a clean shutdown for all servers (tracked + untracked)
+            manager.shutdown_all()
+
+            # If anything is still hanging around, force-kill the known server PIDs
+            killed = 0
+            for pid in sorted(pids_to_kill):
+                try:
+                    if os.name == "nt":
+                        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
+                    else:
+                        try:
+                            os.kill(pid, 15)
+                        except Exception:
+                            pass
+                        try:
+                            os.kill(pid, 9)
+                        except Exception:
+                            pass
+                    killed += 1
+                except Exception:
+                    pass
+
+            if killed:
+                self._log_models(f"✓ Stopped servers and force-killed {killed} leftover server process(es). VRAM should free up shortly.")
+            else:
+                self._log_models("✓ All servers stopped. VRAM should free up shortly.")
+
+            QTimer.singleShot(1500, self._update_gpu_vram_display)
+        except Exception as e:
+            self._log_models(f"Failed to free VRAM: {e}")
+            QMessageBox.warning(self, "Free VRAM", f"Could not stop servers: {e}")
+
+    def _update_gpu_vram_display(self) -> None:
+        """Update GPU VRAM label with live usage (total and free) from nvidia-smi for selected GPU."""
+        if not hasattr(self, "gpu_vram_label") or not self.gpu_vram_label:
+            return
+        try:
+            detector = SystemDetector()
+            usage = detector.get_gpu_memory_usage()
+            if not usage:
+                self.gpu_vram_label.setText(f"{self.user_vram_gb:.0f} GB")
+                return
+            gpu_index = 0
+            config_path = self.root / "desktop_app" / "config" / "gpu_config.json"
+            if config_path.exists():
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        cfg = json.load(f)
+                        indices = cfg.get("selected_gpu_indices") or cfg.get("gpu_indices")
+                        if indices and len(indices) > 0 and indices[0] is not None:
+                            gpu_index = int(indices[0])
+                except Exception:
+                    pass
+            if gpu_index >= len(usage):
+                gpu_index = 0
+            u = usage[gpu_index]
+            total_mb = u.get("total_mb", 0)
+            used_mb = u.get("used_mb", 0)
+            free_mb = max(0, total_mb - used_mb)
+            total_gb = total_mb / 1024.0
+            free_gb = free_mb / 1024.0
+            self.gpu_vram_label.setText(f"{total_gb:.0f} GB ({free_gb:.1f} GB free)")
+        except Exception:
+            self.gpu_vram_label.setText(f"{self.user_vram_gb:.0f} GB")
+
     def _set_gpu_vram_override(self, vram_gb: float) -> None:
         """Save manual GPU VRAM override to config file."""
         config_path = self.root / "desktop_app" / "config" / "gpu_config.json"
@@ -9741,176 +9903,344 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_model_to_model_sub_tab(self) -> QWidget:
-        """Build the Model To Model sub-tab: automated conversation between 2 or 3 models."""
+        """Build the Model To Model sub-tab: full clone of Test layout (left chat + right panel), automated turn-taking."""
         from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
-        from PySide6.QtWidgets import QButtonGroup, QRadioButton
 
         w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(12)
+        main_layout = QHBoxLayout(w)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
 
-        # --- Top controls ---
-        # Seed prompt
-        layout.addWidget(QLabel("<b>Topic / initial prompt</b>"))
-        self.m2m_seed_prompt = QTextEdit()
-        self.m2m_seed_prompt.setPlaceholderText("Enter a topic or initial prompt to start the model-to-model conversation...")
-        self.m2m_seed_prompt.setMinimumHeight(70)
-        self.m2m_seed_prompt.setMaximumHeight(100)
-        layout.addWidget(self.m2m_seed_prompt)
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(15)
+        self.m2m_left_layout = left_layout
 
-        # Row: number of models (2 or 3)
-        model_count_row = QHBoxLayout()
-        model_count_row.addWidget(QLabel("Models:"))
-        self.m2m_model_count_2 = QRadioButton("2 models")
+        title_row = QHBoxLayout()
+        m2m_title = QLabel("Model To Model - Side-by-Side Chat")
+        m2m_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
+        title_row.addWidget(m2m_title)
+        title_row.addStretch(1)
+        title_row.addWidget(QLabel("Number of models:"))
+        self.m2m_model_count_2 = QCheckBox("2")
         self.m2m_model_count_2.setChecked(True)
-        self.m2m_model_count_3 = QRadioButton("3 models")
-        self.m2m_model_count_group = QButtonGroup(w)
-        self.m2m_model_count_group.addButton(self.m2m_model_count_2)
-        self.m2m_model_count_group.addButton(self.m2m_model_count_3)
-        model_count_row.addWidget(self.m2m_model_count_2)
-        model_count_row.addWidget(self.m2m_model_count_3)
-        model_count_row.addStretch()
-        layout.addLayout(model_count_row)
-
-        # Row: Model A, B, C dropdowns
-        models_row = QHBoxLayout()
-        models_row.addWidget(QLabel("Model A:"))
-        self.m2m_model_a = QComboBox()
-        self.m2m_model_a.setMinimumWidth(220)
-        models_row.addWidget(self.m2m_model_a, 1)
-        models_row.addWidget(QLabel("Model B:"))
-        self.m2m_model_b = QComboBox()
-        self.m2m_model_b.setMinimumWidth(220)
-        models_row.addWidget(self.m2m_model_b, 1)
-        self.m2m_model_c_label = QLabel("Model C:")
-        models_row.addWidget(self.m2m_model_c_label)
-        self.m2m_model_c = QComboBox()
-        self.m2m_model_c.setMinimumWidth(220)
-        models_row.addWidget(self.m2m_model_c, 1)
-        self.m2m_model_c.setVisible(False)
-        self.m2m_model_c_label.setVisible(False)
-        layout.addLayout(models_row)
-
-        # Row: Max turns, Temperature, Max tokens, buttons
-        params_row = QHBoxLayout()
-        params_row.addWidget(QLabel("Max turns:"))
+        self.m2m_model_count_2.setTristate(False)
+        self.m2m_model_count_2.toggled.connect(self._on_m2m_model_count_2_toggled)
+        title_row.addWidget(self.m2m_model_count_2)
+        self.m2m_model_count_3 = QCheckBox("3")
+        self.m2m_model_count_3.setChecked(False)
+        self.m2m_model_count_3.setTristate(False)
+        self.m2m_model_count_3.toggled.connect(self._on_m2m_model_count_3_toggled)
+        title_row.addWidget(self.m2m_model_count_3)
+        title_row.addSpacing(20)
+        title_row.addWidget(QLabel("Max turns:"))
         self.m2m_max_turns = QSpinBox()
         self.m2m_max_turns.setRange(1, 200)
         self.m2m_max_turns.setValue(20)
-        self.m2m_max_turns.setMinimumWidth(70)
-        params_row.addWidget(self.m2m_max_turns)
-        params_row.addWidget(QLabel("Temperature:"))
+        self.m2m_max_turns.setMinimumWidth(60)
+        title_row.addWidget(self.m2m_max_turns)
+        title_row.addWidget(QLabel("Temp:"))
         self.m2m_temperature = QDoubleSpinBox()
         self.m2m_temperature.setRange(0.0, 2.0)
         self.m2m_temperature.setSingleStep(0.1)
         self.m2m_temperature.setValue(0.7)
-        self.m2m_temperature.setMinimumWidth(70)
-        params_row.addWidget(self.m2m_temperature)
-        params_row.addWidget(QLabel("Max new tokens:"))
+        self.m2m_temperature.setMinimumWidth(60)
+        title_row.addWidget(self.m2m_temperature)
+        title_row.addWidget(QLabel("Max tokens:"))
         self.m2m_max_new_tokens = QSpinBox()
-        self.m2m_max_new_tokens.setRange(32, 8192)
-        self.m2m_max_new_tokens.setValue(512)
-        self.m2m_max_new_tokens.setMinimumWidth(80)
-        params_row.addWidget(self.m2m_max_new_tokens)
-        params_row.addStretch()
+        self.m2m_max_new_tokens.setRange(32, 10000)
+        self.m2m_max_new_tokens.setValue(10000)
+        self.m2m_max_new_tokens.setMinimumWidth(70)
+        title_row.addWidget(self.m2m_max_new_tokens)
+        left_layout.addLayout(title_row)
+
+        m2m_info = QLabel("Models take turns replying to each other. Enter a topic below and click Start.")
+        m2m_info.setStyleSheet("color: #888; padding: 5px; font-size: 9pt;")
+        m2m_info.setWordWrap(True)
+        left_layout.addWidget(m2m_info)
+
+        headers_layout = QHBoxLayout()
+        headers_layout.setContentsMargins(0, 0, 0, 0)
+        headers_layout.setSpacing(6)
+        colors = self._get_theme_colors()
+
+        m2m_a_header_widget = QWidget()
+        m2m_a_header_widget.setContentsMargins(0, 0, 0, 0)
+        m2m_a_header_layout = QVBoxLayout(m2m_a_header_widget)
+        m2m_a_header_layout.setContentsMargins(0, 0, 0, 0)
+        m2m_a_header_layout.setSpacing(6)
+        self.m2m_model_a_header = QLabel("🔵 <b>Model A</b> <span style='font-size:16pt;color:#000000;'>(Port: -)</span>")
+        self.m2m_model_a_header.setObjectName("m2mModelAHeader")
+        self.m2m_model_a_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        if hasattr(self, "themed_widgets") and "labels" in self.themed_widgets:
+            self.themed_widgets["labels"].append(self.m2m_model_a_header)
+        m2m_a_header_layout.addWidget(self.m2m_model_a_header)
+        self.m2m_model_a = QComboBox()
+        self.m2m_model_a.setEditable(True)
+        self.m2m_model_a.currentTextChanged.connect(self._update_m2m_model_header_ports)
+        m2m_a_header_layout.addWidget(self.m2m_model_a)
+        headers_layout.addWidget(m2m_a_header_widget, 1)
+
+        m2m_b_header_widget = QWidget()
+        m2m_b_header_widget.setContentsMargins(0, 0, 0, 0)
+        m2m_b_header_layout = QVBoxLayout(m2m_b_header_widget)
+        m2m_b_header_layout.setContentsMargins(0, 0, 0, 0)
+        m2m_b_header_layout.setSpacing(6)
+        self.m2m_model_b_header = QLabel("🟢 <b>Model B</b> <span style='font-size:16pt;color:#000000;'>(Port: -)</span>")
+        self.m2m_model_b_header.setObjectName("m2mModelBHeader")
+        self.m2m_model_b_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        if hasattr(self, "themed_widgets") and "labels" in self.themed_widgets:
+            self.themed_widgets["labels"].append(self.m2m_model_b_header)
+        m2m_b_header_layout.addWidget(self.m2m_model_b_header)
+        self.m2m_model_b = QComboBox()
+        self.m2m_model_b.setEditable(True)
+        self.m2m_model_b.currentTextChanged.connect(self._update_m2m_model_header_ports)
+        m2m_b_header_layout.addWidget(self.m2m_model_b)
+        headers_layout.addWidget(m2m_b_header_widget, 1)
+
+        m2m_c_header_widget = QWidget()
+        m2m_c_header_widget.setContentsMargins(0, 0, 0, 0)
+        m2m_c_header_layout = QVBoxLayout(m2m_c_header_widget)
+        m2m_c_header_layout.setContentsMargins(0, 0, 0, 0)
+        m2m_c_header_layout.setSpacing(6)
+        self.m2m_model_c_header = QLabel("🟣 <b>Model C</b> <span style='font-size:16pt;color:#000000;'>(Port: -)</span>")
+        self.m2m_model_c_header.setObjectName("m2mModelCHeader")
+        self.m2m_model_c_header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+        if hasattr(self, "themed_widgets") and "labels" in self.themed_widgets:
+            self.themed_widgets["labels"].append(self.m2m_model_c_header)
+        m2m_c_header_layout.addWidget(self.m2m_model_c_header)
+        self.m2m_model_c = QComboBox()
+        self.m2m_model_c.setEditable(True)
+        self.m2m_model_c.currentTextChanged.connect(self._update_m2m_model_header_ports)
+        m2m_c_header_layout.addWidget(self.m2m_model_c)
+        headers_layout.addWidget(m2m_c_header_widget, 1)
+        m2m_c_header_widget.setVisible(False)
+        self.m2m_model_c_header_widget = m2m_c_header_widget
+
+        left_layout.addLayout(headers_layout)
+
+        self.m2m_chat_display = SynchronizedChatDisplay(num_models=2)
+        self.m2m_chat_display.set_theme(getattr(self, "dark_mode", True))
+        left_layout.addWidget(self.m2m_chat_display, 1)
+
+        prompt_layout = QVBoxLayout()
+        prompt_layout.addWidget(QLabel("<b>💬 Topic / initial prompt:</b>"))
+        input_row = QHBoxLayout()
+        self.m2m_prompt = QTextEdit()
+        self.m2m_prompt.setPlaceholderText("Enter a topic or initial prompt to start the model-to-model conversation...")
+        self.m2m_prompt.setMinimumHeight(90)
+        self.m2m_prompt.setMaximumHeight(90)
+        input_row.addWidget(self.m2m_prompt, 1)
+        btn_column = QVBoxLayout()
+        btn_column.setSpacing(8)
         self.m2m_start_btn = QPushButton("▶ Start")
         self.m2m_start_btn.clicked.connect(self._start_m2m_conversation)
-        params_row.addWidget(self.m2m_start_btn)
+        self.m2m_start_btn.setMinimumHeight(40)
+        self.m2m_start_btn.setStyleSheet("QPushButton { font-size: 12pt; font-weight: bold; }")
+        btn_column.addWidget(self.m2m_start_btn)
         self.m2m_stop_resume_btn = QPushButton("⏹ Stop")
-        self.m2m_stop_resume_btn.setCheckable(True)  # unchecked = running (show Stop), checked = paused (show Resume)
+        self.m2m_stop_resume_btn.setCheckable(True)
         self.m2m_stop_resume_btn.clicked.connect(self._m2m_stop_resume)
         self.m2m_stop_resume_btn.setEnabled(False)
-        params_row.addWidget(self.m2m_stop_resume_btn)
+        self.m2m_stop_resume_btn.setMinimumHeight(40)
+        btn_column.addWidget(self.m2m_stop_resume_btn)
         self.m2m_clear_btn = QPushButton("🗑️ Clear")
         self.m2m_clear_btn.clicked.connect(self._clear_m2m_chat)
-        params_row.addWidget(self.m2m_clear_btn)
-        layout.addLayout(params_row)
+        self.m2m_clear_btn.setMinimumHeight(40)
+        btn_column.addWidget(self.m2m_clear_btn)
+        input_row.addLayout(btn_column)
+        prompt_layout.addLayout(input_row)
+        left_layout.addLayout(prompt_layout)
 
-        # Toggle Model C visibility when 2/3 models changes (display always has 3 columns; we use only A/B when 2 models)
-        def _on_m2m_model_count_changed():
-            use_three = self.m2m_model_count_3.isChecked()
-            self.m2m_model_c.setVisible(use_three)
-            self.m2m_model_c_label.setVisible(use_three)
-        self.m2m_model_count_2.toggled.connect(lambda checked: _on_m2m_model_count_changed() if checked else None)
-        self.m2m_model_count_3.toggled.connect(lambda checked: _on_m2m_model_count_changed() if checked else None)
+        right_widget = QWidget()
+        right_widget.setMinimumWidth(360)
+        right_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
 
-        # --- Conversation display (3 columns; when 2 models only A and B are used) ---
-        self.m2m_chat_display = SynchronizedChatDisplay(num_models=3)
-        self.m2m_chat_display.set_theme(getattr(self, 'dark_mode', True))
-        layout.addWidget(self.m2m_chat_display, 1)
+        model_selector_layout = QHBoxLayout()
+        model_selector_layout.setSpacing(5)
+        self.m2m_model_a_btn = QPushButton("🔵 A")
+        self.m2m_model_a_btn.setCheckable(True)
+        self.m2m_model_a_btn.setChecked(True)
+        self.m2m_model_a_btn.clicked.connect(lambda: self._m2m_switch_model_settings(0))
+        self.m2m_model_b_btn = QPushButton("🟢 B")
+        self.m2m_model_b_btn.setCheckable(True)
+        self.m2m_model_b_btn.clicked.connect(lambda: self._m2m_switch_model_settings(1))
+        self.m2m_model_c_btn = QPushButton("🟣 C")
+        self.m2m_model_c_btn.setCheckable(True)
+        self.m2m_model_c_btn.clicked.connect(lambda: self._m2m_switch_model_settings(2))
+        self.m2m_model_c_btn.setVisible(False)
+        model_selector_layout.addWidget(self.m2m_model_a_btn)
+        model_selector_layout.addWidget(self.m2m_model_b_btn)
+        model_selector_layout.addWidget(self.m2m_model_c_btn)
+        right_layout.addLayout(model_selector_layout)
 
-        # Worker reference and paused state
+        self.m2m_model_settings_stack = QStackedWidget()
+        for _ in ("A", "B", "C"):
+            page = QWidget()
+            pl = QVBoxLayout(page)
+            pl.addWidget(QLabel("Shared parameters are in the title row (Max turns, Temp, Max tokens)."))
+            self.m2m_model_settings_stack.addWidget(page)
+        right_layout.addWidget(self.m2m_model_settings_stack, 0)
+
+        log_title = QLabel("Logs")
+        log_title.setStyleSheet("color: white; font-weight: bold; font-size: 11pt;")
+        right_layout.addWidget(log_title)
+        self.m2m_chat_log_display = QTextEdit()
+        self.m2m_chat_log_display.setReadOnly(True)
+        self.m2m_chat_log_display.setMinimumHeight(180)
+        self.m2m_chat_log_display.setStyleSheet("""
+            QTextEdit {
+                background: rgba(20, 20, 30, 0.8);
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 8px;
+                color: #cccccc;
+                padding: 10px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 9pt;
+            }
+        """)
+        right_layout.addWidget(self.m2m_chat_log_display, 1)
+
+        main_layout.addWidget(left_widget, 1)
+        main_layout.addWidget(right_widget, 0)
+
         self.m2m_worker = None
         self.m2m_paused = False
 
         QTimer.singleShot(100, self._load_m2m_models)
         return w
 
-    def _load_m2m_models(self):
-        """Populate Model To Model dropdowns with READY models + adapters (same source as Test tab)."""
-        if not hasattr(self, 'm2m_model_a') or not self.m2m_model_a:
+    def _m2m_switch_model_settings(self, index: int):
+        if index == 0:
+            self.m2m_model_a_btn.setChecked(True)
+            self.m2m_model_b_btn.setChecked(False)
+            self.m2m_model_c_btn.setChecked(False)
+            self.m2m_model_settings_stack.setCurrentIndex(0)
+        elif index == 1:
+            self.m2m_model_a_btn.setChecked(False)
+            self.m2m_model_b_btn.setChecked(True)
+            self.m2m_model_c_btn.setChecked(False)
+            self.m2m_model_settings_stack.setCurrentIndex(1)
+        else:
+            self.m2m_model_a_btn.setChecked(False)
+            self.m2m_model_b_btn.setChecked(False)
+            self.m2m_model_c_btn.setChecked(True)
+            self.m2m_model_settings_stack.setCurrentIndex(2)
+
+    def _on_m2m_model_count_2_toggled(self, checked: bool) -> None:
+        if checked:
+            self.m2m_model_count_3.blockSignals(True)
+            self.m2m_model_count_3.setChecked(False)
+            self.m2m_model_count_3.blockSignals(False)
+            self._on_m2m_model_count_changed("2")
+        else:
+            if not self.m2m_model_count_3.isChecked():
+                self.m2m_model_count_3.blockSignals(True)
+                self.m2m_model_count_3.setChecked(True)
+                self.m2m_model_count_3.blockSignals(False)
+                self._on_m2m_model_count_changed("3")
+
+    def _on_m2m_model_count_3_toggled(self, checked: bool) -> None:
+        if checked:
+            self.m2m_model_count_2.blockSignals(True)
+            self.m2m_model_count_2.setChecked(False)
+            self.m2m_model_count_2.blockSignals(False)
+            self._on_m2m_model_count_changed("3")
+        else:
+            if not self.m2m_model_count_2.isChecked():
+                self.m2m_model_count_2.blockSignals(True)
+                self.m2m_model_count_2.setChecked(True)
+                self.m2m_model_count_2.blockSignals(False)
+                self._on_m2m_model_count_changed("2")
+
+    def _on_m2m_model_count_changed(self, count_str: str) -> None:
+        count = int(count_str)
+        if count == 3:
+            self.m2m_model_c_header_widget.setVisible(True)
+            self.m2m_model_c_btn.setVisible(True)
+            self.m2m_model_a_btn.setText("🔵 A")
+            self.m2m_model_b_btn.setText("🟢 B")
+            self.m2m_model_c_btn.setText("🟣 C")
+            from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
+            old_display = self.m2m_chat_display
+            if hasattr(self, "m2m_left_layout"):
+                index = self.m2m_left_layout.indexOf(old_display)
+                self.m2m_left_layout.removeWidget(old_display)
+                old_display.setParent(None)
+                old_display.deleteLater()
+                self.m2m_chat_display = SynchronizedChatDisplay(num_models=3)
+                self.m2m_chat_display.set_theme(self.dark_mode)
+                if index >= 0:
+                    self.m2m_left_layout.insertWidget(index, self.m2m_chat_display, 1)
+                else:
+                    self.m2m_left_layout.addWidget(self.m2m_chat_display, 1)
+        else:
+            self.m2m_model_c_header_widget.setVisible(False)
+            if self.m2m_model_c_btn.isChecked():
+                self._m2m_switch_model_settings(0)
+            self.m2m_model_c_btn.setVisible(False)
+            self.m2m_model_a_btn.setText("🔵 Model A")
+            self.m2m_model_b_btn.setText("🟢 Model B")
+            from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
+            old_display = self.m2m_chat_display
+            if hasattr(self, "m2m_left_layout"):
+                index = self.m2m_left_layout.indexOf(old_display)
+                self.m2m_left_layout.removeWidget(old_display)
+                old_display.setParent(None)
+                old_display.deleteLater()
+                self.m2m_chat_display = SynchronizedChatDisplay(num_models=2)
+                self.m2m_chat_display.set_theme(self.dark_mode)
+                if index >= 0:
+                    self.m2m_left_layout.insertWidget(index, self.m2m_chat_display, 1)
+                else:
+                    self.m2m_left_layout.addWidget(self.m2m_chat_display, 1)
+
+    def _update_m2m_model_header_ports(self) -> None:
+        if not hasattr(self, "m2m_model_a_header"):
             return
-        try:
-            from core.model_onboarding import get_onboarding_service
-            onboarding = get_onboarding_service()
-            ready_models = onboarding.list_ready_models()
-            ready_paths = {}
-            for entry in ready_models:
-                base_path = entry.get("base_model_path")
-                if base_path:
-                    try:
-                        ready_paths[str(Path(base_path).resolve())] = entry["model_id"]
-                    except Exception:
-                        ready_paths[str(base_path)] = entry["model_id"]
-            models_dir = self.root / "models"
-            downloaded_models = []
-            if models_dir.exists():
-                for model_dir in sorted(models_dir.iterdir()):
-                    if model_dir.is_dir():
-                        has_config = (model_dir / "config.json").exists()
-                        has_weights = any(
-                            (model_dir / f).exists()
-                            for f in ["model.safetensors", "pytorch_model.bin", "model.safetensors.index.json", "adapter_model.safetensors", "adapter_model.bin"]
-                        )
-                        if has_config and (has_weights or len(list(model_dir.glob("*.safetensors"))) > 0 or len(list(model_dir.glob("*.bin"))) > 0):
-                            downloaded_models.append(model_dir.name)
-            adapter_dir = self.root / "fine_tuned"
-            def _fill_combo(combo):
-                current = combo.currentText()
-                combo.clear()
-                if downloaded_models:
-                    for model_name in downloaded_models:
-                        model_path = models_dir / model_name
-                        model_path_str = str(model_path.resolve())
-                        if model_path_str in ready_paths:
-                            display_name = model_name.replace("__", "/")
-                            combo.addItem(f"✓ 📦 {display_name}", str(model_path))
-                if adapter_dir.exists():
-                    for d in sorted(adapter_dir.iterdir()):
-                        if not d.is_dir():
-                            continue
-                        has_weights = any([
-                            (d / "adapter_model.safetensors").exists(),
-                            (d / "adapter_model.bin").exists(),
-                            (d / "pytorch_model.bin").exists(),
-                            (d / "model.safetensors").exists()
-                        ])
-                        if has_weights:
-                            combo.addItem(f"🎯 {d.name} (adapter)", str(d))
-                if combo.count() == 0:
-                    combo.addItem("(No models available - download from Models tab)")
-                if current:
-                    idx = combo.findText(current)
-                    if idx >= 0:
-                        combo.setCurrentIndex(idx)
-            _fill_combo(self.m2m_model_a)
-            _fill_combo(self.m2m_model_b)
-            _fill_combo(self.m2m_model_c)
-        except Exception as e:
-            if hasattr(self, 'm2m_model_a'):
-                self.m2m_model_a.clear()
-                self.m2m_model_a.addItem(f"(Error: {e})")
+        colors = self._get_theme_colors()
+
+        def get_port(combo, text):
+            if not text or text.startswith("(No models"):
+                return "-"
+            try:
+                idx = combo.currentIndex()
+                if idx < 0:
+                    return "-"
+                path = combo.itemData(idx)
+                if not path:
+                    return "-"
+                model_id = self._resolve_model_id_from_path(path)
+                if not model_id:
+                    return "-"
+                import yaml
+                config_path = self.root / "configs" / "llm_backends.yaml"
+                if config_path.exists():
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = yaml.safe_load(f) or {}
+                        if model_id in config.get("models", {}):
+                            return config["models"][model_id].get("port", "-")
+                return "-"
+            except Exception:
+                return "-"
+
+        for header, combo, label in [
+            (self.m2m_model_a_header, self.m2m_model_a, "Model A"),
+            (self.m2m_model_b_header, self.m2m_model_b, "Model B"),
+            (self.m2m_model_c_header, self.m2m_model_c, "Model C"),
+        ]:
+            text = combo.currentText().strip()
+            port = get_port(combo, text)
+            header.setText(f"{'🔵' if 'A' in label else '🟢' if 'B' in label else '🟣'} <b>{label}</b> <span style='font-size:16pt;color:#000000;'>(Port: {port})</span>")
+            header.setStyleSheet(f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;")
+
+    def _load_m2m_models(self):
+        """Thin wrapper: reuse _refresh_locals so M2M dropdowns are filled without a duplicate filesystem scan."""
+        self._refresh_locals()
 
     def _clear_m2m_chat(self):
         """Clear Model To Model conversation display."""
@@ -9919,7 +10249,7 @@ class MainWindow(QMainWindow):
 
     def _start_m2m_conversation(self):
         """Start the model-to-model conversation (worker started here; wiring in display todo)."""
-        seed = (self.m2m_seed_prompt.toPlainText() or "").strip()
+        seed = (self.m2m_prompt.toPlainText() or "").strip()
         if not seed:
             QMessageBox.warning(self, "Model To Model", "Please enter a topic or initial prompt.")
             return
@@ -16285,18 +16615,49 @@ respective package directories or official repositories.
 
             self.test_gpu_select.blockSignals(False)
     
+    def _fill_model_combo(self, combo, downloaded_models, models_dir, ready_paths, adapter_dir):
+        """Populate a model combo from downloaded_models + adapters (READY only). Reuses data from _refresh_locals to avoid duplicate filesystem scan."""
+        current = combo.currentText()
+        combo.clear()
+        if downloaded_models:
+            for model_name in downloaded_models:
+                model_path = models_dir / model_name
+                model_path_str = str(model_path.resolve())
+                if model_path_str in ready_paths:
+                    display_name = model_name.replace("__", "/")
+                    combo.addItem(f"✓ 📦 {display_name}", str(model_path))
+        if adapter_dir.exists():
+            trained_adapters = []
+            for d in adapter_dir.iterdir():
+                if not d.is_dir():
+                    continue
+                has_weights = any([
+                    (d / "adapter_model.safetensors").exists(),
+                    (d / "adapter_model.bin").exists(),
+                    (d / "pytorch_model.bin").exists(),
+                    (d / "model.safetensors").exists()
+                ])
+                if has_weights:
+                    trained_adapters.append(d)
+            for adapter_path in sorted(trained_adapters):
+                combo.addItem(f"🎯 {adapter_path.name} (adapter)", str(adapter_path))
+        if combo.count() == 0:
+            combo.addItem("(No models available - download from Models tab)")
+        if current and current != "None":
+            idx = combo.findText(current)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
     def _refresh_locals(self) -> None:
         # Refresh downloaded models display
         self._refresh_models()
         
-        # Get downloaded models from the models directory (where downloads actually go)
         models_dir = self.root / "models"
         downloaded_models = []
         
         if models_dir.exists():
             for model_dir in sorted(models_dir.iterdir()):
                 if model_dir.is_dir():
-                    # Check if it has config.json AND actual model weights
                     has_config = (model_dir / "config.json").exists()
                     has_weights = any(
                         (model_dir / f).exists() 
@@ -16305,193 +16666,47 @@ respective package directories or official repositories.
                     if has_config and (has_weights or len(list(model_dir.glob("*.safetensors"))) > 0 or len(list(model_dir.glob("*.bin"))) > 0):
                         downloaded_models.append(model_dir.name)
         
-        # Update Train tab: Select Base Model dropdown with downloaded models
-        # Check if train tab widgets exist (lazy-loaded)
         if hasattr(self, 'train_base_model'):
             current_train = self.train_base_model.currentText()
             self.train_base_model.clear()
-            
             if downloaded_models:
                 for model_name in downloaded_models:
                     self.train_base_model.addItem(model_name)
             else:
                 self.train_base_model.addItem("(No models downloaded yet)")
-            
             if current_train:
                 idx = self.train_base_model.findText(current_train)
                 if idx >= 0:
                     self.train_base_model.setCurrentIndex(idx)
         
-        # Update Test tab Model A dropdown with downloaded models + trained adapters
-        # Check if test sub-tab has been created (lazy-loaded)
         if not hasattr(self, 'test_model_a') or not hasattr(self, 'test_model_b'):
-            return  # Test sub-tab not loaded yet, skip refresh
+            return
         
-        current_a = self.test_model_a.currentText()
-        self.test_model_a.clear()
-        
-        # Add base models from models folder - only READY models
         from core.model_onboarding import get_onboarding_service
         onboarding = get_onboarding_service()
         ready_models = onboarding.list_ready_models()
-        
-        # Build mapping of normalized base_model_path -> model_id
         ready_paths = {}
         for entry in ready_models:
             base_path = entry.get("base_model_path")
             if base_path:
-                # Normalize path for comparison (resolve to absolute, handle case/separators)
                 try:
-                    normalized = str(Path(base_path).resolve())
-                    ready_paths[normalized] = entry["model_id"]
+                    ready_paths[str(Path(base_path).resolve())] = entry["model_id"]
                 except Exception:
-                    # Fallback to original if resolve fails
                     ready_paths[str(base_path)] = entry["model_id"]
         
-        if downloaded_models:
-            for model_name in downloaded_models:
-                model_path = models_dir / model_name
-                # Normalize path for comparison
-                model_path_str = str(model_path.resolve())
-                # Only add if READY
-                if model_path_str in ready_paths:
-                    # Convert directory name to HuggingFace format (org__model -> org/model)
-                    display_name = model_name.replace("__", "/")
-                    self.test_model_a.addItem(f"✓ 📦 {display_name}", str(model_path))
-        
-        # Add trained adapters (only if they have actual model weights)
         adapter_dir = self.root / "fine_tuned"
-        if adapter_dir.exists():
-            # Check for COMPLETE adapters (with model weights, not just config)
-            trained_adapters = []
-            for d in adapter_dir.iterdir():
-                if not d.is_dir():
-                    continue
-                # Check for actual model weight files
-                has_weights = any([
-                    (d / "adapter_model.safetensors").exists(),
-                    (d / "adapter_model.bin").exists(),
-                    (d / "pytorch_model.bin").exists(),
-                    (d / "model.safetensors").exists()
-                ])
-                if has_weights:
-                    trained_adapters.append(d)
-            
-            if trained_adapters:
-                for adapter_path in sorted(trained_adapters):
-                    adapter_name = adapter_path.name
-                    self.test_model_a.addItem(f"🎯 {adapter_name} (adapter)", str(adapter_path))
-        
-        # Show message if no models available at all
-        total_models_a = self.test_model_a.count()
-        if total_models_a == 0:
-            self.test_model_a.addItem("(No models available - download from Models tab)")
-        
-        if current_a and current_a != "None":
-            idx = self.test_model_a.findText(current_a)
-            if idx >= 0:
-                self.test_model_a.setCurrentIndex(idx)
-        
-        # Update Model B dropdown
-        current_b = self.test_model_b.currentText()
-        self.test_model_b.clear()
-        
-        # Add base models from models folder - only READY models
-        if downloaded_models:
-            for model_name in downloaded_models:
-                model_path = models_dir / model_name
-                model_path_str = str(model_path)
-                # Only add if READY
-                if model_path_str in ready_paths:
-                    # Convert directory name to HuggingFace format (org__model -> org/model)
-                    display_name = model_name.replace("__", "/")
-                    self.test_model_b.addItem(f"✓ 📦 {display_name}", str(model_path))
-        
-        # Add trained adapters (only if they have actual model weights)
-        if adapter_dir.exists():
-            # Check for COMPLETE adapters (with model weights, not just config)
-            trained_adapters = []
-            for d in adapter_dir.iterdir():
-                if not d.is_dir():
-                    continue
-                # Check for actual model weight files
-                has_weights = any([
-                    (d / "adapter_model.safetensors").exists(),
-                    (d / "adapter_model.bin").exists(),
-                    (d / "pytorch_model.bin").exists(),
-                    (d / "model.safetensors").exists()
-                ])
-                if has_weights:
-                    trained_adapters.append(d)
-            
-            if trained_adapters:
-                for adapter_path in sorted(trained_adapters):
-                    adapter_name = adapter_path.name
-                    self.test_model_b.addItem(f"🎯 {adapter_name} (adapter)", str(adapter_path))
-        
-        # Show message if no models available at all
-        total_models_b = self.test_model_b.count()
-        if total_models_b == 0:
-            self.test_model_b.addItem("(No models available - download from Models tab)")
-        
-        if current_b and current_b != "None":
-            idx = self.test_model_b.findText(current_b)
-            if idx >= 0:
-                self.test_model_b.setCurrentIndex(idx)
-        
-        # Update Model C dropdown (if it exists)
+        self._fill_model_combo(self.test_model_a, downloaded_models, models_dir, ready_paths, adapter_dir)
+        self._fill_model_combo(self.test_model_b, downloaded_models, models_dir, ready_paths, adapter_dir)
         if hasattr(self, 'test_model_c'):
-            current_c = self.test_model_c.currentText()
-            self.test_model_c.clear()
-            
-            # Add base models from models folder - only READY models
-            if downloaded_models:
-                for model_name in downloaded_models:
-                    model_path = models_dir / model_name
-                    model_path_str = str(model_path)
-                    # Only add if READY
-                    if model_path_str in ready_paths:
-                        # Convert directory name to HuggingFace format (org__model -> org/model)
-                        display_name = model_name.replace("__", "/")
-                        self.test_model_c.addItem(f"✓ 📦 {display_name}", str(model_path))
-            
-            # Add trained adapters (only if they have actual model weights)
-            if adapter_dir.exists():
-                # Check for COMPLETE adapters (with model weights, not just config)
-                trained_adapters = []
-                for d in adapter_dir.iterdir():
-                    if not d.is_dir():
-                        continue
-                    # Check for actual model weight files
-                    has_weights = any([
-                        (d / "adapter_model.safetensors").exists(),
-                        (d / "adapter_model.bin").exists(),
-                        (d / "pytorch_model.bin").exists(),
-                        (d / "model.safetensors").exists()
-                    ])
-                    if has_weights:
-                        trained_adapters.append(d)
-                
-                if trained_adapters:
-                    for adapter_path in sorted(trained_adapters):
-                        adapter_name = adapter_path.name
-                        self.test_model_c.addItem(f"🎯 {adapter_name} (adapter)", str(adapter_path))
-            
-            # Show message if no models available at all
-            total_models_c = self.test_model_c.count()
-            if total_models_c == 0:
-                self.test_model_c.addItem("(No models available - download from Models tab)")
-            
-            if current_c and current_c != "None":
-                idx = self.test_model_c.findText(current_c)
-                if idx >= 0:
-                    self.test_model_c.setCurrentIndex(idx)
+            self._fill_model_combo(self.test_model_c, downloaded_models, models_dir, ready_paths, adapter_dir)
         
-        # Update Model To Model dropdowns (same source as Test tab)
         if hasattr(self, 'm2m_model_a') and self.m2m_model_a is not None:
-            self._load_m2m_models()
+            self._fill_model_combo(self.m2m_model_a, downloaded_models, models_dir, ready_paths, adapter_dir)
+            self._fill_model_combo(self.m2m_model_b, downloaded_models, models_dir, ready_paths, adapter_dir)
+            self._fill_model_combo(self.m2m_model_c, downloaded_models, models_dir, ready_paths, adapter_dir)
+            if hasattr(self, '_update_m2m_model_header_ports'):
+                self._update_m2m_model_header_ports()
         
-        # Update port displays after refreshing models
         if hasattr(self, '_update_model_header_ports'):
             self._update_model_header_ports()
 

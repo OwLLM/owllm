@@ -378,6 +378,34 @@ class LLMServerManager:
                 log_callback(msg)
             logger.info(msg)
 
+        # Check current VRAM usage before starting (warn if free is very low)
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                **self.subprocess_flags,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                lines = [x.strip() for x in r.stdout.strip().split("\n") if x.strip()]
+                # Use first GPU (or index from CUDA_VISIBLE_DEVICES if single)
+                if lines:
+                    parts = lines[0].split(",")
+                    if len(parts) >= 2:
+                        used_mb = float(parts[0].strip())
+                        total_mb = float(parts[1].strip())
+                        free_mb = total_mb - used_mb
+                        free_gb = free_mb / 1024.0
+                        if free_gb < 2.0 and total_mb > 0:
+                            log(
+                                f"[VRAM] Low free GPU memory: {free_gb:.1f} GB free "
+                                f"({used_mb:.0f} MB used / {total_mb:.0f} MB total). "
+                                "Loading the model may fail or be very slow."
+                            )
+        except Exception as e:
+            logger.debug("Could not check VRAM usage: %s", e)
+
         model_cfg = self.config["models"][model_id]
         base_model = model_cfg["base_model"]
         
@@ -1749,13 +1777,24 @@ class LLMServerManager:
     
     def shutdown_all(self):
         """Shutdown all running servers"""
-        if not self.running_servers:
+        # NOTE: servers can be running but not tracked in running_servers (reused via /health).
+        # Always consult StateStore as well so we can stop orphan/untracked processes.
+        model_ids: set[str] = set(self.running_servers.keys())
+        try:
+            for st in ("RUNNING", "STARTING"):
+                for row in (self.state_store.list_servers(status=st) or []):
+                    mid = row.get("model_id")
+                    if mid:
+                        model_ids.add(str(mid))
+        except Exception:
+            pass
+
+        if not model_ids:
             logger.info("No servers to shutdown")
             return
-        
-        logger.info(f"Shutting down all {len(self.running_servers)} running servers")
-        model_ids = list(self.running_servers.keys())
-        for model_id in model_ids:
+
+        logger.info(f"Shutting down all {len(model_ids)} server(s)")
+        for model_id in sorted(model_ids):
             try:
                 self.shutdown_server(model_id)
             except Exception as e:

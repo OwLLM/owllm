@@ -18,7 +18,7 @@ class InferenceConfig:
     model_id: str = "default"  # Required for server-based inference
     base_model: Optional[str] = None
     adapter_dir: Optional[Path] = None
-    max_new_tokens: int = 256
+    max_new_tokens: int = 10000
     temperature: float = 0.7
 
 

@@ -63,7 +63,7 @@ _gptq_backend: str = "auto-gptq"
 
 class GenerateRequest(BaseModel):
     prompt: str
-    max_new_tokens: int = 256
+    max_new_tokens: int = 10000
     temperature: float = 0.7
 
 
@@ -94,7 +94,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = "local-llm"
     messages: List[ChatMessage]
     temperature: float = 0.7
-    max_tokens: int = 256
+    max_tokens: int = 10000
     stream: bool = False
     stop: Optional[Union[str, List[str]]] = None
 

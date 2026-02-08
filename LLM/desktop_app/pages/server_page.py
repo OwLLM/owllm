@@ -13,7 +13,7 @@ from PySide6.QtCore import QThread, Signal, Qt, QUrl, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QCheckBox, QTextEdit, QFileDialog, QGroupBox, QFrame, QMessageBox, QApplication,
-    QGridLayout, QRadioButton, QComboBox
+    QGridLayout, QRadioButton, QComboBox, QListWidget, QListWidgetItem
 )
 from PySide6.QtGui import QDesktopServices, QClipboard
 
@@ -519,9 +519,25 @@ class ServerPage(QWidget):
         # Status timer
         self.llm_status_timer = QTimer()
         self.llm_status_timer.timeout.connect(self._update_llm_server_status)
+        self.llm_status_timer.timeout.connect(self._refresh_active_servers)
         self.llm_status_timer.start(2000)
 
         right_layout.addWidget(llm_server_group)
+
+        # Active inference servers (from StateStore + /health; includes servers started from Test Chat)
+        active_servers_group = QGroupBox("Active inference servers")
+        active_servers_layout = QVBoxLayout(active_servers_group)
+        active_servers_layout.setSpacing(6)
+        self.active_servers_list = QListWidget()
+        self.active_servers_list.setMinimumHeight(100)
+        self.active_servers_list.setMaximumHeight(180)
+        self.active_servers_list.setToolTip("Servers currently running (from this page or Test Chat). Select one to switch model/API.")
+        self.active_servers_list.itemSelectionChanged.connect(self._on_active_server_selected)
+        active_servers_layout.addWidget(self.active_servers_list)
+        active_refresh_btn = QPushButton("Refresh")
+        active_refresh_btn.clicked.connect(self._refresh_active_servers)
+        active_servers_layout.addWidget(active_refresh_btn)
+        right_layout.addWidget(active_servers_group)
         
         # Server Log (shared by both servers)
         log_group = QGroupBox("📋 Server Log")
@@ -1117,33 +1133,46 @@ class ServerPage(QWidget):
     # ========================================================================
     
     def _start_llm_server(self):
-        """Start the LLM inference server"""
+        """Start the LLM inference server. Idempotent: if /health already ok or loading, just update UI."""
         try:
             from core.llm_server_manager import get_global_server_manager
-            
-            # Get selected model ID
+            import requests
+
             selected_model_id = self.llm_model_selector.currentData()
             if selected_model_id is None:
                 QMessageBox.warning(self, "No Model Selected", "Please select a model from the dropdown.")
                 return
 
-            # Remember last attempted model id for error dialogs
             self._last_llm_model_id = selected_model_id
-            
+            manager = get_global_server_manager()
+            url = manager._get_server_url(selected_model_id)
+
+            # Idempotent: if server already up on this port, just refresh UI
+            try:
+                r = requests.get(f"{url}/health", timeout=2)
+                if r.status_code == 200:
+                    data = r.json()
+                    status = str(data.get("status", "")).lower().strip()
+                    reported_model = str(data.get("model", "")).strip()
+                    if status in ("ok", "loading") and (reported_model == selected_model_id or reported_model in ("", "local-llm")):
+                        self._append_log(f"[LLM] Server already running at {url}, reusing.")
+                        QTimer.singleShot(0, lambda: self._on_llm_server_started(url, selected_model_id))
+                        self._refresh_active_servers()
+                        return
+            except Exception:
+                pass
+
             self.llm_start_btn.setEnabled(False)
             self.llm_start_btn.setText("⏳ Starting...")
             self.llm_server_status_label.setText("● Starting...")
             self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
             self._append_log(f"[LLM] Starting server for model '{selected_model_id}' (may take 2-3 minutes)...")
-            
-            # Start in background thread to avoid blocking UI
+
             import threading
             def worker():
                 try:
-                    # Callback to append logs to UI from worker thread
                     def log_cb(msg):
                         QTimer.singleShot(0, lambda: self._append_log(f"[LLM] {msg}"))
-
                     manager = get_global_server_manager()
                     url = manager.ensure_server_running(selected_model_id, log_callback=log_cb)
                     QTimer.singleShot(0, lambda: self._on_llm_server_started(url, selected_model_id))
@@ -1151,10 +1180,10 @@ class ServerPage(QWidget):
                     import traceback
                     error_details = f"{str(e)}\n\nTraceback:\n{traceback.format_exc()}"
                     QTimer.singleShot(0, lambda: self._on_llm_server_error(error_details))
-            
+
             thread = threading.Thread(target=worker, daemon=True)
             thread.start()
-            
+
         except Exception as e:
             self._on_llm_server_error(str(e))
     
@@ -1272,61 +1301,69 @@ class ServerPage(QWidget):
                 pass
     
     def _update_llm_server_status(self):
-        """Periodically check LLM server status"""
+        """Periodically check LLM server status. Health-driven: always probe /health for selected model's port."""
         try:
             from core.llm_server_manager import get_global_server_manager
             import requests
             from pathlib import Path
-            
-            # Get selected model ID
+
             selected_model_id = self.llm_model_selector.currentData()
             if selected_model_id is None:
                 return
-            
+
             manager = get_global_server_manager()
-            
-            # Check if server is in running_servers dict
-            if selected_model_id in manager.running_servers:
-                process, _, _ = manager.running_servers[selected_model_id]
-                if process.poll() is None:  # Process is alive
-                    # Try health check
-                    try:
-                        url = manager._get_server_url(selected_model_id)
-                        response = requests.get(f"{url}/health", timeout=1)
-                        if response.status_code == 200:
-                            # Server is healthy - ALWAYS update UI with current info
-                            port = url.split(':')[-1]
-                            api_url = f"{url}/v1"
-                            
-                            # Update status
-                            self.llm_server_status_label.setText("● Running")
-                            self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
-                            
-                            # Update port
-                            self.llm_port_label.setText(port)
-                            
-                            # Update API URL
-                            self.llm_api_label.setText(api_url)
-                            
-                            # Update model name from config
-                            try:
-                                model_cfg = manager.config["models"][selected_model_id]
-                                base_model = model_cfg["base_model"]
-                                model_name = Path(base_model).name
-                                self.llm_model_label.setText(model_name)
-                            except Exception:
-                                self.llm_model_label.setText(selected_model_id)
-                            
-                            # Update button states
-                            self.llm_start_btn.setEnabled(False)
-                            self.llm_start_btn.setText("● Running")
-                            self.llm_stop_btn.setEnabled(True)
-                            self.copy_api_btn.setEnabled(True)
-                            return
-                    except:
-                        pass
-            
-            # Server not running - reset UI if showing as running
+            url = manager._get_server_url(selected_model_id)
+            port = url.split(":")[-1] if ":" in url else ""
+
+            try:
+                response = requests.get(f"{url}/health", timeout=1)
+                if response.status_code == 200:
+                    data = response.json()
+                    status = str(data.get("status", "")).lower().strip()
+                    reported_model = str(data.get("model", "")).strip()
+
+                    # Port occupied by a different model: show state, do not attempt restart
+                    if reported_model and reported_model not in (selected_model_id, "local-llm", ""):
+                        self.llm_server_status_label.setText(f"● Port in use by {reported_model}")
+                        self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+                        self.llm_port_label.setText(port)
+                        self.llm_api_label.setText(f"{url}/v1")
+                        self.llm_model_label.setText(reported_model)
+                        self.llm_start_btn.setEnabled(False)
+                        self.llm_stop_btn.setEnabled(True)
+                        self.copy_api_btn.setEnabled(True)
+                        return
+
+                    if status == "ok":
+                        self.llm_server_status_label.setText("● Running")
+                        self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
+                        self.llm_port_label.setText(port)
+                        self.llm_api_label.setText(f"{url}/v1")
+                        try:
+                            model_cfg = manager.config["models"][selected_model_id]
+                            base_model = model_cfg["base_model"]
+                            self.llm_model_label.setText(Path(base_model).name)
+                        except Exception:
+                            self.llm_model_label.setText(reported_model or selected_model_id)
+                        self.llm_start_btn.setEnabled(False)
+                        self.llm_start_btn.setText("● Running")
+                        self.llm_stop_btn.setEnabled(True)
+                        self.copy_api_btn.setEnabled(True)
+                        return
+                    if status == "loading":
+                        self.llm_server_status_label.setText("● Loading...")
+                        self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+                        self.llm_port_label.setText(port)
+                        self.llm_api_label.setText(f"{url}/v1")
+                        self.llm_model_label.setText(reported_model or selected_model_id)
+                        self.llm_start_btn.setEnabled(False)
+                        self.llm_stop_btn.setEnabled(True)
+                        self.copy_api_btn.setEnabled(True)
+                        return
+            except Exception:
+                pass
+
+            # No healthy response: show Not running and allow Start
             if not self.llm_start_btn.isEnabled():
                 self.llm_server_status_label.setText("● Not running")
                 self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #888;")
@@ -1337,9 +1374,101 @@ class ServerPage(QWidget):
                 self.llm_start_btn.setText("▶ Start")
                 self.llm_stop_btn.setEnabled(False)
                 self.copy_api_btn.setEnabled(False)
-                
+
         except Exception:
-            # Manager not initialized or other error - ignore
+            pass
+
+    def _refresh_active_servers(self):
+        """Refresh Active inference servers list from StateStore + /health probes."""
+        if not hasattr(self, "active_servers_list"):
+            return
+        try:
+            from core.state_store import get_state_store
+            import requests
+
+            store = get_state_store()
+            candidates = [s for s in store.list_servers() if (s.get("status") or "").upper() in ("STARTING", "RUNNING")]
+            results = []
+            for s in candidates:
+                model_id = s.get("model_id") or ""
+                port = s.get("port") or 0
+                pid = s.get("pid")
+                if not port:
+                    continue
+                url = f"http://127.0.0.1:{port}/health"
+                try:
+                    r = requests.get(url, timeout=1)
+                    if r.status_code == 200:
+                        data = r.json()
+                        status = str(data.get("status", "")).lower().strip()
+                        model_from_health = str(data.get("model", "")).strip() or model_id
+                        results.append({
+                            "model_id": model_id,
+                            "model_from_health": model_from_health,
+                            "status": status,
+                            "port": port,
+                            "pid": pid,
+                        })
+                except Exception:
+                    pass
+            self.active_servers_list.blockSignals(True)
+            self.active_servers_list.clear()
+            for r in results:
+                status_str = r["status"]
+                if status_str == "ok":
+                    status_str = "Running"
+                elif status_str == "loading":
+                    status_str = "Loading"
+                else:
+                    status_str = status_str or "Unknown"
+                label = f"{r['model_from_health']} — port {r['port']} ({status_str})"
+                item = QListWidgetItem(label)
+                item.setData(Qt.UserRole, r)
+                self.active_servers_list.addItem(item)
+            self.active_servers_list.blockSignals(False)
+        except Exception:
+            pass
+
+    def _on_active_server_selected(self):
+        """When user selects an active server, switch model dropdown and update API/port labels."""
+        items = self.active_servers_list.selectedItems()
+        if not items:
+            return
+        try:
+            r = items[0].data(Qt.UserRole)
+            if not r or not isinstance(r, dict):
+                return
+            model_id = r.get("model_id")
+            port = r.get("port")
+            status = (r.get("status") or "").lower()
+            if not model_id and port:
+                model_id = r.get("model_from_health") or ""
+            # Try to set model selector to this model_id if it exists in dropdown
+            for i in range(self.llm_model_selector.count()):
+                if self.llm_model_selector.itemData(i) == model_id:
+                    self.llm_model_selector.setCurrentIndex(i)
+                    break
+            # Update API/port labels from this server
+            if port:
+                url = f"http://127.0.0.1:{port}"
+                self.llm_port_label.setText(str(port))
+                self.llm_api_label.setText(f"{url}/v1")
+                if status == "ok":
+                    self.llm_server_status_label.setText("● Running")
+                    self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
+                    self.llm_model_label.setText(r.get("model_from_health") or model_id or "-")
+                    self.llm_start_btn.setEnabled(False)
+                    self.llm_start_btn.setText("● Running")
+                    self.llm_stop_btn.setEnabled(True)
+                    self.copy_api_btn.setEnabled(True)
+                elif status == "loading":
+                    self.llm_server_status_label.setText("● Loading...")
+                    self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+                    self.llm_model_label.setText(r.get("model_from_health") or model_id or "-")
+                    self.llm_start_btn.setEnabled(False)
+                    self.llm_stop_btn.setEnabled(True)
+                    self.copy_api_btn.setEnabled(True)
+        except Exception:
             pass
     
     def _copy_api_url(self):

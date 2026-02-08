@@ -58,7 +58,7 @@ class InferenceClient:
     def generate(
         self, 
         prompt: str, 
-        max_new_tokens: int = 256, 
+        max_new_tokens: int = 10000, 
         temperature: float = 0.7
     ) -> str:
         """

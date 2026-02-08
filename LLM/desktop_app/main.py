@@ -363,12 +363,14 @@ class ToolInferenceWorker(QThread):
     inference_finished = Signal(str, list, str)  # final_output, tool_log, model_column
     inference_failed = Signal(str, str)  # error_message, model_column
     
-    def __init__(self, prompt: str, model_id: str, model_column: str, system_prompt: str = ""):
+    def __init__(self, prompt: str, model_id: str, model_column: str, system_prompt: str = "", max_new_tokens: int = 10000, temperature: float = 0.7):
         super().__init__()
         self.prompt = prompt
         self.model_id = model_id
         self.model_column = model_column
         self.system_prompt = system_prompt
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
     
     def run(self):
         """Run tool-enabled inference in background"""
@@ -427,8 +429,8 @@ class ToolInferenceWorker(QThread):
                 auto_execute_safe_tools=True,
                 max_tool_iterations=5,
                 system_prompt=self.system_prompt,
-                max_new_tokens=256,
-                temperature=0.7,
+                max_new_tokens=self.max_new_tokens,
+                temperature=self.temperature,
                 native_executor=native_executor  # Pass native executor if in native mode
             )
             
@@ -9077,11 +9079,13 @@ class MainWindow(QMainWindow):
         self.test_sub_tabs = sub_tabs
         self._test_sub_pages_created = {}  # kept for backward-compat, not used for eager pages
         
-        # Eagerly create both pages to avoid startup crashes
+        # Eagerly create all test sub-pages to avoid startup crashes
         test_page = self._build_test_sub_tab()
         tool_chat_page = self._build_tool_chat_sub_tab()
+        model_to_model_page = self._build_model_to_model_sub_tab()
         sub_tabs.addTab(test_page, "🧪 Test")
         sub_tabs.addTab(tool_chat_page, "🔧 Tool Chat")
+        sub_tabs.addTab(model_to_model_page, "Model To Model")
         
         layout.addWidget(sub_tabs)
         
@@ -9461,13 +9465,13 @@ class MainWindow(QMainWindow):
                     else:
                         return f"{value / 1000000:.1f}M".rstrip('0').rstrip('.')
             
-            max_tokens_label = QLabel(format_max_tokens(512))
+            max_tokens_label = QLabel(format_max_tokens(10000))
             max_tokens_label.setMinimumWidth(40)
             max_tokens_layout.addWidget(max_tokens_label)
             max_tokens = QSpinBox()
             max_tokens.setRange(1, 999999999)  # No practical limit
             max_tokens.setSingleStep(32)
-            max_tokens.setValue(512)
+            max_tokens.setValue(10000)
             max_tokens.setMinimumWidth(80)
             max_tokens.valueChanged.connect(lambda v: max_tokens_label.setText(format_max_tokens(v)))
             max_tokens_layout.addWidget(max_tokens)
@@ -9735,6 +9739,275 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._load_tool_chat_models)
         
         return w
+
+    def _build_model_to_model_sub_tab(self) -> QWidget:
+        """Build the Model To Model sub-tab: automated conversation between 2 or 3 models."""
+        from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
+        from PySide6.QtWidgets import QButtonGroup, QRadioButton
+
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        # --- Top controls ---
+        # Seed prompt
+        layout.addWidget(QLabel("<b>Topic / initial prompt</b>"))
+        self.m2m_seed_prompt = QTextEdit()
+        self.m2m_seed_prompt.setPlaceholderText("Enter a topic or initial prompt to start the model-to-model conversation...")
+        self.m2m_seed_prompt.setMinimumHeight(70)
+        self.m2m_seed_prompt.setMaximumHeight(100)
+        layout.addWidget(self.m2m_seed_prompt)
+
+        # Row: number of models (2 or 3)
+        model_count_row = QHBoxLayout()
+        model_count_row.addWidget(QLabel("Models:"))
+        self.m2m_model_count_2 = QRadioButton("2 models")
+        self.m2m_model_count_2.setChecked(True)
+        self.m2m_model_count_3 = QRadioButton("3 models")
+        self.m2m_model_count_group = QButtonGroup(w)
+        self.m2m_model_count_group.addButton(self.m2m_model_count_2)
+        self.m2m_model_count_group.addButton(self.m2m_model_count_3)
+        model_count_row.addWidget(self.m2m_model_count_2)
+        model_count_row.addWidget(self.m2m_model_count_3)
+        model_count_row.addStretch()
+        layout.addLayout(model_count_row)
+
+        # Row: Model A, B, C dropdowns
+        models_row = QHBoxLayout()
+        models_row.addWidget(QLabel("Model A:"))
+        self.m2m_model_a = QComboBox()
+        self.m2m_model_a.setMinimumWidth(220)
+        models_row.addWidget(self.m2m_model_a, 1)
+        models_row.addWidget(QLabel("Model B:"))
+        self.m2m_model_b = QComboBox()
+        self.m2m_model_b.setMinimumWidth(220)
+        models_row.addWidget(self.m2m_model_b, 1)
+        self.m2m_model_c_label = QLabel("Model C:")
+        models_row.addWidget(self.m2m_model_c_label)
+        self.m2m_model_c = QComboBox()
+        self.m2m_model_c.setMinimumWidth(220)
+        models_row.addWidget(self.m2m_model_c, 1)
+        self.m2m_model_c.setVisible(False)
+        self.m2m_model_c_label.setVisible(False)
+        layout.addLayout(models_row)
+
+        # Row: Max turns, Temperature, Max tokens, buttons
+        params_row = QHBoxLayout()
+        params_row.addWidget(QLabel("Max turns:"))
+        self.m2m_max_turns = QSpinBox()
+        self.m2m_max_turns.setRange(1, 200)
+        self.m2m_max_turns.setValue(20)
+        self.m2m_max_turns.setMinimumWidth(70)
+        params_row.addWidget(self.m2m_max_turns)
+        params_row.addWidget(QLabel("Temperature:"))
+        self.m2m_temperature = QDoubleSpinBox()
+        self.m2m_temperature.setRange(0.0, 2.0)
+        self.m2m_temperature.setSingleStep(0.1)
+        self.m2m_temperature.setValue(0.7)
+        self.m2m_temperature.setMinimumWidth(70)
+        params_row.addWidget(self.m2m_temperature)
+        params_row.addWidget(QLabel("Max new tokens:"))
+        self.m2m_max_new_tokens = QSpinBox()
+        self.m2m_max_new_tokens.setRange(32, 8192)
+        self.m2m_max_new_tokens.setValue(512)
+        self.m2m_max_new_tokens.setMinimumWidth(80)
+        params_row.addWidget(self.m2m_max_new_tokens)
+        params_row.addStretch()
+        self.m2m_start_btn = QPushButton("▶ Start")
+        self.m2m_start_btn.clicked.connect(self._start_m2m_conversation)
+        params_row.addWidget(self.m2m_start_btn)
+        self.m2m_stop_resume_btn = QPushButton("⏹ Stop")
+        self.m2m_stop_resume_btn.setCheckable(True)  # unchecked = running (show Stop), checked = paused (show Resume)
+        self.m2m_stop_resume_btn.clicked.connect(self._m2m_stop_resume)
+        self.m2m_stop_resume_btn.setEnabled(False)
+        params_row.addWidget(self.m2m_stop_resume_btn)
+        self.m2m_clear_btn = QPushButton("🗑️ Clear")
+        self.m2m_clear_btn.clicked.connect(self._clear_m2m_chat)
+        params_row.addWidget(self.m2m_clear_btn)
+        layout.addLayout(params_row)
+
+        # Toggle Model C visibility when 2/3 models changes (display always has 3 columns; we use only A/B when 2 models)
+        def _on_m2m_model_count_changed():
+            use_three = self.m2m_model_count_3.isChecked()
+            self.m2m_model_c.setVisible(use_three)
+            self.m2m_model_c_label.setVisible(use_three)
+        self.m2m_model_count_2.toggled.connect(lambda checked: _on_m2m_model_count_changed() if checked else None)
+        self.m2m_model_count_3.toggled.connect(lambda checked: _on_m2m_model_count_changed() if checked else None)
+
+        # --- Conversation display (3 columns; when 2 models only A and B are used) ---
+        self.m2m_chat_display = SynchronizedChatDisplay(num_models=3)
+        self.m2m_chat_display.set_theme(getattr(self, 'dark_mode', True))
+        layout.addWidget(self.m2m_chat_display, 1)
+
+        # Worker reference and paused state
+        self.m2m_worker = None
+        self.m2m_paused = False
+
+        QTimer.singleShot(100, self._load_m2m_models)
+        return w
+
+    def _load_m2m_models(self):
+        """Populate Model To Model dropdowns with READY models + adapters (same source as Test tab)."""
+        if not hasattr(self, 'm2m_model_a') or not self.m2m_model_a:
+            return
+        try:
+            from core.model_onboarding import get_onboarding_service
+            onboarding = get_onboarding_service()
+            ready_models = onboarding.list_ready_models()
+            ready_paths = {}
+            for entry in ready_models:
+                base_path = entry.get("base_model_path")
+                if base_path:
+                    try:
+                        ready_paths[str(Path(base_path).resolve())] = entry["model_id"]
+                    except Exception:
+                        ready_paths[str(base_path)] = entry["model_id"]
+            models_dir = self.root / "models"
+            downloaded_models = []
+            if models_dir.exists():
+                for model_dir in sorted(models_dir.iterdir()):
+                    if model_dir.is_dir():
+                        has_config = (model_dir / "config.json").exists()
+                        has_weights = any(
+                            (model_dir / f).exists()
+                            for f in ["model.safetensors", "pytorch_model.bin", "model.safetensors.index.json", "adapter_model.safetensors", "adapter_model.bin"]
+                        )
+                        if has_config and (has_weights or len(list(model_dir.glob("*.safetensors"))) > 0 or len(list(model_dir.glob("*.bin"))) > 0):
+                            downloaded_models.append(model_dir.name)
+            adapter_dir = self.root / "fine_tuned"
+            def _fill_combo(combo):
+                current = combo.currentText()
+                combo.clear()
+                if downloaded_models:
+                    for model_name in downloaded_models:
+                        model_path = models_dir / model_name
+                        model_path_str = str(model_path.resolve())
+                        if model_path_str in ready_paths:
+                            display_name = model_name.replace("__", "/")
+                            combo.addItem(f"✓ 📦 {display_name}", str(model_path))
+                if adapter_dir.exists():
+                    for d in sorted(adapter_dir.iterdir()):
+                        if not d.is_dir():
+                            continue
+                        has_weights = any([
+                            (d / "adapter_model.safetensors").exists(),
+                            (d / "adapter_model.bin").exists(),
+                            (d / "pytorch_model.bin").exists(),
+                            (d / "model.safetensors").exists()
+                        ])
+                        if has_weights:
+                            combo.addItem(f"🎯 {d.name} (adapter)", str(d))
+                if combo.count() == 0:
+                    combo.addItem("(No models available - download from Models tab)")
+                if current:
+                    idx = combo.findText(current)
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+            _fill_combo(self.m2m_model_a)
+            _fill_combo(self.m2m_model_b)
+            _fill_combo(self.m2m_model_c)
+        except Exception as e:
+            if hasattr(self, 'm2m_model_a'):
+                self.m2m_model_a.clear()
+                self.m2m_model_a.addItem(f"(Error: {e})")
+
+    def _clear_m2m_chat(self):
+        """Clear Model To Model conversation display."""
+        if hasattr(self, 'm2m_chat_display'):
+            self.m2m_chat_display.clear()
+
+    def _start_m2m_conversation(self):
+        """Start the model-to-model conversation (worker started here; wiring in display todo)."""
+        seed = (self.m2m_seed_prompt.toPlainText() or "").strip()
+        if not seed:
+            QMessageBox.warning(self, "Model To Model", "Please enter a topic or initial prompt.")
+            return
+        use_three = self.m2m_model_count_3.isChecked()
+        model_ids = []
+        for combo, key in [(self.m2m_model_a, "a"), (self.m2m_model_b, "b"), (self.m2m_model_c if use_three else None, "c")]:
+            if combo is None:
+                break
+            path = combo.currentData()
+            if not path or (isinstance(path, str) and path.startswith("(")):
+                QMessageBox.warning(self, "Model To Model", f"Please select a valid model for {key.upper()}.")
+                return
+            try:
+                model_id = self._resolve_model_id_from_path(path)
+            except Exception as e:
+                QMessageBox.warning(self, "Model To Model", f"Could not resolve model for {key.upper()}: {e}")
+                return
+            model_ids.append((key, model_id))
+        if not model_ids:
+            return
+        max_turns = self.m2m_max_turns.value()
+        temperature = self.m2m_temperature.value()
+        max_new_tokens = self.m2m_max_new_tokens.value()
+        self.m2m_paused = False
+        self.m2m_stop_resume_btn.setEnabled(True)
+        self.m2m_stop_resume_btn.setChecked(False)
+        self.m2m_stop_resume_btn.setText("⏹ Stop")
+        self.m2m_start_btn.setEnabled(False)
+        self.m2m_chat_display.add_user_message(seed)
+        from desktop_app.model_to_model_worker import ModelToModelWorker
+        self.m2m_worker = ModelToModelWorker(
+            seed=seed,
+            model_ids=[m[1] for m in model_ids],
+            model_keys=[m[0] for m in model_ids],
+            max_turns=max_turns,
+            temperature=temperature,
+            max_new_tokens=max_new_tokens,
+        )
+        self.m2m_worker.turn_started.connect(self._on_m2m_turn_started)
+        self.m2m_worker.turn_finished.connect(self._on_m2m_turn_finished)
+        self.m2m_worker.finished_signal.connect(self._on_m2m_finished)
+        self.m2m_worker.error_signal.connect(self._on_m2m_error)
+        self.m2m_worker.start()
+
+    def _on_m2m_turn_started(self, model_key: str):
+        if not hasattr(self, 'm2m_chat_display'):
+            return
+        key = (model_key or "a").lower()[:1]
+        if key == "a":
+            self.m2m_chat_display.start_model_a_response()
+        elif key == "b":
+            self.m2m_chat_display.start_model_b_response()
+        elif key == "c":
+            self.m2m_chat_display.start_model_c_response()
+
+    def _on_m2m_turn_finished(self, model_key: str, text: str):
+        if not hasattr(self, 'm2m_chat_display'):
+            return
+        key = (model_key or "a").lower()[:1]
+        if key == "a":
+            self.m2m_chat_display.update_model_a_response(text or "")
+        elif key == "b":
+            self.m2m_chat_display.update_model_b_response(text or "")
+        elif key == "c":
+            self.m2m_chat_display.update_model_c_response(text or "")
+        # Show this model's reply as the next "user" row so the next model sees it as context
+        prefix = f"Model {model_key.upper()}: " if model_key else "Model A: "
+        self.m2m_chat_display.add_user_message(prefix + (text or ""))
+
+    def _on_m2m_finished(self):
+        self.m2m_start_btn.setEnabled(True)
+        self.m2m_stop_resume_btn.setEnabled(False)
+        self.m2m_stop_resume_btn.setText("⏹ Stop")
+        self.m2m_worker = None
+
+    def _on_m2m_error(self, message: str):
+        QMessageBox.critical(self, "Model To Model", message or "An error occurred.")
+        self.m2m_start_btn.setEnabled(True)
+        self.m2m_stop_resume_btn.setEnabled(False)
+        self.m2m_worker = None
+
+    def _m2m_stop_resume(self):
+        if self.m2m_worker is None:
+            return
+        self.m2m_paused = not self.m2m_paused
+        self.m2m_worker.set_paused(self.m2m_paused)
+        self.m2m_stop_resume_btn.setChecked(self.m2m_paused)
+        self.m2m_stop_resume_btn.setText("▶ Resume" if self.m2m_paused else "⏹ Stop")
 
     def _map_tool_column(self, col: str) -> str:
         """
@@ -10600,12 +10873,21 @@ class MainWindow(QMainWindow):
                 self.tool_worker_a.quit()
                 self.tool_worker_a.wait()
         
-        # Create worker thread
+        # Create worker thread (use Test Chat max_tokens/temperature from Model A settings)
+        max_tokens_a = 10000
+        temperature_a = 0.7
+        if hasattr(self, "test_model_a_settings"):
+            if hasattr(self.test_model_a_settings, "max_tokens"):
+                max_tokens_a = self.test_model_a_settings.max_tokens.value()
+            if hasattr(self.test_model_a_settings, "temperature"):
+                temperature_a = self.test_model_a_settings.temperature.value()
         self.tool_worker_a = ToolInferenceWorker(
             prompt=prompt,
             model_id=model_id,
             model_column="model_a",
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            max_new_tokens=max_tokens_a,
+            temperature=temperature_a
         )
         
         # Connect signals
@@ -11052,11 +11334,20 @@ class MainWindow(QMainWindow):
                 self.tool_worker_b.quit()
                 self.tool_worker_b.wait()
 
+        max_tokens_b = 10000
+        temperature_b = 0.7
+        if hasattr(self, "test_model_b_settings"):
+            if hasattr(self.test_model_b_settings, "max_tokens"):
+                max_tokens_b = self.test_model_b_settings.max_tokens.value()
+            if hasattr(self.test_model_b_settings, "temperature"):
+                temperature_b = self.test_model_b_settings.temperature.value()
         self.tool_worker_b = ToolInferenceWorker(
             prompt=prompt,
             model_id=model_id,
             model_column="model_b",
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            max_new_tokens=max_tokens_b,
+            temperature=temperature_b
         )
         
         self.tool_worker_b.progress_update.connect(
@@ -11317,11 +11608,20 @@ class MainWindow(QMainWindow):
                 self.tool_worker_c.quit()
                 self.tool_worker_c.wait()
 
+        max_tokens_c = 10000
+        temperature_c = 0.7
+        if hasattr(self, "test_model_c_settings"):
+            if hasattr(self.test_model_c_settings, "max_tokens"):
+                max_tokens_c = self.test_model_c_settings.max_tokens.value()
+            if hasattr(self.test_model_c_settings, "temperature"):
+                temperature_c = self.test_model_c_settings.temperature.value()
         self.tool_worker_c = ToolInferenceWorker(
             prompt=prompt,
             model_id=model_id,
             model_column="model_c",
-            system_prompt=system_prompt
+            system_prompt=system_prompt,
+            max_new_tokens=max_tokens_c,
+            temperature=temperature_c
         )
         
         self.tool_worker_c.progress_update.connect(
@@ -16186,6 +16486,10 @@ respective package directories or official repositories.
                 idx = self.test_model_c.findText(current_c)
                 if idx >= 0:
                     self.test_model_c.setCurrentIndex(idx)
+        
+        # Update Model To Model dropdowns (same source as Test tab)
+        if hasattr(self, 'm2m_model_a') and self.m2m_model_a is not None:
+            self._load_m2m_models()
         
         # Update port displays after refreshing models
         if hasattr(self, '_update_model_header_ports'):

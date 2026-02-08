@@ -5,13 +5,30 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QResizeEvent
 
 
+def _hex_to_rgb(color: str) -> tuple[int, int, int] | None:
+    """Convert '#RRGGBB' to (r,g,b). Returns None on invalid input."""
+    try:
+        c = (color or "").strip()
+        if c.startswith("#"):
+            c = c[1:]
+        if len(c) != 6:
+            return None
+        r = int(c[0:2], 16)
+        g = int(c[2:4], 16)
+        b = int(c[4:6], 16)
+        return (r, g, b)
+    except Exception:
+        return None
+
+
 class ChatBubble(QFrame):
     """WhatsApp-style chat bubble"""
     
-    def __init__(self, text: str, is_user: bool, parent=None):
+    def __init__(self, text: str, is_user: bool, parent=None, accent_color: str | None = None):
         super().__init__(parent)
         self.is_user = is_user
         self.is_dark = True
+        self.accent_color = accent_color
         
         # Set size policy to Preferred so bubble respects container width
         # The container will control the width, bubble should wrap text within it
@@ -92,31 +109,63 @@ class ChatBubble(QFrame):
         else:
             # AI messages: left side, gray
             if self.is_dark:
-                self.setStyleSheet("""
-                    ChatBubble {
-                        background: #2a2a3e;
-                        border: 1px solid #3a3a4e;
-                        border-radius: 12px;
-                    }
-                    QLabel {
-                        background: transparent;
-                        color: #fafafa;
-                        border: none;
-                    }
-                """)
+                rgb = _hex_to_rgb(self.accent_color) if self.accent_color else None
+                if rgb:
+                    r, g, b = rgb
+                    self.setStyleSheet(f"""
+                        ChatBubble {{
+                            background: rgba({r}, {g}, {b}, 0.18);
+                            border: 1px solid rgba({r}, {g}, {b}, 0.55);
+                            border-radius: 12px;
+                        }}
+                        QLabel {{
+                            background: transparent;
+                            color: #fafafa;
+                            border: none;
+                        }}
+                    """)
+                else:
+                    self.setStyleSheet("""
+                        ChatBubble {
+                            background: #2a2a3e;
+                            border: 1px solid #3a3a4e;
+                            border-radius: 12px;
+                        }
+                        QLabel {
+                            background: transparent;
+                            color: #fafafa;
+                            border: none;
+                        }
+                    """)
             else:
-                self.setStyleSheet("""
-                    ChatBubble {
-                        background: white;
-                        border: 1px solid #e0e0e0;
-                        border-radius: 12px;
-                    }
-                    QLabel {
-                        background: transparent;
-                        color: #000;
-                        border: none;
-                    }
-                """)
+                rgb = _hex_to_rgb(self.accent_color) if self.accent_color else None
+                if rgb:
+                    r, g, b = rgb
+                    self.setStyleSheet(f"""
+                        ChatBubble {{
+                            background: rgba({r}, {g}, {b}, 0.10);
+                            border: 1px solid rgba({r}, {g}, {b}, 0.40);
+                            border-radius: 12px;
+                        }}
+                        QLabel {{
+                            background: transparent;
+                            color: #000;
+                            border: none;
+                        }}
+                    """)
+                else:
+                    self.setStyleSheet("""
+                        ChatBubble {
+                            background: white;
+                            border: 1px solid #e0e0e0;
+                            border-radius: 12px;
+                        }
+                        QLabel {
+                            background: transparent;
+                            color: #000;
+                            border: none;
+                        }
+                    """)
     
     def set_theme(self, dark_mode: bool):
         self.is_dark = dark_mode
@@ -126,10 +175,17 @@ class ChatBubble(QFrame):
 class SynchronizedChatDisplay(QWidget):
     """WhatsApp-style chat with row-based synchronized display"""
     
-    def __init__(self, num_models=2, parent=None):
+    def __init__(self, num_models=2, parent=None, colorize_model_replies: bool = False):
         super().__init__(parent)
         self.is_dark = True
         self.num_models = num_models
+        self.colorize_model_replies = colorize_model_replies
+        # Match Test UI header colors: A=blue, B=green, C=purple.
+        self.model_reply_accents = {
+            "a": "#0064C8",
+            "b": "#00C864",
+            "c": "#9B59B6",
+        }
         self.current_row_a_bubble = None
         self.current_row_b_bubble = None
         self.current_row_c_bubble = None
@@ -142,6 +198,12 @@ class SynchronizedChatDisplay(QWidget):
         
         # Setup UI
         self._setup_ui()
+
+    def _accent_for_column(self, col: str) -> str | None:
+        if not self.colorize_model_replies:
+            return None
+        c = (col or "").strip().lower()[:1]
+        return self.model_reply_accents.get(c)
     
     def _setup_ui(self):
         """Setup the synchronized display layout"""
@@ -435,21 +497,21 @@ class SynchronizedChatDisplay(QWidget):
         """Ensure a response row exists with bubbles for visible models, creating it if needed"""
         if self.current_row_a_bubble is None and self.current_row_b_bubble is None and self.current_row_c_bubble is None:
             # No row exists yet, create one with empty placeholders for visible models
-            bubble_a = ChatBubble("", is_user=False)
+            bubble_a = ChatBubble("", is_user=False, accent_color=self._accent_for_column("a"))
             bubble_a.set_theme(self.is_dark)
             bubble_a.setVisible(False)
             self.current_row_a_bubble = bubble_a
             
             bubble_b = None
             if self.num_models >= 2:
-                bubble_b = ChatBubble("", is_user=False)
+                bubble_b = ChatBubble("", is_user=False, accent_color=self._accent_for_column("b"))
                 bubble_b.set_theme(self.is_dark)
                 bubble_b.setVisible(False)
                 self.current_row_b_bubble = bubble_b
             
             bubble_c = None
             if self.num_models == 3:
-                bubble_c = ChatBubble("", is_user=False)
+                bubble_c = ChatBubble("", is_user=False, accent_color=self._accent_for_column("c"))
                 bubble_c.set_theme(self.is_dark)
                 bubble_c.setVisible(False)
                 self.current_row_c_bubble = bubble_c

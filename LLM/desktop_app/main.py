@@ -9634,7 +9634,7 @@ class MainWindow(QMainWindow):
         
         # SYNCHRONIZED CHAT DISPLAY
         from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
-        self.chat_display = SynchronizedChatDisplay(num_models=2)  # Start with 2 models (default)
+        self.chat_display = SynchronizedChatDisplay(num_models=2, colorize_model_replies=True)  # Start with 2 models (default)
         left_layout.addWidget(self.chat_display, 1)
 
         # Shared prompt input area (BOTTOM)
@@ -12609,7 +12609,7 @@ class MainWindow(QMainWindow):
                     old_display.setParent(None)
                     old_display.deleteLater()
                     # Create and add new display
-                    self.chat_display = SynchronizedChatDisplay(num_models=3)
+                    self.chat_display = SynchronizedChatDisplay(num_models=3, colorize_model_replies=True)
                     self.chat_display.set_theme(self.dark_mode)
                     self.test_left_layout.addWidget(self.chat_display, 1)
                 else:
@@ -12618,7 +12618,7 @@ class MainWindow(QMainWindow):
                     old_display.setParent(None)
                     old_display.deleteLater()
                     # Create and add new display at same position
-                    self.chat_display = SynchronizedChatDisplay(num_models=3)
+                    self.chat_display = SynchronizedChatDisplay(num_models=3, colorize_model_replies=True)
                     self.chat_display.set_theme(self.dark_mode)
                     self.test_left_layout.insertWidget(index, self.chat_display, 1)
                 self.chat_display_widget = self.chat_display
@@ -12652,7 +12652,7 @@ class MainWindow(QMainWindow):
                     old_display.setParent(None)
                     old_display.deleteLater()
                     # Create and add new display
-                    self.chat_display = SynchronizedChatDisplay(num_models=2)
+                    self.chat_display = SynchronizedChatDisplay(num_models=2, colorize_model_replies=True)
                     self.chat_display.set_theme(self.dark_mode)
                     self.test_left_layout.addWidget(self.chat_display, 1)
                 else:
@@ -12661,7 +12661,7 @@ class MainWindow(QMainWindow):
                     old_display.setParent(None)
                     old_display.deleteLater()
                     # Create and add new display at same position
-                    self.chat_display = SynchronizedChatDisplay(num_models=2)
+                    self.chat_display = SynchronizedChatDisplay(num_models=2, colorize_model_replies=True)
                     self.chat_display.set_theme(self.dark_mode)
                     self.test_left_layout.insertWidget(index, self.chat_display, 1)
                 self.chat_display_widget = self.chat_display

@@ -1425,6 +1425,25 @@ class LLMServerManager:
                         f"\nServer output (tail):\n{log_output if log_output else '(no output captured)'}"
                         f"{hint}"
                     )
+                    # If a model was previously marked READY but server dies during startup,
+                    # it is effectively BROKEN until re-onboard/repair succeeds.
+                    try:
+                        broken_key = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+                        base_path_for_row = None
+                        try:
+                            row = self.state_store.get_onboarding(broken_key)
+                            base_path_for_row = (row or {}).get("base_model_path") or None
+                        except Exception:
+                            base_path_for_row = None
+                        self.state_store.upsert_onboarding(
+                            model_id=broken_key,
+                            base_model_path=str(base_path_for_row or model_cfg.get("base_model", "") or ""),
+                            status="BROKEN",
+                            last_error=(f"Server process died during startup (exit {process.returncode}). "
+                                        f"Startup log: {log_file_path_for_user or 'N/A'}")[:2000],
+                        )
+                    except Exception:
+                        pass
                     logger.error(error_msg)
                     raise RuntimeError(error_msg)
             
@@ -1624,6 +1643,24 @@ class LLMServerManager:
                 f"\nServer output:\n{output_text}"
             )
         logger.error(error_msg)
+        # Mark onboarding BROKEN on warmup timeout; model is not usable until repaired/re-onboarded.
+        try:
+            broken_key = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+            base_path_for_row = None
+            try:
+                row = self.state_store.get_onboarding(broken_key)
+                base_path_for_row = (row or {}).get("base_model_path") or None
+            except Exception:
+                base_path_for_row = None
+            self.state_store.upsert_onboarding(
+                model_id=broken_key,
+                base_model_path=str(base_path_for_row or model_cfg.get("base_model", "") or ""),
+                status="BROKEN",
+                last_error=(f"Server failed to become healthy within {self.warmup_timeout}s. "
+                            f"Status: {server_status}. Last health error: {last_error or 'N/A'}")[:2000],
+            )
+        except Exception:
+            pass
         raise TimeoutError(error_msg)
     
     def _check_health(self, model_id: str, return_status: bool = False):

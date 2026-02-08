@@ -7089,6 +7089,12 @@ class MainWindow(QMainWindow):
             if not hasattr(self, '_onboarding_threads'):
                 self._onboarding_threads = {}
             self._onboarding_threads[resolved_model_id] = onboarding_thread
+
+            # Nudge UI to reflect BUILDING quickly (cards are otherwise stale until completion).
+            try:
+                QTimer.singleShot(500, lambda mid=resolved_model_id: self._refresh_models())
+            except Exception:
+                pass
             
             if focus_ui and hasattr(self, 'onboarding_log_display'):
                 self.onboarding_log_display.appendPlainText("✓ Onboarding thread started\n")
@@ -11979,16 +11985,48 @@ class MainWindow(QMainWindow):
                     self.models_content_tabs.setCurrentIndex(1)  # Downloaded
                 if model_path:
                     self._on_model_selected(model_path)
-            except Exception:
-                pass
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Model needs onboarding",
+                        "No model path was provided for this error, so the app cannot select it automatically.\n\n"
+                        "Open the Models tab and select the model manually, then run Re-onboard.",
+                    )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Model needs onboarding",
+                    f"Failed to navigate to Models tab / select model:\n{e}",
+                )
 
         if clicked == btn_reonboard:
             # Start onboarding focused on Environment tab
             try:
                 if model_path:
-                    self._start_model_onboarding(model_path, model_id)
-            except Exception:
-                pass
+                    resolved_id = ""
+                    try:
+                        resolved_id = self._extract_model_id_from_path(model_path) or ""
+                    except Exception:
+                        resolved_id = ""
+                    if not resolved_id:
+                        try:
+                            resolved_id = model_id or Path(model_path).name.replace("__", "/")
+                        except Exception:
+                            resolved_id = model_id or ""
+                    self._start_model_onboarding(model_path, resolved_id)
+                else:
+                    QMessageBox.warning(
+                        self,
+                        "Model needs onboarding",
+                        "Cannot re-onboard because model_path is empty.\n\n"
+                        "Open Models tab, select the model, then click Re-onboard from the card.",
+                    )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Onboarding Error",
+                    f"Failed to start onboarding:\n{e}",
+                )
 
     def prompt_reonboard_server_model(self, server_model_id: str) -> None:
         """

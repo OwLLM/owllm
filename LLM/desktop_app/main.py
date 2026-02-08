@@ -10848,6 +10848,11 @@ class MainWindow(QMainWindow):
             key = (model_key or "a").lower()[:1]
             if hasattr(self.m2m_chat_display, "finish_m2m_turn"):
                 self.m2m_chat_display.finish_m2m_turn(key, message or "Error.")
+        # Always mirror error into the right-side log panel (user expects errors/logs there too)
+        try:
+            self._append_m2m_log(f"[ERROR] {message or 'Unknown error'}")
+        except Exception:
+            pass
         # If this looks like a load/repair failure and we have model_id, show reonboard popup (Open Models + Repair)
         low = (message or "").lower()
         repair_markers = [
@@ -12995,7 +13000,30 @@ class MainWindow(QMainWindow):
         try:
             p = Path(text)
             if p.exists():
-                return str(p)
+                # Safety: don't allow bypassing READY-only gating by pasting an arbitrary local path.
+                # Only accept direct paths that correspond to a READY onboarding entry.
+                try:
+                    from core.model_onboarding import get_onboarding_service
+                    onboarding = get_onboarding_service()
+                    ready_models = onboarding.list_ready_models()
+                    ready_paths = set()
+                    for entry in ready_models:
+                        bp = entry.get("base_model_path")
+                        if not bp:
+                            continue
+                        try:
+                            ready_paths.add(str(Path(bp).resolve()).lower())
+                        except Exception:
+                            ready_paths.add(str(bp).lower())
+                    try:
+                        rp = str(p.resolve()).lower()
+                    except Exception:
+                        rp = str(p).lower()
+                    if rp in ready_paths:
+                        return str(p)
+                except Exception:
+                    # If status lookup fails, fall back to the previous behavior.
+                    return str(p)
         except Exception:
             pass
 

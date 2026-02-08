@@ -281,6 +281,10 @@ class LLMServerManager:
             status = onboarding.get_onboarding_status(onboarding_id)
             
             if status is None:
+                try:
+                    log(f"Model '{onboarding_id}' has no onboarding entry (status=None).")
+                except Exception:
+                    pass
                 raise RuntimeError(
                     f"Model '{onboarding_id}' has not been onboarded. "
                     f"Please run onboarding first (model download/Add model should trigger this)."
@@ -289,6 +293,10 @@ class LLMServerManager:
             if status != "READY":
                 entry = self.state_store.get_onboarding(onboarding_id)
                 error_msg = entry.get("last_error", "Unknown error") if entry else "Unknown error"
+                try:
+                    log(f"Model '{onboarding_id}' is not READY (status={status}). Error: {error_msg}")
+                except Exception:
+                    pass
                 raise RuntimeError(
                     f"Model '{onboarding_id}' is not ready for runtime (status={status}). "
                     f"Please complete onboarding or repair the model. "
@@ -1456,9 +1464,17 @@ class LLMServerManager:
                             )
                             # Mark model BROKEN so Models page shows Repair button and card reflects failure
                             try:
+                                # Use onboarding_id (not config key) so the downloaded model card/status updates correctly.
+                                broken_key = locals().get("onboarding_id") or model_id
+                                base_path_for_row = None
+                                try:
+                                    row = self.state_store.get_onboarding(broken_key)
+                                    base_path_for_row = (row or {}).get("base_model_path") or None
+                                except Exception:
+                                    base_path_for_row = None
                                 self.state_store.upsert_onboarding(
-                                    model_id=model_id,
-                                    base_model_path=str(model_path),
+                                    model_id=broken_key,
+                                    base_model_path=str(base_path_for_row or model_path),
                                     status="BROKEN",
                                     last_error=error_msg or full_error[:500],
                                 )

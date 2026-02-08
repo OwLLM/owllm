@@ -3627,6 +3627,83 @@ class MainWindow(QMainWindow):
                 t = threading.Thread(target=_shutdown_servers, daemon=True)
                 t.start()
                 t.join(timeout=5)
+
+            # HARD STOP: if anything is still around, force-kill known server PIDs/ports from StateStore.
+            # This prevents orphan GPU processes from surviving app exit.
+            try:
+                servers = []
+                try:
+                    servers.extend(manager.state_store.list_servers(status="RUNNING") or [])
+                    servers.extend(manager.state_store.list_servers(status="STARTING") or [])
+                except Exception:
+                    servers = manager.state_store.list_servers() or []
+
+                # 1) Kill by PID (fast path)
+                for row in servers:
+                    pid = row.get("pid")
+                    if not pid:
+                        continue
+                    try:
+                        if os.name == "nt":
+                            subprocess.run(["taskkill", "/F", "/PID", str(int(pid))], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
+                        else:
+                            try:
+                                os.kill(int(pid), 15)
+                            except Exception:
+                                pass
+                            try:
+                                os.kill(int(pid), 9)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                # 2) Kill by port (Windows) when PID is missing/stale
+                if os.name == "nt":
+                    try:
+                        result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=10, **SUBPROCESS_FLAGS)
+                        stdout = result.stdout or ""
+                        for row in servers:
+                            port = row.get("port")
+                            if not port or int(port) <= 0:
+                                continue
+                            port_str = f":{int(port)}"
+                            pids_to_kill = set()
+                            for line in stdout.splitlines():
+                                if ("LISTENING" in line) and (port_str in line):
+                                    parts = line.split()
+                                    if parts and parts[-1].isdigit():
+                                        pids_to_kill.add(parts[-1])
+                            for found_pid in sorted(pids_to_kill):
+                                subprocess.run(["taskkill", "/F", "/PID", found_pid], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
+                    except Exception:
+                        pass
+
+                # 3) Kill orphan OWLLM uvicorn servers not recorded in StateStore
+                if os.name == "nt":
+                    try:
+                        ps = subprocess.run(
+                            [
+                                "powershell",
+                                "-NoProfile",
+                                "-Command",
+                                "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\") | "
+                                "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.server_app:app' } | "
+                                "Select-Object -ExpandProperty ProcessId",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            **SUBPROCESS_FLAGS,
+                        )
+                        for line in (ps.stdout or "").splitlines():
+                            line = line.strip()
+                            if line.isdigit():
+                                subprocess.run(["taskkill", "/F", "/PID", line], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[DEBUG] Error force-killing server processes: {e}")
         except Exception as e:
             print(f"[DEBUG] Error cleaning up server processes: {e}")
 
@@ -3687,6 +3764,79 @@ class MainWindow(QMainWindow):
                 t.join(timeout=3)  # Wait max 3 seconds for shutdown
             except Exception as e:
                 print(f"[DEBUG] Error shutting down LLM servers: {e}")
+
+            # HARD STOP fallback: force-kill by PID/port (Windows) to ensure VRAM is freed on exit.
+            try:
+                servers = []
+                try:
+                    servers.extend(manager.state_store.list_servers(status="RUNNING") or [])
+                    servers.extend(manager.state_store.list_servers(status="STARTING") or [])
+                except Exception:
+                    servers = manager.state_store.list_servers() or []
+
+                for row in servers:
+                    pid = row.get("pid")
+                    if pid:
+                        try:
+                            if os.name == "nt":
+                                subprocess.run(["taskkill", "/F", "/PID", str(int(pid))], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
+                            else:
+                                try:
+                                    os.kill(int(pid), 15)
+                                except Exception:
+                                    pass
+                                try:
+                                    os.kill(int(pid), 9)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                if os.name == "nt":
+                    try:
+                        result = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, timeout=10, **SUBPROCESS_FLAGS)
+                        stdout = result.stdout or ""
+                        for row in servers:
+                            port = row.get("port")
+                            if not port or int(port) <= 0:
+                                continue
+                            port_str = f":{int(port)}"
+                            pids_to_kill = set()
+                            for line in stdout.splitlines():
+                                if ("LISTENING" in line) and (port_str in line):
+                                    parts = line.split()
+                                    if parts and parts[-1].isdigit():
+                                        pids_to_kill.add(parts[-1])
+                            for found_pid in sorted(pids_to_kill):
+                                subprocess.run(["taskkill", "/F", "/PID", found_pid], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
+                    except Exception:
+                        pass
+                
+                # Kill orphan OWLLM uvicorn servers not recorded in StateStore
+                if os.name == "nt":
+                    try:
+                        ps = subprocess.run(
+                            [
+                                "powershell",
+                                "-NoProfile",
+                                "-Command",
+                                "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\") | "
+                                "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.server_app:app' } | "
+                                "Select-Object -ExpandProperty ProcessId",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            **SUBPROCESS_FLAGS,
+                        )
+                        for line in (ps.stdout or "").splitlines():
+                            line = line.strip()
+                            if line.isdigit():
+                                subprocess.run(["taskkill", "/F", "/PID", line], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
+                    except Exception:
+                        pass
+            except Exception as e:
+                print(f"[DEBUG] Error force-killing on close: {e}")
             
             _cleanup_all_pages()
             self._shutdown_in_progress = True
@@ -7850,6 +8000,36 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
 
+            # Extra hard-stop: kill any orphan OWLLM uvicorn servers not recorded in StateStore.
+            # These can keep VRAM pinned even after the GUI exits.
+            if os.name == "nt":
+                try:
+                    ps = subprocess.run(
+                        [
+                            "powershell",
+                            "-NoProfile",
+                            "-Command",
+                            "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\") | "
+                            "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.server_app:app' } | "
+                            "Select-Object -ExpandProperty ProcessId",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        **SUBPROCESS_FLAGS,
+                    )
+                    for line in (ps.stdout or "").splitlines():
+                        line = line.strip()
+                        if line.isdigit():
+                            pid = int(line)
+                            try:
+                                subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
+                                killed += 1
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
             if killed:
                 self._log_models(f"✓ Stopped servers and force-killed {killed} leftover server process(es). VRAM should free up shortly.")
             else:
@@ -10298,26 +10478,32 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'm2m_chat_display'):
             return
         key = (model_key or "a").lower()[:1]
-        if key == "a":
-            self.m2m_chat_display.start_model_a_response()
-        elif key == "b":
-            self.m2m_chat_display.start_model_b_response()
-        elif key == "c":
-            self.m2m_chat_display.start_model_c_response()
+        # M2M rendering: speaker is RIGHT in its own column, LEFT in others
+        if hasattr(self.m2m_chat_display, "start_m2m_turn"):
+            self.m2m_chat_display.start_m2m_turn(key)
+        else:
+            # Fallback to old synchronized response row
+            if key == "a":
+                self.m2m_chat_display.start_model_a_response()
+            elif key == "b":
+                self.m2m_chat_display.start_model_b_response()
+            elif key == "c":
+                self.m2m_chat_display.start_model_c_response()
 
     def _on_m2m_turn_finished(self, model_key: str, text: str):
         if not hasattr(self, 'm2m_chat_display'):
             return
         key = (model_key or "a").lower()[:1]
-        if key == "a":
-            self.m2m_chat_display.update_model_a_response(text or "")
-        elif key == "b":
-            self.m2m_chat_display.update_model_b_response(text or "")
-        elif key == "c":
-            self.m2m_chat_display.update_model_c_response(text or "")
-        # Show this model's reply as the next "user" row so the next model sees it as context
-        prefix = f"Model {model_key.upper()}: " if model_key else "Model A: "
-        self.m2m_chat_display.add_user_message(prefix + (text or ""))
+        if hasattr(self.m2m_chat_display, "finish_m2m_turn"):
+            self.m2m_chat_display.finish_m2m_turn(key, text or "")
+        else:
+            # Fallback to old synchronized response row
+            if key == "a":
+                self.m2m_chat_display.update_model_a_response(text or "")
+            elif key == "b":
+                self.m2m_chat_display.update_model_b_response(text or "")
+            elif key == "c":
+                self.m2m_chat_display.update_model_c_response(text or "")
 
     def _on_m2m_finished(self):
         self.m2m_start_btn.setEnabled(True)

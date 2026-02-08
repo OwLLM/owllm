@@ -133,6 +133,9 @@ class SynchronizedChatDisplay(QWidget):
         self.current_row_a_bubble = None
         self.current_row_b_bubble = None
         self.current_row_c_bubble = None
+        # Model-to-model (M2M) pending turn row (per-column alignment)
+        self._m2m_pending_speaker: str | None = None
+        self._m2m_pending_bubbles = None  # dict[str, ChatBubble] when active
         
         # Set size policy to maintain proper width distribution
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -244,6 +247,160 @@ class SynchronizedChatDisplay(QWidget):
             row_layout.setStretch(i, 1)
         
         return row
+
+    def _create_message_row_mixed(
+        self,
+        bubble_a: ChatBubble,
+        is_user_a: bool,
+        bubble_b: ChatBubble = None,
+        is_user_b: bool = False,
+        bubble_c: ChatBubble = None,
+        is_user_c: bool = False,
+    ):
+        """Create a row where each column can be independently left/right aligned."""
+        row = QWidget()
+        row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
+        def create_column_container(bubble, is_user_msg):
+            container = QWidget()
+            container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            container.setMinimumWidth(0)
+            bubble.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Preferred)
+
+            layout = QHBoxLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+
+            if is_user_msg:
+                layout.addStretch(1)
+                layout.addWidget(bubble, 0)
+            else:
+                layout.addWidget(bubble, 0)
+                layout.addStretch(1)
+
+            def update_bubble_max_width():
+                container_width = container.width()
+                if container_width > 0:
+                    bubble.setMaximumWidth(container_width - 10)
+
+            QTimer.singleShot(0, update_bubble_max_width)
+
+            def resize_event_override(event):
+                update_bubble_max_width()
+                event.accept()
+
+            container.resizeEvent = resize_event_override
+            return container
+
+        row_layout.addWidget(create_column_container(bubble_a, is_user_a), 1)
+        if self.num_models >= 2 and bubble_b is not None:
+            row_layout.addWidget(create_column_container(bubble_b, is_user_b), 1)
+        if self.num_models == 3 and bubble_c is not None:
+            row_layout.addWidget(create_column_container(bubble_c, is_user_c), 1)
+
+        for i in range(row_layout.count()):
+            row_layout.setStretch(i, 1)
+
+        return row
+
+    def start_m2m_turn(self, speaker: str):
+        """
+        Model-to-model: start a pending row for a speaker.
+        Speaker's column shows a RIGHT-side bubble ("Thinking..."), other columns will be filled on finish.
+        """
+        s = (speaker or "a").strip().lower()[:1]
+        self._m2m_pending_speaker = s
+
+        bubble_a = ChatBubble("Thinking..." if s == "a" else "", is_user=(s == "a"))
+        bubble_a.set_theme(self.is_dark)
+        if s != "a":
+            bubble_a.setVisible(False)
+
+        bubble_b = None
+        if self.num_models >= 2:
+            bubble_b = ChatBubble("Thinking..." if s == "b" else "", is_user=(s == "b"))
+            bubble_b.set_theme(self.is_dark)
+            if s != "b":
+                bubble_b.setVisible(False)
+
+        bubble_c = None
+        if self.num_models == 3:
+            bubble_c = ChatBubble("Thinking..." if s == "c" else "", is_user=(s == "c"))
+            bubble_c.set_theme(self.is_dark)
+            if s != "c":
+                bubble_c.setVisible(False)
+
+        row = self._create_message_row_mixed(
+            bubble_a, s == "a",
+            bubble_b, s == "b",
+            bubble_c, s == "c",
+        )
+        self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
+        self._m2m_pending_bubbles = {"a": bubble_a, "b": bubble_b, "c": bubble_c}
+        self._scroll_to_bottom()
+
+    def finish_m2m_turn(self, speaker: str, text: str):
+        """
+        Model-to-model: fill the pending row started by start_m2m_turn().
+        Speaker's message is RIGHT in its own column and LEFT in all other columns.
+        """
+        s = (speaker or "a").strip().lower()[:1]
+        msg = (text or "").strip()
+        if not msg:
+            msg = ""
+
+        pending = self._m2m_pending_bubbles
+        if not pending or self._m2m_pending_speaker != s:
+            # Fallback: just add a new row
+            return self.add_m2m_turn_message(s, msg)
+
+        # For 3-model mode, prefix in other columns for clarity
+        other_text = msg
+        if self.num_models == 3:
+            other_text = f"{s.upper()}: {msg}"
+
+        for col in ("a", "b", "c"):
+            bubble = pending.get(col) if isinstance(pending, dict) else None
+            if bubble is None:
+                continue
+            if col == s:
+                bubble.update_text(msg)
+                bubble.setVisible(True)
+            else:
+                bubble.update_text(other_text)
+                bubble.setVisible(True)
+
+        self._m2m_pending_speaker = None
+        self._m2m_pending_bubbles = None
+        self._scroll_to_bottom()
+
+    def add_m2m_turn_message(self, speaker: str, text: str):
+        """Model-to-model: add a completed turn row with per-column left/right alignment."""
+        s = (speaker or "a").strip().lower()[:1]
+        msg = (text or "").strip()
+        other_text = msg if self.num_models < 3 else f"{s.upper()}: {msg}"
+
+        bubble_a = ChatBubble(msg if s == "a" else other_text, is_user=(s == "a"))
+        bubble_a.set_theme(self.is_dark)
+        bubble_b = None
+        if self.num_models >= 2:
+            bubble_b = ChatBubble(msg if s == "b" else other_text, is_user=(s == "b"))
+            bubble_b.set_theme(self.is_dark)
+        bubble_c = None
+        if self.num_models == 3:
+            bubble_c = ChatBubble(msg if s == "c" else other_text, is_user=(s == "c"))
+            bubble_c.set_theme(self.is_dark)
+
+        row = self._create_message_row_mixed(
+            bubble_a, s == "a",
+            bubble_b, s == "b",
+            bubble_c, s == "c",
+        )
+        self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
+        self._scroll_to_bottom()
     
     def add_user_message(self, text: str):
         """Add user prompt to all columns on the SAME ROW"""
@@ -372,6 +529,8 @@ class SynchronizedChatDisplay(QWidget):
         self.current_row_a_bubble = None
         self.current_row_b_bubble = None
         self.current_row_c_bubble = None
+        self._m2m_pending_speaker = None
+        self._m2m_pending_bubbles = None
     
     def add_tool_call(self, tool_name: str, args: dict, column: str):
         """

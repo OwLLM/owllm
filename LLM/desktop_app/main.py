@@ -11177,6 +11177,15 @@ class MainWindow(QMainWindow):
         if not user_prompt:
             QMessageBox.warning(self, "Test", "Please enter a prompt.")
             return
+
+        # Prevent overlapping turns (we need a strict turn boundary for correct memory)
+        try:
+            for w in (getattr(self, "tool_worker_a", None), getattr(self, "tool_worker_b", None), getattr(self, "tool_worker_c", None)):
+                if w is not None and hasattr(w, "isRunning") and w.isRunning():
+                    QMessageBox.information(self, "Test", "Please wait for the current responses to finish before sending another message.")
+                    return
+        except Exception:
+            pass
         
         model_a_text = self.test_model_a.currentText().strip()
         model_b_text = self.test_model_b.currentText().strip()
@@ -11199,22 +11208,13 @@ class MainWindow(QMainWindow):
         model_c_path = None
         
         if not model_a_text.startswith("(No models") and model_a_text:
-            idx = self.test_model_a.currentIndex()
-            path_data = self.test_model_a.itemData(idx)
-            if path_data:
-                model_a_path = str(path_data)  # Ensure it's a string
+            model_a_path = self._get_model_path_from_combo(self.test_model_a)
         
         if not model_b_text.startswith("(No models") and model_b_text:
-            idx = self.test_model_b.currentIndex()
-            path_data = self.test_model_b.itemData(idx)
-            if path_data:
-                model_b_path = str(path_data)  # Ensure it's a string
+            model_b_path = self._get_model_path_from_combo(self.test_model_b)
         
         if hasattr(self, 'test_model_c') and not model_c_text.startswith("(No models") and model_c_text:
-            idx = self.test_model_c.currentIndex()
-            path_data = self.test_model_c.itemData(idx)
-            if path_data:
-                model_c_path = str(path_data)  # Ensure it's a string
+            model_c_path = self._get_model_path_from_combo(self.test_model_c)
         
         
         # Get system prompts for each model
@@ -11250,28 +11250,35 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Port Conflict", f"Failed to resolve port conflicts: {e}\n\nPlease ensure ports 10500-10600 are available.")
             return
         
-        # Keep prompts separate - system prompt will be passed separately for instruct models
-        prompt_a = user_prompt
-        prompt_b = user_prompt
-        prompt_c = user_prompt
-        
+        # Begin pending turn + disable input until all models finish
+        active_keys = []
+        if model_a_path:
+            active_keys.append("a")
+        if model_b_path:
+            active_keys.append("b")
+        if model_c_path:
+            active_keys.append("c")
+        self._test_begin_pending_turn(user_prompt, active_keys)
+
         # Add user message to all columns on the same line
         self.chat_display.add_user_message(user_prompt)
-        
-        # Run Model A
+
+        # Option B (chat memory): build a per-model multi-turn prompt using role formatting.
+        # We include tool instructions inside the system role to avoid breaking ChatML/Llama formatting.
         if model_a_path:
+            prompt_a = self._build_test_prompt_for_model("a", system_prompt_a, user_prompt)
             self.chat_display.start_model_a_response()
-            self._run_inference_a(model_a_path, prompt_a, system_prompt_a)
-        
-        # Run Model B
+            self._run_inference_a_with_tools(model_a_path, prompt_a, system_prompt="", auto_inject_tool_prompt=False)
+
         if model_b_path:
+            prompt_b = self._build_test_prompt_for_model("b", system_prompt_b, user_prompt)
             self.chat_display.start_model_b_response()
-            self._run_inference_b(model_b_path, prompt_b, system_prompt_b)
-        
-        # Run Model C
+            self._run_inference_b_with_tools(model_b_path, prompt_b, system_prompt="", auto_inject_tool_prompt=False)
+
         if model_c_path:
+            prompt_c = self._build_test_prompt_for_model("c", system_prompt_c, user_prompt)
             self.chat_display.start_model_c_response()
-            self._run_inference_c(model_c_path, prompt_c, system_prompt_c)
+            self._run_inference_c_with_tools(model_c_path, prompt_c, system_prompt="", auto_inject_tool_prompt=False)
         
         # Clear prompt
         self.test_prompt.clear()
@@ -11626,7 +11633,7 @@ class MainWindow(QMainWindow):
         self.test_proc_a = None
     
     
-    def _run_inference_a_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
+    def _run_inference_a_with_tools(self, model_path: str, prompt: str, system_prompt: str = "", auto_inject_tool_prompt: bool = True):
         """Run inference for Model A with tool calling support (non-blocking)"""
         # Logs go to right column; keep chat bubbles for real model replies only.
         self._tool_progress_a = ""
@@ -11641,8 +11648,8 @@ class MainWindow(QMainWindow):
             self.chat_display.update_model_a_response("[ERROR] Failed to start. See logs on the right.")
             return
         
-        # FIX: Auto-inject tool system prompt if not provided
-        if not system_prompt:
+        # Auto-inject tool system prompt if not provided (unless caller disables injection)
+        if auto_inject_tool_prompt and not system_prompt:
             from core.model_capabilities import get_prompted_system_prompt
             system_prompt = get_prompted_system_prompt()
         
@@ -11686,7 +11693,8 @@ class MainWindow(QMainWindow):
             lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
                                 self._append_test_chat_log(f"[A] {error}"),
                                 self.chat_display.update_model_a_response("[ERROR] Failed. See logs on the right."),
-                                self._close_env_dialog("a", is_tool_chat=False))
+                                self._close_env_dialog("a", is_tool_chat=False),
+                                self._test_finish_pending_model("a", None))
         )
         
         # Start worker
@@ -11705,6 +11713,8 @@ class MainWindow(QMainWindow):
             text += f"\n\n[Tools Used: {len(tool_log)}]"
         self._tool_progress_a = text
         self.chat_display.update_model_a_response(text)
+        # Persist assistant reply into Test chat memory
+        self._test_finish_pending_model("a", final_output or "")
 
     def _close_env_dialog(self, which: str, is_tool_chat: bool = False):
         """Close environment setup dialog for a model"""
@@ -12089,7 +12099,7 @@ class MainWindow(QMainWindow):
         self.test_proc_b = None
     
     
-    def _run_inference_b_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
+    def _run_inference_b_with_tools(self, model_path: str, prompt: str, system_prompt: str = "", auto_inject_tool_prompt: bool = True):
         """Run inference for Model B with tool calling support (non-blocking)"""
         self._tool_progress_b = ""
         self._append_test_chat_log("[B] [INFO] Preparing tool-enabled inference...")
@@ -12103,8 +12113,8 @@ class MainWindow(QMainWindow):
             self.chat_display.update_model_b_response("[ERROR] Failed to start. See logs on the right.")
             return
 
-        # FIX: Auto-inject tool system prompt if not provided
-        if not system_prompt:
+        # Auto-inject tool system prompt if not provided (unless caller disables injection)
+        if auto_inject_tool_prompt and not system_prompt:
             from core.model_capabilities import get_prompted_system_prompt
             system_prompt = get_prompted_system_prompt()
 
@@ -12145,7 +12155,8 @@ class MainWindow(QMainWindow):
             lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
                                 self._append_test_chat_log(f"[B] {error}"),
                                 self.chat_display.update_model_b_response("[ERROR] Failed. See logs on the right."),
-                                self._close_env_dialog("b", is_tool_chat=False))
+                                self._close_env_dialog("b", is_tool_chat=False),
+                                self._test_finish_pending_model("b", None))
         )
         
         self.tool_worker_b.start()
@@ -12163,6 +12174,7 @@ class MainWindow(QMainWindow):
             text += f"\n\n[Tools Used: {len(tool_log)}]"
         self._tool_progress_b = text
         self.chat_display.update_model_b_response(text)
+        self._test_finish_pending_model("b", final_output or "")
     
     def _run_inference_c(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model C using QProcess"""
@@ -12363,7 +12375,7 @@ class MainWindow(QMainWindow):
         if filtered_output:
             self.chat_display.update_model_c_response(filtered_output)
     
-    def _run_inference_c_with_tools(self, model_path: str, prompt: str, system_prompt: str = ""):
+    def _run_inference_c_with_tools(self, model_path: str, prompt: str, system_prompt: str = "", auto_inject_tool_prompt: bool = True):
         """Run inference for Model C with tool calling support (non-blocking)"""
         self._tool_progress_c = ""
         self._append_test_chat_log("[C] [INFO] Preparing tool-enabled inference...")
@@ -12377,8 +12389,8 @@ class MainWindow(QMainWindow):
             self.chat_display.update_model_c_response("[ERROR] Failed to start. See logs on the right.")
             return
 
-        # FIX: Auto-inject tool system prompt if not provided
-        if not system_prompt:
+        # Auto-inject tool system prompt if not provided (unless caller disables injection)
+        if auto_inject_tool_prompt and not system_prompt:
             from core.model_capabilities import get_prompted_system_prompt
             system_prompt = get_prompted_system_prompt()
 
@@ -12419,7 +12431,8 @@ class MainWindow(QMainWindow):
             lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
                                 self._append_test_chat_log(f"[C] {error}"),
                                 self.chat_display.update_model_c_response("[ERROR] Failed. See logs on the right."),
-                                self._close_env_dialog("c", is_tool_chat=False))
+                                self._close_env_dialog("c", is_tool_chat=False),
+                                self._test_finish_pending_model("c", None))
         )
         
         self.tool_worker_c.start()
@@ -12437,6 +12450,7 @@ class MainWindow(QMainWindow):
             text += f"\n\n[Tools Used: {len(tool_log)}]"
         self._tool_progress_c = text
         self.chat_display.update_model_c_response(text)
+        self._test_finish_pending_model("c", final_output or "")
     
     def _on_inference_finished_c(self, exit_code: int = 0, exit_status=None):
         """Called when Model C inference finishes"""
@@ -12754,11 +12768,239 @@ class MainWindow(QMainWindow):
         """Clear both chat histories"""
         self.chat_display.clear()
         self.test_prompt.clear()
+        # Stop any in-flight workers so reset is clean
+        try:
+            for w in (getattr(self, "tool_worker_a", None), getattr(self, "tool_worker_b", None), getattr(self, "tool_worker_c", None)):
+                if w is not None and hasattr(w, "isRunning") and w.isRunning():
+                    w.quit()
+                    w.wait(1500)
+        except Exception:
+            pass
+        # Clear in-memory conversation context used for prompt formatting
+        try:
+            self._test_chat_turns = {"a": [], "b": [], "c": []}
+            self._test_pending_user = None
+            self._test_pending_models = set()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "test_send_btn") and self.test_send_btn:
+                self.test_send_btn.setEnabled(True)
+            if hasattr(self, "test_prompt") and self.test_prompt:
+                self.test_prompt.setEnabled(True)
+        except Exception:
+            pass
         try:
             if hasattr(self, "test_chat_log_display") and self.test_chat_log_display:
                 self.test_chat_log_display.clear()
         except Exception:
             pass
+
+    def _ensure_test_chat_memory_state(self) -> None:
+        """Ensure in-memory chat history structures exist (Test side-by-side)."""
+        if not hasattr(self, "_test_chat_turns") or not isinstance(getattr(self, "_test_chat_turns", None), dict):
+            self._test_chat_turns = {"a": [], "b": [], "c": []}
+        if not hasattr(self, "_test_pending_user"):
+            self._test_pending_user = None
+        if not hasattr(self, "_test_pending_models") or not isinstance(getattr(self, "_test_pending_models", None), set):
+            self._test_pending_models = set()
+
+    def _get_model_path_from_combo(self, combo) -> str | None:
+        """
+        Resolve the selected model path from an editable QComboBox.
+        Fixes the common case where the user types a model name/path but currentIndex/itemData still point to the previous selection.
+        """
+        if combo is None:
+            return None
+        # Preferred: actual selected itemData
+        try:
+            idx = combo.currentIndex()
+            if idx >= 0:
+                data = combo.itemData(idx)
+                if data:
+                    return str(data)
+        except Exception:
+            pass
+
+        # Fallback: resolve from visible text
+        try:
+            text = (combo.currentText() or "").strip()
+        except Exception:
+            text = ""
+        if not text or text.startswith("(No models"):
+            return None
+
+        from pathlib import Path
+
+        def norm(s: str) -> str:
+            s = (s or "").strip()
+            for p in ("✓ 📦 ", "📦 ", "🎯 "):
+                if s.startswith(p):
+                    s = s[len(p):].strip()
+            if " (adapter)" in s:
+                s = s.replace(" (adapter)", "").strip()
+            return s
+
+        # Exact visible-text match
+        try:
+            for i in range(combo.count()):
+                if (combo.itemText(i) or "").strip() == text:
+                    d = combo.itemData(i)
+                    if d:
+                        return str(d)
+        except Exception:
+            pass
+
+        # Normalized match (user may type without prefixes)
+        want = norm(text)
+        try:
+            for i in range(combo.count()):
+                if norm(combo.itemText(i) or "") == want:
+                    d = combo.itemData(i)
+                    if d:
+                        return str(d)
+        except Exception:
+            pass
+
+        # Direct path paste
+        try:
+            p = Path(text)
+            if p.exists():
+                return str(p)
+        except Exception:
+            pass
+
+        return None
+
+    def _get_test_template_name(self, model_key: str) -> str:
+        """Return the selected instruction template name for model a/b/c (used to pick chat formatting)."""
+        try:
+            page = None
+            if model_key == "a":
+                page = getattr(self, "test_model_a_settings", None)
+            elif model_key == "b":
+                page = getattr(self, "test_model_b_settings", None)
+            elif model_key == "c":
+                page = getattr(self, "test_model_c_settings", None)
+            if page and hasattr(page, "template_select"):
+                t = str(page.template_select.currentText() or "").strip()
+                # Saved custom instructions appear as "💾 Name" but are not a chat-format choice
+                if t.startswith("💾 "):
+                    return "None"
+                return t or "None"
+        except Exception:
+            pass
+        return "None"
+
+    def _format_test_chat_prompt(self, template_name: str, system_text: str, turns: list, next_user: str) -> str:
+        """
+        Build a multi-turn chat prompt using role formatting (Option B).
+        `turns` is a list of (user_text, assistant_text).
+        """
+        t = (template_name or "None").strip()
+        sys_text = (system_text or "").strip()
+        next_u = (next_user or "").strip()
+
+        # ChatML-style
+        if t == "ChatML":
+            parts = []
+            if sys_text:
+                parts.append(f"<|im_start|>system\n{sys_text}\n<|im_end|>")
+            for u, a in turns:
+                u = (u or "").strip()
+                a = (a or "").strip()
+                if u:
+                    parts.append(f"<|im_start|>user\n{u}\n<|im_end|>")
+                if a:
+                    parts.append(f"<|im_start|>assistant\n{a}\n<|im_end|>")
+            parts.append(f"<|im_start|>user\n{next_u}\n<|im_end|>")
+            parts.append("<|im_start|>assistant\n")
+            return "\n".join(parts).strip() + "\n"
+
+        # Llama-2 style
+        if t == "Llama-2":
+            out = []
+            for i, (u, a) in enumerate(turns):
+                u = (u or "").strip()
+                a = (a or "").strip()
+                if i == 0 and sys_text:
+                    u_block = f"<<SYS>>\n{sys_text}\n<</SYS>>\n\n{u}"
+                else:
+                    u_block = u
+                out.append(f"<s>[INST] {u_block} [/INST] {a} </s>")
+            # New user message (open assistant)
+            if not turns and sys_text:
+                next_block = f"<<SYS>>\n{sys_text}\n<</SYS>>\n\n{next_u}"
+            else:
+                next_block = next_u
+            out.append(f"<s>[INST] {next_block} [/INST]")
+            return "\n".join(out).strip() + " "
+
+        # Vicuna / Alpaca / default: role lines
+        parts = []
+        if sys_text:
+            parts.append(f"SYSTEM: {sys_text}")
+        for u, a in turns:
+            u = (u or "").strip()
+            a = (a or "").strip()
+            if u:
+                parts.append(f"USER: {u}")
+            if a:
+                parts.append(f"ASSISTANT: {a}")
+        parts.append(f"USER: {next_u}")
+        parts.append("ASSISTANT:")
+        return "\n".join(parts).strip() + " "
+
+    def _build_test_prompt_for_model(self, model_key: str, user_system_prompt: str, next_user: str) -> str:
+        """Create the full prompt for a model (includes memory + tool prompt inside system role)."""
+        self._ensure_test_chat_memory_state()
+        turns = list(self._test_chat_turns.get(model_key, []))
+        template = self._get_test_template_name(model_key)
+        # Tool calling is always enabled in Test chat: include tool instructions in the system role.
+        try:
+            from core.model_capabilities import get_prompted_system_prompt
+            tool_sys = (get_prompted_system_prompt() or "").strip()
+        except Exception:
+            tool_sys = ""
+        sys_parts = []
+        if (user_system_prompt or "").strip():
+            sys_parts.append((user_system_prompt or "").strip())
+        if tool_sys:
+            sys_parts.append(tool_sys)
+        combined_system = "\n\n".join(sys_parts).strip()
+        return self._format_test_chat_prompt(template, combined_system, turns, next_user)
+
+    def _test_begin_pending_turn(self, user_prompt: str, active_keys: list[str]) -> None:
+        self._ensure_test_chat_memory_state()
+        self._test_pending_user = (user_prompt or "").strip()
+        self._test_pending_models = set([k for k in (active_keys or []) if k])
+        try:
+            if hasattr(self, "test_send_btn") and self.test_send_btn:
+                self.test_send_btn.setEnabled(False)
+            if hasattr(self, "test_prompt") and self.test_prompt:
+                self.test_prompt.setEnabled(False)
+        except Exception:
+            pass
+
+    def _test_finish_pending_model(self, model_key: str, assistant_text: str | None = None) -> None:
+        """Record assistant response into memory and re-enable Send when all models finished."""
+        self._ensure_test_chat_memory_state()
+        k = (model_key or "").lower()[:1]
+        if not k:
+            return
+        if k in self._test_pending_models:
+            self._test_pending_models.discard(k)
+            if assistant_text is not None and self._test_pending_user:
+                self._test_chat_turns.setdefault(k, []).append((self._test_pending_user, (assistant_text or "").strip()))
+        if not self._test_pending_models:
+            self._test_pending_user = None
+            try:
+                if hasattr(self, "test_send_btn") and self.test_send_btn:
+                    self.test_send_btn.setEnabled(True)
+                if hasattr(self, "test_prompt") and self.test_prompt:
+                    self.test_prompt.setEnabled(True)
+            except Exception:
+                pass
     
     def _update_model_header_ports(self) -> None:
         """Update port display in Model A/B/C headers based on selected models"""

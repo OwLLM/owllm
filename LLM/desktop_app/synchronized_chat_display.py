@@ -345,7 +345,7 @@ class SynchronizedChatDisplay(QWidget):
     def finish_m2m_turn(self, speaker: str, text: str):
         """
         Model-to-model: fill the pending row started by start_m2m_turn().
-        Speaker's message is RIGHT in its own column and LEFT in all other columns.
+        Show ONLY the speaker's message in its own column (no cross-column repeats).
         """
         s = (speaker or "a").strip().lower()[:1]
         msg = (text or "").strip()
@@ -357,11 +357,6 @@ class SynchronizedChatDisplay(QWidget):
             # Fallback: just add a new row
             return self.add_m2m_turn_message(s, msg)
 
-        # For 3-model mode, prefix in other columns for clarity
-        other_text = msg
-        if self.num_models == 3:
-            other_text = f"{s.upper()}: {msg}"
-
         for col in ("a", "b", "c"):
             bubble = pending.get(col) if isinstance(pending, dict) else None
             if bubble is None:
@@ -370,8 +365,8 @@ class SynchronizedChatDisplay(QWidget):
                 bubble.update_text(msg)
                 bubble.setVisible(True)
             else:
-                bubble.update_text(other_text)
-                bubble.setVisible(True)
+                bubble.update_text("")
+                bubble.setVisible(False)
 
         self._m2m_pending_speaker = None
         self._m2m_pending_bubbles = None
@@ -381,18 +376,22 @@ class SynchronizedChatDisplay(QWidget):
         """Model-to-model: add a completed turn row with per-column left/right alignment."""
         s = (speaker or "a").strip().lower()[:1]
         msg = (text or "").strip()
-        other_text = msg if self.num_models < 3 else f"{s.upper()}: {msg}"
-
-        bubble_a = ChatBubble(msg if s == "a" else other_text, is_user=(s == "a"))
+        bubble_a = ChatBubble(msg if s == "a" else "", is_user=(s == "a"))
         bubble_a.set_theme(self.is_dark)
+        if s != "a":
+            bubble_a.setVisible(False)
         bubble_b = None
         if self.num_models >= 2:
-            bubble_b = ChatBubble(msg if s == "b" else other_text, is_user=(s == "b"))
+            bubble_b = ChatBubble(msg if s == "b" else "", is_user=(s == "b"))
             bubble_b.set_theme(self.is_dark)
+            if s != "b":
+                bubble_b.setVisible(False)
         bubble_c = None
         if self.num_models == 3:
-            bubble_c = ChatBubble(msg if s == "c" else other_text, is_user=(s == "c"))
+            bubble_c = ChatBubble(msg if s == "c" else "", is_user=(s == "c"))
             bubble_c.set_theme(self.is_dark)
+            if s != "c":
+                bubble_c.setVisible(False)
 
         row = self._create_message_row_mixed(
             bubble_a, s == "a",

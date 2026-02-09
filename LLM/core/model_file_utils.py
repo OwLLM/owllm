@@ -74,12 +74,12 @@ def list_repo_files(repo_id: str, token: Optional[str] = None) -> List[Dict]:
         if e.response.status_code == 401:
             raise RuntimeError(
                 f"Repository {repo_id} requires authentication. "
-                "Please set HF_TOKEN or HUGGINGFACEHUB_API_TOKEN environment variable."
+                "Please set HF_TOKEN (or HUGGINGFACE_HUB_TOKEN) environment variable."
             )
         elif e.response.status_code == 403:
             raise RuntimeError(
                 f"Repository {repo_id} is private/gated. "
-                "Please set HF_TOKEN or HUGGINGFACEHUB_API_TOKEN environment variable."
+                "Please request access/accept the model terms on Hugging Face, then set HF_TOKEN (or HUGGINGFACE_HUB_TOKEN)."
             )
         elif e.response.status_code == 404:
             raise RuntimeError(f"Repository {repo_id} not found on Hugging Face")

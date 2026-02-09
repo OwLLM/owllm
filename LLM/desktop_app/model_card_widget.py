@@ -27,6 +27,7 @@ class ModelCard(QFrame):
         self.is_downloaded = is_downloaded
         self.is_dark = True
         self.compatibility_badge = compatibility_badge
+        self.requires_token = False
         
         self.setMinimumHeight(220)
         # Remove setMaximumHeight to allow automatic sizing based on content
@@ -287,9 +288,11 @@ class ModelCard(QFrame):
     
     def _apply_style(self):
         """Apply card styling with color-coded border based on compatibility"""
-        # Get border color based on compatibility badge
+        # Get border color based on compatibility badge or token requirement
         border_color = "#667eea"  # Default blue
-        if self.compatibility_badge:
+        if getattr(self, "requires_token", False):
+            border_color = "#F7C948"
+        elif self.compatibility_badge:
             color = self.compatibility_badge.get("color", "")
             if color == "green":
                 border_color = "#4CAF50"
@@ -298,40 +301,36 @@ class ModelCard(QFrame):
             elif color == "red":
                 border_color = "#f44336"
         
+        req = getattr(self, "requires_token", False)
         if self.is_dark:
+            bg0 = "#2a2610" if req else "#1e1e2e"
+            bg1 = "#2a2610" if req else "#16213e"
+            h0 = "#332a18" if req else "#262740"
+            h1 = "#2a2540" if req else "#1a2540"
             self.setStyleSheet(f"""
                 ModelCard {{
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
-                                                stop:0 #1e1e2e, stop:1 #16213e);
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {bg0}, stop:1 {bg1});
                     border: 2px solid {border_color};
                     border-radius: 10px;
                 }}
                 ModelCard:hover {{
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
-                                                stop:0 #262740, stop:1 #1a2540);
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {h0}, stop:1 {h1});
                 }}
-                QLabel {{
-                    background: transparent;
-                    color: #fafafa;
-                    border: none;
-                }}
+                QLabel {{ background: transparent; color: #fafafa; border: none; }}
             """)
         else:
+            bg = "#fffef5" if req else "white"
+            hover_bg = "#faf9f0" if req else "#f5f5f5"
             self.setStyleSheet(f"""
-                ModelCard {{
-                    background: white;
-                    border: 2px solid {border_color};
-                    border-radius: 10px;
-                }}
-                ModelCard:hover {{
-                    background: #f5f5f5;
-                }}
-                QLabel {{
-                    background: transparent;
-                    color: #262730;
-                    border: none;
-                }}
+                ModelCard {{ background: {bg}; border: 2px solid {border_color}; border-radius: 10px; }}
+                ModelCard:hover {{ background: {hover_bg}; }}
+                QLabel {{ background: transparent; color: #262730; border: none; }}
             """)
+    
+    def set_requires_token(self, value: bool):
+        """Mark card as requiring HF token (gated/private); re-applies style (yellow border)."""
+        self.requires_token = bool(value)
+        self._apply_style()
     
     def set_theme(self, dark_mode: bool):
         """Update theme"""
@@ -377,6 +376,7 @@ class DownloadedModelCard(QFrame):
         self.is_dark = True
         self.compatibility_badge = compatibility_badge
         self.onboarding_status = onboarding_status or "NEW"
+        self.requires_token = False
         self.env_key = env_key
         
         self.setMinimumHeight(220)
@@ -758,9 +758,11 @@ class DownloadedModelCard(QFrame):
         """)
     
     def _apply_style(self):
-        # Apply color-coded border based on compatibility badge
+        # Apply color-coded border based on compatibility badge or token requirement
         border_color = "#667eea"  # Default blue
-        if self.compatibility_badge and not self.is_incomplete:
+        if getattr(self, "requires_token", False):
+            border_color = "#F7C948"
+        elif self.compatibility_badge and not self.is_incomplete:
             color = self.compatibility_badge.get("color", "")
             if color == "green":
                 border_color = "#4CAF50"
@@ -772,40 +774,36 @@ class DownloadedModelCard(QFrame):
         if self.is_incomplete:
             border_color = "#ff6b6b"
         
+        req = getattr(self, "requires_token", False)
         if self.is_dark:
+            bg0 = "#2a2610" if req else "#1e1e2e"
+            bg1 = "#2a2610" if req else "#16213e"
+            h0 = "#332a18" if req else "#262740"
+            h1 = "#2a2540" if req else "#1a2540"
             self.setStyleSheet(f"""
                 DownloadedModelCard {{
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
-                                                stop:0 #1e1e2e, stop:1 #16213e);
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {bg0}, stop:1 {bg1});
                     border: 2px solid {border_color};
                     border-radius: 10px;
                 }}
                 DownloadedModelCard:hover {{
-                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, 
-                                                stop:0 #262740, stop:1 #1a2540);
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {h0}, stop:1 {h1});
                 }}
-                QLabel {{
-                    background: transparent;
-                    color: #fafafa;
-                    border: none;
-                }}
+                QLabel {{ background: transparent; color: #fafafa; border: none; }}
             """)
         else:
+            bg = "#fffef5" if req else "white"
+            hover_bg = "#faf9f0" if req else "#f5f5f5"
             self.setStyleSheet(f"""
-                DownloadedModelCard {{
-                    background: white;
-                    border: 2px solid {border_color};
-                    border-radius: 10px;
-                }}
-                DownloadedModelCard:hover {{
-                    background: #f5f5f5;
-                }}
-                QLabel {{
-                    background: transparent;
-                    color: #262730;
-                    border: none;
-                }}
+                DownloadedModelCard {{ background: {bg}; border: 2px solid {border_color}; border-radius: 10px; }}
+                DownloadedModelCard:hover {{ background: {hover_bg}; }}
+                QLabel {{ background: transparent; color: #262730; border: none; }}
             """)
+    
+    def set_requires_token(self, value: bool):
+        """Mark card as requiring HF token (gated/private); re-applies style (yellow border)."""
+        self.requires_token = bool(value)
+        self._apply_style()
     
     def set_theme(self, dark_mode: bool):
         self.is_dark = dark_mode

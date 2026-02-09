@@ -78,14 +78,29 @@ def download_hf_model(model_id: str, target_dir: Path) -> Path:
     return dest
 
 
-def get_model_details(model_id: str) -> dict:
-    """Fetch detailed model information from Hugging Face API."""
+def get_model_details(model_id: str, token: Optional[str] = None) -> dict:
+    """Fetch detailed model information from Hugging Face API.
+    token: optional HF token (else env HF_TOKEN, HUGGINGFACE_HUB_TOKEN, HUGGINGFACEHUB_API_TOKEN, or huggingface_hub get_token).
+    """
     if HfApi is None:
         raise RuntimeError("huggingface_hub is not available. Install requirements.txt")
     
     import requests
     import os
     from urllib.parse import quote
+    
+    if token is None:
+        token = (
+            os.getenv("HF_TOKEN")
+            or os.getenv("HUGGINGFACE_HUB_TOKEN")
+            or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+        )
+        if not token and HfApi is not None:
+            try:
+                from huggingface_hub import get_token as _get_token
+                token = _get_token()
+            except Exception:
+                pass
     
     # Direct REST call workaround (faster/more reliable than model_info in some cases)
     # Known workaround: call /api/models/{repo_id} with files_metadata=false
@@ -97,7 +112,6 @@ def get_model_details(model_id: str) -> dict:
         "files_metadata": "false",
     }
     headers = {}
-    token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
     
@@ -434,6 +448,26 @@ def set_cached_model_stats(model_id: str, downloads: Optional[int], likes: Optio
     })
 
 
+def set_cached_model_stats_ext(model_id: str, downloads: Optional[int], likes: Optional[int],
+                              gated: Optional[bool] = None, private: Optional[bool] = None) -> None:
+    """Cache model stats including gated/private for token-required UI."""
+    from core.state_store import get_state_store
+    from datetime import datetime
+
+    store = get_state_store()
+    cache_key = f"hf_stats:{model_id}"
+    payload = {
+        "downloads": downloads,
+        "likes": likes,
+        "fetched_at": datetime.utcnow().isoformat(),
+    }
+    if gated is not None:
+        payload["gated"] = gated
+    if private is not None:
+        payload["private"] = private
+    store.set_kv(cache_key, payload)
+
+
 def fetch_model_stats(model_id: str) -> Optional[dict]:
     """
     Fetch model stats from Hugging Face API (downloads, likes).
@@ -449,15 +483,15 @@ def fetch_model_stats(model_id: str) -> Optional[dict]:
         details = get_model_details(model_id)
         downloads = details.get("downloads")
         likes = details.get("likes")
-        
-        # Cache the result (even if None, to avoid repeated failed requests)
-        set_cached_model_stats(model_id, downloads, likes)
-        
+        gated = details.get("gated")
+        private = details.get("private")
+        set_cached_model_stats_ext(model_id, downloads, likes, gated=gated, private=private)
         return {
             "downloads": downloads,
-            "likes": likes
+            "likes": likes,
+            "gated": gated,
+            "private": private,
         }
     except Exception:
-        # On any error (offline, 404, gated, etc.), return None
         return None
 

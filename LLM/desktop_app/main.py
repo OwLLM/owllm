@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Dict
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize, QEvent, QObject, QPoint, QPointF
+from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize, QEvent, QObject, QPoint, QPointF, QSettings
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
@@ -44,6 +44,18 @@ from core.python_runtime import PythonRuntimeManager
 
 _APP_BUILD = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%y%m%d-%H%M%S")
 APP_TITLE = "OWLLM"
+
+# Hugging Face token creation URL with permissions preselected (fine-grained, gated read, etc.)
+HF_TOKEN_NEW_PREFILLED_URL = (
+    "https://huggingface.co/settings/tokens/new"
+    "?ownUserPermissions=repo.content.read"
+    "&ownUserPermissions=repo.access.read"
+    "&ownUserPermissions=repo.write"
+    "&ownUserPermissions=user.webhooks.read"
+    "&canReadGatedRepos=true"
+    "&tokenType=fineGrained"
+)
+HF_TOKEN_DOCS_URL = "https://huggingface.co/docs/hub/en/security-tokens"
 
 # Windows subprocess flags to prevent CMD window flashing
 SUBPROCESS_FLAGS = {}
@@ -582,12 +594,13 @@ class RepairThread(QThread):
     error = Signal(str)     # error message
     status = Signal(str)    # current status message (e.g., "Downloading model-00035-of-00061.bin (35/61)")
     
-    def __init__(self, model_id: str, existing_dir: Path, force_fresh_only: bool = False, cache_dir: Optional[Path] = None):
+    def __init__(self, model_id: str, existing_dir: Path, force_fresh_only: bool = False, cache_dir: Optional[Path] = None, token: Optional[str] = None):
         super().__init__()
         self.model_id = model_id
         self.existing_dir = existing_dir
         self.force_fresh_only = force_fresh_only
         self.cache_dir = cache_dir
+        self.token = token
         import threading
         self._stop_requested = threading.Event()
     
@@ -615,8 +628,14 @@ class RepairThread(QThread):
             stall_detected = threading.Event()
             watchdog_stop = threading.Event()
             
-            # Get token
-            token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+            # Use token passed from main thread (env + QSettings + cached), else env fallback
+            token = self.token
+            if not token:
+                token = (
+                    os.getenv("HF_TOKEN")
+                    or os.getenv("HUGGINGFACE_HUB_TOKEN")
+                    or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+                )
             
             # Stall watchdog: monitor .incomplete file growth
             def stall_watchdog():
@@ -921,11 +940,12 @@ class DownloadThread(QThread):
     error = Signal(str)     # error message
     status = Signal(str)    # current status message (e.g., "Downloading model-00035-of-00061.bin (35/61)")
     
-    def __init__(self, model_id: str, target_dir: Path, cache_dir: Optional[Path] = None):
+    def __init__(self, model_id: str, target_dir: Path, cache_dir: Optional[Path] = None, token: Optional[str] = None):
         super().__init__()
         self.model_id = model_id
         self.target_dir = target_dir
         self.cache_dir = cache_dir
+        self.token = token
         import threading
         self._stop_requested = threading.Event()
     
@@ -947,8 +967,14 @@ class DownloadThread(QThread):
             import logging
             logger = logging.getLogger(__name__)
             
-            # Get token
-            token = os.getenv("HF_TOKEN") or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+            # Use token passed from main thread (env + QSettings + cached), else env fallback
+            token = self.token
+            if not token:
+                token = (
+                    os.getenv("HF_TOKEN")
+                    or os.getenv("HUGGINGFACE_HUB_TOKEN")
+                    or os.getenv("HUGGINGFACEHUB_API_TOKEN")
+                )
             
             # Convert model ID to directory name (e.g., unsloth/model -> unsloth__model)
             model_slug = self.model_id.replace("/", "__")
@@ -2107,10 +2133,11 @@ class ModelDetailsWorker(QObject):
     error_occurred = Signal(str)  # Emits error message
     retrying = Signal(int, int)  # Emits (current_attempt, max_attempts) for retry feedback
     
-    def __init__(self, model_id: str, max_retries: int = 2):
+    def __init__(self, model_id: str, max_retries: int = 2, token: Optional[str] = None):
         super().__init__()
         self.model_id = model_id
         self.max_retries = max_retries
+        self.token = token
     
     def fetch(self):
         """Fetch model details with retry logic - runs in background thread"""
@@ -2119,7 +2146,7 @@ class ModelDetailsWorker(QObject):
         for attempt in range(1, self.max_retries + 1):
             try:
                 from core.models import get_model_details
-                details = get_model_details(self.model_id)
+                details = get_model_details(self.model_id, token=self.token)
                 self.details_ready.emit(details)
                 return  # Success, exit retry loop
             except Exception as e:
@@ -5439,13 +5466,49 @@ class MainWindow(QMainWindow):
         cards_layout.addWidget(curated_scroll)
         curated_horizontal.addWidget(cards_widget, 2)  # 2/3 width
         
-        # Right: Model details panel (takes 1/3 of space)
-        self.curated_details_panel = ModelDetailsPanel()
+        # Right: Details tabs (default Access & Tokens)
+        self.curated_details_tabs = QTabWidget()
+        self.curated_details_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background: rgba(0, 0, 0, 0.1);
+            }
+            QTabBar::tab {
+                background: rgba(102, 126, 234, 0.1);
+                color: #d7dde7;
+                padding: 8px 16px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: rgba(102, 126, 234, 0.3);
+                color: white;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover {
+                background: rgba(102, 126, 234, 0.2);
+            }
+        """)
+
+        # Info tab
+        self.curated_info_panel = ModelDetailsPanel()
+        curated_info_scroll = QScrollArea()
+        curated_info_scroll.setWidgetResizable(True)
+        curated_info_scroll.setFrameShape(QFrame.NoFrame)
+        curated_info_scroll.setWidget(self.curated_info_panel)
+        self.curated_details_tabs.addTab(curated_info_scroll, "📋 Info")
+
+        # Access & Tokens tab (insert first, default)
+        curated_access_scroll = self._build_access_tokens_panel()
+        self.curated_details_tabs.insertTab(0, curated_access_scroll, "🔑 Access & Tokens")
+        self.curated_details_tabs.setCurrentIndex(0)
+
         curated_details_scroll = QScrollArea()
         curated_details_scroll.setWidgetResizable(True)
         curated_details_scroll.setFrameShape(QFrame.NoFrame)
         curated_details_scroll.setStyleSheet("background: rgba(0, 0, 0, 0.1); border-left: 1px solid rgba(102, 126, 234, 0.2);")
-        curated_details_scroll.setWidget(self.curated_details_panel)
+        curated_details_scroll.setWidget(self.curated_details_tabs)
         curated_horizontal.addWidget(curated_details_scroll, 1)  # 1/3 width
         
         curated_v_layout.addLayout(curated_horizontal)
@@ -5490,13 +5553,49 @@ class MainWindow(QMainWindow):
         search_cards_layout.addWidget(search_scroll)
         search_horizontal.addWidget(search_cards_widget, 2)  # 2/3 width
         
-        # Right: Model details panel (takes 1/3 of space)
-        self.search_details_panel = ModelDetailsPanel()
+        # Right: Details tabs (default Access & Tokens)
+        self.search_details_tabs = QTabWidget()
+        self.search_details_tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background: rgba(0, 0, 0, 0.1);
+            }
+            QTabBar::tab {
+                background: rgba(102, 126, 234, 0.1);
+                color: #d7dde7;
+                padding: 8px 16px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background: rgba(102, 126, 234, 0.3);
+                color: white;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover {
+                background: rgba(102, 126, 234, 0.2);
+            }
+        """)
+
+        # Info tab
+        self.search_info_panel = ModelDetailsPanel()
+        search_info_scroll = QScrollArea()
+        search_info_scroll.setWidgetResizable(True)
+        search_info_scroll.setFrameShape(QFrame.NoFrame)
+        search_info_scroll.setWidget(self.search_info_panel)
+        self.search_details_tabs.addTab(search_info_scroll, "📋 Info")
+
+        # Access & Tokens tab (insert first, default)
+        search_access_scroll = self._build_access_tokens_panel()
+        self.search_details_tabs.insertTab(0, search_access_scroll, "🔑 Access & Tokens")
+        self.search_details_tabs.setCurrentIndex(0)
+
         search_details_scroll = QScrollArea()
         search_details_scroll.setWidgetResizable(True)
         search_details_scroll.setFrameShape(QFrame.NoFrame)
         search_details_scroll.setStyleSheet("background: rgba(0, 0, 0, 0.1); border-left: 1px solid rgba(102, 126, 234, 0.2);")
-        search_details_scroll.setWidget(self.search_details_panel)
+        search_details_scroll.setWidget(self.search_details_tabs)
         search_horizontal.addWidget(search_details_scroll, 1)  # 1/3 width
         
         search_v_layout.addLayout(search_horizontal)
@@ -5593,6 +5692,11 @@ class MainWindow(QMainWindow):
         env_placeholder_layout.addWidget(placeholder_label)
         self.downloaded_details_tabs.addTab(env_placeholder, "⚙️ Environment")
         self.downloaded_env_widget = env_placeholder  # Store reference for updates
+        
+        # Access & Tokens tab (insert as first tab so it becomes default)
+        dl_access_scroll = self._build_access_tokens_panel()
+        self.downloaded_details_tabs.insertTab(0, dl_access_scroll, "🔑 Access & Tokens")
+        self.downloaded_details_tabs.setCurrentIndex(0)
         
         dl_details_scroll = QScrollArea()
         dl_details_scroll.setWidgetResizable(True)
@@ -5811,6 +5915,8 @@ class MainWindow(QMainWindow):
                             onboarding_status=onboarding_status,
                             env_key=env_key
                         )
+                        if cached_stats and (cached_stats.get("gated") or cached_stats.get("private")):
+                            card.set_requires_token(True)
                         card.set_theme(self.dark_mode)
                         card.selected.connect(self._on_model_selected)
                         card.delete_clicked.connect(self._on_delete_model)
@@ -5936,10 +6042,12 @@ class MainWindow(QMainWindow):
             card = ModelCard(name, model_id, desc, size, icons, is_downloaded, is_new, 
                            downloads=downloads_str, likes=likes_str,
                            compatibility_badge=compatibility_badge)
+            if cached_stats and (cached_stats.get("gated") or cached_stats.get("private")):
+                card.set_requires_token(True)
             card.set_theme(self.dark_mode)
             card.download_clicked.connect(self._download_curated_model)
-            # Connect card click to show details - use functools.partial to avoid lambda capture issues
-            card.card_clicked.connect(lambda checked=False, mid=model_id: self._show_model_details(mid, self.curated_details_panel))
+            # Card click: open Info tab and load details there
+            card.card_clicked.connect(lambda checked=False, mid=model_id: (self.curated_details_tabs.setCurrentIndex(1), self._show_model_details(mid, self.curated_info_panel)))
             self.curated_layout.addWidget(card, row, col)
             self.model_cards.append(card)
             
@@ -5997,6 +6105,8 @@ class MainWindow(QMainWindow):
                 if model_id in self._model_cards_by_id:
                     card = self._model_cards_by_id[model_id]
                     card.set_stats(stats.get("downloads"), stats.get("likes"))
+                    if hasattr(card, 'set_requires_token'):
+                        card.set_requires_token(bool(stats.get("gated") or stats.get("private")))
         
         # Update downloaded cards
         if hasattr(self, '_downloaded_cards_by_id'):
@@ -6004,6 +6114,8 @@ class MainWindow(QMainWindow):
                 if model_id in self._downloaded_cards_by_id:
                     card = self._downloaded_cards_by_id[model_id]
                     card.set_stats(stats.get("downloads"), stats.get("likes"))
+                    if hasattr(card, 'set_requires_token'):
+                        card.set_requires_token(bool(stats.get("gated") or stats.get("private")))
     
     def _on_model_selected(self, model_path: str):
         """Handle downloaded model selection"""
@@ -6017,6 +6129,7 @@ class MainWindow(QMainWindow):
         # Store current model_id for tab change handler
         self._selected_model_id = model_id
         self._selected_model_path = model_path
+        self._update_hf_accept_terms_link(model_id)
         
         # Get onboarding status
         from core.model_onboarding import get_onboarding_service
@@ -6029,21 +6142,237 @@ class MainWindow(QMainWindow):
         # Set default tab based on onboarding status (don't load Info content yet)
         if hasattr(self, 'downloaded_details_tabs'):
             if status == "READY":
-                self.downloaded_details_tabs.setCurrentIndex(0)  # Info tab
+                self.downloaded_details_tabs.setCurrentIndex(1)  # Info tab
                 # Info content will load via _on_details_tab_changed
             else:
                 # Don't load Info tab content when showing Environment tab
-                self.downloaded_details_tabs.setCurrentIndex(1)  # Environment tab
+                self.downloaded_details_tabs.setCurrentIndex(2)  # Environment tab
     
     def _on_details_tab_changed(self, index: int):
         """Handle tab change - only load Info content when Info tab is actually selected"""
         if not hasattr(self, '_selected_model_id'):
             return
         
-        # Only load Info tab content when Info tab (index 0) is selected
-        if index == 0 and hasattr(self, 'downloaded_info_panel'):
+        # Only load Info tab content when Info tab (index 1) is selected
+        if index == 1 and hasattr(self, 'downloaded_info_panel'):
             model_id = self._selected_model_id
             self._show_model_details(model_id, self.downloaded_info_panel)
+    
+    def _ensure_hf_token_ui_registry(self) -> None:
+        if not hasattr(self, "_hf_token_ui_registry"):
+            # Each item: {"token_edit": QLineEdit, "status_label": QLabel, "accept_label": QLabel}
+            self._hf_token_ui_registry = []
+
+    def _register_hf_token_ui(self, token_edit: QLineEdit, status_label: QLabel, accept_label: QLabel) -> None:
+        """Register one instance of the Access & Tokens UI so we can refresh/update all panels."""
+        self._ensure_hf_token_ui_registry()
+        self._hf_token_ui_registry.append({
+            "token_edit": token_edit,
+            "status_label": status_label,
+            "accept_label": accept_label,
+        })
+
+    def _refresh_hf_token_ui(self):
+        """Load token status from QSettings and update Access & Tokens UI (do not show token value)."""
+        self._ensure_hf_token_ui_registry()
+        if not self._hf_token_ui_registry:
+            return
+        settings = QSettings()
+        token = (settings.value("hf/token") or "").strip()
+        for ui in self._hf_token_ui_registry:
+            try:
+                ui["token_edit"].clear()  # never show persisted token
+            except Exception:
+                pass
+            try:
+                ui["status_label"].setText("Token saved" if token else "")
+            except Exception:
+                pass
+    
+    def _on_hf_save_token_clicked(self, token_edit: QLineEdit):
+        """Save HF token to QSettings (from the specific UI instance)."""
+        token = (token_edit.text() or "").strip()
+        settings = QSettings()
+        if token:
+            settings.setValue("hf/token", token)
+            settings.setValue("hf/token_set_at", datetime.now().isoformat())
+            token_edit.clear()
+        else:
+            settings.remove("hf/token")
+            settings.remove("hf/token_set_at")
+        self._refresh_hf_token_ui()
+    
+    def _on_hf_clear_token_clicked(self, token_edit: QLineEdit):
+        """Remove saved HF token from QSettings (from the specific UI instance)."""
+        token_edit.clear()
+        settings = QSettings()
+        settings.remove("hf/token")
+        settings.remove("hf/token_set_at")
+        self._refresh_hf_token_ui()
+    
+    def _on_hf_test_token(self):
+        """Optional: test HF token by calling whoami or similar."""
+        token = self._resolve_hf_token()
+        if not token:
+            QMessageBox.information(self, "Test token", "No token set. Enter a token and save, or set HF_TOKEN / HUGGINGFACE_HUB_TOKEN.")
+            return
+        try:
+            from huggingface_hub import HfApi
+            api = HfApi(token=token)
+            who = api.whoami()
+            name = who.get("name") or who.get("fullname") or "unknown"
+            QMessageBox.information(self, "Test token", f"Token is valid. Logged in as: {name}")
+        except Exception as e:
+            QMessageBox.warning(self, "Test token", f"Token check failed: {e}")
+    
+    def _update_hf_accept_terms_link(self, model_id: Optional[str]):
+        """Set the 'accept terms' link to the model page when a model is selected."""
+        self._ensure_hf_token_ui_registry()
+        if not self._hf_token_ui_registry:
+            return
+        if model_id:
+            url = f"https://huggingface.co/{model_id}"
+            txt = f'Accept model terms: <a href="{url}" style="color: #F7C948;">Open model page and accept agreement</a>'
+        else:
+            txt = 'Accept model terms: open the model page (e.g. <a href="https://huggingface.co/models" style="color: #F7C948;">browse models</a>) and accept the agreement.'
+        for ui in self._hf_token_ui_registry:
+            try:
+                ui["accept_label"].setText(txt)
+            except Exception:
+                pass
+
+    def _build_access_tokens_panel(self) -> QScrollArea:
+        """Build the Access & Tokens panel as a scrollable widget (used in multiple right columns)."""
+        access_panel = QWidget()
+        access_layout = QVBoxLayout(access_panel)
+        access_layout.setContentsMargins(20, 20, 20, 20)
+        access_layout.setSpacing(12)
+
+        expl = QLabel(
+            "• Public/community models are usually downloadable without authentication.\n"
+            "• Official, gated, or private repos require: (1) a Hugging Face token and (2) accepted model terms.\n"
+            "• Token creation: choose Role = Read (fine-grained is optional). Name it 'LocaLLM'. Copy once and paste here."
+        )
+        expl.setWordWrap(True)
+        expl.setStyleSheet("color: #b0b8c8; font-size: 12px;")
+        access_layout.addWidget(expl)
+
+        hf_group = QGroupBox("Hugging Face Authentication")
+        hf_group.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #F7C948;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 12px;
+                background: rgba(247, 201, 72, 0.08);
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; color: #F7C948; }
+        """)
+        hf_layout = QVBoxLayout(hf_group)
+
+        token_edit = QLineEdit()
+        token_edit.setPlaceholderText("Paste your Hugging Face token here")
+        token_edit.setEchoMode(QLineEdit.Password)
+        token_edit.setStyleSheet("padding: 6px; border: 1px solid rgba(247, 201, 72, 0.4); border-radius: 4px;")
+        hf_layout.addWidget(token_edit)
+
+        status_label = QLabel("")
+        status_label.setStyleSheet("color: #F7C948; font-size: 11px;")
+        hf_layout.addWidget(status_label)
+
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("Save")
+        clear_btn = QPushButton("Clear")
+        test_btn = QPushButton("Test token")
+        for b in (save_btn, clear_btn, test_btn):
+            b.setStyleSheet("padding: 6px 12px;")
+        btn_row.addWidget(save_btn)
+        btn_row.addWidget(clear_btn)
+        btn_row.addWidget(test_btn)
+        btn_row.addStretch()
+        hf_layout.addLayout(btn_row)
+
+        save_btn.clicked.connect(lambda: self._on_hf_save_token_clicked(token_edit))
+        clear_btn.clicked.connect(lambda: self._on_hf_clear_token_clicked(token_edit))
+        test_btn.clicked.connect(self._on_hf_test_token)
+
+        link_prefilled = QLabel(
+            f'<a href="{HF_TOKEN_NEW_PREFILLED_URL}" style="color: #F7C948;">Create new token (permissions prefilled)</a>'
+        )
+        link_prefilled.setOpenExternalLinks(True)
+        link_prefilled.setTextFormat(Qt.RichText)
+        hf_layout.addWidget(link_prefilled)
+        warning_label = QLabel(
+            "These permissions are broader than strictly needed for downloads. If you prefer least-privilege, create a Read token instead."
+        )
+        warning_label.setWordWrap(True)
+        warning_label.setStyleSheet("color: #888; font-size: 10px;")
+        hf_layout.addWidget(warning_label)
+        link_docs = QLabel(f'<a href="{HF_TOKEN_DOCS_URL}" style="color: #F7C948;">What these permissions mean (docs)</a>')
+        link_docs.setOpenExternalLinks(True)
+        link_docs.setTextFormat(Qt.RichText)
+        hf_layout.addWidget(link_docs)
+
+        accept_label = QLabel('Accept model terms: open the model page (e.g. <a href="https://huggingface.co/models" style="color: #F7C948;">browse models</a>) and accept the agreement.')
+        accept_label.setOpenExternalLinks(True)
+        accept_label.setTextFormat(Qt.RichText)
+        accept_label.setWordWrap(True)
+        accept_label.setStyleSheet("color: #b0b8c8; font-size: 11px;")
+        hf_layout.addWidget(accept_label)
+
+        access_layout.addWidget(hf_group)
+        access_layout.addStretch()
+
+        access_scroll = QScrollArea()
+        access_scroll.setWidgetResizable(True)
+        access_scroll.setFrameShape(QFrame.NoFrame)
+        access_scroll.setWidget(access_panel)
+
+        self._register_hf_token_ui(token_edit, status_label, accept_label)
+        self._refresh_hf_token_ui()
+        return access_scroll
+    
+    def _resolve_hf_token(self) -> Optional[str]:
+        """Resolve HF token: env (HF_TOKEN, HUGGINGFACE_HUB_TOKEN, HUGGINGFACEHUB_API_TOKEN) -> QSettings -> optional HF cached."""
+        for key in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGINGFACEHUB_API_TOKEN"):
+            v = os.environ.get(key)
+            if v and (v := str(v).strip()):
+                return v
+        settings = QSettings()
+        token = (settings.value("hf/token") or "").strip()
+        if token:
+            return token
+        try:
+            from huggingface_hub import get_token
+            t = get_token()
+            if t:
+                return t
+        except Exception:
+            pass
+        return None
+    
+    def _show_gated_no_token_dialog(self, model_id: str, parent_win=None):
+        """Show a clear error for gated/private repo when no token is set; offer links to token page and model page."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        parent = parent_win or self
+        mb = QMessageBox(parent)
+        mb.setWindowTitle("Gated or private model")
+        mb.setText("This repo is gated or private. You need a Hugging Face token and must accept the model terms.")
+        model_url = f"https://huggingface.co/{model_id}"
+        mb.setInformativeText(
+            f"• Create token (prefilled): {HF_TOKEN_NEW_PREFILLED_URL}\n"
+            f"• Docs: {HF_TOKEN_DOCS_URL}\n"
+            f"• Accept terms: {model_url}\n\n"
+            "Save your token in Models → Access & Tokens, then try again."
+        )
+        btn_token = mb.addButton("Get token", QMessageBox.ActionRole)
+        btn_model = mb.addButton("Open model page", QMessageBox.ActionRole)
+        mb.addButton(QMessageBox.Ok)
+        btn_token.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(HF_TOKEN_NEW_PREFILLED_URL)))
+        btn_model.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(model_url)))
+        mb.exec()
     
     def _on_repair_model(self, model_path: str):
         """Repair or resume download for an incomplete model"""
@@ -6138,7 +6467,7 @@ class MainWindow(QMainWindow):
             
             # Create repair thread (resume-first, non-destructive)
             # Use central cache to keep locks out of model folder
-            thread = RepairThread(model_id, path_obj, force_fresh_only=False, cache_dir=self.hf_cache_dir)
+            thread = RepairThread(model_id, path_obj, force_fresh_only=False, cache_dir=self.hf_cache_dir, token=self._resolve_hf_token())
             
             # Mark as active
             repair_key = f"repair_{model_id}"
@@ -6588,6 +6917,11 @@ class MainWindow(QMainWindow):
             self._log_models(f"❌ Card not found for {model_id}")
             return
         
+        # If this repo is gated/private and no token is set, show clear guidance and abort
+        if getattr(card, "requires_token", False) and not self._resolve_hf_token():
+            self._show_gated_no_token_dialog(model_id, parent_win=self)
+            return
+        
         # IMMEDIATELY disable button to prevent double-clicks
         card.download_btn.setEnabled(False)
         card.download_btn.setText("⏳ Starting...")
@@ -6641,7 +6975,7 @@ class MainWindow(QMainWindow):
         card.layout().addWidget(progress_bar)
         
         # Create download thread with central cache
-        thread = DownloadThread(model_id, target, cache_dir=self.hf_cache_dir)
+        thread = DownloadThread(model_id, target, cache_dir=self.hf_cache_dir, token=self._resolve_hf_token())
         
         # Mark as active BEFORE starting
         self.active_downloads[model_id] = (thread, card)
@@ -7003,9 +7337,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'downloaded_details_tabs'):
             self.downloaded_details_tabs.blockSignals(True)
             
-            if self.downloaded_details_tabs.count() > 1:
-                # Remove existing environment tab
-                self.downloaded_details_tabs.removeTab(1)
+            if self.downloaded_details_tabs.count() > 2:
+                # Remove existing environment tab (index 2: Access=0, Info=1, Environment=2)
+                self.downloaded_details_tabs.removeTab(2)
             
             # Create scroll area for new content
             env_scroll = QScrollArea()
@@ -7013,8 +7347,8 @@ class MainWindow(QMainWindow):
             env_scroll.setFrameShape(QFrame.NoFrame)
             env_scroll.setWidget(env_content)
             
-            # Insert new environment tab
-            self.downloaded_details_tabs.insertTab(1, env_scroll, "⚙️ Environment")
+            # Insert new environment tab at index 2
+            self.downloaded_details_tabs.insertTab(2, env_scroll, "⚙️ Environment")
             self.downloaded_env_widget = env_content
             
             # Re-enable signals
@@ -7064,7 +7398,7 @@ class MainWindow(QMainWindow):
                 if hasattr(self, 'downloaded_details_tabs'):
                     # Block signals to prevent Info tab from loading
                     self.downloaded_details_tabs.blockSignals(True)
-                    self.downloaded_details_tabs.setCurrentIndex(1)  # Force Environment tab
+                    self.downloaded_details_tabs.setCurrentIndex(2)  # Force Environment tab
                     self.downloaded_details_tabs.blockSignals(False)
             
             if focus_ui:
@@ -7143,10 +7477,10 @@ class MainWindow(QMainWindow):
             if path.exists():
                 self._update_environment_tab(str(path), model_id, status)
             
-            # Ensure we stay on Environment tab if we were there
-            if current_index == 1:
+            # Ensure we stay on Environment tab if we were there (index 2)
+            if current_index == 2:
                 self.downloaded_details_tabs.blockSignals(True)
-                self.downloaded_details_tabs.setCurrentIndex(1)
+                self.downloaded_details_tabs.setCurrentIndex(2)
                 self.downloaded_details_tabs.blockSignals(False)
         else:
             # Update environment tab if tabs don't exist
@@ -7538,7 +7872,7 @@ class MainWindow(QMainWindow):
                 self._log_models(f"Warning: Could not clean incomplete files: {e}")
             
             # Create new repair thread with force_fresh_only=True
-            thread = RepairThread(model_id, model_path, force_fresh_only=True, cache_dir=self.hf_cache_dir)
+            thread = RepairThread(model_id, model_path, force_fresh_only=True, cache_dir=self.hf_cache_dir, token=self._resolve_hf_token())
             
             # Mark as active
             self.active_downloads[repair_key] = (thread, card)
@@ -7585,6 +7919,15 @@ class MainWindow(QMainWindow):
         if progress_bar:
             progress_bar.setVisible(False)
             progress_bar.deleteLater()
+        
+        # If error suggests gated/private, show guidance and restore button (no force-fresh)
+        err_lower = (error or "").lower()
+        if "401" in error or "403" in error or "gated" in err_lower or "access denied" in err_lower:
+            self._show_gated_no_token_dialog(model_id, parent_win=self)
+            if hasattr(card, 'repair_btn'):
+                card.repair_btn.setEnabled(True)
+                card.repair_btn.setText("🔧 Fix")
+            return
         
         # Check if error is due to locked directory
         is_locked_error = (
@@ -7653,7 +7996,7 @@ class MainWindow(QMainWindow):
             
             # Start force-fresh repair thread
             path = Path(card.model_path)
-            thread = RepairThread(model_id, path, force_fresh_only=True)
+            thread = RepairThread(model_id, path, force_fresh_only=True, token=self._resolve_hf_token())
             fresh_key = f"repair_fresh_{model_id}"
             self.active_downloads[fresh_key] = (thread, card)
             
@@ -7689,6 +8032,10 @@ class MainWindow(QMainWindow):
         card.download_btn.setVisible(True)
         card.download_btn.setEnabled(True)
         card.download_btn.setText("❌ Failed - Retry")
+        # If error suggests gated/private, show guidance
+        err_lower = (error or "").lower()
+        if "401" in error or "403" in error or "gated" in err_lower or "access denied" in err_lower:
+            self._show_gated_no_token_dialog(model_id, parent_win=self)
 
     def _change_gpu_vram(self) -> None:
         """Open dialog to change GPU VRAM override"""
@@ -7781,8 +8128,8 @@ class MainWindow(QMainWindow):
                 card.set_theme(self.dark_mode)
                 # FIXED: Connect to the correct download handler for search results
                 card.download_clicked.connect(lambda mid=model_id: self._download_model_by_id(mid))
-                # Connect card click to show details - use functools.partial to avoid lambda capture issues
-                card.card_clicked.connect(lambda checked=False, mid=model_id: self._show_model_details(mid, self.search_details_panel))
+                # Card click: open Info tab and load details there
+                card.card_clicked.connect(lambda checked=False, mid=model_id: (self.search_details_tabs.setCurrentIndex(1), self._show_model_details(mid, self.search_info_panel)))
                 self.search_results_layout.addWidget(card, row, col)
                 self.search_model_cards.append(card)
                 
@@ -7805,11 +8152,17 @@ class MainWindow(QMainWindow):
     
     def _show_model_details(self, model_id: str, details_panel) -> None:
         """Fetch and display detailed model information in the details panel"""
+        # Update the Access & Tokens panel link to the selected model page
+        try:
+            self._update_hf_accept_terms_link(model_id)
+        except Exception:
+            pass
+
         # Show loading state
         details_panel.show_loading()
         
         # Create worker and thread for background fetching
-        worker = ModelDetailsWorker(model_id, max_retries=2)
+        worker = ModelDetailsWorker(model_id, max_retries=2, token=self._resolve_hf_token())
         thread = QThread()
         worker.moveToThread(thread)
         

@@ -27,6 +27,105 @@ except ImportError as e:
     logging.error("Please run: pip install transformers")
     raise
 
+# Optional vision/processor imports (used only for multimodal models)
+def _get_vision_imports():
+    out = {}
+    try:
+        from transformers import AutoProcessor
+        out["AutoProcessor"] = AutoProcessor
+    except ImportError:
+        pass
+    # These auto-classes vary by transformers version; import opportunistically.
+    try:
+        from transformers import AutoModelForVision2Seq  # type: ignore
+        out["AutoModelForVision2Seq"] = AutoModelForVision2Seq
+    except Exception:
+        pass
+    try:
+        from transformers import AutoModelForImageTextToText  # type: ignore
+        out["AutoModelForImageTextToText"] = AutoModelForImageTextToText
+    except Exception:
+        pass
+    try:
+        from transformers import AutoModelForConditionalGeneration  # type: ignore
+        out["AutoModelForConditionalGeneration"] = AutoModelForConditionalGeneration
+    except Exception:
+        pass
+    return out
+
+
+def _is_multimodal_config(model_path_str: str) -> bool:
+    """Return True if config.json indicates a vision/multimodal model."""
+    import json
+    import os
+    config_path = os.path.join(model_path_str, "config.json")
+    if not os.path.isfile(config_path):
+        return False
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception:
+        return False
+    architectures = config.get("architectures") or []
+    model_type = (config.get("model_type") or "").lower()
+    arch_str = " ".join(architectures).lower()
+    # Known vision/multimodal indicators
+    vision_hints = (
+        "llava", "mllama", "qwen2vl", "qwen2_vl", "vision", "image", "vl",
+        "llama3_2_vision", "llama3.2_vision", "idefics", "blip", "git", "pix2struct",
+    )
+    if any(h in model_type for h in vision_hints):
+        return True
+    if any(h in arch_str for h in vision_hints):
+        return True
+    return False
+
+
+def _load_multimodal_model(model_path_str: str, use_4bit: bool, bnb_ok: bool):
+    """Load processor and vision model. Returns (processor, model)."""
+    imports = _get_vision_imports()
+    AutoProcessor = imports.get("AutoProcessor")
+    if AutoProcessor is None:
+        raise RuntimeError("Vision model requires transformers with AutoProcessor. Please upgrade: pip install -U transformers")
+    processor = AutoProcessor.from_pretrained(model_path_str, trust_remote_code=True)
+    # Prefer vision-specific auto class, then conditional generation
+    model = None
+    for key in ("AutoModelForImageTextToText", "AutoModelForVision2Seq", "AutoModelForConditionalGeneration"):
+        cls = imports.get(key)
+        if cls is None:
+            continue
+        try:
+            kwargs = dict(trust_remote_code=True, device_map="auto", low_cpu_mem_usage=True)
+            if use_4bit and (not IS_WINDOWS or bnb_ok):
+                kwargs["quantization_config"] = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                )
+            else:
+                kwargs["torch_dtype"] = torch.float16
+            model = cls.from_pretrained(model_path_str, **kwargs)
+            logging.info(f"Loaded multimodal model with {key}")
+            break
+        except ImportError as e:
+            # Surface missing optional deps clearly (common for vision models)
+            error_str = str(e).lower()
+            if "timm" in error_str:
+                raise RuntimeError("Missing dependency: timm. Install with: pip install timm>=0.9.0") from e
+            if "einops" in error_str:
+                raise RuntimeError("Missing dependency: einops. Install with: pip install einops>=0.6.0") from e
+            if "open_clip" in error_str or "open-clip" in error_str:
+                raise RuntimeError("Missing dependency: open-clip-torch. Install with: pip install open-clip-torch>=2.20.0") from e
+            raise
+        except Exception as e:
+            logging.debug(f"{key}.from_pretrained failed: {e}")
+            continue
+    if model is None:
+        raise RuntimeError(
+            "Could not load vision model with AutoModelForImageTextToText, AutoModelForVision2Seq, or AutoModelForConditionalGeneration. "
+            "This may require a newer transformers version or trust_remote_code support for this architecture."
+        )
+    return processor, model
+
 
 def _bitsandbytes_available() -> bool:
     # Allow 4-bit on Windows if bitsandbytes is actually importable.
@@ -109,6 +208,30 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     f"tokenizer_config.json not found at {model_path_str}\n"
                     f"Tokenizer may still load from other files or HuggingFace cache."
                 )
+            # Multimodal: load processor + vision model instead of tokenizer + causal LM
+            if _is_multimodal_config(model_path_str):
+                logging.info("Detected multimodal/vision model from config, loading processor and vision model")
+                bnb_ok = _bitsandbytes_available()
+                processor, model = _load_multimodal_model(model_path_str, use_4bit, bnb_ok)
+                return processor, model, processor
+
+        # Non-local (HF model ID): best-effort multimodal detection via AutoConfig.
+        # This avoids loading vision checkpoints as plain causal LMs.
+        if not is_local_path:
+            try:
+                from transformers import AutoConfig  # type: ignore
+                cfg = AutoConfig.from_pretrained(model_path_str, trust_remote_code=True)
+                model_type_attr = (getattr(cfg, "model_type", "") or "").lower()
+                architectures = getattr(cfg, "architectures", []) or []
+                arch_str = " ".join(architectures).lower()
+                vision_hints = ("llava", "mllama", "qwen2vl", "qwen2_vl", "vision", "image", "vl", "idefics", "blip", "pix2struct")
+                if any(h in model_type_attr for h in vision_hints) or any(h in arch_str for h in vision_hints):
+                    logging.info("Detected multimodal/vision model from AutoConfig, loading processor and vision model")
+                    bnb_ok = _bitsandbytes_available()
+                    processor, model = _load_multimodal_model(model_path_str, use_4bit, bnb_ok)
+                    return processor, model, processor
+            except Exception:
+                pass
         
         try:
             logging.info(f"Calling AutoTokenizer.from_pretrained('{model_path_str}')...")
@@ -255,7 +378,7 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     gptq_kwargs.pop("disable_exllama", None)
                     gptq_kwargs.pop("disable_exllamav2", None)
                     model = AutoGPTQForCausalLM.from_quantized(**gptq_kwargs)
-                return tokenizer, model
+                return tokenizer, model, None
             except Exception as gptq_ex:
                 logging.error(f"auto-gptq load failed: {type(gptq_ex).__name__}: {gptq_ex}")
                 raise RuntimeError(
@@ -424,7 +547,7 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                             gptq_kwargs.pop("disable_exllama", None)
                             gptq_kwargs.pop("disable_exllamav2", None)
                             model = AutoGPTQForCausalLM.from_quantized(**gptq_kwargs)
-                        return tokenizer, model
+                        return tokenizer, model, None
                     except Exception as gptq_ex:
                         logging.error(f"auto-gptq load failed: {type(gptq_ex).__name__}: {gptq_ex}")
                         # IMPORTANT: Do not fall back to FP16 for GPTQ models.
@@ -474,7 +597,7 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                     _raise_windows_paging_file_help(e)
                 raise
         
-        return tokenizer, model
+        return tokenizer, model, None
     
     # Check if adapter_dir is a checkpoint subdirectory and use parent if so
     if "checkpoint-" in adapter_dir and os.path.basename(adapter_dir).startswith("checkpoint-"):
@@ -709,7 +832,7 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
             )
         model = PeftModel.from_pretrained(base, adapter_dir, local_files_only=True)
         logging.info("Adapter attached successfully")
-        return tokenizer, model
+        return tokenizer, model, None
     except Exception:
         # Fall back: if adapter_dir is actually a merged model directory, try to load it.
         try:
@@ -757,7 +880,7 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                 if torch.cuda.is_available():
                     merged = merged.to("cuda")
                     logging.info("Moved merged model to GPU")
-                return tokenizer, merged
+                return tokenizer, merged, None
             except Exception as e:
                 # Provide clearer guidance for common environment mismatches
                 raise RuntimeError(
@@ -1194,3 +1317,51 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
         )
 
     return text_clean
+
+
+def generate_multimodal(processor, model, prompt, images, max_new_tokens=128, temperature=0.7):
+    """Generate text from prompt and images using a vision model and processor.
+
+    Args:
+        processor: The processor (e.g. from AutoProcessor).
+        model: The vision model.
+        prompt: User text prompt.
+        images: List of PIL.Image (or single image).
+        max_new_tokens: Maximum tokens to generate.
+        temperature: Sampling temperature (0 = greedy).
+    Returns:
+        Decoded text string.
+    """
+    model.eval()
+    device = next(model.parameters()).device
+    if not isinstance(images, (list, tuple)):
+        images = [images]
+    # Processor API: text and images (many VLMs use this)
+    try:
+        inputs = processor(text=prompt, images=images if images else None, return_tensors="pt")
+    except TypeError:
+        # Some processors expect images= for a single image or different signature
+        inputs = processor(text=[prompt], images=images if images else None, return_tensors="pt")
+    inputs = {k: v.to(device) for k, v in inputs.items() if hasattr(v, "to")}
+    pad_id = getattr(processor, "pad_token_id", None) or getattr(processor.tokenizer, "pad_token_id", None) if hasattr(processor, "tokenizer") else None
+    eos_id = getattr(processor, "eos_token_id", None) or getattr(processor.tokenizer, "eos_token_id", None) if hasattr(processor, "tokenizer") else None
+    gen_kwargs = {
+        "max_new_tokens": max_new_tokens,
+        "pad_token_id": pad_id or eos_id,
+        "eos_token_id": eos_id,
+        "do_sample": temperature > 0,
+    }
+    if temperature > 0:
+        gen_kwargs["temperature"] = temperature
+    with torch.no_grad():
+        out = model.generate(**inputs, **gen_kwargs)
+    # Decode: processor may have decode or tokenizer
+    if hasattr(processor, "decode"):
+        text = processor.decode(out[0], skip_special_tokens=True)
+    elif hasattr(processor, "batch_decode"):
+        text = processor.batch_decode(out, skip_special_tokens=True)[0]
+    elif hasattr(processor, "tokenizer"):
+        text = processor.tokenizer.decode(out[0], skip_special_tokens=True)
+    else:
+        text = str(out[0].tolist())
+    return text.strip()

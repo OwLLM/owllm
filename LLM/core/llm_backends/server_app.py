@@ -43,6 +43,7 @@ app.add_middleware(
 # Global model state
 tokenizer = None
 model = None
+processor = None  # For multimodal/vision models (replaces tokenizer for generation)
 model_type = "base"
 system_prompt = ""
 model_name = "local-llm"
@@ -57,6 +58,36 @@ _load_finished_at: float = 0.0
 _gptq_backend: str = "auto-gptq"
 
 
+def _decode_images_to_pil(images: List[str]):
+    """Decode base64 or data URL strings to PIL Images. Raises HTTPException on invalid input."""
+    import base64
+    import re
+    try:
+        from PIL import Image
+        import io
+    except ImportError:
+        raise HTTPException(status_code=500, detail="PIL is required for image input. Install with: pip install Pillow")
+    out = []
+    for i, s in enumerate(images):
+        if not s or not isinstance(s, str):
+            raise HTTPException(status_code=400, detail=f"images[{i}] must be a non-empty string (base64 or data URL)")
+        s = s.strip()
+        raw = None
+        if s.startswith("data:"):
+            m = re.match(r"data:image/[^;]+;base64,(.+)", s, re.DOTALL)
+            if not m:
+                raise HTTPException(status_code=400, detail=f"images[{i}] invalid data URL (expected data:image/...;base64,...)")
+            raw = base64.b64decode(m.group(1))
+        else:
+            raw = base64.b64decode(s)
+        try:
+            img = Image.open(io.BytesIO(raw)).convert("RGB")
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"images[{i}] could not be decoded as image: {e}")
+        out.append(img)
+    return out
+
+
 # ============================================================================
 # Native API Models
 # ============================================================================
@@ -65,6 +96,7 @@ class GenerateRequest(BaseModel):
     prompt: str
     max_new_tokens: int = 10000
     temperature: float = 0.7
+    images: List[str] = Field(default_factory=list)  # Optional: base64 or data URL strings for vision models
 
 
 class GenerateResponse(BaseModel):
@@ -97,6 +129,7 @@ class ChatCompletionRequest(BaseModel):
     max_tokens: int = 10000
     stream: bool = False
     stop: Optional[Union[str, List[str]]] = None
+    images: List[str] = Field(default_factory=list)  # Optional: base64 or data URL strings for vision models
 
 
 class ChatCompletionChoice(BaseModel):
@@ -191,7 +224,7 @@ async def startup_event():
 
     def _loader():
         nonlocal base_model, adapter_dir, use_4bit, gptq_backend
-        global tokenizer, model, _gptq_backend
+        global tokenizer, model, processor, _gptq_backend
         global _load_state, _load_error, _load_finished_at
         _gptq_backend = gptq_backend
         try:
@@ -200,14 +233,22 @@ async def startup_event():
                 from core.llm_backends.exllama_backend import load_model
             else:
                 from core.llm_backends.run_adapter_backend import load_model
-            tok, mdl = load_model(
+            result = load_model(
                 base_model=base_model,
                 adapter_dir=adapter_dir,
                 use_4bit=use_4bit,
                 offload=True
             )
-            tokenizer = tok
-            model = mdl
+            tok_or_proc = result[0] if len(result) > 0 else None
+            model = result[1] if len(result) > 1 else None
+            proc = result[2] if len(result) > 2 else None
+            # Important: for multimodal models, keep tokenizer unset and use processor.
+            if proc is not None:
+                processor = proc
+                tokenizer = None
+            else:
+                tokenizer = tok_or_proc
+                processor = None
             _load_state = "ready"
             _load_finished_at = time.time()
             logger.info("Model loaded successfully!")
@@ -231,14 +272,17 @@ async def startup_event():
 @app.get("/health")
 async def health_check():
     """Health check endpoint with strict validation"""
-    # Strict health gate: model and tokenizer must be valid objects
+    # Strict health gate: model and (tokenizer or processor) must be valid
+    has_tokenizer = (
+        tokenizer is not None and
+        hasattr(tokenizer, 'encode') and
+        hasattr(tokenizer, 'decode')
+    )
+    has_processor = processor is not None
     is_ready = (
         _load_state == "ready" and
         model is not None and
-        tokenizer is not None and
-        # Additional validation: ensure tokenizer is actually a tokenizer object
-        hasattr(tokenizer, 'encode') and
-        hasattr(tokenizer, 'decode')
+        (has_tokenizer or has_processor)
     )
     
     payload: Dict[str, Any] = {
@@ -255,16 +299,13 @@ async def health_check():
     if _load_started_at:
         payload["loading_seconds"] = round((time.time() - _load_started_at), 1)
     
-    # If model/tokenizer exist but are invalid, report as error
+    # If model/tokenizer/processor exist but are invalid, report as error
     if _load_state == "ready" and not is_ready:
         payload["status"] = "error"
-        payload["error"] = "Model or tokenizer is invalid (missing required attributes)"
+        payload["error"] = "Model or tokenizer/processor is invalid (missing required attributes)"
         payload["model_valid"] = model is not None
-        payload["tokenizer_valid"] = (
-            tokenizer is not None and
-            hasattr(tokenizer, 'encode') and
-            hasattr(tokenizer, 'decode')
-        )
+        payload["tokenizer_valid"] = has_tokenizer
+        payload["processor_valid"] = has_processor
     
     return payload
 
@@ -279,38 +320,55 @@ async def generate(request: GenerateRequest):
             detail = f"Model load failed: {_load_error}"
         raise HTTPException(status_code=503, detail=detail)
     
-    if model is None or tokenizer is None:
+    if model is None:
         raise HTTPException(
             status_code=503,
-            detail="Model or tokenizer is None. Model load may have failed silently."
-        )
-    
-    # Additional validation: ensure tokenizer is actually a tokenizer object
-    if not (hasattr(tokenizer, 'encode') and hasattr(tokenizer, 'decode')):
-        raise HTTPException(
-            status_code=503,
-            detail=f"Tokenizer is invalid (type: {type(tokenizer)}). Missing required methods (encode/decode)."
+            detail="Model is None. Model load may have failed silently."
         )
     
     try:
-        # Use the same backend that loaded the model
-        if _gptq_backend == "exllamav2":
-            from core.llm_backends.exllama_backend import generate_text
-        else:
-            from core.llm_backends.run_adapter_backend import generate_text
+        # ExLlamaV2 is text-only
+        if _gptq_backend == "exllamav2" and request.images:
+            raise HTTPException(status_code=400, detail="This backend does not support images (GPTQ ExLlamaV2).")
 
         logger.debug(f"Generation request: prompt_len={len(request.prompt)}, max_tokens={request.max_new_tokens}, temp={request.temperature}")
-        
-        # Call generation function
-        text = generate_text(
-            tokenizer=tokenizer,
-            model=model,
-            prompt=request.prompt,
-            max_new_tokens=request.max_new_tokens,
-            temperature=request.temperature,
-            model_type=model_type,
-            system_prompt=system_prompt
-        )
+
+        # Multimodal path (processor)
+        if processor is not None:
+            from core.llm_backends.run_adapter_backend import generate_multimodal
+            pil_images = _decode_images_to_pil(request.images) if request.images else []
+            text = generate_multimodal(
+                processor=processor,
+                model=model,
+                prompt=(system_prompt + "\n\n" if system_prompt else "") + request.prompt,
+                images=pil_images,
+                max_new_tokens=request.max_new_tokens,
+                temperature=request.temperature,
+            )
+        else:
+            if tokenizer is None:
+                raise HTTPException(status_code=503, detail="Tokenizer/processor missing. Model load may have failed.")
+            # Additional validation: ensure tokenizer is actually a tokenizer object
+            if not (hasattr(tokenizer, 'encode') and hasattr(tokenizer, 'decode')):
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Tokenizer is invalid (type: {type(tokenizer)}). Missing required methods (encode/decode)."
+                )
+            # Use the same backend that loaded the model
+            if _gptq_backend == "exllamav2":
+                from core.llm_backends.exllama_backend import generate_text
+            else:
+                from core.llm_backends.run_adapter_backend import generate_text
+            # Call generation function
+            text = generate_text(
+                tokenizer=tokenizer,
+                model=model,
+                prompt=request.prompt,
+                max_new_tokens=request.max_new_tokens,
+                temperature=request.temperature,
+                model_type=model_type,
+                system_prompt=system_prompt
+            )
         
         logger.debug(f"generate_text returned: type={type(text)}, len={len(str(text)) if text else 0}, text_preview={repr(str(text)[:100]) if text else 'None'}")
         
@@ -344,7 +402,7 @@ async def debug_generate(request: GenerateRequest):
     Debug endpoint to diagnose 'empty reply' issues.
     Returns token lengths and decoded outputs (truncated).
     """
-    if _load_state != "ready" or model is None or tokenizer is None:
+    if _load_state != "ready" or model is None or (tokenizer is None and processor is None):
         detail = "Model not ready"
         if _load_state == "error" and _load_error:
             detail = f"Model load failed: {_load_error}"
@@ -352,6 +410,8 @@ async def debug_generate(request: GenerateRequest):
 
     if _gptq_backend == "exllamav2":
         return DebugGenerateResponse(status="ExLlamaV2 backend: debug_generate not implemented")
+    if processor is not None:
+        return DebugGenerateResponse(status="Vision backend: debug_generate not implemented")
 
     notes: List[str] = []
     try:
@@ -449,7 +509,7 @@ async def list_models():
 @app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
 async def chat_completions(request: ChatCompletionRequest):
     """Chat completions endpoint (OpenAI-compatible)"""
-    if model is None or tokenizer is None or _load_state != "ready":
+    if model is None or (tokenizer is None and processor is None) or _load_state != "ready":
         detail = "Model not ready"
         if _load_state == "error" and _load_error:
             detail = f"Model load failed: {_load_error}"
@@ -481,21 +541,37 @@ async def chat_completions(request: ChatCompletionRequest):
         
         full_prompt = "\n\n".join(prompt_parts)
 
-        # Use the same backend that loaded the model
-        if _gptq_backend == "exllamav2":
-            from core.llm_backends.exllama_backend import generate_text
+        # ExLlamaV2 is text-only
+        if _gptq_backend == "exllamav2" and request.images:
+            raise HTTPException(status_code=400, detail="This backend does not support images (GPTQ ExLlamaV2).")
+
+        if processor is not None:
+            from core.llm_backends.run_adapter_backend import generate_multimodal
+            pil_images = _decode_images_to_pil(request.images) if request.images else []
+            generated_text = generate_multimodal(
+                processor=processor,
+                model=model,
+                prompt=full_prompt,
+                images=pil_images,
+                max_new_tokens=request.max_tokens,
+                temperature=request.temperature,
+            )
         else:
-            from core.llm_backends.run_adapter_backend import generate_text
-        # Generate response
-        generated_text = generate_text(
-            tokenizer=tokenizer,
-            model=model,
-            prompt=full_prompt,
-            max_new_tokens=request.max_tokens,
-            temperature=request.temperature,
-            model_type=model_type,
-            system_prompt=""  # Already included in prompt
-        )
+            # Use the same backend that loaded the model
+            if _gptq_backend == "exllamav2":
+                from core.llm_backends.exllama_backend import generate_text
+            else:
+                from core.llm_backends.run_adapter_backend import generate_text
+            # Generate response
+            generated_text = generate_text(
+                tokenizer=tokenizer,
+                model=model,
+                prompt=full_prompt,
+                max_new_tokens=request.max_tokens,
+                temperature=request.temperature,
+                model_type=model_type,
+                system_prompt=""  # Already included in prompt
+            )
         
         # Create response in OpenAI format
         response = ChatCompletionResponse(

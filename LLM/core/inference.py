@@ -20,6 +20,7 @@ class InferenceConfig:
     adapter_dir: Optional[Path] = None
     max_new_tokens: int = 10000
     temperature: float = 0.7
+    images: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -137,7 +138,8 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
         return client.generate(
             prompt=cfg.prompt,
             max_new_tokens=cfg.max_new_tokens,
-            temperature=cfg.temperature
+            temperature=cfg.temperature,
+            images=cfg.images,
         )
     except EmptyModelResponseError as e:
         # Self-heal: this specific case means server returned 200 OK with {"text": ""}.
@@ -156,7 +158,8 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
         return client.generate(
             prompt=cfg.prompt,
             max_new_tokens=cfg.max_new_tokens,
-            temperature=cfg.temperature
+            temperature=cfg.temperature,
+            images=cfg.images,
         )
 
 
@@ -230,7 +233,8 @@ def run_inference_with_tools(
             base_model=cfg.base_model,
             adapter_dir=cfg.adapter_dir,
             max_new_tokens=cfg.max_new_tokens,
-            temperature=cfg.temperature
+            temperature=cfg.temperature,
+            images=cfg.images,
         )
         
         # Call LLM

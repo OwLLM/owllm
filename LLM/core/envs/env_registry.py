@@ -553,7 +553,8 @@ try:
     # Step 1: Try to load config
     config_path = model_path / "config.json"
     if not config_path.exists():
-        print("ERROR: config.json not found")
+        print("REASON: OTHER")
+        print("ERROR: config.json not found at model path: " + str(model_path.resolve()))
         sys.exit(1)
     
     with open(config_path, 'r', encoding='utf-8') as f:
@@ -609,6 +610,40 @@ try:
             print(f"ERROR: {{error_str}}")
             sys.exit(1)
         print(f"MODEL_CLASS_WARNING: {{error_str}}")
+    
+    # Step 5: Deep probe for suspicious models (remote-code / vision / risky arch) - imports only, no weights
+    architectures = config.get("architectures") or []
+    arch_str = " ".join(architectures).lower()
+    model_type_lower = (config.get("model_type") or "").lower()
+    auto_map = config.get("auto_map") or config.get("auto_map_from_pretrained")
+    has_auto_map = bool(auto_map and isinstance(auto_map, dict))
+    risky_keywords = ("vision", "vl", "llava", "mllama", "qwen2vl", "qwen2_vl", "mamba", "nemotron", "idefics", "blip", "pix2struct")
+    is_vision = any(k in model_type_lower or k in arch_str for k in risky_keywords)
+    is_suspicious = has_auto_map or is_vision
+    
+    if is_suspicious:
+        if is_vision:
+            try:
+                from transformers import AutoProcessor
+                AutoProcessor.from_pretrained(str(model_path), trust_remote_code=True)
+                print("DEEP_PROBE_VISION: OK")
+            except Exception as e:
+                err = str(e)
+                if "ModuleNotFoundError" in type(e).__name__ or "ImportError" in type(e).__name__:
+                    print("REASON: MISSING_PACKAGE")
+                    print("ERROR: " + err[:2000])
+                    sys.exit(1)
+                print("DEEP_PROBE_VISION_WARNING: " + err[:500])
+            # Map import module name -> pip package name (PIL is installed via Pillow)
+            vision_deps = [("PIL", "Pillow"), ("timm", "timm"), ("einops", "einops")]
+            for mod_name, pip_name in vision_deps:
+                try:
+                    __import__(mod_name)
+                except Exception as e_import:
+                    if "ModuleNotFoundError" in type(e_import).__name__ or "ImportError" in type(e_import).__name__:
+                        print("REASON: MISSING_PACKAGE")
+                        print("ERROR: Missing optional dependency for vision models. Install with: pip install " + pip_name)
+                        sys.exit(1)
     
     print("PROBE: SUCCESS")
     sys.exit(0)

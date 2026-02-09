@@ -5,7 +5,7 @@ HTTP client for calling persistent LLM inference servers.
 import requests
 import logging
 import os
-from typing import Optional
+from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,8 @@ class InferenceClient:
         self, 
         prompt: str, 
         max_new_tokens: int = 10000, 
-        temperature: float = 0.7
+        temperature: float = 0.7,
+        images: Optional[List[str]] = None,
     ) -> str:
         """
         Generate text from prompt.
@@ -83,6 +84,8 @@ class InferenceClient:
             "max_new_tokens": max_new_tokens,
             "temperature": temperature
         }
+        if images is not None:
+            payload["images"] = images
         
         logger.debug(f"Sending generation request to {url}")
         logger.debug(f"Prompt length: {len(prompt)} chars")

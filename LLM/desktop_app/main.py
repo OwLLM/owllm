@@ -8,7 +8,7 @@ import subprocess
 from functools import partial
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Dict
+from typing import Optional, Tuple, Dict, List
 
 from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize, QEvent, QObject, QPoint, QPointF, QSettings
 from PySide6.QtWidgets import (
@@ -45,8 +45,16 @@ from core.python_runtime import PythonRuntimeManager
 _APP_BUILD = datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%y%m%d-%H%M%S")
 APP_TITLE = "OWLLM"
 
-# Hugging Face token creation URL with permissions preselected (fine-grained, gated read, etc.)
-HF_TOKEN_NEW_PREFILLED_URL = (
+# Hugging Face token creation URLs with permissions preselected.
+# Note: HF doesn't publicly document these query params; they are based on observed UI behavior.
+HF_TOKEN_NEW_PREFILLED_URL_MINIMAL = (
+    "https://huggingface.co/settings/tokens/new"
+    "?ownUserPermissions=repo.content.read"
+    "&ownUserPermissions=repo.access.read"
+    "&canReadGatedRepos=true"
+    "&tokenType=fineGrained"
+)
+HF_TOKEN_NEW_PREFILLED_URL_BROAD = (
     "https://huggingface.co/settings/tokens/new"
     "?ownUserPermissions=repo.content.read"
     "&ownUserPermissions=repo.access.read"
@@ -375,7 +383,16 @@ class ToolInferenceWorker(QThread):
     inference_finished = Signal(str, list, str)  # final_output, tool_log, model_column
     inference_failed = Signal(str, str)  # error_message, model_column
     
-    def __init__(self, prompt: str, model_id: str, model_column: str, system_prompt: str = "", max_new_tokens: int = 10000, temperature: float = 0.7):
+    def __init__(
+        self,
+        prompt: str,
+        model_id: str,
+        model_column: str,
+        system_prompt: str = "",
+        max_new_tokens: int = 10000,
+        temperature: float = 0.7,
+        images: Optional[List[str]] = None,
+    ):
         super().__init__()
         self.prompt = prompt
         self.model_id = model_id
@@ -383,6 +400,7 @@ class ToolInferenceWorker(QThread):
         self.system_prompt = system_prompt
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.images = list(images) if images else []
     
     def run(self):
         """Run tool-enabled inference in background"""
@@ -443,6 +461,7 @@ class ToolInferenceWorker(QThread):
                 system_prompt=self.system_prompt,
                 max_new_tokens=self.max_new_tokens,
                 temperature=self.temperature,
+                images=self.images,
                 native_executor=native_executor  # Pass native executor if in native mode
             )
             
@@ -6178,6 +6197,7 @@ class MainWindow(QMainWindow):
         if not self._hf_token_ui_registry:
             return
         settings = QSettings()
+        settings.sync()
         token = (settings.value("hf/token") or "").strip()
         for ui in self._hf_token_ui_registry:
             try:
@@ -6200,6 +6220,7 @@ class MainWindow(QMainWindow):
         else:
             settings.remove("hf/token")
             settings.remove("hf/token_set_at")
+        settings.sync()
         self._refresh_hf_token_ui()
     
     def _on_hf_clear_token_clicked(self, token_edit: QLineEdit):
@@ -6208,6 +6229,7 @@ class MainWindow(QMainWindow):
         settings = QSettings()
         settings.remove("hf/token")
         settings.remove("hf/token_set_at")
+        settings.sync()
         self._refresh_hf_token_ui()
     
     def _on_hf_test_token(self):
@@ -6293,18 +6315,27 @@ class MainWindow(QMainWindow):
         btn_row.addStretch()
         hf_layout.addLayout(btn_row)
 
-        save_btn.clicked.connect(lambda: self._on_hf_save_token_clicked(token_edit))
-        clear_btn.clicked.connect(lambda: self._on_hf_clear_token_clicked(token_edit))
-        test_btn.clicked.connect(self._on_hf_test_token)
+        # clicked emits a bool; accept it to avoid silent TypeError
+        save_btn.clicked.connect(lambda _=False: self._on_hf_save_token_clicked(token_edit))
+        clear_btn.clicked.connect(lambda _=False: self._on_hf_clear_token_clicked(token_edit))
+        test_btn.clicked.connect(lambda _=False: self._on_hf_test_token())
 
-        link_prefilled = QLabel(
-            f'<a href="{HF_TOKEN_NEW_PREFILLED_URL}" style="color: #F7C948;">Create new token (permissions prefilled)</a>'
+        link_prefilled_broad = QLabel(
+            f'<a href="{HF_TOKEN_NEW_PREFILLED_URL_BROAD}" style="color: #F7C948;">Create new token (broad permissions prefilled)</a>'
         )
-        link_prefilled.setOpenExternalLinks(True)
-        link_prefilled.setTextFormat(Qt.RichText)
-        hf_layout.addWidget(link_prefilled)
+        link_prefilled_broad.setOpenExternalLinks(True)
+        link_prefilled_broad.setTextFormat(Qt.RichText)
+        hf_layout.addWidget(link_prefilled_broad)
+
+        link_prefilled_min = QLabel(
+            f'<a href="{HF_TOKEN_NEW_PREFILLED_URL_MINIMAL}" style="color: #F7C948;">Create new token (minimal, download-only)</a>'
+        )
+        link_prefilled_min.setOpenExternalLinks(True)
+        link_prefilled_min.setTextFormat(Qt.RichText)
+        hf_layout.addWidget(link_prefilled_min)
+
         warning_label = QLabel(
-            "These permissions are broader than strictly needed for downloads. If you prefer least-privilege, create a Read token instead."
+            "Broad tokens are not required for downloads. If you only need gated/private downloads, the minimal link is safer."
         )
         warning_label.setWordWrap(True)
         warning_label.setStyleSheet("color: #888; font-size: 10px;")
@@ -6362,7 +6393,8 @@ class MainWindow(QMainWindow):
         mb.setText("This repo is gated or private. You need a Hugging Face token and must accept the model terms.")
         model_url = f"https://huggingface.co/{model_id}"
         mb.setInformativeText(
-            f"• Create token (prefilled): {HF_TOKEN_NEW_PREFILLED_URL}\n"
+            f"• Create token (broad, prefilled): {HF_TOKEN_NEW_PREFILLED_URL_BROAD}\n"
+            f"• Create token (minimal): {HF_TOKEN_NEW_PREFILLED_URL_MINIMAL}\n"
             f"• Docs: {HF_TOKEN_DOCS_URL}\n"
             f"• Accept terms: {model_url}\n\n"
             "Save your token in Models → Access & Tokens, then try again."
@@ -6370,7 +6402,7 @@ class MainWindow(QMainWindow):
         btn_token = mb.addButton("Get token", QMessageBox.ActionRole)
         btn_model = mb.addButton("Open model page", QMessageBox.ActionRole)
         mb.addButton(QMessageBox.Ok)
-        btn_token.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(HF_TOKEN_NEW_PREFILLED_URL)))
+        btn_token.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(HF_TOKEN_NEW_PREFILLED_URL_BROAD)))
         btn_model.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(model_url)))
         mb.exec()
     
@@ -10430,6 +10462,9 @@ class MainWindow(QMainWindow):
         """)
         input_row.addWidget(self.tool_chat_input, 1)
         
+        # Attachments UI state (per message compose)
+        self._tool_chat_images: List[str] = []
+
         # Buttons column
         btn_col = QVBoxLayout()
         self.tool_chat_send_btn = QPushButton("📤 Send")
@@ -10442,6 +10477,32 @@ class MainWindow(QMainWindow):
         input_row.addLayout(btn_col)
         
         input_layout.addLayout(input_row)
+
+        # Attachments row (vision models only; gated by capabilities)
+        attachments_row = QHBoxLayout()
+        attachments_row.setSpacing(8)
+
+        self.tool_chat_attach_btn = QPushButton("🖼️ Attach image")
+        self.tool_chat_attach_btn.clicked.connect(self._tool_chat_attach_image_file)
+        attachments_row.addWidget(self.tool_chat_attach_btn)
+
+        self.tool_chat_image_url = QLineEdit()
+        self.tool_chat_image_url.setPlaceholderText("Image URL (optional)")
+        attachments_row.addWidget(self.tool_chat_image_url, 1)
+
+        self.tool_chat_add_url_btn = QPushButton("Add URL")
+        self.tool_chat_add_url_btn.clicked.connect(self._tool_chat_add_image_url)
+        attachments_row.addWidget(self.tool_chat_add_url_btn)
+
+        self.tool_chat_attachments_label = QLabel("Attachments: 0")
+        self.tool_chat_attachments_label.setStyleSheet("color: #cccccc;")
+        attachments_row.addWidget(self.tool_chat_attachments_label)
+
+        self.tool_chat_clear_attachments_btn = QPushButton("Clear")
+        self.tool_chat_clear_attachments_btn.clicked.connect(self._tool_chat_clear_attachments)
+        attachments_row.addWidget(self.tool_chat_clear_attachments_btn)
+
+        input_layout.addLayout(attachments_row)
         left_layout.addWidget(input_frame)
         
         main_splitter.addWidget(left_widget)
@@ -10483,6 +10544,13 @@ class MainWindow(QMainWindow):
         
         # Load models
         QTimer.singleShot(100, self._load_tool_chat_models)
+
+        # Capability gating for vision controls
+        try:
+            self.tool_chat_model_a.currentIndexChanged.connect(self._update_tool_chat_image_controls)
+        except Exception:
+            pass
+        QTimer.singleShot(150, self._update_tool_chat_image_controls)
         
         return w
 
@@ -11345,6 +11413,103 @@ class MainWindow(QMainWindow):
             self._tool_chat_history = []
         except Exception:
             pass
+
+    def _tool_chat_set_attachments_ui(self) -> None:
+        try:
+            n = len(getattr(self, "_tool_chat_images", []) or [])
+            if hasattr(self, "tool_chat_attachments_label"):
+                self.tool_chat_attachments_label.setText(f"Attachments: {n}")
+        except Exception:
+            pass
+
+    def _tool_chat_clear_attachments(self) -> None:
+        try:
+            self._tool_chat_images = []
+            if hasattr(self, "tool_chat_image_url"):
+                self.tool_chat_image_url.clear()
+        except Exception:
+            pass
+        self._tool_chat_set_attachments_ui()
+
+    def _tool_chat_attach_image_file(self) -> None:
+        """Attach an image from disk as base64 data URL (vision models only)."""
+        try:
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Select image",
+                "",
+                "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif);;All files (*.*)",
+            )
+            if not file_path:
+                return
+            import base64
+            import mimetypes
+            with open(file_path, "rb") as f:
+                raw = f.read()
+            mime, _ = mimetypes.guess_type(file_path)
+            mime = mime or "image/png"
+            b64 = base64.b64encode(raw).decode("utf-8")
+            data_url = f"data:{mime};base64,{b64}"
+            if not hasattr(self, "_tool_chat_images") or self._tool_chat_images is None:
+                self._tool_chat_images = []
+            self._tool_chat_images.append(data_url)
+            self._tool_chat_set_attachments_ui()
+        except Exception as e:
+            QMessageBox.warning(self, "Attach image failed", str(e))
+
+    def _tool_chat_add_image_url(self) -> None:
+        """Download an image from URL and attach as base64 data URL (vision models only)."""
+        try:
+            url = self.tool_chat_image_url.text().strip() if hasattr(self, "tool_chat_image_url") else ""
+            if not url:
+                return
+            import base64
+            import mimetypes
+            import requests
+            resp = requests.get(url, timeout=10)
+            resp.raise_for_status()
+            raw = resp.content
+            mime = resp.headers.get("content-type") or mimetypes.guess_type(url)[0] or "image/png"
+            if not str(mime).startswith("image/"):
+                raise RuntimeError(f"URL did not return an image (content-type={mime})")
+            b64 = base64.b64encode(raw).decode("utf-8")
+            data_url = f"data:{mime};base64,{b64}"
+            if not hasattr(self, "_tool_chat_images") or self._tool_chat_images is None:
+                self._tool_chat_images = []
+            self._tool_chat_images.append(data_url)
+            self.tool_chat_image_url.clear()
+            self._tool_chat_set_attachments_ui()
+        except Exception as e:
+            QMessageBox.warning(self, "Add image URL failed", str(e))
+
+    def _update_tool_chat_image_controls(self) -> None:
+        """Enable/disable image attachments based on selected model capabilities."""
+        try:
+            model_path = self.tool_chat_model_a.currentData() if hasattr(self, "tool_chat_model_a") else None
+            vision_ok = False
+            if model_path:
+                try:
+                    from core.models import detect_model_capabilities
+                    caps = detect_model_capabilities(model_path=str(model_path), model_name=Path(str(model_path)).name)
+                    vision_ok = "vision" in (caps or [])
+                except Exception:
+                    vision_ok = False
+
+            tooltip = "Attach images (vision-capable models only)."
+            if not vision_ok:
+                tooltip = "This model is not vision-capable. Select a vision model to attach images."
+                self._tool_chat_clear_attachments()
+
+            for w in ("tool_chat_attach_btn", "tool_chat_image_url", "tool_chat_add_url_btn", "tool_chat_clear_attachments_btn"):
+                if hasattr(self, w):
+                    obj = getattr(self, w)
+                    try:
+                        obj.setEnabled(bool(vision_ok))
+                        obj.setToolTip(tooltip)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
     
     def _send_tool_chat_message(self):
         """Send message and run tool-enabled inference for the selected model"""
@@ -11376,9 +11541,11 @@ class MainWindow(QMainWindow):
         
         # Start response for the model
         self.tool_chat_display.start_model_a_response()
-        self._run_tool_chat_inference_a(model_a_path, message)
+        images = list(getattr(self, "_tool_chat_images", []) or [])
+        self._tool_chat_clear_attachments()
+        self._run_tool_chat_inference_a(model_a_path, message, images=images)
     
-    def _run_tool_chat_inference_a(self, model_path: str, prompt: str, system_prompt: str = ""):
+    def _run_tool_chat_inference_a(self, model_path: str, prompt: str, system_prompt: str = "", images: Optional[List[str]] = None):
         """Run tool-enabled inference for Model A in tool chat"""
         try:
             model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
@@ -11401,7 +11568,7 @@ class MainWindow(QMainWindow):
             self.tool_chat_worker_a.quit()
             self.tool_chat_worker_a.wait()
         
-        self.tool_chat_worker_a = ToolInferenceWorker(prompt, model_id, "model_a", system_prompt)
+        self.tool_chat_worker_a = ToolInferenceWorker(prompt, model_id, "model_a", system_prompt, images=images)
         self._tool_chat_progress_a = ""
         self.tool_chat_worker_a.progress_update.connect(
             lambda msg: self._on_tool_chat_progress_update("a", msg)
@@ -18273,6 +18440,8 @@ def main() -> int:
 
     try:
         app = QApplication(sys.argv)
+        app.setOrganizationName("LocaLLM")
+        app.setApplicationName("OWLLM")
         # Set base font size for the entire application - INCREASED to 16pt
         app_font = QFont()
         # Keep this modest; very large fonts require scroll areas (added above).

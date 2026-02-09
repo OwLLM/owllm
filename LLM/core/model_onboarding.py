@@ -203,61 +203,68 @@ class ModelOnboardingService:
             final_env_key = stable_env_key
             final_python_exe = stable_python_exe
             
-            # Step 7: If probe fails with upgradeable causes, try edge env
-            if not probe_success and probe_reason in ("UNSUPPORTED_ARCH", "MISSING_PACKAGE"):
+            # Step 7a: MISSING_PACKAGE - attempt one-time auto-install of optional deps (Pillow/timm/einops), then re-probe
+            if not probe_success and probe_reason == "MISSING_PACKAGE":
+                packages_to_install = self._parse_missing_packages_for_repair(probe_error)
+                if allow_repair and packages_to_install:
+                    log(f"Attempting auto-install of missing packages: {', '.join(packages_to_install)}")
+                    install_ok, install_err = self.env_registry.auto_install_missing_packages(
+                        stable_python_exe,
+                        packages_to_install,
+                        log_callback=log_callback
+                    )
+                    if install_ok:
+                        log("Re-running model load probe after auto-install...")
+                        probe_success, probe_reason, probe_error = self.env_registry.run_model_load_probe(
+                            stable_python_exe,
+                            base_model_path,
+                            adapter_dir,
+                            log_callback=log_callback
+                        )
+                        if probe_success:
+                            log("Model load probe passed after auto-install")
+                if not probe_success and probe_reason == "MISSING_PACKAGE":
+                    error_msg = self._format_probe_missing_package_error(probe_error, log_path)
+                    log(f"Model onboarding failed (missing package): {error_msg[:300]}")
+                    self.state_store.upsert_onboarding(
+                        model_id=model_id,
+                        base_model_path=base_model_path,
+                        adapter_dir=adapter_dir,
+                        env_key=stable_env_key,
+                        backend=backend,
+                        accelerator=accelerator,
+                        status="BROKEN",
+                        last_error=error_msg,
+                        healthcheck_log_path=log_path
+                    )
+                    return {
+                        "status": "BROKEN",
+                        "env_key": stable_env_key,
+                        "backend": backend,
+                        "accelerator": accelerator,
+                        "last_error": error_msg,
+                        "healthcheck_log_path": log_path
+                    }
+            # Step 7b: UNSUPPORTED_ARCH - try edge env fallback (newer transformers, etc.)
+            if not probe_success and probe_reason == "UNSUPPORTED_ARCH":
                 log(f"Model load probe failed: {probe_reason} - {probe_error[:200]}")
                 log("Attempting edge environment fallback...")
-                
                 try:
-                    # Resolve edge env key
                     edge_env_key, _, _ = self.env_registry.resolve_env_for_model(
                         base_model_path,
                         adapter_dir,
                         profile_data,
                         tier="edge"
                     )
-                    
-                    # Create/upgrade edge env
                     self.env_registry._create_or_upgrade_edge_env(
                         stable_env_key,
                         profile_data,
                         log_callback=log_callback
                     )
-                    
-                    # Ensure edge env exists and is healthy
                     edge_env_spec = self.env_registry.ensure_env_exists(edge_env_key, profile_data, log_callback=log_callback)
                     edge_python_exe = edge_env_spec.python_executable
-                    
-                    # If UNSUPPORTED_ARCH, try installing transformers from source
-                    if probe_reason == "UNSUPPORTED_ARCH":
-                        log("Installing transformers from GitHub source for unsupported architecture...")
-                        self.env_registry._upgrade_edge_env_for_unsupported_arch(edge_python_exe, log_callback=log_callback)
-                    
-                    # If MISSING_PACKAGE, try to auto-install missing packages
-                    if probe_reason == "MISSING_PACKAGE":
-                        log("Attempting to auto-install missing packages...")
-                        # Extract package name from error if possible
-                        missing_packages = []
-                        if probe_error:
-                            # Try to extract package names from common error patterns
-                            import re
-                            patterns = [
-                                r"No module named ['\"]([^'\"]+)['\"]",
-                                r"cannot import name ['\"]([^'\"]+)['\"]",
-                            ]
-                            for pattern in patterns:
-                                matches = re.findall(pattern, probe_error)
-                                missing_packages.extend(matches)
-                        
-                        if missing_packages:
-                            # Remove duplicates and common false positives
-                            missing_packages = list(set([p for p in missing_packages if p not in ["transformers", "torch", "tokenizers"]]))
-                            if missing_packages:
-                                log(f"Installing missing packages: {missing_packages}")
-                                success, error = self.env_registry.auto_install_missing_packages(edge_python_exe, missing_packages, log_callback=log_callback)
-                                if not success:
-                                    log(f"Failed to install missing packages: {error}")
-                    
+                    log("Installing transformers from GitHub source for unsupported architecture...")
+                    self.env_registry._upgrade_edge_env_for_unsupported_arch(edge_python_exe, log_callback=log_callback)
                     # Re-run probe on edge env
                     log(f"Running model load probe on edge env: {edge_env_key}")
                     edge_probe_success, edge_probe_reason, edge_probe_error = self.env_registry.run_model_load_probe(
@@ -605,6 +612,71 @@ class ModelOnboardingService:
         stdout = (result.stdout or "").strip()
         stderr = (result.stderr or "").strip()
         return f"Health check failed (returncode={result.returncode})\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+
+    def _parse_missing_packages_for_repair(self, probe_error: str) -> List[str]:
+        """
+        Parse probe error for missing module/package names and return pip package names to install.
+        Maps import names to pip names (e.g. PIL -> Pillow). Used for one-time auto-repair.
+        """
+        import re
+        err_full = (probe_error or "").strip()
+        # Extract pip package name from "Install with: pip install X" (probe emits this)
+        pip_from_hint: List[str] = []
+        for m in re.finditer(r"pip install\s+([A-Za-z0-9_.\-]+)", err_full):
+            pip_from_hint.append(m.group(1).strip())
+        # Extract module names from "No module named 'X'"
+        module_names: List[str] = []
+        for m in re.finditer(r"No module named\s+['\"]([^'\"]+)['\"]", err_full):
+            module_names.append(m.group(1).strip())
+        # Map known module names to pip package names
+        module_to_pip = {"PIL": "Pillow", "timm": "timm", "einops": "einops"}
+        pip_names = []
+        for mod in module_names:
+            pip_names.append(module_to_pip.get(mod, mod))
+        # Combine and de-dup, prefer pip hint when present
+        seen = set()
+        out = []
+        for p in pip_from_hint + pip_names:
+            if p and p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
+
+    def _format_probe_missing_package_error(self, probe_error: str, log_path: Optional[str] = None) -> str:
+        """Format BROKEN error when onboarding probe fails with MISSING_PACKAGE (actionable message)."""
+        import re
+
+        err_full = (probe_error or "").strip()
+        err = err_full[:1500]
+
+        # Best-effort extraction of missing module/package names
+        missing: list[str] = []
+        try:
+            patterns = [
+                r"No module named ['\"]([^'\"]+)['\"]",
+                r"Missing optional dependency.*?:\s*pip install ([A-Za-z0-9_.\\-]+)",
+                r"requires ['\"]([^'\"]+)['\"] package",
+            ]
+            for pat in patterns:
+                missing.extend(re.findall(pat, err_full))
+        except Exception:
+            missing = []
+        # De-dup while preserving order
+        seen = set()
+        missing = [m for m in missing if m and not (m in seen or seen.add(m))]
+
+        missing_line = ""
+        if missing:
+            missing_line = "Missing module(s): " + ", ".join(missing[:10]) + "\n\n"
+
+        log_line = f"\n\nOnboarding log: {log_path}" if log_path else ""
+        return (
+            "Onboarding probe failed during model compatibility check: one or more required packages are missing.\n\n"
+            + missing_line +
+            "Details:\n" + err + "\n\n"
+            "Next step: Install the missing package(s) into the model environment, then Repair or Re-onboard this model from the Models tab."
+            + log_line
+        )
 
 
 # Global instance

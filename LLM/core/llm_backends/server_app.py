@@ -406,37 +406,58 @@ async def generate(request: GenerateRequest):
 
         # Multimodal path (processor)
         if processor is not None:
-            from core.llm_backends.run_adapter_backend import generate_multimodal
+            from core.llm_backends.run_adapter_backend import generate_multimodal, generate_text
             pil_images = _decode_images_to_pil(request.images) if request.images else []
             mm_prompt = (system_prompt + "\n\n" if system_prompt else "") + request.prompt
-            try:
-                text = generate_multimodal(
-                    processor=processor,
+            # Vision models can still receive text-only turns in normal chat.
+            # Avoid processor/image tensor crashes by routing text-only turns through tokenizer path.
+            if not pil_images:
+                text_tokenizer = getattr(processor, "tokenizer", None)
+                if text_tokenizer is None and tokenizer is not None and hasattr(tokenizer, "encode") and hasattr(tokenizer, "decode"):
+                    text_tokenizer = tokenizer
+                if text_tokenizer is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Vision model received no images and no text tokenizer fallback is available."
+                    )
+                text = generate_text(
+                    tokenizer=text_tokenizer,
                     model=model,
                     prompt=mm_prompt,
-                    images=pil_images,
                     max_new_tokens=effective_max_tokens,
                     temperature=request.temperature,
+                    model_type=model_type,
+                    system_prompt="",
                 )
-            except RuntimeError as e:
-                # Known multimodal shape edge-case: retry once with a safer token budget.
-                msg = str(e)
-                if "expanded size of the tensor" in msg or "Tensor sizes:" in msg:
-                    retry_tokens = min(effective_max_tokens, 256)
-                    logger.warning(
-                        "Multimodal generate runtime shape mismatch; retrying with safer max_new_tokens=%s",
-                        retry_tokens,
-                    )
+            else:
+                try:
                     text = generate_multimodal(
                         processor=processor,
                         model=model,
                         prompt=mm_prompt,
                         images=pil_images,
-                        max_new_tokens=retry_tokens,
+                        max_new_tokens=effective_max_tokens,
                         temperature=request.temperature,
                     )
-                else:
-                    raise
+                except RuntimeError as e:
+                    # Known multimodal shape edge-case: retry once with a safer token budget.
+                    msg = str(e)
+                    if "expanded size of the tensor" in msg or "Tensor sizes:" in msg:
+                        retry_tokens = min(effective_max_tokens, 256)
+                        logger.warning(
+                            "Multimodal generate runtime shape mismatch; retrying with safer max_new_tokens=%s",
+                            retry_tokens,
+                        )
+                        text = generate_multimodal(
+                            processor=processor,
+                            model=model,
+                            prompt=mm_prompt,
+                            images=pil_images,
+                            max_new_tokens=retry_tokens,
+                            temperature=request.temperature,
+                        )
+                    else:
+                        raise
         else:
             if tokenizer is None:
                 raise HTTPException(status_code=503, detail="Tokenizer/processor missing. Model load may have failed.")

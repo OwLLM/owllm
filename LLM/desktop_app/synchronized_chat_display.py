@@ -376,21 +376,33 @@ class SynchronizedChatDisplay(QWidget):
         s = (speaker or "a").strip().lower()[:1]
         self._m2m_pending_speaker = s
 
-        bubble_a = ChatBubble("Thinking..." if s == "a" else "", is_user=(s == "a"))
+        bubble_a = ChatBubble(
+            "Thinking..." if s == "a" else "",
+            is_user=False,
+            accent_color=self._accent_for_column("a"),
+        )
         bubble_a.set_theme(self.is_dark)
         if s != "a":
             bubble_a.setVisible(False)
 
         bubble_b = None
         if self.num_models >= 2:
-            bubble_b = ChatBubble("Thinking..." if s == "b" else "", is_user=(s == "b"))
+            bubble_b = ChatBubble(
+                "Thinking..." if s == "b" else "",
+                is_user=False,
+                accent_color=self._accent_for_column("b"),
+            )
             bubble_b.set_theme(self.is_dark)
             if s != "b":
                 bubble_b.setVisible(False)
 
         bubble_c = None
         if self.num_models == 3:
-            bubble_c = ChatBubble("Thinking..." if s == "c" else "", is_user=(s == "c"))
+            bubble_c = ChatBubble(
+                "Thinking..." if s == "c" else "",
+                is_user=False,
+                accent_color=self._accent_for_column("c"),
+            )
             bubble_c.set_theme(self.is_dark)
             if s != "c":
                 bubble_c.setVisible(False)
@@ -438,19 +450,31 @@ class SynchronizedChatDisplay(QWidget):
         """Model-to-model: add a completed turn row with per-column left/right alignment."""
         s = (speaker or "a").strip().lower()[:1]
         msg = (text or "").strip()
-        bubble_a = ChatBubble(msg if s == "a" else "", is_user=(s == "a"))
+        bubble_a = ChatBubble(
+            msg if s == "a" else "",
+            is_user=False,
+            accent_color=self._accent_for_column("a"),
+        )
         bubble_a.set_theme(self.is_dark)
         if s != "a":
             bubble_a.setVisible(False)
         bubble_b = None
         if self.num_models >= 2:
-            bubble_b = ChatBubble(msg if s == "b" else "", is_user=(s == "b"))
+            bubble_b = ChatBubble(
+                msg if s == "b" else "",
+                is_user=False,
+                accent_color=self._accent_for_column("b"),
+            )
             bubble_b.set_theme(self.is_dark)
             if s != "b":
                 bubble_b.setVisible(False)
         bubble_c = None
         if self.num_models == 3:
-            bubble_c = ChatBubble(msg if s == "c" else "", is_user=(s == "c"))
+            bubble_c = ChatBubble(
+                msg if s == "c" else "",
+                is_user=False,
+                accent_color=self._accent_for_column("c"),
+            )
             bubble_c.set_theme(self.is_dark)
             if s != "c":
                 bubble_c.setVisible(False)
@@ -613,7 +637,8 @@ class SynchronizedChatDisplay(QWidget):
         bubble.set_theme(self.is_dark)
         
         # Style as tool call (slightly different color)
-        bubble.setStyleSheet("""
+        text_color = "white" if self.is_dark else "black"
+        bubble.setStyleSheet(f"""
             ChatBubble {
                 background: rgba(102, 126, 234, 0.3);
                 border: 1px solid rgba(102, 126, 234, 0.5);
@@ -621,7 +646,7 @@ class SynchronizedChatDisplay(QWidget):
             }
             QLabel {
                 background: transparent;
-                color: white;
+                color: {text_color};
                 border: none;
             }
         """)
@@ -685,7 +710,8 @@ class SynchronizedChatDisplay(QWidget):
             bubble_c.setVisible(False)
         
         # Set text and styling for the appropriate column
-        result_style = """
+        result_text_color = "white" if self.is_dark else "black"
+        result_style = f"""
             ChatBubble {
                 background: rgba(76, 175, 80, 0.2);
                 border: 1px solid rgba(76, 175, 80, 0.4);
@@ -693,12 +719,12 @@ class SynchronizedChatDisplay(QWidget):
             }
             QLabel {
                 background: transparent;
-                color: white;
+                color: {result_text_color};
                 border: none;
                 font-family: 'Consolas', 'Courier New', monospace;
                 font-size: 10pt;
             }
-        """ if success else """
+        """ if success else f"""
             ChatBubble {
                 background: rgba(244, 67, 54, 0.2);
                 border: 1px solid rgba(244, 67, 54, 0.4);
@@ -706,7 +732,7 @@ class SynchronizedChatDisplay(QWidget):
             }
             QLabel {
                 background: transparent;
-                color: white;
+                color: {result_text_color};
                 border: none;
                 font-family: 'Consolas', 'Courier New', monospace;
                 font-size: 10pt;

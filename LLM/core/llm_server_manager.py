@@ -397,15 +397,36 @@ class LLMServerManager:
         Returns:
             True if available, False if in use
         """
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Fast path: if something is already listening, port is not available.
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            sock.bind(('127.0.0.1', port))
-            sock.close()
+            probe.settimeout(0.25)
+            if probe.connect_ex(("127.0.0.1", port)) == 0:
+                return False
+        except OSError:
+            # Ignore probe errors and fall through to bind check.
+            pass
+        finally:
+            try:
+                probe.close()
+            except Exception:
+                pass
+
+        # Strict bind check: do NOT set SO_REUSEADDR on Windows here.
+        # SO_REUSEADDR can report false positives for "available" even when occupied.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            sock.bind(("127.0.0.1", port))
             return True
         except OSError:
-            sock.close()
             return False
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
 
     def _start_server(self, model_id: str, log_callback=None):
         """
@@ -1182,6 +1203,8 @@ class LLMServerManager:
             # CRITICAL: Pass port via environment variable so auto-reassignment works
             env = os.environ.copy()
             env['SERVER_PORT'] = str(port)
+            # Pin the intended model environment interpreter for launcher -> uvicorn handoff.
+            env["LLM_SERVER_PYTHON"] = str(env_spec.python_executable)
             # Force server process to use the selected GPU (or highest-VRAM default)
             if chosen_gpu is not None:
                 env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -1592,6 +1615,7 @@ class LLMServerManager:
                         
                         if status == "ok":
                             elapsed = time.time() - start_time
+                            log(f"Server is healthy at {server_url} (startup took {elapsed:.1f}s)")
                             logger.info(f"Server '{model_id}' is ready at {server_url} (took {elapsed:.1f}s)")
                             
                             # Close and clean up log file after successful startup
@@ -1604,12 +1628,16 @@ class LLMServerManager:
                                 except Exception:
                                     pass
                                 
-                                # Delete log file (no longer needed after successful startup)
-                                try:
-                                    if log_file_path and os.path.exists(log_file_path):
-                                        os.remove(log_file_path)
-                                except Exception:
-                                    pass
+                                # Delete log file unless debug mode keeps it (LLM_KEEP_SERVER_STARTUP_LOGS)
+                                keep_logs = os.environ.get("LLM_KEEP_SERVER_STARTUP_LOGS", "").lower() in ("true", "1", "yes")
+                                if not keep_logs:
+                                    try:
+                                        if log_file_path and os.path.exists(log_file_path):
+                                            os.remove(log_file_path)
+                                    except Exception:
+                                        pass
+                                else:
+                                    logger.debug("Keeping server startup log (LLM_KEEP_SERVER_STARTUP_LOGS): %s", log_file_path)
                                 
                                 # Update to remove log file references (keep only process)
                                 self.running_servers[model_id] = (process, None, None)

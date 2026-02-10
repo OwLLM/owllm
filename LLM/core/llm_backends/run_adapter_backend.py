@@ -5,11 +5,12 @@ Contains core model loading and text generation logic.
 
 DO NOT MODIFY THE CORE LOGIC - THIS IS A VERBATIM COPY FROM run_adapter.py
 """
+import os
+import time
 import torch
 import warnings
 import logging
 import platform
-import os
 
 # Suppress known warnings
 warnings.filterwarnings("ignore", message=".*quantization_config.*")
@@ -136,6 +137,64 @@ def _bitsandbytes_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def _is_nemotron_family(model=None, model_type=None) -> bool:
+    """Best-effort Nemotron family detection for model-aware guardrails."""
+    try:
+        mt = str(model_type or "").strip().lower()
+        if "nemotron" in mt:
+            return True
+    except Exception:
+        pass
+
+    if model is None:
+        return False
+
+    try:
+        cfg = getattr(model, "config", None)
+        if cfg is not None:
+            cfg_model_type = str(getattr(cfg, "model_type", "")).lower()
+            if "nemotron" in cfg_model_type:
+                return True
+            name_or_path = str(getattr(cfg, "_name_or_path", "")).lower()
+            if "nemotron" in name_or_path:
+                return True
+            arch = getattr(cfg, "architectures", None)
+            if arch:
+                arch_str = " ".join(str(a) for a in arch).lower()
+                if "nemotron" in arch_str:
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+def _resolve_generate_max_time_seconds(model=None, model_type=None):
+    """
+    Resolve generation max_time with minimal blast radius:
+    - Global override: LLM_GENERATE_MAX_TIME_SECONDS (>0) applies to all models.
+    - Nemotron default: LLM_NEMOTRON_GENERATE_MAX_TIME_SECONDS (default 120s).
+    - Non-Nemotron models keep existing behavior (no default max_time).
+    """
+    try:
+        global_max_time = float(os.environ.get("LLM_GENERATE_MAX_TIME_SECONDS", "0").strip())
+        if global_max_time > 0:
+            return global_max_time
+    except Exception:
+        pass
+
+    if _is_nemotron_family(model=model, model_type=model_type):
+        try:
+            nemotron_max_time = float(
+                os.environ.get("LLM_NEMOTRON_GENERATE_MAX_TIME_SECONDS", "120").strip()
+            )
+            if nemotron_max_time > 0:
+                return nemotron_max_time
+        except Exception:
+            pass
+
+    return None
 
 
 def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
@@ -908,30 +967,30 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
     model.eval()
     device = next(model.parameters()).device
     
-    # Check if this is a NemotronH model that requires a cache
+    # Check if this is a NemotronH model that requires a custom cache (not generic Nemotron).
+    # Narrow: only enable for explicit NemotronH identity to avoid applying cache logic to
+    # non-NemotronH variants (e.g. Llama-3.1-Nemotron-Nano) which can hang or misbehave.
     is_nemotron_h = False
     nemotron_cache = None
     try:
-        model_class_name = model.__class__.__name__
-        config_class_name = model.config.__class__.__name__ if hasattr(model, 'config') else ""
-        model_type_attr = getattr(model.config, 'model_type', '').lower() if hasattr(model, 'config') else ""
-        architectures = getattr(model.config, 'architectures', []) if hasattr(model, 'config') else []
-        arch_str = " ".join(architectures).lower() if architectures else ""
+        enable_nemotron_h_cache = os.environ.get("LLM_ENABLE_NEMOTRON_H_CACHE", "true").lower() in ("true", "1", "yes")
+        if not enable_nemotron_h_cache:
+            logging.debug("NemotronH cache path disabled by LLM_ENABLE_NEMOTRON_H_CACHE")
+        else:
+            model_class_name = model.__class__.__name__
+            config_class_name = model.config.__class__.__name__ if hasattr(model, 'config') else ""
+            model_type_attr = getattr(model.config, 'model_type', '').lower() if hasattr(model, 'config') else ""
+            architectures = getattr(model.config, 'architectures', []) if hasattr(model, 'config') else []
+            arch_str = " ".join(architectures).lower() if architectures else ""
+            # Explicit NemotronH identity only (skip generic "nemotron" in name)
+            is_nemotron_h = (
+                model_type_attr == "nemotron_h"
+                or "NemotronH" in model_class_name
+                or "NemotronH" in config_class_name
+                or "nemotronh" in arch_str
+            )
         
-        # Check for NemotronH models (various naming conventions)
-        # Check model class, config class, model_type, and architectures
-        # Also check if the warning message appears (which indicates it's a NemotronH model)
-        is_nemotron_model = (
-            "nemotron" in model_class_name.lower() or 
-            "nemotron" in config_class_name.lower() or 
-            "nemotron" in model_type_attr or
-            "nemotron" in arch_str or
-            "NemotronH" in model_class_name or 
-            "NemotronH" in config_class_name or
-            "NemotronH" in arch_str
-        )
-        
-        if is_nemotron_model:
+        if is_nemotron_h:
             is_nemotron_h = True
             logging.debug(f"Detected Nemotron model: class={model_class_name}, config={config_class_name}, type={model_type_attr}, arch={arch_str}")
             
@@ -1221,10 +1280,23 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
         gen_kwargs["temperature"] = temperature
     else:
         gen_kwargs["do_sample"] = False
-    
+
+    # Model-aware max_time guardrail:
+    # - global override: LLM_GENERATE_MAX_TIME_SECONDS
+    # - Nemotron default only: LLM_NEMOTRON_GENERATE_MAX_TIME_SECONDS (default 120s)
+    max_time_sec = _resolve_generate_max_time_seconds(model=model, model_type=model_type)
+    if max_time_sec is not None:
+        gen_kwargs["max_time"] = max_time_sec
+        logging.info("Generation max_time=%.1fs", max_time_sec)
+
     with torch.no_grad():
         try:
+            t0 = time.time()
+            logging.info("Generate start: input_tokens=%s, max_new_tokens=%s", input_len, effective_max_new_tokens)
             out = model.generate(**inputs, **gen_kwargs)
+            elapsed = time.time() - t0
+            num_new = out.shape[1] - input_len
+            logging.info("Generate done: elapsed=%.2fs, new_tokens=%s", elapsed, num_new)
         except Exception as e:
             # Never silently return empty output; propagate so the UI can show the real failure.
             logging.error(f"Generation failed: {e}")
@@ -1370,8 +1442,15 @@ def generate_multimodal(processor, model, prompt, images, max_new_tokens=128, te
     }
     if temperature > 0:
         gen_kwargs["temperature"] = temperature
+    max_time_sec = _resolve_generate_max_time_seconds(model=model, model_type=None)
+    if max_time_sec is not None:
+        gen_kwargs["max_time"] = max_time_sec
     with torch.no_grad():
+        t0 = time.time()
+        logging.info("Generate multimodal start: max_new_tokens=%s", max_new_tokens)
         out = model.generate(**inputs, **gen_kwargs)
+        elapsed = time.time() - t0
+        logging.info("Generate multimodal done: elapsed=%.2fs", elapsed)
     # Decode: processor may have decode or tokenizer
     if hasattr(processor, "decode"):
         text = processor.decode(out[0], skip_special_tokens=True)

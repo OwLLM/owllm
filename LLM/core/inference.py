@@ -8,6 +8,7 @@ import sys
 import os
 import re
 import json
+import time
 
 
 def get_app_root() -> Path:
@@ -208,10 +209,15 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
     # Ensure server is running for this model
     manager = get_global_server_manager()
     server_url = manager.ensure_server_running(cfg.model_id, log_callback=log_callback)
+    if log_callback:
+        log_callback(f"Server ready: {server_url}")
     
     # Call persistent server via HTTP
     client = InferenceClient(server_url)
+    t0 = time.time()
     try:
+        if log_callback:
+            log_callback("Sending generation request to model server...")
         return client.generate(
             prompt=cfg.prompt,
             max_new_tokens=cfg.max_new_tokens,
@@ -238,6 +244,12 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
             temperature=cfg.temperature,
             images=cfg.images,
         )
+    finally:
+        if log_callback:
+            try:
+                log_callback(f"Model server request completed in {time.time() - t0:.1f}s")
+            except Exception:
+                pass
 
 
 def run_inference_with_tools(

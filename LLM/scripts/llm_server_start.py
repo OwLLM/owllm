@@ -96,14 +96,15 @@ def main():
     else:
         env["PYTHONPATH"] = str(app_root)
     
-    print(f"Launching uvicorn with: {sys.executable} -m uvicorn {import_path}")
+    server_python = str(os.environ.get("LLM_SERVER_PYTHON", "")).strip() or sys.executable
+    print(f"Launching uvicorn with: {server_python} -m uvicorn {import_path}")
     print(f"Working directory: {app_root}")
     print(f"PYTHONPATH: {env['PYTHONPATH']}")
     
     # Launch FastAPI server using -m uvicorn (module-safe, avoids PATH issues)
     try:
         subprocess.run([
-            sys.executable, "-m", "uvicorn",
+            server_python, "-m", "uvicorn",
             import_path,
             "--host", "127.0.0.1",
             "--port", str(port),

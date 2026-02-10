@@ -390,7 +390,7 @@ class ToolInferenceWorker(QThread):
         model_id: str,
         model_column: str,
         system_prompt: str = "",
-        max_new_tokens: int = 10000,
+        max_new_tokens: int = 1024,
         temperature: float = 0.7,
         images: Optional[List[str]] = None,
     ):
@@ -2842,10 +2842,11 @@ class MainWindow(QMainWindow):
                 except Exception:
                     continue
 
+            from core.model_id_resolver import derive_from_model_path
             migrated = 0
             for dname in current_dirs:
                 model_dir = models_dir / dname
-                hf_model_id = dname.replace("__", "/")
+                hf_model_id = derive_from_model_path(str(model_dir)) or dname.replace("__", "/")
 
                 # If correct key already exists, nothing to do
                 try:
@@ -3192,11 +3193,14 @@ class MainWindow(QMainWindow):
                 f"Model at {model_path_str} is not in config. Please onboard it from the Models tab (Downloaded → select model → Environment / Onboarding)."
             )
         
-        # Create new entry with unique model_id and port
-        # Generate model_id from path (sanitize for YAML key)
-        model_id = model_path_obj.name.replace("__", "_").replace("/", "_").replace("\\", "_")
+        # Create new entry with unique model_id and port (canonical-derived key when possible)
+        from core.model_id_resolver import derive_from_model_path
+        canonical = derive_from_model_path(model_path_str)
+        if canonical and "/" in canonical:
+            model_id = canonical.replace("/", "_").replace("\\", "_")
+        else:
+            model_id = model_path_obj.name.replace("__", "_").replace("/", "_").replace("\\", "_")
         if not model_id or model_id in config["models"]:
-            # Fallback: use timestamp-based ID
             import time
             model_id = f"model_{int(time.time())}"
         
@@ -5878,7 +5882,7 @@ class MainWindow(QMainWindow):
                             if onboarding_entry and onboarding_entry.get("env_key"):
                                 env_key = onboarding_entry.get("env_key")
                             else:
-                                # Fallback if some flows still store env_key on models table
+                                # Legacy fallback: models.env_key (onboarding is authoritative)
                                 model_entry = self.state_store.get_model(model_id)
                                 if model_entry:
                                     env_key = model_entry.get("env_key")
@@ -7607,6 +7611,7 @@ class MainWindow(QMainWindow):
             if onboarding_entry and onboarding_entry.get("env_key"):
                 env_key = onboarding_entry.get("env_key")
             else:
+                # Legacy fallback: models.env_key (onboarding is authoritative)
                 model_entry = self.state_store.get_model(model_id)
                 if model_entry:
                     env_key = model_entry.get("env_key")
@@ -10250,13 +10255,13 @@ class MainWindow(QMainWindow):
                     else:
                         return f"{value / 1000000:.1f}M".rstrip('0').rstrip('.')
             
-            max_tokens_label = QLabel(format_max_tokens(10000))
+            max_tokens_label = QLabel(format_max_tokens(1024))
             max_tokens_label.setMinimumWidth(40)
             max_tokens_layout.addWidget(max_tokens_label)
             max_tokens = QSpinBox()
             max_tokens.setRange(1, 999999999)  # No practical limit
             max_tokens.setSingleStep(32)
-            max_tokens.setValue(10000)
+            max_tokens.setValue(1024)
             max_tokens.setMinimumWidth(80)
             max_tokens.valueChanged.connect(lambda v: max_tokens_label.setText(format_max_tokens(v)))
             max_tokens_layout.addWidget(max_tokens)
@@ -10446,7 +10451,7 @@ class MainWindow(QMainWindow):
         controls_row.addWidget(QLabel("Max tokens:"))
         self.tool_chat_max_tokens = QSpinBox()
         self.tool_chat_max_tokens.setRange(64, 32768)
-        self.tool_chat_max_tokens.setValue(10000)
+        self.tool_chat_max_tokens.setValue(1024)
         self.tool_chat_max_tokens.setMinimumWidth(80)
         controls_row.addWidget(self.tool_chat_max_tokens)
         controls_row.addWidget(QLabel("Temp:"))
@@ -11021,13 +11026,13 @@ class MainWindow(QMainWindow):
                 return f"{value // 1000}K" if value % 1000 == 0 else f"{value / 1000:.1f}K".rstrip('0').rstrip('.')
             return f"{value // 1000000}M" if value % 1000000 == 0 else f"{value / 1000000:.1f}M".rstrip('0').rstrip('.')
 
-        max_tokens_label = QLabel(format_max_tokens(10000))
+        max_tokens_label = QLabel(format_max_tokens(1024))
         max_tokens_label.setMinimumWidth(40)
         max_tokens_layout.addWidget(max_tokens_label)
         max_tokens = QSpinBox()
         max_tokens.setRange(1, 999999999)
         max_tokens.setSingleStep(32)
-        max_tokens.setValue(10000)
+        max_tokens.setValue(1024)
         max_tokens.setMinimumWidth(80)
         max_tokens.valueChanged.connect(lambda v: max_tokens_label.setText(format_max_tokens(v)))
         max_tokens_layout.addWidget(max_tokens)
@@ -11738,7 +11743,7 @@ class MainWindow(QMainWindow):
             self.tool_chat_worker_a.quit()
             self.tool_chat_worker_a.wait()
         
-        max_tokens = self.tool_chat_max_tokens.value() if hasattr(self, "tool_chat_max_tokens") and self.tool_chat_max_tokens else 10000
+        max_tokens = self.tool_chat_max_tokens.value() if hasattr(self, "tool_chat_max_tokens") and self.tool_chat_max_tokens else 1024
         temperature = self.tool_chat_temperature.value() if hasattr(self, "tool_chat_temperature") and self.tool_chat_temperature else 0.7
         self.tool_chat_worker_a = ToolInferenceWorker(
             prompt, model_id, "model_a", system_prompt,
@@ -12530,7 +12535,7 @@ class MainWindow(QMainWindow):
                 self.tool_worker_a.wait()
         
         # Create worker thread (use Test Chat max_tokens/temperature from Model A settings)
-        max_tokens_a = 10000
+        max_tokens_a = 1024
         temperature_a = 0.7
         if hasattr(self, "test_model_a_settings"):
             if hasattr(self.test_model_a_settings, "max_tokens"):
@@ -13196,7 +13201,7 @@ class MainWindow(QMainWindow):
                 self.tool_worker_b.quit()
                 self.tool_worker_b.wait()
 
-        max_tokens_b = 10000
+        max_tokens_b = 1024
         temperature_b = 0.7
         if hasattr(self, "test_model_b_settings"):
             if hasattr(self.test_model_b_settings, "max_tokens"):
@@ -13475,7 +13480,7 @@ class MainWindow(QMainWindow):
                 self.tool_worker_c.quit()
                 self.tool_worker_c.wait()
 
-        max_tokens_c = 10000
+        max_tokens_c = 1024
         temperature_c = 0.7
         if hasattr(self, "test_model_c_settings"):
             if hasattr(self.test_model_c_settings, "max_tokens"):
@@ -17279,44 +17284,49 @@ except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to associate model:\n{str(e)}")
     
     def _repair_environment(self, env_id: str):
-        """Repair an environment using InstallerV2"""
+        """Repair an environment. Routes by env_key through .envs/<env_key> (EnvRegistry); legacy environments/ use InstallerV2."""
+        progress_dialog = QDialog(self)
+        progress_dialog.setWindowTitle("Repairing Environment")
+        progress_dialog.setMinimumWidth(400)
+        progress_dialog.setModal(True)
+        progress_layout = QVBoxLayout(progress_dialog)
+        progress_label = QLabel(f"Repairing environment: {env_id}\nPlease wait...")
+        progress_label.setAlignment(Qt.AlignCenter)
+        progress_layout.addWidget(progress_label)
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 0)
+        progress_layout.addWidget(progress_bar)
+        progress_dialog.show()
+        QApplication.processEvents()
+        success = False
+        message = ""
         try:
-            # Show progress dialog
-            progress_dialog = QDialog(self)
-            progress_dialog.setWindowTitle("Repairing Environment")
-            progress_dialog.setMinimumWidth(400)
-            progress_dialog.setModal(True)
-            
-            progress_layout = QVBoxLayout(progress_dialog)
-            
-            progress_label = QLabel(f"Repairing environment: {env_id}\nPlease wait...")
-            progress_label.setAlignment(Qt.AlignCenter)
-            progress_layout.addWidget(progress_label)
-            
-            progress_bar = QProgressBar()
-            progress_bar.setRange(0, 0)  # Indeterminate
-            progress_layout.addWidget(progress_bar)
-            
-            progress_dialog.show()
-            QApplication.processEvents()
-            
-            # Run repair in a thread
-            from LLM.installer_v2 import InstallerV2
-            installer = InstallerV2()
-            
-            # Try to repair
-            success, message = installer.repair_model_environment(env_id)
-            
-            progress_dialog.close()
-            
-            if success:
-                QMessageBox.information(self, "Success", f"Environment '{env_id}' repaired successfully!")
-                self._refresh_environment_list()
+            from core.envs.env_registry import EnvRegistry
+            env_registry = EnvRegistry()
+            venv_path = env_registry.envs_dir / env_id / ".venv"
+            if venv_path.exists():
+                # .envs/<env_key>: authoritative path; use EnvRegistry.repair_env_once
+                try:
+                    env_registry.repair_env_once(env_id)
+                    success = True
+                except Exception as e:
+                    message = str(e)
             else:
-                QMessageBox.critical(self, "Error", f"Failed to repair environment:\n{message}")
-                
+                # Legacy environments/<id>: fallback to InstallerV2
+                from LLM.installer_v2 import InstallerV2
+                installer = InstallerV2()
+                success = installer.repair_model_environment(env_id)
+                if not success:
+                    message = "InstallerV2 repair failed (check logs)."
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to repair environment:\n{str(e)}")
+            message = str(e)
+        finally:
+            progress_dialog.close()
+        if success:
+            QMessageBox.information(self, "Success", f"Environment '{env_id}' repaired successfully!")
+            self._refresh_environment_list()
+        else:
+            QMessageBox.critical(self, "Error", f"Failed to repair environment:\n{message or 'Unknown error'}")
     
     def _show_environment_location_dialog(self, env_id: str, env_info: Dict):
         """Show dialog with environment location and management options"""
@@ -17640,7 +17650,7 @@ except Exception as e:
         
         layout.addWidget(title_container)
         
-        # Two-column layout using QSplitter for fixed 50/50 split
+        # Three-column layout using QSplitter
         splitter = QSplitter(Qt.Horizontal)
         
         # LEFT COLUMN: Credits
@@ -17687,6 +17697,52 @@ except Exception as e:
         credits_layout.addWidget(credits_frame)
         left_scroll.setWidget(credits_widget)
         splitter.addWidget(left_scroll)
+        
+        # MIDDLE COLUMN: OWLLM's rules
+        middle_scroll = QScrollArea()
+        middle_scroll.setWidgetResizable(True)
+        middle_scroll.setFrameShape(QFrame.NoFrame)
+        
+        rules_widget = QWidget()
+        rules_layout = QVBoxLayout(rules_widget)
+        rules_layout.setSpacing(15)
+        
+        rules_frame = QFrame()
+        rules_frame.setFrameShape(QFrame.StyledPanel)
+        rules_inner = QVBoxLayout(rules_frame)
+        rules_inner.setSpacing(12)
+        
+        rules_title = QLabel("📘 OWLLM's Rules")
+        rules_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
+        rules_inner.addWidget(rules_title)
+        
+        rules_text = QLabel("""
+<p style="line-height: 1.35; font-size: 10pt;">
+<b>Core product rules (authoritative):</b>
+</p>
+<ol style="line-height: 1.45; font-size: 10pt; padding-left: 18px;">
+<li><b>Hardware-profile driven:</b> GPU/CPU/RAM/CUDA detection + selected profile are the source of truth for runtime and installs.</li>
+<li><b>Auto-provision on install:</b> installer must detect hardware and install required dependencies automatically.</li>
+<li><b>Self-contained runtime:</b> app must not interfere with host Python, host CUDA, or existing system software.</li>
+<li><b>Deterministic environments:</b> environments are managed by <code>env_key</code> in <code>.envs/&lt;env_key&gt;</code>, with reproducible setup.</li>
+<li><b>Onboarding authority:</b> model readiness and env binding are controlled by onboarding state before chat runtime use.</li>
+<li><b>Auto-repair first:</b> app should recover environment/model/runtime drift with safe repair paths before destructive actions.</li>
+<li><b>Model integrity enforced:</b> incomplete/corrupt models must be detected and blocked from being treated as healthy.</li>
+<li><b>Server reliability:</b> app must run stable local inference servers for both internal chat and external software clients.</li>
+<li><b>MCP + tools capable:</b> model runtime must support tool-calling and MCP workflows as first-class functionality.</li>
+<li><b>Multi-GPU robustness:</b> must work across varied GPU setups and profile changes without manual low-level reconfiguration.</li>
+<li><b>No silent fallback drift:</b> identity/env resolution must be deterministic, observable, and logged.</li>
+<li><b>Safety and transparency:</b> clear errors, visible logs, and actionable recovery guidance are mandatory UX behavior.</li>
+</ol>
+        """)
+        rules_text.setWordWrap(True)
+        rules_text.setTextFormat(Qt.RichText)
+        rules_inner.addWidget(rules_text)
+        rules_inner.addStretch(1)
+        
+        rules_layout.addWidget(rules_frame)
+        middle_scroll.setWidget(rules_widget)
+        splitter.addWidget(middle_scroll)
         
         # RIGHT COLUMN: Licenses
         right_scroll = QScrollArea()
@@ -17781,15 +17837,16 @@ respective package directories or official repositories.
         right_scroll.setWidget(license_widget)
         splitter.addWidget(right_scroll)
         
-        # Set 50/50 split
+        # Set 1/1/1 split
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 1)
         
-        # Apply exact 50/50 split after window is shown
+        # Apply exact 1/1/1 split after window is shown
         def _apply_equal_split():
             w = splitter.width() or 1200
-            half = w // 2
-            splitter.setSizes([half, half])
+            third = max(1, w // 3)
+            splitter.setSizes([third, third, max(1, w - (third * 2))])
         
         QTimer.singleShot(0, _apply_equal_split)
         

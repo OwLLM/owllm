@@ -556,7 +556,7 @@ class ModelOnboardingService:
                 healthcheck_log_path=log_path
             )
 
-            # Keep models table in sync (some UI/flows read env_key from here)
+            # Keep models table in sync (model_onboarding.env_key is authoritative; models.env_key is legacy mirror)
             try:
                 self.state_store.upsert_model(
                     model_id=model_id,

@@ -137,7 +137,34 @@ class StateStore:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_onboarding_status ON model_onboarding(status)")
         
         conn.commit()
+        self._run_migrations(conn)
         logger.info(f"StateStore initialized at {self.db_path}")
+    
+    def _run_migrations(self, conn: sqlite3.Connection):
+        """Additive migrations only: new columns and indexes without breaking existing rows."""
+        # Canonical identity columns (Phase 1)
+        for table, column, col_type in [
+            ("models", "canonical_model_id", "TEXT"),
+            ("model_onboarding", "config_key", "TEXT"),
+            ("model_onboarding", "model_fingerprint", "TEXT"),
+        ]:
+            info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+            names = [r[1] for r in info]
+            if column not in names:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+                logger.debug(f"StateStore migration: added {table}.{column}")
+        conn.commit()
+        # Indexes for canonical/config lookups
+        for index_sql in [
+            "CREATE INDEX IF NOT EXISTS idx_models_canonical_model_id ON models(canonical_model_id)",
+            "CREATE INDEX IF NOT EXISTS idx_onboarding_config_key ON model_onboarding(config_key)",
+            "CREATE INDEX IF NOT EXISTS idx_onboarding_model_fingerprint ON model_onboarding(model_fingerprint)",
+        ]:
+            try:
+                conn.execute(index_sql)
+            except sqlite3.OperationalError:
+                pass
+        conn.commit()
     
     # ========================================================================
     # MODELS
@@ -516,6 +543,110 @@ class StateStore:
         conn.execute("DELETE FROM model_onboarding WHERE model_id = ?", (model_id,))
         conn.commit()
         logger.debug(f"Deleted onboarding: {model_id}")
+    
+    # ========================================================================
+    # INTEGRITY CHECKS (startup / preflight)
+    # ========================================================================
+    
+    def run_integrity_checks(
+        self,
+        env_root: Optional[Path] = None,
+        repair_safe: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Read-only integrity pass: flag drift and optionally repair safe cases.
+        No destructive deletes in phase 1; duplicates are reported for quarantine.
+        
+        Returns:
+            report with keys: duplicate_onboarding, missing_env_for_ready,
+            canonical_mismatch, repaired (list of actions), errors (list of str).
+        """
+        conn = self._get_connection()
+        report: Dict[str, Any] = {
+            "duplicate_onboarding": [],
+            "missing_env_for_ready": [],
+            "canonical_mismatch": [],
+            "repaired": [],
+            "errors": [],
+        }
+        
+        def norm(p: Optional[str]) -> str:
+            if not p:
+                return ""
+            try:
+                return str(Path(p).resolve()).lower()
+            except Exception:
+                return str(p).lower()
+        
+        # 1) Duplicate onboarding rows by base_model_path
+        try:
+            rows = conn.execute(
+                "SELECT model_id, base_model_path FROM model_onboarding"
+            ).fetchall()
+            by_path: Dict[str, List[str]] = {}
+            for row in rows:
+                path_key = norm(row["base_model_path"])
+                if path_key not in by_path:
+                    by_path[path_key] = []
+                by_path[path_key].append(row["model_id"])
+            for path_key, model_ids in by_path.items():
+                if len(model_ids) > 1:
+                    report["duplicate_onboarding"].append({
+                        "base_model_path": path_key,
+                        "model_ids": model_ids,
+                    })
+        except Exception as e:
+            report["errors"].append(f"duplicate_onboarding check: {e}")
+        
+        # 2) READY rows must have valid env at .envs/<env_key>/.venv
+        if env_root is not None:
+            try:
+                env_root = Path(env_root)
+                ready = conn.execute(
+                    "SELECT model_id, env_key FROM model_onboarding WHERE status = ? AND env_key IS NOT NULL AND env_key != ''",
+                    ("READY",),
+                ).fetchall()
+                for row in ready:
+                    env_key = row["env_key"]
+                    venv_dir = env_root / env_key / ".venv"
+                    if not venv_dir.exists():
+                        report["missing_env_for_ready"].append({
+                            "model_id": row["model_id"],
+                            "env_key": env_key,
+                            "expected_path": str(venv_dir),
+                        })
+            except Exception as e:
+                report["errors"].append(f"missing_env check: {e}")
+        
+        # 3) models.canonical_model_id mismatch (when column present and set)
+        try:
+            info = conn.execute("PRAGMA table_info(models)").fetchall()
+            if any(r[1] == "canonical_model_id" for r in info):
+                rows = conn.execute(
+                    "SELECT model_id, canonical_model_id FROM models WHERE canonical_model_id IS NOT NULL AND canonical_model_id != '' AND canonical_model_id != model_id"
+                ).fetchall()
+                for row in rows:
+                    report["canonical_mismatch"].append({
+                        "model_id": row["model_id"],
+                        "canonical_model_id": row["canonical_model_id"],
+                    })
+        except Exception as e:
+            report["errors"].append(f"canonical_mismatch check: {e}")
+        
+        # 4) Safe repair: backfill models.canonical_model_id = model_id where NULL
+        if repair_safe:
+            try:
+                info = conn.execute("PRAGMA table_info(models)").fetchall()
+                if any(r[1] == "canonical_model_id" for r in info):
+                    conn.execute(
+                        "UPDATE models SET canonical_model_id = model_id WHERE canonical_model_id IS NULL"
+                    )
+                    conn.commit()
+                    report["repaired"].append("backfill models.canonical_model_id where NULL")
+            except Exception as e:
+                report["errors"].append(f"repair canonical backfill: {e}")
+        
+        return report
     
     # ========================================================================
     # UTILITIES

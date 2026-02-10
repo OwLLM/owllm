@@ -60,16 +60,16 @@ _gptq_backend: str = "auto-gptq"
 # Configurable max_new_tokens caps (env-driven). UI can request up to these; prevents OOM while honoring user settings.
 def _get_max_tokens_cap_multimodal() -> int:
     try:
-        return max(64, min(16384, int(os.environ.get("LLM_MAX_NEW_TOKENS_MULTIMODAL", "2048"))))
+        return max(64, min(16384, int(os.environ.get("LLM_MAX_NEW_TOKENS_MULTIMODAL", "1024"))))
     except ValueError:
-        return 2048
+        return 1024
 
 
 def _get_max_tokens_cap_text() -> int:
     try:
-        return max(64, min(32768, int(os.environ.get("LLM_MAX_NEW_TOKENS_TEXT", "10000"))))
+        return max(64, min(32768, int(os.environ.get("LLM_MAX_NEW_TOKENS_TEXT", "2048"))))
     except ValueError:
-        return 10000
+        return 2048
 
 
 def _decode_images_to_pil(images: List[str]):
@@ -133,7 +133,7 @@ def _decode_images_to_pil(images: List[str]):
 
 class GenerateRequest(BaseModel):
     prompt: str
-    max_new_tokens: int = 10000
+    max_new_tokens: int = 1024
     temperature: float = 0.7
     images: List[str] = Field(default_factory=list)  # Optional: base64 or data URL strings for vision models
 
@@ -165,7 +165,7 @@ class ChatCompletionRequest(BaseModel):
     model: str = "local-llm"
     messages: List[ChatMessage]
     temperature: float = 0.7
-    max_tokens: int = 10000
+    max_tokens: int = 1024
     stream: bool = False
     stop: Optional[Union[str, List[str]]] = None
     images: List[str] = Field(default_factory=list)  # Optional: base64 or data URL strings for vision models

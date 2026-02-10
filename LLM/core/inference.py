@@ -145,57 +145,34 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
     
     # RUNTIME GATE: Check onboarding status before attempting server start
     onboarding = get_onboarding_service()
-    # cfg.model_id is a server config key in many UI flows (e.g. "zai-org_GLM-4.7"),
-    # but onboarding is keyed by HF id (e.g. "zai-org/GLM-4.7"). Resolve when needed.
-    onboarding_id = cfg.model_id
-    if "/" not in (cfg.model_id or ""):
-        # IMPORTANT:
-        # The UI/config often uses filesystem-safe keys like "org_repo", but onboarding is stored under HF ids "org/repo".
-        # If a stale onboarding row exists for the filesystem-safe key (e.g. BROKEN), it must NOT block chat when the HF id is READY.
-        derived_id = None
+    from core.model_id_resolver import to_canonical_id
+    model_cfg = None
+    if get_global_server_manager():
         try:
-            # Prefer cfg.base_model if provided, else read from llm_backends.yaml via server manager config
-            base_model_path = None
-            if cfg.base_model:
-                base_model_path = str(cfg.base_model)
-            else:
-                mgr = get_global_server_manager()
-                try:
-                    mgr._load_config()
-                except Exception:
-                    pass
-                if hasattr(mgr, "config") and cfg.model_id in (mgr.config.get("models") or {}):
-                    base_model_path = str((mgr.config["models"][cfg.model_id] or {}).get("base_model", "") or "")
-
-            if base_model_path:
-                name = Path(base_model_path).name
-                if "__" in name:
-                    d = name.replace("__", "/")
-                    if "/" in d:
-                        derived_id = d
-                elif "/" not in name and "_" in name:
-                    parts = name.split("_", 1)
-                    if len(parts) == 2:
-                        derived_id = f"{parts[0]}/{parts[1]}"
+            mgr = get_global_server_manager()
+            mgr._load_config()
+            model_cfg = (mgr.config.get("models") or {}).get(cfg.model_id) if hasattr(mgr, "config") else None
         except Exception:
-            derived_id = None
-
-        # Prefer the derived HF id when it is READY (even if cfg.model_id has a stale BROKEN row).
-        try:
-            cfg_status = onboarding.get_onboarding_status(cfg.model_id)
-        except Exception:
-            cfg_status = None
-        try:
-            derived_status = onboarding.get_onboarding_status(derived_id) if derived_id else None
-        except Exception:
-            derived_status = None
-
-        if derived_id and derived_status == "READY":
-            onboarding_id = derived_id
-        elif cfg_status == "READY":
-            onboarding_id = cfg.model_id
-        elif derived_id and derived_status is not None:
-            onboarding_id = derived_id
+            pass
+    if not model_cfg and cfg.base_model:
+        model_cfg = {"base_model": str(cfg.base_model)}
+    derived_id = to_canonical_id(cfg.model_id, model_cfg=model_cfg, base_model_path=str(cfg.base_model) if cfg.base_model else None)
+    onboarding_id = derived_id or cfg.model_id
+    # Prefer READY row when both canonical and config key exist
+    try:
+        cfg_status = onboarding.get_onboarding_status(cfg.model_id)
+    except Exception:
+        cfg_status = None
+    try:
+        derived_status = onboarding.get_onboarding_status(derived_id) if derived_id else None
+    except Exception:
+        derived_status = None
+    if derived_id and derived_status == "READY":
+        onboarding_id = derived_id
+    elif cfg_status == "READY":
+        onboarding_id = cfg.model_id
+    elif derived_id and derived_status is not None:
+        onboarding_id = derived_id
 
     status = onboarding.get_onboarding_status(onboarding_id)
     

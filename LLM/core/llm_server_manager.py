@@ -23,6 +23,7 @@ from typing import Dict, Optional, Tuple, IO
 
 from core.state_store import get_state_store
 from core.envs.env_registry import EnvSpec
+from core.model_id_resolver import to_canonical_id
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,27 @@ class LLMServerManager:
         # THREAD SAFETY: Lock for all server operations
         # Prevents race conditions when multiple chat threads access manager
         self._server_lock = threading.RLock()
+        
+        # Startup integrity check (read-only report + safe repairs)
+        self._integrity_report: Optional[Dict] = None
+        try:
+            self._integrity_report = self.state_store.run_integrity_checks(
+                env_root=getattr(self.env_registry, "envs_dir", None),
+                repair_safe=True,
+            )
+            errs = self._integrity_report.get("errors", [])
+            dup = self._integrity_report.get("duplicate_onboarding", [])
+            missing = self._integrity_report.get("missing_env_for_ready", [])
+            if errs or dup or missing:
+                logger.warning(
+                    "Integrity report: errors=%s, duplicate_onboarding=%s, missing_env_for_ready=%s",
+                    len(errs), len(dup), len(missing),
+                )
+            if self._integrity_report.get("repaired"):
+                logger.info("Integrity repairs applied: %s", self._integrity_report["repaired"])
+        except Exception as e:
+            logger.debug("Startup integrity check skipped or failed: %s", e)
+            self._integrity_report = {}
         
         # Track running server processes
         # Tuple: (process, log_file_handle, log_file_path)
@@ -114,6 +136,10 @@ class LLMServerManager:
             except Exception as e:
                 # Keep previous config if reload fails to avoid breaking running servers.
                 logger.warning(f"Failed to reload LLM config: {e}")
+
+    def get_integrity_report(self) -> Dict:
+        """Return the last startup integrity report (duplicates, missing env, repairs)."""
+        return self._integrity_report if self._integrity_report is not None else {}
 
     def _save_config(self) -> None:
         """
@@ -185,45 +211,10 @@ class LLMServerManager:
     
     def _resolve_onboarding_id(self, model_id: str, model_cfg: Optional[dict] = None) -> str:
         """
-        Resolve the onboarding key for a server config model_id.
-
-        - Onboarding is keyed by HF-style ids (org/repo).
-        - Server config keys are often filesystem-safe or UI-safe ids (e.g. org_repo).
-
-        Strategy:
-        - If model_id already looks like HF id (contains '/'), use it.
-        - Else, derive from model_cfg['base_model'] folder name:
-          - org__repo -> org/repo
-          - legacy org_repo -> org/repo
-        - Else, fall back to model_id.
+        Resolve the onboarding key (canonical model ID) for a server config model_id.
+        Delegates to canonical resolver to avoid identity drift.
         """
-        if "/" in (model_id or ""):
-            return model_id
-
-        base_model_path = ""
-        try:
-            if isinstance(model_cfg, dict):
-                base_model_path = str(model_cfg.get("base_model", "") or "")
-        except Exception:
-            base_model_path = ""
-
-        if base_model_path:
-            try:
-                name = Path(base_model_path).name
-            except Exception:
-                name = base_model_path
-
-            if "__" in name:
-                derived = name.replace("__", "/")
-                if "/" in derived:
-                    return derived
-
-            if "/" not in name and "_" in name:
-                parts = name.split("_", 1)
-                if len(parts) == 2:
-                    return f"{parts[0]}/{parts[1]}"
-
-        return model_id
+        return to_canonical_id(model_id, model_cfg=model_cfg, base_model_path=None)
     
     def ensure_server_running(self, model_id: str, log_callback=None) -> str:
         """
@@ -924,6 +915,7 @@ class LLMServerManager:
             log(f"Getting environment for model: {base_model}")
             
             # Get onboarding entry to find env_key.
+            # Authority: model_onboarding.env_key is the runtime source of truth; models.env_key is legacy mirror.
             # IMPORTANT: onboarding is usually keyed by HF id (org/repo), but
             # older/stale rows may still exist under sanitized config keys.
             # Be resilient to key drift by trying both key forms and path match.
@@ -969,6 +961,7 @@ class LLMServerManager:
                     f"Using fallback onboarding key '{onboarding_id}' "
                     f"(derived key '{derived_onboarding_id}' not available)."
                 )
+                # Phase 3 (optional): reject ambiguous mappings here; for now compatibility path kept.
             
             env_key = onboarding_entry.get("env_key")
             if not env_key:

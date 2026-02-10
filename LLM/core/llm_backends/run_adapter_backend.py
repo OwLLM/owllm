@@ -9,6 +9,7 @@ import torch
 import warnings
 import logging
 import platform
+import os
 
 # Suppress known warnings
 warnings.filterwarnings("ignore", message=".*quantization_config.*")
@@ -1180,8 +1181,24 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
     
     input_len = inputs["input_ids"].shape[1]
     
+    # NemotronH can exhibit very large KV-cache growth with huge token budgets.
+    # Clamp by default to keep latency/VRAM stable; still user-overridable via env.
+    effective_max_new_tokens = max_new_tokens
+    if is_nemotron_h:
+        try:
+            nemotron_cap = int(os.environ.get("LLM_MAX_NEW_TOKENS_NEMOTRON", "1024"))
+        except Exception:
+            nemotron_cap = 1024
+        if effective_max_new_tokens > nemotron_cap:
+            logging.warning(
+                "Clamping Nemotron max_new_tokens from %s to %s (set LLM_MAX_NEW_TOKENS_NEMOTRON to override).",
+                effective_max_new_tokens,
+                nemotron_cap,
+            )
+            effective_max_new_tokens = nemotron_cap
+
     gen_kwargs = {
-        "max_new_tokens": max_new_tokens,
+        "max_new_tokens": effective_max_new_tokens,
         "pad_token_id": tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
         "eos_token_id": tokenizer.eos_token_id,
         "use_cache": True,  # Enable caching

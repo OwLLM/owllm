@@ -13824,8 +13824,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Save Error", f"Failed to save instruction: {str(e)}")
 
     def _refresh_all_instruction_template_combos(self, current_combo: QComboBox, select_name: str = None) -> None:
-        """Reload saved-instruction items in all instruction template dropdowns (Test and M2M stacks) and optionally select the given name."""
-        def refresh_combo(combo):
+        """Reload saved-instruction items in all instruction template dropdowns (Test and M2M stacks). Only the combo where the user saved (current_combo) gets the new selection; others keep their current selection so each model keeps its own prompt."""
+        def refresh_combo(combo, apply_selection: bool = False):
             if combo is None:
                 return
             items_to_remove = []
@@ -13835,24 +13835,24 @@ class MainWindow(QMainWindow):
             for j in reversed(items_to_remove):
                 combo.removeItem(j)
             self._load_saved_instructions_into_combo(combo)
-            if select_name:
+            if apply_selection and select_name:
                 idx = combo.findText(f"💾 {select_name}")
                 if idx >= 0:
                     combo.setCurrentIndex(idx)
 
-        refresh_combo(current_combo)
+        refresh_combo(current_combo, apply_selection=True)
 
         if hasattr(self, 'test_model_settings_stack'):
             for i in range(self.test_model_settings_stack.count()):
                 page = self.test_model_settings_stack.widget(i)
                 if page and hasattr(page, 'template_select'):
-                    refresh_combo(getattr(page, 'template_select'))
+                    refresh_combo(getattr(page, 'template_select'), apply_selection=False)
 
         if hasattr(self, 'm2m_model_settings_stack') and getattr(self, '_m2m_settings_built', False):
             for i in range(self.m2m_model_settings_stack.count()):
                 page = self.m2m_model_settings_stack.widget(i)
                 if page and hasattr(page, 'template_select'):
-                    refresh_combo(getattr(page, 'template_select'))
+                    refresh_combo(getattr(page, 'template_select'), apply_selection=False)
     
     def _clear_test_chat(self) -> None:
         """Clear both chat histories"""

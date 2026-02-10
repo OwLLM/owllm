@@ -295,6 +295,37 @@ class LLMServerManager:
                         onboarding_id = model_id
 
             status = onboarding.get_onboarding_status(onboarding_id)
+            if status is None:
+                # Identity-drift fallback: if key lookups miss, match onboarding row by base_model_path.
+                # This keeps runtime gate aligned with _start_server() fallback behavior.
+                try:
+                    base_model_path = str((model_cfg or {}).get("base_model") or "").strip()
+                    if base_model_path:
+                        try:
+                            target_path = str(Path(base_model_path).resolve()).lower()
+                        except Exception:
+                            target_path = base_model_path.lower()
+                        for row in (self.state_store.list_all_onboarding() or []):
+                            row_base = row.get("base_model_path")
+                            if not row_base:
+                                continue
+                            try:
+                                row_path = str(Path(row_base).resolve()).lower()
+                            except Exception:
+                                row_path = str(row_base).lower()
+                            if row_path == target_path:
+                                onboarding_id = row.get("model_id") or onboarding_id
+                                status = row.get("status")
+                                try:
+                                    log(
+                                        f"Using onboarding fallback key '{onboarding_id}' via base_model_path match "
+                                        f"(runtime gate)."
+                                    )
+                                except Exception:
+                                    pass
+                                break
+                except Exception:
+                    pass
             
             if status is None:
                 try:
@@ -484,7 +515,9 @@ class LLMServerManager:
 
         model_cfg = self.config["models"][model_id]
         base_model = model_cfg["base_model"]
-        
+        # Single key for all BROKEN writes this run (set when we load onboarding; fallback when we only wait).
+        authoritative_onboarding_id = None
+
         # PHASE 1: Get preferred port from YAML (this is the AUTHORITATIVE port assignment)
         preferred_port = model_cfg.get("port", 10500)  # Default if not specified
         port = preferred_port
@@ -993,7 +1026,8 @@ class LLMServerManager:
                     f"(derived key '{derived_onboarding_id}' not available)."
                 )
                 # Phase 3 (optional): reject ambiguous mappings here; for now compatibility path kept.
-            
+            authoritative_onboarding_id = onboarding_id
+
             env_key = onboarding_entry.get("env_key")
             if not env_key:
                 raise RuntimeError(
@@ -1118,12 +1152,19 @@ class LLMServerManager:
                         )
             log("Environment dependencies validated - all critical packages present")
 
-            # Additional health check: verify environment can actually import and use transformers
+            # Additional health check: verify environment can import required modules.
+            # IMPORTANT: critical_packages are pip package names, not always import module names.
             log("Running environment health check...")
             try:
-                # Use same package list as preflight (capability matrix).
-                health_imports = critical_packages
-                health_code = "\n".join([f"import {m}" for m in health_imports] + ["print('OK')"])
+                # Use same package list as preflight (capability matrix), mapped to import names.
+                import_map = {
+                    "protobuf": "google.protobuf",
+                    "auto-gptq": "auto_gptq",
+                    "open-clip-torch": "open_clip",
+                }
+                health_imports = [import_map.get(p, p) for p in critical_packages]
+                health_lines = ["import importlib"] + [f"importlib.import_module('{m}')" for m in health_imports] + ["print('OK')"]
+                health_code = "\n".join(health_lines)
                 result = subprocess.run(
                     [str(env_spec.python_executable), "-c", health_code],
                     capture_output=True,
@@ -1132,7 +1173,11 @@ class LLMServerManager:
                     **self.subprocess_flags
                 )
                 if result.returncode != 0 or "OK" not in result.stdout:
-                    log(f"Environment health check failed. Output: {result.stdout[:200]}")
+                    stdout_snip = (result.stdout or "")[:300]
+                    stderr_snip = (result.stderr or "")[:300]
+                    log(f"Environment health check failed. stdout: {stdout_snip}")
+                    if stderr_snip:
+                        log(f"Environment health check failed. stderr: {stderr_snip}")
                     raise RuntimeError(
                         f"Environment {env_spec.key} failed health check.\n"
                         f"Environment may be corrupted. Please repair it in the Environment/Requirements tab."
@@ -1569,16 +1614,16 @@ class LLMServerManager:
                     # If a model was previously marked READY but server dies during startup,
                     # it is effectively BROKEN until re-onboard/repair succeeds.
                     try:
-                        broken_key = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
-                        base_path_for_row = None
-                        try:
-                            row = self.state_store.get_onboarding(broken_key)
-                            base_path_for_row = (row or {}).get("base_model_path") or None
-                        except Exception:
-                            base_path_for_row = None
+                        broken_key = authoritative_onboarding_id if authoritative_onboarding_id is not None else self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+                        row = self.state_store.get_onboarding(broken_key)
+                        if not row and broken_key != model_id:
+                            row = self.state_store.get_onboarding(model_id)
+                            if row:
+                                broken_key = model_id
+                        base_path_for_row = (row or {}).get("base_model_path") or model_cfg.get("base_model", "") or ""
                         self.state_store.upsert_onboarding(
                             model_id=broken_key,
-                            base_model_path=str(base_path_for_row or model_cfg.get("base_model", "") or ""),
+                            base_model_path=str(base_path_for_row),
                             status="BROKEN",
                             last_error=(f"Server process died during startup (exit {process.returncode}). "
                                         f"Startup log: {log_file_path_for_user or 'N/A'}")[:2000],
@@ -1625,19 +1670,18 @@ class LLMServerManager:
                             )
                             # Mark model BROKEN so Models page shows Repair button and card reflects failure
                             try:
-                                # Use onboarding_id (not config key) so the downloaded model card/status updates correctly.
-                                broken_key = locals().get("onboarding_id") or model_id
-                                base_path_for_row = None
-                                try:
-                                    row = self.state_store.get_onboarding(broken_key)
-                                    base_path_for_row = (row or {}).get("base_model_path") or None
-                                except Exception:
-                                    base_path_for_row = None
+                                broken_key = authoritative_onboarding_id if authoritative_onboarding_id is not None else self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+                                row = self.state_store.get_onboarding(broken_key)
+                                if not row and broken_key != model_id:
+                                    row = self.state_store.get_onboarding(model_id)
+                                    if row:
+                                        broken_key = model_id
+                                base_path_for_row = (row or {}).get("base_model_path") or model_path
                                 self.state_store.upsert_onboarding(
                                     model_id=broken_key,
-                                    base_model_path=str(base_path_for_row or model_path),
+                                    base_model_path=str(base_path_for_row),
                                     status="BROKEN",
-                                    last_error=error_msg or full_error[:500],
+                                    last_error=(error_msg or full_error)[:500],
                                 )
                             except Exception:
                                 pass
@@ -1764,12 +1808,13 @@ class LLMServerManager:
         if server_status == "loading":
             model_path_str = model_cfg.get("base_model", "unknown")
             error_msg = (
-                f"Server stuck in 'loading' state for {self.warmup_timeout}s.\n"
+                f"Server stuck in 'loading' state for {self.warmup_timeout}s (slow-load or load failure).\n"
                 f"This usually means:\n"
                 f"  1. Model files are missing or incomplete\n"
                 f"  2. GPU memory is insufficient\n"
-                f"  3. Model loading encountered an error\n\n"
-                f"Check server logs at: {log_path if log_path else 'N/A'}\n"
+                f"  3. Model loading encountered an error\n"
+                f"  For large/vision models, try increasing LLM_SERVER_WARMUP_TIMEOUT.\n\n"
+                f"Startup log: {log_path if log_path else 'N/A'}\n"
                 f"Model path: {model_path_str}\n"
                 f"Port: {port}\n"
                 f"Last health check error: {last_error or 'Connection refused'}\n"
@@ -1778,8 +1823,9 @@ class LLMServerManager:
         else:
             error_msg = (
                 f"Server '{model_id}' failed to become healthy within {self.warmup_timeout}s.\n"
+                f"Server status: {server_status} (possible crash or misconfiguration).\n"
+                f"Startup log: {log_path if log_path else 'N/A'}\n"
                 f"Port: {port}\n"
-                f"Server status: {server_status}\n"
                 f"Last health check error: {last_error or 'Connection refused'}\n"
                 f"\nServer output:\n{output_text}"
             )
@@ -1798,16 +1844,16 @@ class LLMServerManager:
             pass
         # Mark onboarding BROKEN on warmup timeout; model is not usable until repaired/re-onboarded.
         try:
-            broken_key = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
-            base_path_for_row = None
-            try:
-                row = self.state_store.get_onboarding(broken_key)
-                base_path_for_row = (row or {}).get("base_model_path") or None
-            except Exception:
-                base_path_for_row = None
+            broken_key = authoritative_onboarding_id if authoritative_onboarding_id is not None else self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+            row = self.state_store.get_onboarding(broken_key)
+            if not row and broken_key != model_id:
+                row = self.state_store.get_onboarding(model_id)
+                if row:
+                    broken_key = model_id
+            base_path_for_row = (row or {}).get("base_model_path") or model_cfg.get("base_model", "") or ""
             self.state_store.upsert_onboarding(
                 model_id=broken_key,
-                base_model_path=str(base_path_for_row or model_cfg.get("base_model", "") or ""),
+                base_model_path=str(base_path_for_row),
                 status="BROKEN",
                 last_error=(f"Server failed to become healthy within {self.warmup_timeout}s. "
                             f"Status: {server_status}. Last health error: {last_error or 'N/A'}")[:2000],

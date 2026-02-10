@@ -634,8 +634,8 @@ try:
                     print("ERROR: " + err[:2000])
                     sys.exit(1)
                 print("DEEP_PROBE_VISION_WARNING: " + err[:500])
-            # Map import module name -> pip package name (PIL is installed via Pillow)
-            vision_deps = [("PIL", "Pillow"), ("timm", "timm"), ("einops", "einops")]
+            # Map import module name -> pip package name (PIL is installed via Pillow); open_clip for CLIP/SigLIP (e.g. Llama 3.2 Vision)
+            vision_deps = [("PIL", "Pillow"), ("timm", "timm"), ("einops", "einops"), ("open_clip", "open-clip-torch")]
             for mod_name, pip_name in vision_deps:
                 try:
                     __import__(mod_name)
@@ -2088,16 +2088,22 @@ sys.exit(0)
         
         # Map package names to their import names (some packages have different import names)
         import_map = {
-            "protobuf": "google.protobuf",  # protobuf package is imported as google.protobuf
+            "protobuf": "google.protobuf",   # protobuf package is imported as google.protobuf
             "auto-gptq": "auto_gptq",        # PyPI name uses hyphen; import uses underscore
+            "open-clip-torch": "open_clip",  # PyPI name differs from import name
         }
         
         missing = []
         for pkg in required_packages:
             try:
-                # Use import name if mapped, otherwise use package name
+                # Use import name if mapped, otherwise use package name.
+                # Use importlib so dotted module names work consistently.
                 import_name = import_map.get(pkg, pkg)
-                code = f"import {import_name}; print('OK')"
+                code = (
+                    "import importlib\n"
+                    f"importlib.import_module('{import_name}')\n"
+                    "print('OK')"
+                )
                 result = self._run_python(python_exe, code, timeout=10)
                 if result.returncode != 0 or "OK" not in result.stdout:
                     missing.append(pkg)

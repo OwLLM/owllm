@@ -284,7 +284,10 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
                 model_type_attr = (getattr(cfg, "model_type", "") or "").lower()
                 architectures = getattr(cfg, "architectures", []) or []
                 arch_str = " ".join(architectures).lower()
-                vision_hints = ("llava", "mllama", "qwen2vl", "qwen2_vl", "vision", "image", "vl", "idefics", "blip", "pix2struct")
+                vision_hints = (
+                    "llava", "mllama", "qwen2vl", "qwen2_vl", "vision", "image", "vl",
+                    "llama3_2_vision", "llama3.2_vision", "idefics", "blip", "git", "pix2struct",
+                )
                 if any(h in model_type_attr for h in vision_hints) or any(h in arch_str for h in vision_hints):
                     logging.info("Detected multimodal/vision model from AutoConfig, loading processor and vision model")
                     bnb_ok = _bitsandbytes_available()
@@ -663,7 +666,14 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
     if "checkpoint-" in adapter_dir and os.path.basename(adapter_dir).startswith("checkpoint-"):
         logging.info(f"Detected checkpoint subdirectory, using parent: {os.path.dirname(adapter_dir)}")
         adapter_dir = os.path.dirname(adapter_dir)
-    
+
+    # Vision + adapter: base model is multimodal; adapter path loads tokenizer + causal LM and will fail or misbehave.
+    if _is_multimodal_config(model_path_str):
+        raise RuntimeError(
+            f"Base model is a vision/multimodal model (e.g. Llama 3.2 Vision). "
+            f"Loading with an adapter directory is not supported. Use the base model without an adapter, or choose a text-only base model for adapter/LoRA."
+        )
+
     # Check if adapter_dir exists and has required files
     import os
     if not os.path.exists(adapter_dir):

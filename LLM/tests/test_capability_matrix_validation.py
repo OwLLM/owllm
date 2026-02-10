@@ -87,6 +87,30 @@ def test_non_target_profiles_unchanged():
     assert GUARDRAIL_DEFAULTS["base"]["max_new_tokens_text"] == GUARDRAIL_DEFAULTS["bnb"]["max_new_tokens_text"]
 
 
+def test_multimodal_runtime_packages_include_vision_deps(tmp_path):
+    """When model is multimodal, get_runtime_required_packages includes Pillow, timm, einops, open-clip-torch."""
+    from core.envs.capability_matrix import get_runtime_required_packages
+    (tmp_path / "config.json").write_text(
+        '{"model_type": "llama3_2_vision", "architectures": ["Llama3.2VisionForConditionalGeneration"]}',
+        encoding="utf-8",
+    )
+    packages = get_runtime_required_packages(str(tmp_path), model_cfg={}, adapter_dir=None, model_id=None)
+    assert "Pillow" in packages
+    assert "timm" in packages
+    assert "einops" in packages
+    assert "open-clip-torch" in packages
+
+
+def test_text_only_model_no_vision_deps(tmp_path):
+    """Non-vision model required packages do not include vision-only deps (regression)."""
+    from core.envs.capability_matrix import get_runtime_required_packages
+    (tmp_path / "config.json").write_text('{"model_type": "llama", "architectures": ["LlamaForCausalLM"]}', encoding="utf-8")
+    packages = get_runtime_required_packages(str(tmp_path), model_cfg={}, adapter_dir=None, model_id=None)
+    assert "transformers" in packages
+    assert "torch" in packages
+    assert "open-clip-torch" not in packages
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

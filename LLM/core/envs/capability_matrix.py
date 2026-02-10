@@ -151,8 +151,12 @@ def resolve_capability(
 
     quant_for_env = "bnb" if needs_bnb else "base"
 
-    # Multimodal: no extra packages in matrix; run_adapter_backend uses same stack + optional timm/einops
+    # Multimodal: require vision stack so runtime preflight matches onboarding probe (parity).
     is_multimodal = _is_multimodal_config_static(str(model_path_obj))
+    if is_multimodal:
+        for pkg in ["Pillow", "timm", "einops", "open-clip-torch"]:
+            if pkg not in required_packages:
+                required_packages.append(pkg)
 
     return {
         "profile_id": profile_id,

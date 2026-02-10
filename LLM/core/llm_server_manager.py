@@ -1025,10 +1025,21 @@ class LLMServerManager:
                 except Exception:
                     adapter_dir = None
             needs_peft = bool(adapter_dir)
+            # On Windows, 4-bit base-model loading requires bitsandbytes.
+            # Without it we silently fall back to slow FP16 paths.
+            requires_bnb = False
+            try:
+                use_4bit_cfg = bool(model_cfg.get("use_4bit", True))
+                is_gptq_model = (model_path / "quantize_config.json").exists()
+                requires_bnb = (os.name == "nt" and use_4bit_cfg and not is_gptq_model)
+            except Exception:
+                requires_bnb = False
 
             critical_packages = ["protobuf", "transformers", "tokenizers", "torch", "accelerate"]
             if needs_peft:
                 critical_packages.append("peft")
+            if requires_bnb:
+                critical_packages.append("bitsandbytes")
             missing_packages = self.env_registry.check_missing_packages(
                 env_spec.python_executable, 
                 required_packages=critical_packages
@@ -1095,6 +1106,8 @@ class LLMServerManager:
                 health_imports = ["transformers", "tokenizers", "torch", "accelerate"]
                 if needs_peft:
                     health_imports.append("peft")
+                if requires_bnb:
+                    health_imports.append("bitsandbytes")
                 health_code = "\n".join([f"import {m}" for m in health_imports] + ["print('OK')"])
                 result = subprocess.run(
                     [str(env_spec.python_executable), "-c", health_code],

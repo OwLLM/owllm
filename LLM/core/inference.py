@@ -316,12 +316,25 @@ def run_inference_with_tools(
     # - For non-action prompts (including greetings), use plain model inference (no tool loop).
     if not explicit_action_request:
         safe_prompt = _strip_tool_instruction_block(cfg.prompt)
+        safe_max_new_tokens = cfg.max_new_tokens
+        # Keep non-action chat turns responsive by default.
+        # Override via env if longer non-action completions are desired.
+        try:
+            non_action_cap = int(os.getenv("LLM_MAX_NEW_TOKENS_NON_ACTION", "256"))
+            if non_action_cap > 0 and safe_max_new_tokens > non_action_cap:
+                safe_max_new_tokens = non_action_cap
+                log(
+                    f"[ToolGuard] Capping non-action max_new_tokens to {safe_max_new_tokens} "
+                    "(set LLM_MAX_NEW_TOKENS_NON_ACTION to override)"
+                )
+        except Exception:
+            pass
         inference_cfg = InferenceConfig(
             prompt=safe_prompt,
             model_id=cfg.model_id,
             base_model=cfg.base_model,
             adapter_dir=cfg.adapter_dir,
-            max_new_tokens=cfg.max_new_tokens,
+            max_new_tokens=safe_max_new_tokens,
             temperature=cfg.temperature,
             images=cfg.images,
         )

@@ -1187,9 +1187,20 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
         import traceback
         logging.debug(traceback.format_exc())
     
-    # Format prompt based on model type
-    if model_type == "instruct":
-        # Use chat template for instruct models
+    # Format prompt based on model type.
+    # Nemotron family models often behave like instruct/chat models even when config says "base".
+    # Use chat template for Nemotron by default (env-toggleable) to avoid long run-on generations.
+    enable_nemotron_chat_template = os.environ.get("LLM_ENABLE_NEMOTRON_CHAT_TEMPLATE", "true").lower() in ("true", "1", "yes")
+    use_chat_template = (
+        model_type == "instruct" or
+        (
+            enable_nemotron_chat_template and
+            _is_nemotron_family(model=model, model_type=model_type) and
+            hasattr(tokenizer, "apply_chat_template")
+        )
+    )
+    if use_chat_template:
+        # Use chat template for instruct-like models
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -1222,7 +1233,7 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
     #   Some tokenizers add an EOS token when add_special_tokens=True, and if the
     #   *last input token is EOS* then HF generation will produce 0 new tokens.
     # - Base models usually should add specials (BOS) for best results.
-    add_specials = (model_type != "instruct")
+    add_specials = (not use_chat_template)
     
     inputs = tokenizer(formatted_prompt, return_tensors="pt", add_special_tokens=add_specials)
     # Safety: if the tokenizer (or template) still caused the prompt to end with EOS,

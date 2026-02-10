@@ -271,12 +271,37 @@ class LLMServerManager:
             from core.model_onboarding import get_onboarding_service
             onboarding = get_onboarding_service()
             onboarding_id = model_id
-            try:
-                # Only remap if there isn't already an onboarding row for the config key.
-                if "/" not in model_id and self.state_store.get_onboarding(model_id) is None:
-                    onboarding_id = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
-            except Exception:
-                onboarding_id = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+            # IMPORTANT:
+            # - Onboarding is keyed by HF-style ids (org/repo)
+            # - Config keys can be sanitized ids (org_repo, org__repo, etc.)
+            # If a stale onboarding row exists under the sanitized key, it can incorrectly block runtime
+            # even when the canonical HF id is READY. Prefer the canonical HF id when it is READY.
+            if "/" not in (model_id or ""):
+                derived_id = model_id
+                try:
+                    derived_id = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+                except Exception:
+                    derived_id = model_id
+
+                if derived_id and derived_id != model_id and "/" in derived_id:
+                    try:
+                        derived_status = onboarding.get_onboarding_status(derived_id)
+                    except Exception:
+                        derived_status = None
+                    try:
+                        model_status = onboarding.get_onboarding_status(model_id)
+                    except Exception:
+                        model_status = None
+
+                    if derived_status == "READY":
+                        onboarding_id = derived_id
+                    elif model_status == "READY":
+                        onboarding_id = model_id
+                    elif derived_status is not None:
+                        # Prefer derived id for better error messages (points to the real model identity).
+                        onboarding_id = derived_id
+                    else:
+                        onboarding_id = model_id
 
             status = onboarding.get_onboarding_status(onboarding_id)
             
@@ -319,16 +344,39 @@ class LLMServerManager:
             if model_id in self.running_servers:
                 process, _, _ = self.running_servers[model_id]
                 if process.poll() is None:  # Process is alive
-                    if self._check_health(model_id):
+                    health_status, _ = self._check_health(model_id, return_status=True)
+                    if health_status == "ok":
                         log(f"Server '{model_id}' already running and healthy")
                         return self._get_server_url(model_id)
+                    if health_status == "loading":
+                        # Prefer waiting for loading to finish rather than killing/restarting
+                        log(f"Server '{model_id}' is loading, waiting for it to become ready...")
+                        try:
+                            self._wait_for_health_ok(model_id, self.warmup_timeout, log_callback=log)
+                            return self._get_server_url(model_id)
+                        except TimeoutError:
+                            log(f"Server '{model_id}' did not become ready in time, will restart")
+                            process.kill()
+                            del self.running_servers[model_id]
                     else:
-                        log(f"Server '{model_id}' process alive but not healthy, restarting")
+                        log(f"Server '{model_id}' process alive but not healthy (status={health_status}), restarting")
                         process.kill()
                         del self.running_servers[model_id]
                 else:
                     log(f"Server '{model_id}' process died, restarting")
                     del self.running_servers[model_id]
+
+            # If another slot already started this model (STARTING), wait for it instead of starting duplicate
+            server_state = self.state_store.get_server(model_id)
+            if server_state and server_state.get("status") == "STARTING":
+                port = server_state.get("port")
+                if port is not None:
+                    log(f"Server for '{model_id}' is already starting (port {port}), waiting for it...")
+                    try:
+                        self._wait_for_health_ok(model_id, self.warmup_timeout, log_callback=log, port=port)
+                        return self._get_server_url(model_id)
+                    except TimeoutError:
+                        log(f"Existing start did not become ready in time, will start server")
             
             # Fast-path: if something is already healthy on our preferred port, reuse it
             # without logging "Starting server..." or calling _start_server
@@ -367,7 +415,7 @@ class LLMServerManager:
         except OSError:
             sock.close()
             return False
-    
+
     def _start_server(self, model_id: str, log_callback=None):
         """
         Start server in correct environment with warmup polling.
@@ -386,7 +434,13 @@ class LLMServerManager:
                 log_callback(msg)
             logger.info(msg)
 
+        from core.inference import get_app_root
+        from core.gpu_config import get_chosen_gpu_index
+        app_root = get_app_root()
+        chosen_gpu = get_chosen_gpu_index(app_root, subprocess_flags=self.subprocess_flags)
+
         # Check current VRAM usage before starting (warn if free is very low)
+        # Use the selected GPU index so the warning reflects the GPU the server will use
         try:
             r = subprocess.run(
                 ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
@@ -397,9 +451,9 @@ class LLMServerManager:
             )
             if r.returncode == 0 and r.stdout.strip():
                 lines = [x.strip() for x in r.stdout.strip().split("\n") if x.strip()]
-                # Use first GPU (or index from CUDA_VISIBLE_DEVICES if single)
                 if lines:
-                    parts = lines[0].split(",")
+                    line_idx = chosen_gpu if (chosen_gpu is not None and 0 <= chosen_gpu < len(lines)) else 0
+                    parts = lines[line_idx].split(",")
                     if len(parts) >= 2:
                         used_mb = float(parts[0].strip())
                         total_mb = float(parts[1].strip())
@@ -407,7 +461,7 @@ class LLMServerManager:
                         free_gb = free_mb / 1024.0
                         if free_gb < 2.0 and total_mb > 0:
                             log(
-                                f"[VRAM] Low free GPU memory: {free_gb:.1f} GB free "
+                                f"[VRAM] Low free GPU memory (GPU {line_idx}): {free_gb:.1f} GB free "
                                 f"({used_mb:.0f} MB used / {total_mb:.0f} MB total). "
                                 "Loading the model may fail or be very slow."
                             )
@@ -870,13 +924,50 @@ class LLMServerManager:
             log(f"Getting environment for model: {base_model}")
             
             # Get onboarding entry to find env_key.
-            # IMPORTANT: onboarding is keyed by HF id (org/repo), not the server config key.
-            onboarding_id = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+            # IMPORTANT: onboarding is usually keyed by HF id (org/repo), but
+            # older/stale rows may still exist under sanitized config keys.
+            # Be resilient to key drift by trying both key forms and path match.
+            derived_onboarding_id = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+            onboarding_id = derived_onboarding_id
             onboarding_entry = self.state_store.get_onboarding(onboarding_id)
+
+            if not onboarding_entry and model_id != onboarding_id:
+                onboarding_entry = self.state_store.get_onboarding(model_id)
+                if onboarding_entry:
+                    onboarding_id = model_id
+
+            if not onboarding_entry:
+                # Last fallback: match onboarding rows by base_model_path.
+                try:
+                    target_path = str(model_path.resolve()).lower()
+                except Exception:
+                    target_path = str(model_path).lower()
+                try:
+                    for row in self.state_store.list_all_onboarding():
+                        base_path = row.get("base_model_path")
+                        if not base_path:
+                            continue
+                        try:
+                            row_path = str(Path(base_path).resolve()).lower()
+                        except Exception:
+                            row_path = str(base_path).lower()
+                        if row_path == target_path:
+                            onboarding_entry = row
+                            onboarding_id = row.get("model_id") or onboarding_id
+                            break
+                except Exception:
+                    pass
+
             if not onboarding_entry:
                 raise RuntimeError(
-                    f"Model '{onboarding_id}' onboarding entry not found. "
+                    f"Model onboarding entry not found for runtime model '{model_id}'. "
+                    f"Tried keys: '{derived_onboarding_id}' and '{model_id}'. "
                     f"Please run onboarding first."
+                )
+            if onboarding_id != derived_onboarding_id:
+                log(
+                    f"Using fallback onboarding key '{onboarding_id}' "
+                    f"(derived key '{derived_onboarding_id}' not available)."
                 )
             
             env_key = onboarding_entry.get("env_key")
@@ -1098,6 +1189,10 @@ class LLMServerManager:
             # CRITICAL: Pass port via environment variable so auto-reassignment works
             env = os.environ.copy()
             env['SERVER_PORT'] = str(port)
+            # Force server process to use the selected GPU (or highest-VRAM default)
+            if chosen_gpu is not None:
+                env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+                env["CUDA_VISIBLE_DEVICES"] = str(chosen_gpu)
             # Reduce CUDA allocator fragmentation issues.
             # NOTE: expandable_segments is not supported on Windows builds (PyTorch warns). Use max_split_size_mb instead.
             env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
@@ -1448,8 +1543,9 @@ class LLMServerManager:
                     raise RuntimeError(error_msg)
             
             # Try health check (server may be up while model is still loading)
+            # Use higher read timeout during warmup so slow /health during load does not fail
             try:
-                response = requests.get(f"{server_url}/health", timeout=2)
+                response = requests.get(f"{server_url}/health", timeout=10)
                 if response.status_code == 200:
                     try:
                         data = response.json()
@@ -1555,7 +1651,7 @@ class LLMServerManager:
         # Check if server is still in "loading" state
         server_status = "unknown"
         try:
-            response = requests.get(f"{server_url}/health", timeout=2)
+            response = requests.get(f"{server_url}/health", timeout=10)
             if response.status_code == 200:
                 data = response.json()
                 server_status = str(data.get("status", "")).lower()
@@ -1662,7 +1758,49 @@ class LLMServerManager:
         except Exception:
             pass
         raise TimeoutError(error_msg)
-    
+
+    def _wait_for_health_ok(
+        self,
+        model_id: str,
+        timeout_sec: float,
+        log_callback=None,
+        port: Optional[int] = None,
+    ) -> None:
+        """
+        Poll /health until status is 'ok' or timeout.
+        Uses a higher read timeout (10s) during warmup to avoid false failures while loading.
+        Treats status 'loading' as expected and keeps waiting.
+        """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+            logger.info(msg)
+
+        base_url = f"http://127.0.0.1:{port}" if port is not None else self._get_server_url(model_id)
+        start = time.time()
+        health_timeout = 10  # higher read timeout during warmup
+        last_log = 0.0
+        while time.time() - start < timeout_sec:
+            try:
+                response = requests.get(f"{base_url}/health", timeout=health_timeout)
+                if response.status_code == 200:
+                    data = response.json()
+                    status = str(data.get("status", "")).lower().strip()
+                    if status == "ok":
+                        return
+                    if status == "loading" and time.time() - last_log >= 10:
+                        log(f"Server still loading... ({int(time.time() - start)}s elapsed)")
+                        last_log = time.time()
+            except requests.exceptions.RequestException:
+                pass
+            except Exception:
+                pass
+            time.sleep(2)
+        raise TimeoutError(
+            f"Server for '{model_id}' did not become ready within {timeout_sec}s. "
+            "Try freeing VRAM, switching GPU, or reducing max_new_tokens."
+        )
+
     def _check_health(self, model_id: str, return_status: bool = False):
         """
         Check if server is healthy.

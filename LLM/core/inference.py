@@ -6,10 +6,91 @@ from typing import Optional, List, Callable, Tuple
 import subprocess
 import sys
 import os
+import re
+import json
 
 
 def get_app_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+_SIDE_EFFECT_TOOLS = {"write_file", "run_shell"}
+_GREETING_PATTERN = re.compile(r"^(hi|hello|hey|yo|sup|good (morning|afternoon|evening)|hola|ciao)[!. ]*$", re.IGNORECASE)
+_ACTION_KEYWORDS = (
+    "read ", "open ", "list ", "show ", "check ", "inspect ", "search ", "find ",
+    "write ", "create ", "edit ", "modify ", "update ", "run ", "execute ", "git ",
+    "status", "file", "files", "folder", "folders", "directory", "directories", "path", "command", "shell"
+)
+
+
+def _extract_last_user_message(prompt: str) -> str:
+    """Best-effort extraction of the most recent user turn from common chat templates."""
+    if not prompt:
+        return ""
+
+    patterns = [
+        r"USER:\s*(.*?)(?:\nASSISTANT:|$)",
+        r"<\|im_start\|>user\s*(.*?)\s*<\|im_end\|>",
+        r"\[INST\]\s*(.*?)\s*\[/INST\]",
+    ]
+    for pattern in patterns:
+        matches = re.findall(pattern, prompt, flags=re.IGNORECASE | re.DOTALL)
+        if matches:
+            last = (matches[-1] or "").strip()
+            # Strip llama SYS wrapper when present in [INST] block
+            last = re.sub(r"<<SYS>>.*?<</SYS>>", "", last, flags=re.DOTALL).strip()
+            if last:
+                return last
+    return prompt.strip()[-500:]
+
+
+# Relaxed greeting/small-talk pattern: typos and short casual openers (e.g. "hey whatsaop?")
+_GREETING_LIKE_PATTERN = re.compile(
+    r"^(hi|hello|hey|yo|sup|hola|ciao|whatsapp|whatsaop|what\'?s up|how are you|how ya doin)[\s!?.]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_low_intent_message(user_msg: str) -> bool:
+    text = (user_msg or "").strip().lower()
+    if not text:
+        return True
+    if len(text) <= 80 and re.match(r"^(hi|hello|hey|yo|sup|hola|ciao)\b", text):
+        return True
+    if _GREETING_PATTERN.match(text):
+        return True
+    if _GREETING_LIKE_PATTERN.match(text):
+        return True
+    if len(text) <= 24 and text in {"hello", "hi", "hey", "yo", "sup", "thanks", "thank you", "ok", "okay"}:
+        return True
+    return False
+
+
+def _is_action_request(user_msg: str) -> bool:
+    text = (user_msg or "").strip().lower()
+    if not text:
+        return False
+    return any(keyword in text for keyword in _ACTION_KEYWORDS)
+
+
+def _strip_tool_instruction_block(prompt: str) -> str:
+    """
+    Remove embedded tool-instruction block from the prompt when we intentionally bypass tool execution.
+    Keeps user/system context, but strips the long XML tool guide that some models tend to parrot.
+    """
+    if not prompt:
+        return ""
+    start_marker = "You are a helpful AI assistant with access to tools."
+    end_marker = "Only call tools when necessary."
+    start_idx = prompt.find(start_marker)
+    if start_idx < 0:
+        return prompt
+    end_idx = prompt.find(end_marker, start_idx)
+    if end_idx < 0:
+        return prompt
+    end_idx += len(end_marker)
+    cleaned = (prompt[:start_idx] + prompt[end_idx:]).strip()
+    return re.sub(r"\n{3,}", "\n\n", cleaned)
 
 
 @dataclass
@@ -18,7 +99,7 @@ class InferenceConfig:
     model_id: str = "default"  # Required for server-based inference
     base_model: Optional[str] = None
     adapter_dir: Optional[Path] = None
-    max_new_tokens: int = 10000
+    max_new_tokens: int = 512
     temperature: float = 0.7
     images: List[str] = field(default_factory=list)
 
@@ -67,35 +148,54 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
     # cfg.model_id is a server config key in many UI flows (e.g. "zai-org_GLM-4.7"),
     # but onboarding is keyed by HF id (e.g. "zai-org/GLM-4.7"). Resolve when needed.
     onboarding_id = cfg.model_id
-    if "/" not in cfg.model_id:
+    if "/" not in (cfg.model_id or ""):
+        # IMPORTANT:
+        # The UI/config often uses filesystem-safe keys like "org_repo", but onboarding is stored under HF ids "org/repo".
+        # If a stale onboarding row exists for the filesystem-safe key (e.g. BROKEN), it must NOT block chat when the HF id is READY.
+        derived_id = None
         try:
-            from core.state_store import get_state_store
-            if get_state_store().get_onboarding(cfg.model_id) is None:
-                # Prefer cfg.base_model if provided, else read from llm_backends.yaml via server manager config
-                base_model_path = None
-                if cfg.base_model:
-                    base_model_path = str(cfg.base_model)
-                else:
-                    mgr = get_global_server_manager()
-                    try:
-                        mgr._load_config()
-                    except Exception:
-                        pass
-                    if hasattr(mgr, "config") and cfg.model_id in (mgr.config.get("models") or {}):
-                        base_model_path = str((mgr.config["models"][cfg.model_id] or {}).get("base_model", "") or "")
+            # Prefer cfg.base_model if provided, else read from llm_backends.yaml via server manager config
+            base_model_path = None
+            if cfg.base_model:
+                base_model_path = str(cfg.base_model)
+            else:
+                mgr = get_global_server_manager()
+                try:
+                    mgr._load_config()
+                except Exception:
+                    pass
+                if hasattr(mgr, "config") and cfg.model_id in (mgr.config.get("models") or {}):
+                    base_model_path = str((mgr.config["models"][cfg.model_id] or {}).get("base_model", "") or "")
 
-                if base_model_path:
-                    name = Path(base_model_path).name
-                    if "__" in name:
-                        derived = name.replace("__", "/")
-                        if "/" in derived:
-                            onboarding_id = derived
-                    elif "/" not in name and "_" in name:
-                        parts = name.split("_", 1)
-                        if len(parts) == 2:
-                            onboarding_id = f"{parts[0]}/{parts[1]}"
+            if base_model_path:
+                name = Path(base_model_path).name
+                if "__" in name:
+                    d = name.replace("__", "/")
+                    if "/" in d:
+                        derived_id = d
+                elif "/" not in name and "_" in name:
+                    parts = name.split("_", 1)
+                    if len(parts) == 2:
+                        derived_id = f"{parts[0]}/{parts[1]}"
         except Exception:
-            pass
+            derived_id = None
+
+        # Prefer the derived HF id when it is READY (even if cfg.model_id has a stale BROKEN row).
+        try:
+            cfg_status = onboarding.get_onboarding_status(cfg.model_id)
+        except Exception:
+            cfg_status = None
+        try:
+            derived_status = onboarding.get_onboarding_status(derived_id) if derived_id else None
+        except Exception:
+            derived_status = None
+
+        if derived_id and derived_status == "READY":
+            onboarding_id = derived_id
+        elif cfg_status == "READY":
+            onboarding_id = cfg.model_id
+        elif derived_id and derived_status is not None:
+            onboarding_id = derived_id
 
     status = onboarding.get_onboarding_status(onboarding_id)
     
@@ -201,6 +301,10 @@ def run_inference_with_tools(
         # Tools disabled, run normal inference
         output = run_inference(cfg, env, log_callback=log_callback)
         return output, []
+
+    def log(msg: str) -> None:
+        if log_callback:
+            log_callback(msg)
     
     # Initialize tool infrastructure
     # Check if native executor provided (native mode)
@@ -215,6 +319,27 @@ def run_inference_with_tools(
     
     tool_log = []
     conversation_history = cfg.prompt
+    user_msg = _extract_last_user_message(cfg.prompt)
+    low_intent = _is_low_intent_message(user_msg)
+    explicit_action_request = _is_action_request(user_msg)
+
+    # Global default-safe behavior:
+    # - For non-action prompts (including greetings), use plain model inference (no tool loop).
+    if not explicit_action_request:
+        safe_prompt = _strip_tool_instruction_block(cfg.prompt)
+        inference_cfg = InferenceConfig(
+            prompt=safe_prompt,
+            model_id=cfg.model_id,
+            base_model=cfg.base_model,
+            adapter_dir=cfg.adapter_dir,
+            max_new_tokens=cfg.max_new_tokens,
+            temperature=cfg.temperature,
+            images=cfg.images,
+        )
+        reason = "low_intent_prompt" if low_intent else "missing_explicit_action_request"
+        log(f"[ToolGuard] Bypassing tool mode ({reason})")
+        output = run_inference(inference_cfg, env, log_callback=log_callback)
+        return output, []
     
     # Add system prompt if provided
     if cfg.system_prompt:
@@ -222,6 +347,8 @@ def run_inference_with_tools(
     
     iteration = 0
     final_output = ""
+    previous_tool_signature: Optional[Tuple[str, ...]] = None
+    repeated_signature_count = 0
     
     while iteration < cfg.max_tool_iterations:
         iteration += 1
@@ -250,21 +377,73 @@ def run_inference_with_tools(
         if not tool_calls:
             # No more tool calls, we're done
             break
+
+        # Policy guardrails (model-agnostic):
+        # - Never execute tools on casual/greeting turns
+        # - Require explicit user action intent before executing tool calls
+        if low_intent or not explicit_action_request:
+            reason = "low_intent_prompt" if low_intent else "missing_explicit_action_request"
+            tool_names = ", ".join(sorted({tc.name for tc in tool_calls}))
+            log(f"[ToolGuard] Blocked tool execution ({reason}) for tools: {tool_names}")
+            for tc in tool_calls:
+                tool_log.append({
+                    "tool": tc.name,
+                    "args": tc.arguments,
+                    "status": "blocked_policy",
+                    "reason": reason,
+                    "iteration": iteration,
+                })
+            break
+
+        # Loop breaker: stop repeated identical tool-call sets across iterations.
+        signature = tuple(sorted(
+            f"{tc.name}:{json.dumps(tc.arguments, sort_keys=True, ensure_ascii=True)}"
+            for tc in tool_calls
+        ))
+        if signature == previous_tool_signature:
+            repeated_signature_count += 1
+        else:
+            repeated_signature_count = 0
+        previous_tool_signature = signature
+        if repeated_signature_count >= 1:
+            tool_names = ", ".join(sorted({tc.name for tc in tool_calls}))
+            log(f"[ToolGuard] Stopped repeated tool-call loop for tools: {tool_names}")
+            for tc in tool_calls:
+                tool_log.append({
+                    "tool": tc.name,
+                    "args": tc.arguments,
+                    "status": "blocked_loop",
+                    "reason": "repeated_tool_signature",
+                    "iteration": iteration,
+                })
+            break
         
         # Process each tool call
         any_executed = False
         for tool_call in tool_calls:
             # Check if approval is needed
-            requires_approval = approval_manager.requires_approval(tool_call.name)
-            
-            if requires_approval and approval_callback:
-                approved = approval_callback(tool_call.name, tool_call.arguments)
-                if not approved:
-                    # Tool denied, skip execution
+            requires_approval = approval_manager.requires_approval(tool_call.name) or tool_call.name in _SIDE_EFFECT_TOOLS
+            if requires_approval:
+                if not approval_callback:
+                    # Safe-by-default: deny dangerous/warning tools when no approval channel exists.
+                    log(f"[ToolGuard] Denied '{tool_call.name}' (approval callback not available)")
                     tool_log.append({
                         "tool": tool_call.name,
                         "args": tool_call.arguments,
                         "status": "denied",
+                        "reason": "approval_required_no_callback",
+                        "iteration": iteration
+                    })
+                    continue
+                approved = approval_callback(tool_call.name, tool_call.arguments)
+                if not approved:
+                    # Tool denied, skip execution
+                    log(f"[ToolGuard] Denied '{tool_call.name}' by user approval callback")
+                    tool_log.append({
+                        "tool": tool_call.name,
+                        "args": tool_call.arguments,
+                        "status": "denied",
+                        "reason": "approval_denied",
                         "iteration": iteration
                     })
                     continue

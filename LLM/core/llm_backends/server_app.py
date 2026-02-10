@@ -57,6 +57,20 @@ _load_finished_at: float = 0.0
 # GPTQ backend selection: "auto-gptq" (default) or "exllamav2" when USE_EXLLAMAV2_GPTQ=true
 _gptq_backend: str = "auto-gptq"
 
+# Configurable max_new_tokens caps (env-driven). UI can request up to these; prevents OOM while honoring user settings.
+def _get_max_tokens_cap_multimodal() -> int:
+    try:
+        return max(64, min(16384, int(os.environ.get("LLM_MAX_NEW_TOKENS_MULTIMODAL", "2048"))))
+    except ValueError:
+        return 2048
+
+
+def _get_max_tokens_cap_text() -> int:
+    try:
+        return max(64, min(32768, int(os.environ.get("LLM_MAX_NEW_TOKENS_TEXT", "10000"))))
+    except ValueError:
+        return 10000
+
 
 def _decode_images_to_pil(images: List[str]):
     """Decode base64 or data URL strings to PIL Images. Raises HTTPException on invalid input."""
@@ -84,6 +98,31 @@ def _decode_images_to_pil(images: List[str]):
             img = Image.open(io.BytesIO(raw)).convert("RGB")
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"images[{i}] could not be decoded as image: {e}")
+        # Normalize size for VLM stability (avoid extreme aspect/size edge cases).
+        try:
+            w, h = img.size
+            if w <= 0 or h <= 0:
+                raise HTTPException(status_code=400, detail=f"images[{i}] has invalid dimensions ({w}x{h})")
+            # Upscale tiny images to a minimum side.
+            min_side = min(w, h)
+            if min_side < 32:
+                scale = 32.0 / float(min_side)
+                new_w = max(32, int(round(w * scale)))
+                new_h = max(32, int(round(h * scale)))
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                w, h = img.size
+            # Downscale very large images to keep tokenized vision patches reasonable.
+            max_side = max(w, h)
+            if max_side > 1344:
+                scale = 1344.0 / float(max_side)
+                new_w = max(32, int(round(w * scale)))
+                new_h = max(32, int(round(h * scale)))
+                img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        except HTTPException:
+            raise
+        except Exception:
+            # Ignore normalization failures and use original decoded image.
+            pass
         out.append(img)
     return out
 
@@ -331,20 +370,49 @@ async def generate(request: GenerateRequest):
         if _gptq_backend == "exllamav2" and request.images:
             raise HTTPException(status_code=400, detail="This backend does not support images (GPTQ ExLlamaV2).")
 
-        logger.debug(f"Generation request: prompt_len={len(request.prompt)}, max_tokens={request.max_new_tokens}, temp={request.temperature}")
+        # Apply configurable caps (env: LLM_MAX_NEW_TOKENS_MULTIMODAL, LLM_MAX_NEW_TOKENS_TEXT)
+        max_tokens_cap = _get_max_tokens_cap_multimodal() if processor is not None else _get_max_tokens_cap_text()
+        effective_max_tokens = min(request.max_new_tokens, max_tokens_cap)
+        if request.max_new_tokens > max_tokens_cap:
+            logger.info(
+                f"max_new_tokens capped: requested={request.max_new_tokens}, cap={max_tokens_cap} "
+                f"({'multimodal' if processor else 'text'}). Set LLM_MAX_NEW_TOKENS_* env to change."
+            )
+        logger.debug(f"Generation request: prompt_len={len(request.prompt)}, max_tokens={effective_max_tokens}, temp={request.temperature}")
 
         # Multimodal path (processor)
         if processor is not None:
             from core.llm_backends.run_adapter_backend import generate_multimodal
             pil_images = _decode_images_to_pil(request.images) if request.images else []
-            text = generate_multimodal(
-                processor=processor,
-                model=model,
-                prompt=(system_prompt + "\n\n" if system_prompt else "") + request.prompt,
-                images=pil_images,
-                max_new_tokens=request.max_new_tokens,
-                temperature=request.temperature,
-            )
+            mm_prompt = (system_prompt + "\n\n" if system_prompt else "") + request.prompt
+            try:
+                text = generate_multimodal(
+                    processor=processor,
+                    model=model,
+                    prompt=mm_prompt,
+                    images=pil_images,
+                    max_new_tokens=effective_max_tokens,
+                    temperature=request.temperature,
+                )
+            except RuntimeError as e:
+                # Known multimodal shape edge-case: retry once with a safer token budget.
+                msg = str(e)
+                if "expanded size of the tensor" in msg or "Tensor sizes:" in msg:
+                    retry_tokens = min(effective_max_tokens, 256)
+                    logger.warning(
+                        "Multimodal generate runtime shape mismatch; retrying with safer max_new_tokens=%s",
+                        retry_tokens,
+                    )
+                    text = generate_multimodal(
+                        processor=processor,
+                        model=model,
+                        prompt=mm_prompt,
+                        images=pil_images,
+                        max_new_tokens=retry_tokens,
+                        temperature=request.temperature,
+                    )
+                else:
+                    raise
         else:
             if tokenizer is None:
                 raise HTTPException(status_code=503, detail="Tokenizer/processor missing. Model load may have failed.")
@@ -364,7 +432,7 @@ async def generate(request: GenerateRequest):
                 tokenizer=tokenizer,
                 model=model,
                 prompt=request.prompt,
-                max_new_tokens=request.max_new_tokens,
+                max_new_tokens=effective_max_tokens,
                 temperature=request.temperature,
                 model_type=model_type,
                 system_prompt=system_prompt
@@ -393,8 +461,10 @@ async def generate(request: GenerateRequest):
         logger.error(f"Generation failed: {error_type}: {error_msg}")
         import traceback
         logger.error(traceback.format_exc())
-        # Ensure we always raise HTTPException, never return empty text
-        raise HTTPException(status_code=500, detail=f"Generation failed: {error_type}: {error_msg}")
+        detail = f"Generation failed: {error_type}: {error_msg}"
+        if "out of memory" in error_msg.lower() or ("cuda" in error_msg.lower() and "memory" in error_msg.lower()):
+            detail += " Try: free VRAM, switch GPU in app settings, or reduce max_new_tokens."
+        raise HTTPException(status_code=500, detail=detail)
 
 @app.post("/debug_generate", response_model=DebugGenerateResponse)
 async def debug_generate(request: GenerateRequest):

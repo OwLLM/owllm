@@ -135,6 +135,9 @@ class ToolCallDetector:
         # Try both patterns
         for pattern in [pattern1, pattern2]:
             for match in re.finditer(pattern, cleaned_text, re.DOTALL):
+                # Ignore tool-call snippets that appear to be examples/documentation text.
+                if self._is_example_context(cleaned_text, match.start()):
+                    continue
                 tool_name = match.group(1)
                 args_str = match.group(2)
                 
@@ -150,6 +153,16 @@ class ToolCallDetector:
                 ))
         
         return calls
+
+    def _is_example_context(self, text: str, match_start: int) -> bool:
+        """
+        Return True when a detected XML tool call appears in nearby explanatory/example context.
+        This avoids executing snippets like: "Example: <tool_call>read_file(...)</tool_call>".
+        """
+        window_start = max(0, match_start - 120)
+        context = text[window_start:match_start].lower()
+        markers = ("example:", "example ", "for example", "e.g.", "format:", "such as", "like:")
+        return any(marker in context for marker in markers)
     
     def _parse_xml_args(self, args_str: str) -> Dict[str, Any]:
         """

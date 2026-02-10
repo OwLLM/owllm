@@ -164,6 +164,7 @@ def launch_installer():
     if run_installer_bat.exists():
         log("Launching installer via run_installer.bat...")
         try:
+            print("[LAUNCHER] process_start: run_installer.bat", file=sys.stderr)
             subprocess.Popen(
                 [str(run_installer_bat)],
                 cwd=str(llm_dir),
@@ -178,6 +179,7 @@ def launch_installer():
     if installer_gui.exists():
         log("Launching installer_gui.py...")
         try:
+            print("[LAUNCHER] process_start: installer_gui.py", file=sys.stderr)
             # Use system Python to launch installer
             subprocess.Popen(
                 [sys.executable, str(installer_gui)],
@@ -198,6 +200,7 @@ def launch_app(venv_python):
     log("Launching application...")
     
     try:
+        print("[LAUNCHER] process_start: desktop_app.main", file=sys.stderr)
         # Launch desktop_app.main
         result = subprocess.Popen(
             [str(venv_python), "-m", "desktop_app.main"],

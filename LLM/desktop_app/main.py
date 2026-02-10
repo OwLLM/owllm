@@ -25,6 +25,7 @@ USE_HYBRID_FRAME = os.getenv("USE_HYBRID_FRAME", "1") == "1"
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
 from desktop_app.training_widgets import MetricCard
 from desktop_app.splash_screen import SplashScreen
+from desktop_app.process_utils import apply_create_no_window
 from desktop_app.pages.server_page import ServerPage
 from desktop_app.pages.mcp_page import MCPPage
 from desktop_app.pages.github_import_page import GitHubImportPage
@@ -1376,7 +1377,6 @@ class PackageCard(QFrame):
                         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                             stop:0 rgba(60, 60, 80, 0.8), stop:1 rgba(40, 40, 55, 0.8));
                         border: 3px solid #f44336;
-                        transform: translateY(-2px);
                     }}
                 """)
             else:
@@ -1392,7 +1392,6 @@ class PackageCard(QFrame):
                         background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                             stop:0 rgba(60, 60, 80, 0.8), stop:1 rgba(40, 40, 55, 0.8));
                         border: 1px solid rgba(102, 126, 234, 0.5);
-                        transform: translateY(-2px);
                     }}
                 """)
 
@@ -4422,15 +4421,22 @@ class MainWindow(QMainWindow):
         run_installer_bat = app_dir / "run_installer.bat"
         installer_gui = app_dir / "installer_gui.py"
         
-        # Prefer run_installer.bat which ensures bootstrap is used
+        # Prefer run_installer.bat which ensures bootstrap is used (explicit cmd to avoid shell window)
         if run_installer_bat.exists():
             try:
-                subprocess.Popen(
-                    [str(run_installer_bat)],
-                    cwd=str(app_dir),
-                    shell=True,
-                    **SUBPROCESS_FLAGS
-                )
+                print("[MAIN] process_start: install_deps run_installer.bat", file=sys.stderr)
+                if sys.platform == "win32":
+                    subprocess.Popen(
+                        ["cmd", "/c", str(run_installer_bat)],
+                        cwd=str(app_dir),
+                        **SUBPROCESS_FLAGS
+                    )
+                else:
+                    subprocess.Popen(
+                        [str(run_installer_bat)],
+                        cwd=str(app_dir),
+                        **SUBPROCESS_FLAGS
+                    )
                 # Close main app - installer will handle everything
                 self.close()
                 return
@@ -4442,6 +4448,7 @@ class MainWindow(QMainWindow):
         if installer_gui.exists():
             python_exe = sys.executable
             try:
+                print("[MAIN] process_start: install_deps installer_gui.py", file=sys.stderr)
                 subprocess.Popen(
                     [python_exe, str(installer_gui)],
                     cwd=str(app_dir),
@@ -4540,10 +4547,12 @@ class MainWindow(QMainWindow):
         if launcher_exe.exists():
             # Launch using launcher.exe
             import subprocess
+            print("[MAIN] process_start: restart launcher.exe", file=sys.stderr)
             subprocess.Popen([str(launcher_exe)], cwd=str(app_dir), **SUBPROCESS_FLAGS)
         else:
             # Fallback: restart with python
             python = sys.executable
+            print("[MAIN] process_start: restart desktop_app.main", file=sys.stderr)
             subprocess.Popen([python, "-m", "desktop_app.main"], cwd=str(app_dir), **SUBPROCESS_FLAGS)
         
         # Close current instance
@@ -6828,7 +6837,8 @@ class MainWindow(QMainWindow):
                             result = subprocess.run(
                                 ['cmd', '/c', 'rmdir', '/S', '/Q', str(path)], 
                                 capture_output=True, 
-                                timeout=30
+                                timeout=30,
+                                **SUBPROCESS_FLAGS
                             )
                             # Also try PowerShell method as fallback
                             if path.exists() and attempt >= 2:
@@ -6836,7 +6846,8 @@ class MainWindow(QMainWindow):
                                 subprocess.run(
                                     ['powershell', '-Command', ps_cmd],
                                     capture_output=True,
-                                    timeout=30
+                                    timeout=30,
+                                    **SUBPROCESS_FLAGS
                                 )
                         else:
                             shutil.rmtree(path, ignore_errors=True)
@@ -9705,6 +9716,7 @@ class MainWindow(QMainWindow):
         self.train_start.setEnabled(False)
         self.train_stop.setEnabled(True)
         
+        apply_create_no_window(proc)
         # Start process
         proc.start()
         
@@ -10330,10 +10342,27 @@ class MainWindow(QMainWindow):
         
         right_layout.addWidget(self.test_model_settings_stack, 0)
 
-        # Logs panel (right column). Keep chat bubbles for real model replies only.
-        log_title = QLabel("Logs")
-        log_title.setStyleSheet("color: white; font-weight: bold; font-size: 11pt;")
-        right_layout.addWidget(log_title)
+        # Right panel tabs: Logs + Unfiltered raw model output.
+        right_title = QLabel("Right Panel")
+        right_title.setStyleSheet("color: white; font-weight: bold; font-size: 11pt;")
+        right_layout.addWidget(right_title)
+
+        self.test_right_tabs = QTabWidget()
+        self.test_right_tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid rgba(102, 126, 234, 0.25); border-radius: 8px; }
+            QTabBar::tab {
+                background: rgba(30, 35, 50, 0.9);
+                color: #cccccc;
+                padding: 6px 10px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                color: white;
+                background: rgba(70, 85, 130, 0.9);
+            }
+        """)
 
         self.test_chat_log_display = QTextEdit()
         self.test_chat_log_display.setReadOnly(True)
@@ -10349,7 +10378,25 @@ class MainWindow(QMainWindow):
                 font-size: 9pt;
             }
         """)
-        right_layout.addWidget(self.test_chat_log_display, 1)
+
+        self.test_chat_unfiltered_display = QTextEdit()
+        self.test_chat_unfiltered_display.setReadOnly(True)
+        self.test_chat_unfiltered_display.setMinimumHeight(180)
+        self.test_chat_unfiltered_display.setStyleSheet("""
+            QTextEdit {
+                background: rgba(24, 16, 16, 0.85);
+                border: 1px solid rgba(210, 140, 100, 0.35);
+                border-radius: 8px;
+                color: #f0d0c0;
+                padding: 10px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 9pt;
+            }
+        """)
+
+        self.test_right_tabs.addTab(self.test_chat_log_display, "Logs")
+        self.test_right_tabs.addTab(self.test_chat_unfiltered_display, "Unfiltered Answer")
+        right_layout.addWidget(self.test_right_tabs, 1)
 
         # Add columns to main layout
         # Use stretch factors to maintain ratio: left takes most space, right gets what it needs
@@ -10395,6 +10442,22 @@ class MainWindow(QMainWindow):
         self.tool_chat_model_a.setMinimumWidth(250)
         controls_row.addWidget(self.tool_chat_model_a, 1)
         
+        # Max tokens (user-settable; server caps apply via env)
+        controls_row.addWidget(QLabel("Max tokens:"))
+        self.tool_chat_max_tokens = QSpinBox()
+        self.tool_chat_max_tokens.setRange(64, 32768)
+        self.tool_chat_max_tokens.setValue(10000)
+        self.tool_chat_max_tokens.setMinimumWidth(80)
+        controls_row.addWidget(self.tool_chat_max_tokens)
+        controls_row.addWidget(QLabel("Temp:"))
+        self.tool_chat_temperature = QDoubleSpinBox()
+        self.tool_chat_temperature.setRange(0.0, 2.0)
+        self.tool_chat_temperature.setSingleStep(0.1)
+        self.tool_chat_temperature.setValue(0.7)
+        self.tool_chat_temperature.setDecimals(1)
+        self.tool_chat_temperature.setMinimumWidth(60)
+        controls_row.addWidget(self.tool_chat_temperature)
+
         # Enable tools checkbox (always enabled)
         enable_tools_check = QCheckBox("Enable Tools")
         enable_tools_check.setChecked(True)
@@ -10507,16 +10570,29 @@ class MainWindow(QMainWindow):
         
         main_splitter.addWidget(left_widget)
         
-        # Right: Tool execution log
+        # Right: Tool execution log + unfiltered answer
         right_widget = QWidget()
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(8)
-        
-        log_title = QLabel("Tool Execution Log")
-        log_title.setStyleSheet("color: white; font-weight: bold; font-size: 12pt;")
-        right_layout.addWidget(log_title)
-        
+
+        self.tool_chat_right_tabs = QTabWidget()
+        self.tool_chat_right_tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid rgba(102, 126, 234, 0.25); border-radius: 8px; }
+            QTabBar::tab {
+                background: rgba(30, 35, 50, 0.9);
+                color: #cccccc;
+                padding: 6px 10px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                color: white;
+                background: rgba(70, 85, 130, 0.9);
+            }
+        """)
+
         self.tool_chat_log_display = QTextEdit()
         self.tool_chat_log_display.setReadOnly(True)
         self.tool_chat_log_display.setStyleSheet("""
@@ -10530,7 +10606,24 @@ class MainWindow(QMainWindow):
                 font-size: 10pt;
             }
         """)
-        right_layout.addWidget(self.tool_chat_log_display, 1)
+
+        self.tool_chat_unfiltered_display = QTextEdit()
+        self.tool_chat_unfiltered_display.setReadOnly(True)
+        self.tool_chat_unfiltered_display.setStyleSheet("""
+            QTextEdit {
+                background: rgba(24, 16, 16, 0.85);
+                border: 1px solid rgba(210, 140, 100, 0.35);
+                border-radius: 8px;
+                color: #f0d0c0;
+                padding: 12px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 10pt;
+            }
+        """)
+
+        self.tool_chat_right_tabs.addTab(self.tool_chat_log_display, "Logs")
+        self.tool_chat_right_tabs.addTab(self.tool_chat_unfiltered_display, "Unfiltered Answer")
+        right_layout.addWidget(self.tool_chat_right_tabs, 1)
         
         main_splitter.addWidget(right_widget)
         
@@ -10787,9 +10880,22 @@ class MainWindow(QMainWindow):
 
         right_layout.addWidget(self.m2m_model_settings_stack, 0)
 
-        log_title = QLabel("Logs")
-        log_title.setStyleSheet("color: white; font-weight: bold; font-size: 11pt;")
-        right_layout.addWidget(log_title)
+        self.m2m_right_tabs = QTabWidget()
+        self.m2m_right_tabs.setStyleSheet("""
+            QTabWidget::pane { border: 1px solid rgba(102, 126, 234, 0.25); border-radius: 8px; }
+            QTabBar::tab {
+                background: rgba(30, 35, 50, 0.9);
+                color: #cccccc;
+                padding: 6px 10px;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                color: white;
+                background: rgba(70, 85, 130, 0.9);
+            }
+        """)
         self.m2m_chat_log_display = QTextEdit()
         self.m2m_chat_log_display.setReadOnly(True)
         self.m2m_chat_log_display.setMinimumHeight(180)
@@ -10804,7 +10910,23 @@ class MainWindow(QMainWindow):
                 font-size: 9pt;
             }
         """)
-        right_layout.addWidget(self.m2m_chat_log_display, 1)
+        self.m2m_unfiltered_display = QTextEdit()
+        self.m2m_unfiltered_display.setReadOnly(True)
+        self.m2m_unfiltered_display.setMinimumHeight(180)
+        self.m2m_unfiltered_display.setStyleSheet("""
+            QTextEdit {
+                background: rgba(24, 16, 16, 0.85);
+                border: 1px solid rgba(210, 140, 100, 0.35);
+                border-radius: 8px;
+                color: #f0d0c0;
+                padding: 10px;
+                font-family: 'Consolas', 'Courier New', monospace;
+                font-size: 9pt;
+            }
+        """)
+        self.m2m_right_tabs.addTab(self.m2m_chat_log_display, "Logs")
+        self.m2m_right_tabs.addTab(self.m2m_unfiltered_display, "Unfiltered Answer")
+        right_layout.addWidget(self.m2m_right_tabs, 1)
 
         main_layout.addWidget(left_widget, 1)
         main_layout.addWidget(right_widget, 0)
@@ -11149,6 +11271,13 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'm2m_chat_display'):
             self.m2m_chat_display.clear()
         try:
+            if hasattr(self, "m2m_chat_log_display") and self.m2m_chat_log_display:
+                self.m2m_chat_log_display.clear()
+            if hasattr(self, "m2m_unfiltered_display") and self.m2m_unfiltered_display:
+                self.m2m_unfiltered_display.clear()
+        except Exception:
+            pass
+        try:
             self._m2m_history = []
         except Exception:
             pass
@@ -11212,6 +11341,8 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "m2m_chat_log_display") and self.m2m_chat_log_display:
                 self.m2m_chat_log_display.clear()
+            if hasattr(self, "m2m_unfiltered_display") and self.m2m_unfiltered_display:
+                self.m2m_unfiltered_display.clear()
         except Exception:
             pass
         self.m2m_chat_display.add_user_message(seed)
@@ -11258,20 +11389,22 @@ class MainWindow(QMainWindow):
         if not hasattr(self, 'm2m_chat_display'):
             return
         key = (model_key or "a").lower()[:1]
+        self._append_m2m_unfiltered(key, text or "")
+        clean_text = self._clean_test_chat_answer(text or "")
         if hasattr(self.m2m_chat_display, "finish_m2m_turn"):
-            self.m2m_chat_display.finish_m2m_turn(key, text or "")
+            self.m2m_chat_display.finish_m2m_turn(key, clean_text)
         else:
             # Fallback to old synchronized response row
             if key == "a":
-                self.m2m_chat_display.update_model_a_response(text or "")
+                self.m2m_chat_display.update_model_a_response(clean_text)
             elif key == "b":
-                self.m2m_chat_display.update_model_b_response(text or "")
+                self.m2m_chat_display.update_model_b_response(clean_text)
             elif key == "c":
-                self.m2m_chat_display.update_model_c_response(text or "")
+                self.m2m_chat_display.update_model_c_response(clean_text)
         try:
             if not hasattr(self, "_m2m_history") or self._m2m_history is None:
                 self._m2m_history = []
-            self._m2m_history.append((key, text or ""))
+            self._m2m_history.append((key, clean_text))
         except Exception:
             pass
 
@@ -11408,6 +11541,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'tool_chat_display'):
             self.tool_chat_display.clear()
             self.tool_chat_log_display.clear()
+            if hasattr(self, "tool_chat_unfiltered_display") and self.tool_chat_unfiltered_display:
+                self.tool_chat_unfiltered_display.clear()
             self.tool_chat_display.add_user_message("=== Chat cleared ===")
         try:
             self._tool_chat_history = []
@@ -11511,6 +11646,23 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
     
+    def _tool_chat_friendly_error(self, error_text: str) -> str:
+        """Map known inference/backend errors to short user-facing guidance for Tool Chat."""
+        if not error_text:
+            return "[ERROR] Failed. See logs on the right."
+        low = error_text.lower()
+        if "does not support images" in low or "gptq exllamav2" in low:
+            return "This model or backend does not support images. Use a vision-capable model or remove attachments."
+        if "pil is required" in low or "pillow" in low:
+            return "Image support is missing (PIL/Pillow). Re-onboard the model with isolation so Pillow is installed."
+        if "tokenizer/processor missing" in low or "model load may have failed" in low:
+            return "Model or processor failed to load. See logs. Try re-onboarding or switching model."
+        if "expanded size of the tensor" in low or "tensor sizes:" in low:
+            return "Vision generation failed on this image shape. Try another image or shorter output (max tokens)."
+        if "not ready" in low or "not been onboarded" in low:
+            return "Model is not ready. Run onboarding from the Models tab, then retry."
+        return "[ERROR] Failed. See logs on the right."
+
     def _send_tool_chat_message(self):
         """Send message and run tool-enabled inference for the selected model"""
         message = self.tool_chat_input.toPlainText().strip()
@@ -11524,6 +11676,24 @@ class MainWindow(QMainWindow):
         if not model_a_path or model_a_path == "(No models downloaded)":
             QMessageBox.warning(self, "No Model", "Please select a model.")
             return
+        
+        # Preflight: if user attached images, ensure selected model is vision-capable
+        images = list(getattr(self, "_tool_chat_images", []) or [])
+        if images:
+            vision_ok = False
+            try:
+                from core.models import detect_model_capabilities
+                caps = detect_model_capabilities(model_path=str(model_a_path), model_name=Path(str(model_a_path)).name)
+                vision_ok = "vision" in (caps or [])
+            except Exception:
+                vision_ok = False
+            if not vision_ok:
+                QMessageBox.warning(
+                    self,
+                    "Images not supported",
+                    "The selected model is not vision-capable. Remove attachments or choose a vision model (e.g. Llama 3.2 Vision).",
+                )
+                return
         
         # Clear input
         self.tool_chat_input.clear()
@@ -11568,7 +11738,14 @@ class MainWindow(QMainWindow):
             self.tool_chat_worker_a.quit()
             self.tool_chat_worker_a.wait()
         
-        self.tool_chat_worker_a = ToolInferenceWorker(prompt, model_id, "model_a", system_prompt, images=images)
+        max_tokens = self.tool_chat_max_tokens.value() if hasattr(self, "tool_chat_max_tokens") and self.tool_chat_max_tokens else 10000
+        temperature = self.tool_chat_temperature.value() if hasattr(self, "tool_chat_temperature") and self.tool_chat_temperature else 0.7
+        self.tool_chat_worker_a = ToolInferenceWorker(
+            prompt, model_id, "model_a", system_prompt,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            images=images,
+        )
         self._tool_chat_progress_a = ""
         self.tool_chat_worker_a.progress_update.connect(
             lambda msg: self._on_tool_chat_progress_update("a", msg)
@@ -11581,12 +11758,14 @@ class MainWindow(QMainWindow):
         )
         self.tool_chat_worker_a.inference_finished.connect(self._on_tool_chat_finished_a)
         self.tool_chat_worker_a.inference_failed.connect(
-            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
-                                self._append_tool_chat_log(error),
-                                self.tool_chat_display.update_model_a_response("[ERROR] Failed. See logs on the right."),
-                                self._close_env_dialog("a", is_tool_chat=True),
-                                self.tool_chat_input.setEnabled(True),
-                                self.tool_chat_send_btn.setEnabled(True))
+            lambda error, col, mid=model_id, mp=model_path: (
+                self._maybe_show_reonboard_popup(error, mid, mp),
+                self._append_tool_chat_log(error),
+                self.tool_chat_display.update_model_a_response(self._tool_chat_friendly_error(error)),
+                self._close_env_dialog("a", is_tool_chat=True),
+                self.tool_chat_input.setEnabled(True),
+                self.tool_chat_send_btn.setEnabled(True),
+            )
         )
         self.tool_chat_worker_a.start()
     
@@ -11701,9 +11880,11 @@ class MainWindow(QMainWindow):
             dialog.close()
             setattr(self, "_env_dialog_tool_a", None)
         
-        text = final_output
-        if tool_log:
-            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._append_tool_chat_unfiltered("A", final_output or "")
+        text = self._clean_test_chat_answer(final_output)
+        executed_count = self._count_executed_tools(tool_log)
+        if executed_count > 0:
+            text += f"\n\n[Tools Used: {executed_count}]"
         self._tool_chat_progress_a = text
         self.tool_chat_display.update_model_a_response(text)
         try:
@@ -11722,9 +11903,11 @@ class MainWindow(QMainWindow):
             dialog.close()
             setattr(self, "_env_dialog_tool_b", None)
         
-        text = final_output
-        if tool_log:
-            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._append_tool_chat_unfiltered("B", final_output or "")
+        text = self._clean_test_chat_answer(final_output)
+        executed_count = self._count_executed_tools(tool_log)
+        if executed_count > 0:
+            text += f"\n\n[Tools Used: {executed_count}]"
         self._tool_chat_progress_b = text
         self.tool_chat_display.update_model_b_response(text)
         self._check_tool_chat_all_finished()
@@ -11737,9 +11920,11 @@ class MainWindow(QMainWindow):
             dialog.close()
             setattr(self, "_env_dialog_tool_c", None)
         
-        text = final_output
-        if tool_log:
-            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._append_tool_chat_unfiltered("C", final_output or "")
+        text = self._clean_test_chat_answer(final_output)
+        executed_count = self._count_executed_tools(tool_log)
+        if executed_count > 0:
+            text += f"\n\n[Tools Used: {executed_count}]"
         self._tool_chat_progress_c = text
         self.tool_chat_display.update_model_c_response(text)
         self._check_tool_chat_all_finished()
@@ -12232,6 +12417,7 @@ class MainWindow(QMainWindow):
         )
         proc.finished.connect(lambda code, status: self._on_inference_finished_a(code, status))
         
+        apply_create_no_window(proc)
         proc.start()
         self.test_proc_a = proc
     
@@ -12374,11 +12560,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_worker_a.inference_finished.connect(self._on_tool_inference_finished_a)
         self.tool_worker_a.inference_failed.connect(
-            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
-                                self._append_test_chat_log(f"[A] {error}"),
-                                self.chat_display.update_model_a_response("[ERROR] Failed. See logs on the right."),
-                                self._close_env_dialog("a", is_tool_chat=False),
-                                self._test_finish_pending_model("a", None))
+            lambda error, col, mid=model_id, mp=model_path: self._handle_test_model_inference_failed(
+                "a", error, mid, mp
+            )
         )
         
         # Start worker
@@ -12392,13 +12576,15 @@ class MainWindow(QMainWindow):
             dialog.close()
             setattr(self, "_env_dialog_a", None)
         
-        text = final_output
-        if tool_log:
-            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._append_test_chat_unfiltered("A", final_output or "")
+        text = self._clean_test_chat_answer(final_output)
+        executed_count = self._count_executed_tools(tool_log)
+        if executed_count > 0:
+            text += f"\n\n[Tools Used: {executed_count}]"
         self._tool_progress_a = text
         self.chat_display.update_model_a_response(text)
         # Persist assistant reply into Test chat memory
-        self._test_finish_pending_model("a", final_output or "")
+        self._test_finish_pending_model("a", text or "")
 
     def _close_env_dialog(self, which: str, is_tool_chat: bool = False):
         """Close environment setup dialog for a model"""
@@ -12419,6 +12605,63 @@ class MainWindow(QMainWindow):
             return (m.group(1) or "").strip().splitlines()[0].strip()
         except Exception:
             return ""
+
+    def _is_gpu_oom_error(self, text: str) -> bool:
+        low = (text or "").lower()
+        markers = [
+            "cuda out of memory",
+            "out of memory",
+            "cublas_status_alloc_failed",
+            "insufficient memory",
+            "failed to allocate",
+            "not enough memory",
+            "vram",
+        ]
+        return any(m in low for m in markers)
+
+    def _offer_gpu_cleanup_for_test_chat(self, model_tag: str, error_text: str = "") -> None:
+        """Prompt user to free previously loaded model weights when GPU memory is exhausted."""
+        if not self._is_gpu_oom_error(error_text):
+            return
+        if getattr(self, "_gpu_cleanup_prompt_active", False):
+            return
+        self._gpu_cleanup_prompt_active = True
+        try:
+            prompt = QMessageBox.question(
+                self,
+                "GPU Memory Full",
+                f"Model {model_tag.upper()} appears to have failed due to GPU memory exhaustion.\n\n"
+                "This can happen when previous model weights are still loaded in VRAM.\n\n"
+                "Do you want to clean up previously loaded weights now?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if prompt == QMessageBox.Yes:
+                self._append_test_chat_log(f"[{model_tag.upper()}] [INFO] User requested VRAM cleanup after OOM.")
+                self._free_vram_now()
+        finally:
+            self._gpu_cleanup_prompt_active = False
+
+    def _handle_test_model_inference_failed(
+        self,
+        model_key: str,
+        error: str,
+        model_id: str,
+        model_path: str,
+    ) -> None:
+        """Common failure handling for Test Chat model workers."""
+        tag = (model_key or "?").upper()
+        self._maybe_show_reonboard_popup(error, model_id, model_path)
+        self._append_test_chat_log(f"[{tag}] {error}")
+        if model_key == "a":
+            self.chat_display.update_model_a_response("[ERROR] Failed. See logs on the right.")
+        elif model_key == "b":
+            self.chat_display.update_model_b_response("[ERROR] Failed. See logs on the right.")
+        else:
+            self.chat_display.update_model_c_response("[ERROR] Failed. See logs on the right.")
+        self._close_env_dialog(model_key, is_tool_chat=False)
+        self._test_finish_pending_model(model_key, None)
+        self._offer_gpu_cleanup_for_test_chat(model_key, error)
 
     def _should_offer_reonboard_popup(self, error_text: str) -> bool:
         low = (error_text or "").lower()
@@ -12451,6 +12694,15 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _append_tool_chat_unfiltered(self, model_key: str, text: str) -> None:
+        """Append raw/unfiltered tool-chat model output to right panel."""
+        try:
+            if hasattr(self, "tool_chat_unfiltered_display") and self.tool_chat_unfiltered_display:
+                tag = (model_key or "?").upper()
+                self.tool_chat_unfiltered_display.append(f"[{tag}] {str(text or '').strip()}")
+        except Exception:
+            pass
+
     def _append_test_chat_log(self, text: str) -> None:
         """Append to Test Chat right-side log panel."""
         try:
@@ -12458,6 +12710,83 @@ class MainWindow(QMainWindow):
                 self.test_chat_log_display.append(str(text))
         except Exception:
             pass
+
+    def _append_m2m_unfiltered(self, model_key: str, text: str) -> None:
+        """Append raw/unfiltered M2M model output to right panel."""
+        try:
+            if hasattr(self, "m2m_unfiltered_display") and self.m2m_unfiltered_display:
+                tag = (model_key or "?").upper()
+                self.m2m_unfiltered_display.append(f"[{tag}] {str(text or '').strip()}")
+        except Exception:
+            pass
+
+    def _append_test_chat_unfiltered(self, model_key: str, text: str) -> None:
+        """Append raw/unfiltered model output to the Unfiltered right-panel tab."""
+        try:
+            if hasattr(self, "test_chat_unfiltered_display") and self.test_chat_unfiltered_display:
+                tag = (model_key or "?").upper()
+                self.test_chat_unfiltered_display.append(f"[{tag}] {str(text or '').strip()}")
+        except Exception:
+            pass
+
+    def _clean_test_chat_answer(self, text: str) -> str:
+        """
+        Keep chat column focused on human-readable answer:
+        - remove echoed tool-instruction block
+        - remove XML tool-call/result fragments and repetitive stop tokens
+        """
+        try:
+            import re
+            cleaned = str(text or "")
+            # Remove echoed tool-instruction block when model parrots system text
+            cleaned = re.sub(
+                r"You are a helpful AI assistant with access to tools\..*?Only call tools when necessary\.",
+                "",
+                cleaned,
+                flags=re.DOTALL,
+            )
+            # Remove XML tool calls/results and repeated stop tokens
+            cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", cleaned, flags=re.DOTALL)
+            cleaned = re.sub(r"<tool_result[^>]*>.*?</tool_result>", "", cleaned, flags=re.DOTALL)
+            cleaned = cleaned.replace("</s>", " ")
+            cleaned = re.sub(r"<\|im_start\|>system.*?<\|im_end\|>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+            cleaned = re.sub(r"<\|im_start\|>user.*?<\|im_end\|>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+
+            # If the model emits role-scaffold transcripts, keep only the final assistant turn.
+            assistant_role_blocks = re.findall(
+                r"(?:^|\n)ASSISTANT:\s*(.*?)(?=\n(?:SYSTEM:|USER:|ASSISTANT:)|\Z)",
+                cleaned,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            if assistant_role_blocks:
+                cleaned = (assistant_role_blocks[-1] or "").strip()
+
+            # ChatML fallback: keep last assistant block if present.
+            chatml_assistant_blocks = re.findall(
+                r"<\|im_start\|>assistant\s*(.*?)\s*<\|im_end\|>",
+                cleaned,
+                flags=re.DOTALL | re.IGNORECASE,
+            )
+            if chatml_assistant_blocks:
+                cleaned = (chatml_assistant_blocks[-1] or "").strip()
+
+            # Remove any remaining role-prefix lines that leak through.
+            cleaned = re.sub(r"(?im)^\s*(SYSTEM|USER|ASSISTANT)\s*:\s*$", "", cleaned)
+            cleaned = re.sub(r"(?im)^\s*(SYSTEM|USER)\s*:.*$", "", cleaned)
+            cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+            cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+            cleaned = cleaned.strip()
+            return cleaned or "(No clean answer produced.)"
+        except Exception:
+            return (text or "").strip()
+
+    def _count_executed_tools(self, tool_log: list) -> int:
+        """Count only actually executed tools (success/error), not blocked/denied metadata rows."""
+        try:
+            executed_statuses = {"success", "error"}
+            return sum(1 for e in (tool_log or []) if str((e or {}).get("status", "")).lower() in executed_statuses)
+        except Exception:
+            return 0
 
     def _maybe_show_reonboard_popup(self, error_text: str, model_id: str, model_path: str = "") -> None:
         """
@@ -12761,6 +13090,7 @@ class MainWindow(QMainWindow):
         )
         proc.finished.connect(lambda code, status: self._on_inference_finished_b(code, status))
         
+        apply_create_no_window(proc)
         proc.start()
         self.test_proc_b = proc
     
@@ -12895,11 +13225,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_worker_b.inference_finished.connect(self._on_tool_inference_finished_b)
         self.tool_worker_b.inference_failed.connect(
-            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
-                                self._append_test_chat_log(f"[B] {error}"),
-                                self.chat_display.update_model_b_response("[ERROR] Failed. See logs on the right."),
-                                self._close_env_dialog("b", is_tool_chat=False),
-                                self._test_finish_pending_model("b", None))
+            lambda error, col, mid=model_id, mp=model_path: self._handle_test_model_inference_failed(
+                "b", error, mid, mp
+            )
         )
         
         self.tool_worker_b.start()
@@ -12912,12 +13240,14 @@ class MainWindow(QMainWindow):
             dialog.close()
             setattr(self, "_env_dialog_b", None)
         
-        text = final_output
-        if tool_log:
-            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._append_test_chat_unfiltered("B", final_output or "")
+        text = self._clean_test_chat_answer(final_output)
+        executed_count = self._count_executed_tools(tool_log)
+        if executed_count > 0:
+            text += f"\n\n[Tools Used: {executed_count}]"
         self._tool_progress_b = text
         self.chat_display.update_model_b_response(text)
-        self._test_finish_pending_model("b", final_output or "")
+        self._test_finish_pending_model("b", text or "")
     
     def _run_inference_c(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model C using QProcess"""
@@ -13055,6 +13385,7 @@ class MainWindow(QMainWindow):
         )
         proc.finished.connect(lambda code, status: self._on_inference_finished_c(code, status))
         
+        apply_create_no_window(proc)
         proc.start()
         self.test_proc_c = proc
     
@@ -13173,11 +13504,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_worker_c.inference_finished.connect(self._on_tool_inference_finished_c)
         self.tool_worker_c.inference_failed.connect(
-            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
-                                self._append_test_chat_log(f"[C] {error}"),
-                                self.chat_display.update_model_c_response("[ERROR] Failed. See logs on the right."),
-                                self._close_env_dialog("c", is_tool_chat=False),
-                                self._test_finish_pending_model("c", None))
+            lambda error, col, mid=model_id, mp=model_path: self._handle_test_model_inference_failed(
+                "c", error, mid, mp
+            )
         )
         
         self.tool_worker_c.start()
@@ -13190,12 +13519,14 @@ class MainWindow(QMainWindow):
             dialog.close()
             setattr(self, "_env_dialog_c", None)
         
-        text = final_output
-        if tool_log:
-            text += f"\n\n[Tools Used: {len(tool_log)}]"
+        self._append_test_chat_unfiltered("C", final_output or "")
+        text = self._clean_test_chat_answer(final_output)
+        executed_count = self._count_executed_tools(tool_log)
+        if executed_count > 0:
+            text += f"\n\n[Tools Used: {executed_count}]"
         self._tool_progress_c = text
         self.chat_display.update_model_c_response(text)
-        self._test_finish_pending_model("c", final_output or "")
+        self._test_finish_pending_model("c", text or "")
     
     def _on_inference_finished_c(self, exit_code: int = 0, exit_status=None):
         """Called when Model C inference finishes"""
@@ -13547,6 +13878,8 @@ class MainWindow(QMainWindow):
         try:
             if hasattr(self, "test_chat_log_display") and self.test_chat_log_display:
                 self.test_chat_log_display.clear()
+            if hasattr(self, "test_chat_unfiltered_display") and self.test_chat_unfiltered_display:
+                self.test_chat_unfiltered_display.clear()
         except Exception:
             pass
 

@@ -19,6 +19,7 @@ from desktop_app.widgets.connection_card import ConnectionCard
 from desktop_app.mcp.connection_manager import MCPConnectionManager
 from desktop_app.mcp.server_manager import MCPServerManager
 from desktop_app.pages.server_page import ServerPage
+from desktop_app.process_utils import apply_create_no_window
 
 
 class ConfigureServerDialog(QDialog):
@@ -366,6 +367,7 @@ class MCPConnectionsPage(QWidget):
             if install_path and install_path.exists():
                 process.setWorkingDirectory(str(install_path))
             
+            apply_create_no_window(process)
             process.start(program, args)
             
             if process.waitForStarted(3000):

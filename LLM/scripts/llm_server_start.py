@@ -9,6 +9,17 @@ import yaml
 import subprocess
 from pathlib import Path
 
+# Windows: avoid console window when launched as child of desktop app
+_SUBPROCESS_FLAGS = {}
+if sys.platform == "win32":
+    _si = subprocess.STARTUPINFO()
+    _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    _si.wShowWindow = subprocess.SW_HIDE
+    _SUBPROCESS_FLAGS = {
+        "startupinfo": _si,
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+    }
+
 def main():
     # Validate arguments
     if len(sys.argv) < 2:
@@ -97,7 +108,7 @@ def main():
             "--host", "127.0.0.1",
             "--port", str(port),
             "--log-level", "info"
-        ], check=True, cwd=str(app_root), env=env)
+        ], check=True, cwd=str(app_root), env=env, **_SUBPROCESS_FLAGS)
     except KeyboardInterrupt:
         print("\nServer stopped by user")
         sys.exit(0)

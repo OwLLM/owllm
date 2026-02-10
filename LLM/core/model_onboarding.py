@@ -620,19 +620,24 @@ class ModelOnboardingService:
         """
         import re
         err_full = (probe_error or "").strip()
+        # Map known import/module names (and common bad hints) to correct pip packages
+        # NOTE: Some probes/logs may incorrectly suggest `pip install PIL` (there is no such PyPI package).
+        module_to_pip = {"PIL": "Pillow", "timm": "timm", "einops": "einops"}
+
         # Extract pip package name from "Install with: pip install X" (probe emits this)
         pip_from_hint: List[str] = []
         for m in re.finditer(r"pip install\s+([A-Za-z0-9_.\-]+)", err_full):
-            pip_from_hint.append(m.group(1).strip())
+            raw = m.group(1).strip()
+            # Normalize common bad hints to real pip names (case-insensitive)
+            pip_from_hint.append(module_to_pip.get(raw, module_to_pip.get(raw.upper(), raw)))
         # Extract module names from "No module named 'X'"
         module_names: List[str] = []
         for m in re.finditer(r"No module named\s+['\"]([^'\"]+)['\"]", err_full):
             module_names.append(m.group(1).strip())
         # Map known module names to pip package names
-        module_to_pip = {"PIL": "Pillow", "timm": "timm", "einops": "einops"}
         pip_names = []
         for mod in module_names:
-            pip_names.append(module_to_pip.get(mod, mod))
+            pip_names.append(module_to_pip.get(mod, module_to_pip.get(mod.upper(), mod)))
         # Combine and de-dup, prefer pip hint when present
         seen = set()
         out = []
@@ -649,6 +654,9 @@ class ModelOnboardingService:
         err_full = (probe_error or "").strip()
         err = err_full[:1500]
 
+        # Normalize common missing-module names to actual pip packages for display clarity
+        normalize = {"PIL": "Pillow"}
+
         # Best-effort extraction of missing module/package names
         missing: list[str] = []
         try:
@@ -664,6 +672,8 @@ class ModelOnboardingService:
         # De-dup while preserving order
         seen = set()
         missing = [m for m in missing if m and not (m in seen or seen.add(m))]
+        # Normalize display names (e.g. PIL -> Pillow)
+        missing = [normalize.get(m, normalize.get(m.upper(), m)) for m in missing]
 
         missing_line = ""
         if missing:

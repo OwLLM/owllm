@@ -1446,12 +1446,52 @@ def generate_multimodal(processor, model, prompt, images, max_new_tokens=128, te
     device = next(model.parameters()).device
     if not isinstance(images, (list, tuple)):
         images = [images]
-    # Processor API: text and images (many VLMs use this)
-    try:
-        inputs = processor(text=prompt, images=images if images else None, return_tensors="pt")
-    except TypeError:
-        # Some processors expect images= for a single image or different signature
-        inputs = processor(text=[prompt], images=images if images else None, return_tensors="pt")
+
+    def _has_zero_dim_tensors(obj) -> bool:
+        try:
+            for v in (obj or {}).values():
+                shape = getattr(v, "shape", None)
+                if shape is not None and len(shape) > 0:
+                    for d in shape:
+                        if int(d) == 0:
+                            return True
+        except Exception:
+            pass
+        return False
+
+    # Processor API differs across VLM families. Try multiple safe input formats.
+    # This prevents a known edge case where processor output contains a zero-sized
+    # dimension and model.generate later crashes with tensor expansion errors.
+    proc_attempts = [
+        {"text": prompt, "images": images if images else None},
+        {"text": [prompt], "images": images if images else None},
+    ]
+    if images and len(images) == 1:
+        proc_attempts.extend([
+            {"text": prompt, "images": images[0]},
+            {"text": [prompt], "images": [images[0]]},
+        ])
+
+    inputs = None
+    last_proc_error = None
+    for kwargs in proc_attempts:
+        try:
+            candidate = processor(return_tensors="pt", **kwargs)
+            if _has_zero_dim_tensors(candidate):
+                last_proc_error = RuntimeError("processor returned zero-dimension tensor(s)")
+                continue
+            inputs = candidate
+            break
+        except Exception as e:
+            last_proc_error = e
+            continue
+
+    if inputs is None:
+        raise RuntimeError(
+            "Multimodal processor could not build valid tensors for this image/prompt pair. "
+            f"Last processor error: {last_proc_error}"
+        )
+
     inputs = {k: v.to(device) for k, v in inputs.items() if hasattr(v, "to")}
     pad_id = getattr(processor, "pad_token_id", None) or getattr(processor.tokenizer, "pad_token_id", None) if hasattr(processor, "tokenizer") else None
     eos_id = getattr(processor, "eos_token_id", None) or getattr(processor.tokenizer, "eos_token_id", None) if hasattr(processor, "tokenizer") else None

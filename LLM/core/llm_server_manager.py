@@ -1080,9 +1080,39 @@ class LLMServerManager:
             
             if missing_packages:
                 log(f"Missing critical packages detected: {', '.join(missing_packages)}")
+                is_dedicated = "--dedicated--" in env_spec.key
+                vision_migration_pkgs = {"Pillow", "timm", "einops", "open-clip-torch"}
+                missing_set = set(missing_packages)
+                # Backward-compat migration for existing dedicated vision envs created before
+                # multimodal deps were enforced in runtime preflight.
+                if is_dedicated and missing_set and missing_set.issubset(vision_migration_pkgs):
+                    log(
+                        "Detected missing dedicated vision deps in existing env; "
+                        "attempting one-shot compatibility install before fail-fast..."
+                    )
+                    try:
+                        mig_ok, mig_err = self.env_registry.auto_install_missing_packages(
+                            env_spec.python_executable,
+                            missing_packages,
+                            log_callback=log,
+                        )
+                        if mig_ok:
+                            mig_recheck = self.env_registry.check_missing_packages(
+                                env_spec.python_executable,
+                                required_packages=critical_packages,
+                            )
+                            if not mig_recheck:
+                                missing_packages = []
+                                log("Dedicated vision dependency migration succeeded; revalidation passed.")
+                            else:
+                                log(f"Vision migration install incomplete; still missing: {mig_recheck}")
+                        else:
+                            log(f"Vision migration install failed: {mig_err[:300]}")
+                    except Exception as mig_ex:
+                        log(f"Vision migration install error: {mig_ex}")
                 # Optional one-shot runtime auto-repair (opt-in via LLM_RUNTIME_AUTO_REPAIR=1)
                 auto_repair = os.environ.get("LLM_RUNTIME_AUTO_REPAIR", "").strip().lower() in ("1", "true", "yes")
-                if auto_repair:
+                if auto_repair and missing_packages:
                     log("LLM_RUNTIME_AUTO_REPAIR enabled: attempting one-shot install of missing packages...")
                     try:
                         install_ok, install_err = self.env_registry.auto_install_missing_packages(
@@ -1106,7 +1136,6 @@ class LLMServerManager:
                         log(f"Runtime auto-repair error: {repair_ex}")
                 if missing_packages:
                     # Fail-fast: mark BROKEN and raise (default behavior, or after failed auto-repair)
-                    is_dedicated = "--dedicated--" in env_spec.key
                     from datetime import datetime
                     log_dir = app_root / "logs" / "server_startup"
                     log_dir.mkdir(parents=True, exist_ok=True)
@@ -1161,6 +1190,7 @@ class LLMServerManager:
                     "protobuf": "google.protobuf",
                     "auto-gptq": "auto_gptq",
                     "open-clip-torch": "open_clip",
+                    "Pillow": "PIL",
                 }
                 health_imports = [import_map.get(p, p) for p in critical_packages]
                 health_lines = ["import importlib"] + [f"importlib.import_module('{m}')" for m in health_imports] + ["print('OK')"]

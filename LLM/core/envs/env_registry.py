@@ -2091,6 +2091,7 @@ sys.exit(0)
             "protobuf": "google.protobuf",   # protobuf package is imported as google.protobuf
             "auto-gptq": "auto_gptq",        # PyPI name uses hyphen; import uses underscore
             "open-clip-torch": "open_clip",  # PyPI name differs from import name
+            "Pillow": "PIL",                 # PyPI name differs from import module
         }
         
         missing = []

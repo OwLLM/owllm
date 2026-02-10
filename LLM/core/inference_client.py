@@ -2,9 +2,10 @@
 Inference Client
 HTTP client for calling persistent LLM inference servers.
 """
-import requests
 import logging
 import os
+import time
+import requests
 from typing import Optional, List
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,7 @@ class InferenceClient:
         logger.debug(f"Sending generation request to {url}")
         logger.debug(f"Prompt length: {len(prompt)} chars")
         logger.debug(f"Max tokens: {max_new_tokens}, Temperature: {temperature}")
-        
+        _start = time.perf_counter()
         try:
             response = self.session.post(
                 url,
@@ -136,6 +137,11 @@ class InferenceClient:
             raise ValueError(f"Server response missing 'text' field: {result}")
         
         text = result["text"]
+        duration_ms = int((time.perf_counter() - _start) * 1000)
+        logger.info(
+            "RUNTIME_EVENT generate_done url=%s duration_ms=%s prompt_len=%s response_len=%s",
+            url, duration_ms, len(prompt), len(text) if text else 0,
+        )
         logger.debug(f"Generated text length: {len(text)} chars")
 
         # Never treat an empty response as success. This typically means:

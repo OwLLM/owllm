@@ -38,11 +38,10 @@ PROFILES = {
 def _detect_gptq_backend(model_id: Optional[str] = None) -> str:
     """Return 'exllamav2' or 'auto-gptq' from llm_backends.yaml for model_id."""
     try:
-        from pathlib import Path as P
-        from core.inference import get_app_root
         import yaml
-        root = get_app_root()
-        config_path = root / "configs" / "llm_backends.yaml"
+        # LLM root: core/envs/capability_matrix.py -> parent.parent = core, parent.parent.parent = LLM
+        llm_root = Path(__file__).resolve().parent.parent.parent
+        config_path = llm_root / "configs" / "llm_backends.yaml"
         if not config_path.exists():
             return "auto-gptq"
         with open(config_path, "r", encoding="utf-8") as f:
@@ -209,3 +208,39 @@ def get_runtime_required_packages(
         model_id=model_id,
     )
     return cap.get("required_packages", BASE_PACKAGES.copy())
+
+
+# Guardrails by model family: defaults for token caps and timeouts (configurable via env).
+# Keys must match profile_id from resolve_capability. Env overrides applied in get_guardrail_max_tokens.
+GUARDRAIL_DEFAULTS: Dict[str, Dict[str, int]] = {
+    "base": {"max_new_tokens_text": 4096, "max_new_tokens_multimodal": 1024},
+    "base_peft": {"max_new_tokens_text": 4096, "max_new_tokens_multimodal": 1024},
+    "bnb": {"max_new_tokens_text": 4096, "max_new_tokens_multimodal": 1024},
+    "bnb_peft": {"max_new_tokens_text": 4096, "max_new_tokens_multimodal": 1024},
+    "gptq": {"max_new_tokens_text": 4096, "max_new_tokens_multimodal": 1024},
+    "gptq_peft": {"max_new_tokens_text": 4096, "max_new_tokens_multimodal": 1024},
+    "awq": {"max_new_tokens_text": 4096, "max_new_tokens_multimodal": 1024},
+    "awq_peft": {"max_new_tokens_text": 4096, "max_new_tokens_multimodal": 1024},
+    "llamacpp": {"max_new_tokens_text": 4096, "max_new_tokens_multimodal": 1024},
+}
+
+
+def get_guardrail_max_tokens(
+    profile_id: str,
+    is_multimodal: bool,
+) -> int:
+    """
+    Per-family token cap for generation. Env LLM_MAX_NEW_TOKENS_TEXT / LLM_MAX_NEW_TOKENS_MULTIMODAL
+    override the profile default when set.
+    """
+    key = "max_new_tokens_multimodal" if is_multimodal else "max_new_tokens_text"
+    defaults = GUARDRAIL_DEFAULTS.get(profile_id) or GUARDRAIL_DEFAULTS.get("base", {})
+    default_val = defaults.get(key, 1024 if is_multimodal else 4096)
+    env_key = "LLM_MAX_NEW_TOKENS_MULTIMODAL" if is_multimodal else "LLM_MAX_NEW_TOKENS_TEXT"
+    try:
+        env_val = os.environ.get(env_key, "").strip()
+        if env_val:
+            return max(64, min(32768, int(env_val)))
+    except (ValueError, TypeError):
+        pass
+    return max(64, min(32768, default_val))

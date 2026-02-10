@@ -1652,16 +1652,21 @@ sys.exit(0)
         model_path: str,
         adapter_dir: Optional[str] = None,
         profile_data: Optional[dict] = None,
-        tier: str = "stable"
+        tier: str = "stable",
+        model_cfg: Optional[dict] = None,
+        model_id: Optional[str] = None,
     ) -> tuple[str, str, str]:
         """
         Pure function: resolve env_key, accelerator, backend for a model (no side effects).
+        Uses universal capability matrix when model_cfg/model_id provided for parity with runtime.
         
         Args:
             model_path: Path to base model
             adapter_dir: Optional adapter directory
             profile_data: Hardware profile data (if None, auto-detected)
             tier: Environment capability tier "stable" | "edge" (defaults to "stable")
+            model_cfg: Optional model config (e.g. from llm_backends.yaml) for use_4bit etc.
+            model_id: Optional model id for gptq_backend and capability resolution
         
         Returns:
             Tuple of (env_key, accelerator, backend)
@@ -1671,20 +1676,32 @@ sys.exit(0)
             if not profile_data:
                 raise RuntimeError("Could not determine hardware profile")
         
-        # Detect model requirements
-        from core.envs.model_requirement_detector import detect_model_requirements
-        req = detect_model_requirements(model_path, adapter_dir)
+        # Use universal capability matrix when config available (onboarding + runtime parity)
+        if model_cfg is not None or model_id is not None:
+            from core.envs.capability_matrix import resolve_capability
+            cap = resolve_capability(
+                model_path=model_path,
+                model_cfg=model_cfg,
+                adapter_dir=adapter_dir,
+                model_id=model_id,
+            )
+            quant_for_env = cap.get("quant_for_env", "base")
+            backend_from_cap = "llamacpp" if cap.get("profile_id") == "llamacpp" else "tf"
+        else:
+            quant_for_env = None
+            backend_from_cap = None
+        
+        if quant_for_env is None:
+            # Fallback: detect from model requirement detector only
+            from core.envs.model_requirement_detector import detect_model_requirements
+            req = detect_model_requirements(model_path, adapter_dir)
+            quant_for_env = "bnb" if req.get("needs_bnb") else "base"
+            backend_from_cap = "llamacpp" if req.get("backend_required") == "llamacpp" else "tf"
         
         # Derive accelerator
         accelerator = self._derive_accelerator_from_profile(profile_data)
-        
-        # Choose backend and quant
-        if req["backend_required"] == "llamacpp":
-            backend = "llamacpp"
-            quant = None
-        else:
-            backend = "tf"
-            quant = "bnb" if req["needs_bnb"] else "base"
+        backend = backend_from_cap or "tf"
+        quant = quant_for_env if backend == "tf" else None
         
         # Resolve env_key with tier
         env_key = self.env_key_resolver.resolve_env_key(

@@ -12,9 +12,30 @@ from datetime import datetime
 from core.state_store import get_state_store
 from core.envs.model_requirement_detector import detect_model_requirements
 from core.envs.env_registry import EnvRegistry
+from core.envs.capability_matrix import (
+    get_runtime_required_packages,
+    BASE_PACKAGES,
+)
 from model_integrity_checker import ModelIntegrityChecker
 
 logger = logging.getLogger(__name__)
+
+
+def _get_model_cfg(model_id: Optional[str]) -> Dict[str, Any]:
+    """Load model config from llm_backends.yaml for parity with runtime capability resolution."""
+    if not model_id:
+        return {}
+    try:
+        from core.models import get_app_root
+        import yaml
+        config_path = get_app_root() / "configs" / "llm_backends.yaml"
+        if not config_path.exists():
+            return {}
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        return (cfg or {}).get("models", {}).get(model_id, {}) or {}
+    except Exception:
+        return {}
 
 
 def _get_gptq_backend_for_model(model_id: str) -> str:
@@ -124,12 +145,15 @@ class ModelOnboardingService:
             req = detect_model_requirements(base_model_path, adapter_dir)
             log(f"Detected requirements: {req}")
             
-            # Step 2: Resolve stable env_key (pure, no side effects)
+            # Step 2: Resolve stable env_key (pure, no side effects; use capability matrix for parity with runtime)
+            model_cfg = _get_model_cfg(model_id)
             stable_env_key, accelerator, backend = self.env_registry.resolve_env_for_model(
                 base_model_path,
                 adapter_dir,
                 profile_data,
-                tier="stable"
+                tier="stable",
+                model_cfg=model_cfg,
+                model_id=model_id,
             )
             log(f"Resolved stable env_key: {stable_env_key} (backend={backend}, accelerator={accelerator})")
             
@@ -254,7 +278,9 @@ class ModelOnboardingService:
                         base_model_path,
                         adapter_dir,
                         profile_data,
-                        tier="edge"
+                        tier="edge",
+                        model_cfg=model_cfg,
+                        model_id=model_id,
                     )
                     self.env_registry._create_or_upgrade_edge_env(
                         stable_env_key,
@@ -387,12 +413,18 @@ class ModelOnboardingService:
             
             log(f"Shard-complete integrity check passed")
             
-            # Step 9: Check for model-specific extra dependencies
+            # Step 9: Check for model-specific extra dependencies (universal capability matrix)
             log(f"Checking for model-specific extra dependencies")
-            required_packages = _get_required_packages_for_requirements(req, model_id)
+            required_packages = get_runtime_required_packages(
+                base_model_path,
+                model_cfg=model_cfg,
+                adapter_dir=adapter_dir,
+                model_id=model_id,
+            )
+            extra_packages = [p for p in required_packages if p not in BASE_PACKAGES]
             
-            if required_packages:
-                log(f"Model requires extra packages: {required_packages}")
+            if extra_packages:
+                log(f"Model requires extra packages: {extra_packages}")
                 log(f"Enforcing per-model isolation for extra dependencies.")
                 
                 # Resolve dedicated env key
@@ -407,7 +439,7 @@ class ModelOnboardingService:
                         final_env_key,
                         profile_data,
                         log_callback=log_callback,
-                        required_packages=required_packages,
+                        required_packages=extra_packages,
                     )
                     # Update final env to the dedicated one
                     final_env_key = dedicated_env_key
@@ -440,10 +472,10 @@ class ModelOnboardingService:
                     }
 
                 # Step 10: Run dependency probe (install model-specific packages into dedicated env)
-                log(f"Installing required packages into dedicated environment: {required_packages}")
+                log(f"Installing required packages into dedicated environment: {extra_packages}")
                 missing_packages = self.env_registry.check_missing_packages(
                     final_python_exe,
-                    required_packages
+                    extra_packages
                 )
                 
                 if missing_packages:
@@ -512,9 +544,9 @@ class ModelOnboardingService:
                     
                     log(f"Successfully installed and verified packages in dedicated env: {missing_packages}")
                 else:
-                    log(f"All required packages already present in dedicated env: {required_packages}")
+                    log(f"All required packages already present in dedicated env: {extra_packages}")
                     # GPTQ: verify CUDA kernels when auto-gptq was pre-installed (no install = no verification in auto_install)
-                    if "auto-gptq" in required_packages:
+                    if "auto-gptq" in extra_packages:
                         log("Verifying auto-gptq CUDA kernels...")
                         verify_ok, verify_err = self.env_registry._verify_autogptq_cuda_kernels(final_python_exe)
                         if not verify_ok:

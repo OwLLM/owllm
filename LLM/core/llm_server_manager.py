@@ -449,7 +449,9 @@ class LLMServerManager:
         from core.inference import get_app_root
         from core.gpu_config import get_chosen_gpu_index
         app_root = get_app_root()
+        # Deterministic resolution: GPU from gpu_config.json then nvidia-smi; port from YAML then conflict handling; interpreter from env (below).
         chosen_gpu = get_chosen_gpu_index(app_root, subprocess_flags=self.subprocess_flags)
+        log(f"Launch context: preferred_port from YAML, gpu={chosen_gpu if chosen_gpu is not None else 'default'}, interpreter from model env (resolved below)")
 
         # Check current VRAM usage before starting (warn if free is very low)
         # Use the selected GPU index so the warning reflects the GPU the server will use
@@ -826,7 +828,15 @@ class LLMServerManager:
                     other_port = other_cfg.get("port")
                     if other_port:
                         other_model_ports.add(other_port)
-            
+            # Exclude ports already in use by running/starting servers (deterministic conflict avoidance)
+            try:
+                for st in ("RUNNING", "STARTING"):
+                    for row in (self.state_store.list_servers(status=st) or []):
+                        p = row.get("port")
+                        if p is not None:
+                            other_model_ports.add(int(p))
+            except Exception:
+                pass
             # Also check ports in the standard range (10500-10600)
             candidate_ports = list(other_model_ports) + list(range(10500, 10601))
             
@@ -1006,108 +1016,113 @@ class LLMServerManager:
             )
             log(f"Using environment: {env_spec.key}")
             log(f"Python executable: {env_spec.python_executable}")
+            log(f"Resolved launch: interpreter={env_spec.python_executable}, gpu={chosen_gpu if chosen_gpu is not None else 'default'}, port={port}")
+            logger.info(
+                "RUNTIME_EVENT launch_resolved model_id=%s interpreter=%s gpu=%s port=%s",
+                model_id, env_spec.python_executable, chosen_gpu if chosen_gpu is not None else "default", port,
+            )
             
             # ENVIRONMENT-FIRST: Comprehensive validation and repair BEFORE model load
             log("Validating environment dependencies (environment-first approach)...")
             
-            # Check for critical packages.
-            # IMPORTANT: Do NOT require peft unless we're actually using an adapter.
-            # Requiring peft for *all* models causes pointless installs in dedicated envs
-            # (and risks version conflicts for models that don't use adapters).
-            adapter_dir = None
-            try:
-                adapter_dir = onboarding_entry.get("adapter_dir") or None
-            except Exception:
-                adapter_dir = None
-            if not adapter_dir:
-                try:
-                    adapter_dir = (self.config.get("models", {}).get(model_id, {}) or {}).get("adapter_dir") or None
-                except Exception:
-                    adapter_dir = None
-            needs_peft = bool(adapter_dir)
-            # On Windows, 4-bit base-model loading requires bitsandbytes.
-            # Without it we silently fall back to slow FP16 paths.
-            requires_bnb = False
-            try:
-                use_4bit_cfg = bool(model_cfg.get("use_4bit", True))
-                is_gptq_model = (model_path / "quantize_config.json").exists()
-                requires_bnb = (os.name == "nt" and use_4bit_cfg and not is_gptq_model)
-            except Exception:
-                requires_bnb = False
-
-            critical_packages = ["protobuf", "transformers", "tokenizers", "torch", "accelerate"]
-            if needs_peft:
-                critical_packages.append("peft")
-            if requires_bnb:
-                critical_packages.append("bitsandbytes")
+            # Check for critical packages using universal capability matrix (parity with onboarding).
+            from core.envs.capability_matrix import get_runtime_required_packages, BASE_PACKAGES as _BASE_PACKAGES
+            critical_packages = get_runtime_required_packages(
+                str(model_path),
+                model_cfg=model_cfg,
+                adapter_dir=onboarding_entry.get("adapter_dir") or (self.config.get("models", {}).get(model_id, {}) or {}).get("adapter_dir"),
+                model_id=model_id,
+            )
+            if not critical_packages:
+                critical_packages = list(_BASE_PACKAGES)
+            logger.info(
+                "RUNTIME_EVENT dependency_resolved model_id=%s env_key=%s packages_count=%s",
+                model_id, env_spec.key, len(critical_packages),
+            )
             missing_packages = self.env_registry.check_missing_packages(
-                env_spec.python_executable, 
+                env_spec.python_executable,
                 required_packages=critical_packages
             )
             
             if missing_packages:
                 log(f"Missing critical packages detected: {', '.join(missing_packages)}")
-                
-                # Check if this is a dedicated environment
-                is_dedicated = "--dedicated--" in env_spec.key
-                
-                # Runtime policy: DO NOT install/repair during chat startup.
-                # If a READY model is missing critical packages, it is not actually READY.
-                from datetime import datetime
-                log_dir = app_root / "logs" / "server_startup"
-                log_dir.mkdir(parents=True, exist_ok=True)
-                timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                safe_model_id = model_id.replace("/", "__").replace("\\", "__")
-                preflight_log_path = log_dir / f"{safe_model_id}_{timestamp}_env_preflight.log"
-                try:
-                    preflight_log_path.write_text(
-                        f"Missing critical packages in env '{env_spec.key}': {', '.join(missing_packages)}\n",
-                        encoding="utf-8",
-                        errors="replace",
-                    )
-                except Exception:
-                    pass
+                # Optional one-shot runtime auto-repair (opt-in via LLM_RUNTIME_AUTO_REPAIR=1)
+                auto_repair = os.environ.get("LLM_RUNTIME_AUTO_REPAIR", "").strip().lower() in ("1", "true", "yes")
+                if auto_repair:
+                    log("LLM_RUNTIME_AUTO_REPAIR enabled: attempting one-shot install of missing packages...")
+                    try:
+                        install_ok, install_err = self.env_registry.auto_install_missing_packages(
+                            env_spec.python_executable,
+                            missing_packages,
+                            log_callback=log,
+                        )
+                        if install_ok:
+                            recheck = self.env_registry.check_missing_packages(
+                                env_spec.python_executable,
+                                required_packages=critical_packages,
+                            )
+                            if not recheck:
+                                missing_packages = []
+                                log("Runtime auto-repair succeeded; revalidation passed.")
+                            else:
+                                log(f"After install, packages still missing: {recheck}")
+                        else:
+                            log(f"Runtime auto-repair install failed: {install_err[:200]}")
+                    except Exception as repair_ex:
+                        log(f"Runtime auto-repair error: {repair_ex}")
+                if missing_packages:
+                    # Fail-fast: mark BROKEN and raise (default behavior, or after failed auto-repair)
+                    is_dedicated = "--dedicated--" in env_spec.key
+                    from datetime import datetime
+                    log_dir = app_root / "logs" / "server_startup"
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                    safe_model_id = model_id.replace("/", "__").replace("\\", "__")
+                    preflight_log_path = log_dir / f"{safe_model_id}_{timestamp}_env_preflight.log"
+                    try:
+                        preflight_log_path.write_text(
+                            f"Missing critical packages in env '{env_spec.key}': {', '.join(missing_packages)}\n",
+                            encoding="utf-8",
+                            errors="replace",
+                        )
+                    except Exception:
+                        pass
 
-                try:
-                    self.state_store.upsert_onboarding(
-                        model_id=onboarding_id,
-                        base_model_path=str(model_path),
-                        adapter_dir=adapter_dir,
-                        env_key=env_spec.key,
-                        status="BROKEN",
-                        last_error=(
-                            f"Missing critical packages in environment '{env_spec.key}': {', '.join(missing_packages)}\n"
+                    try:
+                        self.state_store.upsert_onboarding(
+                            model_id=onboarding_id,
+                            base_model_path=str(model_path),
+                            adapter_dir=adapter_dir,
+                            env_key=env_spec.key,
+                            status="BROKEN",
+                            last_error=(
+                                f"Missing critical packages in environment '{env_spec.key}': {', '.join(missing_packages)}\n"
+                                f"Startup log: {preflight_log_path}"
+                            )[:2000],
+                        )
+                    except Exception:
+                        pass
+
+                    if is_dedicated:
+                        raise RuntimeError(
+                            f"Model environment is missing critical packages: {', '.join(missing_packages)}\n"
+                            f"The model has been marked BROKEN. Please re-onboard/repair this model before chatting.\n"
                             f"Startup log: {preflight_log_path}"
-                        )[:2000],
-                    )
-                except Exception:
-                    pass
+                        )
+                    else:
+                        raise RuntimeError(
+                            f"Missing critical packages in shared environment '{env_spec.key}': {', '.join(missing_packages)}\n"
+                            "Please re-onboard the model to create/refresh its dedicated environment, "
+                            "or click '🛡️ Isolation' on the model card.\n"
+                            f"Startup log: {preflight_log_path}"
+                        )
+            log("Environment dependencies validated - all critical packages present")
 
-                if is_dedicated:
-                    raise RuntimeError(
-                        f"Model environment is missing critical packages: {', '.join(missing_packages)}\n"
-                        f"The model has been marked BROKEN. Please re-onboard/repair this model before chatting.\n"
-                        f"Startup log: {preflight_log_path}"
-                    )
-                else:
-                    raise RuntimeError(
-                        f"Missing critical packages in shared environment '{env_spec.key}': {', '.join(missing_packages)}\n"
-                        "Please re-onboard the model to create/refresh its dedicated environment, "
-                        "or click '🛡️ Isolation' on the model card.\n"
-                        f"Startup log: {preflight_log_path}"
-                    )
-            else:
-                log("Environment dependencies validated - all critical packages present")
-            
             # Additional health check: verify environment can actually import and use transformers
             log("Running environment health check...")
             try:
-                # Keep this check aligned with critical_packages (peft is optional unless adapters are used).
-                health_imports = ["transformers", "tokenizers", "torch", "accelerate"]
-                if needs_peft:
-                    health_imports.append("peft")
-                if requires_bnb:
-                    health_imports.append("bitsandbytes")
+                # Use same package list as preflight (capability matrix).
+                health_imports = critical_packages
                 health_code = "\n".join([f"import {m}" for m in health_imports] + ["print('OK')"])
                 result = subprocess.run(
                     [str(env_spec.python_executable), "-c", health_code],
@@ -1123,6 +1138,7 @@ class LLMServerManager:
                         f"Environment may be corrupted. Please repair it in the Environment/Requirements tab."
                     )
                 log("Environment health check passed")
+                logger.info("RUNTIME_EVENT health_ready model_id=%s env_key=%s", model_id, env_spec.key)
             except Exception as e:
                 log(f"Environment health check error: {e}")
                 raise RuntimeError(
@@ -1192,6 +1208,7 @@ class LLMServerManager:
             
             # PHASE 1: Record server starting in StateStore
             from datetime import datetime
+            logger.info("RUNTIME_EVENT startup_starting model_id=%s port=%s interpreter=%s", model_id, port, env_spec.python_executable)
             self.state_store.upsert_server(
                 model_id=model_id,
                 pid=None,  # Will update after process starts
@@ -1732,17 +1749,11 @@ class LLMServerManager:
             except Exception:
                 pass
         
-        # Clean up
+        # Clean up (preserve startup log for diagnostics; user-facing errors reference log path)
         if model_id in self.running_servers:
             del self.running_servers[model_id]
-            
-            # Delete log file after reading
-            try:
-                if log_file_path and os.path.exists(log_file_path):
-                    os.remove(log_file_path)
-            except Exception:
-                pass
-        
+            # Do not remove startup log on timeout/failure so users can inspect it
+
         # Build error message
         if log_output:
             output_text = log_output
@@ -1773,6 +1784,18 @@ class LLMServerManager:
                 f"\nServer output:\n{output_text}"
             )
         logger.error(error_msg)
+        # Deterministic state transition: STARTING -> FAILED on timeout
+        try:
+            self.state_store.upsert_server(
+                model_id=model_id,
+                pid=None,
+                port=port,
+                status="FAILED",
+                last_error=(f"Server failed to become healthy within {self.warmup_timeout}s. "
+                            f"Status: {server_status}. {last_error or 'N/A'}")[:500],
+            )
+        except Exception:
+            pass
         # Mark onboarding BROKEN on warmup timeout; model is not usable until repaired/re-onboarded.
         try:
             broken_key = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)

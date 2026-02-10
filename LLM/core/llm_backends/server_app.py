@@ -57,19 +57,39 @@ _load_finished_at: float = 0.0
 # GPTQ backend selection: "auto-gptq" (default) or "exllamav2" when USE_EXLLAMAV2_GPTQ=true
 _gptq_backend: str = "auto-gptq"
 
-# Configurable max_new_tokens caps (env-driven). UI can request up to these; prevents OOM while honoring user settings.
-def _get_max_tokens_cap_multimodal() -> int:
+# Guardrails by family: cap from capability profile, env overrides applied in get_guardrail_max_tokens.
+def _resolve_guardrail_profile_id() -> str:
+    """Resolve profile_id from env (BASE_MODEL, USE_4BIT, ADAPTER_DIR, MODEL_NAME) for family-specific guardrails."""
+    base_model = (os.environ.get("BASE_MODEL") or "").strip()
+    if not base_model:
+        return "base"
     try:
-        return max(64, min(16384, int(os.environ.get("LLM_MAX_NEW_TOKENS_MULTIMODAL", "1024"))))
-    except ValueError:
-        return 1024
+        from core.envs.capability_matrix import resolve_capability
+        model_cfg = {
+            "use_4bit": (os.environ.get("USE_4BIT", "true").strip().lower() == "true"),
+            "adapter_dir": os.environ.get("ADAPTER_DIR") or None,
+        }
+        cap = resolve_capability(
+            base_model,
+            model_cfg=model_cfg,
+            adapter_dir=os.environ.get("ADAPTER_DIR") or None,
+            model_id=os.environ.get("MODEL_NAME") or None,
+        )
+        return cap.get("profile_id") or "base"
+    except Exception:
+        return "base"
+
+
+def _get_max_tokens_cap_multimodal() -> int:
+    """Family-aware cap for multimodal; env LLM_MAX_NEW_TOKENS_MULTIMODAL overrides profile default."""
+    from core.envs.capability_matrix import get_guardrail_max_tokens
+    return get_guardrail_max_tokens(_resolve_guardrail_profile_id(), is_multimodal=True)
 
 
 def _get_max_tokens_cap_text() -> int:
-    try:
-        return max(64, min(32768, int(os.environ.get("LLM_MAX_NEW_TOKENS_TEXT", "2048"))))
-    except ValueError:
-        return 2048
+    """Family-aware cap for text; env LLM_MAX_NEW_TOKENS_TEXT overrides profile default."""
+    from core.envs.capability_matrix import get_guardrail_max_tokens
+    return get_guardrail_max_tokens(_resolve_guardrail_profile_id(), is_multimodal=False)
 
 
 def _decode_images_to_pil(images: List[str]):
@@ -377,6 +397,10 @@ async def generate(request: GenerateRequest):
             logger.info(
                 f"max_new_tokens capped: requested={request.max_new_tokens}, cap={max_tokens_cap} "
                 f"({'multimodal' if processor else 'text'}). Set LLM_MAX_NEW_TOKENS_* env to change."
+            )
+            logger.info(
+                "RUNTIME_EVENT guardrail_cap_used cap=%s requested=%s multimodal=%s",
+                max_tokens_cap, request.max_new_tokens, processor is not None,
             )
         logger.debug(f"Generation request: prompt_len={len(request.prompt)}, max_tokens={effective_max_tokens}, temp={request.temperature}")
 

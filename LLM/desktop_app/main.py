@@ -720,6 +720,7 @@ class RepairThread(QThread):
             watchdog_thread.start()
             
             # Progress callback for real-time updates
+            current_file_status = "Preparing download..."
             def progress_callback(bytes_done: int, bytes_total: int):
                 if bytes_total > 0 and bytes_total >= bytes_done:
                     percent = int((bytes_done / bytes_total) * 100)
@@ -731,12 +732,18 @@ class RepairThread(QThread):
                     else:
                         percent = 0
                     self.progress.emit(percent)
+                    # Emit rich status text with live byte progress for GUI label.
+                    done_gb = bytes_done / (1024 ** 3)
+                    total_gb = bytes_total / (1024 ** 3)
+                    self.status.emit(f"{current_file_status}  |  {done_gb:.2f}/{total_gb:.2f} GB ({percent}%)")
                 else:
                     # Unknown total - emit based on bytes downloaded (rough estimate)
                     # ~1% per 50MB, but start from 0%
                     if bytes_done > 0:
                         estimated_percent = min(int(bytes_done / (50 * 1024 * 1024)), 99)
                         self.progress.emit(max(1, estimated_percent))  # At least 1% if we have bytes
+                        done_gb = bytes_done / (1024 ** 3)
+                        self.status.emit(f"{current_file_status}  |  {done_gb:.2f} GB downloaded")
                     else:
                         self.progress.emit(0)
             
@@ -750,6 +757,8 @@ class RepairThread(QThread):
                 if attempt > 1:
                     status_msg += f" - attempt {attempt}"
                 logger.info(status_msg)
+                nonlocal current_file_status
+                current_file_status = status_msg
                 # Emit status signal for UI display
                 self.status.emit(status_msg)
             
@@ -906,20 +915,20 @@ class RepairThread(QThread):
                             cache_dir=self.cache_dir
                         )
                     
-                    # Download all files (resume=False so corrupted same-size shards are replaced)
+                    # Download all files in resume mode so only missing parts are fetched.
                     try:
                         download_repo_files(
                             repo_id=self.model_id,
                             dest_dir=self.existing_dir,
                             token=token,
                             allow_patterns=None,  # Download everything
-                            resume=False,  # Force redownload so corrupted shards are replaced
+                            resume=True,  # Keep completed files and continue partial downloads
                             timeout_s=900,  # 15 min per file max for responsiveness
                             max_retries=2,
                             progress_callback=progress_callback,
                             status_callback=status_callback,
                             should_cancel=lambda: should_cancel() or stall_detected.is_set(),
-                            clean_locks=True,  # Force clean locks on repair
+                            clean_locks=True,  # Clean lock files while preserving resumable data
                             cache_dir=self.cache_dir
                         )
                     except Exception as download_error:
@@ -960,12 +969,20 @@ class DownloadThread(QThread):
     error = Signal(str)     # error message
     status = Signal(str)    # current status message (e.g., "Downloading model-00035-of-00061.bin (35/61)")
     
-    def __init__(self, model_id: str, target_dir: Path, cache_dir: Optional[Path] = None, token: Optional[str] = None):
+    def __init__(
+        self,
+        model_id: str,
+        target_dir: Path,
+        cache_dir: Optional[Path] = None,
+        token: Optional[str] = None,
+        allow_patterns: Optional[List[str]] = None,
+    ):
         super().__init__()
         self.model_id = model_id
         self.target_dir = target_dir
         self.cache_dir = cache_dir
         self.token = token
+        self.allow_patterns = allow_patterns
         import threading
         self._stop_requested = threading.Event()
     
@@ -1001,6 +1018,7 @@ class DownloadThread(QThread):
             dest = self.target_dir / model_slug
             
             # Progress callback for real-time updates
+            current_file_status = "Preparing download..."
             def progress_callback(bytes_done: int, bytes_total: int):
                 if bytes_total > 0 and bytes_total >= bytes_done:
                     percent = int((bytes_done / bytes_total) * 100)
@@ -1012,12 +1030,17 @@ class DownloadThread(QThread):
                     else:
                         percent = 0
                     self.progress.emit(percent)
+                    done_gb = bytes_done / (1024 ** 3)
+                    total_gb = bytes_total / (1024 ** 3)
+                    self.status.emit(f"{current_file_status}  |  {done_gb:.2f}/{total_gb:.2f} GB ({percent}%)")
                 else:
                     # Unknown total - emit based on bytes downloaded (rough estimate)
                     # ~1% per 50MB, start from 0%
                     if bytes_done > 0:
                         estimated_percent = min(int(bytes_done / (50 * 1024 * 1024)), 99)
                         self.progress.emit(max(1, estimated_percent))
+                        done_gb = bytes_done / (1024 ** 3)
+                        self.status.emit(f"{current_file_status}  |  {done_gb:.2f} GB downloaded")
                     else:
                         self.progress.emit(0)
             
@@ -1031,6 +1054,8 @@ class DownloadThread(QThread):
                 if attempt > 1:
                     status_msg += f" - attempt {attempt}"
                 logger.info(status_msg)
+                nonlocal current_file_status
+                current_file_status = status_msg
                 # Emit status signal for UI display
                 self.status.emit(status_msg)
             
@@ -1089,12 +1114,12 @@ class DownloadThread(QThread):
                     "This usually indicates a stalled connection, blocked download, or authentication issue."
                 )
             
-            # Download all remaining files
+            # Download all remaining files (or selected GGUF variants only)
             download_repo_files(
                 repo_id=self.model_id,
                 dest_dir=dest,
                 token=token,
-                allow_patterns=None,  # Download everything
+                allow_patterns=self.allow_patterns,  # None = everything
                 resume=True,  # Skip files that already exist
                 timeout_s=900,  # 15 min per file max for responsiveness
                 max_retries=2,
@@ -6447,20 +6472,7 @@ class MainWindow(QMainWindow):
             path_obj = Path(model_path)
             self._unlock_model_files(path_obj, log_callback=lambda m: self._log_models(m))
             
-            # Clean up .incomplete files that might block repair
-            try:
-                cache_dir = path_obj / ".cache" / "huggingface" / "download"
-                if cache_dir.exists():
-                    incomplete_files = list(cache_dir.rglob("*.incomplete"))
-                    if incomplete_files:
-                        self._log_models(f"Removing {len(incomplete_files)} incomplete download files...")
-                        for incomplete_file in incomplete_files:
-                            try:
-                                incomplete_file.unlink()
-                            except Exception:
-                                pass
-            except Exception as e:
-                self._log_models(f"Warning: Could not clean incomplete files: {e}")
+            # Keep .incomplete files so repair can resume instead of restarting from zero.
             
             # Find the card to show progress
             card = None
@@ -6521,6 +6533,7 @@ class MainWindow(QMainWindow):
             # Connect signals
             thread.progress.connect(lambda p: progress_bar.setValue(p))
             thread.status.connect(lambda msg: status_label.setText(msg))
+            thread.status.connect(lambda msg: self._update_progress_bar_text(progress_bar, "Repairing", msg))
             thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key, status_label))
             # Store repair info so we can look it up when error signal is received
             if not hasattr(self, '_repair_info'):
@@ -6927,6 +6940,96 @@ class MainWindow(QMainWindow):
         elif index == 1:  # Downloaded tab
             self.browse_tab_btn.setChecked(False)
             self.downloaded_tab_btn.setChecked(True)
+
+    def _update_progress_bar_text(self, progress_bar, prefix: str, status_msg: str) -> None:
+        """Show GB/GB details in progress bars when status includes them."""
+        try:
+            if not progress_bar:
+                return
+            msg = (status_msg or "").strip()
+            details = ""
+            if " | " in msg:
+                details = msg.split(" | ", 1)[1].strip()
+            if details:
+                progress_bar.setFormat(f"{prefix}... %p% | {details}")
+            else:
+                progress_bar.setFormat(f"{prefix}... %p%")
+        except Exception:
+            pass
+
+    def _fmt_size_short(self, size_bytes: Optional[int]) -> str:
+        """Format bytes for compact UI labels."""
+        try:
+            n = int(size_bytes or 0)
+        except Exception:
+            n = 0
+        if n <= 0:
+            return "unknown"
+        units = ["B", "KB", "MB", "GB", "TB"]
+        i = 0
+        v = float(n)
+        while v >= 1024.0 and i < len(units) - 1:
+            v /= 1024.0
+            i += 1
+        if i <= 1:
+            return f"{int(v)} {units[i]}"
+        return f"{v:.2f} {units[i]}"
+
+    def _guess_gguf_quant(self, filename: str) -> str:
+        """Best-effort quant tag extraction from GGUF filename."""
+        try:
+            import re
+            base = Path(filename).name
+            m = re.search(r"(IQ\d+_[A-Z0-9]+|Q\d+_[A-Z0-9]+|Q\d+_[0-9A-Z]+|Q\d+|F16|F32)", base, flags=re.IGNORECASE)
+            if m:
+                return m.group(1).upper()
+        except Exception:
+            pass
+        return "unknown"
+
+    def _prompt_gguf_variant_selection(self, model_id: str, token: Optional[str]) -> tuple[bool, Optional[List[str]]]:
+        """
+        Ask user to choose GGUF variant when repo exposes multiple .gguf files.
+        Returns: (proceed, allow_patterns). allow_patterns=None means download all files.
+        """
+        try:
+            from core.model_file_utils import list_repo_files
+            siblings = list_repo_files(model_id, token=token)
+            gguf_rows = []
+            for s in siblings:
+                name = s.get("rfilename", "")
+                if isinstance(name, str) and name.lower().endswith(".gguf"):
+                    gguf_rows.append((name, int(s.get("size", 0) or 0)))
+            if len(gguf_rows) <= 1:
+                return True, None
+
+            items = ["Download all GGUF variants (default)"]
+            item_to_file: Dict[str, Optional[str]] = {items[0]: None}
+            for name, size in sorted(gguf_rows, key=lambda x: x[0].lower()):
+                quant = self._guess_gguf_quant(name)
+                label = f"{Path(name).name}  [{quant}]  ({self._fmt_size_short(size)})"
+                items.append(label)
+                item_to_file[label] = name
+
+            choice, ok = QInputDialog.getItem(
+                self,
+                "Choose GGUF quantization",
+                f"'{model_id}' has multiple GGUF variants.\nSelect one variant to download (or keep all).",
+                items,
+                0,
+                False,
+            )
+            if not ok:
+                return False, None
+            selected = item_to_file.get(choice)
+            if selected:
+                self._log_models(f"GGUF selection: downloading only {Path(selected).name}")
+                return True, [selected]
+            return True, None
+        except Exception as e:
+            # Non-blocking: fallback to old behavior (download all files)
+            self._log_models(f"[WARNING] Could not load GGUF variants for selection: {e}")
+            return True, None
     
     def _on_search_text_changed(self, text: str):
         """Handle search text changes - return to curated view when cleared"""
@@ -6967,6 +7070,12 @@ class MainWindow(QMainWindow):
         # If this repo is gated/private and no token is set, show clear guidance and abort
         if getattr(card, "requires_token", False) and not self._resolve_hf_token():
             self._show_gated_no_token_dialog(model_id, parent_win=self)
+            return
+
+        token = self._resolve_hf_token()
+        proceed, selected_patterns = self._prompt_gguf_variant_selection(model_id, token)
+        if not proceed:
+            self._log_models(f"Cancelled download for {model_id}")
             return
         
         # IMMEDIATELY disable button to prevent double-clicks
@@ -7022,13 +7131,20 @@ class MainWindow(QMainWindow):
         card.layout().addWidget(progress_bar)
         
         # Create download thread with central cache
-        thread = DownloadThread(model_id, target, cache_dir=self.hf_cache_dir, token=self._resolve_hf_token())
+        thread = DownloadThread(
+            model_id,
+            target,
+            cache_dir=self.hf_cache_dir,
+            token=token,
+            allow_patterns=selected_patterns,
+        )
         
         # Mark as active BEFORE starting
         self.active_downloads[model_id] = (thread, card)
         
         # Connect signals
         thread.progress.connect(lambda p: progress_bar.setValue(p))
+        thread.status.connect(lambda msg: self._update_progress_bar_text(progress_bar, "Downloading", msg))
         thread.finished.connect(lambda dest: self._on_download_complete(model_id, dest, card, progress_bar))
         thread.error.connect(lambda err: self._on_download_error(model_id, err, card, progress_bar))
         
@@ -7928,6 +8044,7 @@ class MainWindow(QMainWindow):
             # Connect signals
             thread.progress.connect(lambda p: progress_bar.setValue(p))
             thread.status.connect(lambda msg: status_label.setText(msg) if status_label else None)
+            thread.status.connect(lambda msg: self._update_progress_bar_text(progress_bar, "Redownloading", msg))
             thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key, status_label))
             thread.error.connect(lambda err: self._on_repair_error(model_id, err, card, progress_bar, repair_key))
             
@@ -8007,54 +8124,8 @@ class MainWindow(QMainWindow):
                 card.repair_btn.setText("🔧 Fix")
             return
         
-        # Auto force-fresh download after a repair crash/failure (only once)
-        if not getattr(card, "_force_fresh_attempted", False):
-            card._force_fresh_attempted = True
-            self._log_models(f"↻ Repair failed; forcing fresh download for {model_id}...")
-            
-            # Disable repair button while force-fresh runs
-            if hasattr(card, 'repair_btn'):
-                card.repair_btn.setEnabled(False)
-                card.repair_btn.setText("⏳ Redownloading...")
-            
-            # New progress bar for force-fresh download
-            fresh_bar = QProgressBar()
-            fresh_bar.setMinimum(0)
-            fresh_bar.setMaximum(100)
-            fresh_bar.setValue(0)
-            fresh_bar.setTextVisible(True)
-            fresh_bar.setFormat("Redownloading... %p%")
-            fresh_bar.setStyleSheet("""
-                QProgressBar {
-                    border: none;
-                    border-radius: 4px;
-                    text-align: center;
-                    background-color: #262730;
-                    color: white;
-                    font-weight: bold;
-                    height: 30px;
-                }
-                QProgressBar::chunk {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
-                        stop:0 #ffa500, stop:1 #ff8c00);
-                    border-radius: 4px;
-                }
-            """)
-            card.layout().addWidget(fresh_bar)
-            
-            # Start force-fresh repair thread
-            path = Path(card.model_path)
-            thread = RepairThread(model_id, path, force_fresh_only=True, token=self._resolve_hf_token())
-            fresh_key = f"repair_fresh_{model_id}"
-            self.active_downloads[fresh_key] = (thread, card)
-            
-            thread.progress.connect(lambda p: fresh_bar.setValue(p))
-            thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, fresh_bar, fresh_key))
-            thread.error.connect(lambda err: self._on_repair_error(model_id, err, card, fresh_bar, fresh_key))
-            thread.start()
-            return
-        
-        # Restore repair button if fresh attempt also failed
+        # Keep local partial files after failure so the next repair can resume.
+        # Do not auto-force a full redownload on generic network/stall failures.
         if hasattr(card, 'repair_btn'):
             card.repair_btn.setEnabled(True)
             card.repair_btn.setText("🔧 Fix")
@@ -8173,6 +8244,20 @@ class MainWindow(QMainWindow):
                     likes=likes_text,
                     compatibility_badge=compatibility_badge
                 )
+                # Keep search cards visually consistent with curated cards.
+                # Curated cards often render taller because they include descriptions.
+                # Lock search result card height to the first curated card when available.
+                try:
+                    target_h = None
+                    if hasattr(self, "model_cards") and self.model_cards:
+                        ref_card = self.model_cards[0]
+                        target_h = int(ref_card.sizeHint().height() or ref_card.height() or 0)
+                    if not target_h or target_h < 220:
+                        target_h = 280
+                    card.setMinimumHeight(target_h)
+                    card.setMaximumHeight(target_h)
+                except Exception:
+                    pass
                 card.set_theme(self.dark_mode)
                 # FIXED: Connect to the correct download handler for search results
                 card.download_clicked.connect(lambda mid=model_id: self._download_model_by_id(mid))

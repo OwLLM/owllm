@@ -91,7 +91,7 @@ def list_repo_files(repo_id: str, token: Optional[str] = None) -> List[Dict]:
         raise RuntimeError(f"Network error listing files for {repo_id}: {e}")
 
 
-def clean_download_locks(dest_dir: Path) -> None:
+def clean_download_locks(dest_dir: Path, remove_incomplete: bool = False) -> None:
     """
     Aggressively clean all HuggingFace download locks and incomplete files.
     Call this before attempting to delete/redownload a model.
@@ -103,7 +103,10 @@ def clean_download_locks(dest_dir: Path) -> None:
             import time
             import sys
             import subprocess
-            for pattern in ["*.lock", "*.incomplete"]:
+            patterns = ["*.lock"]
+            if remove_incomplete:
+                patterns.append("*.incomplete")
+            for pattern in patterns:
                 for lockfile in cache_dir.glob(pattern):
                     try:
                         if sys.platform == "win32":
@@ -509,7 +512,8 @@ def download_repo_files(
     
     # Clean up locks if requested (for repair operations)
     if clean_locks:
-        clean_download_locks(dest_dir)
+        # Preserve resumable partials during resume-mode repairs/downloads.
+        clean_download_locks(dest_dir, remove_incomplete=(force_fresh or (not resume)))
     
     # Get file list
     siblings = list_repo_files(repo_id, token)
@@ -664,14 +668,16 @@ def download_repo_files(
         return dest_dir
         
     except Exception as e:
-        # Clean up incomplete downloads and locks
-        logger.warning(f"Download failed, cleaning up incomplete files in {dest_dir}")
+        # Clean up stale lock files; preserve partial chunks in resume mode.
+        logger.warning(f"Download failed, cleaning up lock files in {dest_dir}")
         try:
             cache_dir = dest_dir / ".cache" / "huggingface" / "download"
             if cache_dir.exists():
-                # Remove all .lock and .incomplete files
-                import glob
-                for pattern in ["*.lock", "*.incomplete"]:
+                # Remove .lock always; remove .incomplete only when not resuming.
+                patterns = ["*.lock"]
+                if not resume:
+                    patterns.append("*.incomplete")
+                for pattern in patterns:
                     for lockfile in cache_dir.glob(pattern):
                         try:
                             lockfile.unlink(missing_ok=True)

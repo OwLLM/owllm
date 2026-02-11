@@ -27,8 +27,12 @@ def apply_create_no_window(proc: "QProcess") -> None:
     try:
         import subprocess
         CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+        STARTF_USESHOWWINDOW = getattr(subprocess, "STARTF_USESHOWWINDOW", 0x00000001)
+        SW_HIDE = getattr(subprocess, "SW_HIDE", 0)
     except ImportError:
         CREATE_NO_WINDOW = 0x08000000
+        STARTF_USESHOWWINDOW = 0x00000001
+        SW_HIDE = 0
 
     def modifier(args):
         # Qt 6 CreateProcessArguments: may expose flags or dwCreationFlags depending on bindings
@@ -36,5 +40,13 @@ def apply_create_no_window(proc: "QProcess") -> None:
             args.flags = getattr(args, "flags", 0) | CREATE_NO_WINDOW
         if hasattr(args, "dwCreationFlags"):
             args.dwCreationFlags = getattr(args, "dwCreationFlags", 0) | CREATE_NO_WINDOW
+        # Some Qt builds expose startupInfo; hide window explicitly there as well.
+        si = getattr(args, "startupInfo", None)
+        if si is not None:
+            try:
+                si.dwFlags = getattr(si, "dwFlags", 0) | STARTF_USESHOWWINDOW
+                si.wShowWindow = SW_HIDE
+            except Exception:
+                pass
 
     proc.setCreateProcessArgumentsModifier(modifier)

@@ -120,6 +120,52 @@ class ModelIntegrityChecker:
         
         # Initialize missing_files list before any branch uses it
         missing_files: List[str] = []
+
+        # GGUF models follow a different completeness contract than transformers models.
+        # If GGUF files exist, consider the model complete when:
+        # - no selection marker: at least one .gguf exists
+        # - selection marker exists: all selected GGUF files exist
+        gguf_files = [f for f in files if f.lower().endswith(".gguf")]
+        if gguf_files:
+            marker_path = model_path / ".selected_weights.json"
+            selected_missing: List[str] = []
+            try:
+                if marker_path.exists():
+                    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                    patterns = marker.get("allow_patterns")
+                    if isinstance(patterns, list) and patterns:
+                        # Require all selected patterns to exist for "complete".
+                        existing_set = set(gguf_files)
+                        for pat in patterns:
+                            if not isinstance(pat, str) or not pat.strip():
+                                continue
+                            name = Path(pat).name
+                            if name not in existing_set:
+                                selected_missing.append(name)
+            except Exception:
+                # Ignore marker parse failures; fallback to presence-based completeness.
+                selected_missing = []
+
+            is_complete_gguf = (len(selected_missing) == 0)
+            if selected_missing:
+                missing_files.append(
+                    "selected gguf missing: " + ", ".join(selected_missing[:5]) +
+                    ("..." if len(selected_missing) > 5 else "")
+                )
+
+            # For GGUF, config/tokenizer checks do not apply.
+            model_id = self._extract_model_id(model_path, model_name)
+            estimated_size = self._estimate_model_size(model_path)
+            return ModelStatus(
+                model_path=model_path,
+                model_name=model_name,
+                has_config=False,
+                has_weights=True,
+                is_complete=is_complete_gguf,
+                missing_files=missing_files,
+                model_id=model_id,
+                estimated_size_mb=estimated_size
+            )
         
         # Check for config
         has_config = 'config.json' in files

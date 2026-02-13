@@ -44,6 +44,35 @@ void OpenLogInNotepad(const std::wstring& logPath) {
     ShellExecuteW(NULL, L"open", L"notepad.exe", logPath.c_str(), NULL, SW_SHOW);
 }
 
+// Prefer pythonw.exe for GUI scripts to avoid console flash. If pythonExe path points to
+// python.exe, returns path to pythonw.exe in same dir if it exists, else returns pythonExe.
+std::wstring PreferPythonWForGui(const std::wstring& pythonExe) {
+    if (pythonExe.empty()) return pythonExe;
+    size_t n = pythonExe.size();
+    if (n < 11) return pythonExe;
+    const wchar_t* p = pythonExe.c_str();
+    if (_wcsicmp(p + n - 10, L"python.exe") != 0)
+        return pythonExe;
+    std::wstring pythonw = pythonExe.substr(0, n - 10) + L"pythonw.exe";
+    return FileExists(pythonw) ? pythonw : pythonExe;
+}
+
+// Run a batch file with no console window (CREATE_NO_WINDOW). Used for installer fallbacks
+// so Launcher.exe does not flash CMD. Returns true if process was started successfully.
+bool RunBatchNoWindow(const std::wstring& batPath, const std::wstring& workingDir) {
+    std::wstring cmd = L"cmd.exe /c \"" + batPath + L"\"";
+    STARTUPINFOW si = {0};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {0};
+    BOOL ok = CreateProcessW(NULL, &cmd[0], NULL, NULL, FALSE, CREATE_NO_WINDOW,
+        NULL, workingDir.c_str(), &si, &pi);
+    if (ok) {
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+    return !!ok;
+}
+
 // Helper to read cleanup request JSON
 bool ReadCleanupRequest(const std::wstring& exeDir, std::wstring& modelDir) {
     std::wstring requestFile = exeDir + L"\\logs\\cleanup_request.json";
@@ -632,19 +661,19 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
     
     if (!venvComplete) {
-        // Venv doesn't exist - launch installer GUI via bootstrap
+        // Venv doesn't exist - launch installer GUI via bootstrap (no console window)
         std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
         if (FileExists(runInstallerBat)) {
-            // Use run_installer.bat which ensures bootstrap is used
-            ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
-            return 0;
-        } else {
-            // Fallback: try bootstrap_launcher.bat first, then installer_gui.py
-            std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
-            if (FileExists(bootstrapBat)) {
-                ShellExecuteW(NULL, L"open", bootstrapBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+            if (RunBatchNoWindow(runInstallerBat, exeDir))
                 return 0;
-            }
+        }
+        std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
+        if (FileExists(bootstrapBat)) {
+            if (RunBatchNoWindow(bootstrapBat, exeDir))
+                return 0;
+        }
+        {
+            // Fallback: installer_gui.py
             
             std::wstring installerGui = exeDir + L"\\installer_gui.py";
             if (FileExists(installerGui)) {
@@ -657,7 +686,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                     pythonToUse = FindSystemPython();
                 }
                 if (!pythonToUse.empty()) {
-                    ShellExecuteW(NULL, L"open", pythonToUse.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+                    std::wstring guiPython = PreferPythonWForGui(pythonToUse);
+                    ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
                     return 0;
                 }
             } else {
@@ -683,42 +713,32 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     int healthCheckResult = LaunchPythonApp(exeDir, venvPython, healthCheckCmd, healthCheckLog);
     
     if (healthCheckResult != 0) {
-        // PySide6 is broken - launch installer GUI via bootstrap
+        // PySide6 is broken - launch installer GUI via bootstrap (no console window)
         std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
-        if (FileExists(runInstallerBat)) {
-            ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+        if (FileExists(runInstallerBat) && RunBatchNoWindow(runInstallerBat, exeDir))
             return 0;
-            } else {
-                // Try bootstrap launcher first
-                std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
-                if (FileExists(bootstrapBat)) {
-                    ShellExecuteW(NULL, L"open", bootstrapBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
-                    return 0;
-                }
-                
-                std::wstring installerGui = exeDir + L"\\installer_gui.py";
-                if (FileExists(installerGui)) {
-                    // Use self-contained Python if available, otherwise system Python
-                    std::wstring pythonToUse = systemPython;
-                    if (pythonToUse.empty()) {
-                        pythonToUse = CheckSelfContainedPython(exeDir);
-                    }
-                    if (pythonToUse.empty()) {
-                        pythonToUse = FindSystemPython();
-                    }
-                    if (!pythonToUse.empty()) {
-                        ShellExecuteW(NULL, L"open", pythonToUse.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
-                        return 0;
-                    }
-            } else {
-                MessageBoxW(NULL,
-                    L"Critical dependencies are broken and installer GUI is not available.\n\n"
-                    L"Please run the setup manually or check the installation.",
-                    L"Setup Required",
-                    MB_OK | MB_ICONERROR);
-                return 1;
+        std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
+        if (FileExists(bootstrapBat) && RunBatchNoWindow(bootstrapBat, exeDir))
+            return 0;
+        std::wstring installerGui = exeDir + L"\\installer_gui.py";
+        if (FileExists(installerGui)) {
+            std::wstring pythonToUse = systemPython;
+            if (pythonToUse.empty())
+                pythonToUse = CheckSelfContainedPython(exeDir);
+            if (pythonToUse.empty())
+                pythonToUse = FindSystemPython();
+            if (!pythonToUse.empty()) {
+                std::wstring guiPython = PreferPythonWForGui(pythonToUse);
+                ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
+                return 0;
             }
         }
+        MessageBoxW(NULL,
+            L"Critical dependencies are broken and installer GUI is not available.\n\n"
+            L"Please run the setup manually or check the installation.",
+            L"Setup Required",
+            MB_OK | MB_ICONERROR);
+        return 1;
     }
     
     // Step 4: Dependency health check - Verify critical packages are installed
@@ -731,44 +751,33 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         int dependencyCheckResult = LaunchPythonApp(exeDir, venvPython, dependencyCheckCmd, dependencyCheckLog);
         
         if (dependencyCheckResult != 0) {
-            // Dependencies are missing or wrong - launch installer GUI via bootstrap
+            // Dependencies are missing or wrong - launch installer GUI via bootstrap (no console window)
             std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
-            if (FileExists(runInstallerBat)) {
-                // Use run_installer.bat which ensures bootstrap is used
-                ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
-                return 0;  // Exit - installer GUI will handle repair
-            } else {
-                // Fallback: try bootstrap_launcher.bat first, then installer_gui.py
-                std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
-                if (FileExists(bootstrapBat)) {
-                    ShellExecuteW(NULL, L"open", bootstrapBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+            if (FileExists(runInstallerBat) && RunBatchNoWindow(runInstallerBat, exeDir))
+                return 0;
+            std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
+            if (FileExists(bootstrapBat) && RunBatchNoWindow(bootstrapBat, exeDir))
+                return 0;
+            std::wstring installerGui = exeDir + L"\\installer_gui.py";
+            if (FileExists(installerGui)) {
+                std::wstring pythonToUse = systemPython;
+                if (pythonToUse.empty())
+                    pythonToUse = CheckSelfContainedPython(exeDir);
+                if (pythonToUse.empty())
+                    pythonToUse = FindSystemPython();
+                if (!pythonToUse.empty()) {
+                    std::wstring guiPython = PreferPythonWForGui(pythonToUse);
+                    ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
                     return 0;
                 }
-                
-                std::wstring installerGui = exeDir + L"\\installer_gui.py";
-                if (FileExists(installerGui)) {
-                    // Use self-contained Python if available, otherwise system Python
-                    std::wstring pythonToUse = systemPython;
-                    if (pythonToUse.empty()) {
-                        pythonToUse = CheckSelfContainedPython(exeDir);
-                    }
-                    if (pythonToUse.empty()) {
-                        pythonToUse = FindSystemPython();
-                    }
-                    if (!pythonToUse.empty()) {
-                        ShellExecuteW(NULL, L"open", pythonToUse.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
-                        return 0;
-                    }
-                } else {
-                    MessageBoxW(NULL,
-                        L"Critical dependencies are missing or have wrong versions.\n\n"
-                        L"Installer GUI is not available.\n"
-                        L"Please run the setup manually or check the installation.",
-                        L"Setup Required",
-                        MB_OK | MB_ICONERROR);
-                    return 1;
-                }
             }
+            MessageBoxW(NULL,
+                L"Critical dependencies are missing or have wrong versions.\n\n"
+                L"Installer GUI is not available.\n"
+                L"Please run the setup manually or check the installation.",
+                L"Setup Required",
+                MB_OK | MB_ICONERROR);
+            return 1;
         }
     } else {
         // Dependency check script missing - log warning but continue
@@ -904,16 +913,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             return 0;
         }
         
-        // Fallback to installer
-        if (FileExists(runInstallerBat)) {
-            ShellExecuteW(NULL, L"open", runInstallerBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+        // Fallback to installer (no console window)
+        if (FileExists(runInstallerBat) && RunBatchNoWindow(runInstallerBat, exeDir))
             return 0;
-        }
-        
-        if (FileExists(bootstrapBat)) {
-            ShellExecuteW(NULL, L"open", bootstrapBat.c_str(), NULL, exeDir.c_str(), SW_SHOW);
+        if (FileExists(bootstrapBat) && RunBatchNoWindow(bootstrapBat, exeDir))
             return 0;
-        }
         
         if (FileExists(installerGui)) {
             // Try to find Python to run installer (use systemPython from earlier in function)
@@ -925,7 +929,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 pythonToUse = FindSystemPython();
             }
             if (!pythonToUse.empty()) {
-                ShellExecuteW(NULL, L"open", pythonToUse.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+                std::wstring guiPython = PreferPythonWForGui(pythonToUse);
+                ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
                 return 0;
             }
         }

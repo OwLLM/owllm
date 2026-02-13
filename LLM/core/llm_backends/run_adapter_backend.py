@@ -11,6 +11,8 @@ import torch
 import warnings
 import logging
 import platform
+import json
+from pathlib import Path
 
 # Suppress known warnings
 warnings.filterwarnings("ignore", message=".*quantization_config.*")
@@ -129,6 +131,188 @@ def _load_multimodal_model(model_path_str: str, use_4bit: bool, bnb_ok: bool):
     return processor, model
 
 
+class _LlamaCppWrapper:
+    """Small wrapper so generate_text can route GGUF calls."""
+
+    def __init__(self, llm, model_path: str):
+        self.llm = llm
+        self.model_path = model_path
+        self._is_llamacpp = True
+
+
+def _extract_base_model_id_for_gguf(model_dir: Path) -> str:
+    """Best-effort base model id for transformers GGUF loading."""
+    # 1) Explicit override
+    env_id = (os.environ.get("LLM_GGUF_BASE_MODEL_ID") or "").strip()
+    if env_id:
+        return env_id
+
+    # 2) README frontmatter: base_model: <org/repo>
+    readme = model_dir / "README.md"
+    if readme.exists():
+        try:
+            text = readme.read_text(encoding="utf-8", errors="replace")
+            lines = text.splitlines()
+            for i, raw in enumerate(lines):
+                line = (raw or "").strip()
+                if line.lower().startswith("base_model:"):
+                    val = line.split(":", 1)[1].strip()
+                    if val:
+                        return val
+                    # YAML list style:
+                    # base_model:
+                    # - org/repo
+                    for j in range(i + 1, min(i + 6, len(lines))):
+                        nxt = (lines[j] or "").strip()
+                        if not nxt:
+                            continue
+                        if nxt.startswith("-"):
+                            cand = nxt.lstrip("-").strip()
+                            if cand:
+                                return cand
+                        # stop on next top-level key
+                        if ":" in nxt and not nxt.startswith("-"):
+                            break
+
+                # Fallback: parse explicit HF links in README text.
+                marker = "huggingface.co/"
+                if marker in line.lower():
+                    low = line.lower()
+                    idx = low.find(marker)
+                    if idx >= 0:
+                        tail = line[idx + len(marker):].strip().strip("[]()")
+                        if tail:
+                            repo = tail.split()[0].strip().strip("/")
+                            if "/" in repo:
+                                return repo
+        except Exception:
+            pass
+
+    # 3) Folder fallback
+    name = model_dir.name
+    if "__" in name:
+        return name.replace("__", "/")
+    return name
+
+
+def _pick_gguf_file(model_dir: Path) -> Path:
+    """Pick GGUF file for runtime, preferring active_variant from marker."""
+    marker = model_dir / ".selected_weights.json"
+    if marker.exists():
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+            active = data.get("active_variant")
+            if isinstance(active, str) and active.strip():
+                cand = (model_dir / active).resolve()
+                if cand.exists() and cand.is_file() and cand.suffix.lower() == ".gguf":
+                    return cand
+        except Exception:
+            pass
+    ggufs = sorted(model_dir.rglob("*.gguf"))
+    if not ggufs:
+        raise ValueError(f"No .gguf files found in model directory: {model_dir}")
+    return ggufs[0]
+
+
+def _load_gguf_model(model_dir: Path):
+    """Load GGUF with llama-cpp-python first, then ctransformers fallback."""
+    gguf_path = _pick_gguf_file(model_dir)
+    n_ctx = int(os.environ.get("LLM_LLAMACPP_N_CTX", "4096"))
+    n_threads = int(os.environ.get("LLM_LLAMACPP_N_THREADS", str(max(1, (os.cpu_count() or 4) // 2))))
+
+    # Try llama-cpp-python first when available.
+    try:
+        from llama_cpp import Llama  # type: ignore
+
+        # Default CPU-safe; users can override if they installed a CUDA-enabled llama-cpp build.
+        n_gpu_layers = int(os.environ.get("LLM_LLAMACPP_N_GPU_LAYERS", "0"))
+        logging.info(
+            "Loading GGUF via llama-cpp-python: file=%s, n_ctx=%s, n_threads=%s, n_gpu_layers=%s",
+            str(gguf_path),
+            n_ctx,
+            n_threads,
+            n_gpu_layers,
+        )
+        llm = Llama(
+            model_path=str(gguf_path),
+            n_ctx=n_ctx,
+            n_threads=n_threads,
+            n_gpu_layers=n_gpu_layers,
+            verbose=False,
+        )
+        return None, _LlamaCppWrapper(llm, str(gguf_path)), None
+    except Exception as llama_err:
+        logging.info("llama-cpp-python unavailable or failed, trying ctransformers backend: %s", llama_err)
+
+    # Fallback: ctransformers (works without local C++ toolchain on many Windows setups).
+    try:
+        from ctransformers import AutoModelForCausalLM  # type: ignore
+
+        gpu_layers = int(os.environ.get("LLM_CTRANSFORMERS_GPU_LAYERS", "0"))
+        model = AutoModelForCausalLM.from_pretrained(
+            str(model_dir),
+            model_file=gguf_path.name,
+            gpu_layers=gpu_layers,
+            context_length=n_ctx,
+            threads=n_threads,
+        )
+        wrapper = _LlamaCppWrapper(model, str(gguf_path))
+        wrapper._is_ctransformers = True
+        logging.info(
+            "Loaded GGUF via ctransformers: file=%s, context_length=%s, threads=%s, gpu_layers=%s",
+            str(gguf_path),
+            n_ctx,
+            n_threads,
+            gpu_layers,
+        )
+        return None, wrapper, None
+    except Exception as ct_err:
+        logging.info("ctransformers unavailable or failed, trying transformers GGUF fallback: %s", ct_err)
+
+    # Final fallback: transformers native GGUF support.
+    try:
+        primary_id = _extract_base_model_id_for_gguf(model_dir)
+        candidates = [primary_id]
+        # Common GLM fallback for quant repos that reference a custom fork/tokenizer backend.
+        if "glm-4.7-flash" in primary_id.lower() and "zai-org/GLM-4.7-Flash" not in candidates:
+            candidates.append("zai-org/GLM-4.7-Flash")
+        folder_id = model_dir.name.replace("__", "/")
+        if folder_id not in candidates:
+            candidates.append(folder_id)
+
+        last_err = None
+        for base_model_id in candidates:
+            try:
+                logging.info(
+                    "Loading GGUF via transformers fallback: base_model_id=%s, gguf=%s",
+                    base_model_id,
+                    str(gguf_path),
+                )
+                tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
+                model_kwargs = dict(
+                    gguf_file=str(gguf_path),
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                )
+                if torch.cuda.is_available():
+                    model_kwargs["device_map"] = "auto"
+                    model_kwargs["torch_dtype"] = torch.float16
+                else:
+                    model_kwargs["device_map"] = None
+                model = AutoModelForCausalLM.from_pretrained(base_model_id, **model_kwargs)
+                return tokenizer, model, None
+            except Exception as ex:
+                last_err = ex
+                logging.warning("Transformers GGUF fallback failed for base '%s': %s", base_model_id, ex)
+                continue
+        raise RuntimeError(f"Transformers GGUF fallback failed for all base candidates: {candidates}. Last error: {last_err}")
+    except Exception as tf_err:
+        raise RuntimeError(
+            "GGUF runtime backend failed for this model. "
+            "Tried llama-cpp-python, ctransformers, and transformers GGUF fallback."
+        ) from tf_err
+
+
 def _bitsandbytes_available() -> bool:
     # Allow 4-bit on Windows if bitsandbytes is actually importable.
     # Older code disabled it unconditionally on Windows, which forces FP16 and can make large models "hang".
@@ -211,9 +395,6 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
     tokenizer = None
     
     # Normalize base_model path early - ensure it's a proper string
-    import os
-    from pathlib import Path
-    
     # Check if it looks like a local file path (contains path separators or starts with drive letter on Windows)
     is_local_path = os.sep in base_model or (os.name == 'nt' and len(base_model) > 1 and base_model[1] == ':')
     
@@ -224,6 +405,9 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
             raise ValueError(f"Model path does not exist: {base_model}")
         if not model_path.is_dir():
             raise ValueError(f"Model path is not a directory: {base_model}")
+        # GGUF path: use llama-cpp backend and bypass transformers config checks.
+        if list(model_path.rglob("*.gguf")):
+            return _load_gguf_model(model_path)
         # Check for essential model files
         config_file = model_path / "config.json"
         if not config_file.exists():
@@ -974,6 +1158,39 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
         model_type: "instruct" or "base" - determines prompt formatting
         system_prompt: Optional system prompt for instruct models
     """
+    if getattr(model, "_is_llamacpp", False):
+        if model_type == "instruct" and system_prompt:
+            formatted_prompt = f"{system_prompt}\n\nUser: {prompt}\nAssistant:"
+        else:
+            formatted_prompt = f"{prompt}"
+        try:
+            if getattr(model, "_is_ctransformers", False):
+                text = model.llm(
+                    formatted_prompt,
+                    max_new_tokens=int(max_new_tokens),
+                    temperature=float(temperature),
+                )
+                text = (text or "").strip()
+                if not text:
+                    raise RuntimeError("ctransformers returned empty response")
+                return text
+            resp = model.llm.create_completion(
+                prompt=formatted_prompt,
+                max_tokens=int(max_new_tokens),
+                temperature=float(temperature),
+            )
+            text = (
+                ((resp or {}).get("choices") or [{}])[0].get("text", "")
+                if isinstance(resp, dict)
+                else ""
+            )
+            text = (text or "").strip()
+            if not text:
+                raise RuntimeError("llama-cpp returned empty response")
+            return text
+        except Exception as e:
+            raise RuntimeError(f"GGUF generation failed: {e}") from e
+
     model.eval()
     device = next(model.parameters()).device
     

@@ -550,6 +550,19 @@ model_path = Path(r"{model_path_escaped}")
 adapter_dir = {f'Path(r"{adapter_dir_escaped}")' if adapter_dir else 'None'}
 
 try:
+    # GGUF-only models don't have transformers config.json.
+    # Accept either a direct .gguf file path or a directory containing .gguf files.
+    if model_path.is_file() and model_path.suffix.lower() == ".gguf":
+        print("PROBE: SUCCESS (GGUF file)")
+        sys.exit(0)
+    if model_path.is_dir():
+        gguf_files = list(model_path.rglob("*.gguf"))
+    else:
+        gguf_files = []
+    if gguf_files:
+        print("PROBE: SUCCESS (GGUF)")
+        sys.exit(0)
+
     # Step 1: Try to load config
     config_path = model_path / "config.json"
     if not config_path.exists():

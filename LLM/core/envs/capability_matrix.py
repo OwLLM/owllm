@@ -105,7 +105,7 @@ def resolve_capability(
     if req.get("backend_required") == "llamacpp":
         return {
             "profile_id": "llamacpp",
-            "required_packages": [],  # not used for llamacpp in same way
+            "required_packages": [],
             "quant_for_env": "base",
             "needs_peft": False,
             "needs_bnb": False,

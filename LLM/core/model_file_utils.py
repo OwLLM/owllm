@@ -171,7 +171,8 @@ def kill_processes_locking_directory(dest_dir: Path) -> None:
                                 subprocess.run(
                                     ['taskkill', '/F', '/PID', str(pid)],
                                     capture_output=True,
-                                    timeout=3
+                                    timeout=3,
+                                    **SUBPROCESS_FLAGS
                                 )
                     except (ValueError, IndexError):
                         pass
@@ -518,18 +519,27 @@ def download_repo_files(
     # Get file list
     siblings = list_repo_files(repo_id, token)
     
-    # Filter by patterns if specified
+    # Filter by patterns if specified (match full rfilename or basename for flexibility)
     if allow_patterns:
         import fnmatch
+        all_rfilenames = [sib.get("rfilename", "") for sib in siblings if sib.get("rfilename")]
         filtered = []
         for sib in siblings:
             rfilename = sib.get("rfilename", "")
-            if any(fnmatch.fnmatch(rfilename, pattern) for pattern in allow_patterns):
-                filtered.append(sib)
+            if not rfilename:
+                continue
+            basename = Path(rfilename).name
+            for pattern in allow_patterns:
+                if fnmatch.fnmatch(rfilename, pattern) or fnmatch.fnmatch(basename, pattern):
+                    filtered.append(sib)
+                    break
         siblings = filtered
-    
-    if not siblings:
-        raise RuntimeError(f"No files match patterns {allow_patterns} in {repo_id}")
+        if not siblings:
+            sample = (all_rfilenames[:20] + ["..."] if len(all_rfilenames) > 20 else all_rfilenames)
+            raise RuntimeError(
+                f"No files match patterns {allow_patterns} in {repo_id}. "
+                f"Available files (sample): {sample}"
+            )
     
     # Calculate total size (use actual file sizes, not API-reported sizes which can be 0)
     # For progress tracking, we'll track actual downloaded bytes vs estimated total
@@ -616,7 +626,78 @@ def download_repo_files(
                     if cache_dir:
                         download_kwargs["cache_dir"] = str(cache_dir)
                     
+                    # Stream in-flight progress while hf_hub_download blocks.
+                    # This keeps GUI progress moving continuously instead of only per-file.
+                    import threading
+                    monitor_stop = threading.Event()
+                    monitor_thread = None
+
+                    def _estimate_inflight_bytes() -> int:
+                        # Prefer local destination file if it is being written directly.
+                        try:
+                            if local_path.exists():
+                                return int(local_path.stat().st_size)
+                        except Exception:
+                            pass
+
+                        # Fallback: inspect newest .incomplete in HF cache/download dirs.
+                        monitor_dirs = []
+                        if cache_dir:
+                            monitor_dirs.append(Path(cache_dir))
+                        monitor_dirs.append(dest_dir / ".cache" / "huggingface" / "download")
+
+                        newest_size = 0
+                        newest_mtime = 0.0
+                        now_ts = time.time()
+                        for d in monitor_dirs:
+                            try:
+                                if not d.exists():
+                                    continue
+                                for f in d.rglob("*.incomplete"):
+                                    try:
+                                        st = f.stat()
+                                        # Ignore stale leftovers from old runs
+                                        if (now_ts - st.st_mtime) > 1800:
+                                            continue
+                                        if st.st_mtime >= newest_mtime:
+                                            newest_mtime = st.st_mtime
+                                            newest_size = int(st.st_size)
+                                    except Exception:
+                                        continue
+                            except Exception:
+                                continue
+                        return newest_size
+
+                    baseline_bytes = _estimate_inflight_bytes()
+
+                    def _progress_monitor():
+                        while not monitor_stop.is_set():
+                            try:
+                                inflight = _estimate_inflight_bytes()
+                                current_file_done = max(0, inflight - baseline_bytes)
+                                if file_size > 0:
+                                    current_file_done = min(current_file_done, file_size)
+                                if progress_callback:
+                                    progress_callback(downloaded_bytes + current_file_done, total_size)
+                            except Exception:
+                                pass
+                            monitor_stop.wait(0.8)
+
+                    try:
+                        monitor_thread = threading.Thread(target=_progress_monitor, daemon=True)
+                        monitor_thread.start()
+                    except Exception:
+                        monitor_thread = None
+
                     downloaded_path = hf_hub_download(**download_kwargs)
+
+                    # Stop progress monitor cleanly.
+                    monitor_stop.set()
+                    if monitor_thread is not None:
+                        try:
+                            monitor_thread.join(timeout=1.0)
+                        except Exception:
+                            pass
                     
                     # Verify file was written
                     if not Path(downloaded_path).exists():

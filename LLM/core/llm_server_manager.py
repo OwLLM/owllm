@@ -960,12 +960,17 @@ class LLMServerManager:
                     f"Please check the model path in llm_backends.yaml"
                 )
             
-            # Check for common model file patterns
-            model_files = list(model_path.glob("*.safetensors")) + list(model_path.glob("*.bin"))
+            # Check for common model file patterns (HF + GGUF).
+            # Use rglob so nested layouts are accepted too.
+            model_files = (
+                list(model_path.rglob("*.safetensors"))
+                + list(model_path.rglob("*.bin"))
+                + list(model_path.rglob("*.gguf"))
+            )
             if not model_files:
                 raise RuntimeError(
                     f"No model files found in {model_path}\n"
-                    f"Expected .safetensors or .bin files. The model may not be downloaded correctly."
+                    f"Expected .safetensors, .bin, or .gguf files. The model may not be downloaded correctly."
                 )
             
             log(f"Found {len(model_files)} model files, starting server...")
@@ -1406,7 +1411,7 @@ class LLMServerManager:
                                 if "FileNotFoundError" in log_text or "No such file" in log_text:
                                     # Extract model path from error
                                     import re
-                                    match = re.search(r'No such file.*?([^\s]+\.(?:safetensors|bin))', log_text)
+                                    match = re.search(r'No such file.*?([^\s]+\.(?:safetensors|bin|gguf))', log_text)
                                     if match:
                                         missing_file = match.group(1)
                                         raise RuntimeError(

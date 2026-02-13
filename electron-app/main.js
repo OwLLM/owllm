@@ -104,7 +104,8 @@ async function startStreamlit() {
     '--server.address', '127.0.0.1'
   ], {
     env: { ...process.env, ELECTRON_MODE: '1' },
-    cwd: path.dirname(guiPath)
+    cwd: path.dirname(guiPath),
+    windowsHide: true
   });
   
   streamlitProcess.stdout.on('data', (data) => {

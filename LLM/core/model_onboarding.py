@@ -124,6 +124,17 @@ class ModelOnboardingService:
             if log_callback:
                 log_callback(msg)
             logger.info(msg)
+
+        # Normalize model path for onboarding.
+        # If caller passed a specific GGUF file, onboarding should operate on its parent model directory.
+        try:
+            p = Path(base_model_path).resolve()
+            if p.is_file() and p.suffix.lower() == ".gguf":
+                base_model_path = str(p.parent)
+            else:
+                base_model_path = str(p)
+        except Exception:
+            pass
         
         # Set status to BUILDING
         self.state_store.upsert_onboarding(
@@ -144,6 +155,7 @@ class ModelOnboardingService:
             log(f"Detecting requirements for model: {model_id}")
             req = detect_model_requirements(base_model_path, adapter_dir)
             log(f"Detected requirements: {req}")
+            is_gguf = str(req.get("quantization", "")).lower() == "gguf"
             
             # Step 2: Resolve stable env_key (pure, no side effects; use capability matrix for parity with runtime)
             model_cfg = _get_model_cfg(model_id)
@@ -215,14 +227,41 @@ class ModelOnboardingService:
                         "healthcheck_log_path": log_path
                     }
             
-            # Step 6: Run model load probe on stable env
-            log(f"Running model load probe on stable env: {stable_env_key}")
-            probe_success, probe_reason, probe_error = self.env_registry.run_model_load_probe(
-                stable_python_exe,
-                base_model_path,
-                adapter_dir,
-                log_callback=log_callback
-            )
+            # Step 6: Run model load probe on stable env (skip transformers probe for GGUF-only models)
+            if is_gguf:
+                gguf_files = list(Path(base_model_path).rglob("*.gguf"))
+                if not gguf_files:
+                    error_msg = "GGUF model selected but no .gguf files found at model path."
+                    log(f"Model onboarding failed: {error_msg}")
+                    self.state_store.upsert_onboarding(
+                        model_id=model_id,
+                        base_model_path=base_model_path,
+                        adapter_dir=adapter_dir,
+                        env_key=stable_env_key,
+                        backend=backend,
+                        accelerator=accelerator,
+                        status="BROKEN",
+                        last_error=error_msg,
+                        healthcheck_log_path=log_path
+                    )
+                    return {
+                        "status": "BROKEN",
+                        "env_key": stable_env_key,
+                        "backend": backend,
+                        "accelerator": accelerator,
+                        "last_error": error_msg,
+                        "healthcheck_log_path": log_path
+                    }
+                log(f"GGUF model detected ({len(gguf_files)} file(s)); skipping transformers config probe.")
+                probe_success, probe_reason, probe_error = True, None, None
+            else:
+                log(f"Running model load probe on stable env: {stable_env_key}")
+                probe_success, probe_reason, probe_error = self.env_registry.run_model_load_probe(
+                    stable_python_exe,
+                    base_model_path,
+                    adapter_dir,
+                    log_callback=log_callback
+                )
             
             final_env_key = stable_env_key
             final_python_exe = stable_python_exe
@@ -382,36 +421,39 @@ class ModelOnboardingService:
                 log(f"Model load probe passed on stable env: {stable_env_key}")
             
             # Step 8: Run shard-complete integrity check
-            log(f"Running shard-complete integrity check for model: {model_id}")
-            integrity_checker = ModelIntegrityChecker()
-            integrity_status = integrity_checker.check_model(Path(base_model_path))
-            
-            if not integrity_status.is_complete:
-                error_msg = f"Model integrity check failed. Missing: {', '.join(integrity_status.missing_files)}"
-                log(f"Model onboarding failed: {error_msg}")
+            if is_gguf:
+                log("Skipping transformers shard integrity check for GGUF model.")
+            else:
+                log(f"Running shard-complete integrity check for model: {model_id}")
+                integrity_checker = ModelIntegrityChecker()
+                integrity_status = integrity_checker.check_model(Path(base_model_path))
                 
-                self.state_store.upsert_onboarding(
-                    model_id=model_id,
-                    base_model_path=base_model_path,
-                    adapter_dir=adapter_dir,
-                    env_key=final_env_key,
-                    backend=backend,
-                    accelerator=accelerator,
-                    status="BROKEN",
-                    last_error=error_msg,
-                    healthcheck_log_path=log_path
-                )
+                if not integrity_status.is_complete:
+                    error_msg = f"Model integrity check failed. Missing: {', '.join(integrity_status.missing_files)}"
+                    log(f"Model onboarding failed: {error_msg}")
+                    
+                    self.state_store.upsert_onboarding(
+                        model_id=model_id,
+                        base_model_path=base_model_path,
+                        adapter_dir=adapter_dir,
+                        env_key=final_env_key,
+                        backend=backend,
+                        accelerator=accelerator,
+                        status="BROKEN",
+                        last_error=error_msg,
+                        healthcheck_log_path=log_path
+                    )
+                    
+                    return {
+                        "status": "BROKEN",
+                        "env_key": final_env_key,
+                        "backend": backend,
+                        "accelerator": accelerator,
+                        "last_error": error_msg,
+                        "healthcheck_log_path": log_path
+                    }
                 
-                return {
-                    "status": "BROKEN",
-                    "env_key": final_env_key,
-                    "backend": backend,
-                    "accelerator": accelerator,
-                    "last_error": error_msg,
-                    "healthcheck_log_path": log_path
-                }
-            
-            log(f"Shard-complete integrity check passed")
+                log(f"Shard-complete integrity check passed")
             
             # Step 9: Check for model-specific extra dependencies (universal capability matrix)
             log(f"Checking for model-specific extra dependencies")

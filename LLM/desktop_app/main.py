@@ -14,9 +14,9 @@ from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnviro
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
-    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox, QStyleOptionButton, QDialog
+    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox, QStyleOptionButton, QDialog, QDialogButtonBox, QAbstractItemView
 )
-from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap, QPainter, QPen, QColor
+from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap, QPainter, QPen, QColor, QBrush
 
 # Feature flag for hybrid frame wrapper (enabled by default)
 # To disable: set USE_HYBRID_FRAME=0 before running
@@ -614,13 +614,14 @@ class RepairThread(QThread):
     error = Signal(str)     # error message
     status = Signal(str)    # current status message (e.g., "Downloading model-00035-of-00061.bin (35/61)")
     
-    def __init__(self, model_id: str, existing_dir: Path, force_fresh_only: bool = False, cache_dir: Optional[Path] = None, token: Optional[str] = None):
+    def __init__(self, model_id: str, existing_dir: Path, force_fresh_only: bool = False, cache_dir: Optional[Path] = None, token: Optional[str] = None, allow_patterns: Optional[List[str]] = None):
         super().__init__()
         self.model_id = model_id
         self.existing_dir = existing_dir
         self.force_fresh_only = force_fresh_only
         self.cache_dir = cache_dir
         self.token = token
+        self.allow_patterns = allow_patterns  # When set, repair only these files (e.g. single GGUF)
         import threading
         self._stop_requested = threading.Event()
     
@@ -721,7 +722,19 @@ class RepairThread(QThread):
             
             # Progress callback for real-time updates
             current_file_status = "Preparing download..."
+            last_progress_bytes = 0
+            last_progress_ts = 0.0
             def progress_callback(bytes_done: int, bytes_total: int):
+                nonlocal last_progress_bytes, last_progress_ts
+                now_ts = time.time()
+                speed_suffix = ""
+                if last_progress_ts > 0 and bytes_done >= last_progress_bytes:
+                    dt = max(1e-6, now_ts - last_progress_ts)
+                    bps = (bytes_done - last_progress_bytes) / dt
+                    if bps > 0:
+                        speed_suffix = f" | {bps / (1024 * 1024):.1f} MB/s"
+                last_progress_bytes = max(last_progress_bytes, bytes_done)
+                last_progress_ts = now_ts
                 if bytes_total > 0 and bytes_total >= bytes_done:
                     percent = int((bytes_done / bytes_total) * 100)
                     # Allow 100% when bytes_done >= bytes_total (download complete)
@@ -853,23 +866,43 @@ class RepairThread(QThread):
                                 "Please close other applications and try again."
                             )
                 
-                # Directory deleted - now download fresh
+                # Directory deleted - now download fresh (metadata first, then weights/selected)
                 self.progress.emit(25)
                 logger.info(f"Starting FRESH download for {self.model_id}")
+                fresh_metadata = [
+                    "*.json", "*.txt", "*.md", "*.model", "*.tiktoken",
+                    "tokenizer.*", "vocab.*", "merges.txt", "special_tokens_map.json",
+                    "config.json", "generation_config.json", "tokenizer.json"
+                ]
                 try:
                     download_repo_files(
                         repo_id=self.model_id,
                         dest_dir=self.existing_dir,
                         token=token,
-                        allow_patterns=None,
+                        allow_patterns=fresh_metadata,
                         resume=False,
+                        timeout_s=120,
+                        max_retries=2,
+                        progress_callback=progress_callback,
+                        status_callback=status_callback,
+                        should_cancel=lambda: should_cancel() or stall_detected.is_set(),
+                        clean_locks=True,
+                        force_fresh=False,
+                        cache_dir=self.cache_dir
+                    )
+                    download_repo_files(
+                        repo_id=self.model_id,
+                        dest_dir=self.existing_dir,
+                        token=token,
+                        allow_patterns=self.allow_patterns,
+                        resume=True,
                         timeout_s=900,
                         max_retries=2,
                         progress_callback=progress_callback,
                         status_callback=status_callback,
                         should_cancel=lambda: should_cancel() or stall_detected.is_set(),
                         clean_locks=True,
-                        force_fresh=False,  # Already cleaned above
+                        force_fresh=False,
                         cache_dir=self.cache_dir
                     )
                 except Exception as download_error:
@@ -915,13 +948,13 @@ class RepairThread(QThread):
                             cache_dir=self.cache_dir
                         )
                     
-                    # Download all files in resume mode so only missing parts are fetched.
+                    # Download remaining files in resume mode (or only allow_patterns if set).
                     try:
                         download_repo_files(
                             repo_id=self.model_id,
                             dest_dir=self.existing_dir,
                             token=token,
-                            allow_patterns=None,  # Download everything
+                            allow_patterns=self.allow_patterns,  # None = everything; else e.g. single GGUF
                             resume=True,  # Keep completed files and continue partial downloads
                             timeout_s=900,  # 15 min per file max for responsiveness
                             max_retries=2,
@@ -1000,6 +1033,7 @@ class DownloadThread(QThread):
     def run(self):
         try:
             import os
+            import time
             from core.model_file_utils import download_repo_files
             import logging
             logger = logging.getLogger(__name__)
@@ -1019,7 +1053,19 @@ class DownloadThread(QThread):
             
             # Progress callback for real-time updates
             current_file_status = "Preparing download..."
+            last_progress_bytes = 0
+            last_progress_ts = 0.0
             def progress_callback(bytes_done: int, bytes_total: int):
+                nonlocal last_progress_bytes, last_progress_ts
+                now_ts = time.time()
+                speed_suffix = ""
+                if last_progress_ts > 0 and bytes_done >= last_progress_bytes:
+                    dt = max(1e-6, now_ts - last_progress_ts)
+                    bps = (bytes_done - last_progress_bytes) / dt
+                    if bps > 0:
+                        speed_suffix = f" | {bps / (1024 * 1024):.1f} MB/s"
+                last_progress_bytes = max(last_progress_bytes, bytes_done)
+                last_progress_ts = now_ts
                 if bytes_total > 0 and bytes_total >= bytes_done:
                     percent = int((bytes_done / bytes_total) * 100)
                     # Allow 100% when bytes_done >= bytes_total (download complete)
@@ -1032,7 +1078,7 @@ class DownloadThread(QThread):
                     self.progress.emit(percent)
                     done_gb = bytes_done / (1024 ** 3)
                     total_gb = bytes_total / (1024 ** 3)
-                    self.status.emit(f"{current_file_status}  |  {done_gb:.2f}/{total_gb:.2f} GB ({percent}%)")
+                    self.status.emit(f"{current_file_status}  |  {done_gb:.2f}/{total_gb:.2f} GB ({percent}%){speed_suffix}")
                 else:
                     # Unknown total - emit based on bytes downloaded (rough estimate)
                     # ~1% per 50MB, start from 0%
@@ -1040,7 +1086,7 @@ class DownloadThread(QThread):
                         estimated_percent = min(int(bytes_done / (50 * 1024 * 1024)), 99)
                         self.progress.emit(max(1, estimated_percent))
                         done_gb = bytes_done / (1024 ** 3)
-                        self.status.emit(f"{current_file_status}  |  {done_gb:.2f} GB downloaded")
+                        self.status.emit(f"{current_file_status}  |  {done_gb:.2f} GB downloaded{speed_suffix}")
                     else:
                         self.progress.emit(0)
             
@@ -1061,6 +1107,7 @@ class DownloadThread(QThread):
             
             # Start with metadata-only preflight
             self.progress.emit(1)
+            self.status.emit("Phase 1: downloading metadata (config, tokenizer, etc.)...")
             metadata_patterns = [
                 "*.json", "*.txt", "*.md", "*.model", "*.tiktoken",
                 "tokenizer.*", "vocab.*", "merges.txt", "special_tokens_map.json",
@@ -1115,6 +1162,10 @@ class DownloadThread(QThread):
                 )
             
             # Download all remaining files (or selected GGUF variants only)
+            if self.allow_patterns:
+                self.status.emit(f"Phase 2: downloading selected weights ({len(self.allow_patterns)} file(s))...")
+            else:
+                self.status.emit("Phase 2: downloading weights and remaining files...")
             download_repo_files(
                 repo_id=self.model_id,
                 dest_dir=dest,
@@ -3091,6 +3142,9 @@ class MainWindow(QMainWindow):
             model_path_obj = Path(model_path).resolve()
             if not model_path_obj.exists():
                 raise ValueError(f"Model path does not exist: {model_path}")
+            # Runtime may provide a concrete GGUF file path; config tracks model directories.
+            if model_path_obj.is_file() and model_path_obj.suffix.lower() == ".gguf":
+                model_path_obj = model_path_obj.parent
             model_path_str = str(model_path_obj)
         except Exception as e:
             raise ValueError(f"Invalid model path: {model_path} - {e}")
@@ -3285,6 +3339,54 @@ class MainWindow(QMainWindow):
         )
         
         return model_id
+
+    def _resolve_chat_model_id_from_path(self, model_path: str) -> str:
+        """
+        Resolve model_id for runtime chat flows.
+        If a model is already READY in onboarding but missing from llm_backends.yaml,
+        create a config entry once so chat does not get stuck in re-onboard loops.
+        """
+        try:
+            return self._resolve_model_id_from_path(model_path, allow_create=False)
+        except Exception as e:
+            err = str(e).lower()
+            if "not in config" not in err:
+                raise
+
+            # Only auto-register if this exact model path is already READY in onboarding.
+            try:
+                target = Path(model_path).resolve()
+                if target.suffix.lower() == ".gguf":
+                    target = target.parent
+                target_norm = str(target).lower()
+            except Exception:
+                raise
+
+            ready_match = False
+            try:
+                ready_rows = self.state_store.list_onboarding_by_status("READY") or []
+                for row in ready_rows:
+                    base = row.get("base_model_path")
+                    if not base:
+                        continue
+                    try:
+                        row_path = Path(str(base)).resolve()
+                        if row_path.suffix.lower() == ".gguf":
+                            row_path = row_path.parent
+                        row_norm = str(row_path).lower()
+                    except Exception:
+                        row_norm = str(base).lower()
+                    if row_norm == target_norm:
+                        ready_match = True
+                        break
+            except Exception:
+                ready_match = False
+
+            if not ready_match:
+                raise
+
+            # One-time config registration for READY model, then return resolved key.
+            return self._resolve_model_id_from_path(model_path, allow_create=True)
     
     def _create_status_widget(self, label: str, is_ok: bool, detail: str) -> QWidget:
         """Create a status indicator widget"""
@@ -4817,6 +4919,8 @@ class MainWindow(QMainWindow):
             card.set_theme(self.dark_mode)
         for card in self.downloaded_model_cards:
             card.set_theme(self.dark_mode)
+        for card in getattr(self, "search_model_cards", []):
+            card.set_theme(self.dark_mode)
         # Update metric cards
         for card in self.metric_cards:
             card.set_theme(self.dark_mode)
@@ -5943,6 +6047,8 @@ class MainWindow(QMainWindow):
                             has_files = False
                         
                         is_incomplete = not status.is_complete or is_active_download or not has_files
+                        # Prevent contradictory UI (READY ribbon on incomplete cards).
+                        display_onboarding_status = "BROKEN" if is_incomplete else onboarding_status
                         
                         if is_incomplete:
                             if is_active_download:
@@ -5969,7 +6075,7 @@ class MainWindow(QMainWindow):
                             icons, 
                             is_incomplete=is_incomplete,
                             compatibility_badge=compatibility_badge,
-                            onboarding_status=onboarding_status,
+                            onboarding_status=display_onboarding_status,
                             env_key=env_key
                         )
                         if cached_stats and (cached_stats.get("gated") or cached_stats.get("private")):
@@ -6522,9 +6628,34 @@ class MainWindow(QMainWindow):
             status_label.setWordWrap(True)
             card.layout().addWidget(status_label)
             
+            # Prefer persisted selected-weights marker; fallback to local GGUF inference.
+            repair_allow_patterns = None
+            try:
+                marker_path = path_obj / ".selected_weights.json"
+                if marker_path.exists():
+                    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                    pats = marker.get("allow_patterns")
+                    if isinstance(pats, list):
+                        repair_allow_patterns = [str(p) for p in pats if isinstance(p, str) and p.strip()]
+                        if repair_allow_patterns:
+                            self._log_models(f"  Repair will re-download selected subset ({len(repair_allow_patterns)} file(s)).")
+                if not repair_allow_patterns:
+                    from core.model_file_utils import list_repo_files
+                    local_gguf = list(path_obj.rglob("*.gguf"))
+                    if local_gguf:
+                        siblings = list_repo_files(model_id, token=self._resolve_hf_token())
+                        repo_gguf = [s.get("rfilename", "") for s in siblings if (s.get("rfilename") or "").lower().endswith(".gguf")]
+                        if len(repo_gguf) > 1 and len(local_gguf) == 1:
+                            match_name = local_gguf[0].name
+                            for r in repo_gguf:
+                                if Path(r).name == match_name:
+                                    repair_allow_patterns = [r]
+                                    self._log_models(f"  Repair will re-download only: {match_name}")
+                                    break
+            except Exception:
+                pass
             # Create repair thread (resume-first, non-destructive)
-            # Use central cache to keep locks out of model folder
-            thread = RepairThread(model_id, path_obj, force_fresh_only=False, cache_dir=self.hf_cache_dir, token=self._resolve_hf_token())
+            thread = RepairThread(model_id, path_obj, force_fresh_only=False, cache_dir=self.hf_cache_dir, token=self._resolve_hf_token(), allow_patterns=repair_allow_patterns)
             
             # Mark as active
             repair_key = f"repair_{model_id}"
@@ -6987,49 +7118,151 @@ class MainWindow(QMainWindow):
             pass
         return "unknown"
 
+    def _gguf_quant_weight(self, quant: str) -> int:
+        """Heuristic weight ranking for GGUF quants (higher = heavier)."""
+        q = (quant or "").upper()
+        if "F32" in q:
+            return 100
+        if "F16" in q:
+            return 95
+        if q.startswith("Q8") or "Q8_" in q:
+            return 80
+        if q.startswith("Q6") or "Q6_" in q:
+            return 65
+        if q.startswith("Q5") or "Q5_" in q:
+            return 55
+        if q.startswith("Q4") or "Q4_" in q:
+            return 45
+        if q.startswith("IQ4"):
+            return 42
+        if q.startswith("Q3") or "Q3_" in q:
+            return 35
+        if q.startswith("IQ3"):
+            return 33
+        if q.startswith("Q2") or "Q2_" in q:
+            return 25
+        if q.startswith("IQ2"):
+            return 23
+        return 40
+
     def _prompt_gguf_variant_selection(self, model_id: str, token: Optional[str]) -> tuple[bool, Optional[List[str]]]:
         """
         Ask user to choose GGUF variant when repo exposes multiple .gguf files.
         Returns: (proceed, allow_patterns). allow_patterns=None means download all files.
+        Uses index-based mapping and shows FITS/TOO LARGE by VRAM; no silent download-all on error.
         """
+        from core.model_file_utils import list_repo_files
         try:
-            from core.model_file_utils import list_repo_files
             siblings = list_repo_files(model_id, token=token)
-            gguf_rows = []
-            for s in siblings:
-                name = s.get("rfilename", "")
-                if isinstance(name, str) and name.lower().endswith(".gguf"):
-                    gguf_rows.append((name, int(s.get("size", 0) or 0)))
-            if len(gguf_rows) <= 1:
-                return True, None
-
-            items = ["Download all GGUF variants (default)"]
-            item_to_file: Dict[str, Optional[str]] = {items[0]: None}
-            for name, size in sorted(gguf_rows, key=lambda x: x[0].lower()):
-                quant = self._guess_gguf_quant(name)
-                label = f"{Path(name).name}  [{quant}]  ({self._fmt_size_short(size)})"
-                items.append(label)
-                item_to_file[label] = name
-
-            choice, ok = QInputDialog.getItem(
-                self,
-                "Choose GGUF quantization",
-                f"'{model_id}' has multiple GGUF variants.\nSelect one variant to download (or keep all).",
-                items,
-                0,
-                False,
-            )
-            if not ok:
-                return False, None
-            selected = item_to_file.get(choice)
-            if selected:
-                self._log_models(f"GGUF selection: downloading only {Path(selected).name}")
-                return True, [selected]
-            return True, None
         except Exception as e:
-            # Non-blocking: fallback to old behavior (download all files)
-            self._log_models(f"[WARNING] Could not load GGUF variants for selection: {e}")
+            self._log_models(f"[WARNING] Could not list repo files for GGUF selection: {e}")
+            reply = QMessageBox.question(
+                self,
+                "GGUF selection unavailable",
+                f"Could not load the list of GGUF files for this model.\n\nError: {e}\n\n"
+                "Do you want to download all files anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                self._log_models("User chose to download all files after listing failure.")
+                return True, None
+            self._log_models("User cancelled download after listing failure.")
+            return False, None
+
+        gguf_rows = []
+        for s in siblings:
+            name = s.get("rfilename", "")
+            if isinstance(name, str) and name.lower().endswith(".gguf"):
+                quant = self._guess_gguf_quant(name)
+                gguf_rows.append((name, int(s.get("size", 0) or 0), quant))
+        if len(gguf_rows) <= 1:
+            self._log_models("Single or no GGUF variant; downloading all files.")
             return True, None
+
+        # Sort strictly from heaviest to lightest.
+        # Known sizes use byte size; unknown sizes fall back to quant heaviness.
+        gguf_rows.sort(
+            key=lambda x: (x[1] > 0, x[1] if x[1] > 0 else self._gguf_quant_weight(x[2])),
+            reverse=True,
+        )
+        vram_gb = float(getattr(self, "user_vram_gb", 0) or 0)
+        if vram_gb <= 0:
+            # Avoid "all red" when VRAM detection fails; use a practical fallback.
+            vram_gb = 8.0
+            self._log_models("[WARNING] VRAM detection unavailable. Using 8 GB estimate for GGUF fit colors.")
+        vram_bytes = vram_gb * (1024 ** 3)
+
+        # Build list of (rfilename, display_label, fits_vram)
+        file_list: List[str] = []
+        labels_with_fit: List[Tuple[str, bool]] = []
+        for name, size, quant in gguf_rows:
+            file_list.append(name)
+            size_str = self._fmt_size_short(size)
+            # Fit rule:
+            # - Known size: FITS when file size <= VRAM
+            # - Unknown size: use quant heuristic; only clearly heavy quants are TOO LARGE
+            if size <= 0:
+                quant_weight = self._gguf_quant_weight(quant)
+                fits = quant_weight < 80  # Q8/F16/F32 default to red; others green
+                prefix = "[FITS]" if fits else "[TOO LARGE]"
+            else:
+                fits = size <= vram_bytes
+                prefix = "[FITS]" if fits else "[TOO LARGE]"
+            labels_with_fit.append((f"{prefix}  {Path(name).name}  [{quant}]  ({size_str})", fits))
+
+        # Custom dialog with colorized multi-select list.
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Choose GGUF quantization")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            f"'{model_id}' has multiple GGUF variants.\n"
+            "Select one or more to download (or select 'Download all')."
+        ))
+        list_widget = QListWidget()
+        list_widget.setMinimumHeight(280)
+        list_widget.setSelectionMode(QAbstractItemView.MultiSelection)
+        # First item: download all
+        list_widget.addItem(QListWidgetItem("Download all GGUF variants"))
+        for label_text, fits in labels_with_fit:
+            item = QListWidgetItem(label_text)
+            item.setForeground(QBrush(QColor("#4CAF50") if fits else QColor("#f44336")))
+            list_widget.addItem(item)
+        # Sensible default: choose all known FITS entries. If none, keep "download all".
+        selected_any = False
+        for idx, (_, fits) in enumerate(labels_with_fit, start=1):
+            if fits:
+                list_widget.item(idx).setSelected(True)
+                selected_any = True
+        if not selected_any:
+            list_widget.item(0).setSelected(True)
+        layout.addWidget(list_widget)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self._log_models("User cancelled GGUF selection.")
+            return False, None
+
+        selected_rows = sorted({i.row() for i in list_widget.selectedIndexes()})
+        if (not selected_rows) or (0 in selected_rows):
+            self._log_models("User selected: download all GGUF variants.")
+            return True, None
+        selected_patterns: List[str] = []
+        for row in selected_rows:
+            if row <= 0:
+                continue
+            idx = row - 1
+            if 0 <= idx < len(file_list):
+                selected_patterns.append(file_list[idx])
+        if not selected_patterns:
+            self._log_models("User selection empty after filtering; defaulting to download all.")
+            return True, None
+        selected_names = [Path(p).name for p in selected_patterns]
+        self._log_models(f"GGUF selection: downloading {len(selected_patterns)} variant(s): {selected_names}")
+        return True, selected_patterns
     
     def _on_search_text_changed(self, text: str):
         """Handle search text changes - return to curated view when cleared"""
@@ -7083,6 +7316,10 @@ class MainWindow(QMainWindow):
         card.download_btn.setText("⏳ Starting...")
         
         self._log_models(f"📥 Downloading {model_id}...")
+        if selected_patterns:
+            self._log_models(f"  Selected weights: {[Path(p).name for p in selected_patterns]}")
+        else:
+            self._log_models("  Downloading all files.")
         target = Path(self.hf_target_dir.text().strip())
         # Ensure destination folder exists immediately so it appears in Downloaded tab during download
         try:
@@ -7094,11 +7331,23 @@ class MainWindow(QMainWindow):
                 (dest_dir / ".download_in_progress").write_text("1", encoding="utf-8")
             except Exception:
                 pass
+            # Persist selected weights so repair/restart keeps the same subset.
+            try:
+                selection_marker = dest_dir / ".selected_weights.json"
+                if selected_patterns:
+                    payload = {
+                        "model_id": model_id,
+                        "allow_patterns": selected_patterns,
+                        "active_variant": selected_patterns[0],
+                        "saved_at": datetime.now().isoformat(),
+                    }
+                    selection_marker.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                elif selection_marker.exists():
+                    selection_marker.unlink()
+            except Exception as e:
+                self._log_models(f"[WARNING] Could not persist selected weights marker: {e}")
         except Exception as e:
             self._log_models(f"[WARNING] Could not pre-create destination folder: {e}")
-        
-        # Refresh downloaded tab so the card shows up during download
-        QTimer.singleShot(200, self._refresh_models)
         
         # Hide button after a moment (let user see "Starting...")
         QTimer.singleShot(500, lambda: card.download_btn.setVisible(False))
@@ -7142,9 +7391,10 @@ class MainWindow(QMainWindow):
         # Mark as active BEFORE starting
         self.active_downloads[model_id] = (thread, card)
         
-        # Connect signals
+        # Connect signals (progress on card and in status log so it stays visible)
         thread.progress.connect(lambda p: progress_bar.setValue(p))
         thread.status.connect(lambda msg: self._update_progress_bar_text(progress_bar, "Downloading", msg))
+        thread.status.connect(lambda msg: self._log_models(f"  {msg}"))
         thread.finished.connect(lambda dest: self._on_download_complete(model_id, dest, card, progress_bar))
         thread.error.connect(lambda err: self._on_download_error(model_id, err, card, progress_bar))
         
@@ -7737,7 +7987,7 @@ class MainWindow(QMainWindow):
         # Get other card data
         from desktop_app.model_card_widget import DownloadedModelCard
         from core.models import detect_model_capabilities, get_capability_icons, get_model_size
-        from core.model_compatibility import get_model_compatibility_badge
+        from core.model_requirements import get_model_compatibility_badge
         
         status_check = self.model_checker.check_model(path)
         
@@ -7751,6 +8001,8 @@ class MainWindow(QMainWindow):
             icons = get_capability_icons(capabilities)
             compatibility_badge = get_model_compatibility_badge(model_id, model_name, self.user_vram_gb)
         
+        display_fresh_status = "BROKEN" if (not status_check.is_complete) else fresh_status
+
         # Create new card with fresh data
         new_card = DownloadedModelCard(
             model_name,
@@ -7759,7 +8011,7 @@ class MainWindow(QMainWindow):
             icons,
             is_incomplete=not status_check.is_complete,
             compatibility_badge=compatibility_badge,
-            onboarding_status=fresh_status,
+            onboarding_status=display_fresh_status,
             env_key=env_key
         )
         new_card.set_theme(self.dark_mode)
@@ -8035,8 +8287,30 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self._log_models(f"Warning: Could not clean incomplete files: {e}")
             
-            # Create new repair thread with force_fresh_only=True
-            thread = RepairThread(model_id, model_path, force_fresh_only=True, cache_dir=self.hf_cache_dir, token=self._resolve_hf_token())
+            # Prefer persisted selected-weights marker for fresh redownload too.
+            fresh_allow_patterns = None
+            try:
+                marker_path = Path(model_path) / ".selected_weights.json"
+                if marker_path.exists():
+                    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                    pats = marker.get("allow_patterns")
+                    if isinstance(pats, list):
+                        fresh_allow_patterns = [str(p) for p in pats if isinstance(p, str) and p.strip()]
+                if not fresh_allow_patterns:
+                    from core.model_file_utils import list_repo_files
+                    local_gguf = list(Path(model_path).rglob("*.gguf"))
+                    if local_gguf:
+                        siblings = list_repo_files(model_id, token=self._resolve_hf_token())
+                        repo_gguf = [s.get("rfilename", "") for s in siblings if (s.get("rfilename") or "").lower().endswith(".gguf")]
+                        if len(repo_gguf) > 1 and len(local_gguf) == 1:
+                            match_name = local_gguf[0].name
+                            for r in repo_gguf:
+                                if Path(r).name == match_name:
+                                    fresh_allow_patterns = [r]
+                                    break
+            except Exception:
+                pass
+            thread = RepairThread(model_id, Path(model_path), force_fresh_only=True, cache_dir=self.hf_cache_dir, token=self._resolve_hf_token(), allow_patterns=fresh_allow_patterns)
             
             # Mark as active
             self.active_downloads[repair_key] = (thread, card)
@@ -8215,7 +8489,9 @@ class MainWindow(QMainWindow):
             row, col = 0, 0
             for h in hits:
                 model_id = h.model_id
-                model_name = model_id.split("/")[-1]
+                model_name_raw = model_id.split("/")[-1]
+                # Make search result titles wrap/read like curated cards.
+                model_name = model_name_raw.replace("-", " ").replace("_", " ")
                 
                 # Check if downloaded
                 model_slug = model_id.replace("/", "__")
@@ -8230,7 +8506,7 @@ class MainWindow(QMainWindow):
                 likes_text = f"{h.likes:,}" if h.likes else "0"
                 
                 # Get compatibility badge
-                compatibility_badge = get_model_compatibility_badge(model_id, model_name, self.user_vram_gb)
+                compatibility_badge = get_model_compatibility_badge(model_id, model_name_raw, self.user_vram_gb)
                 
                 # Create card with download functionality
                 card = ModelCard(
@@ -11391,7 +11667,7 @@ class MainWindow(QMainWindow):
                 return
             paths_by_key[key] = str(path) if path else ""
             try:
-                model_id = self._resolve_model_id_from_path(path, allow_create=False)
+                model_id = self._resolve_chat_model_id_from_path(path)
             except Exception as e:
                 derived_id = Path(path).name.replace("__", "/") if path else ""
                 self._maybe_show_reonboard_popup(str(e), derived_id, str(path) if path else "")
@@ -11601,7 +11877,10 @@ class MainWindow(QMainWindow):
                 if base_path:
                     # Normalize path for comparison (resolve to absolute, handle case/separators)
                     try:
-                        normalized = str(Path(base_path).resolve())
+                        bp = Path(base_path).resolve()
+                        if bp.suffix.lower() == ".gguf":
+                            bp = bp.parent
+                        normalized = str(bp)
                         ready_paths[normalized] = entry["model_id"]
                     except Exception:
                         # Fallback to original if resolve fails
@@ -11711,6 +11990,8 @@ class MainWindow(QMainWindow):
         """Enable/disable image attachments based on selected model capabilities."""
         try:
             model_path = self.tool_chat_model_a.currentData() if hasattr(self, "tool_chat_model_a") else None
+            if model_path:
+                model_path = self._resolve_runtime_model_path(str(model_path))
             vision_ok = False
             if model_path:
                 try:
@@ -11761,6 +12042,8 @@ class MainWindow(QMainWindow):
         
         # Get selected model
         model_a_path = self.tool_chat_model_a.currentData()
+        if model_a_path:
+            model_a_path = self._resolve_runtime_model_path(str(model_a_path))
         
         # Check if model is selected
         if not model_a_path or model_a_path == "(No models downloaded)":
@@ -11808,7 +12091,7 @@ class MainWindow(QMainWindow):
     def _run_tool_chat_inference_a(self, model_path: str, prompt: str, system_prompt: str = "", images: Optional[List[str]] = None):
         """Run tool-enabled inference for Model A in tool chat"""
         try:
-            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
+            model_id = self._resolve_chat_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id: {e}"
             self._append_tool_chat_log(error_msg)
@@ -11862,7 +12145,7 @@ class MainWindow(QMainWindow):
     def _run_tool_chat_inference_b(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run tool-enabled inference for Model B in tool chat"""
         try:
-            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
+            model_id = self._resolve_chat_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id: {e}"
             self._append_tool_chat_log(error_msg)
@@ -11907,7 +12190,7 @@ class MainWindow(QMainWindow):
     def _run_tool_chat_inference_c(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run tool-enabled inference for Model C in tool chat"""
         try:
-            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
+            model_id = self._resolve_chat_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id: {e}"
             self._append_tool_chat_log(error_msg)
@@ -12599,7 +12882,7 @@ class MainWindow(QMainWindow):
         
         # Resolve model_id from model_path (no synthetic config creation in chat)
         try:
-            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
+            model_id = self._resolve_chat_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
             self._append_test_chat_log(f"[A] {error_msg}")
@@ -13267,7 +13550,7 @@ class MainWindow(QMainWindow):
 
         # Resolve model_id from model_path (no synthetic config creation in chat)
         try:
-            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
+            model_id = self._resolve_chat_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
             self._append_test_chat_log(f"[B] {error_msg}")
@@ -13546,7 +13829,7 @@ class MainWindow(QMainWindow):
 
         # Resolve model_id from model_path (no synthetic config creation in chat)
         try:
-            model_id = self._resolve_model_id_from_path(model_path, allow_create=False)
+            model_id = self._resolve_chat_model_id_from_path(model_path)
         except Exception as e:
             error_msg = f"[ERROR] Failed to resolve model_id from path: {e}"
             self._append_test_chat_log(f"[C] {error_msg}")
@@ -13982,6 +14265,104 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_test_pending_models") or not isinstance(getattr(self, "_test_pending_models", None), set):
             self._test_pending_models = set()
 
+    def _resolve_runtime_model_path(self, base_path: str) -> str:
+        """
+        Resolve runtime path for a selected model directory.
+        If multiple GGUF variants were selected during download, prompt user to pick
+        one for runtime and persist as active_variant in .selected_weights.json.
+        """
+        try:
+            p = Path(base_path)
+            if not p.exists() or not p.is_dir():
+                return str(base_path)
+            marker = p / ".selected_weights.json"
+            if not marker.exists():
+                return str(base_path)
+            data = json.loads(marker.read_text(encoding="utf-8"))
+            allow_patterns = data.get("allow_patterns")
+            if not isinstance(allow_patterns, list) or not allow_patterns:
+                return str(base_path)
+            patterns = [str(x) for x in allow_patterns if isinstance(x, str) and x.strip()]
+            if not patterns:
+                return str(base_path)
+            # Build existing GGUF candidates from persisted patterns.
+            candidates: List[Path] = []
+            for pat in patterns:
+                cand = p / pat
+                if cand.exists() and cand.is_file():
+                    candidates.append(cand)
+                else:
+                    # fallback by basename
+                    name = Path(pat).name
+                    for f in p.rglob("*.gguf"):
+                        if f.name == name:
+                            candidates.append(f)
+                            break
+            # Deduplicate while preserving order
+            uniq: List[Path] = []
+            seen = set()
+            for c in candidates:
+                key = str(c.resolve()) if c.exists() else str(c)
+                if key not in seen:
+                    seen.add(key)
+                    uniq.append(c)
+            candidates = uniq
+            if not candidates:
+                return str(base_path)
+            if len(candidates) == 1:
+                return str(candidates[0])
+            # Multi-choice runtime picker (session cache + persisted active_variant)
+            if not hasattr(self, "_runtime_gguf_choice_cache"):
+                self._runtime_gguf_choice_cache = {}
+            cache_key = str(p.resolve()).lower()
+            active = data.get("active_variant")
+            active_name = Path(active).name if isinstance(active, str) and active else ""
+            chosen = None
+            # cache first
+            cached_name = self._runtime_gguf_choice_cache.get(cache_key)
+            if cached_name:
+                for c in candidates:
+                    if c.name == cached_name:
+                        chosen = c
+                        break
+            # marker active_variant fallback
+            if chosen is None and active_name:
+                for c in candidates:
+                    if c.name == active_name:
+                        chosen = c
+                        break
+            # ask user if still not chosen
+            if chosen is None:
+                labels = [c.name for c in candidates]
+                default_idx = 0
+                choice, ok = QInputDialog.getItem(
+                    self,
+                    "Choose GGUF runtime variant",
+                    f"Model has {len(candidates)} downloaded GGUF variants.\nChoose one to use now:",
+                    labels,
+                    default_idx,
+                    False,
+                )
+                if not ok:
+                    chosen = candidates[0]
+                else:
+                    for c in candidates:
+                        if c.name == choice:
+                            chosen = c
+                            break
+                    if chosen is None:
+                        chosen = candidates[0]
+            # persist runtime active variant
+            try:
+                data["active_variant"] = str(chosen.relative_to(p)).replace("\\", "/")
+                marker.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception:
+                pass
+            self._runtime_gguf_choice_cache[cache_key] = chosen.name
+            return str(chosen)
+        except Exception:
+            return str(base_path)
+
     def _get_model_path_from_combo(self, combo) -> str | None:
         """
         Resolve the selected model path from an editable QComboBox.
@@ -13995,7 +14376,7 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 data = combo.itemData(idx)
                 if data:
-                    return str(data)
+                    return self._resolve_runtime_model_path(str(data))
         except Exception:
             pass
 
@@ -14024,7 +14405,7 @@ class MainWindow(QMainWindow):
                 if (combo.itemText(i) or "").strip() == text:
                     d = combo.itemData(i)
                     if d:
-                        return str(d)
+                        return self._resolve_runtime_model_path(str(d))
         except Exception:
             pass
 
@@ -14035,7 +14416,7 @@ class MainWindow(QMainWindow):
                 if norm(combo.itemText(i) or "") == want:
                     d = combo.itemData(i)
                     if d:
-                        return str(d)
+                        return self._resolve_runtime_model_path(str(d))
         except Exception:
             pass
 
@@ -14063,10 +14444,10 @@ class MainWindow(QMainWindow):
                     except Exception:
                         rp = str(p).lower()
                     if rp in ready_paths:
-                        return str(p)
+                        return self._resolve_runtime_model_path(str(p))
                 except Exception:
                     # If status lookup fails, fall back to the previous behavior.
-                    return str(p)
+                    return self._resolve_runtime_model_path(str(p))
         except Exception:
             pass
 
@@ -18816,7 +19197,10 @@ respective package directories or official repositories.
             base_path = entry.get("base_model_path")
             if base_path:
                 try:
-                    ready_paths[str(Path(base_path).resolve())] = entry["model_id"]
+                    bp = Path(base_path).resolve()
+                    if bp.suffix.lower() == ".gguf":
+                        bp = bp.parent
+                    ready_paths[str(bp)] = entry["model_id"]
                 except Exception:
                     ready_paths[str(base_path)] = entry["model_id"]
         

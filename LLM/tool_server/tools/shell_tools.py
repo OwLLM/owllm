@@ -3,10 +3,22 @@ Shell execution tools.
 """
 from __future__ import annotations
 
+import sys
 import subprocess
 from typing import Any, Dict
 
 from tool_server.decorators import tool
+
+# Windows: hide console when running shell commands (avoid CMD flash)
+_SHELL_FLAGS: Dict[str, Any] = {}
+if sys.platform == "win32":
+    _si = subprocess.STARTUPINFO()
+    _si.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0x00000001)
+    _si.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    _SHELL_FLAGS = {
+        "startupinfo": _si,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+    }
 
 
 @tool(
@@ -37,6 +49,7 @@ def run_shell_handler(ctx: Any, command: str) -> Dict[str, Any]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        **_SHELL_FLAGS,
     )
     return {
         "ok": proc.returncode == 0,

@@ -139,3 +139,10 @@ models:
     port: 10518
     use_4bit: true
     system_prompt: ''
+  DavidAU_GLM-4.7-Flash-Uncensored-Heretic-NEO-CODE-Imatrix-MAX-GGUF:
+    base_model: C:\1_Git\LocaLLM\LLM\models\DavidAU__GLM-4.7-Flash-Uncensored-Heretic-NEO-CODE-Imatrix-MAX-GGUF
+    adapter_dir: null
+    model_type: base
+    port: 10519
+    use_4bit: true
+    system_prompt: ''

@@ -180,12 +180,18 @@ class ModelCard(QFrame):
         
         layout.addLayout(middle_layout)
         
-        # Model ID
-        id_label = QLabel(f"📂 {model_id}")
+        # Model ID (insert wrap points so long repo IDs don't look different in search cards)
+        model_id_display = (
+            model_id.replace("/", "/ ")
+            .replace("-", "- ")
+            .replace("_", "_ ")
+        )
+        id_label = QLabel(f"📂 {model_id_display}")
         id_font = QFont()
         id_font.setPointSize(11)
         id_label.setFont(id_font)
         id_label.setStyleSheet("color: #888;")
+        id_label.setWordWrap(True)
         layout.addWidget(id_label)
         
         layout.addStretch(1)
@@ -376,6 +382,9 @@ class DownloadedModelCard(QFrame):
         self.is_dark = True
         self.compatibility_badge = compatibility_badge
         self.onboarding_status = onboarding_status or "NEW"
+        if self.is_incomplete and self.onboarding_status == "READY":
+            # Incomplete must override READY visual state.
+            self.onboarding_status = "BROKEN"
         self.requires_token = False
         self.env_key = env_key
         

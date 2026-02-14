@@ -87,7 +87,19 @@ class SelfHealOrchestrator:
                     log_callback=log_callback,
                 )
                 if not rt_ok:
-                    return False, reason_code, f"{error_message}\nSelf-heal runtime bundle failed: {rt_err}"
+                    # Secondary fallback: invoke env package installer path, which includes
+                    # Python 3.11 rebuild logic for llama-cpp wheel availability.
+                    log("Self-heal: runtime bundle repair failed, attempting package-installer fallback...")
+                    pkg_ok, pkg_err = env_registry.auto_install_missing_packages(
+                        python_exe,
+                        ["llama-cpp-python"],
+                        log_callback=log_callback,
+                    )
+                    if not pkg_ok:
+                        return False, reason_code, (
+                            f"{error_message}\nSelf-heal runtime bundle failed: {rt_err}\n"
+                            f"Self-heal package fallback failed: {pkg_err}"
+                        )
                 probe_ok, probe_reason, probe_error = env_registry.run_model_load_probe(
                     python_exe,
                     model_path,

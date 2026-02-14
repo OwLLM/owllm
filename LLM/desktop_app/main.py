@@ -7844,6 +7844,15 @@ class MainWindow(QMainWindow):
                     self.onboarding_progress_bar.setRange(0, 100)
                     self.onboarding_progress_bar.setValue(5)
                     self.onboarding_progress_bar.setFormat("Onboarding: starting...")
+                    # Start lightweight heartbeat so UI doesn't look stuck when logs are sparse.
+                    if hasattr(self, "_onboarding_progress_timer") and self._onboarding_progress_timer:
+                        try:
+                            self._onboarding_progress_timer.stop()
+                        except Exception:
+                            pass
+                    self._onboarding_progress_timer = QTimer(self)
+                    self._onboarding_progress_timer.timeout.connect(self._tick_onboarding_progress_bar)
+                    self._onboarding_progress_timer.start(900)
             
             # Create onboarding thread
             onboarding_thread = OnboardingThread(resolved_model_id, model_path, None)
@@ -7903,10 +7912,29 @@ class MainWindow(QMainWindow):
                     self.onboarding_progress_bar.setRange(0, 100)
                     self.onboarding_progress_bar.setValue(curr)
                     self.onboarding_progress_bar.setFormat(f"Onboarding: {curr}%")
+
+    def _tick_onboarding_progress_bar(self):
+        """Timer-based progress heartbeat for sparse-log onboarding steps."""
+        if not hasattr(self, "onboarding_progress_bar"):
+            return
+        try:
+            curr = int(self.onboarding_progress_bar.value())
+            if curr < 90:
+                curr = min(90, curr + 1)
+                self.onboarding_progress_bar.setRange(0, 100)
+                self.onboarding_progress_bar.setValue(curr)
+                self.onboarding_progress_bar.setFormat(f"Onboarding: {curr}%")
+        except Exception:
+            pass
     
     def _on_onboarding_finished(self, model_id: str, result: dict):
         """Handle onboarding completion"""
         status = result.get("status", "UNKNOWN")
+        if hasattr(self, "_onboarding_progress_timer") and self._onboarding_progress_timer:
+            try:
+                self._onboarding_progress_timer.stop()
+            except Exception:
+                pass
         if hasattr(self, "onboarding_progress_bar"):
             self.onboarding_progress_bar.setRange(0, 100)
             self.onboarding_progress_bar.setValue(100 if status == "READY" else 0)
@@ -8182,6 +8210,11 @@ class MainWindow(QMainWindow):
 
     def _on_onboarding_error(self, model_id: str, error: str):
         """Handle onboarding error"""
+        if hasattr(self, "_onboarding_progress_timer") and self._onboarding_progress_timer:
+            try:
+                self._onboarding_progress_timer.stop()
+            except Exception:
+                pass
         if hasattr(self, "onboarding_progress_bar"):
             self.onboarding_progress_bar.setRange(0, 100)
             self.onboarding_progress_bar.setValue(0)

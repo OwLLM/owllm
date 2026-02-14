@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Optional, Tuple
 import subprocess
 import sys
+import os
 
 
 LogCallback = Optional[Callable[[str], None]]
@@ -40,6 +41,17 @@ class RuntimeBundleManager:
             **self.subprocess_flags,
         )
 
+    def _infer_llm_root(self, python_exe: Path) -> Optional[Path]:
+        try:
+            # .../LLM/.envs/<env_key>/.venv/Scripts/python.exe -> LLM root
+            p = Path(python_exe).resolve()
+            for parent in p.parents:
+                if parent.name.lower() == "llm":
+                    return parent
+        except Exception:
+            return None
+        return None
+
     def _log(self, log_callback: LogCallback, message: str) -> None:
         if log_callback:
             log_callback(message)
@@ -65,12 +77,30 @@ class RuntimeBundleManager:
 
         self._log(log_callback, "GGUF runtime: llama_cpp not ready, attempting repair install...")
 
-        # 2) Try official package first.
+        # Remove known conflicting/incomplete providers first.
+        try:
+            self._run_pip(
+                python_exe,
+                ["uninstall", "-y", "llama-cpp-pydist", "llama-cpp-python-binary"],
+                timeout=120,
+            )
+        except Exception:
+            pass
+
+        # 2) Try official wheel path first.
+        llama_index = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
         install_attempts = [
-            ["install", "--upgrade", "llama-cpp-python"],
-            # Fallback package used in some Windows setups (may still be incomplete for API surface).
-            ["install", "--upgrade", "llama-cpp-pydist"],
-            # Last resort backend for GGUF probes (not always stable, but can unblock some models).
+            [
+                "install",
+                "--upgrade",
+                "--only-binary",
+                ":all:",
+                "--prefer-binary",
+                "llama-cpp-python==0.3.2",
+                "--extra-index-url",
+                llama_index,
+            ],
+            # Last resort backend package to keep probe capabilities, but not primary runtime success criterion.
             ["install", "--upgrade", "ctransformers"],
         ]
 
@@ -104,11 +134,18 @@ class RuntimeBundleManager:
             timeout=20,
         )
         if check_ct.returncode == 0 and "OK" in (check_ct.stdout or ""):
-            self._log(
-                log_callback,
-                "GGUF runtime repair: falling back to ctransformers-only runtime (degraded compatibility).",
+            allow_ct_only = os.environ.get("LLM_ALLOW_CTRANSFORMERS_ONLY_RUNTIME", "").strip().lower() in ("1", "true", "yes")
+            if allow_ct_only:
+                self._log(
+                    log_callback,
+                    "GGUF runtime repair: ctransformers-only fallback enabled by LLM_ALLOW_CTRANSFORMERS_ONLY_RUNTIME.",
+                )
+                return True, ""
+            return (
+                False,
+                "GGUF runtime found ctransformers but primary llama-cpp-python API is unavailable. "
+                "ctransformers-only mode is disabled by default due compatibility risks.",
             )
-            return True, ""
 
         details = "; ".join(errors[:5]) if errors else (check_llama.stderr or check_llama.stdout or "unknown")
         return (

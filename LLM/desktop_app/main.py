@@ -7872,7 +7872,7 @@ class MainWindow(QMainWindow):
                 self.onboarding_log_display.appendPlainText("\n✅ Onboarding completed successfully!")
             else:
                 error = result.get("last_error", "Unknown error")
-                self.onboarding_log_display.appendPlainText(f"\n❌ Onboarding failed: {error}")
+                self.onboarding_log_display.appendPlainText(f"\n{self._format_onboarding_error(error)}")
                 if "REBOOT_REQUIRED_VC" in (error or ""):
                     QTimer.singleShot(300, self._show_vcredist_reboot_prompt)
         
@@ -8046,6 +8046,32 @@ class MainWindow(QMainWindow):
         """
         if not error_msg:
             return "Unknown error"
+        if "[RUNTIME_MISSING_COMPONENT]" in error_msg:
+            return (
+                "❌ Runtime Components Missing\n\n"
+                "The selected backend runtime is not fully installed in the model environment.\n"
+                "Use Repair/Re-onboard to install required runtime components.\n\n"
+                f"Technical details:\n{error_msg[:700]}"
+            )
+        if "[BACKEND_INCOMPATIBLE_MODEL]" in error_msg:
+            return (
+                "❌ Backend Incompatible With Model Variant\n\n"
+                "The selected model variant cannot be parsed/loaded by the available runtime backend.\n"
+                "Try another variant or repair backend runtime.\n\n"
+                f"Technical details:\n{error_msg[:700]}"
+            )
+        if "[MODEL_FILE_CORRUPT]" in error_msg:
+            return (
+                "❌ Model Files Corrupted or Incomplete\n\n"
+                "Repair model files and rerun onboarding.\n\n"
+                f"Technical details:\n{error_msg[:700]}"
+            )
+        if "[NETWORK_OR_AUTH]" in error_msg:
+            return (
+                "❌ Network/Auth Issue\n\n"
+                "The runtime could not access required remote artifacts. Verify network and HF token.\n\n"
+                f"Technical details:\n{error_msg[:700]}"
+            )
         
         # Check for reason codes in error message
         if "UNSUPPORTED_ARCH" in error_msg or "does not recognize this architecture" in error_msg:

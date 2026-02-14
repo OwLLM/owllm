@@ -216,6 +216,88 @@ def get_runtime_required_packages(
     return cap.get("required_packages", BASE_PACKAGES.copy())
 
 
+def get_runtime_contract(profile_id: str) -> Dict[str, Any]:
+    """
+    Backend runtime contract for preflight/probe stages.
+    """
+    if profile_id == "llamacpp":
+        return {
+            "backend": "llamacpp",
+            "required_imports": ["llama_cpp"],
+            "requires_probe": True,
+            "notes": ["GGUF runtime must load via llama_cpp primary backend or explicit fallback."],
+        }
+    if profile_id in ("gptq", "gptq_peft"):
+        return {
+            "backend": "transformers",
+            "required_imports": ["transformers", "torch"],
+            "requires_probe": True,
+            "notes": ["Quantized GPTQ runtime requires compatible loader stack."],
+        }
+    if profile_id in ("awq", "awq_peft"):
+        return {
+            "backend": "transformers",
+            "required_imports": ["transformers", "torch"],
+            "requires_probe": True,
+            "notes": ["AWQ runtime requires compatible quantization stack."],
+        }
+    return {
+        "backend": "transformers",
+        "required_imports": ["transformers", "torch", "tokenizers"],
+        "requires_probe": True,
+        "notes": ["Transformers runtime requires config/tokenizer/probe success."],
+    }
+
+
+def classify_runtime_failure(reason_code: Optional[str], error_message: Optional[str]) -> Dict[str, str]:
+    """
+    Normalize probe/startup failures into a stable category + repair action.
+    """
+    reason = (reason_code or "OTHER").strip().upper()
+    msg = (error_message or "").strip()
+    low = msg.lower()
+
+    if reason == "RUNTIME_MISSING_COMPONENT":
+        return {
+            "category": "RUNTIME_MISSING_COMPONENT",
+            "action": "Repair environment runtime components for selected backend, then retry.",
+        }
+    if reason == "MISSING_PACKAGE":
+        return {
+            "category": "RUNTIME_MISSING_COMPONENT",
+            "action": "Install missing package(s) in the model environment and rerun onboarding.",
+        }
+    if reason == "UNSUPPORTED_ARCH":
+        return {
+            "category": "BACKEND_INCOMPATIBLE_MODEL",
+            "action": "Switch backend/runtime path or use a compatible model variant.",
+        }
+    if "gguf_init_from_file" in low or "block size" in low:
+        return {
+            "category": "BACKEND_INCOMPATIBLE_MODEL",
+            "action": "Selected GGUF variant is incompatible with available runtime backend. Try another variant or repair backend.",
+        }
+    if "no .gguf files found" in low or "missing shard" in low or "missing" in low and "model" in low:
+        return {
+            "category": "MODEL_FILE_CORRUPT",
+            "action": "Repair/download model files and validate integrity before retrying.",
+        }
+    if "timeout" in low or "health check failed" in low:
+        return {
+            "category": "ENVIRONMENT_CORRUPT",
+            "action": "Repair or recreate environment, then rerun onboarding.",
+        }
+    if "unauthenticated requests to the hf hub" in low or "401" in low or "403" in low:
+        return {
+            "category": "NETWORK_OR_AUTH",
+            "action": "Set valid HF token/network access and retry onboarding.",
+        }
+    return {
+        "category": "ENVIRONMENT_CORRUPT",
+        "action": "Run repair/re-onboard for this model environment and review startup logs.",
+    }
+
+
 # Guardrails by model family: defaults for token caps and timeouts (configurable via env).
 # Keys must match profile_id from resolve_capability. Env overrides applied in get_guardrail_max_tokens.
 GUARDRAIL_DEFAULTS: Dict[str, Dict[str, int]] = {

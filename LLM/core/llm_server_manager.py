@@ -24,6 +24,7 @@ from typing import Dict, Optional, Tuple, IO
 from core.state_store import get_state_store
 from core.envs.env_registry import EnvSpec
 from core.model_id_resolver import to_canonical_id
+from core.envs.capability_matrix import classify_runtime_failure
 from model_integrity_checker import ModelIntegrityChecker
 
 logger = logging.getLogger(__name__)
@@ -1187,13 +1188,13 @@ class LLMServerManager:
 
                     if is_dedicated:
                         raise RuntimeError(
-                            f"Model environment is missing critical packages: {', '.join(missing_packages)}\n"
+                            f"[RUNTIME_MISSING_COMPONENT] Model environment is missing critical packages: {', '.join(missing_packages)}\n"
                             f"The model has been marked BROKEN. Please re-onboard/repair this model before chatting.\n"
                             f"Startup log: {preflight_log_path}"
                         )
                     else:
                         raise RuntimeError(
-                            f"Missing critical packages in shared environment '{env_spec.key}': {', '.join(missing_packages)}\n"
+                            f"[RUNTIME_MISSING_COMPONENT] Missing critical packages in shared environment '{env_spec.key}': {', '.join(missing_packages)}\n"
                             "Please re-onboard the model to create/refresh its dedicated environment, "
                             "or click '🛡️ Isolation' on the model card.\n"
                             f"Startup log: {preflight_log_path}"
@@ -1236,7 +1237,7 @@ class LLMServerManager:
             except Exception as e:
                 log(f"Environment health check error: {e}")
                 raise RuntimeError(
-                    f"Environment {env_spec.key} health check failed: {e}\n"
+                    f"[ENVIRONMENT_CORRUPT] Environment {env_spec.key} health check failed: {e}\n"
                     f"Please repair the environment before attempting to load models."
                 )
 
@@ -1717,6 +1718,10 @@ class LLMServerManager:
                                 f"Please re-onboard/repair this model, then retry.\n"
                                 f"Startup log: {log_path_for_error or 'N/A'}"
                             )
+                            norm = classify_runtime_failure("OTHER", str(error_msg))
+                            category = norm.get("category", "ENVIRONMENT_CORRUPT")
+                            action = norm.get("action", "")
+                            full_error = f"[{category}] {full_error}\nSuggested action: {action}"
                             # Mark model BROKEN so Models page shows Repair button and card reflects failure
                             try:
                                 broken_key = authoritative_onboarding_id if authoritative_onboarding_id is not None else self._resolve_onboarding_id(model_id, model_cfg=model_cfg)

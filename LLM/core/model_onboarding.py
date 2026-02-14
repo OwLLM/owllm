@@ -15,8 +15,12 @@ from core.envs.env_registry import EnvRegistry
 from core.envs.capability_matrix import (
     get_runtime_required_packages,
     BASE_PACKAGES,
+    classify_runtime_failure,
+    resolve_capability,
+    get_runtime_contract,
 )
 from model_integrity_checker import ModelIntegrityChecker
+from core.runtime.self_heal_orchestrator import SelfHealOrchestrator
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +232,35 @@ class ModelOnboardingService:
             
             # Step 6: Run model load probe on stable env (GGUF and transformers).
             # GGUF probe validates backend compatibility, not just file presence.
+            cap = resolve_capability(
+                model_path=base_model_path,
+                model_cfg=model_cfg,
+                adapter_dir=adapter_dir,
+                model_id=model_id,
+            )
+            contract = get_runtime_contract(cap.get("profile_id", "base"))
+            import_to_pkg = {
+                "llama_cpp": "llama-cpp-python",
+                "transformers": "transformers",
+                "torch": "torch",
+                "tokenizers": "tokenizers",
+            }
+            contract_packages = [
+                import_to_pkg.get(mod, mod) for mod in (contract.get("required_imports") or [])
+            ]
+            if contract_packages:
+                missing_contract = self.env_registry.check_missing_packages(
+                    stable_python_exe,
+                    required_packages=contract_packages,
+                )
+                if missing_contract and allow_repair:
+                    log(f"Runtime contract missing packages: {missing_contract}; repairing...")
+                    self.env_registry.auto_install_missing_packages(
+                        stable_python_exe,
+                        missing_contract,
+                        log_callback=log_callback,
+                    )
+
             log(f"Running model load probe on stable env: {stable_env_key}")
             probe_success, probe_reason, probe_error = self.env_registry.run_model_load_probe(
                 stable_python_exe,
@@ -235,6 +268,25 @@ class ModelOnboardingService:
                 adapter_dir,
                 log_callback=log_callback
             )
+
+            # Step 6b: bounded self-heal pass for probe failures
+            if not probe_success and allow_repair:
+                orchestrator = SelfHealOrchestrator(max_attempts=1)
+                log(f"Probe failed ({probe_reason}); attempting bounded self-heal...")
+                healed, repaired_reason, repaired_error = orchestrator.try_repair_probe_failure(
+                    env_registry=self.env_registry,
+                    python_exe=stable_python_exe,
+                    model_path=base_model_path,
+                    adapter_dir=adapter_dir,
+                    reason_code=probe_reason,
+                    error_message=probe_error,
+                    log_callback=log_callback,
+                )
+                if healed:
+                    probe_success, probe_reason, probe_error = True, None, None
+                    log("Self-heal completed and probe passed.")
+                else:
+                    probe_reason, probe_error = repaired_reason, repaired_error
             
             final_env_key = stable_env_key
             final_python_exe = stable_python_exe
@@ -367,7 +419,13 @@ class ModelOnboardingService:
                     }
             elif not probe_success:
                 # Probe failed with non-upgradeable reason
-                error_msg = f"Model load probe failed ({probe_reason}): {probe_error[:500]}"
+                norm = classify_runtime_failure(probe_reason, probe_error)
+                category = norm.get("category", "ENVIRONMENT_CORRUPT")
+                action = norm.get("action", "")
+                error_msg = (
+                    f"[{category}] Model load probe failed ({probe_reason}): {str(probe_error)[:500]}\n"
+                    f"Suggested action: {action}"
+                )
                 log(f"Model onboarding failed: {error_msg}")
                 
                 self.state_store.upsert_onboarding(
@@ -725,7 +783,7 @@ class ModelOnboardingService:
 
         log_line = f"\n\nOnboarding log: {log_path}" if log_path else ""
         return (
-            "Onboarding probe failed during model compatibility check: one or more required packages are missing.\n\n"
+            "[RUNTIME_MISSING_COMPONENT] Onboarding probe failed during model compatibility check: one or more required packages are missing.\n\n"
             + missing_line +
             "Details:\n" + err + "\n\n"
             "Next step: Install the missing package(s) into the model environment, then Repair or Re-onboard this model from the Models tab."

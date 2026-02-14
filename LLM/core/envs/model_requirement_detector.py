@@ -45,6 +45,7 @@ def detect_model_requirements(model_path: str, adapter_dir: Optional[str] = None
             "backend_required": "llamacpp",
             "quantization": "gguf",
             "needs_bnb": False,
+            "runtime_contract": "llamacpp",
             "notes": notes
         }
     
@@ -65,6 +66,7 @@ def detect_model_requirements(model_path: str, adapter_dir: Optional[str] = None
         "backend_required": None,
         "quantization": "none",
         "needs_bnb": False,
+        "runtime_contract": "transformers",
         "notes": notes
     }
 
@@ -101,6 +103,7 @@ def _detect_gptq_awq(model_path: Path, config: Optional[dict], adapter_dir: Opti
                     "backend_required": None,
                     "quantization": quant_method,
                     "needs_bnb": False,
+                    "runtime_contract": "transformers",
                     "notes": notes
                 }
     
@@ -112,6 +115,7 @@ def _detect_gptq_awq(model_path: Path, config: Optional[dict], adapter_dir: Opti
             "backend_required": None,
             "quantization": "gptq",
             "needs_bnb": False,
+            "runtime_contract": "transformers",
             "notes": notes
         }
     if "awq" in model_name_lower:
@@ -120,6 +124,7 @@ def _detect_gptq_awq(model_path: Path, config: Optional[dict], adapter_dir: Opti
             "backend_required": None,
             "quantization": "awq",
             "needs_bnb": False,
+            "runtime_contract": "transformers",
             "notes": notes
         }
     
@@ -135,6 +140,7 @@ def _detect_gptq_awq(model_path: Path, config: Optional[dict], adapter_dir: Opti
                             "backend_required": None,
                             "quantization": "gptq",
                             "needs_bnb": False,
+                            "runtime_contract": "transformers",
                             "notes": notes
                         }
                     if "awq" in name_lower:
@@ -143,6 +149,7 @@ def _detect_gptq_awq(model_path: Path, config: Optional[dict], adapter_dir: Opti
                             "backend_required": None,
                             "quantization": "awq",
                             "needs_bnb": False,
+                            "runtime_contract": "transformers",
                             "notes": notes
                         }
         except Exception:
@@ -171,6 +178,7 @@ def _detect_bnb_requirement(model_path: Path, config: Optional[dict], adapter_di
                     "backend_required": None,
                     "quantization": "bnb",
                     "needs_bnb": True,
+                    "runtime_contract": "transformers",
                     "notes": notes
                 }
             
@@ -181,6 +189,7 @@ def _detect_bnb_requirement(model_path: Path, config: Optional[dict], adapter_di
                     "backend_required": None,
                     "quantization": "bnb",
                     "needs_bnb": True,
+                    "runtime_contract": "transformers",
                     "notes": notes
                 }
             
@@ -191,6 +200,7 @@ def _detect_bnb_requirement(model_path: Path, config: Optional[dict], adapter_di
                     "backend_required": None,
                     "quantization": "bnb",
                     "needs_bnb": True,
+                    "runtime_contract": "transformers",
                     "notes": notes
                 }
     
@@ -202,6 +212,7 @@ def _detect_bnb_requirement(model_path: Path, config: Optional[dict], adapter_di
             "backend_required": None,
             "quantization": "bnb",
             "needs_bnb": True,
+            "runtime_contract": "transformers",
             "notes": notes
         }
     
@@ -225,6 +236,7 @@ def _detect_bnb_requirement(model_path: Path, config: Optional[dict], adapter_di
                                 "backend_required": None,
                                 "quantization": "bnb",
                                 "needs_bnb": True,
+                                "runtime_contract": "transformers",
                                 "notes": notes
                             }
             except Exception as e:

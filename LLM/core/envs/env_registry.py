@@ -33,6 +33,7 @@ class EnvRegistry:
         from core.environment_manager import EnvironmentManager
         from core.envs.env_key_resolver import EnvKeyResolver
         from core.state_store import get_state_store
+        from core.runtime.runtime_bundle_manager import RuntimeBundleManager
         
         self.env_manager = EnvironmentManager()
         self.env_key_resolver = EnvKeyResolver()
@@ -56,6 +57,7 @@ class EnvRegistry:
                 'startupinfo': startupinfo,
                 'creationflags': subprocess.CREATE_NO_WINDOW
             }
+        self.runtime_bundle_manager = RuntimeBundleManager(subprocess_flags=self.subprocess_flags)
 
     def _get_env_python_executable(self, env_key: str) -> Optional[Path]:
         """Get Python executable path for env_key"""
@@ -530,11 +532,33 @@ class EnvRegistry:
             
         Returns:
             Tuple of (success: bool, reason_code: Optional[str], error_message: Optional[str])
-            reason_code: UNSUPPORTED_ARCH | MISSING_PACKAGE | REMOTE_CODE_REQUIRED | OTHER | None
+            reason_code:
+              UNSUPPORTED_ARCH | MISSING_PACKAGE | REMOTE_CODE_REQUIRED |
+              RUNTIME_MISSING_COMPONENT | OTHER | None
         """
         def log(msg):
             if log_callback:
                 log_callback(msg)
+
+        # Self-healing preflight for GGUF runtime components.
+        # Keep this outside probe subprocess so we can install/repair deterministically.
+        try:
+            model_path_obj = Path(model_path)
+            gguf_detected = False
+            if model_path_obj.is_file() and model_path_obj.suffix.lower() == ".gguf":
+                gguf_detected = True
+            elif model_path_obj.is_dir():
+                gguf_detected = any(model_path_obj.rglob("*.gguf"))
+            if gguf_detected:
+                ok, runtime_err = self.runtime_bundle_manager.ensure_gguf_runtime(
+                    python_exe,
+                    log_callback=log_callback,
+                )
+                if not ok:
+                    log(f"GGUF runtime preflight failed: {runtime_err[:240]}")
+                    return False, "RUNTIME_MISSING_COMPONENT", runtime_err
+        except Exception as e:
+            return False, "RUNTIME_MISSING_COMPONENT", f"GGUF runtime preflight error: {e}"
         
         # Build probe code that attempts to load model config and validate architecture
         # Escape paths for Python string
@@ -839,6 +863,13 @@ except Exception as e:
 
         # Normalize well-known GGUF loader failure into a clearer category/message.
         low = (error_msg or "").lower()
+        if "no module named 'llama_cpp'" in low or "cannot import name 'llama'" in low:
+            reason_code = "RUNTIME_MISSING_COMPONENT"
+            error_msg = (
+                "GGUF runtime backend component is missing or incomplete "
+                "(llama_cpp import is unavailable). "
+                "Repair/rebuild GGUF runtime components in this environment."
+            )
         if "gguf_init_from_file" in low and "block size" in low:
             reason_code = "UNSUPPORTED_ARCH"
             error_msg = (

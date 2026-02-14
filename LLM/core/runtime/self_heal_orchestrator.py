@@ -71,6 +71,35 @@ class SelfHealOrchestrator:
         if category not in ("RUNTIME_MISSING_COMPONENT", "ENVIRONMENT_CORRUPT"):
             return False, reason_code, error_message
 
+        # GGUF runtime failures should use runtime bundle repair path first
+        # instead of generic package installation, which can dead-end on source builds.
+        try:
+            model_path_obj = Path(model_path)
+            is_gguf = False
+            if model_path_obj.is_file() and model_path_obj.suffix.lower() == ".gguf":
+                is_gguf = True
+            elif model_path_obj.is_dir():
+                is_gguf = any(model_path_obj.rglob("*.gguf"))
+            if category == "RUNTIME_MISSING_COMPONENT" and is_gguf and hasattr(env_registry, "runtime_bundle_manager"):
+                log("Self-heal: invoking GGUF runtime bundle repair flow.")
+                rt_ok, rt_err = env_registry.runtime_bundle_manager.ensure_gguf_runtime(
+                    python_exe,
+                    log_callback=log_callback,
+                )
+                if not rt_ok:
+                    return False, reason_code, f"{error_message}\nSelf-heal runtime bundle failed: {rt_err}"
+                probe_ok, probe_reason, probe_error = env_registry.run_model_load_probe(
+                    python_exe,
+                    model_path,
+                    adapter_dir=adapter_dir,
+                    log_callback=log_callback,
+                )
+                if probe_ok:
+                    return True, None, None
+                return False, probe_reason, probe_error
+        except Exception:
+            pass
+
         packages = self._extract_missing_packages(error_message or "")
         if reason_code == "RUNTIME_MISSING_COMPONENT" and "llama-cpp-python" not in packages:
             # GGUF path common requirement

@@ -21,6 +21,16 @@ class _FakeEnvRegistry:
         return True, None, None
 
 
+class _FakeRuntimeBundle:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.calls = 0
+
+    def ensure_gguf_runtime(self, python_exe, log_callback=None):
+        self.calls += 1
+        return self.ok, "" if self.ok else "runtime install failed"
+
+
 def test_normalize_failure_maps_categories():
     orch = SelfHealOrchestrator(max_attempts=1)
     out = orch.normalize_failure("MISSING_PACKAGE", "No module named 'llama_cpp'")
@@ -44,4 +54,28 @@ def test_try_repair_probe_failure_installs_and_recovers():
     assert err is None
     assert "llama-cpp-python" in fake.installed
     assert fake.probe_calls == 1
+
+
+def test_try_repair_probe_failure_prefers_runtime_bundle_for_gguf(tmp_path):
+    model_dir = tmp_path / "gguf_model"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    (model_dir / "x.gguf").write_bytes(b"GGUF" + (b"\x00" * 2048))
+
+    orch = SelfHealOrchestrator(max_attempts=1)
+    fake = _FakeEnvRegistry()
+    fake.runtime_bundle_manager = _FakeRuntimeBundle(ok=True)
+
+    ok, reason, err = orch.try_repair_probe_failure(
+        env_registry=fake,
+        python_exe=Path(sys.executable),
+        model_path=str(model_dir),
+        adapter_dir=None,
+        reason_code="RUNTIME_MISSING_COMPONENT",
+        error_message="llama_cpp unavailable",
+        log_callback=None,
+    )
+    assert ok is True
+    assert reason is None
+    assert err is None
+    assert fake.runtime_bundle_manager.calls == 1
 

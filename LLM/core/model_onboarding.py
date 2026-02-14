@@ -248,6 +248,10 @@ class ModelOnboardingService:
             contract_packages = [
                 import_to_pkg.get(mod, mod) for mod in (contract.get("required_imports") or [])
             ]
+            # GGUF runtime contract is enforced by runtime bundle preflight/probe.
+            # Avoid hard-failing onboarding on a single package name contract here.
+            if cap.get("profile_id") == "llamacpp":
+                contract_packages = []
             if contract_packages:
                 missing_contract = self.env_registry.check_missing_packages(
                     stable_python_exe,

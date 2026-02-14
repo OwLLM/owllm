@@ -7726,6 +7726,26 @@ class MainWindow(QMainWindow):
             }
         """)
         log_layout = QVBoxLayout()
+        self.onboarding_progress_bar = QProgressBar()
+        self.onboarding_progress_bar.setRange(0, 100)
+        self.onboarding_progress_bar.setValue(0)
+        self.onboarding_progress_bar.setTextVisible(True)
+        self.onboarding_progress_bar.setFormat("Onboarding: %p%")
+        self.onboarding_progress_bar.setStyleSheet("""
+            QProgressBar {
+                background: rgba(0, 0, 0, 0.2);
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 4px;
+                color: #d7dde7;
+                text-align: center;
+                min-height: 18px;
+            }
+            QProgressBar::chunk {
+                background-color: rgba(102, 126, 234, 0.8);
+                border-radius: 3px;
+            }
+        """)
+        log_layout.addWidget(self.onboarding_progress_bar)
         self.onboarding_log_display = QPlainTextEdit()
         self.onboarding_log_display.setReadOnly(True)
         self.onboarding_log_display.setPlaceholderText("Onboarding progress will appear here...")
@@ -7820,6 +7840,9 @@ class MainWindow(QMainWindow):
                     self.onboarding_log_display.clear()
                     self.onboarding_log_display.appendPlainText(f"Starting onboarding for: {resolved_model_id}\n")
                     self.onboarding_log_display.appendPlainText(f"Model path: {model_path}\n\n")
+                if hasattr(self, "onboarding_progress_bar"):
+                    self.onboarding_progress_bar.setRange(0, 0)  # indeterminate while starting
+                    self.onboarding_progress_bar.setFormat("Onboarding: working...")
             
             # Create onboarding thread
             onboarding_thread = OnboardingThread(resolved_model_id, model_path, None)
@@ -7863,10 +7886,22 @@ class MainWindow(QMainWindow):
             # Auto-scroll to bottom
             scrollbar = self.onboarding_log_display.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
+        if hasattr(self, "onboarding_progress_bar"):
+            import re
+            m = re.search(r"(\d{1,3})\s*%", msg or "")
+            if m:
+                p = max(0, min(100, int(m.group(1))))
+                self.onboarding_progress_bar.setRange(0, 100)
+                self.onboarding_progress_bar.setValue(p)
+                self.onboarding_progress_bar.setFormat(f"Onboarding: {p}%")
     
     def _on_onboarding_finished(self, model_id: str, result: dict):
         """Handle onboarding completion"""
         status = result.get("status", "UNKNOWN")
+        if hasattr(self, "onboarding_progress_bar"):
+            self.onboarding_progress_bar.setRange(0, 100)
+            self.onboarding_progress_bar.setValue(100 if status == "READY" else 0)
+            self.onboarding_progress_bar.setFormat("Onboarding: complete" if status == "READY" else "Onboarding: failed")
         if hasattr(self, 'onboarding_log_display'):
             if status == "READY":
                 self.onboarding_log_display.appendPlainText("\n✅ Onboarding completed successfully!")
@@ -8138,6 +8173,10 @@ class MainWindow(QMainWindow):
 
     def _on_onboarding_error(self, model_id: str, error: str):
         """Handle onboarding error"""
+        if hasattr(self, "onboarding_progress_bar"):
+            self.onboarding_progress_bar.setRange(0, 100)
+            self.onboarding_progress_bar.setValue(0)
+            self.onboarding_progress_bar.setFormat("Onboarding: failed")
         if hasattr(self, 'onboarding_log_display'):
             formatted = self._format_onboarding_error(error)
             self.onboarding_log_display.appendPlainText(f"\n{formatted}")

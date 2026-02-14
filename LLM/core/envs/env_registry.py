@@ -627,9 +627,9 @@ try:
         except Exception as e:
             backend_errors.append("llama-cpp-python: " + str(e)[:400])
 
-        # 2) ctransformers (opt-in: can hard-abort certain GGUF variants)
+        # 2) ctransformers (enabled by default in probe subprocess; disable via env)
         import os
-        enable_ctransformers = (os.environ.get("LLM_ENABLE_CTRANSFORMERS_FALLBACK", "").strip().lower() in ("1", "true", "yes"))
+        enable_ctransformers = (os.environ.get("LLM_ENABLE_CTRANSFORMERS_FALLBACK", "1").strip().lower() not in ("0", "false", "no"))
         if enable_ctransformers:
             try:
                 from ctransformers import AutoModelForCausalLM
@@ -863,7 +863,10 @@ except Exception as e:
 
         # Normalize well-known GGUF loader failure into a clearer category/message.
         low = (error_msg or "").lower()
-        if "no module named 'llama_cpp'" in low or "cannot import name 'llama'" in low:
+        if (
+            ("no module named 'llama_cpp'" in low or "cannot import name 'llama'" in low)
+            and "gguf runtime backend failed for probe" not in low
+        ):
             reason_code = "RUNTIME_MISSING_COMPONENT"
             error_msg = (
                 "GGUF runtime backend component is missing or incomplete "

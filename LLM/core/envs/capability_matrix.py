@@ -277,6 +277,11 @@ def classify_runtime_failure(reason_code: Optional[str], error_message: Optional
             "category": "BACKEND_INCOMPATIBLE_MODEL",
             "action": "Selected GGUF variant is incompatible with available runtime backend. Try another variant or repair backend.",
         }
+    if "gguf runtime backend failed for probe" in low and "ctransformers:" in low and "failed to create llm" in low:
+        return {
+            "category": "BACKEND_INCOMPATIBLE_MODEL",
+            "action": "GGUF runtime backend cannot load this variant. Try another GGUF quant/variant or use a different backend format.",
+        }
     if "no .gguf files found" in low or "missing shard" in low or "missing" in low and "model" in low:
         return {
             "category": "MODEL_FILE_CORRUPT",

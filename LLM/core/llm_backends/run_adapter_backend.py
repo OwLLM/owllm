@@ -244,30 +244,37 @@ def _load_gguf_model(model_dir: Path):
     except Exception as llama_err:
         logging.info("llama-cpp-python unavailable or failed, trying ctransformers backend: %s", llama_err)
 
-    # Fallback: ctransformers (works without local C++ toolchain on many Windows setups).
-    try:
-        from ctransformers import AutoModelForCausalLM  # type: ignore
+    # Optional fallback: ctransformers can hard-abort some GGUF variants on Windows.
+    # Keep it opt-in to preserve isolation/stability; prefer llama-cpp/transformers first.
+    ct_err = None
+    enable_ctransformers = os.environ.get("LLM_ENABLE_CTRANSFORMERS_FALLBACK", "").strip().lower() in ("1", "true", "yes")
+    if enable_ctransformers:
+        try:
+            from ctransformers import AutoModelForCausalLM  # type: ignore
 
-        gpu_layers = int(os.environ.get("LLM_CTRANSFORMERS_GPU_LAYERS", "0"))
-        model = AutoModelForCausalLM.from_pretrained(
-            str(model_dir),
-            model_file=gguf_path.name,
-            gpu_layers=gpu_layers,
-            context_length=n_ctx,
-            threads=n_threads,
-        )
-        wrapper = _LlamaCppWrapper(model, str(gguf_path))
-        wrapper._is_ctransformers = True
-        logging.info(
-            "Loaded GGUF via ctransformers: file=%s, context_length=%s, threads=%s, gpu_layers=%s",
-            str(gguf_path),
-            n_ctx,
-            n_threads,
-            gpu_layers,
-        )
-        return None, wrapper, None
-    except Exception as ct_err:
-        logging.info("ctransformers unavailable or failed, trying transformers GGUF fallback: %s", ct_err)
+            gpu_layers = int(os.environ.get("LLM_CTRANSFORMERS_GPU_LAYERS", "0"))
+            model = AutoModelForCausalLM.from_pretrained(
+                str(model_dir),
+                model_file=gguf_path.name,
+                gpu_layers=gpu_layers,
+                context_length=n_ctx,
+                threads=n_threads,
+            )
+            wrapper = _LlamaCppWrapper(model, str(gguf_path))
+            wrapper._is_ctransformers = True
+            logging.info(
+                "Loaded GGUF via ctransformers: file=%s, context_length=%s, threads=%s, gpu_layers=%s",
+                str(gguf_path),
+                n_ctx,
+                n_threads,
+                gpu_layers,
+            )
+            return None, wrapper, None
+        except Exception as cex:
+            ct_err = cex
+            logging.info("ctransformers unavailable or failed, trying transformers GGUF fallback: %s", ct_err)
+    else:
+        logging.info("Skipping ctransformers fallback (LLM_ENABLE_CTRANSFORMERS_FALLBACK not enabled)")
 
     # Final fallback: transformers native GGUF support.
     try:

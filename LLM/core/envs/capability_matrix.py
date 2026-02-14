@@ -105,7 +105,9 @@ def resolve_capability(
     if req.get("backend_required") == "llamacpp":
         return {
             "profile_id": "llamacpp",
-            "required_packages": [],
+            # GGUF runtime requires at least one backend package.
+            # We require llama-cpp-python as the default stable backend.
+            "required_packages": ["llama-cpp-python"],
             "quant_for_env": "base",
             "needs_peft": False,
             "needs_bnb": False,

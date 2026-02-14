@@ -49,6 +49,9 @@ class ModelIntegrityChecker:
         'model.safetensors.index.json',  # For sharded models
         'pytorch_model.bin.index.json',  # For sharded models
     ]
+    # Corrupt/truncated GGUF files are often only a few bytes long.
+    # Keep this low enough to avoid false positives on tiny test artifacts.
+    MIN_GGUF_BYTES = 1024 * 1024  # 1 MB
     
     def __init__(self, models_dir: Optional[Path] = None):
         """Initialize the checker
@@ -122,35 +125,87 @@ class ModelIntegrityChecker:
         missing_files: List[str] = []
 
         # GGUF models follow a different completeness contract than transformers models.
-        # If GGUF files exist, consider the model complete when:
-        # - no selection marker: at least one .gguf exists
-        # - selection marker exists: all selected GGUF files exist
-        gguf_files = [f for f in files if f.lower().endswith(".gguf")]
+        # Validate selected files and basic file integrity (size + GGUF magic header)
+        # so onboarding/runtime can fail fast before backend startup.
+        gguf_paths = [f for f in model_path.rglob("*.gguf") if f.is_file()]
+        gguf_files = [str(p.relative_to(model_path)).replace("\\", "/") for p in gguf_paths]
         if gguf_files:
             marker_path = model_path / ".selected_weights.json"
             selected_missing: List[str] = []
+            gguf_name_to_path = {p.name: p for p in gguf_paths}
+            gguf_rel_to_path = {str(p.relative_to(model_path)).replace("\\", "/"): p for p in gguf_paths}
+            selected_targets: List[Path] = []
             try:
                 if marker_path.exists():
                     marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                    active_variant = marker.get("active_variant")
+                    if isinstance(active_variant, str) and active_variant.strip():
+                        active_rel = active_variant.strip().replace("\\", "/")
+                        active_path = gguf_rel_to_path.get(active_rel) or gguf_name_to_path.get(Path(active_rel).name)
+                        if active_path is None:
+                            selected_missing.append(active_rel)
+                        else:
+                            selected_targets.append(active_path)
                     patterns = marker.get("allow_patterns")
                     if isinstance(patterns, list) and patterns:
                         # Require all selected patterns to exist for "complete".
-                        existing_set = set(gguf_files)
                         for pat in patterns:
                             if not isinstance(pat, str) or not pat.strip():
                                 continue
-                            name = Path(pat).name
-                            if name not in existing_set:
-                                selected_missing.append(name)
+                            rel_pat = pat.strip().replace("\\", "/")
+                            cand = gguf_rel_to_path.get(rel_pat) or gguf_name_to_path.get(Path(rel_pat).name)
+                            if cand is None:
+                                selected_missing.append(Path(rel_pat).name)
+                            else:
+                                selected_targets.append(cand)
             except Exception:
                 # Ignore marker parse failures; fallback to presence-based completeness.
                 selected_missing = []
+                selected_targets = []
 
-            is_complete_gguf = (len(selected_missing) == 0)
+            # If no explicit selection exists, validate at least one discovered GGUF.
+            if not selected_targets:
+                selected_targets = list(gguf_paths)
+
+            # De-duplicate while preserving order.
+            seen_targets = set()
+            unique_targets: List[Path] = []
+            for path in selected_targets:
+                key = str(path)
+                if key in seen_targets:
+                    continue
+                seen_targets.add(key)
+                unique_targets.append(path)
+
+            invalid_gguf: List[str] = []
+            for gguf_path in unique_targets:
+                rel_name = str(gguf_path.relative_to(model_path)).replace("\\", "/")
+                try:
+                    size_bytes = gguf_path.stat().st_size
+                except Exception:
+                    invalid_gguf.append(f"{rel_name} (unreadable)")
+                    continue
+                if size_bytes < self.MIN_GGUF_BYTES:
+                    invalid_gguf.append(f"{rel_name} (too small: {size_bytes} bytes)")
+                    continue
+                try:
+                    with open(gguf_path, "rb") as fh:
+                        magic = fh.read(4)
+                    if magic != b"GGUF":
+                        invalid_gguf.append(f"{rel_name} (invalid header)")
+                except Exception:
+                    invalid_gguf.append(f"{rel_name} (header read failed)")
+
+            is_complete_gguf = (len(selected_missing) == 0 and len(invalid_gguf) == 0)
             if selected_missing:
                 missing_files.append(
                     "selected gguf missing: " + ", ".join(selected_missing[:5]) +
                     ("..." if len(selected_missing) > 5 else "")
+                )
+            if invalid_gguf:
+                missing_files.append(
+                    "invalid gguf file(s): " + ", ".join(invalid_gguf[:5]) +
+                    ("..." if len(invalid_gguf) > 5 else "")
                 )
 
             # For GGUF, config/tokenizer checks do not apply.

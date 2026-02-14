@@ -550,18 +550,123 @@ model_path = Path(r"{model_path_escaped}")
 adapter_dir = {f'Path(r"{adapter_dir_escaped}")' if adapter_dir else 'None'}
 
 try:
-    # GGUF-only models don't have transformers config.json.
-    # Accept either a direct .gguf file path or a directory containing .gguf files.
+    # GGUF probe: verify at least one runtime backend can initialize this exact file.
+    # This prevents onboarding from marking incompatible GGUF models READY.
     if model_path.is_file() and model_path.suffix.lower() == ".gguf":
-        print("PROBE: SUCCESS (GGUF file)")
-        sys.exit(0)
+        gguf_files = [model_path]
+        gguf_root = model_path.parent
+    elif model_path.is_dir():
+        gguf_files = list(model_path.rglob("*.gguf"))
+        gguf_root = model_path
+    else:
+        gguf_files = []
+        gguf_root = model_path
+
+    if gguf_files:
+        gguf_path = sorted(gguf_files)[0]
+        try:
+            marker = gguf_root / ".selected_weights.json"
+            if marker.exists():
+                data = json.loads(marker.read_text(encoding="utf-8"))
+                active = data.get("active_variant")
+                if isinstance(active, str) and active.strip():
+                    cand = (gguf_root / active).resolve()
+                    if cand.exists() and cand.is_file() and cand.suffix.lower() == ".gguf":
+                        gguf_path = cand
+        except Exception:
+            pass
+
+        backend_errors = []
+        # 1) llama-cpp-python (quick vocab-only init when supported)
+        try:
+            from llama_cpp import Llama
+            try:
+                _ = Llama(
+                    model_path=str(gguf_path),
+                    n_ctx=64,
+                    n_threads=1,
+                    n_gpu_layers=0,
+                    vocab_only=True,
+                    verbose=False,
+                )
+            except TypeError:
+                _ = Llama(
+                    model_path=str(gguf_path),
+                    n_ctx=64,
+                    n_threads=1,
+                    n_gpu_layers=0,
+                    verbose=False,
+                )
+            print("GGUF_BACKEND: llama-cpp-python")
+            print("PROBE: SUCCESS (GGUF)")
+            sys.exit(0)
+        except Exception as e:
+            backend_errors.append("llama-cpp-python: " + str(e)[:400])
+
+        # 2) ctransformers (opt-in: can hard-abort certain GGUF variants)
+        import os
+        enable_ctransformers = (os.environ.get("LLM_ENABLE_CTRANSFORMERS_FALLBACK", "").strip().lower() in ("1", "true", "yes"))
+        if enable_ctransformers:
+            try:
+                from ctransformers import AutoModelForCausalLM
+                _ = AutoModelForCausalLM.from_pretrained(
+                    str(gguf_path.parent),
+                    model_file=gguf_path.name,
+                    gpu_layers=0,
+                    context_length=64,
+                    threads=1,
+                )
+                print("GGUF_BACKEND: ctransformers")
+                print("PROBE: SUCCESS (GGUF)")
+                sys.exit(0)
+            except Exception as e:
+                backend_errors.append("ctransformers: " + str(e)[:400])
+        else:
+            backend_errors.append("ctransformers: skipped (LLM_ENABLE_CTRANSFORMERS_FALLBACK not enabled)")
+
+        # 3) transformers GGUF fallback (best-effort)
+        try:
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+
+            candidates = []
+            env_id = (os.environ.get("LLM_GGUF_BASE_MODEL_ID") or "").strip()
+            if env_id:
+                candidates.append(env_id)
+            folder_id = gguf_root.name.replace("__", "/")
+            if folder_id and folder_id not in candidates:
+                candidates.append(folder_id)
+            if "glm-4.7-flash" in folder_id.lower() and "zai-org/GLM-4.7-Flash" not in candidates:
+                candidates.append("zai-org/GLM-4.7-Flash")
+
+            last_tf_err = None
+            for base_model_id in candidates:
+                try:
+                    _ = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
+                    _ = AutoModelForCausalLM.from_pretrained(
+                        base_model_id,
+                        gguf_file=str(gguf_path),
+                        trust_remote_code=True,
+                        low_cpu_mem_usage=True,
+                        device_map=None,
+                    )
+                    print("GGUF_BACKEND: transformers")
+                    print("PROBE: SUCCESS (GGUF)")
+                    sys.exit(0)
+                except Exception as tf_ex:
+                    last_tf_err = tf_ex
+            backend_errors.append("transformers: " + str(last_tf_err)[:400] if last_tf_err else "transformers: no candidate base model id")
+        except Exception as e:
+            backend_errors.append("transformers: " + str(e)[:400])
+
+        print("REASON: OTHER")
+        print("ERROR: GGUF runtime backend failed for probe. File: " + str(gguf_path) + ". Tried llama-cpp-python, ctransformers, and transformers. Details: " + " | ".join(backend_errors))
+        sys.exit(1)
+
+    # Non-GGUF: standard transformers config/tokenizer probe.
     if model_path.is_dir():
         gguf_files = list(model_path.rglob("*.gguf"))
     else:
         gguf_files = []
-    if gguf_files:
-        print("PROBE: SUCCESS (GGUF)")
-        sys.exit(0)
 
     # Step 1: Try to load config
     config_path = model_path / "config.json"
@@ -690,32 +795,58 @@ except Exception as e:
         reason_code = None
         error_msg = combined.strip()
         
+        # Prefer explicit ERROR lines emitted by the probe.
+        explicit_error = None
+        for line in combined.splitlines():
+            if line.startswith("ERROR:"):
+                explicit_error = line.replace("ERROR:", "").strip()
+                break
+
         if "REASON: UNSUPPORTED_ARCH" in combined:
             reason_code = "UNSUPPORTED_ARCH"
             # Extract the actual error message
-            for line in combined.splitlines():
-                if line.startswith("ERROR:"):
-                    error_msg = line.replace("ERROR:", "").strip()
-                    break
+            if explicit_error:
+                error_msg = explicit_error
         elif "REASON: MISSING_PACKAGE" in combined:
             reason_code = "MISSING_PACKAGE"
-            for line in combined.splitlines():
-                if line.startswith("ERROR:"):
-                    error_msg = line.replace("ERROR:", "").strip()
-                    break
+            if explicit_error:
+                error_msg = explicit_error
         elif "REASON: REMOTE_CODE_REQUIRED" in combined:
             reason_code = "REMOTE_CODE_REQUIRED"
-            for line in combined.splitlines():
-                if line.startswith("ERROR:"):
-                    error_msg = line.replace("ERROR:", "").strip()
-                    break
+            if explicit_error:
+                error_msg = explicit_error
         else:
             reason_code = "OTHER"
-            # Use the last meaningful error line
-            for line in reversed(combined.splitlines()):
-                if line.strip() and not line.startswith("REASON:"):
-                    error_msg = line.strip()
+            if explicit_error:
+                error_msg = explicit_error
+            else:
+                # Use the last meaningful non-noise line.
+                noise_prefixes = (
+                    "WARNING:",
+                    "INFO:",
+                    "DEBUG:",
+                    "TRACE:",
+                    "HTTP Request:",
+                )
+                for line in reversed(combined.splitlines()):
+                    s = line.strip()
+                    if not s or s.startswith("REASON:"):
+                        continue
+                    if any(s.startswith(p) for p in noise_prefixes):
+                        continue
+                    error_msg = s
                     break
+
+        # Normalize well-known GGUF loader failure into a clearer category/message.
+        low = (error_msg or "").lower()
+        if "gguf_init_from_file" in low and "block size" in low:
+            reason_code = "UNSUPPORTED_ARCH"
+            error_msg = (
+                "GGUF backend cannot parse this quantized file "
+                "(gguf_init_from_file block-size mismatch). "
+                "This variant is incompatible with the available runtime backend in this environment. "
+                "Try a different GGUF variant or repair/rebuild the llama-cpp backend."
+            )
         
         log(f"Model load probe failed: {reason_code} - {error_msg[:200]}")
         return False, reason_code, error_msg
@@ -2105,6 +2236,7 @@ sys.exit(0)
             "auto-gptq": "auto_gptq",        # PyPI name uses hyphen; import uses underscore
             "open-clip-torch": "open_clip",  # PyPI name differs from import name
             "Pillow": "PIL",                 # PyPI name differs from import module
+            "llama-cpp-python": "llama_cpp", # PyPI name differs from import module
         }
         
         missing = []

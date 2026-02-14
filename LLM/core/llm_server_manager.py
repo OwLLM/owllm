@@ -24,6 +24,7 @@ from typing import Dict, Optional, Tuple, IO
 from core.state_store import get_state_store
 from core.envs.env_registry import EnvSpec
 from core.model_id_resolver import to_canonical_id
+from model_integrity_checker import ModelIntegrityChecker
 
 logger = logging.getLogger(__name__)
 
@@ -972,6 +973,19 @@ class LLMServerManager:
                     f"No model files found in {model_path}\n"
                     f"Expected .safetensors, .bin, or .gguf files. The model may not be downloaded correctly."
                 )
+            try:
+                integrity_status = ModelIntegrityChecker().check_model(model_path)
+                if not integrity_status.is_complete:
+                    details = ", ".join(integrity_status.missing_files) or "unknown model file issue"
+                    raise RuntimeError(
+                        f"Model files failed integrity check: {details}\n"
+                        f"Please use 'Repair model files' or re-onboard this model.\n"
+                        f"Model path: {model_path}"
+                    )
+            except RuntimeError:
+                raise
+            except Exception as integrity_ex:
+                log(f"Model integrity preflight warning: {integrity_ex}")
             
             log(f"Found {len(model_files)} model files, starting server...")
 

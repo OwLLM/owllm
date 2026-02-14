@@ -7841,8 +7841,9 @@ class MainWindow(QMainWindow):
                     self.onboarding_log_display.appendPlainText(f"Starting onboarding for: {resolved_model_id}\n")
                     self.onboarding_log_display.appendPlainText(f"Model path: {model_path}\n\n")
                 if hasattr(self, "onboarding_progress_bar"):
-                    self.onboarding_progress_bar.setRange(0, 0)  # indeterminate while starting
-                    self.onboarding_progress_bar.setFormat("Onboarding: working...")
+                    self.onboarding_progress_bar.setRange(0, 100)
+                    self.onboarding_progress_bar.setValue(5)
+                    self.onboarding_progress_bar.setFormat("Onboarding: starting...")
             
             # Create onboarding thread
             onboarding_thread = OnboardingThread(resolved_model_id, model_path, None)
@@ -7894,6 +7895,14 @@ class MainWindow(QMainWindow):
                 self.onboarding_progress_bar.setRange(0, 100)
                 self.onboarding_progress_bar.setValue(p)
                 self.onboarding_progress_bar.setFormat(f"Onboarding: {p}%")
+            else:
+                # Keep progress moving even when log lines don't include numeric percentages.
+                curr = int(self.onboarding_progress_bar.value())
+                if curr < 95:
+                    curr = min(95, curr + 3)
+                    self.onboarding_progress_bar.setRange(0, 100)
+                    self.onboarding_progress_bar.setValue(curr)
+                    self.onboarding_progress_bar.setFormat(f"Onboarding: {curr}%")
     
     def _on_onboarding_finished(self, model_id: str, result: dict):
         """Handle onboarding completion"""

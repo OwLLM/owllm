@@ -83,7 +83,7 @@ class EnvRegistry:
     def _get_base_python_for_env(self, env_key: str, required_packages: Optional[list] = None, log_callback=None) -> Optional[Path]:
         """
         Single source of truth for base Python when creating envs.
-        GPTQ needs Python 3.11 (cp311) for auto-gptq wheels; otherwise use default.
+        GPTQ and GGUF (llama-cpp-python wheels) prefer Python 3.11 on Windows.
         """
         def log(msg: str):
             if log_callback:
@@ -92,8 +92,10 @@ class EnvRegistry:
             logging.info(msg)
 
         required_packages = required_packages or []
-        needs_gptq = any(p and "auto-gptq" in str(p).lower() for p in required_packages)
-        if not needs_gptq:
+        req_lower = [str(p or "").lower() for p in required_packages]
+        needs_gptq = any("auto-gptq" in p for p in req_lower)
+        needs_llamacpp = any("llama-cpp-python" in p for p in req_lower)
+        if not (needs_gptq or needs_llamacpp):
             return None
 
         root_dir = self.env_manager.root_dir
@@ -102,7 +104,7 @@ class EnvRegistry:
             mgr = PythonRuntimeManager(root_dir)
             py311 = mgr.get_python_runtime("3.11")
             if py311 and py311.exists():
-                log(f"Using bundled Python 3.11 for GPTQ env: {py311}")
+                log(f"Using bundled Python 3.11 for specialized runtime env: {py311}")
                 return py311
         except Exception as e:
             log(f"[WARN] Could not get bundled Python 3.11 for GPTQ: {e}")
@@ -2401,6 +2403,24 @@ sys.exit(0)
                         timeout=60,
                         **self.subprocess_flags
                     )
+                if pkg_norm.startswith("llama-cpp-python"):
+                    # Prefer binary wheels from official llama-cpp wheel index to avoid local C++ build requirements.
+                    # This avoids nmake/MSVC hard failures on Windows.
+                    llama_index = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+                    pip_cmd = [
+                        str(python_exe), "-m", "pip", "install", "--upgrade",
+                        "--only-binary", ":all:",
+                        "--prefer-binary",
+                        "llama-cpp-python",
+                        "--extra-index-url", llama_index,
+                    ]
+                    timeout_s = 600
+                    subprocess.run(
+                        [str(python_exe), "-m", "pip", "uninstall", "-y", "llama-cpp-pydist", "llama-cpp-python", "llama-cpp-python-binary"],
+                        capture_output=True,
+                        timeout=120,
+                        **self.subprocess_flags
+                    )
 
                 result = subprocess.run(
                     pip_cmd,
@@ -2488,6 +2508,59 @@ sys.exit(0)
                                 # fall through to standard error return below
                         else:
                             log("Python 3.11 not available (or profile missing); cannot rebuild env for auto-gptq wheels.")
+
+                    # llama-cpp-python: if wheel not available/build tool missing (common on Python 3.12),
+                    # rebuild env with Python 3.11 and retry with wheel index.
+                    if pkg_norm.startswith("llama-cpp-python") and (
+                        "No matching distribution found for llama-cpp-python" in error_output
+                        or "Could not find a version that satisfies the requirement llama-cpp-python" in error_output
+                        or "nmake" in error_output.lower()
+                        or "cmake error" in error_output.lower()
+                    ):
+                        log("llama-cpp-python wheel/build failed. Attempting env rebuild with Python 3.11...")
+                        profile = self._get_active_profile_data()
+                        py311 = self._get_base_python_for_env(env_key, ["llama-cpp-python"], log_callback=log_callback)
+                        if not py311:
+                            py311 = self._find_windows_python("3.11", log_callback=log_callback)
+                        if profile and py311:
+                            try:
+                                self._atomic_create_env(env_key, profile, log_callback=log_callback, base_python_exe=py311)
+                                rebuilt_python = self._get_env_python_executable(env_key)
+                                if not rebuilt_python or not rebuilt_python.exists():
+                                    raise RuntimeError(f"Rebuilt env python not found: {rebuilt_python}")
+                                llama_index = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+                                retry_cmd = [
+                                    str(rebuilt_python), "-m", "pip", "install", "--upgrade",
+                                    "--only-binary", ":all:",
+                                    "--prefer-binary",
+                                    "llama-cpp-python==0.3.2",
+                                    "--extra-index-url", llama_index,
+                                ]
+                                retry = subprocess.run(
+                                    retry_cmd,
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=600,
+                                    **self.subprocess_flags
+                                )
+                                retry_out = (retry.stdout or "") + (retry.stderr or "")
+                                if retry.returncode != 0:
+                                    raise RuntimeError(retry_out.strip()[:8000])
+                                verify = subprocess.run(
+                                    [str(rebuilt_python), "-c", "from llama_cpp import Llama; print('OK')"],
+                                    capture_output=True,
+                                    text=True,
+                                    timeout=30,
+                                    **self.subprocess_flags
+                                )
+                                if verify.returncode != 0 or "OK" not in (verify.stdout or ""):
+                                    raise RuntimeError((verify.stderr or verify.stdout or "llama_cpp verify failed")[:8000])
+                                log("llama-cpp-python installed and verified after Python 3.11 env rebuild.")
+                                return True, ""
+                            except Exception as rebuild_err:
+                                log(f"Python 3.11 rebuild+install failed for llama-cpp-python: {rebuild_err}")
+                        else:
+                            log("Python 3.11 not available (or profile missing); cannot rebuild env for llama-cpp-python wheels.")
 
                     log(f"Failed to install {pkg}: {truncated_error}")
                     errors.append(f"Package '{pkg}' failed:\n{truncated_error}")

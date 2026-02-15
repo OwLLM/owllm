@@ -12238,13 +12238,8 @@ class MainWindow(QMainWindow):
         )
         self.tool_chat_worker_a.inference_finished.connect(self._on_tool_chat_finished_a)
         self.tool_chat_worker_a.inference_failed.connect(
-            lambda error, col, mid=model_id, mp=model_path: (
-                self._maybe_show_reonboard_popup(error, mid, mp),
-                self._append_tool_chat_log(error),
-                self.tool_chat_display.update_model_a_response(self._tool_chat_friendly_error(error)),
-                self._close_env_dialog("a", is_tool_chat=True),
-                self.tool_chat_input.setEnabled(True),
-                self.tool_chat_send_btn.setEnabled(True),
+            lambda error, col, mid=model_id, mp=model_path: self._handle_tool_chat_inference_failed(
+                "a", error, mid, mp
             )
         )
         self.tool_chat_worker_a.start()
@@ -12285,12 +12280,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_chat_worker_b.inference_finished.connect(self._on_tool_chat_finished_b)
         self.tool_chat_worker_b.inference_failed.connect(
-            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
-                                self._append_tool_chat_log(error),
-                                self.tool_chat_display.update_model_b_response("[ERROR] Failed. See logs on the right."),
-                                self._close_env_dialog("b", is_tool_chat=True),
-                                self.tool_chat_input.setEnabled(True),
-                                self.tool_chat_send_btn.setEnabled(True))
+            lambda error, col, mid=model_id, mp=model_path: self._handle_tool_chat_inference_failed(
+                "b", error, mid, mp
+            )
         )
         self.tool_chat_worker_b.start()
     
@@ -12330,12 +12322,9 @@ class MainWindow(QMainWindow):
         )
         self.tool_chat_worker_c.inference_finished.connect(self._on_tool_chat_finished_c)
         self.tool_chat_worker_c.inference_failed.connect(
-            lambda error, col, mid=model_id, mp=model_path: (self._maybe_show_reonboard_popup(error, mid, mp),
-                                self._append_tool_chat_log(error),
-                                self.tool_chat_display.update_model_c_response("[ERROR] Failed. See logs on the right."),
-                                self._close_env_dialog("c", is_tool_chat=True),
-                                self.tool_chat_input.setEnabled(True),
-                                self.tool_chat_send_btn.setEnabled(True))
+            lambda error, col, mid=model_id, mp=model_path: self._handle_tool_chat_inference_failed(
+                "c", error, mid, mp
+            )
         )
         self.tool_chat_worker_c.start()
     
@@ -12451,6 +12440,36 @@ class MainWindow(QMainWindow):
         
         # Keep chat bubbles clean: write progress to the right-side log only.
         self._append_tool_chat_log(msg)
+
+    def _handle_tool_chat_inference_failed(self, model_key: str, error: str, model_id: str, model_path: str) -> None:
+        """Robust Tool Chat failure handler that always restores UI state."""
+        try:
+            self._maybe_show_reonboard_popup(error, model_id, model_path)
+            self._append_tool_chat_log(error)
+            friendly = self._tool_chat_friendly_error(error)
+            if model_key == "a":
+                self.tool_chat_display.update_model_a_response(friendly)
+            elif model_key == "b":
+                self.tool_chat_display.update_model_b_response(friendly)
+            else:
+                self.tool_chat_display.update_model_c_response(friendly)
+        except Exception as e:
+            # Never allow popup/log rendering failures to wedge chat input state.
+            self._append_tool_chat_log(f"[WARN] Tool chat failure-handler error: {e}")
+        finally:
+            try:
+                self._close_env_dialog(model_key, is_tool_chat=True)
+            except Exception:
+                pass
+            try:
+                self.tool_chat_input.setEnabled(True)
+                self.tool_chat_send_btn.setEnabled(True)
+            except Exception:
+                pass
+            try:
+                self._check_tool_chat_all_finished()
+            except Exception:
+                pass
     
     def _check_tool_chat_all_finished(self):
         """Check if tool chat worker has finished"""
@@ -13131,17 +13150,27 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Common failure handling for Test Chat model workers."""
         tag = (model_key or "?").upper()
-        self._maybe_show_reonboard_popup(error, model_id, model_path)
-        self._append_test_chat_log(f"[{tag}] {error}")
-        if model_key == "a":
-            self.chat_display.update_model_a_response("[ERROR] Failed. See logs on the right.")
-        elif model_key == "b":
-            self.chat_display.update_model_b_response("[ERROR] Failed. See logs on the right.")
-        else:
-            self.chat_display.update_model_c_response("[ERROR] Failed. See logs on the right.")
-        self._close_env_dialog(model_key, is_tool_chat=False)
-        self._test_finish_pending_model(model_key, None)
-        self._offer_gpu_cleanup_for_test_chat(model_key, error)
+        try:
+            self._maybe_show_reonboard_popup(error, model_id, model_path)
+            self._append_test_chat_log(f"[{tag}] {error}")
+            if model_key == "a":
+                self.chat_display.update_model_a_response("[ERROR] Failed. See logs on the right.")
+            elif model_key == "b":
+                self.chat_display.update_model_b_response("[ERROR] Failed. See logs on the right.")
+            else:
+                self.chat_display.update_model_c_response("[ERROR] Failed. See logs on the right.")
+            self._offer_gpu_cleanup_for_test_chat(model_key, error)
+        except Exception as e:
+            self._append_test_chat_log(f"[{tag}] [WARN] failure-handler exception: {e}")
+        finally:
+            try:
+                self._close_env_dialog(model_key, is_tool_chat=False)
+            except Exception:
+                pass
+            try:
+                self._test_finish_pending_model(model_key, None)
+            except Exception:
+                pass
 
     def _should_offer_reonboard_popup(self, error_text: str) -> bool:
         low = (error_text or "").lower()

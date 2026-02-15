@@ -542,6 +542,52 @@ class EnvRegistry:
             if log_callback:
                 log_callback(msg)
 
+        # GGUF variant sweep: if a directory has multiple local GGUF files, probe each file.
+        # This makes runtime self-healing by selecting any loadable downloaded variant.
+        try:
+            model_path_obj = Path(model_path)
+            if model_path_obj.is_dir():
+                gguf_files = sorted([p for p in model_path_obj.rglob("*.gguf") if p.is_file()])
+                if len(gguf_files) > 1:
+                    # Prioritize active_variant from marker when present.
+                    ordered: list[Path] = []
+                    try:
+                        marker = model_path_obj / ".selected_weights.json"
+                        if marker.exists():
+                            data = json.loads(marker.read_text(encoding="utf-8"))
+                            active = data.get("active_variant")
+                            if isinstance(active, str) and active.strip():
+                                active_path = (model_path_obj / active).resolve()
+                                if active_path in gguf_files:
+                                    ordered.append(active_path)
+                    except Exception:
+                        pass
+                    for p in gguf_files:
+                        if p not in ordered:
+                            ordered.append(p)
+
+                    failures: list[str] = []
+                    for gguf in ordered:
+                        ok, reason, err = self.run_model_load_probe(
+                            python_exe=python_exe,
+                            model_path=str(gguf),
+                            adapter_dir=adapter_dir,
+                            log_callback=log_callback,
+                        )
+                        if ok:
+                            log(f"GGUF variant probe succeeded with: {gguf.name}")
+                            return True, None, None
+                        failures.append(f"{gguf.name}: {str(err)[:220]}")
+                    return (
+                        False,
+                        "UNSUPPORTED_ARCH",
+                        "All local GGUF variants failed backend probe. "
+                        f"Tried {len(ordered)} variant(s). "
+                        + " | ".join(failures[:6]),
+                    )
+        except Exception:
+            pass
+
         # Self-healing preflight for GGUF runtime components.
         # Keep this outside probe subprocess so we can install/repair deterministically.
         try:
@@ -602,87 +648,105 @@ try:
         except Exception:
             pass
 
+        import os
         backend_errors = []
-        # 1) llama-cpp-python (quick vocab-only init when supported)
+        backend_ready = False
+        deep_probe = os.environ.get("LLM_GGUF_DEEP_PROBE", "0").strip().lower() in ("1", "true", "yes")
+
+        # 1) llama-cpp-python backend
         try:
             from llama_cpp import Llama
-            try:
-                _ = Llama(
-                    model_path=str(gguf_path),
-                    n_ctx=64,
-                    n_threads=1,
-                    n_gpu_layers=0,
-                    vocab_only=True,
-                    verbose=False,
-                )
-            except TypeError:
-                _ = Llama(
-                    model_path=str(gguf_path),
-                    n_ctx=64,
-                    n_threads=1,
-                    n_gpu_layers=0,
-                    verbose=False,
-                )
-            print("GGUF_BACKEND: llama-cpp-python")
-            print("PROBE: SUCCESS (GGUF)")
-            sys.exit(0)
+            if deep_probe:
+                try:
+                    _ = Llama(
+                        model_path=str(gguf_path),
+                        n_ctx=64,
+                        n_threads=1,
+                        n_gpu_layers=0,
+                        vocab_only=True,
+                        verbose=False,
+                    )
+                except TypeError:
+                    _ = Llama(
+                        model_path=str(gguf_path),
+                        n_ctx=64,
+                        n_threads=1,
+                        n_gpu_layers=0,
+                        verbose=False,
+                    )
+                print("GGUF_BACKEND: llama-cpp-python(deep)")
+                backend_ready = True
+            else:
+                print("GGUF_BACKEND: llama-cpp-python(import)")
+                backend_ready = True
         except Exception as e:
             backend_errors.append("llama-cpp-python: " + str(e)[:400])
 
-        # 2) ctransformers (enabled by default in probe subprocess; disable via env)
-        import os
+        # 2) ctransformers backend
         enable_ctransformers = (os.environ.get("LLM_ENABLE_CTRANSFORMERS_FALLBACK", "1").strip().lower() not in ("0", "false", "no"))
-        if enable_ctransformers:
+        if not backend_ready and enable_ctransformers:
             try:
                 from ctransformers import AutoModelForCausalLM
-                _ = AutoModelForCausalLM.from_pretrained(
-                    str(gguf_path.parent),
-                    model_file=gguf_path.name,
-                    gpu_layers=0,
-                    context_length=64,
-                    threads=1,
-                )
-                print("GGUF_BACKEND: ctransformers")
-                print("PROBE: SUCCESS (GGUF)")
-                sys.exit(0)
+                if deep_probe:
+                    _ = AutoModelForCausalLM.from_pretrained(
+                        str(gguf_path.parent),
+                        model_file=gguf_path.name,
+                        gpu_layers=0,
+                        context_length=64,
+                        threads=1,
+                    )
+                    print("GGUF_BACKEND: ctransformers(deep)")
+                else:
+                    print("GGUF_BACKEND: ctransformers(import)")
+                backend_ready = True
             except Exception as e:
                 backend_errors.append("ctransformers: " + str(e)[:400])
-        else:
+        elif not enable_ctransformers:
             backend_errors.append("ctransformers: skipped (LLM_ENABLE_CTRANSFORMERS_FALLBACK not enabled)")
 
-        # 3) transformers GGUF fallback (best-effort)
-        try:
-            from transformers import AutoTokenizer, AutoModelForCausalLM
+        # 3) transformers GGUF fallback backend
+        if not backend_ready:
+            try:
+                from transformers import AutoTokenizer, AutoModelForCausalLM
 
-            candidates = []
-            env_id = (os.environ.get("LLM_GGUF_BASE_MODEL_ID") or "").strip()
-            if env_id:
-                candidates.append(env_id)
-            folder_id = gguf_root.name.replace("__", "/")
-            if folder_id and folder_id not in candidates:
-                candidates.append(folder_id)
-            if "glm-4.7-flash" in folder_id.lower() and "zai-org/GLM-4.7-Flash" not in candidates:
-                candidates.append("zai-org/GLM-4.7-Flash")
+                candidates = []
+                env_id = (os.environ.get("LLM_GGUF_BASE_MODEL_ID") or "").strip()
+                if env_id:
+                    candidates.append(env_id)
+                folder_id = gguf_root.name.replace("__", "/")
+                if folder_id and folder_id not in candidates:
+                    candidates.append(folder_id)
+                if "glm-4.7-flash" in folder_id.lower() and "zai-org/GLM-4.7-Flash" not in candidates:
+                    candidates.append("zai-org/GLM-4.7-Flash")
 
-            last_tf_err = None
-            for base_model_id in candidates:
-                try:
-                    _ = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
-                    _ = AutoModelForCausalLM.from_pretrained(
-                        base_model_id,
-                        gguf_file=str(gguf_path),
-                        trust_remote_code=True,
-                        low_cpu_mem_usage=True,
-                        device_map=None,
-                    )
-                    print("GGUF_BACKEND: transformers")
-                    print("PROBE: SUCCESS (GGUF)")
-                    sys.exit(0)
-                except Exception as tf_ex:
-                    last_tf_err = tf_ex
-            backend_errors.append("transformers: " + str(last_tf_err)[:400] if last_tf_err else "transformers: no candidate base model id")
-        except Exception as e:
-            backend_errors.append("transformers: " + str(e)[:400])
+                if deep_probe:
+                    last_tf_err = None
+                    for base_model_id in candidates:
+                        try:
+                            _ = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
+                            _ = AutoModelForCausalLM.from_pretrained(
+                                base_model_id,
+                                gguf_file=str(gguf_path),
+                                trust_remote_code=True,
+                                low_cpu_mem_usage=True,
+                                device_map=None,
+                            )
+                            print("GGUF_BACKEND: transformers(deep)")
+                            backend_ready = True
+                            break
+                        except Exception as tf_ex:
+                            last_tf_err = tf_ex
+                    if not backend_ready:
+                        backend_errors.append("transformers: " + str(last_tf_err)[:400] if last_tf_err else "transformers: no candidate base model id")
+                else:
+                    print("GGUF_BACKEND: transformers(import)")
+                    backend_ready = True
+            except Exception as e:
+                backend_errors.append("transformers: " + str(e)[:400])
+
+        if backend_ready:
+            print("PROBE: SUCCESS (GGUF)")
+            sys.exit(0)
 
         print("REASON: OTHER")
         print("ERROR: GGUF runtime backend failed for probe. File: " + str(gguf_path) + ". Tried llama-cpp-python, ctransformers, and transformers. Details: " + " | ".join(backend_errors))

@@ -277,6 +277,16 @@ def classify_runtime_failure(reason_code: Optional[str], error_message: Optional
             "category": "BACKEND_INCOMPATIBLE_MODEL",
             "action": "Selected GGUF variant is incompatible with available runtime backend. Try another variant or repair backend.",
         }
+    if "failed to load model from file" in low and "gguf runtime backend failed for probe" in low:
+        return {
+            "category": "MODEL_FILE_CORRUPT",
+            "action": "GGUF file could not be loaded by backend. Repair model files or redownload a different GGUF variant.",
+        }
+    if "gguf runtime backend failed for probe" in low and "cannot import name 'llama'" in low:
+        return {
+            "category": "RUNTIME_MISSING_COMPONENT",
+            "action": "GGUF runtime package is broken/incomplete. Rebuild the runtime environment (prefer Python 3.11 wheel path).",
+        }
     if "gguf runtime backend failed for probe" in low and "ctransformers:" in low and "failed to create llm" in low:
         return {
             "category": "BACKEND_INCOMPATIBLE_MODEL",

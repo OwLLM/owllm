@@ -7979,9 +7979,9 @@ class MainWindow(QMainWindow):
         # Also refresh all models to ensure consistency (with longer delay as fallback)
         QTimer.singleShot(1000, self._refresh_models)
         
-        # Refresh Test tab dropdowns if status is READY (so new models appear)
-        if status == "READY":
-            QTimer.singleShot(1500, self._refresh_locals)  # _refresh_locals updates Test tab dropdowns
+        # Refresh Test tab dropdowns after onboarding completion so new/updated models appear
+        # without requiring app restart (READY/BROKEN transitions can both affect availability).
+        QTimer.singleShot(1500, self._refresh_locals)  # _refresh_locals updates Test tab dropdowns
         
         # DO NOT automatically switch to Info tab - let user stay on Environment tab to see results
     

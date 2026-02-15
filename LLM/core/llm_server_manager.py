@@ -1211,6 +1211,7 @@ class LLMServerManager:
                     "auto-gptq": "auto_gptq",
                     "open-clip-torch": "open_clip",
                     "Pillow": "PIL",
+                    "llama-cpp-python": "llama_cpp",
                 }
                 health_imports = [import_map.get(p, p) for p in critical_packages]
                 health_lines = ["import importlib"] + [f"importlib.import_module('{m}')" for m in health_imports] + ["print('OK')"]

@@ -7985,6 +7985,7 @@ class MainWindow(QMainWindow):
         # Refresh Test tab dropdowns after onboarding completion so new/updated models appear
         # without requiring app restart (READY/BROKEN transitions can both affect availability).
         QTimer.singleShot(1500, self._refresh_locals)  # _refresh_locals updates Test tab dropdowns
+        QTimer.singleShot(1600, self._load_tool_chat_models)  # Tool Chat has its own READY-model loader
         
         # DO NOT automatically switch to Info tab - let user stay on Environment tab to see results
     
@@ -11990,11 +11991,11 @@ class MainWindow(QMainWindow):
                         bp = Path(base_path).resolve()
                         if bp.suffix.lower() == ".gguf":
                             bp = bp.parent
-                        normalized = str(bp)
+                        normalized = str(bp).lower()
                         ready_paths[normalized] = entry["model_id"]
                     except Exception:
                         # Fallback to original if resolve fails
-                        ready_paths[str(base_path)] = entry["model_id"]
+                        ready_paths[str(base_path).lower()] = entry["model_id"]
             
             models = list_local_downloads()
             download_root = get_app_root() / "models"
@@ -12005,7 +12006,10 @@ class MainWindow(QMainWindow):
                 for model_name in models:
                     model_path = download_root / model_name
                     # Normalize path for comparison
-                    model_path_str = str(model_path.resolve())
+                    try:
+                        model_path_str = str(model_path.resolve()).lower()
+                    except Exception:
+                        model_path_str = str(model_path).lower()
                     if model_path_str in ready_paths:
                         self.tool_chat_model_a.addItem(f"✓ {model_name}", str(model_path))
                         ready_count += 1
@@ -19262,11 +19266,20 @@ respective package directories or official repositories.
         combo.setUpdatesEnabled(False)
         try:
             combo.clear()
+            ready_path_keys = set()
+            for p in (ready_paths or {}).keys():
+                try:
+                    ready_path_keys.add(str(Path(str(p)).resolve()).lower())
+                except Exception:
+                    ready_path_keys.add(str(p).lower())
             if downloaded_models:
                 for model_name in downloaded_models:
                     model_path = models_dir / model_name
-                    model_path_str = str(model_path.resolve())
-                    if model_path_str in ready_paths:
+                    try:
+                        model_path_str = str(model_path.resolve()).lower()
+                    except Exception:
+                        model_path_str = str(model_path).lower()
+                    if model_path_str in ready_path_keys:
                         display_name = model_name.replace("__", "/")
                         combo.addItem(f"✓ 📦 {display_name}", str(model_path))
             if adapter_dir.exists():
@@ -19309,7 +19322,8 @@ respective package directories or official repositories.
                         (model_dir / f).exists() 
                         for f in ["model.safetensors", "pytorch_model.bin", "model.safetensors.index.json", "adapter_model.safetensors", "adapter_model.bin"]
                     )
-                    if has_config and (has_weights or len(list(model_dir.glob("*.safetensors"))) > 0 or len(list(model_dir.glob("*.bin"))) > 0):
+                    has_gguf = len(list(model_dir.glob("*.gguf"))) > 0
+                    if has_gguf or (has_config and (has_weights or len(list(model_dir.glob("*.safetensors"))) > 0 or len(list(model_dir.glob("*.bin"))) > 0)):
                         downloaded_models.append(model_dir.name)
         
         if hasattr(self, 'train_base_model'):
@@ -19339,9 +19353,9 @@ respective package directories or official repositories.
                     bp = Path(base_path).resolve()
                     if bp.suffix.lower() == ".gguf":
                         bp = bp.parent
-                    ready_paths[str(bp)] = entry["model_id"]
+                    ready_paths[str(bp).lower()] = entry["model_id"]
                 except Exception:
-                    ready_paths[str(base_path)] = entry["model_id"]
+                    ready_paths[str(base_path).lower()] = entry["model_id"]
         
         adapter_dir = self.root / "fine_tuned"
         self._fill_model_combo(self.test_model_a, downloaded_models, models_dir, ready_paths, adapter_dir)
@@ -19358,6 +19372,8 @@ respective package directories or official repositories.
         
         if hasattr(self, '_update_model_header_ports'):
             self._update_model_header_ports()
+        if hasattr(self, "tool_chat_model_a"):
+            self._load_tool_chat_models()
 
         # log list from repo root and logs directory
         # Check if logs tab widgets exist (lazy-loaded)

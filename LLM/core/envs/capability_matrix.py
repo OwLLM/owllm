@@ -106,8 +106,8 @@ def resolve_capability(
         return {
             "profile_id": "llamacpp",
             # GGUF runtime requires at least one backend package.
-            # We require llama-cpp-python as the default stable backend.
-            "required_packages": ["llama-cpp-python"],
+            # Include tokenizer conversion deps so transformers GGUF fallback is actually viable.
+            "required_packages": ["llama-cpp-python", "sentencepiece", "tiktoken", "tokenizers"],
             "quant_for_env": "base",
             "needs_peft": False,
             "needs_bnb": False,
@@ -276,6 +276,11 @@ def classify_runtime_failure(reason_code: Optional[str], error_message: Optional
         return {
             "category": "BACKEND_INCOMPATIBLE_MODEL",
             "action": "Selected GGUF variant is incompatible with available runtime backend. Try another variant or repair backend.",
+        }
+    if "gguf runtime backend failed for this model" in low:
+        return {
+            "category": "BACKEND_INCOMPATIBLE_MODEL",
+            "action": "Runtime could not load GGUF with available backends. Try another GGUF variant/quant or update GGUF runtime backend in this environment.",
         }
     if "failed to load model from file" in low and "gguf runtime backend failed for probe" in low:
         return {

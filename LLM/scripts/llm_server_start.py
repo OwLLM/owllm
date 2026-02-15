@@ -96,7 +96,31 @@ def main():
     else:
         env["PYTHONPATH"] = str(app_root)
     
-    server_python = str(os.environ.get("LLM_SERVER_PYTHON", "")).strip() or sys.executable
+    requested_python = str(os.environ.get("LLM_SERVER_PYTHON", "")).strip()
+    server_python = sys.executable
+    if requested_python:
+        try:
+            req_path = Path(requested_python).resolve()
+            cur_path = Path(sys.executable).resolve()
+            req_low = str(req_path).lower()
+            cur_low = str(cur_path).lower()
+            # Safety: if launcher already runs inside a model env, do not jump to system python.
+            # This prevents environment drift (e.g., accidentally launching uvicorn on Python 3.12).
+            if ".envs" in cur_low and ".envs" not in req_low:
+                print(
+                    f"[WARN] Ignoring LLM_SERVER_PYTHON outside model env: {req_path}. "
+                    f"Using current interpreter: {cur_path}"
+                )
+            elif req_path.exists():
+                server_python = str(req_path)
+            else:
+                print(
+                    f"[WARN] LLM_SERVER_PYTHON does not exist: {req_path}. "
+                    f"Using current interpreter: {cur_path}"
+                )
+        except Exception as e:
+            print(f"[WARN] Could not validate LLM_SERVER_PYTHON ({requested_python}): {e}")
+            print(f"[WARN] Falling back to current interpreter: {sys.executable}")
     print(f"Launching uvicorn with: {server_python} -m uvicorn {import_path}")
     print(f"Working directory: {app_root}")
     print(f"PYTHONPATH: {env['PYTHONPATH']}")

@@ -32,6 +32,7 @@ _TRANSIENT_RUNTIME_FAILURE_MARKERS = (
     "read timed out",
     "timed out",
     "startup log:",
+    "gguf runtime backend failed for this model",
 )
 
 

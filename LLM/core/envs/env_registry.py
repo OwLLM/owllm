@@ -2597,7 +2597,7 @@ sys.exit(0)
                                     str(rebuilt_python), "-m", "pip", "install", "--upgrade",
                                     "--only-binary", ":all:",
                                     "--prefer-binary",
-                                    "llama-cpp-python==0.3.2",
+                                    "llama-cpp-python",
                                     "--extra-index-url", llama_index,
                                 ]
                                 retry = subprocess.run(

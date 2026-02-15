@@ -165,6 +165,7 @@ class LLMServerManager:
             "read timed out",
             "timed out",
             "startup log:",
+            "gguf runtime backend failed for this model",
         )
         return any(m in low for m in markers)
 

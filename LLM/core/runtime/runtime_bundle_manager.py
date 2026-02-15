@@ -87,9 +87,17 @@ class RuntimeBundleManager:
         except Exception:
             pass
 
-        # 2) Try official wheel path first.
+        # 2) Try latest binary wheel first, then explicit wheel index fallback.
         llama_index = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
         install_attempts = [
+            [
+                "install",
+                "--upgrade",
+                "--only-binary",
+                ":all:",
+                "--prefer-binary",
+                "llama-cpp-python",
+            ],
             [
                 "install",
                 "--upgrade",

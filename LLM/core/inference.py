@@ -23,6 +23,17 @@ _ACTION_KEYWORDS = (
     "status", "file", "files", "folder", "folders", "directory", "directories", "path", "command", "shell"
 )
 
+_TRANSIENT_RUNTIME_FAILURE_MARKERS = (
+    "server failed to become healthy within",
+    "process died during startup",
+    "stale starting state",
+    "recovered stale starting state",
+    "connection refused",
+    "read timed out",
+    "timed out",
+    "startup log:",
+)
+
 
 def _extract_last_user_message(prompt: str) -> str:
     """Best-effort extraction of the most recent user turn from common chat templates."""
@@ -72,6 +83,13 @@ def _is_action_request(user_msg: str) -> bool:
     if not text:
         return False
     return any(keyword in text for keyword in _ACTION_KEYWORDS)
+
+
+def _is_transient_runtime_failure(last_error: str) -> bool:
+    low = (last_error or "").strip().lower()
+    if not low:
+        return False
+    return any(marker in low for marker in _TRANSIENT_RUNTIME_FAILURE_MARKERS)
 
 
 def _strip_tool_instruction_block(prompt: str) -> str:
@@ -196,15 +214,24 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
         except Exception:
             pass
 
-        msg = (
-            f"Model '{onboarding_id}' is not ready for chat (status={status}).\n"
-            f"Please re-onboard/repair this model from the UI before chatting."
-        )
-        if last_error:
-            msg += f"\n\nLast error:\n{last_error}"
-        if log_path:
-            msg += f"\n\nOnboarding log: {log_path}"
-        raise RuntimeError(msg)
+        # Allow one runtime recovery attempt for transient startup failures.
+        # Keep strict blocking for real onboarding issues (missing runtime/components/corrupt files).
+        if str(status).upper() == "BROKEN" and _is_transient_runtime_failure(last_error):
+            if log_callback:
+                log_callback(
+                    f"Model '{onboarding_id}' is BROKEN due to a transient startup failure; "
+                    "attempting runtime recovery..."
+                )
+        else:
+            msg = (
+                f"Model '{onboarding_id}' is not ready for chat (status={status}).\n"
+                f"Please re-onboard/repair this model from the UI before chatting."
+            )
+            if last_error:
+                msg += f"\n\nLast error:\n{last_error}"
+            if log_path:
+                msg += f"\n\nOnboarding log: {log_path}"
+            raise RuntimeError(msg)
     
     # Ensure server is running for this model
     manager = get_global_server_manager()

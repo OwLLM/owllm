@@ -18,6 +18,7 @@ import socket
 import logging
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple, IO
 
@@ -97,12 +98,23 @@ class LLMServerManager:
         self.running_servers: Dict[str, Tuple[subprocess.Popen, Optional[IO], Optional[str]]] = {}
         
         # Warmup timeout (seconds to wait for server to become READY).
-        # Large models can take a long time on first load (esp. after install / cold cache).
-        self.warmup_timeout = 1800
+        # Keep a bounded default so chat does not appear frozen for very long.
+        self.warmup_timeout = 300
         try:
             self.warmup_timeout = int(os.getenv("LLM_SERVER_WARMUP_TIMEOUT", str(self.warmup_timeout)))
         except Exception:
-            self.warmup_timeout = 1800
+            self.warmup_timeout = 300
+
+        # Existing STARTING-row watchdog:
+        # if another process marked STARTING but no real server is progressing,
+        # treat it as stale and recover instead of waiting indefinitely.
+        self.starting_stale_timeout = 120
+        try:
+            self.starting_stale_timeout = int(
+                os.getenv("LLM_SERVER_STARTING_STALE_TIMEOUT", str(self.starting_stale_timeout))
+            )
+        except Exception:
+            self.starting_stale_timeout = 120
 
     def _load_config(self) -> None:
         """(Re)load llm_backends.yaml into self.config if present/valid."""
@@ -138,6 +150,23 @@ class LLMServerManager:
             except Exception as e:
                 # Keep previous config if reload fails to avoid breaking running servers.
                 logger.warning(f"Failed to reload LLM config: {e}")
+
+    def _is_transient_runtime_broken_reason(self, error_msg: str) -> bool:
+        """True when BROKEN reason is likely recoverable by restarting server runtime."""
+        low = (error_msg or "").strip().lower()
+        if not low:
+            return False
+        markers = (
+            "server failed to become healthy within",
+            "process died during startup",
+            "stale starting state",
+            "recovered stale starting state",
+            "connection refused",
+            "read timed out",
+            "timed out",
+            "startup log:",
+        )
+        return any(m in low for m in markers)
 
     def get_integrity_report(self) -> Dict:
         """Return the last startup integrity report (duplicates, missing env, repairs)."""
@@ -342,15 +371,24 @@ class LLMServerManager:
             if status != "READY":
                 entry = self.state_store.get_onboarding(onboarding_id)
                 error_msg = entry.get("last_error", "Unknown error") if entry else "Unknown error"
-                try:
-                    log(f"Model '{onboarding_id}' is not READY (status={status}). Error: {error_msg}")
-                except Exception:
-                    pass
-                raise RuntimeError(
-                    f"Model '{onboarding_id}' is not ready for runtime (status={status}). "
-                    f"Please complete onboarding or repair the model. "
-                    f"Error: {error_msg}"
-                )
+                if str(status).upper() == "BROKEN" and self._is_transient_runtime_broken_reason(str(error_msg)):
+                    try:
+                        log(
+                            f"Model '{onboarding_id}' is BROKEN due to transient startup failure; "
+                            "attempting automatic runtime recovery."
+                        )
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        log(f"Model '{onboarding_id}' is not READY (status={status}). Error: {error_msg}")
+                    except Exception:
+                        pass
+                    raise RuntimeError(
+                        f"Model '{onboarding_id}' is not ready for runtime (status={status}). "
+                        f"Please complete onboarding or repair the model. "
+                        f"Error: {error_msg}"
+                    )
             
             # Check for duplicate ports and warn
             preferred_port = model_cfg.get("port", 10500)
@@ -394,13 +432,47 @@ class LLMServerManager:
             server_state = self.state_store.get_server(model_id)
             if server_state and server_state.get("status") == "STARTING":
                 port = server_state.get("port")
+                pid = server_state.get("pid")
+                started_at = server_state.get("started_at")
                 if port is not None:
-                    log(f"Server for '{model_id}' is already starting (port {port}), waiting for it...")
-                    try:
-                        self._wait_for_health_ok(model_id, self.warmup_timeout, log_callback=log, port=port)
-                        return self._get_server_url(model_id)
-                    except TimeoutError:
-                        log(f"Existing start did not become ready in time, will start server")
+                    wait_timeout = max(20, min(self.warmup_timeout, self.starting_stale_timeout))
+                    age_sec = self._state_age_seconds(started_at)
+                    pid_alive = self._is_pid_alive(pid)
+                    port_has_listener = not self._check_port_available(int(port))
+                    stale_start = (
+                        (age_sec is not None and age_sec >= self.starting_stale_timeout)
+                        and ((pid is not None and not pid_alive) or (not port_has_listener))
+                    )
+                    if stale_start:
+                        log(
+                            f"Detected stale STARTING state for '{model_id}' "
+                            f"(age={int(age_sec)}s, pid={pid}, pid_alive={pid_alive}, port={port}, "
+                            f"listener={port_has_listener}). Recovering by resetting state."
+                        )
+                        try:
+                            self.state_store.upsert_server(
+                                model_id=model_id,
+                                pid=pid if isinstance(pid, int) else None,
+                                port=int(port),
+                                status="FAILED",
+                                stopped_at=datetime.utcnow().isoformat(),
+                                last_error=(
+                                    "Recovered stale STARTING state: no active startup process/listener. "
+                                    "A fresh server start will be attempted."
+                                )[:500],
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        log(
+                            f"Server for '{model_id}' is already starting (port {port}), "
+                            f"waiting up to {wait_timeout}s for readiness..."
+                        )
+                        try:
+                            self._wait_for_health_ok(model_id, wait_timeout, log_callback=log, port=port)
+                            return self._get_server_url(model_id)
+                        except TimeoutError:
+                            log(f"Existing start did not become ready in {wait_timeout}s, will start server")
             
             # Fast-path: if something is already healthy on our preferred port, reuse it
             # without logging "Starting server..." or calling _start_server
@@ -460,6 +532,49 @@ class LLMServerManager:
                 sock.close()
             except Exception:
                 pass
+
+    def _is_pid_alive(self, pid: Optional[int]) -> bool:
+        """Best-effort check whether a process PID is still alive."""
+        if pid is None:
+            return False
+        try:
+            pid_i = int(pid)
+        except Exception:
+            return False
+        if pid_i <= 0:
+            return False
+        try:
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"PID eq {pid_i}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    **self.subprocess_flags,
+                )
+                out = (result.stdout or "").strip().lower()
+                if "no tasks are running" in out:
+                    return False
+                return f"\"{pid_i}\"" in out
+            os.kill(pid_i, 0)
+            return True
+        except Exception:
+            return False
+
+    def _state_age_seconds(self, iso_ts: Optional[str]) -> Optional[float]:
+        """Parse ISO timestamp and return age in seconds (UTC)."""
+        if not iso_ts:
+            return None
+        try:
+            ts = str(iso_ts).strip()
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            dt = datetime.fromisoformat(ts)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now(timezone.utc) - dt).total_seconds())
+        except Exception:
+            return None
 
     def _start_server(self, model_id: str, log_callback=None):
         """

@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Dict, List
 
-from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize, QEvent, QObject, QPoint, QPointF, QSettings
+from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize, QEvent, QObject, QPoint, QPointF, QSettings, QLockFile
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
@@ -21,6 +21,9 @@ from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap, 
 # Feature flag for hybrid frame wrapper (enabled by default)
 # To disable: set USE_HYBRID_FRAME=0 before running
 USE_HYBRID_FRAME = os.getenv("USE_HYBRID_FRAME", "1") == "1"
+
+# Keep a module-level reference so lock lifetime matches app lifetime.
+_APP_INSTANCE_LOCK = None
 
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
 from desktop_app.training_widgets import MetricCard
@@ -19434,6 +19437,18 @@ def main() -> int:
         write_startup_error(f"Failed to setup watchdog: {e}")
 
     try:
+        # Single-instance guard: prevents duplicate OWLLM processes from racing on state/ports.
+        global _APP_INSTANCE_LOCK
+        lock_path = str((logs_dir / "owllm.instance.lock").resolve())
+        _APP_INSTANCE_LOCK = QLockFile(lock_path)
+        _APP_INSTANCE_LOCK.setStaleLockTime(0)
+        if not _APP_INSTANCE_LOCK.tryLock(100):
+            write_startup_error(
+                "Another OWLLM instance is already running. Exiting duplicate instance.",
+                f"lock_file={lock_path}",
+            )
+            return 0
+
         app = QApplication(sys.argv)
         app.setOrganizationName("LocaLLM")
         app.setApplicationName("OWLLM")

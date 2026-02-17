@@ -79,3 +79,39 @@ def test_try_repair_probe_failure_prefers_runtime_bundle_for_gguf(tmp_path):
     assert err is None
     assert fake.runtime_bundle_manager.calls == 1
 
+
+def test_backend_incompatible_not_repairable():
+    """BACKEND_INCOMPATIBLE_MODEL is non-transient: orchestrator does not attempt repair."""
+    orch = SelfHealOrchestrator(max_attempts=1)
+    fake = _FakeEnvRegistry()
+    ok, reason, err = orch.try_repair_probe_failure(
+        env_registry=fake,
+        python_exe=Path(sys.executable),
+        model_path="C:/tmp/gguf_model",
+        adapter_dir=None,
+        reason_code="OTHER",
+        error_message="gguf runtime backend failed for this model. gguf_init_from_file block size",
+        log_callback=None,
+    )
+    assert ok is False
+    assert reason == "OTHER"
+    assert "gguf" in (err or "").lower() or "block" in (err or "").lower()
+    assert len(fake.installed) == 0
+
+
+def test_transient_runtime_missing_repairable():
+    """RUNTIME_MISSING_COMPONENT is transient: orchestrator attempts package repair."""
+    orch = SelfHealOrchestrator(max_attempts=1)
+    fake = _FakeEnvRegistry()
+    ok, reason, err = orch.try_repair_probe_failure(
+        env_registry=fake,
+        python_exe=Path(sys.executable),
+        model_path="C:/tmp/model",
+        adapter_dir=None,
+        reason_code="RUNTIME_MISSING_COMPONENT",
+        error_message="No module named 'llama_cpp'",
+        log_callback=None,
+    )
+    assert ok is True
+    assert "llama-cpp-python" in fake.installed
+

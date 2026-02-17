@@ -111,6 +111,43 @@ def test_text_only_model_no_vision_deps(tmp_path):
     assert "open-clip-torch" not in packages
 
 
+def test_llamacpp_required_and_fallback_packages(tmp_path):
+    """GGUF/llamacpp profile: required_packages only llama-cpp-python; fallback_packages non-empty."""
+    from core.envs.capability_matrix import (
+        resolve_capability,
+        get_runtime_required_packages,
+        get_runtime_fallback_packages,
+    )
+    (tmp_path / "model.gguf").write_bytes(b"GGUF" + (b"\x00" * 256))
+    cap = resolve_capability(str(tmp_path), model_cfg={}, adapter_dir=None, model_id=None)
+    assert cap.get("profile_id") == "llamacpp"
+    assert cap.get("required_packages") == ["llama-cpp-python"]
+    fallback = cap.get("fallback_packages", [])
+    assert isinstance(fallback, list)
+    assert "sentencepiece" in fallback
+    assert "tokenizers" in fallback
+    required = get_runtime_required_packages(str(tmp_path), model_cfg={}, adapter_dir=None, model_id=None)
+    assert required == ["llama-cpp-python"]
+    fallback_get = get_runtime_fallback_packages(str(tmp_path), model_cfg={}, adapter_dir=None, model_id=None)
+    assert set(fallback_get) >= {"sentencepiece", "tokenizers"}
+
+
+def test_classify_gguf_backend_incompatible():
+    """classify_runtime_failure maps GGUF variant/backend errors to BACKEND_INCOMPATIBLE_MODEL."""
+    from core.envs.capability_matrix import classify_runtime_failure
+    cases = [
+        ("OTHER", "gguf_init_from_file failed block size"),
+        ("OTHER", "gguf runtime backend failed for this model. Tried llama-cpp-python"),
+        ("OTHER", "gguf runtime backend failed for probe ctransformers: failed to create llm"),
+        ("UNSUPPORTED_ARCH", "unsupported arch"),
+    ]
+    for reason, msg in cases:
+        out = classify_runtime_failure(reason, msg)
+        assert out.get("category") == "BACKEND_INCOMPATIBLE_MODEL", (
+            f"expected BACKEND_INCOMPATIBLE_MODEL for ({reason!r}, {msg[:50]!r}), got {out}"
+        )
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

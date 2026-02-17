@@ -25,7 +25,7 @@ from typing import Dict, Optional, Tuple, IO
 from core.state_store import get_state_store
 from core.envs.env_registry import EnvSpec
 from core.model_id_resolver import to_canonical_id
-from core.envs.capability_matrix import classify_runtime_failure
+from core.envs.capability_matrix import classify_runtime_failure, get_runtime_fallback_packages
 from model_integrity_checker import ModelIntegrityChecker
 
 logger = logging.getLogger(__name__)
@@ -240,7 +240,19 @@ class LLMServerManager:
                     return package_name
         
         return None
-    
+
+    def _is_fallback_missing_health_error(self, error_msg: str) -> bool:
+        """True when /health error suggests missing tokenizer/fallback deps (sentencepiece, tiktoken, tokenizers)."""
+        if not isinstance(error_msg, str) or not error_msg.strip():
+            return False
+        low = error_msg.lower()
+        return (
+            "sentencepiece" in low
+            or "tiktoken" in low
+            or ("sentencepiece or tiktoken" in low)
+            or ("couldn't instantiate the backend tokenizer" in low and ("sentencepiece" in low or "tiktoken" in low))
+        )
+
     def _resolve_onboarding_id(self, model_id: str, model_cfg: Optional[dict] = None) -> str:
         """
         Resolve the onboarding key (canonical model ID) for a server config model_id.
@@ -1515,7 +1527,8 @@ class LLMServerManager:
         start_time = time.time()
         last_error = None
         last_progress_update = 0  # Track last progress update time
-        
+        self_heal_attempted = False  # One-shot startup self-heal for known fallback deps
+
         log(f"Waiting for server to become healthy (timeout: {self.warmup_timeout}s)...")
         log(f"This involves loading the model into GPU memory. Please wait...")
         
@@ -1829,17 +1842,141 @@ class LLMServerManager:
                             log_path_for_error = None
                             if model_id in self.running_servers:
                                 _, _, log_path_for_error = self.running_servers[model_id]
-                            full_error = (
-                                f"Server failed to load model: {error_msg}\n"
-                                f"Check model files are complete in: {model_path}\n"
-                                f"Please re-onboard/repair this model, then retry.\n"
-                                f"Startup log: {log_path_for_error or 'N/A'}"
-                            )
                             norm = classify_runtime_failure("OTHER", str(error_msg))
                             category = norm.get("category", "ENVIRONMENT_CORRUPT")
                             action = norm.get("action", "")
+                            # BACKEND_INCOMPATIBLE_MODEL: do not attempt self-heal; return categorized error.
+                            if category == "BACKEND_INCOMPATIBLE_MODEL":
+                                remediation = (
+                                    "This GGUF variant appears incompatible with available runtime backends.\n"
+                                    "Try another GGUF quant/variant or a different backend format."
+                                )
+                                full_error = (
+                                    f"Server failed to load model: {error_msg}\n"
+                                    f"Check model files are complete in: {model_path}\n"
+                                    f"{remediation}\n"
+                                    f"Startup log: {log_path_for_error or 'N/A'}"
+                                )
+                                full_error = f"[{category}] {full_error}\nSuggested action: {action}"
+                                try:
+                                    broken_key = authoritative_onboarding_id if authoritative_onboarding_id is not None else self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+                                    row = self.state_store.get_onboarding(broken_key)
+                                    if not row and broken_key != model_id:
+                                        row = self.state_store.get_onboarding(model_id)
+                                        if row:
+                                            broken_key = model_id
+                                    base_path_for_row = (row or {}).get("base_model_path") or model_path
+                                    self.state_store.upsert_onboarding(
+                                        model_id=broken_key,
+                                        base_model_path=str(base_path_for_row),
+                                        status="BROKEN",
+                                        last_error=(error_msg or full_error)[:500],
+                                    )
+                                except Exception:
+                                    pass
+                                raise RuntimeError(full_error)
+                            # One-shot targeted self-heal for known missing fallback deps (tokenizer/transformers path).
+                            if not self_heal_attempted and self._is_fallback_missing_health_error(str(error_msg)):
+                                try:
+                                    broken_key = authoritative_onboarding_id if authoritative_onboarding_id is not None else self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
+                                    row = self.state_store.get_onboarding(broken_key)
+                                    if not row and broken_key != model_id:
+                                        row = self.state_store.get_onboarding(model_id)
+                                    base_model_path = (row or {}).get("base_model_path") or model_cfg.get("base_model") or ""
+                                    fallback_packages = get_runtime_fallback_packages(
+                                        str(base_model_path),
+                                        model_cfg=model_cfg,
+                                        adapter_dir=adapter_dir,
+                                        model_id=model_id,
+                                    ) if base_model_path else []
+                                    if fallback_packages and env_spec:
+                                        self_heal_attempted = True
+                                        log("One-shot startup self-heal: installing fallback packages (tokenizer/transformers path)...")
+                                        install_ok, install_err = self.env_registry.auto_install_missing_packages(
+                                            env_spec.python_executable,
+                                            fallback_packages,
+                                            log_callback=log,
+                                        )
+                                        if install_ok:
+                                            # Restart server so it runs with updated env
+                                            if model_id in self.running_servers:
+                                                old_process, old_log_file, _ = self.running_servers[model_id]
+                                                try:
+                                                    if old_process and old_process.poll() is None:
+                                                        old_process.kill()
+                                                except Exception:
+                                                    pass
+                                                try:
+                                                    if old_log_file:
+                                                        old_log_file.flush()
+                                                        old_log_file.close()
+                                                except Exception:
+                                                    pass
+                                                del self.running_servers[model_id]
+                                            log_dir = app_root / "logs" / "server_startup"
+                                            log_dir.mkdir(parents=True, exist_ok=True)
+                                            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                                            safe_model_id = model_id.replace("/", "__").replace("\\", "__")
+                                            log_path2 = log_dir / f"{safe_model_id}_{timestamp}_selfheal.log"
+                                            log_file2 = open(log_path2, "w", encoding="utf-8", errors="replace")
+                                            env2 = os.environ.copy()
+                                            env2["SERVER_PORT"] = str(port)
+                                            env2["LLM_SERVER_PYTHON"] = str(env_spec.python_executable)
+                                            if chosen_gpu is not None:
+                                                env2["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+                                                env2["CUDA_VISIBLE_DEVICES"] = str(chosen_gpu)
+                                            env2.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
+                                            if use_exllamav2_gptq:
+                                                env2["USE_EXLLAMAV2_GPTQ"] = "true"
+                                            subprocess_kwargs2 = {
+                                                "cwd": str(app_root),
+                                                "stdout": log_file2,
+                                                "stderr": subprocess.STDOUT,
+                                                "text": True,
+                                                "encoding": "utf-8",
+                                                "errors": "replace",
+                                                "env": env2,
+                                            }
+                                            if os.name == "nt":
+                                                startupinfo = subprocess.STARTUPINFO()
+                                                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                                                startupinfo.wShowWindow = subprocess.SW_HIDE
+                                                subprocess_kwargs2["startupinfo"] = startupinfo
+                                                subprocess_kwargs2["creationflags"] = subprocess.CREATE_NO_WINDOW
+                                            process2 = subprocess.Popen(
+                                                [str(env_spec.python_executable), str(launcher_script), model_id],
+                                                **subprocess_kwargs2,
+                                            )
+                                            self.running_servers[model_id] = (process2, log_file2, str(log_path2))
+                                            process = process2
+                                            self.state_store.upsert_server(
+                                                model_id=model_id,
+                                                pid=process2.pid,
+                                                port=port,
+                                                status="STARTING",
+                                            )
+                                            log("Server restarted after self-heal; re-checking health...")
+                                            time.sleep(5)
+                                            continue
+                                        else:
+                                            log(f"Self-heal install failed: {(install_err or '')[:300]}")
+                                except Exception as heal_ex:
+                                    log(f"Startup self-heal error: {heal_ex}")
+                            # Categorized error: use action from classifier (no generic re-onboard loop).
+                            if category == "MODEL_FILE_CORRUPT":
+                                remediation = (
+                                    "Model files may be incomplete/corrupt.\n"
+                                    "Repair/redownload model files, then retry."
+                                )
+                            else:
+                                remediation = action if action else "Repair environment or re-run onboarding for this model, then retry."
+                            full_error = (
+                                f"Server failed to load model: {error_msg}\n"
+                                f"Check model files are complete in: {model_path}\n"
+                                f"{remediation}\n"
+                                f"Startup log: {log_path_for_error or 'N/A'}"
+                            )
                             full_error = f"[{category}] {full_error}\nSuggested action: {action}"
-                            # Mark model BROKEN so Models page shows Repair button and card reflects failure
                             try:
                                 broken_key = authoritative_onboarding_id if authoritative_onboarding_id is not None else self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
                                 row = self.state_store.get_onboarding(broken_key)

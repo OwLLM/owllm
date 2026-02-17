@@ -71,7 +71,8 @@ def resolve_capability(
     Returns:
         {
             "profile_id": str,
-            "required_packages": List[str],
+            "required_packages": List[str],   # Must pass onboarding; runtime preflight fails if missing
+            "fallback_packages": List[str],   # Optional; installed opportunistically, never block onboarding
             "quant_for_env": "base" | "bnb",
             "needs_peft": bool,
             "needs_bnb": bool,
@@ -103,11 +104,12 @@ def resolve_capability(
 
     # Build package list from profile
     if req.get("backend_required") == "llamacpp":
+        # required_packages: only what must pass onboarding (single source for onboarding + runtime gate).
+        # fallback_packages: tokenizer/transformers fallback deps; installed opportunistically, never block onboarding.
         return {
             "profile_id": "llamacpp",
-            # GGUF runtime requires at least one backend package.
-            # Include tokenizer conversion deps so transformers GGUF fallback is actually viable.
-            "required_packages": ["llama-cpp-python", "sentencepiece", "tiktoken", "tokenizers"],
+            "required_packages": ["llama-cpp-python"],
+            "fallback_packages": ["sentencepiece", "tokenizers", "tiktoken"],
             "quant_for_env": "base",
             "needs_peft": False,
             "needs_bnb": False,
@@ -160,9 +162,13 @@ def resolve_capability(
             if pkg not in required_packages:
                 required_packages.append(pkg)
 
+    # Non-llamacpp profiles have no fallback packages (all needed deps are required).
+    fallback_packages: List[str] = []
+
     return {
         "profile_id": profile_id,
         "required_packages": required_packages,
+        "fallback_packages": fallback_packages,
         "quant_for_env": quant_for_env,
         "needs_peft": needs_peft,
         "needs_bnb": needs_bnb,
@@ -205,7 +211,8 @@ def get_runtime_required_packages(
 ) -> List[str]:
     """
     Return the exact list of package names required at runtime for this model.
-    Use this in both onboarding (to ensure env has them) and runtime preflight (to fail fast if missing).
+    Single source: used by both onboarding (gate) and runtime preflight (fail fast if missing).
+    Fallback packages are never included here; use get_runtime_fallback_packages for optional installs.
     """
     cap = resolve_capability(
         model_path=model_path,
@@ -214,6 +221,25 @@ def get_runtime_required_packages(
         model_id=model_id,
     )
     return cap.get("required_packages", BASE_PACKAGES.copy())
+
+
+def get_runtime_fallback_packages(
+    model_path: str,
+    model_cfg: Optional[Dict[str, Any]] = None,
+    adapter_dir: Optional[str] = None,
+    model_id: Optional[str] = None,
+) -> List[str]:
+    """
+    Return optional package names for this model (e.g. tokenizer deps for GGUF transformers fallback).
+    Installed opportunistically by startup self-heal; never block onboarding.
+    """
+    cap = resolve_capability(
+        model_path=model_path,
+        model_cfg=model_cfg,
+        adapter_dir=adapter_dir,
+        model_id=model_id,
+    )
+    return cap.get("fallback_packages", [])
 
 
 def get_runtime_contract(profile_id: str) -> Dict[str, Any]:

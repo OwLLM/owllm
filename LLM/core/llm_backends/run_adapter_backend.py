@@ -235,8 +235,13 @@ def _list_gguf_candidates(model_dir: Path) -> list[Path]:
     return candidates
 
 
+# Deterministic GGUF backend order: 1) llama-cpp-python (primary), 2) transformers (fallback), 3) ctransformers (optional when enabled).
+# Bounded base_candidates for transformers fallback (diagnostics record per-variant outcome).
+_MAX_GGUF_TRANSFORMERS_BASE_CANDIDATES = 5
+
+
 def _load_gguf_model(model_dir: Path):
-    """Load GGUF with llama-cpp-python first, then ctransformers fallback."""
+    """Load GGUF with deterministic backend order: llama-cpp-python primary, transformers fallback, ctransformers optional."""
     gguf_candidates = _list_gguf_candidates(model_dir)
     if not gguf_candidates:
         raise ValueError(f"No .gguf files found in model directory: {model_dir}")
@@ -244,23 +249,24 @@ def _load_gguf_model(model_dir: Path):
     n_threads = int(os.environ.get("LLM_LLAMACPP_N_THREADS", str(max(1, (os.cpu_count() or 4) // 2))))
     enable_ctransformers = os.environ.get("LLM_ENABLE_CTRANSFORMERS_FALLBACK", "").strip().lower() in ("1", "true", "yes")
     variant_errors: list[str] = []
+    variant_outcomes: list[dict] = []  # Per-variant diagnostics: [{ "variant": name, "backends": [...] }]
     primary_id = _extract_base_model_id_for_gguf(model_dir)
     base_candidates = [primary_id]
-    # Common GLM fallback for quant repos that reference a custom fork/tokenizer backend.
     if "glm-4.7-flash" in primary_id.lower() and "zai-org/GLM-4.7-Flash" not in base_candidates:
         base_candidates.append("zai-org/GLM-4.7-Flash")
     folder_id = model_dir.name.replace("__", "/")
     if folder_id not in base_candidates:
         base_candidates.append(folder_id)
+    base_candidates = base_candidates[:_MAX_GGUF_TRANSFORMERS_BASE_CANDIDATES]
 
     for gguf_path in gguf_candidates:
         backend_errors: list[str] = []
+        backend_outcomes: list[str] = []
 
-        # Try llama-cpp-python first when available.
+        # 1) Primary: llama-cpp-python
         try:
             from llama_cpp import Llama  # type: ignore
 
-            # Default CPU-safe; users can override if they installed a CUDA-enabled llama-cpp build.
             n_gpu_layers = int(os.environ.get("LLM_LLAMACPP_N_GPU_LAYERS", "0"))
             logging.info(
                 "Loading GGUF via llama-cpp-python: file=%s, n_ctx=%s, n_threads=%s, n_gpu_layers=%s",
@@ -276,13 +282,66 @@ def _load_gguf_model(model_dir: Path):
                 n_gpu_layers=n_gpu_layers,
                 verbose=False,
             )
+            backend_outcomes.append("llama-cpp-python: ok")
+            variant_outcomes.append({"variant": gguf_path.name, "backends": backend_outcomes})
             return None, _LlamaCppWrapper(llm, str(gguf_path)), None
         except Exception as llama_err:
-            backend_errors.append(f"llama-cpp-python: {str(llama_err)[:300]}")
-            logging.info("llama-cpp-python unavailable or failed, trying ctransformers backend: %s", llama_err)
+            err_snip = str(llama_err)[:300]
+            backend_errors.append(f"llama-cpp-python: {err_snip}")
+            backend_outcomes.append(f"llama-cpp-python: {err_snip}")
+            logging.info("llama-cpp-python failed for %s, trying transformers fallback: %s", gguf_path.name, llama_err)
 
-        # Optional fallback: ctransformers can hard-abort some GGUF variants on Windows.
-        # Keep it opt-in to preserve isolation/stability; prefer llama-cpp/transformers first.
+        # 2) Fallback: transformers with robust tokenizer (sentencepiece/tiktoken use_fast=False)
+        tf_last_err = None
+        for base_model_id in base_candidates:
+            try:
+                logging.info(
+                    "Loading GGUF via transformers fallback: base_model_id=%s, gguf=%s",
+                    base_model_id,
+                    str(gguf_path),
+                )
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
+                except Exception as tok_ex:
+                    tok_msg = str(tok_ex)
+                    if (
+                        "Couldn't instantiate the backend tokenizer" in tok_msg
+                        or "sentencepiece or tiktoken" in tok_msg
+                    ):
+                        logging.warning(
+                            "Transformers tokenizer fast backend failed for '%s'; retrying with use_fast=False. Error: %s",
+                            base_model_id,
+                            tok_ex,
+                        )
+                        tokenizer = AutoTokenizer.from_pretrained(
+                            base_model_id,
+                            trust_remote_code=True,
+                            use_fast=False,
+                        )
+                    else:
+                        raise
+                model_kwargs = dict(
+                    gguf_file=str(gguf_path),
+                    trust_remote_code=True,
+                    low_cpu_mem_usage=True,
+                )
+                if torch.cuda.is_available():
+                    model_kwargs["device_map"] = "auto"
+                    model_kwargs["torch_dtype"] = torch.float16
+                else:
+                    model_kwargs["device_map"] = None
+                model = AutoModelForCausalLM.from_pretrained(base_model_id, **model_kwargs)
+                backend_outcomes.append("transformers: ok")
+                variant_outcomes.append({"variant": gguf_path.name, "backends": backend_outcomes})
+                return tokenizer, model, None
+            except Exception as ex:
+                tf_last_err = ex
+                logging.warning("Transformers GGUF fallback failed for base '%s': %s", base_model_id, ex)
+                continue
+        backend_errors.append(f"transformers: {str(tf_last_err)[:300] if tf_last_err else 'unknown'}")
+        backend_outcomes.append(f"transformers: {str(tf_last_err)[:200] if tf_last_err else 'unknown'}")
+
+        # 3) Optional: ctransformers only when enabled (recorded in diagnostics)
         if enable_ctransformers:
             try:
                 from ctransformers import AutoModelForCausalLM  # type: ignore
@@ -297,6 +356,8 @@ def _load_gguf_model(model_dir: Path):
                 )
                 wrapper = _LlamaCppWrapper(model, str(gguf_path))
                 wrapper._is_ctransformers = True
+                backend_outcomes.append("ctransformers: ok")
+                variant_outcomes.append({"variant": gguf_path.name, "backends": backend_outcomes})
                 logging.info(
                     "Loaded GGUF via ctransformers: file=%s, context_length=%s, threads=%s, gpu_layers=%s",
                     str(gguf_path),
@@ -307,44 +368,21 @@ def _load_gguf_model(model_dir: Path):
                 return None, wrapper, None
             except Exception as cex:
                 backend_errors.append(f"ctransformers: {str(cex)[:300]}")
-                logging.info("ctransformers unavailable or failed, trying transformers GGUF fallback: %s", cex)
+                backend_outcomes.append(f"ctransformers: {str(cex)[:200]}")
+                logging.info("ctransformers failed for %s: %s", gguf_path.name, cex)
         else:
             backend_errors.append("ctransformers: skipped (LLM_ENABLE_CTRANSFORMERS_FALLBACK not enabled)")
-            logging.info("Skipping ctransformers fallback (LLM_ENABLE_CTRANSFORMERS_FALLBACK not enabled)")
+            backend_outcomes.append("ctransformers: skipped")
 
-        # Final fallback: transformers native GGUF support.
-        tf_last_err = None
-        for base_model_id in base_candidates:
-            try:
-                logging.info(
-                    "Loading GGUF via transformers fallback: base_model_id=%s, gguf=%s",
-                    base_model_id,
-                    str(gguf_path),
-                )
-                tokenizer = AutoTokenizer.from_pretrained(base_model_id, trust_remote_code=True)
-                model_kwargs = dict(
-                    gguf_file=str(gguf_path),
-                    trust_remote_code=True,
-                    low_cpu_mem_usage=True,
-                )
-                if torch.cuda.is_available():
-                    model_kwargs["device_map"] = "auto"
-                    model_kwargs["torch_dtype"] = torch.float16
-                else:
-                    model_kwargs["device_map"] = None
-                model = AutoModelForCausalLM.from_pretrained(base_model_id, **model_kwargs)
-                return tokenizer, model, None
-            except Exception as ex:
-                tf_last_err = ex
-                logging.warning("Transformers GGUF fallback failed for base '%s': %s", base_model_id, ex)
-                continue
-        backend_errors.append(f"transformers: {str(tf_last_err)[:300] if tf_last_err else 'unknown'}")
+        variant_outcomes.append({"variant": gguf_path.name, "backends": backend_outcomes})
         variant_errors.append(f"{gguf_path.name}: " + " | ".join(backend_errors))
 
+    for vo in variant_outcomes:
+        logging.info("GGUF variant outcome: %s", vo)
     details = " || ".join(variant_errors[:8])
     raise RuntimeError(
         "GGUF runtime backend failed for this model. "
-        "Tried llama-cpp-python, ctransformers, and transformers GGUF fallback. "
+        "Tried llama-cpp-python (primary), transformers (fallback), then ctransformers (optional). "
         f"Details: {details[:1800]}"
     )
 

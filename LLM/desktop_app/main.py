@@ -11975,49 +11975,8 @@ class MainWindow(QMainWindow):
         return c[:1] if c else "a"
     
     def _load_tool_chat_models(self):
-        """Load available models into tool chat selector - only READY models"""
-        try:
-            from core.model_onboarding import get_onboarding_service
-            onboarding = get_onboarding_service()
-            ready_models = onboarding.list_ready_models()
-            
-            # Build mapping of normalized base_model_path -> model_id
-            ready_paths = {}
-            for entry in ready_models:
-                base_path = entry.get("base_model_path")
-                if base_path:
-                    # Normalize path for comparison (resolve to absolute, handle case/separators)
-                    try:
-                        bp = Path(base_path).resolve()
-                        if bp.suffix.lower() == ".gguf":
-                            bp = bp.parent
-                        normalized = str(bp).lower()
-                        ready_paths[normalized] = entry["model_id"]
-                    except Exception:
-                        # Fallback to original if resolve fails
-                        ready_paths[str(base_path).lower()] = entry["model_id"]
-            
-            models = list_local_downloads()
-            download_root = get_app_root() / "models"
-            
-            self.tool_chat_model_a.clear()
-            ready_count = 0
-            if models:
-                for model_name in models:
-                    model_path = download_root / model_name
-                    # Normalize path for comparison
-                    try:
-                        model_path_str = str(model_path.resolve()).lower()
-                    except Exception:
-                        model_path_str = str(model_path).lower()
-                    if model_path_str in ready_paths:
-                        self.tool_chat_model_a.addItem(f"✓ {model_name}", str(model_path))
-                        ready_count += 1
-            
-            if ready_count == 0:
-                self.tool_chat_model_a.addItem("(No READY models - run onboarding first)", None)
-        except Exception as e:
-            self.tool_chat_model_a.addItem(f"(Error: {e})", None)
+        """Refresh Tool Chat selector; uses shared READY list so Test/M2M/Tool Chat stay in sync."""
+        self._refresh_ready_model_selectors()
     
     def _clear_tool_chat(self):
         """Clear tool chat history"""
@@ -13306,7 +13265,8 @@ class MainWindow(QMainWindow):
 
     def _maybe_show_reonboard_popup(self, error_text: str, model_id: str, model_path: str = "") -> None:
         """
-        Show a popup prompting the user to re-onboard when a model isn't actually READY.
+        Show a popup with next steps when a model isn't actually READY.
+        Message is aligned with failure category (no generic re-onboard for BACKEND_INCOMPATIBLE_MODEL).
         This is intentionally UI-only (no automatic repairs during chat).
         """
         if not self._should_offer_reonboard_popup(error_text):
@@ -13315,15 +13275,23 @@ class MainWindow(QMainWindow):
         from pathlib import Path
         from PySide6.QtGui import QDesktopServices
         from PySide6.QtCore import QUrl
+        from core.envs.capability_matrix import classify_runtime_failure
 
         log_path = self._extract_first_log_path_from_error(error_text)
         log_exists = bool(log_path) and Path(log_path).exists()
 
+        norm = classify_runtime_failure("OTHER", str(error_text or ""))
+        category = norm.get("category", "ENVIRONMENT_CORRUPT")
+        action = norm.get("action", "")
+
         msg = QMessageBox(self)
-        msg.setWindowTitle("Model needs onboarding")
+        msg.setWindowTitle("Model not ready")
         msg.setIcon(QMessageBox.Warning)
         msg.setText(f"Model '{model_id}' is not ready to use.")
-        msg.setInformativeText("Please re-onboard/repair the model environment, then retry.")
+        if category == "BACKEND_INCOMPATIBLE_MODEL":
+            msg.setInformativeText(action or "Try another GGUF variant or backend format.")
+        else:
+            msg.setInformativeText(action or "Please repair or re-onboard the model environment, then retry.")
         msg.setDetailedText(error_text)
 
         btn_reonboard = msg.addButton("Re-onboard now", QMessageBox.AcceptRole)
@@ -19259,6 +19227,82 @@ respective package directories or official repositories.
 
             self.m2m_gpu_select.blockSignals(False)
 
+    def _refresh_ready_model_selectors(self) -> None:
+        """
+        Single source: fetch READY models once and refresh Test, M2M, and Tool Chat selectors.
+        Call this after onboarding completes or when opening Tool Chat so all selectors stay in sync.
+        """
+        if not hasattr(self, "test_model_a") or not hasattr(self, "test_model_b"):
+            return
+        models_dir = self.root / "models"
+        downloaded_models = []
+        if models_dir.exists():
+            for model_dir in sorted(models_dir.iterdir()):
+                if model_dir.is_dir():
+                    has_config = (model_dir / "config.json").exists()
+                    has_weights = any(
+                        (model_dir / f).exists()
+                        for f in ["model.safetensors", "pytorch_model.bin", "model.safetensors.index.json", "adapter_model.safetensors", "adapter_model.bin"]
+                    )
+                    has_gguf = len(list(model_dir.glob("*.gguf"))) > 0
+                    if has_gguf or (has_config and (has_weights or len(list(model_dir.glob("*.safetensors"))) > 0 or len(list(model_dir.glob("*.bin"))) > 0)):
+                        downloaded_models.append(model_dir.name)
+        from core.model_onboarding import get_onboarding_service
+        onboarding = get_onboarding_service()
+        ready_models = onboarding.list_ready_models()
+        ready_paths = {}
+        for entry in ready_models:
+            base_path = entry.get("base_model_path")
+            if base_path:
+                try:
+                    bp = Path(base_path).resolve()
+                    if bp.suffix.lower() == ".gguf":
+                        bp = bp.parent
+                    ready_paths[str(bp).lower()] = entry["model_id"]
+                except Exception:
+                    ready_paths[str(base_path).lower()] = entry["model_id"]
+        adapter_dir = self.root / "fine_tuned"
+        self._fill_model_combo(self.test_model_a, downloaded_models, models_dir, ready_paths, adapter_dir)
+        self._fill_model_combo(self.test_model_b, downloaded_models, models_dir, ready_paths, adapter_dir)
+        if hasattr(self, "test_model_c"):
+            self._fill_model_combo(self.test_model_c, downloaded_models, models_dir, ready_paths, adapter_dir)
+        if hasattr(self, "m2m_model_a") and self.m2m_model_a is not None:
+            self._fill_model_combo(self.m2m_model_a, downloaded_models, models_dir, ready_paths, adapter_dir)
+            self._fill_model_combo(self.m2m_model_b, downloaded_models, models_dir, ready_paths, adapter_dir)
+            self._fill_model_combo(self.m2m_model_c, downloaded_models, models_dir, ready_paths, adapter_dir)
+            if hasattr(self, "_update_m2m_model_header_ports"):
+                self._update_m2m_model_header_ports()
+        if hasattr(self, "_update_model_header_ports"):
+            self._update_model_header_ports()
+        if hasattr(self, "tool_chat_model_a"):
+            self._fill_tool_chat_selector(ready_paths, downloaded_models, models_dir)
+
+    def _fill_tool_chat_selector(self, ready_paths: dict, downloaded_models: list, models_dir: Path) -> None:
+        """Populate Tool Chat model combo from same READY data as Test/M2M (single source)."""
+        try:
+            self.tool_chat_model_a.clear()
+            ready_path_keys = set()
+            for p in (ready_paths or {}).keys():
+                try:
+                    ready_path_keys.add(str(Path(str(p)).resolve()).lower())
+                except Exception:
+                    ready_path_keys.add(str(p).lower())
+            ready_count = 0
+            if downloaded_models:
+                for model_name in downloaded_models:
+                    model_path = models_dir / model_name
+                    try:
+                        model_path_str = str(model_path.resolve()).lower()
+                    except Exception:
+                        model_path_str = str(model_path).lower()
+                    if model_path_str in ready_path_keys:
+                        self.tool_chat_model_a.addItem(f"✓ {model_name}", str(model_path))
+                        ready_count += 1
+            if ready_count == 0:
+                self.tool_chat_model_a.addItem("(No READY models - run onboarding first)", None)
+        except Exception as e:
+            self.tool_chat_model_a.addItem(f"(Error: {e})", None)
+
     def _fill_model_combo(self, combo, downloaded_models, models_dir, ready_paths, adapter_dir):
         """Populate a model combo from downloaded_models + adapters (READY only). Reuses data from _refresh_locals to avoid duplicate filesystem scan."""
         current = combo.currentText()
@@ -19339,41 +19383,8 @@ respective package directories or official repositories.
                 if idx >= 0:
                     self.train_base_model.setCurrentIndex(idx)
         
-        if not hasattr(self, 'test_model_a') or not hasattr(self, 'test_model_b'):
-            return
-        
-        from core.model_onboarding import get_onboarding_service
-        onboarding = get_onboarding_service()
-        ready_models = onboarding.list_ready_models()
-        ready_paths = {}
-        for entry in ready_models:
-            base_path = entry.get("base_model_path")
-            if base_path:
-                try:
-                    bp = Path(base_path).resolve()
-                    if bp.suffix.lower() == ".gguf":
-                        bp = bp.parent
-                    ready_paths[str(bp).lower()] = entry["model_id"]
-                except Exception:
-                    ready_paths[str(base_path).lower()] = entry["model_id"]
-        
-        adapter_dir = self.root / "fine_tuned"
-        self._fill_model_combo(self.test_model_a, downloaded_models, models_dir, ready_paths, adapter_dir)
-        self._fill_model_combo(self.test_model_b, downloaded_models, models_dir, ready_paths, adapter_dir)
-        if hasattr(self, 'test_model_c'):
-            self._fill_model_combo(self.test_model_c, downloaded_models, models_dir, ready_paths, adapter_dir)
-        
-        if hasattr(self, 'm2m_model_a') and self.m2m_model_a is not None:
-            self._fill_model_combo(self.m2m_model_a, downloaded_models, models_dir, ready_paths, adapter_dir)
-            self._fill_model_combo(self.m2m_model_b, downloaded_models, models_dir, ready_paths, adapter_dir)
-            self._fill_model_combo(self.m2m_model_c, downloaded_models, models_dir, ready_paths, adapter_dir)
-            if hasattr(self, '_update_m2m_model_header_ports'):
-                self._update_m2m_model_header_ports()
-        
-        if hasattr(self, '_update_model_header_ports'):
-            self._update_model_header_ports()
-        if hasattr(self, "tool_chat_model_a"):
-            self._load_tool_chat_models()
+        # Single source: refresh Test, M2M, and Tool Chat selectors from one list_ready_models() call
+        self._refresh_ready_model_selectors()
 
         # log list from repo root and logs directory
         # Check if logs tab widgets exist (lazy-loaded)

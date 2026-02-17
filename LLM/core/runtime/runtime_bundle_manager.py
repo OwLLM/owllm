@@ -59,6 +59,8 @@ class RuntimeBundleManager:
     def ensure_gguf_runtime(self, python_exe: Path, log_callback: LogCallback = None) -> Tuple[bool, str]:
         """
         Ensure the environment can initialize GGUF runtime backend(s).
+        Idempotent: returns immediately if primary check passes; repair only when needed.
+        Wheel-first: uses --only-binary/--prefer-binary for llama-cpp-python before source fallbacks.
 
         Returns:
             (ok, error_message)
@@ -66,7 +68,7 @@ class RuntimeBundleManager:
         if not python_exe or not python_exe.exists():
             return False, f"Python executable not found for runtime bundle: {python_exe}"
 
-        # 1) Preferred runtime: llama-cpp-python with Llama symbol.
+        # 1) Idempotent: if primary backend is already OK, skip repair.
         check_llama = self._run_python(
             python_exe,
             "from llama_cpp import Llama; print('OK')",

@@ -109,7 +109,7 @@ def resolve_capability(
         return {
             "profile_id": "llamacpp",
             "required_packages": ["llama-cpp-python"],
-            "fallback_packages": ["sentencepiece", "tokenizers", "tiktoken"],
+            "fallback_packages": ["gguf", "sentencepiece", "tokenizers", "tiktoken"],
             "quant_for_env": "base",
             "needs_peft": False,
             "needs_bnb": False,
@@ -297,6 +297,11 @@ def classify_runtime_failure(reason_code: Optional[str], error_message: Optional
         return {
             "category": "BACKEND_INCOMPATIBLE_MODEL",
             "action": "Switch backend/runtime path or use a compatible model variant.",
+        }
+    if "gguf>=0.10.0" in low or "install torch and gguf" in low:
+        return {
+            "category": "RUNTIME_MISSING_COMPONENT",
+            "action": "Install missing GGUF runtime package ('gguf>=0.10.0') in the model environment, then retry startup.",
         }
     # Tokenizer converter/backends missing (sentencepiece/tiktoken) should be treated as
     # runtime-missing optional fallback deps so startup self-heal can install them.

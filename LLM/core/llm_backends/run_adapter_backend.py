@@ -292,6 +292,7 @@ def _load_gguf_model(model_dir: Path):
             logging.info("llama-cpp-python failed for %s, trying transformers fallback: %s", gguf_path.name, llama_err)
 
         # 2) Fallback: transformers with robust tokenizer (sentencepiece/tiktoken use_fast=False)
+        # Load tokenizer/config from a compatible base repo, but always load GGUF weights from local model_dir.
         tf_last_err = None
         for base_model_id in base_candidates:
             try:
@@ -320,8 +321,11 @@ def _load_gguf_model(model_dir: Path):
                         )
                     else:
                         raise
+                from transformers import AutoConfig
+                cfg = AutoConfig.from_pretrained(base_model_id, trust_remote_code=True)
                 model_kwargs = dict(
-                    gguf_file=str(gguf_path),
+                    gguf_file=gguf_path.name,
+                    config=cfg,
                     trust_remote_code=True,
                     low_cpu_mem_usage=True,
                 )
@@ -330,13 +334,21 @@ def _load_gguf_model(model_dir: Path):
                     model_kwargs["torch_dtype"] = torch.float16
                 else:
                     model_kwargs["device_map"] = None
-                model = AutoModelForCausalLM.from_pretrained(base_model_id, **model_kwargs)
+                model = AutoModelForCausalLM.from_pretrained(str(model_dir), **model_kwargs)
                 backend_outcomes.append("transformers: ok")
                 variant_outcomes.append({"variant": gguf_path.name, "backends": backend_outcomes})
                 return tokenizer, model, None
             except Exception as ex:
                 tf_last_err = ex
                 logging.warning("Transformers GGUF fallback failed for base '%s': %s", base_model_id, ex)
+                # Missing gguf python package is environment-level; no need to keep iterating candidates.
+                low_ex = str(ex).lower()
+                if "gguf>=0.10.0" in low_ex or "install torch and gguf" in low_ex:
+                    break
+                # Unsupported GGUF architecture is deterministic for this runtime stack.
+                # Stop trying additional base candidates so this root cause is not masked.
+                if "gguf model with architecture" in low_ex and "not supported yet" in low_ex:
+                    break
                 continue
         backend_errors.append(f"transformers: {str(tf_last_err)[:300] if tf_last_err else 'unknown'}")
         backend_outcomes.append(f"transformers: {str(tf_last_err)[:200] if tf_last_err else 'unknown'}")
@@ -344,10 +356,10 @@ def _load_gguf_model(model_dir: Path):
         # 3) Optional: ctransformers only when enabled (recorded in diagnostics)
         if enable_ctransformers:
             try:
-                from ctransformers import AutoModelForCausalLM  # type: ignore
+                from ctransformers import AutoModelForCausalLM as CTAutoModelForCausalLM  # type: ignore
 
                 gpu_layers = int(os.environ.get("LLM_CTRANSFORMERS_GPU_LAYERS", "0"))
-                model = AutoModelForCausalLM.from_pretrained(
+                model = CTAutoModelForCausalLM.from_pretrained(
                     str(model_dir),
                     model_file=gguf_path.name,
                     gpu_layers=gpu_layers,

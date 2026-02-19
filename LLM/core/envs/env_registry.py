@@ -80,6 +80,46 @@ class EnvRegistry:
         """Get active hardware profile data (delegates to resolver)"""
         return self.env_key_resolver.get_active_profile_data()
 
+    def _requires_constrained_python(self, required_packages: Optional[list]) -> bool:
+        """
+        True when package stack requires a constrained interpreter selection.
+        Current policy: Windows + (auto-gptq or llama-cpp-python) prefers Python 3.11 wheel path.
+        """
+        if sys.platform != "win32":
+            return False
+        required_packages = required_packages or []
+        req_lower = [str(p or "").lower() for p in required_packages]
+        return any("auto-gptq" in p or "llama-cpp-python" in p for p in req_lower)
+
+    def _infer_required_packages_for_env_key(self, env_key: str) -> list:
+        """
+        Best-effort package inference from env_key when caller does not provide
+        required_packages. Keeps behavior deterministic for backend-constrained envs.
+        """
+        try:
+            parsed = self.env_key_resolver.parse_env_key(env_key)
+            if (parsed.get("backend") or "").lower() == "llamacpp":
+                return ["llama-cpp-python"]
+        except Exception:
+            pass
+        return []
+
+    def _get_python_version(self, python_exe: Path) -> str:
+        """Return major.minor for a python executable (best effort)."""
+        try:
+            r = subprocess.run(
+                [str(python_exe), "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                **self.subprocess_flags,
+            )
+            if r.returncode == 0:
+                return (r.stdout or "").strip()
+        except Exception:
+            pass
+        return ""
+
     def _get_base_python_for_env(self, env_key: str, required_packages: Optional[list] = None, log_callback=None) -> Optional[Path]:
         """
         Single source of truth for base Python when creating envs.
@@ -107,7 +147,7 @@ class EnvRegistry:
                 log(f"Using bundled Python 3.11 for specialized runtime env: {py311}")
                 return py311
         except Exception as e:
-            log(f"[WARN] Could not get bundled Python 3.11 for GPTQ: {e}")
+            log(f"[WARN] Could not get bundled Python 3.11 for constrained runtime env: {e}")
         return None
 
     def _find_windows_python(self, version: str, log_callback=None) -> Optional[Path]:
@@ -148,6 +188,7 @@ class EnvRegistry:
         profile_data: dict,
         log_callback=None,
         base_python_exe: Optional[Path] = None,
+        required_packages: Optional[list] = None,
     ) -> Path:
         """
         PHASE 2: Atomically create environment with health checks.
@@ -188,11 +229,38 @@ class EnvRegistry:
         try:
             log(f"Creating environment in temp location: {tmp_dir}")
             
+            required_packages = required_packages or self._infer_required_packages_for_env_key(env_key)
+            requires_constrained_python = self._requires_constrained_python(required_packages)
+
             # Create venv (optionally using a specific base Python)
             venv_path = tmp_dir / ".venv"
-            creator_python = base_python_exe or Path(sys.executable)
+            creator_python = base_python_exe
+            if requires_constrained_python and not creator_python:
+                creator_python = self._get_base_python_for_env(env_key, required_packages, log_callback)
+                if not creator_python:
+                    creator_python = self._find_windows_python("3.11", log_callback=log_callback)
+                if not creator_python or not creator_python.exists():
+                    pkg_hint = ", ".join(required_packages) if required_packages else "specialized runtime package(s)"
+                    raise RuntimeError(
+                        f"Cannot create constrained environment '{env_key}': Python 3.11 runtime not available.\n"
+                        f"Required packages: {pkg_hint}\n"
+                        "Install bundled/runtime Python 3.11 (or make `py -3.11` discoverable), then retry."
+                    )
+            if not creator_python:
+                creator_python = Path(sys.executable)
+
+            creator_ver = self._get_python_version(creator_python)
+            if requires_constrained_python and sys.platform == "win32" and not creator_ver.startswith("3.11"):
+                pkg_hint = ", ".join(required_packages) if required_packages else "specialized runtime package(s)"
+                raise RuntimeError(
+                    f"Constrained environment '{env_key}' requires Python 3.11, got {creator_ver or 'unknown'} at {creator_python}.\n"
+                    f"Required packages: {pkg_hint}\n"
+                    "Refusing to create env with incompatible interpreter to avoid broken wheel/runtime state."
+                )
             if base_python_exe:
                 log(f"Using base Python for venv creation: {creator_python}")
+            elif requires_constrained_python:
+                log(f"Using constrained Python runtime for env creation: {creator_python} (version={creator_ver or 'unknown'})")
             # NOTE: Python embeddable distributions can lack stdlib `venv` on Windows.
             # Fall back to `virtualenv` for self-contained isolated environments.
             create_cmd = [str(creator_python), "-m", "venv", str(venv_path), "--clear"]
@@ -521,6 +589,7 @@ class EnvRegistry:
         python_exe: Path,
         model_path: str,
         adapter_dir: Optional[str] = None,
+        deep_probe: bool = False,
         log_callback=None
     ) -> tuple[bool, Optional[str], Optional[str]]:
         """
@@ -651,7 +720,10 @@ try:
         import os
         backend_errors = []
         backend_ready = False
-        deep_probe = os.environ.get("LLM_GGUF_DEEP_PROBE", "0").strip().lower() in ("1", "true", "yes")
+        deep_probe = (
+            {"True" if deep_probe else "False"}
+            or os.environ.get("LLM_GGUF_DEEP_PROBE", "0").strip().lower() in ("1", "true", "yes")
+        )
 
         # 1) llama-cpp-python backend
         try:
@@ -1359,30 +1431,31 @@ except Exception as e:
             logging.info(msg)
             
         required_packages = required_packages or []
-        needs_fresh_gptq = any(p and "auto-gptq" in str(p).lower() for p in required_packages)
+        needs_fresh_specialized = self._requires_constrained_python(required_packages)
 
-        if needs_fresh_gptq:
-            log(f"GPTQ: creating dedicated env fresh with Python 3.11 (no copy)")
+        if needs_fresh_specialized:
+            log("Specialized runtime: creating dedicated env fresh with constrained Python runtime (no copy)")
             dedicated_env_path = self.envs_dir / dedicated_env_key
             if dedicated_env_path.exists():
-                log(f"Removing existing dedicated env for fresh GPTQ build")
+                log("Removing existing dedicated env for fresh constrained-runtime build")
                 self._rmtree_windows_safe(dedicated_env_path)
             base_python_exe = self._get_base_python_for_env(dedicated_env_key, required_packages, log_callback)
             if not base_python_exe or not base_python_exe.exists():
                 base_python_exe = self._find_windows_python("3.11", log_callback=log_callback)
             if not base_python_exe or not base_python_exe.exists():
                 raise RuntimeError(
-                    "GPTQ requires Python 3.11 for auto-gptq wheels; bundled Python 3.11 not available. "
+                    "Specialized runtime requires Python 3.11 wheels; bundled Python 3.11 not available. "
                     "Install Python 3.11 and ensure it is discoverable via 'py -3.11' on Windows."
                 )
             self._atomic_create_env(
                 dedicated_env_key, profile_data,
                 log_callback=log_callback,
-                base_python_exe=base_python_exe
+                base_python_exe=base_python_exe,
+                required_packages=required_packages,
             )
             dedicated_python_exe = self._get_env_python_executable(dedicated_env_key)
             if not (dedicated_python_exe and dedicated_python_exe.exists()):
-                raise RuntimeError(f"Failed to create dedicated GPTQ environment: {dedicated_env_key}")
+                raise RuntimeError(f"Failed to create dedicated specialized environment: {dedicated_env_key}")
             torch_version, _ = self._get_torch_info(dedicated_python_exe)
             self.state_store.upsert_env(
                 env_key=dedicated_env_key,
@@ -1392,7 +1465,7 @@ except Exception as e:
                 backend="transformers",
                 status="READY"
             )
-            log(f"Dedicated GPTQ environment {dedicated_env_key} ready!")
+            log(f"Dedicated specialized environment {dedicated_env_key} ready!")
             return self.envs_dir / dedicated_env_key
 
         log(f"Creating dedicated environment: {dedicated_env_key} from {base_env_key}")
@@ -1471,7 +1544,12 @@ except Exception as e:
         
         if not (base_python_exe and base_python_exe.exists() and base_env_path.exists()):
             log(f"Base environment {base_env_key} not found, creating it first...")
-            self.ensure_env_exists(base_env_key, profile_data, log_callback=log_callback)
+            self.ensure_env_exists(
+                base_env_key,
+                profile_data,
+                required_packages=required_packages,
+                log_callback=log_callback,
+            )
             base_env_path = self.envs_dir / base_env_key
             base_python_exe = self._get_env_python_executable(base_env_key)
             
@@ -1963,6 +2041,7 @@ sys.exit(0)
         self,
         env_key: str,
         profile_data: Optional[dict] = None,
+        required_packages: Optional[list] = None,
         log_callback=None
     ) -> EnvSpec:
         """
@@ -1976,25 +2055,54 @@ sys.exit(0)
         Returns:
             EnvSpec for the environment
         """
+        def log(msg):
+            if log_callback:
+                log_callback(msg)
+            import logging
+            logging.info(msg)
+
         if profile_data is None:
             profile_data = self._get_active_profile_data()
             if not profile_data:
                 raise RuntimeError("Could not determine hardware profile")
+
+        required_packages = required_packages or self._infer_required_packages_for_env_key(env_key)
+        requires_constrained_python = self._requires_constrained_python(required_packages)
         
         # Check if env already exists and is healthy
         python_exe = self._get_env_python_executable(env_key)
         env_state = self.state_store.get_env(env_key)
         
         if python_exe and python_exe.exists() and env_state and env_state.get('status') == 'READY':
-            if self._health_check_env(python_exe, profile_data, env_key=env_key):
-                return EnvSpec(
-                    key=env_key,
-                    python_executable=python_exe,
-                    metadata={"env_key": env_key, "status": "READY", "source": "existing"}
-                )
+            if requires_constrained_python:
+                py_ver = self._get_python_version(python_exe)
+                if not py_ver.startswith("3.11"):
+                    log(
+                        f"Existing env '{env_key}' uses Python {py_ver or 'unknown'}; "
+                        "recreating with constrained Python 3.11 runtime."
+                    )
+                else:
+                    if self._health_check_env(python_exe, profile_data, env_key=env_key):
+                        return EnvSpec(
+                            key=env_key,
+                            python_executable=python_exe,
+                            metadata={"env_key": env_key, "status": "READY", "source": "existing"}
+                        )
+            else:
+                if self._health_check_env(python_exe, profile_data, env_key=env_key):
+                    return EnvSpec(
+                        key=env_key,
+                        python_executable=python_exe,
+                        metadata={"env_key": env_key, "status": "READY", "source": "existing"}
+                    )
         
         # Create new environment
-        self._atomic_create_env(env_key, profile_data, log_callback=log_callback)
+        self._atomic_create_env(
+            env_key,
+            profile_data,
+            log_callback=log_callback,
+            required_packages=required_packages,
+        )
         
         python_exe = self._get_env_python_executable(env_key)
         if not python_exe or not python_exe.exists():
@@ -2191,6 +2299,7 @@ sys.exit(0)
             profile_data=profile_data,
             tier="stable"  # Default to stable for get_env_for_model
         )
+        env_required_packages = self._infer_required_packages_for_env_key(env_key)
         
         log(f"Resolved env_key: {env_key}")
         
@@ -2274,7 +2383,12 @@ sys.exit(0)
         # STRATEGY 5: Create new shared environment
         log(f"Creating new shared environment: {env_key}")
         try:
-            self._atomic_create_env(env_key, profile_data, log_callback=log_callback)
+            self._atomic_create_env(
+                env_key,
+                profile_data,
+                log_callback=log_callback,
+                required_packages=env_required_packages,
+            )
         except Exception as e:
             # If creation fails and we have an old env, fall back to it even if unhealthy
             if old_env_path and old_env_path.exists():
@@ -2557,7 +2671,13 @@ sys.exit(0)
                             py311 = self._find_windows_python("3.11", log_callback=log_callback)
                         if profile and py311:
                             try:
-                                self._atomic_create_env(env_key, profile, log_callback=log_callback, base_python_exe=py311)
+                                self._atomic_create_env(
+                                    env_key,
+                                    profile,
+                                    log_callback=log_callback,
+                                    base_python_exe=py311,
+                                    required_packages=["auto-gptq"],
+                                )
                                 rebuilt_python = self._get_env_python_executable(env_key)
                                 if not rebuilt_python or not rebuilt_python.exists():
                                     raise RuntimeError(f"Rebuilt env python not found: {rebuilt_python}")
@@ -2606,7 +2726,13 @@ sys.exit(0)
                             py311 = self._find_windows_python("3.11", log_callback=log_callback)
                         if profile and py311:
                             try:
-                                self._atomic_create_env(env_key, profile, log_callback=log_callback, base_python_exe=py311)
+                                self._atomic_create_env(
+                                    env_key,
+                                    profile,
+                                    log_callback=log_callback,
+                                    base_python_exe=py311,
+                                    required_packages=["llama-cpp-python"],
+                                )
                                 rebuilt_python = self._get_env_python_executable(env_key)
                                 if not rebuilt_python or not rebuilt_python.exists():
                                     raise RuntimeError(f"Rebuilt env python not found: {rebuilt_python}")

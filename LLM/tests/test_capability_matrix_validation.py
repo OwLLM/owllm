@@ -124,12 +124,13 @@ def test_llamacpp_required_and_fallback_packages(tmp_path):
     assert cap.get("required_packages") == ["llama-cpp-python"]
     fallback = cap.get("fallback_packages", [])
     assert isinstance(fallback, list)
+    assert "gguf" in fallback
     assert "sentencepiece" in fallback
     assert "tokenizers" in fallback
     required = get_runtime_required_packages(str(tmp_path), model_cfg={}, adapter_dir=None, model_id=None)
     assert required == ["llama-cpp-python"]
     fallback_get = get_runtime_fallback_packages(str(tmp_path), model_cfg={}, adapter_dir=None, model_id=None)
-    assert set(fallback_get) >= {"sentencepiece", "tokenizers"}
+    assert set(fallback_get) >= {"gguf", "sentencepiece", "tokenizers"}
 
 
 def test_classify_gguf_backend_incompatible():

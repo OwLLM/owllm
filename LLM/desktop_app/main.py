@@ -7986,6 +7986,9 @@ class MainWindow(QMainWindow):
         # without requiring app restart (READY/BROKEN transitions can both affect availability).
         QTimer.singleShot(1500, self._refresh_locals)  # _refresh_locals updates Test tab dropdowns
         QTimer.singleShot(1600, self._load_tool_chat_models)  # Tool Chat has its own READY-model loader
+        # Refresh Server page model selector so newly READY models appear without app restart
+        if hasattr(self, "server_page") and hasattr(self.server_page, "_populate_model_selector"):
+            QTimer.singleShot(1700, self.server_page._populate_model_selector)
         
         # DO NOT automatically switch to Info tab - let user stay on Environment tab to see results
     

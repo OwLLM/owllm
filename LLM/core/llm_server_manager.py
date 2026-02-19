@@ -242,12 +242,15 @@ class LLMServerManager:
         return None
 
     def _is_fallback_missing_health_error(self, error_msg: str) -> bool:
-        """True when /health error suggests missing tokenizer/fallback deps (sentencepiece, tiktoken, tokenizers)."""
+        """True when /health error suggests missing fallback deps (gguf tokenizer/runtime packages)."""
         if not isinstance(error_msg, str) or not error_msg.strip():
             return False
         low = error_msg.lower()
         return (
-            "sentencepiece" in low
+            "gguf>=0.10.0" in low
+            or "install torch and gguf" in low
+            or "please install torch and gguf" in low
+            or "sentencepiece" in low
             or "tiktoken" in low
             or ("sentencepiece or tiktoken" in low)
             or ("couldn't instantiate the backend tokenizer" in low and ("sentencepiece" in low or "tiktoken" in low))
@@ -1209,10 +1212,11 @@ class LLMServerManager:
             
             # Check for critical packages using universal capability matrix (parity with onboarding).
             from core.envs.capability_matrix import get_runtime_required_packages, BASE_PACKAGES as _BASE_PACKAGES
+            adapter_dir = onboarding_entry.get("adapter_dir") or (self.config.get("models", {}).get(model_id, {}) or {}).get("adapter_dir")
             critical_packages = get_runtime_required_packages(
                 str(model_path),
                 model_cfg=model_cfg,
-                adapter_dir=onboarding_entry.get("adapter_dir") or (self.config.get("models", {}).get(model_id, {}) or {}).get("adapter_dir"),
+                adapter_dir=adapter_dir,
                 model_id=model_id,
             )
             if not critical_packages:
@@ -1369,6 +1373,69 @@ class LLMServerManager:
                     f"[ENVIRONMENT_CORRUPT] Environment {env_spec.key} health check failed: {e}\n"
                     f"Please repair the environment before attempting to load models."
                 )
+
+            # Runtime pass/fail probe gate:
+            # Validate this exact env can initialize/load this exact model family before launch.
+            # This prevents "env looks healthy but model can never start" loops.
+            log("Running runtime model-load probe gate...")
+            is_gguf_model = False
+            try:
+                if model_path.is_file() and model_path.suffix.lower() == ".gguf":
+                    is_gguf_model = True
+                elif model_path.is_dir():
+                    is_gguf_model = any(model_path.rglob("*.gguf"))
+            except Exception:
+                is_gguf_model = False
+            probe_ok, probe_reason, probe_error = self.env_registry.run_model_load_probe(
+                env_spec.python_executable,
+                str(model_path),
+                adapter_dir=adapter_dir,
+                deep_probe=is_gguf_model,
+                log_callback=log,
+            )
+            if not probe_ok:
+                from datetime import datetime
+                log_dir = app_root / "logs" / "server_startup"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+                safe_model_id = model_id.replace("/", "__").replace("\\", "__")
+                probe_log_path = log_dir / f"{safe_model_id}_{timestamp}_runtime_probe.log"
+                try:
+                    probe_log_path.write_text(
+                        f"Runtime model-load probe failed.\n"
+                        f"model_id={model_id}\n"
+                        f"env_key={env_spec.key}\n"
+                        f"reason={probe_reason or 'OTHER'}\n"
+                        f"error={probe_error or 'Unknown'}\n",
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except Exception:
+                    pass
+
+                norm = classify_runtime_failure(probe_reason or "OTHER", str(probe_error or ""))
+                category = norm.get("category", "ENVIRONMENT_CORRUPT")
+                action = norm.get("action", "")
+                full_error = (
+                    f"[{category}] Runtime probe failed before server launch.\n"
+                    f"Model: {model_id}\n"
+                    f"Reason: {probe_reason or 'OTHER'}\n"
+                    f"Error: {probe_error or 'Unknown'}\n"
+                    f"Startup log: {probe_log_path}\n"
+                    f"Suggested action: {action}"
+                )
+                try:
+                    self.state_store.upsert_onboarding(
+                        model_id=onboarding_id,
+                        base_model_path=str(model_path),
+                        adapter_dir=adapter_dir,
+                        env_key=env_spec.key,
+                        status="BROKEN",
+                        last_error=full_error[:2000],
+                    )
+                except Exception:
+                    pass
+                raise RuntimeError(full_error)
 
             # GPTQ-specific: prevent native crash by verifying auto-gptq CUDA kernels.
             # Runtime policy: DO NOT repair during chat startup. If preflight fails, mark BROKEN and instruct re-onboarding.
@@ -2453,6 +2520,90 @@ class LLMServerManager:
                 )
             except Exception:
                 pass
+
+    def shutdown_server_by_port(self, port: int) -> bool:
+        """
+        Force-stop whatever process is listening on the given port.
+        Used when model_id is ambiguous (e.g. active list shows a server not in dropdown).
+        Kills PIDs found on the port, then best-effort updates StateStore rows with that port to STOPPED.
+
+        Returns:
+            True if at least one PID was killed or no listener found; False on unexpected error.
+        """
+        if not port:
+            return False
+        port = int(port)
+        with self._server_lock:
+            killed_any = False
+            if os.name == "nt":
+                try:
+                    result = subprocess.run(
+                        ["netstat", "-ano"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        **self.subprocess_flags,
+                    )
+                    pids_to_kill: set[str] = set()
+                    port_str = f":{port}"
+                    for line in (result.stdout or "").splitlines():
+                        if ("LISTENING" in line) and (port_str in line):
+                            parts = line.split()
+                            if parts and parts[-1].isdigit():
+                                pids_to_kill.add(parts[-1])
+                    for found_pid in sorted(pids_to_kill):
+                        subprocess.run(
+                            ["taskkill", "/F", "/PID", found_pid],
+                            capture_output=True,
+                            timeout=10,
+                            **self.subprocess_flags,
+                        )
+                        logger.info(f"Killed PID {found_pid} on port {port} (stop-by-port)")
+                        killed_any = True
+                except Exception as e:
+                    logger.warning(f"Failed to kill by port {port}: {e}")
+                    return False
+            else:
+                # Unix: try common ways to find PIDs on port
+                try:
+                    result = subprocess.run(
+                        ["lsof", "-ti", f":{port}"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        **self.subprocess_flags,
+                    )
+                    pids = (result.stdout or "").strip().split()
+                    for pid in pids:
+                        if pid.isdigit():
+                            try:
+                                os.kill(int(pid), 9)
+                                killed_any = True
+                                logger.info(f"Killed PID {pid} on port {port} (stop-by-port)")
+                            except Exception:
+                                pass
+                except Exception as e:
+                    logger.warning(f"Failed to kill by port {port}: {e}")
+                    return False
+
+            # Best-effort: mark any StateStore server row with this port as STOPPED
+            try:
+                for row in self.state_store.list_servers() or []:
+                    if row.get("port") == port:
+                        mid = row.get("model_id")
+                        if mid:
+                            self.state_store.upsert_server(
+                                model_id=mid,
+                                pid=None,
+                                port=0,
+                                status="STOPPED",
+                                stopped_at=datetime.utcnow().isoformat(),
+                            )
+                            logger.debug(f"Marked server '{mid}' (port {port}) as STOPPED")
+            except Exception as e:
+                logger.warning(f"Failed to update StateStore for port {port}: {e}")
+
+            return True
     
     def shutdown_all(self):
         """Shutdown all running servers"""

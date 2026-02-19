@@ -146,3 +146,10 @@ models:
     port: 10519
     use_4bit: true
     system_prompt: ''
+  unsloth_Qwen2.5-32B-Instruct-bnb-4bit:
+    base_model: C:\1_Git\LocaLLM\LLM\models\unsloth__Qwen2.5-32B-Instruct-bnb-4bit
+    adapter_dir: null
+    model_type: instruct
+    port: 10520
+    use_4bit: true
+    system_prompt: ''

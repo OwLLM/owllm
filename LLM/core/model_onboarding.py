@@ -170,11 +170,22 @@ class ModelOnboardingService:
                 model_cfg=model_cfg,
                 model_id=model_id,
             )
+            runtime_required_packages = get_runtime_required_packages(
+                base_model_path,
+                model_cfg=model_cfg,
+                adapter_dir=adapter_dir,
+                model_id=model_id,
+            )
             log(f"Resolved stable env_key: {stable_env_key} (backend={backend}, accelerator={accelerator})")
             
             # Step 3: Ensure stable environment exists (creates if missing)
             log(f"Ensuring stable environment exists: {stable_env_key}")
-            stable_env_spec = self.env_registry.ensure_env_exists(stable_env_key, profile_data, log_callback=log_callback)
+            stable_env_spec = self.env_registry.ensure_env_exists(
+                stable_env_key,
+                profile_data,
+                required_packages=runtime_required_packages,
+                log_callback=log_callback,
+            )
             stable_python_exe = stable_env_spec.python_executable
             
             # Step 4: Run health check on stable env
@@ -355,7 +366,12 @@ class ModelOnboardingService:
                         profile_data,
                         log_callback=log_callback
                     )
-                    edge_env_spec = self.env_registry.ensure_env_exists(edge_env_key, profile_data, log_callback=log_callback)
+                    edge_env_spec = self.env_registry.ensure_env_exists(
+                        edge_env_key,
+                        profile_data,
+                        required_packages=runtime_required_packages,
+                        log_callback=log_callback,
+                    )
                     edge_python_exe = edge_env_spec.python_executable
                     log("Installing transformers from GitHub source for unsupported architecture...")
                     self.env_registry._upgrade_edge_env_for_unsupported_arch(edge_python_exe, log_callback=log_callback)
@@ -489,12 +505,7 @@ class ModelOnboardingService:
             
             # Step 9: Check for model-specific extra dependencies (universal capability matrix)
             log(f"Checking for model-specific extra dependencies")
-            required_packages = get_runtime_required_packages(
-                base_model_path,
-                model_cfg=model_cfg,
-                adapter_dir=adapter_dir,
-                model_id=model_id,
-            )
+            required_packages = runtime_required_packages
             extra_packages = [p for p in required_packages if p not in BASE_PACKAGES]
             
             if extra_packages:

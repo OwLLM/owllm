@@ -578,9 +578,15 @@ class ServerPage(QWidget):
         self.active_servers_list.setToolTip("Servers currently running (from this page or Test Chat). Select one to switch model/API.")
         self.active_servers_list.itemSelectionChanged.connect(self._on_active_server_selected)
         active_servers_layout.addWidget(self.active_servers_list)
+        active_btns_layout = QHBoxLayout()
         active_refresh_btn = QPushButton("Refresh")
         active_refresh_btn.clicked.connect(self._refresh_active_servers)
-        active_servers_layout.addWidget(active_refresh_btn)
+        active_btns_layout.addWidget(active_refresh_btn)
+        self.active_stop_selected_btn = QPushButton("⏹ Stop selected")
+        self.active_stop_selected_btn.setToolTip("Stop the selected server (by model or by port)")
+        self.active_stop_selected_btn.clicked.connect(self._stop_selected_active_server)
+        active_btns_layout.addWidget(self.active_stop_selected_btn)
+        active_servers_layout.addLayout(active_btns_layout)
         right_layout.addWidget(active_servers_group)
         
         # Server Log (shared by both servers)
@@ -671,67 +677,153 @@ class ServerPage(QWidget):
             self.copy_model_btn.setEnabled(self.llm_model_selector.currentData() is not None)
     
     def _populate_model_selector(self):
-        """Populate the model selector dropdown with READY models from llm_backends.yaml"""
+        """Populate the model selector dropdown with READY models from llm_backends.yaml.
+        Matches READY by model_id and by normalized base_model path so config keys align with onboarding."""
         try:
             import yaml
             from pathlib import Path
             from core.model_onboarding import get_onboarding_service
-            
+
             config_path = Path(__file__).parent.parent.parent / "configs" / "llm_backends.yaml"
             if not config_path.exists():
                 self.llm_model_selector.addItem("(No models configured)", None)
                 return
-            
+
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f) or {}
-            
+
             models = config.get("models", {})
             if not models:
                 self.llm_model_selector.addItem("(No models configured)", None)
                 return
-            
-            # Get READY models from onboarding
+
+            # Get READY models: by model_id and by normalized base_model path (so YAML key can differ from onboarding key)
             onboarding = get_onboarding_service()
-            ready_models = {entry["model_id"]: entry for entry in onboarding.list_ready_models()}
-            
-            # Add only READY models
+            ready_list = onboarding.list_ready_models()
+            ready_by_id = {entry["model_id"]: entry for entry in ready_list}
+            ready_by_path = {}
+            for e in ready_list:
+                p = e.get("base_model_path") or ""
+                if p:
+                    try:
+                        norm = str(Path(p).resolve()).lower().replace("\\", "/")
+                        ready_by_path[norm] = e
+                    except Exception:
+                        ready_by_path[str(p).lower().replace("\\", "/")] = e
+
+            def is_ready(model_id: str, base_model: str) -> bool:
+                if model_id in ready_by_id:
+                    return True
+                if not base_model:
+                    return False
+                try:
+                    norm = str(Path(base_model).resolve()).lower().replace("\\", "/")
+                    return norm in ready_by_path
+                except Exception:
+                    return str(base_model).lower().replace("\\", "/") in ready_by_path
+
+            # Add READY models that appear in config (match by id or by base path)
             model_items = []
             for model_id, model_cfg in models.items():
                 if model_id == "default" and len(models) > 1:
-                    continue  # Skip default if there are other models
-                
-                # Only include if READY
-                if model_id not in ready_models:
                     continue
-                
                 base_model = model_cfg.get("base_model", "")
+                if not is_ready(model_id, base_model):
+                    continue
                 port = model_cfg.get("port", "?")
-                
-                # Extract model name from path
                 if base_model:
                     model_name = Path(base_model).name
                     display_text = f"✓ {model_name} (Port: {port})"
                 else:
                     display_text = f"✓ {model_id} (Port: {port})"
-                
                 model_items.append((display_text, model_id))
-            
-            # Sort by model name for easier selection
+
+            # Add READY models not in config so they still appear; ensure they get a config entry so Start works
+            added_ids = {mid for _, mid in model_items}
+            for entry in ready_list:
+                mid = entry.get("model_id") or ""
+                if not mid or mid in added_ids:
+                    continue
+                base = entry.get("base_model_path") or ""
+                port = "?"
+                if mid not in models:
+                    # One-time: add to llm_backends.yaml so manager can start this model
+                    self._ensure_model_in_config(config_path, config, mid, base)
+                models = config.get("models", {})
+                model_cfg = models.get(mid, {})
+                if isinstance(model_cfg, dict) and model_cfg.get("port") is not None:
+                    port = model_cfg.get("port", "?")
+                name = Path(base).name if base else mid
+                model_items.append((f"✓ {name} (Port: {port})", mid))
+                added_ids.add(mid)
+
             model_items.sort(key=lambda x: x[0])
-            
+
             self.llm_model_selector.clear()
             if not model_items:
                 self.llm_model_selector.addItem("(No READY models - run onboarding first)", None)
             else:
                 for display_text, model_id in model_items:
                     self.llm_model_selector.addItem(display_text, model_id)
-                
-                # Select first model by default
                 if self.llm_model_selector.count() > 0:
                     self.llm_model_selector.setCurrentIndex(0)
         except Exception as e:
             self.llm_model_selector.clear()
             self.llm_model_selector.addItem(f"(Error loading models: {e})", None)
+
+    def _ensure_model_in_config(self, config_path: Path, config: dict, model_id: str, base_model_path: str):
+        """Add READY model to llm_backends.yaml if missing so Start works. Returns port or None."""
+        try:
+            import yaml
+            import socket
+            if "models" not in config:
+                config["models"] = {}
+            if model_id in config["models"]:
+                return config["models"][model_id].get("port")
+            path_str = str(Path(base_model_path).resolve()) if base_model_path else ""
+            if not path_str:
+                return None
+
+            def _port_free(p: int) -> bool:
+                s = None
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind(("127.0.0.1", int(p)))
+                    return True
+                except Exception:
+                    return False
+                finally:
+                    if s:
+                        try:
+                            s.close()
+                        except Exception:
+                            pass
+
+            used = {int(c.get("port", 10500)) for c in config["models"].values() if isinstance(c, dict) and c.get("port") is not None}
+            port = 10500
+            while port in used or not _port_free(port):
+                port += 1
+            path_lower = path_str.lower()
+            model_type = "instruct" if ("instruct" in path_lower or "chat" in path_lower or "-it" in path_lower) else "base"
+            config["models"][model_id] = {
+                "base_model": path_str,
+                "adapter_dir": None,
+                "model_type": model_type,
+                "port": port,
+                "use_4bit": True,
+                "system_prompt": "",
+            }
+            with open(config_path, "w", encoding="utf-8") as f:
+                yaml.safe_dump(config, f, sort_keys=False, default_flow_style=False)
+            try:
+                from core.llm_server_manager import get_global_server_manager
+                get_global_server_manager()._load_config()
+            except Exception:
+                pass
+            return port
+        except Exception:
+            return None
 
     def _load_config(self):
         """Load configuration from file."""
@@ -1423,22 +1515,25 @@ class ServerPage(QWidget):
             pass
 
     def _refresh_active_servers(self):
-        """Refresh Active inference servers list from StateStore + /health probes."""
+        """Refresh Active inference servers list from StateStore + /health probes.
+        Also probes ports from llm_backends.yaml so servers that are running but not in StateStore (e.g. stale state) still appear."""
         if not hasattr(self, "active_servers_list"):
             return
         try:
             from core.state_store import get_state_store
             import requests
+            import yaml
 
             store = get_state_store()
             candidates = [s for s in store.list_servers() if (s.get("status") or "").upper() in ("STARTING", "RUNNING")]
-            results = []
+            results_by_port = {}
             for s in candidates:
                 model_id = s.get("model_id") or ""
                 port = s.get("port") or 0
                 pid = s.get("pid")
                 if not port:
                     continue
+                port = int(port)
                 url = f"http://127.0.0.1:{port}/health"
                 try:
                     r = requests.get(url, timeout=1)
@@ -1446,15 +1541,49 @@ class ServerPage(QWidget):
                         data = r.json()
                         status = str(data.get("status", "")).lower().strip()
                         model_from_health = str(data.get("model", "")).strip() or model_id
-                        results.append({
+                        results_by_port[port] = {
                             "model_id": model_id,
                             "model_from_health": model_from_health,
                             "status": status,
                             "port": port,
                             "pid": pid,
-                        })
+                        }
                 except Exception:
                     pass
+
+            # Probe ports from config so running servers appear even if StateStore is missing/stale
+            config_path = Path(__file__).parent.parent.parent / "configs" / "llm_backends.yaml"
+            if config_path.exists():
+                try:
+                    with open(config_path, "r", encoding="utf-8") as f:
+                        config = yaml.safe_load(f) or {}
+                    for model_id, model_cfg in (config.get("models") or {}).items():
+                        if not isinstance(model_cfg, dict):
+                            continue
+                        port = model_cfg.get("port")
+                        if port is None or int(port) in results_by_port:
+                            continue
+                        port = int(port)
+                        url = f"http://127.0.0.1:{port}/health"
+                        try:
+                            r = requests.get(url, timeout=1)
+                            if r.status_code == 200:
+                                data = r.json()
+                                status = str(data.get("status", "")).lower().strip()
+                                model_from_health = str(data.get("model", "")).strip() or model_id
+                                results_by_port[port] = {
+                                    "model_id": model_id,
+                                    "model_from_health": model_from_health,
+                                    "status": status,
+                                    "port": port,
+                                    "pid": None,
+                                }
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            results = list(results_by_port.values())
             self.active_servers_list.blockSignals(True)
             self.active_servers_list.clear()
             for r in results:
@@ -1514,6 +1643,50 @@ class ServerPage(QWidget):
                     self.copy_api_btn.setEnabled(True)
         except Exception:
             pass
+
+    def _stop_selected_active_server(self):
+        """Stop the server selected in the Active inference servers list (by model_id or by port)."""
+        items = self.active_servers_list.selectedItems()
+        if not items:
+            self._append_log("[LLM] No server selected. Select a row in Active inference servers, then click Stop selected.")
+            return
+        try:
+            from core.llm_server_manager import get_global_server_manager
+
+            r = items[0].data(Qt.UserRole)
+            if not r or not isinstance(r, dict):
+                self._append_log("[LLM] Selected row has no data.")
+                return
+            model_id = (r.get("model_id") or "").strip() or (r.get("model_from_health") or "").strip()
+            port = r.get("port") or 0
+            pid = r.get("pid")
+
+            manager = get_global_server_manager()
+
+            # Prefer shutdown by model_id when we have one that matches a known config
+            if model_id:
+                try:
+                    manager.shutdown_server(model_id)
+                    self._append_log(f"[LLM] Stopped server for model '{model_id}'.")
+                except Exception as e:
+                    self._append_log(f"[LLM] Stop by model failed ({e}), trying by port {port}...")
+                    if port and manager.shutdown_server_by_port(port):
+                        self._append_log(f"[LLM] Stopped server on port {port}.")
+                    else:
+                        self._append_log(f"[LLM] Could not stop server (port {port}).")
+            elif port:
+                if manager.shutdown_server_by_port(port):
+                    self._append_log(f"[LLM] Stopped server on port {port}.")
+                else:
+                    self._append_log(f"[LLM] Could not stop server on port {port}.")
+            else:
+                self._append_log("[LLM] No model or port for selected server.")
+
+            self._refresh_active_servers()
+            # Refresh status line in case the stopped server was the one shown
+            QTimer.singleShot(0, self._update_llm_server_status)
+        except Exception as e:
+            self._append_log(f"[LLM] Error stopping selected server: {e}")
     
     def _copy_api_url(self):
         """Copy OpenAI-compatible API URL to clipboard"""

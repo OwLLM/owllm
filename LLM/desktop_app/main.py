@@ -5,6 +5,7 @@ import os
 import shutil
 import json
 import subprocess
+import time
 from functools import partial
 from datetime import datetime
 from pathlib import Path
@@ -2763,19 +2764,35 @@ class MainWindow(QMainWindow):
             "info": "Info"
         }
         
-        tabs.addTab(self._build_home_tab(), "🏠 Home")
-        tabs.addTab(self._build_models_tab(), "Models")
-        tabs.addTab(self._build_train_tab(), "Train")
-        tabs.addTab(self._build_test_tab(), "Test")
-        tabs.addTab(self._build_logs_tab(), "Logs")
-        self.server_page = ServerPage(self)
+        def _timed_build(name: str, builder):
+            t0 = time.perf_counter()
+            widget = builder()
+            dt = (time.perf_counter() - t0) * 1000.0
+            try:
+                self._log_to_app_log(f"[STARTUP] built tab '{name}' in {dt:.0f}ms")
+            except Exception:
+                pass
+            return widget
+
+        tabs.addTab(_timed_build("Home", self._build_home_tab), "🏠 Home")
+        tabs.addTab(_timed_build("Models", self._build_models_tab), "Models")
+        tabs.addTab(_timed_build("Train", self._build_train_tab), "Train")
+        tabs.addTab(_timed_build("Test", self._build_test_tab), "Test")
+        tabs.addTab(_timed_build("Logs", self._build_logs_tab), "Logs")
+        self.server_page = _timed_build("Server", lambda: ServerPage(self))
         tabs.addTab(self.server_page, "Server")
-        tabs.addTab(MCPPage(self), "MCP")
-        tabs.addTab(GitHubImportPage(self), "GitHub Import")
+        tabs.addTab(_timed_build("MCP", lambda: MCPPage(self)), "MCP")
+        tabs.addTab(_timed_build("GitHub Import", lambda: GitHubImportPage(self)), "GitHub Import")
         
-        self.env_page = self._build_environment_management_page()
+        # Lazy-init Environment Manager page (can be expensive on startup due environment scans).
+        self._env_page_initialized = False
+        self.env_page = QWidget()
+        _env_placeholder_layout = QVBoxLayout(self.env_page)
+        _env_placeholder_layout.setContentsMargins(20, 20, 20, 20)
+        _env_placeholder_layout.addWidget(QLabel("Environment Manager will load when opened..."))
+        _env_placeholder_layout.addStretch(1)
         tabs.addTab(self.env_page, "Environment Manager")
-        tabs.addTab(self._build_info_tab(), "Info")
+        tabs.addTab(_timed_build("Info", self._build_info_tab), "Info")
         
         # Connect buttons to tab switching using page names
         self.home_btn.clicked.connect(lambda: self._switch_tab(tabs, "home"))
@@ -4386,7 +4403,35 @@ class MainWindow(QMainWindow):
             
         # Environment Manager tab: refresh requirements when entered
         elif index < self.tabs.count() and self.tabs.tabText(index) == self.tab_page_names.get("environment"):
+            self._ensure_environment_tab_initialized()
             self._refresh_requirements_grid()
+
+    def _ensure_environment_tab_initialized(self) -> None:
+        """Build Environment Manager page on first open to keep app startup fast."""
+        try:
+            if getattr(self, "_env_page_initialized", False):
+                return
+            if not hasattr(self, "tabs") or self.tabs is None:
+                return
+            env_label = self.tab_page_names.get("environment")
+            env_index = -1
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i) == env_label:
+                    env_index = i
+                    break
+            if env_index < 0:
+                return
+            t0 = time.perf_counter()
+            real_page = self._build_environment_management_page()
+            self.tabs.removeTab(env_index)
+            self.tabs.insertTab(env_index, real_page, env_label)
+            self.env_page = real_page
+            self._env_page_initialized = True
+            self.tabs.setCurrentIndex(env_index)
+            dt = (time.perf_counter() - t0) * 1000.0
+            self._log_to_app_log(f"[STARTUP] lazy-built tab 'Environment Manager' in {dt:.0f}ms")
+        except Exception as e:
+            self._log_to_app_log(f"[STARTUP] failed lazy init of Environment Manager: {e}")
 
     def _switch_tab(self, tab_widget: QTabWidget, page_identifier):
         """

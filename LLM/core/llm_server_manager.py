@@ -1746,6 +1746,42 @@ class LLMServerManager:
                         # IMPORTANT: Do NOT delete the startup log on failure.
                         # Users need the full file to diagnose native crashes (e.g. 0xC0000005).
                     
+                    # Recoverable race on Windows: another in-flight server may bind first.
+                    # If startup log indicates bind conflict, probe /health and reuse that server.
+                    log_lower = (log_output or "").lower()
+                    bind_conflict_markers = (
+                        "winerror 10048",
+                        "[errno 10048]",
+                        "address already in use",
+                        "only one usage of each socket address",
+                    )
+                    if any(m in log_lower for m in bind_conflict_markers):
+                        log(f"Detected port bind conflict on {port}; checking for existing server to reuse...")
+                        for _ in range(3):
+                            try:
+                                reused_resp = requests.get(f"http://127.0.0.1:{port}/health", timeout=2)
+                                if reused_resp.status_code == 200:
+                                    reused_data = reused_resp.json()
+                                    reused_model = str(reused_data.get("model", "")).strip()
+                                    reused_status = str(reused_data.get("status", "")).lower().strip()
+                                    if reused_model in {model_id, "", "local-llm"}:
+                                        log(
+                                            f"Bind conflict recovered: reusing server on port {port} "
+                                            f"(status={reused_status or 'unknown'}, model={reused_model or 'generic'})."
+                                        )
+                                        if reused_status == "ok":
+                                            self.state_store.upsert_server(model_id, None, port, "RUNNING")
+                                            return
+                                        # loading/error/unknown: keep warmup loop alive and wait for next /health check
+                                        port_has_our_server = True
+                                        self.state_store.upsert_server(model_id, None, port, "STARTING")
+                                        break
+                            except Exception:
+                                pass
+                            time.sleep(1)
+                        if port_has_our_server:
+                            continue
+
                     # PHASE 1: Record failure in StateStore
                     self.state_store.upsert_server(
                         model_id=model_id,
@@ -1883,21 +1919,50 @@ class LLMServerManager:
                                     if not row and broken_key != model_id:
                                         row = self.state_store.get_onboarding(model_id)
                                     base_model_path = (row or {}).get("base_model_path") or model_cfg.get("base_model") or ""
+                                    fallback_adapter_dir = (
+                                        (row or {}).get("adapter_dir")
+                                        or (self.config.get("models", {}).get(model_id, {}) or {}).get("adapter_dir")
+                                    )
                                     fallback_packages = get_runtime_fallback_packages(
                                         str(base_model_path),
                                         model_cfg=model_cfg,
-                                        adapter_dir=adapter_dir,
+                                        adapter_dir=fallback_adapter_dir,
                                         model_id=model_id,
                                     ) if base_model_path else []
                                     if fallback_packages and env_spec:
                                         self_heal_attempted = True
                                         log("One-shot startup self-heal: installing fallback packages (tokenizer/transformers path)...")
-                                        install_ok, install_err = self.env_registry.auto_install_missing_packages(
-                                            env_spec.python_executable,
-                                            fallback_packages,
-                                            log_callback=log,
-                                        )
-                                        if install_ok:
+                                        low_err = str(error_msg or "").lower()
+                                        ordered_fallbacks = list(fallback_packages)
+                                        # For "sentencepiece or tiktoken" tokenizer errors, prefer wheel-friendly tiktoken first.
+                                        if "sentencepiece or tiktoken" in low_err:
+                                            # Install only the deps explicitly requested by tokenizer conversion path.
+                                            # Do not force-install tokenizers here; slow tokenizer mode can proceed
+                                            # with sentencepiece/tiktoken and keeps repair narrower.
+                                            ordered_fallbacks = [
+                                                p for p in ordered_fallbacks if p in ("tiktoken", "sentencepiece")
+                                            ]
+                                            if "tiktoken" not in ordered_fallbacks:
+                                                ordered_fallbacks.insert(0, "tiktoken")
+                                            elif ordered_fallbacks[0] != "tiktoken":
+                                                ordered_fallbacks = ["tiktoken"] + [p for p in ordered_fallbacks if p != "tiktoken"]
+
+                                        installed_any = False
+                                        install_failures: list[str] = []
+                                        for pkg in ordered_fallbacks:
+                                            ok_pkg, err_pkg = self.env_registry.auto_install_missing_packages(
+                                                env_spec.python_executable,
+                                                [pkg],
+                                                log_callback=log,
+                                            )
+                                            if ok_pkg:
+                                                installed_any = True
+                                            else:
+                                                install_failures.append(f"{pkg}: {(err_pkg or '')[:300]}")
+                                                # Optional fallback deps are best-effort; keep trying others.
+                                                continue
+
+                                        if installed_any:
                                             # Restart server so it runs with updated env
                                             if model_id in self.running_servers:
                                                 old_process, old_log_file, _ = self.running_servers[model_id]
@@ -1959,7 +2024,8 @@ class LLMServerManager:
                                             time.sleep(5)
                                             continue
                                         else:
-                                            log(f"Self-heal install failed: {(install_err or '')[:300]}")
+                                            if install_failures:
+                                                log(f"Self-heal install failed: {' | '.join(install_failures)[:500]}")
                                 except Exception as heal_ex:
                                     log(f"Startup self-heal error: {heal_ex}")
                             # Categorized error: use action from classifier (no generic re-onboard loop).

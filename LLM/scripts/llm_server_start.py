@@ -121,6 +121,9 @@ def main():
         except Exception as e:
             print(f"[WARN] Could not validate LLM_SERVER_PYTHON ({requested_python}): {e}")
             print(f"[WARN] Falling back to current interpreter: {sys.executable}")
+    # Keep child Python unbuffered so uvicorn/app tracebacks are emitted immediately
+    # to the parent startup log when startup fails.
+    env["PYTHONUNBUFFERED"] = "1"
     print(f"Launching uvicorn with: {server_python} -m uvicorn {import_path}")
     print(f"Working directory: {app_root}")
     print(f"PYTHONPATH: {env['PYTHONPATH']}")
@@ -133,7 +136,7 @@ def main():
             "--host", "127.0.0.1",
             "--port", str(port),
             "--log-level", "info"
-        ], check=True, cwd=str(app_root), env=env, **_SUBPROCESS_FLAGS)
+        ], check=True, cwd=str(app_root), env=env)
     except KeyboardInterrupt:
         print("\nServer stopped by user")
         sys.exit(0)

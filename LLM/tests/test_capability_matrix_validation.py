@@ -148,6 +148,19 @@ def test_classify_gguf_backend_incompatible():
         )
 
 
+def test_classify_tokenizer_missing_as_runtime_missing_component():
+    """Tokenizer fallback dependency misses must classify as runtime-missing (self-healable)."""
+    from core.envs.capability_matrix import classify_runtime_failure
+    msg = (
+        "RuntimeError: GGUF runtime backend failed for this model. "
+        "transformers: Couldn't instantiate the backend tokenizer from one of: ... "
+        "You need to have sentencepiece or tiktoken installed to convert a slow tokenizer."
+    )
+    out = classify_runtime_failure("OTHER", msg)
+    assert out.get("category") == "RUNTIME_MISSING_COMPONENT"
+    assert "sentencepiece" in (out.get("action") or "").lower() or "tiktoken" in (out.get("action") or "").lower()
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

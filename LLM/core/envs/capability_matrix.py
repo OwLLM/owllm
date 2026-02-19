@@ -298,6 +298,19 @@ def classify_runtime_failure(reason_code: Optional[str], error_message: Optional
             "category": "BACKEND_INCOMPATIBLE_MODEL",
             "action": "Switch backend/runtime path or use a compatible model variant.",
         }
+    # Tokenizer converter/backends missing (sentencepiece/tiktoken) should be treated as
+    # runtime-missing optional fallback deps so startup self-heal can install them.
+    if (
+        "sentencepiece or tiktoken" in low
+        or (
+            "couldn't instantiate the backend tokenizer" in low
+            and ("sentencepiece" in low or "tiktoken" in low)
+        )
+    ):
+        return {
+            "category": "RUNTIME_MISSING_COMPONENT",
+            "action": "Install tokenizer fallback dependencies (sentencepiece/tiktoken) in the model environment, then retry startup.",
+        }
     if "gguf_init_from_file" in low or "block size" in low:
         return {
             "category": "BACKEND_INCOMPATIBLE_MODEL",

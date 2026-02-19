@@ -2485,6 +2485,15 @@ sys.exit(0)
                         timeout=120,
                         **self.subprocess_flags
                     )
+                # Tokenizer fallback deps: prefer wheels to avoid local build toolchain requirements.
+                if pkg_norm in {"sentencepiece", "tiktoken", "tokenizers"}:
+                    pip_cmd = [
+                        str(python_exe), "-m", "pip", "install", "--upgrade",
+                        "--only-binary", ":all:",
+                        "--prefer-binary",
+                        pkg_norm,
+                    ]
+                    timeout_s = 600
 
                 result = subprocess.run(
                     pip_cmd,
@@ -2512,6 +2521,15 @@ sys.exit(0)
                         log("auto-gptq CUDA extension verified OK")
                 else:
                     error_output = (result.stderr or result.stdout or "").strip()
+                    if not error_output:
+                        try:
+                            pip_cmd_str = " ".join(str(x) for x in pip_cmd)
+                        except Exception:
+                            pip_cmd_str = str(pip_cmd)
+                        error_output = (
+                            f"pip exited with code {result.returncode} and produced no output.\n"
+                            f"command: {pip_cmd_str}"
+                        )
                     # Persist full pip output for post-mortem debugging
                     full_log_path = None
                     try:

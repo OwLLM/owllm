@@ -70,12 +70,16 @@ class SystemDetector:
             pass  # Don't fail detection if logging fails
     
     def detect_all(self) -> Dict:
-        """Run all detection methods and return results"""
+        """Run all detection methods and return results."""
+        python_info = self.detect_python()
+        pytorch_info = self.detect_pytorch()
+        cuda_info = self.detect_cuda()
         results = {
-            "python": self.detect_python(),
-            "pytorch": self.detect_pytorch(),
-            "cuda": self.detect_cuda(),
-            "hardware": self.detect_hardware(),
+            "python": python_info,
+            "pytorch": pytorch_info,
+            "cuda": cuda_info,
+            # Reuse already-detected CUDA info to avoid duplicate nvidia-smi scans.
+            "hardware": self.detect_hardware(cuda_info=cuda_info),
             "vcredist": self.detect_vcredist() if self.platform == "windows" else None,
             "recommendations": {}
         }
@@ -616,8 +620,12 @@ class SystemDetector:
             pass
         return result
 
-    def detect_hardware(self) -> Dict:
-        """Detect hardware capabilities"""
+    def detect_hardware(self, cuda_info: Optional[Dict] = None) -> Dict:
+        """Detect hardware capabilities.
+
+        Args:
+            cuda_info: Optional precomputed CUDA detection result to reuse.
+        """
         result = {
             "cpu_name": None,  # Add top-level cpu_name for easy access
             "cpu": {
@@ -718,8 +726,9 @@ class SystemDetector:
             except:
                 pass
             
-            # GPU (from CUDA detection or system)
-            cuda_info = self.detect_cuda()
+            # GPU (reuse precomputed CUDA result when available to avoid redundant detection)
+            if cuda_info is None:
+                cuda_info = self.detect_cuda()
             if cuda_info["found"] and cuda_info["gpus"]:
                 gpu = cuda_info["gpus"][0]
                 result["gpu"]["found"] = True

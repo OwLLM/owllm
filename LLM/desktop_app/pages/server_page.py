@@ -816,11 +816,6 @@ class ServerPage(QWidget):
             }
             with open(config_path, "w", encoding="utf-8") as f:
                 yaml.safe_dump(config, f, sort_keys=False, default_flow_style=False)
-            try:
-                from core.llm_server_manager import get_global_server_manager
-                get_global_server_manager()._load_config()
-            except Exception:
-                pass
             return port
         except Exception:
             return None

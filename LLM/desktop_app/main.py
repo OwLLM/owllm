@@ -559,17 +559,8 @@ class SystemDetectThread(QThread):
     def run(self):
         try:
             detector = SystemDetector()
-            python_info = detector.detect_python()
-            cuda_info = detector.detect_cuda()
-            pytorch_info = detector.detect_pytorch()
-            hardware_info = detector.detect_hardware()
-            
-            system_info = {
-                "python": python_info,
-                "cuda": cuda_info,
-                "pytorch": pytorch_info,
-                "hardware": hardware_info,
-            }
+            # Single pass to avoid duplicate CUDA/GPU probing at startup.
+            system_info = detector.detect_all()
             self.detected.emit(system_info)
         except Exception as e:
             import traceback

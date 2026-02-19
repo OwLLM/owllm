@@ -738,7 +738,8 @@ class ServerPage(QWidget):
                     display_text = f"✓ {model_id} (Port: {port})"
                 model_items.append((display_text, model_id))
 
-            # Add READY models not in config so they still appear; ensure they get a config entry so Start works
+            # Add READY models not in config so they still appear.
+            # Registration into llm_backends.yaml is deferred to Start click to keep app startup fast.
             added_ids = {mid for _, mid in model_items}
             for entry in ready_list:
                 mid = entry.get("model_id") or ""
@@ -746,11 +747,7 @@ class ServerPage(QWidget):
                     continue
                 base = entry.get("base_model_path") or ""
                 port = "?"
-                if mid not in models:
-                    # One-time: add to llm_backends.yaml so manager can start this model
-                    self._ensure_model_in_config(config_path, config, mid, base)
-                models = config.get("models", {})
-                model_cfg = models.get(mid, {})
+                model_cfg = models.get(mid, {}) if isinstance(models, dict) else {}
                 if isinstance(model_cfg, dict) and model_cfg.get("port") is not None:
                     port = model_cfg.get("port", "?")
                 name = Path(base).name if base else mid
@@ -1276,6 +1273,25 @@ class ServerPage(QWidget):
 
             self._last_llm_model_id = selected_model_id
             manager = get_global_server_manager()
+            # Lazy config registration: only when user starts a model.
+            # This avoids expensive work during app startup/page construction.
+            if selected_model_id not in (manager.config.get("models") or {}):
+                try:
+                    from core.model_onboarding import get_onboarding_service
+                    onboarding = get_onboarding_service()
+                    ready_rows = onboarding.list_ready_models() or []
+                    row = next((r for r in ready_rows if (r.get("model_id") or "") == selected_model_id), None)
+                    base_model_path = (row or {}).get("base_model_path") or ""
+                    if base_model_path:
+                        config_path = Path(__file__).parent.parent.parent / "configs" / "llm_backends.yaml"
+                        import yaml
+                        with open(config_path, "r", encoding="utf-8") as f:
+                            cfg = yaml.safe_load(f) or {}
+                        self._ensure_model_in_config(config_path, cfg, selected_model_id, base_model_path)
+                        manager._load_config()
+                        self._append_log(f"[LLM] Registered READY model '{selected_model_id}' into config.")
+                except Exception as e:
+                    self._append_log(f"[LLM] Could not auto-register model '{selected_model_id}': {e}")
             url = manager._get_server_url(selected_model_id)
 
             # Idempotent: if server already up on this port, just refresh UI

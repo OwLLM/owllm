@@ -3801,6 +3801,21 @@ class MainWindow(QMainWindow):
             event.accept()
             return
 
+        # Ensure requirements checker thread is not left running at shutdown.
+        try:
+            t = getattr(self, "_req_check_thread", None)
+            if t is not None:
+                try:
+                    if t.isRunning():
+                        t.stop()
+                        t.wait(1200)
+                except Exception:
+                    pass
+                self._retire_requirement_check_thread(t)
+                self._req_check_thread = None
+        except Exception:
+            pass
+
         # Check if any LLM server is running; if so, ask user to confirm
         try:
             from core.llm_server_manager import get_global_server_manager
@@ -15839,9 +15854,16 @@ except Exception as e:
         self.selected_packages = set()  # Track which packages are checked
         self._selected_install_queue = []  # Queue for sequential selected installs
         
-        # Stop existing check if running (non-blocking)
-        if hasattr(self, '_req_check_thread') and self._req_check_thread.isRunning():
-            self._req_check_thread.stop()
+        # Stop existing check safely and retain old thread refs until they fully finish.
+        old_thread = getattr(self, "_req_check_thread", None)
+        if old_thread is not None:
+            try:
+                if old_thread.isRunning():
+                    old_thread.stop()
+            except Exception:
+                pass
+            self._retire_requirement_check_thread(old_thread)
+            self._req_check_thread = None
 
         # PROFILE IS THE ONLY SOURCE OF TRUTH
         profile_requirements = self._get_profile_requirements()
@@ -15982,6 +16004,7 @@ except Exception as e:
             self._is_package_functional, 
             self._check_version_mismatch
         )
+        self._req_check_thread.setObjectName("RequirementCheckThread")
         self._req_check_thread.package_checked.connect(self._on_package_checked)
         self._req_check_thread.all_finished.connect(self._on_all_requirements_checked)
         
@@ -16000,6 +16023,38 @@ except Exception as e:
             
         self._last_requirements_refresh_ts = time.monotonic()
         self._req_check_thread.start()
+
+    def _retire_requirement_check_thread(self, thread):
+        """Keep old RequirementCheckThread alive until it has fully stopped."""
+        if thread is None:
+            return
+        if not hasattr(self, "_retired_req_check_threads"):
+            self._retired_req_check_threads = []
+        if thread in self._retired_req_check_threads:
+            return
+        self._retired_req_check_threads.append(thread)
+
+        def _cleanup():
+            try:
+                if hasattr(self, "_retired_req_check_threads") and thread in self._retired_req_check_threads:
+                    self._retired_req_check_threads.remove(thread)
+            except Exception:
+                pass
+            try:
+                thread.deleteLater()
+            except Exception:
+                pass
+
+        try:
+            thread.finished.connect(_cleanup)
+        except Exception:
+            pass
+
+        try:
+            if not thread.isRunning():
+                _cleanup()
+        except Exception:
+            _cleanup()
 
     def _update_requirements_tab_notice(self):
         """Show a notice on the requirements tab button if attention is needed."""

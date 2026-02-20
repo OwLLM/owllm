@@ -61,12 +61,146 @@ class ServerThread(QThread):
                 pass
 
 
+class ActiveServersProbeThread(QThread):
+    """Background probe for active inference servers to keep UI responsive."""
+    results_ready = Signal(list)  # list[dict]
+    probe_error = Signal(str)
+
+    def __init__(self, config_path: Path):
+        super().__init__()
+        self.config_path = Path(config_path)
+
+    def run(self):
+        try:
+            from core.state_store import get_state_store
+            import requests
+            import yaml
+
+            results_by_port = {}
+            status_priority = {"ok": 4, "loading": 3, "unresponsive": 2, "unknown": 1}
+
+            def _upsert_result(entry: dict):
+                port = int(entry.get("port") or 0)
+                if port <= 0:
+                    return
+                current = results_by_port.get(port)
+                if current is None:
+                    results_by_port[port] = entry
+                    return
+                new_status = str(entry.get("status") or "unknown").lower()
+                cur_status = str(current.get("status") or "unknown").lower()
+                if status_priority.get(new_status, 0) > status_priority.get(cur_status, 0):
+                    results_by_port[port] = entry
+                    return
+                # Keep stronger status, but backfill missing metadata.
+                if not current.get("model_id") and entry.get("model_id"):
+                    current["model_id"] = entry.get("model_id")
+                if not current.get("model_from_health") and entry.get("model_from_health"):
+                    current["model_from_health"] = entry.get("model_from_health")
+                if not current.get("pid") and entry.get("pid"):
+                    current["pid"] = entry.get("pid")
+
+            def _is_tcp_open(port: int) -> bool:
+                try:
+                    with socket.create_connection(("127.0.0.1", int(port)), timeout=0.35):
+                        return True
+                except Exception:
+                    return False
+
+            def _probe_health(port: int, model_id: str = "", pid=None):
+                url = f"http://127.0.0.1:{port}/health"
+                try:
+                    # Short timeout keeps large config scans bounded while still catching local servers.
+                    r = requests.get(url, timeout=(0.5, 0.8))
+                    if r.status_code != 200:
+                        # Health endpoint not ready/responding, but process may still be alive.
+                        if _is_tcp_open(port):
+                            _upsert_result(
+                                {
+                                    "model_id": model_id,
+                                    "model_from_health": model_id,
+                                    "status": "unresponsive",
+                                    "port": port,
+                                    "pid": pid,
+                                }
+                            )
+                        return
+                    data = r.json()
+                    status = str(data.get("status", "")).lower().strip()
+                    model_from_health = str(data.get("model", "")).strip() or model_id
+                    _upsert_result(
+                        {
+                            "model_id": model_id,
+                            "model_from_health": model_from_health,
+                            "status": status,
+                            "port": port,
+                            "pid": pid,
+                        }
+                    )
+                except Exception:
+                    if _is_tcp_open(port):
+                        _upsert_result(
+                            {
+                                "model_id": model_id,
+                                "model_from_health": model_id,
+                                "status": "unresponsive",
+                                "port": port,
+                                "pid": pid,
+                            }
+                        )
+                    return
+
+            store = get_state_store()
+            candidates = [
+                s for s in (store.list_servers() or [])
+                if (s.get("status") or "").upper() in ("STARTING", "RUNNING")
+            ]
+            for s in candidates:
+                if self.isInterruptionRequested():
+                    return
+                port = s.get("port") or 0
+                if not port:
+                    continue
+                try:
+                    port = int(port)
+                except Exception:
+                    continue
+                _probe_health(port=port, model_id=s.get("model_id") or "", pid=s.get("pid"))
+
+            # Probe configured ports too, so externally-started/stale-state servers still appear.
+            if self.config_path.exists():
+                try:
+                    with open(self.config_path, "r", encoding="utf-8") as f:
+                        config = yaml.safe_load(f) or {}
+                    for model_id, model_cfg in (config.get("models") or {}).items():
+                        if self.isInterruptionRequested():
+                            return
+                        if not isinstance(model_cfg, dict):
+                            continue
+                        port = model_cfg.get("port")
+                        if port is None:
+                            continue
+                        try:
+                            port = int(port)
+                        except Exception:
+                            continue
+                        _probe_health(port=port, model_id=model_id, pid=None)
+                except Exception:
+                    pass
+
+            self.results_ready.emit(list(results_by_port.values()))
+        except Exception as e:
+            self.probe_error.emit(str(e))
+
+
 class ServerPage(QWidget):
     """Server management page"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.server_thread: Optional[ServerThread] = None
+        self._active_probe_thread: Optional[ActiveServersProbeThread] = None
+        self._active_probe_pending = False
         self.config_manager = None  # Defer initialization
         self._server_address = ""
         self._loading_config = False
@@ -81,6 +215,34 @@ class ServerPage(QWidget):
     
     def _stop_server_on_close(self):
         """Stop the server thread if running."""
+        if hasattr(self, "llm_status_timer") and self.llm_status_timer is not None:
+            try:
+                self.llm_status_timer.stop()
+            except Exception:
+                pass
+
+        if self._active_probe_thread is not None:
+            probe_thread = self._active_probe_thread
+            try:
+                probe_thread.requestInterruption()
+                # Give the worker a brief chance to finish cleanly before object teardown.
+                probe_thread.wait(800)
+            except Exception:
+                pass
+            try:
+                probe_thread.results_ready.disconnect()
+            except Exception:
+                pass
+            try:
+                probe_thread.probe_error.disconnect()
+            except Exception:
+                pass
+            try:
+                probe_thread.finished.disconnect()
+            except Exception:
+                pass
+            self._active_probe_thread = None
+
         if self.server_thread is not None:
             try:
                 # Check if thread is still valid and running
@@ -562,8 +724,7 @@ class ServerPage(QWidget):
         
         # Status timer
         self.llm_status_timer = QTimer()
-        self.llm_status_timer.timeout.connect(self._update_llm_server_status)
-        self.llm_status_timer.timeout.connect(self._refresh_active_servers)
+        self.llm_status_timer.timeout.connect(self._on_llm_status_timer_tick)
         self.llm_status_timer.start(2000)
 
         right_layout.addWidget(llm_server_group)
@@ -639,6 +800,16 @@ class ServerPage(QWidget):
         
         # Sync Copy Model Name button state with initial selection
         QTimer.singleShot(0, self._on_llm_model_selection_changed)
+
+    def _on_llm_status_timer_tick(self):
+        """Poll server status only while this page is visible."""
+        try:
+            if not self.isVisible():
+                return
+            self._update_llm_server_status()
+            self._refresh_active_servers()
+        except Exception:
+            pass
     
     def _initialize_config(self):
         """Initialize config manager and load config (deferred)."""
@@ -1446,6 +1617,14 @@ class ServerPage(QWidget):
                     parent.prompt_reonboard_server_model(model_id)
             except Exception:
                 pass
+
+    def _is_local_port_open(self, port: str) -> bool:
+        """Fast TCP check used as fallback when /health times out."""
+        try:
+            with socket.create_connection(("127.0.0.1", int(port)), timeout=0.35):
+                return True
+        except Exception:
+            return False
     
     def _update_llm_server_status(self):
         """Periodically check LLM server status. Health-driven: always probe /health for selected model's port."""
@@ -1508,7 +1687,18 @@ class ServerPage(QWidget):
                         self.copy_api_btn.setEnabled(True)
                         return
             except Exception:
-                pass
+                # Health endpoint can stall under heavy load; treat open TCP port as busy/unresponsive.
+                if port and self._is_local_port_open(port):
+                    self.llm_server_status_label.setText("● Busy/Unresponsive")
+                    self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+                    self.llm_port_label.setText(port)
+                    self.llm_api_label.setText(f"{url}/v1")
+                    self.llm_model_label.setText(selected_model_id or "-")
+                    self.llm_start_btn.setEnabled(False)
+                    self.llm_start_btn.setText("● Busy")
+                    self.llm_stop_btn.setEnabled(True)
+                    self.copy_api_btn.setEnabled(True)
+                    return
 
             # No healthy response: show Not running and allow Start
             if not self.llm_start_btn.isEnabled():
@@ -1526,92 +1716,85 @@ class ServerPage(QWidget):
             pass
 
     def _refresh_active_servers(self):
-        """Refresh Active inference servers list from StateStore + /health probes.
-        Also probes ports from llm_backends.yaml so servers that are running but not in StateStore (e.g. stale state) still appear."""
+        """Non-blocking refresh of Active inference servers list."""
+        if not hasattr(self, "active_servers_list"):
+            return
+        self._schedule_active_servers_refresh()
+
+    def _schedule_active_servers_refresh(self):
+        """Schedule an async active-server probe, coalescing overlapping requests."""
+        try:
+            if self._active_probe_thread is not None and self._active_probe_thread.isRunning():
+                self._active_probe_pending = True
+                return
+
+            config_path = Path(__file__).parent.parent.parent / "configs" / "llm_backends.yaml"
+            thread = ActiveServersProbeThread(config_path=config_path)
+            self._active_probe_thread = thread
+            self._active_probe_pending = False
+            thread.results_ready.connect(self._on_active_servers_probe_ready)
+            thread.probe_error.connect(self._on_active_servers_probe_error)
+            thread.finished.connect(self._on_active_servers_probe_finished)
+            thread.start()
+        except Exception:
+            pass
+
+    def _on_active_servers_probe_ready(self, results: list):
+        """Apply active-server probe results to the list widget on the UI thread."""
         if not hasattr(self, "active_servers_list"):
             return
         try:
-            from core.state_store import get_state_store
-            import requests
-            import yaml
-
-            store = get_state_store()
-            candidates = [s for s in store.list_servers() if (s.get("status") or "").upper() in ("STARTING", "RUNNING")]
-            results_by_port = {}
-            for s in candidates:
-                model_id = s.get("model_id") or ""
-                port = s.get("port") or 0
-                pid = s.get("pid")
-                if not port:
-                    continue
-                port = int(port)
-                url = f"http://127.0.0.1:{port}/health"
+            selected_port = None
+            selected_items = self.active_servers_list.selectedItems()
+            if selected_items:
                 try:
-                    r = requests.get(url, timeout=1)
-                    if r.status_code == 200:
-                        data = r.json()
-                        status = str(data.get("status", "")).lower().strip()
-                        model_from_health = str(data.get("model", "")).strip() or model_id
-                        results_by_port[port] = {
-                            "model_id": model_id,
-                            "model_from_health": model_from_health,
-                            "status": status,
-                            "port": port,
-                            "pid": pid,
-                        }
+                    selected_data = selected_items[0].data(Qt.UserRole) or {}
+                    selected_port = selected_data.get("port")
                 except Exception:
-                    pass
+                    selected_port = None
 
-            # Probe ports from config so running servers appear even if StateStore is missing/stale
-            config_path = Path(__file__).parent.parent.parent / "configs" / "llm_backends.yaml"
-            if config_path.exists():
-                try:
-                    with open(config_path, "r", encoding="utf-8") as f:
-                        config = yaml.safe_load(f) or {}
-                    for model_id, model_cfg in (config.get("models") or {}).items():
-                        if not isinstance(model_cfg, dict):
-                            continue
-                        port = model_cfg.get("port")
-                        if port is None or int(port) in results_by_port:
-                            continue
-                        port = int(port)
-                        url = f"http://127.0.0.1:{port}/health"
-                        try:
-                            r = requests.get(url, timeout=1)
-                            if r.status_code == 200:
-                                data = r.json()
-                                status = str(data.get("status", "")).lower().strip()
-                                model_from_health = str(data.get("model", "")).strip() or model_id
-                                results_by_port[port] = {
-                                    "model_id": model_id,
-                                    "model_from_health": model_from_health,
-                                    "status": status,
-                                    "port": port,
-                                    "pid": None,
-                                }
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-
-            results = list(results_by_port.values())
             self.active_servers_list.blockSignals(True)
             self.active_servers_list.clear()
-            for r in results:
-                status_str = r["status"]
+            for r in (results or []):
+                status_str = str(r.get("status") or "").strip().lower()
                 if status_str == "ok":
                     status_str = "Running"
                 elif status_str == "loading":
                     status_str = "Loading"
+                elif status_str == "unresponsive":
+                    status_str = "Busy/Unresponsive"
                 else:
                     status_str = status_str or "Unknown"
-                label = f"{r['model_from_health']} — port {r['port']} ({status_str})"
+                label = f"{r.get('model_from_health') or r.get('model_id') or 'Unknown'} — port {r.get('port')} ({status_str})"
                 item = QListWidgetItem(label)
                 item.setData(Qt.UserRole, r)
                 self.active_servers_list.addItem(item)
-            self.active_servers_list.blockSignals(False)
+
+            # Best-effort preserve selection by port across refreshes.
+            if selected_port is not None:
+                for i in range(self.active_servers_list.count()):
+                    d = self.active_servers_list.item(i).data(Qt.UserRole) or {}
+                    if d.get("port") == selected_port:
+                        self.active_servers_list.setCurrentRow(i)
+                        break
         except Exception:
             pass
+        finally:
+            try:
+                self.active_servers_list.blockSignals(False)
+            except Exception:
+                pass
+
+    def _on_active_servers_probe_error(self, _error: str):
+        """Background probe errors are non-fatal; keep UI stable."""
+        return
+
+    def _on_active_servers_probe_finished(self):
+        """Drain coalesced refresh requests after a running probe completes."""
+        self._active_probe_thread = None
+        if self._active_probe_pending:
+            self._active_probe_pending = False
+            self._schedule_active_servers_refresh()
 
     def _on_active_server_selected(self):
         """When user selects an active server, switch model dropdown and update API/port labels."""
@@ -1650,6 +1833,15 @@ class ServerPage(QWidget):
                     self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
                     self.llm_model_label.setText(r.get("model_from_health") or model_id or "-")
                     self.llm_start_btn.setEnabled(False)
+                    self.llm_stop_btn.setEnabled(True)
+                    self.copy_api_btn.setEnabled(True)
+                elif status == "unresponsive":
+                    self.llm_server_status_label.setText("● Busy/Unresponsive")
+                    self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+                    self.llm_model_label.setText(r.get("model_from_health") or model_id or "-")
+                    # Keep Start disabled to avoid duplicate launches on same port.
+                    self.llm_start_btn.setEnabled(False)
+                    self.llm_start_btn.setText("● Busy")
                     self.llm_stop_btn.setEnabled(True)
                     self.copy_api_btn.setEnabled(True)
         except Exception:

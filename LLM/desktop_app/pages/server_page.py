@@ -13,7 +13,7 @@ from PySide6.QtCore import QThread, Signal, Qt, QUrl, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QCheckBox, QTextEdit, QFileDialog, QGroupBox, QFrame, QMessageBox, QApplication,
-    QGridLayout, QRadioButton, QComboBox, QListWidget, QListWidgetItem, QButtonGroup
+    QGridLayout, QRadioButton, QComboBox, QListWidget, QListWidgetItem, QButtonGroup, QSplitter
 )
 from PySide6.QtGui import QDesktopServices, QClipboard
 
@@ -341,9 +341,10 @@ class ServerPage(QWidget):
         title.setProperty("class", "page_title")
         layout.addWidget(title)
 
-        # THREE COLUMN LAYOUT
-        cols = QHBoxLayout()
-        cols.setSpacing(16)
+        # THREE COLUMN LAYOUT (fixed ratio 40/40/20)
+        cols_splitter = QSplitter(Qt.Horizontal)
+        cols_splitter.setChildrenCollapsible(False)
+        cols_splitter.setHandleWidth(8)
 
         # ===================================================================
         # LEFT COLUMN: TOOL SERVER (MCP Server)
@@ -384,6 +385,11 @@ class ServerPage(QWidget):
         settings_grid.setColumnStretch(1, 0)  # value fields (compact width)
         settings_grid.setColumnStretch(2, 0)  # checkbox / shared field span
         settings_grid.setColumnStretch(3, 0)  # small action buttons
+
+        # Keep first-column fields compact: width based on the longest label word.
+        fm = self.fontMetrics()
+        longest_label_word = max(("Port", "Token", "Root"), key=len)
+        first_col_field_width = max(130, fm.horizontalAdvance(longest_label_word) + 90)
         
         # Port
         settings_grid.addWidget(QLabel("Port:"), 0, 0)
@@ -401,8 +407,7 @@ class ServerPage(QWidget):
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.Password)
         self.token_edit.setPlaceholderText("Auth token")
-        self.token_edit.setMinimumWidth(220)
-        self.token_edit.setMaximumWidth(320)
+        self.token_edit.setFixedWidth(first_col_field_width)
         settings_grid.addWidget(self.token_edit, 1, 1, 1, 2)
         
         generate_token_btn = QPushButton("🎲")
@@ -414,8 +419,8 @@ class ServerPage(QWidget):
         # Root directory
         settings_grid.addWidget(QLabel("Root:"), 2, 0)
         self.root_edit = QLineEdit(str(Path.cwd()))
-        self.root_edit.setMinimumWidth(220)
-        self.root_edit.setMaximumWidth(320)
+        self.root_edit.setFixedWidth(first_col_field_width)
+        self.root_edit.setToolTip(str(Path.cwd()))
         settings_grid.addWidget(self.root_edit, 2, 1, 1, 2)
         browse_btn = QPushButton("📁")
         browse_btn.setMaximumWidth(30)
@@ -810,11 +815,33 @@ class ServerPage(QWidget):
         right_layout.addWidget(log_group)
         right_layout.addStretch()
 
-        # Add columns to main layout
-        cols.addWidget(left_col, 4)
-        cols.addWidget(middle_col, 4)
-        cols.addWidget(right_col, 2)
-        layout.addLayout(cols)
+        # Add columns to splitter
+        cols_splitter.addWidget(left_col)
+        cols_splitter.addWidget(middle_col)
+        cols_splitter.addWidget(right_col)
+
+        # Enforce fixed 40/40/20 ratio on resize.
+        def _maintain_server_cols_ratio():
+            total = cols_splitter.width()
+            if total <= 0:
+                return
+            w1 = int(total * 0.4)
+            w2 = int(total * 0.4)
+            w3 = max(1, total - w1 - w2)
+            cur = cols_splitter.sizes()
+            if len(cur) == 3 and (cur[0] != w1 or cur[1] != w2 or cur[2] != w3):
+                cols_splitter.setSizes([w1, w2, w3])
+
+        class _ServerColsFixedRatioFilter(QObject):
+            def eventFilter(self, obj, event):
+                if obj is cols_splitter and event.type() == QEvent.Resize:
+                    QTimer.singleShot(0, _maintain_server_cols_ratio)
+                return False
+
+        self._server_cols_ratio_filter = _ServerColsFixedRatioFilter()
+        cols_splitter.installEventFilter(self._server_cols_ratio_filter)
+        QTimer.singleShot(0, _maintain_server_cols_ratio)
+        layout.addWidget(cols_splitter)
         
         # Sync Copy Model Name button state with initial selection
         QTimer.singleShot(0, self._on_llm_model_selection_changed)

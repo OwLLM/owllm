@@ -562,6 +562,11 @@ class SystemDetectThread(QThread):
             detector = SystemDetector()
             # Single pass to avoid duplicate CUDA/GPU probing at startup.
             system_info = detector.detect_all()
+            # Cache normalized hardware profile for downstream UI checks.
+            try:
+                system_info["hardware_profile"] = detector.get_hardware_profile()
+            except Exception:
+                pass
             self.detected.emit(system_info)
         except Exception as e:
             import traceback
@@ -4404,7 +4409,11 @@ class MainWindow(QMainWindow):
         # Environment Manager tab: refresh requirements when entered
         elif index < self.tabs.count() and self.tabs.tabText(index) == self.tab_page_names.get("environment"):
             self._ensure_environment_tab_initialized()
-            self._refresh_requirements_grid()
+            # Avoid repeated heavy refreshes when users switch tabs frequently.
+            last_refresh = float(getattr(self, "_last_requirements_refresh_ts", 0.0) or 0.0)
+            now = time.monotonic()
+            if (now - last_refresh) > 30.0:
+                self._refresh_requirements_grid()
 
     def _ensure_environment_tab_initialized(self) -> None:
         """Build Environment Manager page on first open to keep app startup fast."""
@@ -15808,11 +15817,8 @@ except Exception as e:
         # Set initial sizes
         QTimer.singleShot(100, maintain_fixed_ratio)
         
-        # Also check periodically (backup in case events are missed)
-        if not hasattr(self, '_requirements_ratio_timer'):
-            self._requirements_ratio_timer = QTimer()
-            self._requirements_ratio_timer.timeout.connect(maintain_fixed_ratio)
-            self._requirements_ratio_timer.start(100)  # Check every 100ms
+        # Do not run a perpetual timer here; it adds constant main-thread work.
+        # Resize events + initial sizing are sufficient.
         
         main_layout.addWidget(splitter)
         
@@ -15833,10 +15839,9 @@ except Exception as e:
         self.selected_packages = set()  # Track which packages are checked
         self._selected_install_queue = []  # Queue for sequential selected installs
         
-        # Stop existing check if running
+        # Stop existing check if running (non-blocking)
         if hasattr(self, '_req_check_thread') and self._req_check_thread.isRunning():
             self._req_check_thread.stop()
-            self._req_check_thread.wait()
 
         # PROFILE IS THE ONLY SOURCE OF TRUTH
         profile_requirements = self._get_profile_requirements()
@@ -15846,16 +15851,15 @@ except Exception as e:
         try:
             from pathlib import Path
             from core.profile_selector import ProfileSelector
-            from system_detector import SystemDetector
             
             llm_dir = Path(__file__).parent.parent
             compat_matrix_path = llm_dir / "metadata" / "compatibility_matrix.json"
             if compat_matrix_path.exists():
-                detector = SystemDetector()
-                detector.detect_all()
-                hw_profile = detector.get_hardware_profile()
-                selector = ProfileSelector(compat_matrix_path)
-                _, _, _, binary_packages = selector.select_profile(hw_profile)
+                # Reuse already-detected system info; avoid expensive synchronous re-detection.
+                hw_profile = self.system_info.get("hardware_profile")
+                if hw_profile:
+                    selector = ProfileSelector(compat_matrix_path)
+                    _, _, _, binary_packages = selector.select_profile(hw_profile)
         except Exception as e:
             print(f"[GUI] Could not load binary packages: {e}")
         
@@ -15994,6 +15998,7 @@ except Exception as e:
         # Clear the notice badge while checking
         self._update_requirements_tab_notice()
             
+        self._last_requirements_refresh_ts = time.monotonic()
         self._req_check_thread.start()
 
     def _update_requirements_tab_notice(self):
@@ -16164,6 +16169,9 @@ except Exception as e:
 
     def _on_package_checked(self, pkg_name, inst_ver, is_installed, is_functional, version_mismatch, status_text, status_color, needs_attention):
         """Update a single card when check completes."""
+        # Ignore stale signals from an older check thread after a refresh.
+        if hasattr(self, "_req_check_thread") and self.sender() is not self._req_check_thread:
+            return
         if hasattr(self, 'requirements_progress'):
             self.requirements_progress.setValue(self.requirements_progress.value() + 1)
             
@@ -16181,6 +16189,9 @@ except Exception as e:
 
     def _on_all_requirements_checked(self):
         """Enable refresh button and re-sort cards when finished."""
+        # Ignore stale completion signal from superseded thread.
+        if hasattr(self, "_req_check_thread") and self.sender() is not self._req_check_thread:
+            return
         if hasattr(self, 'refresh_btn'):
             self.refresh_btn.setEnabled(True)
             self.refresh_btn.setText("🔄 Refresh Status")
@@ -17023,16 +17034,28 @@ except Exception as e:
                     if not venv_path.exists():
                         continue
                     
-                    # Get Python version
+                    # Get Python version (fast path: parse pyvenv.cfg, avoid spawning subprocess)
                     python_exe = env_registry._get_env_python_executable(env_key)
                     python_version = "Unknown"
-                    if python_exe and python_exe.exists():
+                    try:
+                        pyvenv_cfg = venv_path / "pyvenv.cfg"
+                        if pyvenv_cfg.exists():
+                            for line in pyvenv_cfg.read_text(encoding="utf-8", errors="replace").splitlines():
+                                if line.lower().startswith("version"):
+                                    _, _, val = line.partition("=")
+                                    val = val.strip()
+                                    if val:
+                                        python_version = f"Python {val}"
+                                        break
+                    except Exception:
+                        pass
+                    if python_version == "Unknown" and python_exe and python_exe.exists():
                         try:
                             result = subprocess.run(
                                 [str(python_exe), "--version"],
                                 capture_output=True,
                                 text=True,
-                                timeout=5,
+                                timeout=3,
                                 **env_registry.subprocess_flags
                             )
                             if result.returncode == 0:
@@ -17051,13 +17074,8 @@ except Exception as e:
                         except Exception:
                             pass
                     
-                    # Get disk usage
+                    # Disk usage deep scans can be very slow for large envs; compute lazily elsewhere.
                     disk_usage_mb = 0
-                    try:
-                        total_size = sum(f.stat().st_size for f in env_dir.rglob('*') if f.is_file())
-                        disk_usage_mb = total_size / (1024 * 1024)
-                    except Exception:
-                        pass
                     
                     # Get associated models from StateStore (source of truth)
                     from core.state_store import get_state_store
@@ -17276,8 +17294,9 @@ except Exception as e:
         name_label.setWordWrap(True)
         header_layout.addWidget(name_label)
         
-        python_ver = env_info.get("python_version", "Unknown")
-        py_label = QLabel(f"🐍 Python {python_ver}")
+        python_ver = str(env_info.get("python_version", "Unknown"))
+        py_display = python_ver if python_ver.lower().startswith("python") else f"Python {python_ver}"
+        py_label = QLabel(f"🐍 {py_display}")
         py_label.setStyleSheet("font-size: 11pt; color: rgba(255, 255, 255, 0.8); background: transparent; border: none;")
         header_layout.addWidget(py_label)
         

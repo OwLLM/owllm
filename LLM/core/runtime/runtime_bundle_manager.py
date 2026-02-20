@@ -106,7 +106,7 @@ class RuntimeBundleManager:
                 "--only-binary",
                 ":all:",
                 "--prefer-binary",
-                "llama-cpp-python==0.3.2",
+                "llama-cpp-python",
                 "--extra-index-url",
                 llama_index,
             ],

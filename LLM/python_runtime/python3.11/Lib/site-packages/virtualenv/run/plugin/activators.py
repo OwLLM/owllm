@@ -54,6 +54,7 @@ class ActivationSelector(ComponentBuilder):
             activator.add_parser_arguments(self.parser, self.interpreter)
 
     def create(self, options):
+        assert self.active is not None  # noqa: S101  # Set by handle_selected_arg_parse
         return [activator_class(options) for activator_class in self.active.values()]
 
 

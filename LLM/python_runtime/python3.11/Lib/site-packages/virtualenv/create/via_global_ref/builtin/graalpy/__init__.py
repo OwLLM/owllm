@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 from virtualenv.create.describe import PosixSupports, WindowsSupports
@@ -9,6 +9,12 @@ from virtualenv.create.via_global_ref.builtin.via_global_self_do import ViaGloba
 
 
 class GraalPy(ViaGlobalRefVirtualenvBuiltin, ABC):
+    @classmethod
+    @abstractmethod
+    def _native_lib(cls, lib_dir: Path, platform: str) -> Path:
+        """Return the path to the native library for this platform."""
+        raise NotImplementedError
+
     @classmethod
     def can_describe(cls, interpreter):
         return interpreter.implementation == "GraalVM" and super().can_describe(interpreter)
@@ -56,7 +62,7 @@ class GraalPy(ViaGlobalRefVirtualenvBuiltin, ABC):
         super().set_pyenv_cfg()
         # GraalPy 24.0 and older had home without the bin
         version = self.interpreter.version_info
-        if version.major == 3 and version.minor <= 10:  # noqa: PLR2004
+        if version.minor <= 10:  # noqa: PLR2004
             home = Path(self.pyenv_cfg["home"])
             if home.name == "bin":
                 self.pyenv_cfg["home"] = str(home.parent)
@@ -72,7 +78,7 @@ class GraalPyPosix(GraalPy, PosixSupports):
 
 class GraalPyWindows(GraalPy, WindowsSupports):
     @classmethod
-    def _native_lib(cls, lib_dir, _platform):
+    def _native_lib(cls, lib_dir, platform):  # noqa: ARG003
         return lib_dir / "pythonvm.dll"
 
     def set_pyenv_cfg(self):

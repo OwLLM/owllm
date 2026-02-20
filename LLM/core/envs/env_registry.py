@@ -729,23 +729,15 @@ try:
         try:
             from llama_cpp import Llama
             if deep_probe:
-                try:
-                    _ = Llama(
-                        model_path=str(gguf_path),
-                        n_ctx=64,
-                        n_threads=1,
-                        n_gpu_layers=0,
-                        vocab_only=True,
-                        verbose=False,
-                    )
-                except TypeError:
-                    _ = Llama(
-                        model_path=str(gguf_path),
-                        n_ctx=64,
-                        n_threads=1,
-                        n_gpu_layers=0,
-                        verbose=False,
-                    )
+                # Full constructor probe (no vocab_only shortcut) to catch
+                # metadata incompatibilities like missing rope/yarn keys.
+                _ = Llama(
+                    model_path=str(gguf_path),
+                    n_ctx=64,
+                    n_threads=1,
+                    n_gpu_layers=0,
+                    verbose=False,
+                )
                 print("GGUF_BACKEND: llama-cpp-python(deep)")
                 backend_ready = True
             else:

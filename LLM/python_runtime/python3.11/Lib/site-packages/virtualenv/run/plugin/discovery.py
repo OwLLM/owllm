@@ -29,7 +29,16 @@ def get_discover(parser, args):
         help="interpreter discovery method",
     )
     options, _ = parser.parse_known_args(args)
-    discover_class = discover_types[options.discovery]
+    discovery = options.discovery
+    if discovery not in discover_types:
+        available = ", ".join(sorted(discover_types))
+        msg = (
+            f"discovery {discovery!r} is not available. "
+            f"Available discovery methods: {available}. "
+            f"Is the plugin installed?"
+        )
+        raise RuntimeError(msg)
+    discover_class = discover_types[discovery]
     discover_class.add_parser_arguments(discovery_parser)
     options, _ = parser.parse_known_args(args, namespace=options)
     return discover_class(options)

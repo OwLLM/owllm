@@ -53,9 +53,11 @@ class ComponentBuilder(PluginLoader):
 
     def populate_selected_argparse(self, selected, app_data):
         self.parser.description = f"options for {self.name} {selected}"
+        assert self._impl_class is not None  # noqa: S101  # Set by handle_selected_arg_parse
         self._impl_class.add_parser_arguments(self.parser, self.interpreter, app_data)
 
     def create(self, options):
+        assert self._impl_class is not None  # noqa: S101  # Set by handle_selected_arg_parse
         return self._impl_class(options, self.interpreter)
 
 

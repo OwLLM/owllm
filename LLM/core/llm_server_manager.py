@@ -252,6 +252,8 @@ class LLMServerManager:
             or "please install torch and gguf" in low
             or "sentencepiece" in low
             or "tiktoken" in low
+            or "yarn_log_multiplier" in low
+            or "error loading model hyperparameters: key not found in model" in low
             or ("sentencepiece or tiktoken" in low)
             or ("couldn't instantiate the backend tokenizer" in low and ("sentencepiece" in low or "tiktoken" in low))
         )
@@ -2013,6 +2015,12 @@ class LLMServerManager:
                                                 ordered_fallbacks.insert(0, "tiktoken")
                                             elif ordered_fallbacks[0] != "tiktoken":
                                                 ordered_fallbacks = ["tiktoken"] + [p for p in ordered_fallbacks if p != "tiktoken"]
+                                        # Old llama.cpp metadata support: trigger runtime backend upgrade in-place.
+                                        if (
+                                            "yarn_log_multiplier" in low_err
+                                            or "error loading model hyperparameters: key not found in model" in low_err
+                                        ) and "llama-cpp-python" not in ordered_fallbacks:
+                                            ordered_fallbacks.insert(0, "llama-cpp-python")
 
                                         installed_any = False
                                         install_failures: list[str] = []

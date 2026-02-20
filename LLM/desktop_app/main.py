@@ -3116,6 +3116,13 @@ class MainWindow(QMainWindow):
             Model ID if extractable, None otherwise
         """
         from pathlib import Path
+        if isinstance(model_path, dict):
+            model_id = str(model_path.get("model_id") or "").strip()
+            if model_id:
+                return model_id
+            model_path = str(model_path.get("base_path") or "").strip()
+            if not model_path:
+                return None
         path_obj = Path(model_path)
 
         # Check if path contains a model directory that looks like a HF model ID
@@ -3153,8 +3160,14 @@ class MainWindow(QMainWindow):
         import yaml
         from pathlib import Path
         
-        # Normalize model_path
+        # Normalize model_path. Variant payloads carry base_path/model_id.
         try:
+            if isinstance(model_path, dict):
+                payload_model_id = str(model_path.get("model_id") or "").strip()
+                payload_base = str(model_path.get("base_path") or "").strip()
+                if payload_model_id:
+                    return payload_model_id
+                model_path = payload_base or str(model_path)
             model_path_obj = Path(model_path).resolve()
             if not model_path_obj.exists():
                 raise ValueError(f"Model path does not exist: {model_path}")
@@ -12550,7 +12563,7 @@ class MainWindow(QMainWindow):
         try:
             model_path = self.tool_chat_model_a.currentData() if hasattr(self, "tool_chat_model_a") else None
             if model_path:
-                model_path = self._resolve_runtime_model_path(str(model_path))
+                model_path = self._resolve_runtime_model_payload(model_path)
             vision_ok = False
             if model_path:
                 try:
@@ -12602,7 +12615,7 @@ class MainWindow(QMainWindow):
         # Get selected model
         model_a_path = self.tool_chat_model_a.currentData()
         if model_a_path:
-            model_a_path = self._resolve_runtime_model_path(str(model_a_path))
+            model_a_path = self._resolve_runtime_model_payload(model_a_path)
         
         # Check if model is selected
         if not model_a_path or model_a_path == "(No models downloaded)":
@@ -12926,6 +12939,8 @@ class MainWindow(QMainWindow):
     def _check_tool_chat_all_finished(self):
         """Check if tool chat worker has finished"""
         model_a_path = self.tool_chat_model_a.currentData()
+        if model_a_path:
+            model_a_path = self._resolve_runtime_model_payload(model_a_path)
         
         if model_a_path and model_a_path != "(No models downloaded)":
             if self.tool_chat_worker_a and self.tool_chat_worker_a.isRunning():

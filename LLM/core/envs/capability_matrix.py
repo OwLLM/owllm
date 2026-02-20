@@ -322,6 +322,11 @@ def classify_runtime_failure(reason_code: Optional[str], error_message: Optional
             "action": "Selected GGUF variant is incompatible with available runtime backend. Try another variant or repair backend.",
         }
     if "gguf runtime backend failed for this model" in low:
+        if "yarn_log_multiplier" in low or "error loading model hyperparameters: key not found in model" in low:
+            return {
+                "category": "RUNTIME_MISSING_COMPONENT",
+                "action": "Installed llama-cpp runtime is too old for this GGUF metadata. Upgrade llama-cpp-python in the model environment and retry.",
+            }
         return {
             "category": "BACKEND_INCOMPATIBLE_MODEL",
             "action": "Runtime could not load GGUF with available backends. Try another GGUF variant/quant or update GGUF runtime backend in this environment.",

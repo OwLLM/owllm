@@ -22,7 +22,9 @@ class BuiltinViaGlobalRefMeta(ViaGlobalRefMeta):
 class ViaGlobalRefVirtualenvBuiltin(ViaGlobalRefApi, VirtualenvBuiltin, ABC):
     def __init__(self, options, interpreter) -> None:
         super().__init__(options, interpreter)
-        self._sources = getattr(options.meta, "sources", None)  # if we're created as a describer this might be missing
+        self._sources: list = (
+            getattr(options.meta, "sources", None) or []
+        )  # if created as a describer this might be missing
 
     @classmethod
     def can_create(cls, interpreter):
@@ -98,14 +100,18 @@ class ViaGlobalRefVirtualenvBuiltin(ViaGlobalRefApi, VirtualenvBuiltin, ABC):
                 self.enable_system_site_package = true_system_site
         super().create()
 
+    @property
+    def include_dir(self):
+        return self.dest / ("Include" if self.interpreter.os == "nt" else "include")
+
+    def install_venv_shared_libs(self, venv_creator):
+        pass
+
     def ensure_directories(self):
-        return {self.dest, self.bin_dir, self.script_dir, self.stdlib} | set(self.libs)
+        return {self.dest, self.bin_dir, self.script_dir, self.stdlib, self.include_dir} | set(self.libs)
 
     def set_pyenv_cfg(self):
-        """
-        We directly inject the base prefix and base exec prefix to avoid site.py needing to discover these
-        from home (which usually is done within the interpreter itself).
-        """  # noqa: D205
+        """We directly inject the base prefix and base exec prefix to avoid site.py needing to discover these from home (which usually is done within the interpreter itself)."""
         super().set_pyenv_cfg()
         self.pyenv_cfg["base-prefix"] = self.interpreter.system_prefix
         self.pyenv_cfg["base-exec-prefix"] = self.interpreter.system_exec_prefix

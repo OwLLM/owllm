@@ -55,7 +55,7 @@ class CreatorSelector(ComponentBuilder):
             key_to_class=key_to_class,
             key_to_meta=key_to_meta,
             describe=describe,
-            builtin_key=builtin_key,
+            builtin_key=builtin_key or "",
         )
 
     def add_selector_arg_parse(self, name, choices):
@@ -76,10 +76,12 @@ class CreatorSelector(ComponentBuilder):
 
     def populate_selected_argparse(self, selected, app_data):
         self.parser.description = f"options for {self.name} {selected}"
+        assert self._impl_class is not None  # noqa: S101  # Set by handle_selected_arg_parse
         self._impl_class.add_parser_arguments(self.parser, self.interpreter, self.key_to_meta[selected], app_data)
 
     def create(self, options):
         options.meta = self.key_to_meta[getattr(options, self.name)]
+        assert self._impl_class is not None  # noqa: S101  # Set by handle_selected_arg_parse
         if not issubclass(self._impl_class, Describe):
             options.describe = self.describe(options, self.interpreter)
         return super().create(options)

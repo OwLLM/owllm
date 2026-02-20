@@ -893,6 +893,62 @@ class ServerPage(QWidget):
             return
         if hasattr(self, 'copy_model_btn'):
             self.copy_model_btn.setEnabled(self.llm_model_selector.currentData() is not None)
+
+    def _selected_model_payload(self) -> Optional[dict]:
+        """Normalize selected combo item data into a payload dict."""
+        try:
+            data = self.llm_model_selector.currentData()
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            model_id = str(data.get("model_id") or "").strip()
+            if not model_id:
+                return None
+            return {
+                "model_id": model_id,
+                "base_model": str(data.get("base_model") or "").strip(),
+                "variant_relpath": str(data.get("variant_relpath") or "").strip().replace("\\", "/"),
+            }
+        if isinstance(data, str) and data.strip():
+            return {"model_id": data.strip(), "base_model": "", "variant_relpath": ""}
+        return None
+
+    def _selected_model_id(self) -> Optional[str]:
+        payload = self._selected_model_payload()
+        return payload.get("model_id") if payload else None
+
+    def _apply_selected_variant_marker(self, payload: Optional[dict]) -> None:
+        """Persist selected GGUF variant for runtime by updating active_variant marker."""
+        if not payload:
+            return
+        variant_rel = str(payload.get("variant_relpath") or "").strip().replace("\\", "/")
+        if not variant_rel:
+            return
+        base_model = str(payload.get("base_model") or "").strip()
+        if not base_model:
+            return
+        try:
+            model_path = Path(base_model)
+            if model_path.is_file():
+                model_path = model_path.parent
+            if not model_path.exists() or not model_path.is_dir():
+                return
+            marker = model_path / ".selected_weights.json"
+            data = {}
+            patterns = []
+            if marker.exists():
+                data = json.loads(marker.read_text(encoding="utf-8")) or {}
+                existing = data.get("allow_patterns")
+                if isinstance(existing, list):
+                    patterns = [str(x).replace("\\", "/") for x in existing if isinstance(x, str) and x.strip()]
+            if variant_rel not in patterns:
+                patterns.append(variant_rel)
+            data["model_id"] = str(payload.get("model_id") or data.get("model_id") or "")
+            data["allow_patterns"] = patterns
+            data["active_variant"] = variant_rel
+            marker.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
     
     def _populate_model_selector(self):
         """Populate the model selector dropdown with READY models from llm_backends.yaml.
@@ -1027,12 +1083,40 @@ class ServerPage(QWidget):
                 else:
                     deduped[key] = c
 
+            def _payload_key(payload) -> str:
+                if isinstance(payload, dict):
+                    return f"{payload.get('model_id','')}|{payload.get('variant_relpath','')}"
+                if isinstance(payload, str):
+                    return payload
+                return ""
+
             model_items = []
             for c in deduped.values():
-                model_items.append((f"✓ {c['model_name']} (Port: {c['port']})", c["model_id"]))
+                model_id = c["model_id"]
+                base_model = c.get("base_model") or ""
+                port = c.get("port")
+                model_name = c.get("model_name") or model_id
+                variant_rows = []
+                try:
+                    base_path = Path(base_model)
+                    model_dir = base_path.parent if base_path.is_file() else base_path
+                    if model_dir.exists() and model_dir.is_dir():
+                        ggufs = sorted(model_dir.rglob("*.gguf"))
+                        if len(ggufs) > 1:
+                            for g in ggufs:
+                                rel = str(g.relative_to(model_dir)).replace("\\", "/")
+                                payload = {"model_id": model_id, "base_model": str(model_dir), "variant_relpath": rel}
+                                variant_rows.append((f"✓ {model_name} · GGUF:{g.name} (Port: {port})", payload))
+                except Exception:
+                    pass
+                if variant_rows:
+                    model_items.extend(variant_rows)
+                else:
+                    payload = {"model_id": model_id, "base_model": base_model, "variant_relpath": ""}
+                    model_items.append((f"✓ {model_name} (Port: {port})", payload))
             model_items.sort(key=lambda x: x[0].lower())
 
-            prev_id = self.llm_model_selector.currentData()
+            prev_key = _payload_key(self.llm_model_selector.currentData())
             self._populating_model_selector = True
             self.llm_model_selector.blockSignals(True)
             self.llm_model_selector.clear()
@@ -1043,9 +1127,9 @@ class ServerPage(QWidget):
                     self.llm_model_selector.addItem(display_text, model_id)
                 # Preserve previous selection when possible.
                 restored = False
-                if prev_id is not None:
+                if prev_key:
                     for i in range(self.llm_model_selector.count()):
-                        if self.llm_model_selector.itemData(i) == prev_id:
+                        if _payload_key(self.llm_model_selector.itemData(i)) == prev_key:
                             self.llm_model_selector.setCurrentIndex(i)
                             restored = True
                             break
@@ -1562,10 +1646,12 @@ class ServerPage(QWidget):
             from core.llm_server_manager import get_global_server_manager
             import requests
 
-            selected_model_id = self.llm_model_selector.currentData()
+            payload = self._selected_model_payload()
+            selected_model_id = payload.get("model_id") if payload else None
             if selected_model_id is None:
                 QMessageBox.warning(self, "No Model Selected", "Please select a model from the dropdown.")
                 return
+            self._apply_selected_variant_marker(payload)
 
             self._last_llm_model_id = selected_model_id
             manager = get_global_server_manager()
@@ -1636,7 +1722,7 @@ class ServerPage(QWidget):
             from core.llm_server_manager import get_global_server_manager
             
             # Get selected model ID
-            selected_model_id = self.llm_model_selector.currentData()
+            selected_model_id = self._selected_model_id()
             if selected_model_id is None:
                 return
             
@@ -1758,7 +1844,7 @@ class ServerPage(QWidget):
             import requests
             from pathlib import Path
 
-            selected_model_id = self.llm_model_selector.currentData()
+            selected_model_id = self._selected_model_id()
             if selected_model_id is None:
                 return
 
@@ -2032,7 +2118,7 @@ class ServerPage(QWidget):
             from core.llm_server_manager import get_global_server_manager
             
             # Get selected model ID
-            selected_model_id = self.llm_model_selector.currentData()
+            selected_model_id = self._selected_model_id()
             if selected_model_id is None:
                 QMessageBox.warning(self, "Error", "No model selected.")
                 return
@@ -2058,7 +2144,7 @@ class ServerPage(QWidget):
     
     def _copy_model_name(self):
         """Copy model ID to clipboard for Cursor Model field"""
-        selected_model_id = self.llm_model_selector.currentData()
+        selected_model_id = self._selected_model_id()
         if selected_model_id is None:
             QMessageBox.warning(self, "Error", "No model selected.")
             return
@@ -2068,7 +2154,7 @@ class ServerPage(QWidget):
     
     def _show_llm_api_help(self):
         """Show help dialog for using LLM API with external tools"""
-        selected_model_id = self.llm_model_selector.currentData() if hasattr(self, 'llm_model_selector') else None
+        selected_model_id = self._selected_model_id() if hasattr(self, 'llm_model_selector') else None
         model_hint = f"<code>{selected_model_id}</code>" if selected_model_id else "the selected model ID (dropdown above, or from <code>GET .../v1/models</code>)"
         help_text = f"""
 <h3>Using Your Local LLM with External Tools</h3>

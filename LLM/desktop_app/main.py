@@ -6726,16 +6726,16 @@ class MainWindow(QMainWindow):
             self.active_downloads[repair_key] = (thread, card)
             
             # Connect signals
-            thread.progress.connect(lambda p: progress_bar.setValue(p))
-            thread.status.connect(lambda msg: status_label.setText(msg))
-            thread.status.connect(lambda msg: self._update_progress_bar_text(progress_bar, "Repairing", msg))
+            thread.progress.connect(lambda p: self._safe_progress_set(progress_bar, p))
+            thread.status.connect(lambda msg: self._safe_label_set(status_label, msg))
+            thread.status.connect(lambda msg: self._safe_progress_text(progress_bar, "Repairing", msg))
             thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key, status_label))
             # Store repair info so we can look it up when error signal is received
             if not hasattr(self, '_repair_info'):
                 self._repair_info = {}
             self._repair_info[repair_key] = {
                 'model_id': model_id, 'card': card, 'progress_bar': progress_bar,
-                'status_label': status_label, 'model_path': path_obj
+                'status_label': status_label, 'model_path': path_obj, 'operation': 'repair'
             }
             # Simple lambda that looks up the info
             thread.error.connect(lambda err, rk=repair_key: self._handle_repair_error(rk, err))
@@ -6748,7 +6748,7 @@ class MainWindow(QMainWindow):
             thread.start()
             
             # Update progress bar immediately
-            progress_bar.setValue(2)
+            self._safe_progress_set(progress_bar, 2)
 
     def _on_create_dedicated_env(self, model_path: str):
         """Manually trigger creation of a dedicated environment for a model"""
@@ -7311,7 +7311,14 @@ class MainWindow(QMainWindow):
             return False, None
 
         selected_rows = sorted({i.row() for i in list_widget.selectedIndexes()})
-        if (not selected_rows) or (0 in selected_rows):
+        if not selected_rows:
+            self._log_models("User selected: download all GGUF variants.")
+            return True, None
+        specific_rows = [r for r in selected_rows if r > 0]
+        if 0 in selected_rows and specific_rows:
+            # Explicit file picks always win over accidental mixed selection with row 0.
+            selected_rows = specific_rows
+        elif 0 in selected_rows:
             self._log_models("User selected: download all GGUF variants.")
             return True, None
         selected_patterns: List[str] = []
@@ -7327,6 +7334,78 @@ class MainWindow(QMainWindow):
         selected_names = [Path(p).name for p in selected_patterns]
         self._log_models(f"GGUF selection: downloading {len(selected_patterns)} variant(s): {selected_names}")
         return True, selected_patterns
+
+    def _list_local_gguf_relpaths(self, model_dir: Path) -> List[str]:
+        """List local GGUF files as stable relative POSIX paths."""
+        rels: List[str] = []
+        try:
+            for f in sorted(model_dir.rglob("*.gguf")):
+                try:
+                    rels.append(str(f.relative_to(model_dir)).replace("\\", "/"))
+                except Exception:
+                    rels.append(f.name)
+        except Exception:
+            pass
+        # Deduplicate while preserving order.
+        out: List[str] = []
+        seen = set()
+        for r in rels:
+            if r not in seen:
+                seen.add(r)
+                out.append(r)
+        return out
+
+    def _sync_selected_weights_marker(
+        self,
+        model_dir: Path,
+        model_id: Optional[str] = None,
+        append_patterns: Optional[List[str]] = None,
+        preferred_active: Optional[str] = None,
+    ) -> dict:
+        """
+        Merge marker allow_patterns with discovered local GGUF files and optional new patterns.
+        Ensures manual GGUF files become selectable runtime variants without redownload.
+        """
+        marker_path = model_dir / ".selected_weights.json"
+        data: dict = {}
+        existing_patterns: List[str] = []
+        active_variant: Optional[str] = None
+        try:
+            if marker_path.exists():
+                data = json.loads(marker_path.read_text(encoding="utf-8")) or {}
+                pats = data.get("allow_patterns")
+                if isinstance(pats, list):
+                    existing_patterns = [str(x) for x in pats if isinstance(x, str) and x.strip()]
+                av = data.get("active_variant")
+                if isinstance(av, str) and av.strip():
+                    active_variant = av.strip().replace("\\", "/")
+        except Exception:
+            data = {}
+            existing_patterns = []
+            active_variant = None
+
+        local_ggufs = self._list_local_gguf_relpaths(model_dir)
+        merged: List[str] = []
+        for group in (existing_patterns, local_ggufs, append_patterns or []):
+            for p in group:
+                if not isinstance(p, str):
+                    continue
+                pp = p.strip().replace("\\", "/")
+                if pp and pp not in merged:
+                    merged.append(pp)
+
+        chosen_active = (preferred_active or active_variant or (merged[0] if merged else ""))
+        payload = {
+            "model_id": model_id or data.get("model_id") or model_dir.name.replace("__", "/"),
+            "allow_patterns": merged,
+            "active_variant": chosen_active,
+            "saved_at": datetime.now().isoformat(),
+        }
+        try:
+            marker_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            self._log_models(f"[WARNING] Could not write selected weights marker: {e}")
+        return payload
 
     def _prompt_additional_gguf_variant_selection(
         self,
@@ -7423,7 +7502,12 @@ class MainWindow(QMainWindow):
             return False, None
 
         selected_rows = sorted({i.row() for i in list_widget.selectedIndexes()})
-        if (not selected_rows) or (0 in selected_rows):
+        if not selected_rows:
+            return True, list(file_list)
+        specific_rows = [r for r in selected_rows if r > 0]
+        if 0 in selected_rows and specific_rows:
+            selected_rows = specific_rows
+        elif 0 in selected_rows:
             return True, list(file_list)
 
         selected_patterns: List[str] = []
@@ -7478,9 +7562,15 @@ class MainWindow(QMainWindow):
 
         token = self._resolve_hf_token()
         try:
-            local_gguf_names = {p.name for p in path_obj.rglob("*.gguf")}
+            local_gguf_names = {Path(p).name for p in path_obj.rglob("*.gguf")}
         except Exception:
             local_gguf_names = set()
+
+        # Ensure marker stays in sync with manually added local files too.
+        try:
+            self._sync_selected_weights_marker(path_obj, model_id=model_id)
+        except Exception:
+            pass
 
         proceed, selected_patterns = self._prompt_additional_gguf_variant_selection(model_id, token, local_gguf_names)
         if not proceed or not selected_patterns:
@@ -7491,34 +7581,16 @@ class MainWindow(QMainWindow):
 
         selected_names = [Path(p).name for p in selected_patterns]
         self._log_models(f"➕ Adding GGUF variants for {model_id}: {selected_names}")
+        self._log_models(f"➕ Resolved add-weights patterns: {selected_patterns}")
 
         # Persist merged subset so runtime picker and future repairs remain consistent.
         try:
-            marker_path = path_obj / ".selected_weights.json"
-            merged_patterns: List[str] = []
-            active_variant: Optional[str] = None
-            if marker_path.exists():
-                marker_data = json.loads(marker_path.read_text(encoding="utf-8"))
-                existing = marker_data.get("allow_patterns")
-                if isinstance(existing, list):
-                    merged_patterns.extend([str(x) for x in existing if isinstance(x, str) and x.strip()])
-                av = marker_data.get("active_variant")
-                if isinstance(av, str) and av.strip():
-                    active_variant = av
-            merged_patterns.extend(selected_patterns)
-            dedup: List[str] = []
-            seen = set()
-            for p in merged_patterns:
-                if p not in seen:
-                    seen.add(p)
-                    dedup.append(p)
-            payload = {
-                "model_id": model_id,
-                "allow_patterns": dedup,
-                "active_variant": active_variant or selected_patterns[0],
-                "saved_at": datetime.now().isoformat(),
-            }
-            marker_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._sync_selected_weights_marker(
+                path_obj,
+                model_id=model_id,
+                append_patterns=selected_patterns,
+                preferred_active=None,
+            )
         except Exception as e:
             self._log_models(f"[WARNING] Could not update selected weights marker: {e}")
 
@@ -7562,9 +7634,9 @@ class MainWindow(QMainWindow):
         )
         self.active_downloads[repair_key] = (thread, card)
 
-        thread.progress.connect(lambda p: progress_bar.setValue(p))
-        thread.status.connect(lambda msg: status_label.setText(msg))
-        thread.status.connect(lambda msg: self._update_progress_bar_text(progress_bar, "Adding weights", msg))
+        thread.progress.connect(lambda p: self._safe_progress_set(progress_bar, p))
+        thread.status.connect(lambda msg: self._safe_label_set(status_label, msg))
+        thread.status.connect(lambda msg: self._safe_progress_text(progress_bar, "Adding weights", msg))
         thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key, status_label))
 
         if not hasattr(self, "_repair_info"):
@@ -7575,6 +7647,7 @@ class MainWindow(QMainWindow):
             "progress_bar": progress_bar,
             "status_label": status_label,
             "model_path": path_obj,
+            "operation": "add_weights",
         }
         thread.error.connect(lambda err, rk=repair_key: self._handle_repair_error(rk, err))
         thread.start()
@@ -8557,12 +8630,14 @@ class MainWindow(QMainWindow):
         self._log_models(f"✓ Repair complete: {dest}")
         # Auto-start onboarding in the background (silent) so badges/env association update
         try:
-            dest_path = Path(dest)
-            entry = self.state_store.get_onboarding(model_id)
-            status = (entry.get("status") if entry else None) or "NEW"
-            # Only set READY again via onboarding; if still BROKEN/NEW, run onboarding (probe will set READY or BROKEN)
-            if status not in ("READY", "BUILDING"):
-                self._start_model_onboarding_silent(str(dest_path), model_id)
+            # Add-weights operation should not retrigger onboarding flow.
+            if "_addweights_" not in str(repair_key):
+                dest_path = Path(dest)
+                entry = self.state_store.get_onboarding(model_id)
+                status = (entry.get("status") if entry else None) or "NEW"
+                # Only set READY again via onboarding; if still BROKEN/NEW, run onboarding (probe will set READY or BROKEN)
+                if status not in ("READY", "BUILDING"):
+                    self._start_model_onboarding_silent(str(dest_path), model_id)
         except Exception as e:
             self._log_models(f"[WARNING] Could not start onboarding automatically after repair: {e}")
         
@@ -8573,6 +8648,11 @@ class MainWindow(QMainWindow):
                 thread.quit()
                 thread.wait()
             del self.active_downloads[repair_key]
+        if hasattr(self, "_repair_info") and repair_key in self._repair_info:
+            try:
+                del self._repair_info[repair_key]
+            except Exception:
+                pass
         
         # Remove progress bar and status label
         if progress_bar:
@@ -8597,6 +8677,41 @@ class MainWindow(QMainWindow):
                 card.repair_btn.setText("🔧 Fix" if prefer_fix_text else "🔧 Repair")
         except Exception:
             pass
+
+    def _is_qt_obj_alive(self, obj) -> bool:
+        """Best-effort QObject validity guard for async signal handlers."""
+        if obj is None:
+            return False
+        try:
+            from shiboken6 import isValid as _is_valid
+            return bool(_is_valid(obj))
+        except Exception:
+            try:
+                _ = obj.objectName() if hasattr(obj, "objectName") else True
+                return True
+            except Exception:
+                return False
+
+    def _safe_progress_set(self, progress_bar, value: int) -> None:
+        try:
+            if self._is_qt_obj_alive(progress_bar):
+                progress_bar.setValue(int(value))
+        except Exception:
+            pass
+
+    def _safe_label_set(self, label, text: str) -> None:
+        try:
+            if self._is_qt_obj_alive(label):
+                label.setText(str(text))
+        except Exception:
+            pass
+
+    def _safe_progress_text(self, progress_bar, prefix: str, msg: str) -> None:
+        try:
+            if self._is_qt_obj_alive(progress_bar):
+                self._update_progress_bar_text(progress_bar, prefix, msg)
+        except Exception:
+            pass
         try:
             if hasattr(card, "add_weights_btn"):
                 card.add_weights_btn.setVisible(True)
@@ -8618,21 +8733,22 @@ class MainWindow(QMainWindow):
         progress_bar = info['progress_bar']
         status_label = info['status_label']
         model_path = info['model_path']
+        operation = str(info.get("operation") or "repair")
         
         # Clean up stored info
         del self._repair_info[repair_key]
         
         # Use QTimer to ensure dialog runs on the main thread event loop
         from PySide6.QtCore import QTimer
-        QTimer.singleShot(0, lambda: self._show_repair_error_dialog(model_id, card, progress_bar, repair_key, status_label, model_path, error))
+        QTimer.singleShot(0, lambda: self._show_repair_error_dialog(model_id, card, progress_bar, repair_key, status_label, model_path, error, operation))
 
-    def _show_repair_error_dialog(self, model_id: str, card, progress_bar, repair_key: str, status_label, model_path: Path, error: str):
+    def _show_repair_error_dialog(self, model_id: str, card, progress_bar, repair_key: str, status_label, model_path: Path, error: str, operation: str = "repair"):
         """Actually show the repair error dialog - called via QTimer to ensure main thread"""
         self._log_models(f"Error repairing {model_id}: {error}")
         
         # Update status label to show error occurred (immediate visual feedback)
         if status_label:
-            status_label.setText(f"Repair failed - asking...")
+            self._safe_label_set(status_label, "Repair failed - asking...")
         
         # Clean up thread
         if repair_key in self.active_downloads:
@@ -8682,6 +8798,22 @@ class MainWindow(QMainWindow):
         # For other errors (stall, network failure, etc.), prompt for delete+redownload fallback
         from PySide6.QtWidgets import QMessageBox
 
+        if operation == "add_weights":
+            # Add-weights failure should never suggest deleting the model folder.
+            if progress_bar:
+                progress_bar.setVisible(False)
+                progress_bar.deleteLater()
+            if status_label:
+                status_label.setVisible(False)
+                status_label.deleteLater()
+            self._restore_model_card_action_buttons(card, prefer_fix_text=False)
+            QMessageBox.warning(
+                self,
+                "Add Weights Failed",
+                f"Could not add selected weight(s) for '{model_id}'.\n\n{error[:350]}",
+            )
+            return
+
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Repair Failed")
         msg_box.setText(f"Repair failed or stalled for '{model_id}':\n\n{error[:200]}\n\n"
@@ -8707,7 +8839,7 @@ class MainWindow(QMainWindow):
             
             # Update status label
             if status_label:
-                status_label.setText("Deleting and redownloading...")
+                self._safe_label_set(status_label, "Deleting and redownloading...")
             
             # Unlock files first
             self._unlock_model_files(model_path, log_callback=lambda m: self._log_models(m))
@@ -8756,15 +8888,15 @@ class MainWindow(QMainWindow):
             self.active_downloads[repair_key] = (thread, card)
             
             # Connect signals
-            thread.progress.connect(lambda p: progress_bar.setValue(p))
-            thread.status.connect(lambda msg: status_label.setText(msg) if status_label else None)
-            thread.status.connect(lambda msg: self._update_progress_bar_text(progress_bar, "Redownloading", msg))
+            thread.progress.connect(lambda p: self._safe_progress_set(progress_bar, p))
+            thread.status.connect(lambda msg: self._safe_label_set(status_label, msg))
+            thread.status.connect(lambda msg: self._safe_progress_text(progress_bar, "Redownloading", msg))
             thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key, status_label))
             thread.error.connect(lambda err: self._on_repair_error(model_id, err, card, progress_bar, repair_key))
             
             # Start repair
             thread.start()
-            progress_bar.setValue(2)
+            self._safe_progress_set(progress_bar, 2)
         else:
             # User declined - just clean up UI and re-enable repair button
             if progress_bar:
@@ -14705,29 +14837,28 @@ class MainWindow(QMainWindow):
             p = Path(base_path)
             if not p.exists() or not p.is_dir():
                 return str(base_path)
-            marker = p / ".selected_weights.json"
-            if not marker.exists():
-                return str(base_path)
-            data = json.loads(marker.read_text(encoding="utf-8"))
-            allow_patterns = data.get("allow_patterns")
-            if not isinstance(allow_patterns, list) or not allow_patterns:
-                return str(base_path)
-            patterns = [str(x) for x in allow_patterns if isinstance(x, str) and x.strip()]
-            if not patterns:
-                return str(base_path)
-            # Build existing GGUF candidates from persisted patterns.
+
+            # Keep marker in sync with local GGUFs (including manually copied files).
+            data = self._sync_selected_weights_marker(p)
+            allow_patterns = data.get("allow_patterns") if isinstance(data, dict) else []
+            patterns = [str(x) for x in (allow_patterns or []) if isinstance(x, str) and x.strip()]
+
+            # Build existing GGUF candidates from marker patterns plus any local GGUF fallback.
             candidates: List[Path] = []
             for pat in patterns:
                 cand = p / pat
-                if cand.exists() and cand.is_file():
+                if cand.exists() and cand.is_file() and cand.suffix.lower() == ".gguf":
                     candidates.append(cand)
-                else:
-                    # fallback by basename
-                    name = Path(pat).name
-                    for f in p.rglob("*.gguf"):
-                        if f.name == name:
-                            candidates.append(f)
-                            break
+                    continue
+                # fallback by basename
+                name = Path(pat).name
+                for f in p.rglob("*.gguf"):
+                    if f.name == name:
+                        candidates.append(f)
+                        break
+            if not candidates:
+                for f in sorted(p.rglob("*.gguf")):
+                    candidates.append(f)
             # Deduplicate while preserving order
             uniq: List[Path] = []
             seen = set()
@@ -14785,6 +14916,7 @@ class MainWindow(QMainWindow):
             # persist runtime active variant
             try:
                 data["active_variant"] = str(chosen.relative_to(p)).replace("\\", "/")
+                marker = p / ".selected_weights.json"
                 marker.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 pass
@@ -14792,6 +14924,35 @@ class MainWindow(QMainWindow):
             return str(chosen)
         except Exception:
             return str(base_path)
+
+    def _resolve_runtime_model_payload(self, payload) -> str | None:
+        """Resolve runtime path from combo payload (string path or variant dict)."""
+        if not payload:
+            return None
+        try:
+            if isinstance(payload, dict):
+                base_path = str(payload.get("base_path") or "").strip()
+                variant_rel = str(payload.get("variant_relpath") or "").strip().replace("\\", "/")
+                if not base_path:
+                    return None
+                p = Path(base_path)
+                if variant_rel and p.exists() and p.is_dir():
+                    cand = p / variant_rel
+                    if cand.exists() and cand.is_file():
+                        # Persist selection so backends honor this variant.
+                        try:
+                            self._sync_selected_weights_marker(
+                                p,
+                                model_id=str(payload.get("model_id") or ""),
+                                preferred_active=variant_rel,
+                            )
+                        except Exception:
+                            pass
+                        return str(cand)
+                return self._resolve_runtime_model_path(base_path)
+            return self._resolve_runtime_model_path(str(payload))
+        except Exception:
+            return None
 
     def _get_model_path_from_combo(self, combo) -> str | None:
         """
@@ -14806,7 +14967,7 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 data = combo.itemData(idx)
                 if data:
-                    return self._resolve_runtime_model_path(str(data))
+                    return self._resolve_runtime_model_payload(data)
         except Exception:
             pass
 
@@ -14835,7 +14996,7 @@ class MainWindow(QMainWindow):
                 if (combo.itemText(i) or "").strip() == text:
                     d = combo.itemData(i)
                     if d:
-                        return self._resolve_runtime_model_path(str(d))
+                        return self._resolve_runtime_model_payload(d)
         except Exception:
             pass
 
@@ -14846,7 +15007,7 @@ class MainWindow(QMainWindow):
                 if norm(combo.itemText(i) or "") == want:
                     d = combo.itemData(i)
                     if d:
-                        return self._resolve_runtime_model_path(str(d))
+                        return self._resolve_runtime_model_payload(d)
         except Exception:
             pass
 
@@ -19646,6 +19807,43 @@ respective package directories or official repositories.
         if hasattr(self, "tool_chat_model_a"):
             self._fill_tool_chat_selector(ready_paths, downloaded_models, models_dir)
 
+    def _build_ready_model_variant_entries(
+        self,
+        display_name: str,
+        model_path: Path,
+        model_id: str = "",
+        prefix: str = "✓ 📦 ",
+    ) -> List[Tuple[str, object]]:
+        """Return one combo entry per GGUF variant when multiple variants exist."""
+        try:
+            gguf_rel = self._list_local_gguf_relpaths(model_path)
+        except Exception:
+            gguf_rel = []
+        if len(gguf_rel) <= 1:
+            return [(f"{prefix}{display_name}", str(model_path))]
+
+        # Keep marker synchronized and prefer active_variant at the top.
+        active_rel = ""
+        try:
+            marker = self._sync_selected_weights_marker(model_path, model_id=model_id or None)
+            active_rel = str((marker or {}).get("active_variant") or "").strip().replace("\\", "/")
+        except Exception:
+            pass
+        ordered = list(gguf_rel)
+        if active_rel and active_rel in ordered:
+            ordered.remove(active_rel)
+            ordered.insert(0, active_rel)
+
+        out: List[Tuple[str, object]] = []
+        for rel in ordered:
+            payload = {
+                "base_path": str(model_path),
+                "variant_relpath": rel,
+                "model_id": model_id or "",
+            }
+            out.append((f"{prefix}{display_name} · GGUF:{Path(rel).name}", payload))
+        return out
+
     def _fill_tool_chat_selector(self, ready_paths: dict, downloaded_models: list, models_dir: Path) -> None:
         """Populate Tool Chat model combo from same READY data as Test/M2M (single source)."""
         try:
@@ -19665,7 +19863,15 @@ respective package directories or official repositories.
                     except Exception:
                         model_path_str = str(model_path).lower()
                     if model_path_str in ready_path_keys:
-                        self.tool_chat_model_a.addItem(f"✓ {model_name}", str(model_path))
+                        model_id = (ready_paths or {}).get(model_path_str, "")
+                        display_name = model_name.replace("__", "/")
+                        for label, payload in self._build_ready_model_variant_entries(
+                            display_name=display_name,
+                            model_path=model_path,
+                            model_id=model_id,
+                            prefix="✓ ",
+                        ):
+                            self.tool_chat_model_a.addItem(label, payload)
                         ready_count += 1
             if ready_count == 0:
                 self.tool_chat_model_a.addItem("(No READY models - run onboarding first)", None)
@@ -19694,7 +19900,14 @@ respective package directories or official repositories.
                         model_path_str = str(model_path).lower()
                     if model_path_str in ready_path_keys:
                         display_name = model_name.replace("__", "/")
-                        combo.addItem(f"✓ 📦 {display_name}", str(model_path))
+                        model_id = (ready_paths or {}).get(model_path_str, "")
+                        for label, payload in self._build_ready_model_variant_entries(
+                            display_name=display_name,
+                            model_path=model_path,
+                            model_id=model_id,
+                            prefix="✓ 📦 ",
+                        ):
+                            combo.addItem(label, payload)
             if adapter_dir.exists():
                 trained_adapters = []
                 for d in adapter_dir.iterdir():

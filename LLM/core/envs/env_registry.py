@@ -13,6 +13,7 @@ import subprocess
 import os
 import uuid
 import shutil
+import time
 
 
 @dataclass
@@ -439,11 +440,9 @@ class EnvRegistry:
                 log("Removing old environment...")
                 self._rmtree_windows_safe(final_dir)
             
-            # FIX: Use copytree instead of rename to avoid Windows MAX_PATH issues
-            # This is slower but much more reliable on Windows with deep package structures
+            # Promote temp environment to final location.
             if sys.platform == 'win32':
-                log("Copying environment (Windows long path workaround)...")
-                shutil.copytree(tmp_dir, final_dir, dirs_exist_ok=True)
+                self._promote_env_dir_windows(tmp_dir, final_dir, log)
                 # Clean up temp after successful copy
                 self._rmtree_windows_safe(tmp_dir)
             else:
@@ -483,6 +482,66 @@ class EnvRegistry:
             )
             
             raise RuntimeError(f"Failed to create environment {env_key}: {e}")
+
+    def _promote_env_dir_windows(self, tmp_dir: Path, final_dir: Path, log) -> None:
+        """
+        Robustly copy temp env dir into final dir on Windows.
+        Handles transient .pyd file locks from AV/indexers with retries.
+        """
+        import subprocess
+
+        attempts = 4
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                # Prefer robocopy on Windows for resilient large-tree copies.
+                # Exit codes <= 7 are considered success by robocopy docs.
+                rc_cmd = [
+                    "robocopy",
+                    str(tmp_dir),
+                    str(final_dir),
+                    "/E",
+                    "/R:2",
+                    "/W:1",
+                    "/NFL",
+                    "/NDL",
+                    "/NJH",
+                    "/NJS",
+                    "/NP",
+                ]
+                proc = subprocess.run(
+                    rc_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=900,
+                    **self.subprocess_flags
+                )
+                if proc.returncode <= 7:
+                    return
+                last_error = RuntimeError(
+                    f"robocopy failed with code {proc.returncode}: {(proc.stderr or proc.stdout or '')[:1200]}"
+                )
+            except Exception as rc_ex:
+                last_error = rc_ex
+                # Fallback to shutil copytree for environments without robocopy access.
+                try:
+                    shutil.copytree(tmp_dir, final_dir, dirs_exist_ok=True)
+                    return
+                except Exception as cp_ex:
+                    last_error = cp_ex
+
+            if attempt < attempts:
+                # Best-effort cleanup and retry after short backoff.
+                try:
+                    if final_dir.exists():
+                        self._rmtree_windows_safe(final_dir)
+                except Exception:
+                    pass
+                sleep_s = attempt * 2
+                log(f"Env copy attempt {attempt}/{attempts} failed, retrying in {sleep_s}s...")
+                time.sleep(sleep_s)
+
+        raise RuntimeError(f"Failed to promote env directory to final location: {last_error}")
     
     def _rmtree_windows_safe(self, path: Path):
         """

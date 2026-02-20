@@ -14,6 +14,7 @@ import os
 import uuid
 import shutil
 import time
+import re
 
 
 @dataclass
@@ -2540,6 +2541,35 @@ sys.exit(0)
         def log(msg):
             if log_callback:
                 log_callback(msg)
+
+        def _parse_version_tuple(version_text: str) -> tuple[int, int, int]:
+            nums = [int(x) for x in re.findall(r"\d+", str(version_text or ""))]
+            return (
+                nums[0] if len(nums) > 0 else 0,
+                nums[1] if len(nums) > 1 else 0,
+                nums[2] if len(nums) > 2 else 0,
+            )
+
+        def _get_installed_version(pkg_name: str) -> Optional[str]:
+            try:
+                cmd = [
+                    str(python_exe),
+                    "-c",
+                    f"import importlib.metadata as m; print(m.version('{pkg_name}'), end='')",
+                ]
+                out = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    **self.subprocess_flags,
+                )
+                if out.returncode != 0:
+                    return None
+                val = (out.stdout or "").strip()
+                return val or None
+            except Exception:
+                return None
         
         errors = []
         for pkg in packages:
@@ -2670,6 +2700,19 @@ sys.exit(0)
                 )
                 if result.returncode == 0:
                     log(f"Successfully installed {pkg}")
+                    # llama-cpp-python: success from pip is not enough; enforce minimum runtime version.
+                    if pkg_norm.startswith("llama-cpp-python"):
+                        min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.8").strip() or "0.3.8"
+                        installed = _get_installed_version("llama-cpp-python")
+                        if (not installed) or (_parse_version_tuple(installed) < _parse_version_tuple(min_llama)):
+                            pip_cmd_str = " ".join(str(x) for x in pip_cmd)
+                            errors.append(
+                                f"llama-cpp-python install did not meet minimum required version.\n"
+                                f"required>={min_llama}, installed={installed or 'unknown'}\n"
+                                f"command: {pip_cmd_str}"
+                            )
+                            return False, "\n\n".join(errors)
+                        log(f"llama-cpp-python runtime version verified: {installed} (min {min_llama})")
                     # GPTQ: verify CUDA kernels load (no "CUDA extension not installed" = crash path)
                     if pkg_norm.startswith("auto-gptq"):
                         verify_ok, verify_err = self._verify_autogptq_cuda_kernels(python_exe)

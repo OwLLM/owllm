@@ -18,6 +18,7 @@ import socket
 import logging
 import os
 import threading
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple, IO
@@ -168,6 +169,83 @@ class LLMServerManager:
             "gguf runtime backend failed for this model",
         )
         return any(m in low for m in markers)
+
+    def _parse_version_tuple(self, version_text: str) -> Tuple[int, int, int]:
+        """Parse a version string into a comparable 3-int tuple."""
+        nums = [int(x) for x in re.findall(r"\d+", str(version_text or ""))]
+        major = nums[0] if len(nums) > 0 else 0
+        minor = nums[1] if len(nums) > 1 else 0
+        patch = nums[2] if len(nums) > 2 else 0
+        return (major, minor, patch)
+
+    def _get_env_package_version(self, python_exe: Path, package_name: str) -> Optional[str]:
+        """Return installed package version from target interpreter, or None."""
+        code = (
+            "import importlib.metadata as m\n"
+            f"print(m.version('{package_name}'), end='')\n"
+        )
+        try:
+            result = subprocess.run(
+                [str(python_exe), "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                **self.subprocess_flags
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        value = (result.stdout or "").strip()
+        return value or None
+
+    def _is_gguf_path(self, model_path: Path) -> bool:
+        try:
+            if model_path.is_file() and model_path.suffix.lower() == ".gguf":
+                return True
+            if model_path.is_dir():
+                return any(model_path.rglob("*.gguf"))
+        except Exception:
+            return False
+        return False
+
+    def _ensure_min_llama_cpp_version_for_gguf(self, env_spec: EnvSpec, model_path: Path, log) -> None:
+        """
+        Ensure GGUF environments have a sufficiently new llama-cpp-python runtime.
+        Prevents false "env healthy" states when an old wheel is installed.
+        """
+        if not self._is_gguf_path(model_path):
+            return
+        min_version = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.8").strip() or "0.3.8"
+        current = self._get_env_package_version(env_spec.python_executable, "llama-cpp-python")
+        if not current:
+            return
+        if self._parse_version_tuple(current) >= self._parse_version_tuple(min_version):
+            log(f"llama-cpp-python version check passed ({current} >= {min_version})")
+            return
+
+        log(
+            f"llama-cpp-python is outdated for GGUF runtime ({current} < {min_version}); "
+            "attempting in-place upgrade..."
+        )
+        ok, err = self.env_registry.auto_install_missing_packages(
+            env_spec.python_executable,
+            ["llama-cpp-python"],
+            log_callback=log,
+        )
+        if not ok:
+            raise RuntimeError(
+                f"[RUNTIME_MISSING_COMPONENT] Failed to upgrade llama-cpp-python in environment '{env_spec.key}'. "
+                f"Details: {str(err)[:400]}"
+            )
+
+        current_after = self._get_env_package_version(env_spec.python_executable, "llama-cpp-python")
+        if not current_after or self._parse_version_tuple(current_after) < self._parse_version_tuple(min_version):
+            raise RuntimeError(
+                f"[RUNTIME_MISSING_COMPONENT] llama-cpp-python remains too old after upgrade "
+                f"({current_after or 'unknown'} < {min_version}) in environment '{env_spec.key}'."
+            )
+        log(f"llama-cpp-python upgrade successful ({current_after})")
 
     def get_integrity_report(self) -> Dict:
         """Return the last startup integrity report (duplicates, missing env, repairs)."""
@@ -1183,10 +1261,34 @@ class LLMServerManager:
 
             env_key = onboarding_entry.get("env_key")
             if not env_key:
-                raise RuntimeError(
-                    f"Model '{onboarding_id}' has no env_key in onboarding entry. "
-                    f"Please re-run onboarding."
-                )
+                # Self-heal: legacy/dirty states can have model env_key present while onboarding env_key is null.
+                fallback_model = self.state_store.get_model(onboarding_id) or self.state_store.get_model(model_id)
+                fallback_env_key = (fallback_model or {}).get("env_key")
+                if fallback_env_key:
+                    env_key = fallback_env_key
+                    try:
+                        self.state_store.upsert_onboarding(
+                            model_id=onboarding_id,
+                            base_model_path=onboarding_entry.get("base_model_path") or str(model_path),
+                            adapter_dir=onboarding_entry.get("adapter_dir"),
+                            env_key=env_key,
+                            backend=onboarding_entry.get("backend"),
+                            accelerator=onboarding_entry.get("accelerator"),
+                            status=onboarding_entry.get("status") or "READY",
+                            last_error=onboarding_entry.get("last_error"),
+                            healthcheck_log_path=onboarding_entry.get("healthcheck_log_path"),
+                        )
+                        onboarding_entry = self.state_store.get_onboarding(onboarding_id) or onboarding_entry
+                        log(
+                            f"Recovered missing onboarding env_key from models table: {env_key}"
+                        )
+                    except Exception as heal_ex:
+                        log(f"Failed to persist onboarding env_key recovery: {heal_ex}")
+                if not env_key:
+                    raise RuntimeError(
+                        f"Model '{onboarding_id}' has no env_key in onboarding entry. "
+                        f"Please re-run onboarding."
+                    )
             
             # Get env spec (should already exist from onboarding)
             python_exe = self.env_registry._get_env_python_executable(env_key)
@@ -1334,6 +1436,7 @@ class LLMServerManager:
                             f"Startup log: {preflight_log_path}"
                         )
             log("Environment dependencies validated - all critical packages present")
+            self._ensure_min_llama_cpp_version_for_gguf(env_spec, model_path, log)
 
             # Additional health check: verify environment can import required modules.
             # IMPORTANT: critical_packages are pip package names, not always import module names.

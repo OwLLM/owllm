@@ -7385,16 +7385,45 @@ class MainWindow(QMainWindow):
             active_variant = None
 
         local_ggufs = self._list_local_gguf_relpaths(model_dir)
+        local_set = set(local_ggufs)
+        local_by_name = {Path(rel).name: rel for rel in local_ggufs}
+
+        # Keep only patterns that currently map to existing local GGUF files.
         merged: List[str] = []
-        for group in (existing_patterns, local_ggufs, append_patterns or []):
+        for group in (existing_patterns, append_patterns or []):
             for p in group:
                 if not isinstance(p, str):
                     continue
                 pp = p.strip().replace("\\", "/")
-                if pp and pp not in merged:
-                    merged.append(pp)
+                if not pp:
+                    continue
+                mapped = ""
+                if pp in local_set:
+                    mapped = pp
+                else:
+                    mapped = local_by_name.get(Path(pp).name, "")
+                if mapped and mapped not in merged:
+                    merged.append(mapped)
 
-        chosen_active = (preferred_active or active_variant or (merged[0] if merged else ""))
+        # Ensure all discovered local GGUF files are represented.
+        for rel in local_ggufs:
+            if rel not in merged:
+                merged.append(rel)
+
+        chosen_active = ""
+        for candidate in (preferred_active, active_variant):
+            cand = str(candidate or "").strip().replace("\\", "/")
+            if not cand:
+                continue
+            if cand in local_set:
+                chosen_active = cand
+                break
+            by_name = local_by_name.get(Path(cand).name, "")
+            if by_name:
+                chosen_active = by_name
+                break
+        if not chosen_active:
+            chosen_active = merged[0] if merged else ""
         payload = {
             "model_id": model_id or data.get("model_id") or model_dir.name.replace("__", "/"),
             "allow_patterns": merged,
@@ -8241,6 +8270,12 @@ class MainWindow(QMainWindow):
                     self._onboarding_progress_timer = QTimer(self)
                     self._onboarding_progress_timer.timeout.connect(self._tick_onboarding_progress_bar)
                     self._onboarding_progress_timer.start(900)
+
+            # Normalize stale marker entries before integrity checks run in onboarding.
+            try:
+                self._sync_selected_weights_marker(Path(model_path), model_id=resolved_model_id)
+            except Exception:
+                pass
             
             # Create onboarding thread
             onboarding_thread = OnboardingThread(resolved_model_id, model_path, None)

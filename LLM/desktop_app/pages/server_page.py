@@ -201,6 +201,7 @@ class ServerPage(QWidget):
         self.server_thread: Optional[ServerThread] = None
         self._active_probe_thread: Optional[ActiveServersProbeThread] = None
         self._active_probe_pending = False
+        self._populating_model_selector = False
         self.config_manager = None  # Defer initialization
         self._server_address = ""
         self._loading_config = False
@@ -340,7 +341,7 @@ class ServerPage(QWidget):
         title.setProperty("class", "page_title")
         layout.addWidget(title)
 
-        # TWO COLUMN LAYOUT
+        # THREE COLUMN LAYOUT
         cols = QHBoxLayout()
         cols.setSpacing(16)
 
@@ -379,11 +380,15 @@ class ServerPage(QWidget):
         # Compact settings grid
         settings_grid = QGridLayout()
         settings_grid.setSpacing(6)
+        settings_grid.setColumnStretch(0, 0)  # labels
+        settings_grid.setColumnStretch(1, 0)  # value fields (compact width)
+        settings_grid.setColumnStretch(2, 0)  # checkbox / shared field span
+        settings_grid.setColumnStretch(3, 0)  # small action buttons
         
         # Port
         settings_grid.addWidget(QLabel("Port:"), 0, 0)
         self.port_edit = QLineEdit("8763")
-        self.port_edit.setMaximumWidth(80)
+        self.port_edit.setFixedWidth(84)
         settings_grid.addWidget(self.port_edit, 0, 1)
         
         # Expose to LAN checkbox
@@ -396,6 +401,8 @@ class ServerPage(QWidget):
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.Password)
         self.token_edit.setPlaceholderText("Auth token")
+        self.token_edit.setMinimumWidth(220)
+        self.token_edit.setMaximumWidth(320)
         settings_grid.addWidget(self.token_edit, 1, 1, 1, 2)
         
         generate_token_btn = QPushButton("🎲")
@@ -407,6 +414,8 @@ class ServerPage(QWidget):
         # Root directory
         settings_grid.addWidget(QLabel("Root:"), 2, 0)
         self.root_edit = QLineEdit(str(Path.cwd()))
+        self.root_edit.setMinimumWidth(220)
+        self.root_edit.setMaximumWidth(320)
         settings_grid.addWidget(self.root_edit, 2, 1, 1, 2)
         browse_btn = QPushButton("📁")
         browse_btn.setMaximumWidth(30)
@@ -528,12 +537,12 @@ class ServerPage(QWidget):
         left_layout.addStretch()
 
         # ===================================================================
-        # RIGHT COLUMN: LLM INFERENCE SERVER
+        # MIDDLE COLUMN: LLM INFERENCE SERVER + ACTIVE SERVERS
         # ===================================================================
-        right_col = QWidget()
-        right_layout = QVBoxLayout(right_col)
-        right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.setSpacing(10)
+        middle_col = QWidget()
+        middle_layout = QVBoxLayout(middle_col)
+        middle_layout.setContentsMargins(0, 0, 0, 0)
+        middle_layout.setSpacing(10)
 
         llm_server_group = QGroupBox("🤖 LLM Inference Server")
         llm_server_layout = QVBoxLayout(llm_server_group)
@@ -727,7 +736,7 @@ class ServerPage(QWidget):
         self.llm_status_timer.timeout.connect(self._on_llm_status_timer_tick)
         self.llm_status_timer.start(2000)
 
-        right_layout.addWidget(llm_server_group)
+        middle_layout.addWidget(llm_server_group)
 
         # Active inference servers (from StateStore + /health; includes servers started from Test Chat)
         active_servers_group = QGroupBox("Active inference servers")
@@ -748,8 +757,16 @@ class ServerPage(QWidget):
         self.active_stop_selected_btn.clicked.connect(self._stop_selected_active_server)
         active_btns_layout.addWidget(self.active_stop_selected_btn)
         active_servers_layout.addLayout(active_btns_layout)
-        right_layout.addWidget(active_servers_group)
+        middle_layout.addWidget(active_servers_group)
         
+        # ===================================================================
+        # RIGHT COLUMN: SERVER LOG
+        # ===================================================================
+        right_col = QWidget()
+        right_layout = QVBoxLayout(right_col)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(10)
+
         # Server Log (shared by both servers)
         log_group = QGroupBox("📋 Server Log")
         log_layout = QVBoxLayout(log_group)
@@ -765,7 +782,7 @@ class ServerPage(QWidget):
         clear_btn_layout = QHBoxLayout()
         clear_btn_layout.setContentsMargins(5, 5, 5, 5)
         clear_btn = QPushButton("🗑️ Clear Log") # More descriptive
-        clear_btn.setFixedWidth(140)  # Increased further for length
+        clear_btn.setMinimumWidth(170)
         clear_btn.setMinimumHeight(40) # Increased height
         clear_btn.setCursor(Qt.PointingHandCursor)
         clear_btn.setStyleSheet("""
@@ -794,8 +811,9 @@ class ServerPage(QWidget):
         right_layout.addStretch()
 
         # Add columns to main layout
-        cols.addWidget(left_col, 1)
-        cols.addWidget(right_col, 1)
+        cols.addWidget(left_col, 4)
+        cols.addWidget(middle_col, 4)
+        cols.addWidget(right_col, 2)
         layout.addLayout(cols)
         
         # Sync Copy Model Name button state with initial selection
@@ -807,7 +825,6 @@ class ServerPage(QWidget):
             if not self.isVisible():
                 return
             self._update_llm_server_status()
-            self._refresh_active_servers()
         except Exception:
             pass
     
@@ -844,6 +861,8 @@ class ServerPage(QWidget):
     
     def _on_llm_model_selection_changed(self):
         """Enable/disable Copy Model Name based on selection"""
+        if getattr(self, "_populating_model_selector", False):
+            return
         if hasattr(self, 'copy_model_btn'):
             self.copy_model_btn.setEnabled(self.llm_model_selector.currentData() is not None)
     
@@ -893,8 +912,45 @@ class ServerPage(QWidget):
                 except Exception:
                     return str(base_model).lower().replace("\\", "/") in ready_by_path
 
-            # Add READY models that appear in config (match by id or by base path)
-            model_items = []
+            def _norm_path(p: str) -> str:
+                if not p:
+                    return ""
+                try:
+                    return str(Path(p).resolve()).lower().replace("\\", "/")
+                except Exception:
+                    return str(p).lower().replace("\\", "/")
+
+            def _logical_model_key(model_id: str, base_model: str) -> str:
+                # Base-model path is the true identity; model_id aliases can differ.
+                bp = _norm_path(base_model)
+                if bp:
+                    return f"path::{bp}"
+                return f"id::{str(model_id).lower().replace('/', '_')}"
+
+            def _port_as_int(v):
+                try:
+                    return int(v)
+                except Exception:
+                    return 10**9
+
+            def _pick_better(existing: dict, candidate: dict) -> dict:
+                # Prefer entries with concrete/smaller port and stable underscore IDs over slash aliases.
+                existing_score = (
+                    0 if existing.get("port") == "?" else 1,
+                    -_port_as_int(existing.get("port")),
+                    1 if "/" not in str(existing.get("model_id") or "") else 0,
+                    -len(str(existing.get("model_id") or "")),
+                )
+                candidate_score = (
+                    0 if candidate.get("port") == "?" else 1,
+                    -_port_as_int(candidate.get("port")),
+                    1 if "/" not in str(candidate.get("model_id") or "") else 0,
+                    -len(str(candidate.get("model_id") or "")),
+                )
+                return candidate if candidate_score > existing_score else existing
+
+            # Build candidate entries then de-duplicate by logical model identity.
+            candidates = []
             for model_id, model_cfg in models.items():
                 if model_id == "default" and len(models) > 1:
                     continue
@@ -902,16 +958,19 @@ class ServerPage(QWidget):
                 if not is_ready(model_id, base_model):
                     continue
                 port = model_cfg.get("port", "?")
-                if base_model:
-                    model_name = Path(base_model).name
-                    display_text = f"✓ {model_name} (Port: {port})"
-                else:
-                    display_text = f"✓ {model_id} (Port: {port})"
-                model_items.append((display_text, model_id))
+                model_name = Path(base_model).name if base_model else model_id
+                candidates.append(
+                    {
+                        "model_id": model_id,
+                        "base_model": base_model,
+                        "model_name": model_name,
+                        "port": port,
+                    }
+                )
 
             # Add READY models not in config so they still appear.
             # Registration into llm_backends.yaml is deferred to Start click to keep app startup fast.
-            added_ids = {mid for _, mid in model_items}
+            added_ids = {c["model_id"] for c in candidates}
             for entry in ready_list:
                 mid = entry.get("model_id") or ""
                 if not mid or mid in added_ids:
@@ -922,22 +981,60 @@ class ServerPage(QWidget):
                 if isinstance(model_cfg, dict) and model_cfg.get("port") is not None:
                     port = model_cfg.get("port", "?")
                 name = Path(base).name if base else mid
-                model_items.append((f"✓ {name} (Port: {port})", mid))
+                candidates.append(
+                    {
+                        "model_id": mid,
+                        "base_model": base,
+                        "model_name": name,
+                        "port": port,
+                    }
+                )
                 added_ids.add(mid)
 
-            model_items.sort(key=lambda x: x[0])
+            deduped = {}
+            for c in candidates:
+                key = _logical_model_key(c.get("model_id", ""), c.get("base_model", ""))
+                if key in deduped:
+                    deduped[key] = _pick_better(deduped[key], c)
+                else:
+                    deduped[key] = c
 
+            model_items = []
+            for c in deduped.values():
+                model_items.append((f"✓ {c['model_name']} (Port: {c['port']})", c["model_id"]))
+            model_items.sort(key=lambda x: x[0].lower())
+
+            prev_id = self.llm_model_selector.currentData()
+            self._populating_model_selector = True
+            self.llm_model_selector.blockSignals(True)
             self.llm_model_selector.clear()
             if not model_items:
                 self.llm_model_selector.addItem("(No READY models - run onboarding first)", None)
             else:
                 for display_text, model_id in model_items:
                     self.llm_model_selector.addItem(display_text, model_id)
-                if self.llm_model_selector.count() > 0:
+                # Preserve previous selection when possible.
+                restored = False
+                if prev_id is not None:
+                    for i in range(self.llm_model_selector.count()):
+                        if self.llm_model_selector.itemData(i) == prev_id:
+                            self.llm_model_selector.setCurrentIndex(i)
+                            restored = True
+                            break
+                if (not restored) and self.llm_model_selector.count() > 0:
                     self.llm_model_selector.setCurrentIndex(0)
+            self.llm_model_selector.blockSignals(False)
+            self._populating_model_selector = False
+            self._on_llm_model_selection_changed()
         except Exception as e:
-            self.llm_model_selector.clear()
-            self.llm_model_selector.addItem(f"(Error loading models: {e})", None)
+            try:
+                self.llm_model_selector.blockSignals(True)
+                self.llm_model_selector.clear()
+                self.llm_model_selector.addItem(f"(Error loading models: {e})", None)
+                self.llm_model_selector.blockSignals(False)
+            except Exception:
+                pass
+            self._populating_model_selector = False
 
     def _ensure_model_in_config(self, config_path: Path, config: dict, model_id: str, base_model_path: str):
         """Add READY model to llm_backends.yaml if missing so Start works. Returns port or None."""
@@ -1802,7 +1899,18 @@ class ServerPage(QWidget):
         if not items:
             return
         try:
-            r = items[0].data(Qt.UserRole)
+            # Take an immutable snapshot to avoid races with async list refresh.
+            item = items[0]
+            r = dict(item.data(Qt.UserRole) or {})
+            if not r or not isinstance(r, dict):
+                return
+            QTimer.singleShot(0, lambda data=r: self._apply_active_server_selection(data))
+        except Exception:
+            pass
+
+    def _apply_active_server_selection(self, r: dict):
+        """Apply selected active-server details to status widgets."""
+        try:
             if not r or not isinstance(r, dict):
                 return
             model_id = r.get("model_id")
@@ -1810,12 +1918,12 @@ class ServerPage(QWidget):
             status = (r.get("status") or "").lower()
             if not model_id and port:
                 model_id = r.get("model_from_health") or ""
-            # Try to set model selector to this model_id if it exists in dropdown
+
             for i in range(self.llm_model_selector.count()):
                 if self.llm_model_selector.itemData(i) == model_id:
                     self.llm_model_selector.setCurrentIndex(i)
                     break
-            # Update API/port labels from this server
+
             if port:
                 url = f"http://127.0.0.1:{port}"
                 self.llm_port_label.setText(str(port))
@@ -1839,7 +1947,6 @@ class ServerPage(QWidget):
                     self.llm_server_status_label.setText("● Busy/Unresponsive")
                     self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
                     self.llm_model_label.setText(r.get("model_from_health") or model_id or "-")
-                    # Keep Start disabled to avoid duplicate launches on same port.
                     self.llm_start_btn.setEnabled(False)
                     self.llm_start_btn.setText("● Busy")
                     self.llm_stop_btn.setEnabled(True)

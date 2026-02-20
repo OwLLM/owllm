@@ -9,11 +9,11 @@ import socket
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QThread, Signal, Qt, QUrl, QTimer
+from PySide6.QtCore import QThread, Signal, Qt, QUrl, QTimer, QObject, QEvent
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
     QCheckBox, QTextEdit, QFileDialog, QGroupBox, QFrame, QMessageBox, QApplication,
-    QGridLayout, QRadioButton, QComboBox, QListWidget, QListWidgetItem, QButtonGroup, QSplitter
+    QGridLayout, QRadioButton, QComboBox, QListWidget, QListWidgetItem, QButtonGroup, QSplitter, QSizePolicy
 )
 from PySide6.QtGui import QDesktopServices, QClipboard
 
@@ -382,14 +382,13 @@ class ServerPage(QWidget):
         settings_grid = QGridLayout()
         settings_grid.setSpacing(6)
         settings_grid.setColumnStretch(0, 0)  # labels
-        settings_grid.setColumnStretch(1, 0)  # value fields (compact width)
-        settings_grid.setColumnStretch(2, 0)  # checkbox / shared field span
-        settings_grid.setColumnStretch(3, 0)  # small action buttons
+        settings_grid.setColumnStretch(1, 0)  # compact value fields
+        settings_grid.setColumnStretch(2, 0)  # LAN / small action buttons
 
         # Keep first-column fields compact: width based on the longest label word.
         fm = self.fontMetrics()
         longest_label_word = max(("Port", "Token", "Root"), key=len)
-        first_col_field_width = max(130, fm.horizontalAdvance(longest_label_word) + 90)
+        first_col_field_width = max(108, fm.horizontalAdvance(longest_label_word) + 64)
         
         # Port
         settings_grid.addWidget(QLabel("Port:"), 0, 0)
@@ -407,26 +406,28 @@ class ServerPage(QWidget):
         self.token_edit = QLineEdit()
         self.token_edit.setEchoMode(QLineEdit.Password)
         self.token_edit.setPlaceholderText("Auth token")
-        self.token_edit.setFixedWidth(first_col_field_width)
-        settings_grid.addWidget(self.token_edit, 1, 1, 1, 2)
+        self.token_edit.setMaximumWidth(first_col_field_width)
+        self.token_edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        settings_grid.addWidget(self.token_edit, 1, 1)
         
         generate_token_btn = QPushButton("🎲")
-        generate_token_btn.setMaximumWidth(30)
+        generate_token_btn.setFixedWidth(28)
         generate_token_btn.setToolTip("Generate random token")
         generate_token_btn.clicked.connect(self._generate_token)
-        settings_grid.addWidget(generate_token_btn, 1, 3)
+        settings_grid.addWidget(generate_token_btn, 1, 2)
         
         # Root directory
         settings_grid.addWidget(QLabel("Root:"), 2, 0)
         self.root_edit = QLineEdit(str(Path.cwd()))
-        self.root_edit.setFixedWidth(first_col_field_width)
+        self.root_edit.setMaximumWidth(first_col_field_width)
+        self.root_edit.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.root_edit.setToolTip(str(Path.cwd()))
-        settings_grid.addWidget(self.root_edit, 2, 1, 1, 2)
+        settings_grid.addWidget(self.root_edit, 2, 1)
         browse_btn = QPushButton("📁")
-        browse_btn.setMaximumWidth(30)
+        browse_btn.setFixedWidth(28)
         browse_btn.setToolTip("Browse...")
         browse_btn.clicked.connect(self._select_root)
-        settings_grid.addWidget(browse_btn, 2, 3)
+        settings_grid.addWidget(browse_btn, 2, 2)
         
         tool_server_layout.addLayout(settings_grid)
 

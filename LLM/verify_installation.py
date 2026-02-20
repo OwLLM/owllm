@@ -11,6 +11,17 @@ from typing import Dict, Tuple, Optional
 from importlib.metadata import PackageNotFoundError, version as pkg_version
 
 
+def _safe_status_symbol(ok_symbol: str, fallback: str) -> str:
+    """Return Unicode symbol when console encoding supports it, else ASCII fallback."""
+    enc = (getattr(sys.stdout, "encoding", None) or "").lower()
+    try:
+        if enc and ok_symbol.encode(enc, errors="strict"):
+            return ok_symbol
+    except Exception:
+        pass
+    return fallback
+
+
 def verify_python() -> Tuple[bool, str]:
     """Verify Python installation and version"""
     try:
@@ -264,7 +275,7 @@ def print_verification_report(checks: Dict[str, Tuple[bool, str]]):
     for component in critical:
         if component in checks:
             success, message = checks[component]
-            status = "✓" if success else "✗"
+            status = _safe_status_symbol("✓", "[OK]") if success else _safe_status_symbol("✗", "[FAIL]")
             print(f"  {status} {component:20s} {message}")
     
     print("\nOPTIONAL COMPONENTS:")
@@ -272,7 +283,7 @@ def print_verification_report(checks: Dict[str, Tuple[bool, str]]):
     for component in optional:
         if component in checks:
             success, message = checks[component]
-            status = "✓" if success else "⚠"
+            status = _safe_status_symbol("✓", "[OK]") if success else _safe_status_symbol("⚠", "[WARN]")
             print(f"  {status} {component:20s} {message}")
     
     print("\n" + "=" * 70)
@@ -280,7 +291,7 @@ def print_verification_report(checks: Dict[str, Tuple[bool, str]]):
     # Overall status
     critical_pass = all(checks[c][0] for c in critical if c in checks)
     if critical_pass:
-        print("STATUS: ✓ All critical components verified")
+        print(f"STATUS: {_safe_status_symbol('✓', '[OK]')} All critical components verified")
         
         # Check optional
         unsloth_ok = checks.get("Unsloth", (False, ""))[0]
@@ -291,7 +302,7 @@ def print_verification_report(checks: Dict[str, Tuple[bool, str]]):
         if not cuda_ok:
             print("NOTE: No GPU detected - training will be slow (CPU-only)")
     else:
-        print("STATUS: ✗ Critical components missing or broken")
+        print(f"STATUS: {_safe_status_symbol('✗', '[FAIL]')} Critical components missing or broken")
         print("        Please run the first-time setup or check installation logs")
     
     print("=" * 70 + "\n")

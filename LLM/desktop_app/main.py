@@ -6146,6 +6146,7 @@ class MainWindow(QMainWindow):
                         card.set_theme(self.dark_mode)
                         card.selected.connect(self._on_model_selected)
                         card.delete_clicked.connect(self._on_delete_model)
+                        card.add_weights_clicked.connect(self._on_add_weights)
                         card.dedicated_env_clicked.connect(self._on_create_dedicated_env)
                         if is_incomplete:
                             card.repair_clicked.connect(self._on_repair_model)
@@ -7326,6 +7327,257 @@ class MainWindow(QMainWindow):
         selected_names = [Path(p).name for p in selected_patterns]
         self._log_models(f"GGUF selection: downloading {len(selected_patterns)} variant(s): {selected_names}")
         return True, selected_patterns
+
+    def _prompt_additional_gguf_variant_selection(
+        self,
+        model_id: str,
+        token: Optional[str],
+        existing_filenames: set[str],
+    ) -> tuple[bool, Optional[List[str]]]:
+        """
+        Ask user which *missing* GGUF variants to add to an existing local model.
+        Returns: (proceed, selected_patterns). selected_patterns is always a list when proceed=True.
+        """
+        from core.model_file_utils import list_repo_files
+        try:
+            siblings = list_repo_files(model_id, token=token)
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "Add Weights",
+                f"Could not load GGUF variants for '{model_id}'.\n\nError: {e}",
+            )
+            return False, None
+
+        existing_lower = {x.lower() for x in existing_filenames if isinstance(x, str) and x}
+        gguf_rows: List[Tuple[str, int, str]] = []
+        for s in siblings:
+            name = s.get("rfilename", "")
+            if not (isinstance(name, str) and name.lower().endswith(".gguf")):
+                continue
+            if Path(name).name.lower() in existing_lower:
+                continue
+            quant = self._guess_gguf_quant(name)
+            gguf_rows.append((name, int(s.get("size", 0) or 0), quant))
+
+        if not gguf_rows:
+            QMessageBox.information(
+                self,
+                "Add Weights",
+                "No additional GGUF variants are available. All repo GGUF files already exist locally.",
+            )
+            return False, None
+
+        gguf_rows.sort(
+            key=lambda x: (x[1] > 0, x[1] if x[1] > 0 else self._gguf_quant_weight(x[2])),
+            reverse=True,
+        )
+        vram_gb = float(getattr(self, "user_vram_gb", 0) or 0)
+        if vram_gb <= 0:
+            vram_gb = 8.0
+        vram_bytes = vram_gb * (1024 ** 3)
+
+        file_list: List[str] = []
+        labels_with_fit: List[Tuple[str, bool]] = []
+        for name, size, quant in gguf_rows:
+            file_list.append(name)
+            size_str = self._fmt_size_short(size)
+            if size <= 0:
+                fits = self._gguf_quant_weight(quant) < 80
+            else:
+                fits = size <= vram_bytes
+            prefix = "[FITS]" if fits else "[TOO LARGE]"
+            labels_with_fit.append((f"{prefix}  {Path(name).name}  [{quant}]  ({size_str})", fits))
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Add GGUF weights")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel(
+            f"Select additional GGUF variants for '{model_id}'.\n"
+            "Only missing files will be downloaded into the existing model folder."
+        ))
+        list_widget = QListWidget()
+        list_widget.setMinimumHeight(280)
+        list_widget.setSelectionMode(QAbstractItemView.MultiSelection)
+        list_widget.addItem(QListWidgetItem("Select all missing GGUF variants"))
+        for label_text, fits in labels_with_fit:
+            item = QListWidgetItem(label_text)
+            item.setForeground(QBrush(QColor("#4CAF50") if fits else QColor("#f44336")))
+            list_widget.addItem(item)
+
+        selected_any = False
+        for idx, (_, fits) in enumerate(labels_with_fit, start=1):
+            if fits:
+                list_widget.item(idx).setSelected(True)
+                selected_any = True
+        if not selected_any:
+            list_widget.item(0).setSelected(True)
+
+        layout.addWidget(list_widget)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return False, None
+
+        selected_rows = sorted({i.row() for i in list_widget.selectedIndexes()})
+        if (not selected_rows) or (0 in selected_rows):
+            return True, list(file_list)
+
+        selected_patterns: List[str] = []
+        for row in selected_rows:
+            if row <= 0:
+                continue
+            idx = row - 1
+            if 0 <= idx < len(file_list):
+                selected_patterns.append(file_list[idx])
+        if not selected_patterns:
+            return True, list(file_list)
+        return True, selected_patterns
+
+    def _on_add_weights(self, model_path: str):
+        """Download additional GGUF variants into an already downloaded model directory."""
+        path_obj = Path(model_path)
+        if not path_obj.exists() or not path_obj.is_dir():
+            QMessageBox.warning(self, "Add Weights", "Model folder was not found.")
+            return
+
+        status = self.model_checker.check_model(path_obj)
+        model_id = status.model_id
+        if not model_id:
+            QMessageBox.warning(
+                self,
+                "Add Weights",
+                f"Could not determine Hugging Face model ID for '{path_obj.name}'.",
+            )
+            return
+
+        if model_id in self.active_downloads or f"repair_{model_id}" in self.active_downloads:
+            QMessageBox.information(
+                self,
+                "Add Weights",
+                f"A download/repair is already active for '{model_id}'. Please wait for it to finish.",
+            )
+            return
+
+        card = None
+        for c in self.downloaded_model_cards:
+            if getattr(c, "model_path", "") == model_path:
+                card = c
+                break
+        if card is None:
+            self._log_models(f"Could not find model card for add-weights action: {model_path}")
+            return
+
+        add_btn = getattr(card, "add_weights_btn", None)
+        if add_btn is not None:
+            add_btn.setEnabled(False)
+            add_btn.setText("⏳ Loading...")
+
+        token = self._resolve_hf_token()
+        try:
+            local_gguf_names = {p.name for p in path_obj.rglob("*.gguf")}
+        except Exception:
+            local_gguf_names = set()
+
+        proceed, selected_patterns = self._prompt_additional_gguf_variant_selection(model_id, token, local_gguf_names)
+        if not proceed or not selected_patterns:
+            if add_btn is not None:
+                add_btn.setEnabled(True)
+                add_btn.setText("➕ Weights")
+            return
+
+        selected_names = [Path(p).name for p in selected_patterns]
+        self._log_models(f"➕ Adding GGUF variants for {model_id}: {selected_names}")
+
+        # Persist merged subset so runtime picker and future repairs remain consistent.
+        try:
+            marker_path = path_obj / ".selected_weights.json"
+            merged_patterns: List[str] = []
+            active_variant: Optional[str] = None
+            if marker_path.exists():
+                marker_data = json.loads(marker_path.read_text(encoding="utf-8"))
+                existing = marker_data.get("allow_patterns")
+                if isinstance(existing, list):
+                    merged_patterns.extend([str(x) for x in existing if isinstance(x, str) and x.strip()])
+                av = marker_data.get("active_variant")
+                if isinstance(av, str) and av.strip():
+                    active_variant = av
+            merged_patterns.extend(selected_patterns)
+            dedup: List[str] = []
+            seen = set()
+            for p in merged_patterns:
+                if p not in seen:
+                    seen.add(p)
+                    dedup.append(p)
+            payload = {
+                "model_id": model_id,
+                "allow_patterns": dedup,
+                "active_variant": active_variant or selected_patterns[0],
+                "saved_at": datetime.now().isoformat(),
+            }
+            marker_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            self._log_models(f"[WARNING] Could not update selected weights marker: {e}")
+
+        progress_bar = QProgressBar()
+        progress_bar.setMinimum(0)
+        progress_bar.setMaximum(100)
+        progress_bar.setValue(0)
+        progress_bar.setTextVisible(True)
+        progress_bar.setFormat("Adding weights... %p%")
+        progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: none;
+                border-radius: 4px;
+                text-align: center;
+                background-color: #262730;
+                color: white;
+                font-weight: bold;
+                height: 30px;
+            }
+            QProgressBar::chunk {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #4CAF50, stop:1 #2e7d32);
+                border-radius: 4px;
+            }
+        """)
+        card.layout().addWidget(progress_bar)
+
+        status_label = QLabel("Preparing additional weights download...")
+        status_label.setStyleSheet("color: #ccc; font-size: 11pt; padding: 6px;")
+        status_label.setWordWrap(True)
+        card.layout().addWidget(status_label)
+
+        repair_key = f"repair_{model_id}_addweights_{int(time.time() * 1000)}"
+        thread = RepairThread(
+            model_id,
+            path_obj,
+            force_fresh_only=False,
+            cache_dir=self.hf_cache_dir,
+            token=token,
+            allow_patterns=selected_patterns,
+        )
+        self.active_downloads[repair_key] = (thread, card)
+
+        thread.progress.connect(lambda p: progress_bar.setValue(p))
+        thread.status.connect(lambda msg: status_label.setText(msg))
+        thread.status.connect(lambda msg: self._update_progress_bar_text(progress_bar, "Adding weights", msg))
+        thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key, status_label))
+
+        if not hasattr(self, "_repair_info"):
+            self._repair_info = {}
+        self._repair_info[repair_key] = {
+            "model_id": model_id,
+            "card": card,
+            "progress_bar": progress_bar,
+            "status_label": status_label,
+            "model_path": path_obj,
+        }
+        thread.error.connect(lambda err, rk=repair_key: self._handle_repair_error(rk, err))
+        thread.start()
     
     def _on_search_text_changed(self, text: str):
         """Handle search text changes - return to curated view when cleared"""
@@ -8156,6 +8408,7 @@ class MainWindow(QMainWindow):
         new_card.set_theme(self.dark_mode)
         new_card.selected.connect(self._on_model_selected)
         new_card.delete_clicked.connect(self._on_delete_model)
+        new_card.add_weights_clicked.connect(self._on_add_weights)
         new_card.dedicated_env_clicked.connect(self._on_create_dedicated_env)
         if not status_check.is_complete:
             new_card.repair_clicked.connect(self._on_repair_model)
@@ -8335,6 +8588,22 @@ class MainWindow(QMainWindow):
             self._refresh_locals()
         
         QTimer.singleShot(500, refresh_after_repair)
+
+    def _restore_model_card_action_buttons(self, card, prefer_fix_text: bool = False) -> None:
+        """Restore card action buttons after failed/aborted background operations."""
+        try:
+            if hasattr(card, "repair_btn"):
+                card.repair_btn.setEnabled(True)
+                card.repair_btn.setText("🔧 Fix" if prefer_fix_text else "🔧 Repair")
+        except Exception:
+            pass
+        try:
+            if hasattr(card, "add_weights_btn"):
+                card.add_weights_btn.setVisible(True)
+                card.add_weights_btn.setEnabled(True)
+                card.add_weights_btn.setText("➕ Weights")
+        except Exception:
+            pass
     
     def _handle_repair_error(self, repair_key: str, error: str):
         """Handle repair error signal - looks up stored info and delegates to the actual handler"""
@@ -8392,10 +8661,7 @@ class MainWindow(QMainWindow):
                 status_label.setVisible(False)
                 status_label.deleteLater()
             
-            # Re-enable repair button
-            if hasattr(card, 'repair_btn'):
-                card.repair_btn.setEnabled(True)
-                card.repair_btn.setText("🔧 Repair")
+            self._restore_model_card_action_buttons(card, prefer_fix_text=False)
             
             # Show error message - NO AUTOMATIC RESTART
             from PySide6.QtWidgets import QMessageBox
@@ -8508,10 +8774,7 @@ class MainWindow(QMainWindow):
                 status_label.setVisible(False)
                 status_label.deleteLater()
             
-            # Re-enable repair button
-            if hasattr(card, 'repair_btn'):
-                card.repair_btn.setEnabled(True)
-                card.repair_btn.setText("🔧 Repair")
+            self._restore_model_card_action_buttons(card, prefer_fix_text=False)
     
     def _on_repair_error(self, model_id: str, error: str, card, progress_bar, repair_key: str):
         """Handle repair error (legacy - used for delete+redownload fallback errors)"""
@@ -8537,9 +8800,7 @@ class MainWindow(QMainWindow):
         err_lower = (error or "").lower()
         if "401" in error or "403" in error or "gated" in err_lower or "access denied" in err_lower:
             self._show_gated_no_token_dialog(model_id, parent_win=self)
-            if hasattr(card, 'repair_btn'):
-                card.repair_btn.setEnabled(True)
-                card.repair_btn.setText("🔧 Fix")
+            self._restore_model_card_action_buttons(card, prefer_fix_text=True)
             return
         
         # Check if error is due to locked directory
@@ -8566,17 +8827,12 @@ class MainWindow(QMainWindow):
             msg.setStandardButtons(QMessageBox.Ok)
             msg.exec()
             
-            # Restore repair button
-            if hasattr(card, 'repair_btn'):
-                card.repair_btn.setEnabled(True)
-                card.repair_btn.setText("🔧 Fix")
+            self._restore_model_card_action_buttons(card, prefer_fix_text=True)
             return
         
         # Keep local partial files after failure so the next repair can resume.
         # Do not auto-force a full redownload on generic network/stall failures.
-        if hasattr(card, 'repair_btn'):
-            card.repair_btn.setEnabled(True)
-            card.repair_btn.setText("🔧 Fix")
+        self._restore_model_card_action_buttons(card, prefer_fix_text=True)
     
     def _on_download_error(self, model_id: str, error: str, card, progress_bar):
         """Handle download error"""

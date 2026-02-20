@@ -370,6 +370,7 @@ class DownloadedModelCard(QFrame):
     selected = Signal(str)
     delete_clicked = Signal(str)  # Emits model path
     repair_clicked = Signal(str)  # Emits model path
+    add_weights_clicked = Signal(str)  # Emits model path
     dedicated_env_clicked = Signal(str)  # Emits model path
     
     def __init__(self, model_name: str, model_path: str, size: str, icons: str, 
@@ -652,6 +653,15 @@ class DownloadedModelCard(QFrame):
             self.repair_btn.clicked.connect(lambda: self.repair_clicked.emit(self.model_path))
             self.repair_btn.setStyleSheet(button_style)
             button_layout.addWidget(self.repair_btn)
+        else:
+            # Download additional GGUF variants for already-downloaded models.
+            self.add_weights_btn = QPushButton("➕ Weights")
+            self.add_weights_btn.setToolTip("Download additional GGUF weight variants for this model")
+            self.add_weights_btn.setMinimumHeight(35)
+            self.add_weights_btn.setCursor(Qt.ArrowCursor)
+            self.add_weights_btn.clicked.connect(lambda: self.add_weights_clicked.emit(self.model_path))
+            self.add_weights_btn.setStyleSheet(button_style)
+            button_layout.addWidget(self.add_weights_btn)
         
         # Dedicated Env button logic:
         # - For READY models: only show if they don't have a dedicated env yet

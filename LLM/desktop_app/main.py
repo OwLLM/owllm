@@ -17529,6 +17529,10 @@ except Exception as e:
     
     def _refresh_environment_list(self):
         """Refresh the environment list with modern cards"""
+        # Environment Manager page is lazy-loaded; ignore refresh requests
+        # until its widgets/layout are initialized.
+        if not hasattr(self, "env_cards_layout") or self.env_cards_layout is None:
+            return
         self._log_to_env_terminal("🔄 Refreshing environment list...")
         
         # Clear existing cards

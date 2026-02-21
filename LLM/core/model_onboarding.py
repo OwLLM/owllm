@@ -139,12 +139,20 @@ class ModelOnboardingService:
                 base_model_path = str(p)
         except Exception:
             pass
+
+        existing_entry = self.state_store.get_onboarding(model_id) or {}
+        known_env_key = existing_entry.get("env_key")
+        known_backend = existing_entry.get("backend")
+        known_accelerator = existing_entry.get("accelerator")
         
         # Set status to BUILDING
         self.state_store.upsert_onboarding(
             model_id=model_id,
             base_model_path=base_model_path,
             adapter_dir=adapter_dir,
+            env_key=known_env_key,
+            backend=known_backend,
+            accelerator=known_accelerator,
             status="BUILDING"
         )
         
@@ -177,6 +185,9 @@ class ModelOnboardingService:
                 model_id=model_id,
             )
             log(f"Resolved stable env_key: {stable_env_key} (backend={backend}, accelerator={accelerator})")
+            known_env_key = stable_env_key
+            known_backend = backend
+            known_accelerator = accelerator
             
             # Step 3: Ensure stable environment exists (creates if missing)
             log(f"Ensuring stable environment exists: {stable_env_key}")
@@ -696,11 +707,18 @@ class ModelOnboardingService:
         except Exception as e:
             error_msg = str(e)
             log(f"Onboarding failed with exception: {error_msg}")
-            
+
+            current_entry = self.state_store.get_onboarding(model_id) or {}
+            persisted_env_key = known_env_key or current_entry.get("env_key")
+            persisted_backend = known_backend or current_entry.get("backend")
+            persisted_accelerator = known_accelerator or current_entry.get("accelerator")
             self.state_store.upsert_onboarding(
                 model_id=model_id,
                 base_model_path=base_model_path,
                 adapter_dir=adapter_dir,
+                env_key=persisted_env_key,
+                backend=persisted_backend,
+                accelerator=persisted_accelerator,
                 status="BROKEN",
                 last_error=error_msg
             )

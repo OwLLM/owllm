@@ -566,6 +566,8 @@ class StateStore:
             "duplicate_onboarding": [],
             "missing_env_for_ready": [],
             "canonical_mismatch": [],
+            "stale_building": [],
+            "env_key_drift": [],
             "repaired": [],
             "errors": [],
         }
@@ -645,6 +647,75 @@ class StateStore:
                     report["repaired"].append("backfill models.canonical_model_id where NULL")
             except Exception as e:
                 report["errors"].append(f"repair canonical backfill: {e}")
+
+            # 5) Safe repair: keep env_key consistent between model_onboarding (authoritative) and models.
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT mo.model_id, mo.env_key AS onboarding_env_key, m.env_key AS model_env_key
+                    FROM model_onboarding mo
+                    LEFT JOIN models m ON m.model_id = mo.model_id
+                    """
+                ).fetchall()
+                for row in rows:
+                    mid = row["model_id"]
+                    oenv = (row["onboarding_env_key"] or "").strip()
+                    menv = (row["model_env_key"] or "").strip()
+                    if oenv and menv and oenv != menv:
+                        report["env_key_drift"].append({
+                            "model_id": mid,
+                            "onboarding_env_key": oenv,
+                            "model_env_key": menv,
+                        })
+                        conn.execute("UPDATE models SET env_key = ? WHERE model_id = ?", (oenv, mid))
+                        report["repaired"].append(f"sync models.env_key from onboarding for {mid}")
+                    elif oenv and not menv:
+                        conn.execute("UPDATE models SET env_key = ? WHERE model_id = ?", (oenv, mid))
+                        report["repaired"].append(f"backfill models.env_key from onboarding for {mid}")
+                    elif menv and not oenv:
+                        conn.execute(
+                            "UPDATE model_onboarding SET env_key = ?, updated_at = ? WHERE model_id = ?",
+                            (menv, datetime.utcnow().isoformat(), mid),
+                        )
+                        report["repaired"].append(f"backfill onboarding.env_key from models for {mid}")
+                conn.commit()
+            except Exception as e:
+                report["errors"].append(f"repair env_key drift/backfill: {e}")
+
+            # 6) Safe repair: stale BUILDING rows older than threshold become BROKEN.
+            try:
+                stale_hours = 2
+                stale_before = datetime.utcnow().timestamp() - (stale_hours * 3600)
+                building = conn.execute(
+                    "SELECT model_id, env_key, updated_at FROM model_onboarding WHERE status = 'BUILDING'"
+                ).fetchall()
+                for row in building:
+                    updated_raw = row["updated_at"] or ""
+                    try:
+                        updated_ts = datetime.fromisoformat(updated_raw).timestamp()
+                    except Exception:
+                        updated_ts = 0.0
+                    if updated_ts and updated_ts < stale_before:
+                        mid = row["model_id"]
+                        report["stale_building"].append({
+                            "model_id": mid,
+                            "updated_at": updated_raw,
+                            "env_key": row["env_key"],
+                        })
+                        conn.execute(
+                            """
+                            UPDATE model_onboarding
+                            SET status = 'BROKEN',
+                                last_error = COALESCE(last_error, 'Stale BUILDING onboarding state auto-marked BROKEN at startup integrity check.'),
+                                updated_at = ?
+                            WHERE model_id = ?
+                            """,
+                            (datetime.utcnow().isoformat(), mid),
+                        )
+                        report["repaired"].append(f"mark stale BUILDING as BROKEN for {mid}")
+                conn.commit()
+            except Exception as e:
+                report["errors"].append(f"repair stale BUILDING rows: {e}")
         
         return report
     

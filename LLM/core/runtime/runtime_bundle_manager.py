@@ -12,6 +12,7 @@ from typing import Callable, Optional, Tuple
 import subprocess
 import sys
 import os
+import re
 
 
 LogCallback = Optional[Callable[[str], None]]
@@ -56,6 +57,32 @@ class RuntimeBundleManager:
         if log_callback:
             log_callback(message)
 
+    def _parse_version_tuple(self, version_text: str) -> tuple[int, int, int]:
+        nums = [int(x) for x in re.findall(r"\d+", str(version_text or ""))]
+        return (
+            nums[0] if len(nums) > 0 else 0,
+            nums[1] if len(nums) > 1 else 0,
+            nums[2] if len(nums) > 2 else 0,
+        )
+
+    def _get_installed_version(self, python_exe: Path, package_name: str) -> Optional[str]:
+        probe = self._run_python(
+            python_exe,
+            f"import importlib.metadata as m; print(m.version('{package_name}'), end='')",
+            timeout=20,
+        )
+        if probe.returncode != 0:
+            return None
+        value = (probe.stdout or "").strip()
+        return value or None
+
+    def _llama_version_ok(self, python_exe: Path) -> tuple[bool, Optional[str], str]:
+        min_version = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.8").strip() or "0.3.8"
+        installed = self._get_installed_version(python_exe, "llama-cpp-python")
+        if not installed:
+            return False, None, min_version
+        return self._parse_version_tuple(installed) >= self._parse_version_tuple(min_version), installed, min_version
+
     def ensure_gguf_runtime(self, python_exe: Path, log_callback: LogCallback = None) -> Tuple[bool, str]:
         """
         Ensure the environment can initialize GGUF runtime backend(s).
@@ -75,9 +102,16 @@ class RuntimeBundleManager:
             timeout=20,
         )
         if check_llama.returncode == 0 and "OK" in (check_llama.stdout or ""):
-            return True, ""
-
-        self._log(log_callback, "GGUF runtime: llama_cpp not ready, attempting repair install...")
+            version_ok, installed, min_version = self._llama_version_ok(python_exe)
+            if version_ok:
+                return True, ""
+            self._log(
+                log_callback,
+                f"GGUF runtime: llama_cpp import works but version is too old "
+                f"({installed or 'unknown'} < {min_version}); repairing...",
+            )
+        else:
+            self._log(log_callback, "GGUF runtime: llama_cpp not ready, attempting repair install...")
 
         # Remove known conflicting/incomplete providers first.
         try:
@@ -91,6 +125,7 @@ class RuntimeBundleManager:
 
         # 2) Try latest binary wheel first, then explicit wheel index fallback.
         llama_index = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+        min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.8").strip() or "0.3.8"
         install_attempts = [
             [
                 "install",
@@ -98,7 +133,7 @@ class RuntimeBundleManager:
                 "--only-binary",
                 ":all:",
                 "--prefer-binary",
-                "llama-cpp-python",
+                f"llama-cpp-python>={min_llama}",
             ],
             [
                 "install",
@@ -106,7 +141,7 @@ class RuntimeBundleManager:
                 "--only-binary",
                 ":all:",
                 "--prefer-binary",
-                "llama-cpp-python",
+                f"llama-cpp-python>={min_llama}",
                 "--extra-index-url",
                 llama_index,
             ],
@@ -134,8 +169,21 @@ class RuntimeBundleManager:
             )
             out = (verify.stdout or "") + "\n" + (verify.stderr or "")
             if verify.returncode == 0 and "HAS_LLAMA True" in out:
-                self._log(log_callback, "GGUF runtime repair: llama_cpp primary API available.")
-                return True, ""
+                version_ok, installed, min_version = self._llama_version_ok(python_exe)
+                if version_ok:
+                    self._log(
+                        log_callback,
+                        f"GGUF runtime repair: llama_cpp primary API available (version {installed}, min {min_version}).",
+                    )
+                    return True, ""
+                self._log(
+                    log_callback,
+                    f"GGUF runtime repair: llama_cpp import is available but version is too old "
+                    f"({installed or 'unknown'} < {min_version}).",
+                )
+                errors.append(
+                    f"llama-cpp-python: version below minimum (installed={installed or 'unknown'}, required>={min_version})"
+                )
 
         # If llama_cpp API is unavailable, we still consider ctransformers as a degraded fallback.
         check_ct = self._run_python(

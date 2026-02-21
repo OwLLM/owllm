@@ -2666,11 +2666,12 @@ sys.exit(0)
                     # Prefer binary wheels from official llama-cpp wheel index to avoid local C++ build requirements.
                     # This avoids nmake/MSVC hard failures on Windows.
                     llama_index = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
+                    min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.8").strip() or "0.3.8"
                     pip_cmd = [
                         str(python_exe), "-m", "pip", "install", "--upgrade",
                         "--only-binary", ":all:",
                         "--prefer-binary",
-                        "llama-cpp-python",
+                        f"llama-cpp-python>={min_llama}",
                         "--extra-index-url", llama_index,
                     ]
                     timeout_s = 600
@@ -2835,7 +2836,7 @@ sys.exit(0)
                                     str(rebuilt_python), "-m", "pip", "install", "--upgrade",
                                     "--only-binary", ":all:",
                                     "--prefer-binary",
-                                    "llama-cpp-python",
+                                    f"llama-cpp-python>={os.getenv('LLM_MIN_LLAMA_CPP_VERSION', '0.3.8').strip() or '0.3.8'}",
                                     "--extra-index-url", llama_index,
                                 ]
                                 retry = subprocess.run(

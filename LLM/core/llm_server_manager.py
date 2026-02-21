@@ -342,6 +342,25 @@ class LLMServerManager:
         Delegates to canonical resolver to avoid identity drift.
         """
         return to_canonical_id(model_id, model_cfg=model_cfg, base_model_path=None)
+
+    def _find_onboarding_entries_by_base_model_path(self, base_model_path: str) -> list[dict]:
+        """Return all onboarding rows matching the normalized base model path."""
+        matches: list[dict] = []
+        try:
+            target_path = str(Path(base_model_path).resolve()).lower()
+        except Exception:
+            target_path = str(base_model_path).lower()
+        for row in (self.state_store.list_all_onboarding() or []):
+            row_base = row.get("base_model_path")
+            if not row_base:
+                continue
+            try:
+                row_path = str(Path(row_base).resolve()).lower()
+            except Exception:
+                row_path = str(row_base).lower()
+            if row_path == target_path:
+                matches.append(row)
+        return matches
     
     def ensure_server_running(self, model_id: str, log_callback=None) -> str:
         """
@@ -428,35 +447,34 @@ class LLMServerManager:
                 try:
                     base_model_path = str((model_cfg or {}).get("base_model") or "").strip()
                     if base_model_path:
-                        try:
-                            target_path = str(Path(base_model_path).resolve()).lower()
-                        except Exception:
-                            target_path = base_model_path.lower()
-                        for row in (self.state_store.list_all_onboarding() or []):
-                            row_base = row.get("base_model_path")
-                            if not row_base:
-                                continue
+                        matches = self._find_onboarding_entries_by_base_model_path(base_model_path)
+                        if len(matches) > 1:
+                            ids = sorted((m.get("model_id") or "") for m in matches if m.get("model_id"))
+                            raise RuntimeError(
+                                f"Ambiguous onboarding mapping for model path '{base_model_path}'. "
+                                f"Matching onboarding ids: {ids}. Please remove duplicates and retry."
+                            )
+                        if len(matches) == 1:
+                            row = matches[0]
+                            onboarding_id = row.get("model_id") or onboarding_id
+                            status = row.get("status")
                             try:
-                                row_path = str(Path(row_base).resolve()).lower()
+                                log(
+                                    f"Using onboarding fallback key '{onboarding_id}' via base_model_path match "
+                                    f"(runtime gate)."
+                                )
                             except Exception:
-                                row_path = str(row_base).lower()
-                            if row_path == target_path:
-                                onboarding_id = row.get("model_id") or onboarding_id
-                                status = row.get("status")
-                                try:
-                                    log(
-                                        f"Using onboarding fallback key '{onboarding_id}' via base_model_path match "
-                                        f"(runtime gate)."
-                                    )
-                                except Exception:
-                                    pass
-                                break
+                                pass
+                except RuntimeError:
+                    raise
                 except Exception:
                     pass
             
             if status is None:
                 try:
                     log(f"Model '{onboarding_id}' has no onboarding entry (status=None).")
+                except RuntimeError:
+                    raise
                 except Exception:
                     pass
                 raise RuntimeError(
@@ -1226,22 +1244,17 @@ class LLMServerManager:
             if not onboarding_entry:
                 # Last fallback: match onboarding rows by base_model_path.
                 try:
-                    target_path = str(model_path.resolve()).lower()
-                except Exception:
-                    target_path = str(model_path).lower()
-                try:
-                    for row in self.state_store.list_all_onboarding():
-                        base_path = row.get("base_model_path")
-                        if not base_path:
-                            continue
-                        try:
-                            row_path = str(Path(base_path).resolve()).lower()
-                        except Exception:
-                            row_path = str(base_path).lower()
-                        if row_path == target_path:
-                            onboarding_entry = row
-                            onboarding_id = row.get("model_id") or onboarding_id
-                            break
+                    matches = self._find_onboarding_entries_by_base_model_path(str(model_path))
+                    if len(matches) > 1:
+                        ids = sorted((m.get("model_id") or "") for m in matches if m.get("model_id"))
+                        raise RuntimeError(
+                            f"Ambiguous onboarding mapping for model path '{model_path}'. "
+                            f"Matching onboarding ids: {ids}. Please remove duplicate onboarding rows."
+                        )
+                    if len(matches) == 1:
+                        row = matches[0]
+                        onboarding_entry = row
+                        onboarding_id = row.get("model_id") or onboarding_id
                 except Exception:
                     pass
 

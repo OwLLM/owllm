@@ -568,6 +568,7 @@ class StateStore:
             "canonical_mismatch": [],
             "stale_building": [],
             "env_key_drift": [],
+            "backend_drift": [],
             "repaired": [],
             "errors": [],
         }
@@ -652,7 +653,11 @@ class StateStore:
             try:
                 rows = conn.execute(
                     """
-                    SELECT mo.model_id, mo.env_key AS onboarding_env_key, m.env_key AS model_env_key
+                    SELECT mo.model_id,
+                           mo.env_key AS onboarding_env_key,
+                           m.env_key AS model_env_key,
+                           mo.backend AS onboarding_backend,
+                           m.backend AS model_backend
                     FROM model_onboarding mo
                     LEFT JOIN models m ON m.model_id = mo.model_id
                     """
@@ -678,6 +683,23 @@ class StateStore:
                             (menv, datetime.utcnow().isoformat(), mid),
                         )
                         report["repaired"].append(f"backfill onboarding.env_key from models for {mid}")
+                    ob = (row["onboarding_backend"] or "").strip()
+                    mb = (row["model_backend"] or "").strip()
+                    if ob and mb and ob != mb:
+                        report["backend_drift"].append(
+                            {"model_id": mid, "onboarding_backend": ob, "model_backend": mb}
+                        )
+                        conn.execute("UPDATE models SET backend = ? WHERE model_id = ?", (ob, mid))
+                        report["repaired"].append(f"sync models.backend from onboarding for {mid}")
+                    elif ob and not mb:
+                        conn.execute("UPDATE models SET backend = ? WHERE model_id = ?", (ob, mid))
+                        report["repaired"].append(f"backfill models.backend from onboarding for {mid}")
+                    elif mb and not ob:
+                        conn.execute(
+                            "UPDATE model_onboarding SET backend = ?, updated_at = ? WHERE model_id = ?",
+                            (mb, datetime.utcnow().isoformat(), mid),
+                        )
+                        report["repaired"].append(f"backfill onboarding.backend from models for {mid}")
                 conn.commit()
             except Exception as e:
                 report["errors"].append(f"repair env_key drift/backfill: {e}")

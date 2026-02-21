@@ -1273,6 +1273,8 @@ class LLMServerManager:
             authoritative_onboarding_id = onboarding_id
 
             env_key = onboarding_entry.get("env_key")
+            onboarding_backend = str(onboarding_entry.get("backend") or "").strip().lower()
+            use_bundled_backend = onboarding_backend == "llama_cpp_server"
             if not env_key:
                 # Self-heal: legacy/dirty states can have model env_key present while onboarding env_key is null.
                 fallback_model = self.state_store.get_model(onboarding_id) or self.state_store.get_model(model_id)
@@ -1316,6 +1318,8 @@ class LLMServerManager:
                 python_executable=python_exe,
                 metadata={"env_key": env_key, "status": "READY", "source": "onboarded"}
             )
+            if use_bundled_backend:
+                log("Runtime routing: using bundled llama.cpp backend for this model.")
             log(f"Using environment: {env_spec.key}")
             log(f"Python executable: {env_spec.python_executable}")
             log(f"Resolved launch: interpreter={env_spec.python_executable}, gpu={chosen_gpu if chosen_gpu is not None else 'default'}, port={port}")
@@ -1338,6 +1342,17 @@ class LLMServerManager:
             )
             if not critical_packages:
                 critical_packages = list(_BASE_PACKAGES)
+            is_gguf_model_early = False
+            try:
+                if model_path.is_file() and model_path.suffix.lower() == ".gguf":
+                    is_gguf_model_early = True
+                elif model_path.is_dir():
+                    is_gguf_model_early = any(model_path.rglob("*.gguf"))
+            except Exception:
+                is_gguf_model_early = False
+            if use_bundled_backend and is_gguf_model_early:
+                # Bundled runtime path does not require python gguf package stack.
+                critical_packages = []
             logger.info(
                 "RUNTIME_EVENT dependency_resolved model_id=%s env_key=%s packages_count=%s",
                 model_id, env_spec.key, len(critical_packages),
@@ -1349,6 +1364,41 @@ class LLMServerManager:
             
             if missing_packages:
                 log(f"Missing critical packages detected: {', '.join(missing_packages)}")
+                if (
+                    is_gguf_model_early
+                    and "llama-cpp-python" in set(missing_packages)
+                    and not use_bundled_backend
+                ):
+                    try:
+                        bundled_ok, bundled_msg = self.env_registry.runtime_bundle_manager.probe_bundled_gguf_runtime(
+                            model_path,
+                            log_callback=log,
+                        )
+                        if bundled_ok:
+                            use_bundled_backend = True
+                            missing_packages = [p for p in missing_packages if p != "llama-cpp-python"]
+                            onboarding_backend = "llama_cpp_server"
+                            log(
+                                "Switching runtime route to bundled llama.cpp backend because "
+                                "python llama-cpp runtime is unavailable for this GGUF model. "
+                                f"{bundled_msg}"
+                            )
+                            try:
+                                self.state_store.upsert_onboarding(
+                                    model_id=onboarding_id,
+                                    base_model_path=str(model_path),
+                                    adapter_dir=adapter_dir,
+                                    env_key=env_spec.key,
+                                    backend="llama_cpp_server",
+                                    accelerator=onboarding_entry.get("accelerator"),
+                                    status=onboarding_entry.get("status") or "READY",
+                                    last_error=onboarding_entry.get("last_error"),
+                                    healthcheck_log_path=onboarding_entry.get("healthcheck_log_path"),
+                                )
+                            except Exception:
+                                pass
+                    except Exception as bundled_switch_ex:
+                        log(f"Bundled runtime switch attempt failed: {bundled_switch_ex}")
                 is_dedicated = "--dedicated--" in env_spec.key
                 vision_migration_pkgs = {"Pillow", "timm", "einops", "open-clip-torch"}
                 missing_set = set(missing_packages)
@@ -1449,7 +1499,8 @@ class LLMServerManager:
                             f"Startup log: {preflight_log_path}"
                         )
             log("Environment dependencies validated - all critical packages present")
-            self._ensure_min_llama_cpp_version_for_gguf(env_spec, model_path, log)
+            if not use_bundled_backend:
+                self._ensure_min_llama_cpp_version_for_gguf(env_spec, model_path, log)
 
             # Additional health check: verify environment can import required modules.
             # IMPORTANT: critical_packages are pip package names, not always import module names.
@@ -1504,13 +1555,21 @@ class LLMServerManager:
                     is_gguf_model = any(model_path.rglob("*.gguf"))
             except Exception:
                 is_gguf_model = False
-            probe_ok, probe_reason, probe_error = self.env_registry.run_model_load_probe(
-                env_spec.python_executable,
-                str(model_path),
-                adapter_dir=adapter_dir,
-                deep_probe=is_gguf_model,
-                log_callback=log,
-            )
+            if use_bundled_backend and is_gguf_model:
+                probe_ok, bundled_msg = self.env_registry.runtime_bundle_manager.probe_bundled_gguf_runtime(
+                    model_path,
+                    log_callback=log,
+                )
+                probe_reason = None if probe_ok else "UNSUPPORTED_ARCH"
+                probe_error = None if probe_ok else bundled_msg
+            else:
+                probe_ok, probe_reason, probe_error = self.env_registry.run_model_load_probe(
+                    env_spec.python_executable,
+                    str(model_path),
+                    adapter_dir=adapter_dir,
+                    deep_probe=is_gguf_model,
+                    log_callback=log,
+                )
             if not probe_ok:
                 from datetime import datetime
                 log_dir = app_root / "logs" / "server_startup"
@@ -1564,7 +1623,7 @@ class LLMServerManager:
             except Exception:
                 is_gptq_model = False
 
-            if is_gptq_model:
+            if is_gptq_model and not use_bundled_backend:
                 ok, err = self.env_registry._verify_autogptq_cuda_kernels(env_spec.python_executable)
                 if not ok:
                     from datetime import datetime
@@ -1644,6 +1703,8 @@ class LLMServerManager:
             env['SERVER_PORT'] = str(port)
             # Pin the intended model environment interpreter for launcher -> uvicorn handoff.
             env["LLM_SERVER_PYTHON"] = str(env_spec.python_executable)
+            if use_bundled_backend:
+                env["LLM_RUNTIME_BACKEND"] = "llama_cpp_server"
             # Force server process to use the selected GPU (or highest-VRAM default)
             if chosen_gpu is not None:
                 env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"

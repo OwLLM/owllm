@@ -13,6 +13,7 @@ import subprocess
 import sys
 import os
 import re
+import json
 
 
 LogCallback = Optional[Callable[[str], None]]
@@ -82,6 +83,101 @@ class RuntimeBundleManager:
         if not installed:
             return False, None, min_version
         return self._parse_version_tuple(installed) >= self._parse_version_tuple(min_version), installed, min_version
+
+    def _candidate_bundled_paths(self, name: str) -> list[Path]:
+        llm_root = self._infer_llm_root(Path(sys.executable))
+        if llm_root is None:
+            return []
+        return [
+            llm_root / "runtime" / "llama.cpp" / name,
+            llm_root / "runtime" / "llama_cpp" / name,
+            llm_root / "bin" / name,
+            llm_root / "tools" / "llama.cpp" / name,
+        ]
+
+    def discover_bundled_llama_binaries(self) -> dict[str, Optional[Path]]:
+        """
+        Discover optional bundled llama.cpp binaries.
+        Returns keys: server, cli (Path or None).
+        """
+        server_env = (os.getenv("LLM_BUNDLED_LLAMA_SERVER_EXE", "") or "").strip()
+        cli_env = (os.getenv("LLM_BUNDLED_LLAMA_CLI_EXE", "") or "").strip()
+        server = Path(server_env) if server_env else None
+        cli = Path(cli_env) if cli_env else None
+
+        if (server is None) or (not server.exists()):
+            for cand in self._candidate_bundled_paths("llama-server.exe"):
+                if cand.exists():
+                    server = cand
+                    break
+        if (cli is None) or (not cli.exists()):
+            for cand in self._candidate_bundled_paths("llama-cli.exe"):
+                if cand.exists():
+                    cli = cand
+                    break
+
+        if server is not None and not server.exists():
+            server = None
+        if cli is not None and not cli.exists():
+            cli = None
+        return {"server": server, "cli": cli}
+
+    def _pick_gguf_variant(self, model_path: Path) -> Optional[Path]:
+        try:
+            if model_path.is_file() and model_path.suffix.lower() == ".gguf":
+                return model_path
+            if not model_path.is_dir():
+                return None
+            marker = model_path / ".selected_weights.json"
+            if marker.exists():
+                try:
+                    data = json.loads(marker.read_text(encoding="utf-8"))
+                    active = data.get("active_variant")
+                    if isinstance(active, str) and active.strip():
+                        candidate = (model_path / active).resolve()
+                        if candidate.exists() and candidate.suffix.lower() == ".gguf":
+                            return candidate
+                except Exception:
+                    pass
+            ggufs = sorted(model_path.rglob("*.gguf"))
+            return ggufs[0] if ggufs else None
+        except Exception:
+            return None
+
+    def probe_bundled_gguf_runtime(self, model_path: Path, log_callback: LogCallback = None) -> Tuple[bool, str]:
+        """
+        Probe bundled llama.cpp CLI with one token generation on selected GGUF.
+        Returns (ok, details). Non-destructive and timeout-bounded.
+        """
+        bins = self.discover_bundled_llama_binaries()
+        cli = bins.get("cli")
+        if cli is None:
+            return False, "Bundled llama-cli.exe not found."
+        gguf = self._pick_gguf_variant(model_path)
+        if gguf is None:
+            return False, f"No GGUF file found under: {model_path}"
+
+        attempts = [
+            [str(cli), "-m", str(gguf), "-n", "1", "-p", "probe", "-c", "128", "-ngl", "0"],
+            [str(cli), "--model", str(gguf), "--n-predict", "1", "--prompt", "probe", "--ctx-size", "128", "--n-gpu-layers", "0"],
+        ]
+        for cmd in attempts:
+            try:
+                self._log(log_callback, f"Bundled GGUF probe: {' '.join(cmd)}")
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    **self.subprocess_flags,
+                )
+                if proc.returncode == 0:
+                    return True, f"Bundled llama.cpp probe succeeded for {gguf.name}"
+                out = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+                last = out[:600]
+            except Exception as e:
+                last = str(e)[:600]
+        return False, f"Bundled llama.cpp probe failed for {gguf.name}. Last error: {last}"
 
     def ensure_gguf_runtime(self, python_exe: Path, log_callback: LogCallback = None) -> Tuple[bool, str]:
         """

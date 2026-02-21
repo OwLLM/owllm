@@ -64,6 +64,9 @@ def main():
     
     os.environ["MODEL_TYPE"] = model_cfg.get("model_type", "base")
     os.environ["USE_4BIT"] = str(model_cfg.get("use_4bit", True)).lower()
+    runtime_backend = str(os.environ.get("LLM_RUNTIME_BACKEND", model_cfg.get("runtime_backend", "") or "")).strip()
+    if runtime_backend:
+        os.environ["LLM_RUNTIME_BACKEND"] = runtime_backend
 
     # GPTQ backend: "auto-gptq" (default) or "exllamav2" when explicitly selected
     if model_cfg.get("gptq_backend") == "exllamav2":
@@ -84,9 +87,13 @@ def main():
     print(f"4-bit quantization: {os.environ['USE_4BIT']}")
     print("-" * 50)
 
-    # We're running from LLM directory, so use relative import
-    # The working directory is set to app_root (LLM/) by llm_server_manager
-    import_path = "core.llm_backends.server_app:app"
+    # We're running from LLM directory, so use relative import.
+    # If routed backend is bundled llama.cpp, launch proxy server app instead.
+    if runtime_backend == "llama_cpp_server":
+        import_path = "core.llm_backends.bundled_proxy_server:app"
+        print("Runtime backend route: bundled llama.cpp proxy")
+    else:
+        import_path = "core.llm_backends.server_app:app"
     
     # Set PYTHONPATH to ensure imports work
     app_root = script_dir.parent  # LLM directory

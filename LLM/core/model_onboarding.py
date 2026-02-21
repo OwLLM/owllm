@@ -316,6 +316,7 @@ class ModelOnboardingService:
             
             final_env_key = stable_env_key
             final_python_exe = stable_python_exe
+            final_backend = backend
             
             # Step 7a: MISSING_PACKAGE - attempt one-time auto-install of optional deps (Pillow/timm/einops), then re-probe
             if not probe_success and probe_reason == "MISSING_PACKAGE":
@@ -481,6 +482,34 @@ class ModelOnboardingService:
                 }
             else:
                 log(f"Model load probe passed on stable env: {stable_env_key}")
+
+            # Hybrid runtime routing: prefer bundled llama.cpp backend when GGUF python runtime
+            # cannot satisfy required compatibility, but bundled probe is runnable.
+            try:
+                model_path_obj = Path(base_model_path)
+                is_gguf = model_path_obj.is_file() and model_path_obj.suffix.lower() == ".gguf"
+                if not is_gguf and model_path_obj.is_dir():
+                    is_gguf = any(model_path_obj.rglob("*.gguf"))
+                if is_gguf:
+                    bundled_ok, bundled_msg = self.env_registry.runtime_bundle_manager.probe_bundled_gguf_runtime(
+                        model_path_obj,
+                        log_callback=log_callback,
+                    )
+                    if bundled_ok:
+                        py_ok, py_err = self.env_registry.runtime_bundle_manager.ensure_gguf_runtime(
+                            final_python_exe,
+                            log_callback=log_callback,
+                        )
+                        if not py_ok:
+                            final_backend = "llama_cpp_server"
+                            log(
+                                "Selecting bundled llama.cpp runtime backend for this GGUF model "
+                                f"(python runtime not compatible: {str(py_err)[:220]})."
+                            )
+                        else:
+                            log(f"Keeping python GGUF backend (runtime compatible). Bundled probe: {bundled_msg}")
+            except Exception as backend_route_ex:
+                log(f"Backend routing preselection warning: {backend_route_ex}")
             
             # Step 8: Run model-file integrity check (transformers and GGUF paths).
             log(f"Running model integrity check for: {model_id}")
@@ -496,7 +525,7 @@ class ModelOnboardingService:
                     base_model_path=base_model_path,
                     adapter_dir=adapter_dir,
                     env_key=final_env_key,
-                    backend=backend,
+                    backend=final_backend,
                     accelerator=accelerator,
                     status="BROKEN",
                     last_error=error_msg,
@@ -506,7 +535,7 @@ class ModelOnboardingService:
                 return {
                     "status": "BROKEN",
                     "env_key": final_env_key,
-                    "backend": backend,
+                    "backend": final_backend,
                     "accelerator": accelerator,
                     "last_error": error_msg,
                     "healthcheck_log_path": log_path
@@ -551,7 +580,7 @@ class ModelOnboardingService:
                         base_model_path=base_model_path,
                         adapter_dir=adapter_dir,
                         env_key=final_env_key,
-                        backend=backend,
+                        backend=final_backend,
                         accelerator=accelerator,
                         status="BROKEN",
                         last_error=error_msg,
@@ -601,7 +630,7 @@ class ModelOnboardingService:
                         return {
                             "status": "BROKEN",
                             "env_key": final_env_key,
-                            "backend": backend,
+                            "backend": final_backend,
                             "accelerator": accelerator,
                             "last_error": error_msg,
                             "healthcheck_log_path": log_path
@@ -622,7 +651,7 @@ class ModelOnboardingService:
                             base_model_path=base_model_path,
                             adapter_dir=adapter_dir,
                             env_key=final_env_key,
-                            backend=backend,
+                            backend=final_backend,
                             accelerator=accelerator,
                             status="BROKEN",
                             last_error=error_msg,
@@ -632,7 +661,7 @@ class ModelOnboardingService:
                         return {
                             "status": "BROKEN",
                             "env_key": final_env_key,
-                            "backend": backend,
+                            "backend": final_backend,
                             "accelerator": accelerator,
                             "last_error": error_msg,
                             "healthcheck_log_path": log_path
@@ -653,7 +682,7 @@ class ModelOnboardingService:
                                 base_model_path=base_model_path,
                                 adapter_dir=adapter_dir,
                                 env_key=final_env_key,
-                                backend=backend,
+                                backend=final_backend,
                                 accelerator=accelerator,
                                 status="BROKEN",
                                 last_error=error_msg,
@@ -662,7 +691,7 @@ class ModelOnboardingService:
                             return {
                                 "status": "BROKEN",
                                 "env_key": final_env_key,
-                                "backend": backend,
+                                "backend": final_backend,
                                 "accelerator": accelerator,
                                 "last_error": error_msg,
                                 "healthcheck_log_path": log_path
@@ -678,7 +707,7 @@ class ModelOnboardingService:
                 base_model_path=base_model_path,
                 adapter_dir=adapter_dir,
                 env_key=final_env_key,
-                backend=backend,
+                backend=final_backend,
                 accelerator=accelerator,
                 status="READY",
                 healthcheck_log_path=log_path
@@ -688,7 +717,7 @@ class ModelOnboardingService:
             try:
                 self.state_store.upsert_model(
                     model_id=model_id,
-                    backend=backend,
+                    backend=final_backend,
                     model_path=str(base_model_path),
                     env_key=final_env_key,
                     params=None
@@ -699,7 +728,7 @@ class ModelOnboardingService:
             return {
                 "status": "READY",
                 "env_key": final_env_key,
-                "backend": backend,
+                "backend": final_backend,
                 "accelerator": accelerator,
                 "healthcheck_log_path": log_path
             }

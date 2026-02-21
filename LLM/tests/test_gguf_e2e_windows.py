@@ -71,6 +71,26 @@ def test_gguf_e2e_windows_proof_gate():
     model_id = os.getenv("GGUF_TEST_MODEL_ID", "").strip()
     if not model_id:
         pytest.skip("Set GGUF_TEST_MODEL_ID to run strict Windows GGUF E2E proof gate.")
+    _run_proof_gate_for_model(model_id)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only GGUF proof gate")
+def test_gguf_e2e_windows_proof_gate_unsupported():
+    model_id = os.getenv("GGUF_TEST_MODEL_ID_UNSUPPORTED", "").strip()
+    if not model_id:
+        pytest.skip("Set GGUF_TEST_MODEL_ID_UNSUPPORTED to run unsupported-family proof gate.")
+    _run_proof_gate_for_model(model_id)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only GGUF proof gate")
+def test_gguf_e2e_windows_proof_gate_baseline():
+    model_id = os.getenv("GGUF_TEST_MODEL_ID_BASELINE", "").strip()
+    if not model_id:
+        pytest.skip("Set GGUF_TEST_MODEL_ID_BASELINE to run baseline GGUF proof gate.")
+    _run_proof_gate_for_model(model_id)
+
+
+def _run_proof_gate_for_model(model_id: str) -> None:
 
     config_path = Path(__file__).parent.parent / "configs" / "llm_backends.yaml"
     manager = LLMServerManager(config_path)

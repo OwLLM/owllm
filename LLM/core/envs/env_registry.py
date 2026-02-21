@@ -707,6 +707,18 @@ class EnvRegistry:
                             log(f"GGUF variant probe succeeded with: {gguf.name}")
                             return True, None, None
                         failures.append(f"{gguf.name}: {str(err)[:220]}")
+                    # Hybrid runtime fallback: if python GGUF backends fail for all variants,
+                    # try bundled llama.cpp probe before classifying as unsupported.
+                    try:
+                        bundled_ok, bundled_msg = self.runtime_bundle_manager.probe_bundled_gguf_runtime(
+                            model_path_obj,
+                            log_callback=log_callback,
+                        )
+                        if bundled_ok:
+                            log(f"Bundled llama.cpp probe succeeded after python backend probe failure: {bundled_msg}")
+                            return True, None, None
+                    except Exception as bundled_ex:
+                        failures.append(f"bundled_probe_error: {str(bundled_ex)[:160]}")
                     return (
                         False,
                         "UNSUPPORTED_ARCH",
@@ -732,6 +744,14 @@ class EnvRegistry:
                     log_callback=log_callback,
                 )
                 if not ok:
+                    # Hybrid runtime fallback: allow bundled llama.cpp backend when python runtime isn't satisfiable.
+                    bundled_ok, bundled_msg = self.runtime_bundle_manager.probe_bundled_gguf_runtime(
+                        model_path_obj,
+                        log_callback=log_callback,
+                    )
+                    if bundled_ok:
+                        log(f"Bundled llama.cpp runtime probe succeeded: {bundled_msg}")
+                        return True, None, None
                     log(f"GGUF runtime preflight failed: {runtime_err[:240]}")
                     return False, "RUNTIME_MISSING_COMPONENT", runtime_err
         except Exception as e:

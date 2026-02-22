@@ -11,7 +11,7 @@
         "name": "Local Tool Server",
         "env_vars": {}
       },
-      "status": "connected"
+      "status": "configured"
     }
   }
 }

@@ -20,7 +20,12 @@ _GREETING_PATTERN = re.compile(r"^(hi|hello|hey|yo|sup|good (morning|afternoon|e
 _ACTION_KEYWORDS = (
     "read ", "open ", "list ", "show ", "check ", "inspect ", "search ", "find ",
     "write ", "create ", "edit ", "modify ", "update ", "run ", "execute ", "git ",
-    "status", "file", "files", "folder", "folders", "directory", "directories", "path", "command", "shell"
+    "status", "file", "files", "folder", "folders", "directory", "directories", "path", "command", "shell",
+    "read_file", "tool"
+)
+_ACTION_INTENT_PATTERN = re.compile(
+    r"\b(read[_ ]file|use (the )?tool|open (the )?file|read (the )?file|show (me )?(the )?file)\b",
+    re.IGNORECASE,
 )
 
 _TRANSIENT_RUNTIME_FAILURE_MARKERS = (
@@ -68,6 +73,9 @@ def _is_low_intent_message(user_msg: str) -> bool:
     text = (user_msg or "").strip().lower()
     if not text:
         return True
+    # Action intent must always win over greeting heuristics.
+    if _is_action_request(text):
+        return False
     if len(text) <= 80 and re.match(r"^(hi|hello|hey|yo|sup|hola|ciao)\b", text):
         return True
     if _GREETING_PATTERN.match(text):
@@ -83,7 +91,9 @@ def _is_action_request(user_msg: str) -> bool:
     text = (user_msg or "").strip().lower()
     if not text:
         return False
-    return any(keyword in text for keyword in _ACTION_KEYWORDS)
+    if any(keyword in text for keyword in _ACTION_KEYWORDS):
+        return True
+    return bool(_ACTION_INTENT_PATTERN.search(text))
 
 
 def _is_transient_runtime_failure(last_error: str) -> bool:
@@ -379,6 +389,28 @@ def run_inference_with_tools(
     final_output = ""
     previous_tool_signature: Optional[Tuple[str, ...]] = None
     repeated_signature_count = 0
+    forced_finalize = False
+
+    def _force_finalize_without_tools(reason: str) -> str:
+        """Force a final assistant reply after tool guard interruption."""
+        safe_prompt = _strip_tool_instruction_block(conversation_history)
+        finalize_prompt = (
+            safe_prompt
+            + "\n\n[Tool execution note]\n"
+            + f"Tool execution was stopped: {reason}.\n"
+            + "Now provide your best final answer to the user without calling tools. "
+            + "If required data is missing, say exactly what is missing in one short sentence."
+        )
+        inference_cfg = InferenceConfig(
+            prompt=finalize_prompt,
+            model_id=cfg.model_id,
+            base_model=cfg.base_model,
+            adapter_dir=cfg.adapter_dir,
+            max_new_tokens=cfg.max_new_tokens,
+            temperature=cfg.temperature,
+            images=cfg.images,
+        )
+        return run_inference(inference_cfg, env, log_callback=log_callback)
     
     while iteration < cfg.max_tool_iterations:
         iteration += 1
@@ -423,6 +455,11 @@ def run_inference_with_tools(
                     "reason": reason,
                     "iteration": iteration,
                 })
+            try:
+                final_output = _force_finalize_without_tools(f"blocked_policy:{reason}")
+                forced_finalize = True
+            except Exception as finalize_ex:
+                log(f"[ToolGuard] Finalize-after-policy-block failed: {finalize_ex}")
             break
 
         # Loop breaker: stop repeated identical tool-call sets across iterations.
@@ -446,6 +483,11 @@ def run_inference_with_tools(
                     "reason": "repeated_tool_signature",
                     "iteration": iteration,
                 })
+            try:
+                final_output = _force_finalize_without_tools("repeated_tool_signature")
+                forced_finalize = True
+            except Exception as finalize_ex:
+                log(f"[ToolGuard] Finalize-after-loop-stop failed: {finalize_ex}")
             break
         
         # Process each tool call
@@ -503,9 +545,21 @@ def run_inference_with_tools(
         
         if not any_executed:
             # No tools were executed (all denied or errored), stop iteration
+            try:
+                final_output = _force_finalize_without_tools("no_tools_executed")
+                forced_finalize = True
+            except Exception as finalize_ex:
+                log(f"[ToolGuard] Finalize-after-no-executed failed: {finalize_ex}")
             break
         
         # Update prompt with full history for next iteration
         cfg.prompt = conversation_history
     
+    # If loop exited without a forced finalization and the output still contains tool tags,
+    # make one best-effort final response so users never get a silent/non-answer stop.
+    if not forced_finalize and isinstance(final_output, str) and "<tool_call>" in final_output:
+        try:
+            final_output = _force_finalize_without_tools("tool_call_left_in_output")
+        except Exception as finalize_ex:
+            log(f"[ToolGuard] Final fallback finalize failed: {finalize_ex}")
     return final_output, tool_log

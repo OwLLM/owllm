@@ -223,3 +223,10 @@ models:
     port: 10530
     use_4bit: true
     system_prompt: ''
+  adapter_20260108_163745:
+    base_model: C:\1_Git\LocaLLM\LLM\fine_tuned\adapter_20260108_163745
+    adapter_dir: null
+    model_type: base
+    port: 10532
+    use_4bit: true
+    system_prompt: ''

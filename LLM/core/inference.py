@@ -141,8 +141,11 @@ def clean_display_answer(text: str) -> str:
     )
 
     # Remove XML tool calls/results and repeated stop tokens.
-    cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
-    cleaned = re.sub(r"<tool_result[^>]*>.*?</tool_result>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"<tool_call>.*?</\s*tool_call\s*>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"<tool_result[^>]*>.*?</\s*tool_result\s*>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    # Also remove malformed one-line tool tags that may miss proper closing shape.
+    cleaned = re.sub(r"(?im)^\s*`{0,3}\s*<\s*tool_call\b.*$", "", cleaned)
+    cleaned = re.sub(r"(?im)^\s*`{0,3}\s*<\s*/\s*tool_call\s*>\s*`{0,3}\s*$", "", cleaned)
     cleaned = cleaned.replace("</s>", " ")
 
     # Drop quoted/plain tool transcript blocks the model may echo.
@@ -261,6 +264,8 @@ def _extract_direct_read_file_path(user_msg: str) -> Optional[str]:
         r"read_file\s+(?:on|for)?\s*([^\s,;]+)",
         r"read\s+(?:the\s+)?file\s+([^\s,;]+)",
         r"open\s+(?:the\s+)?file\s+([^\s,;]+)",
+        r"(?:file\s*name|filename)\s+is\s+([^\s,;]+)",
+        r"file\s+is\s+([^\s,;]+)",
     ]
     for pat in patterns:
         m = re.search(pat, text, flags=re.IGNORECASE)
@@ -271,6 +276,10 @@ def _extract_direct_read_file_path(user_msg: str) -> Optional[str]:
         path = re.sub(r"[).,;:!?]+$", "", path)
         if path:
             return path
+    # Follow-up shorthand: message only contains a likely filename.
+    bare = text.strip().strip("\"'`")
+    if re.fullmatch(r"[A-Za-z0-9_.\-\\/]+\.[A-Za-z0-9]{1,16}", bare):
+        return bare
     return None
 
 
@@ -314,6 +323,22 @@ def _extract_direct_search_in_file_intent(user_msg: str) -> Optional[Tuple[str, 
         if query and path:
             return path, query
     return None
+
+
+def _tool_error_message(result: Any) -> str:
+    err = ""
+    try:
+        err = str(getattr(result, "error", "") or "")
+    except Exception:
+        err = ""
+    if not err:
+        try:
+            payload = getattr(result, "result", None)
+            if isinstance(payload, dict) and payload.get("error"):
+                err = str(payload.get("error"))
+        except Exception:
+            pass
+    return err or "Tool execution failed."
 
 
 @dataclass
@@ -596,7 +621,7 @@ def run_inference_with_tools(
             deterministic = _derive_answer_from_tool_log(tool_log, user_msg)
             if deterministic:
                 return deterministic, tool_log
-        # Fall through to model loop only if direct fast-path did not succeed.
+        return f"Could not read `{direct_read_path}`: {_tool_error_message(result)}", tool_log
 
     # Deterministic fast-path for explicit list directory intents.
     direct_list_path = _extract_direct_list_dir_path(user_msg)
@@ -640,7 +665,7 @@ def run_inference_with_tools(
                     f"Directory listing for `{direct_list_path}`:\n\n"
                     + "\n".join(shown)
                 ), tool_log
-        # Fall through to model loop only if direct fast-path did not succeed.
+        return f"Could not list `{direct_list_path}`: {_tool_error_message(result)}", tool_log
 
     # Deterministic fast-path for explicit search-in-file intents.
     direct_search = _extract_direct_search_in_file_intent(user_msg)
@@ -686,7 +711,7 @@ def run_inference_with_tools(
                     + "\n".join(matches)
                 ), tool_log
             return f"No matches for `{query}` in `{search_path}`.", tool_log
-        # Fall through to model loop only if direct fast-path did not succeed.
+        return f"Could not search in `{search_path}`: {_tool_error_message(result)}", tool_log
     
     # Add system prompt if provided
     if cfg.system_prompt:

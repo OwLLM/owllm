@@ -83,6 +83,15 @@ from __future__ import annotations
     assert "from __future__ import annotations" in cleaned
 
 
+def test_clean_display_answer_removes_malformed_tool_call_tags():
+    raw = """
+```<tool_call>read_file(path="Dios.txt")</
+tool_call>```
+"""
+    cleaned = clean_display_answer(raw)
+    assert "tool_call" not in cleaned.lower()
+
+
 def test_unusable_answer_detection_for_refusal_and_blank():
     assert _is_unusable_final_answer("I'm sorry, but I can't assist with that.")
     assert _is_unusable_final_answer("\n\n\r\n\t")
@@ -108,6 +117,8 @@ def test_deterministic_fallback_from_read_file_tool_log():
 def test_extract_direct_read_file_path_from_user_text():
     assert _extract_direct_read_file_path("hey, use read_file on LLM/core/inference.py and show first lines") == "LLM/core/inference.py"
     assert _extract_direct_read_file_path("please read the file README.md") == "README.md"
+    assert _extract_direct_read_file_path("fucking file name is Dios.txt") == "Dios.txt"
+    assert _extract_direct_read_file_path("Dios.txt") == "Dios.txt"
 
 
 def test_extract_direct_list_dir_path_from_user_text():

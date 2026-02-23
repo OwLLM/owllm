@@ -639,16 +639,16 @@ class SynchronizedChatDisplay(QWidget):
         # Style as tool call (slightly different color)
         text_color = "white" if self.is_dark else "black"
         bubble.setStyleSheet(f"""
-            ChatBubble {
+            ChatBubble {{
                 background: rgba(102, 126, 234, 0.3);
                 border: 1px solid rgba(102, 126, 234, 0.5);
                 border-radius: 12px;
-            }
-            QLabel {
+            }}
+            QLabel {{
                 background: transparent;
                 color: {text_color};
                 border: none;
-            }
+            }}
         """)
         
         # Add to appropriate column
@@ -712,31 +712,31 @@ class SynchronizedChatDisplay(QWidget):
         # Set text and styling for the appropriate column
         result_text_color = "white" if self.is_dark else "black"
         result_style = f"""
-            ChatBubble {
+            ChatBubble {{
                 background: rgba(76, 175, 80, 0.2);
                 border: 1px solid rgba(76, 175, 80, 0.4);
                 border-radius: 12px;
-            }
-            QLabel {
+            }}
+            QLabel {{
                 background: transparent;
                 color: {result_text_color};
                 border: none;
                 font-family: 'Consolas', 'Courier New', monospace;
                 font-size: 10pt;
-            }
+            }}
         """ if success else f"""
-            ChatBubble {
+            ChatBubble {{
                 background: rgba(244, 67, 54, 0.2);
                 border: 1px solid rgba(244, 67, 54, 0.4);
                 border-radius: 12px;
-            }
-            QLabel {
+            }}
+            QLabel {{
                 background: transparent;
                 color: {result_text_color};
                 border: none;
                 font-family: 'Consolas', 'Courier New', monospace;
                 font-size: 10pt;
-            }
+            }}
         """
         
         if column.lower() == "a":

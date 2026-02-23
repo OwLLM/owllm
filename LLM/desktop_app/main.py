@@ -473,10 +473,9 @@ class ToolInferenceWorker(QThread):
             # Tool callback to emit signals
             def tool_callback(tool_name: str, args: dict, result):
                 self.tool_call_detected.emit(tool_name, args, self.model_column)
-                if isinstance(result, dict) and result.get("success"):
-                    self.tool_result_received.emit(tool_name, result, True, self.model_column)
-                else:
-                    self.tool_result_received.emit(tool_name, result, False, self.model_column)
+                success = bool(isinstance(result, dict) and result.get("success"))
+                payload = result.get("result") if isinstance(result, dict) and "result" in result else result
+                self.tool_result_received.emit(tool_name, payload, success, self.model_column)
             
             self.progress_update.emit("[INFO] Preparing inference...")
             
@@ -12794,17 +12793,26 @@ class MainWindow(QMainWindow):
         self.tool_chat_worker_c.start()
     
     def _on_tool_chat_tool_call(self, tool_name: str, args: dict, model_column: str):
-        """Handle tool call in tool chat"""
+        """Handle tool call in tool chat (log only; keep chat bubbles clean)."""
         col = self._map_tool_column(model_column)
-        self.tool_chat_display.add_tool_call(tool_name, args, col)
         self.tool_chat_log_display.append(f"[{col.upper()}] Tool call: {tool_name}({json.dumps(args)})")
     
     def _on_tool_chat_tool_result(self, tool_name: str, result: object, success: bool, model_column: str):
-        """Handle tool result in tool chat"""
+        """Handle tool result in tool chat (log only; keep chat bubbles clean)."""
         col = self._map_tool_column(model_column)
-        self.tool_chat_display.add_tool_result({"tool": tool_name, "result": result}, col, success)
         status = "✓" if success else "✗"
         self.tool_chat_log_display.append(f"[{col.upper()}] {status} {tool_name}: {json.dumps(result)[:200]}")
+
+    def _on_test_chat_tool_call(self, tool_name: str, args: dict, model_column: str):
+        """Log test-chat tool calls to the side panel; do not inject into chat bubbles."""
+        col = self._map_tool_column(model_column)
+        self._append_test_chat_log(f"[{col.upper()}] Tool call: {tool_name}({json.dumps(args)})")
+
+    def _on_test_chat_tool_result(self, tool_name: str, result: object, success: bool, model_column: str):
+        """Log test-chat tool results to the side panel; do not inject into chat bubbles."""
+        col = self._map_tool_column(model_column)
+        status = "✓" if success else "✗"
+        self._append_test_chat_log(f"[{col.upper()}] {status} {tool_name}: {json.dumps(result)[:200]}")
     
     def _on_tool_chat_finished_a(self, final_output: str, tool_log: list, model_column: str):
         """Handle completion for Model A in tool chat"""
@@ -12818,7 +12826,7 @@ class MainWindow(QMainWindow):
         text = self._clean_test_chat_answer(final_output)
         executed_count = self._count_executed_tools(tool_log)
         if executed_count > 0:
-            text += f"\n\n[Tools Used: {executed_count}]"
+            self._append_tool_chat_log(f"[A] Tools executed: {executed_count}")
         self._tool_chat_progress_a = text
         self.tool_chat_display.update_model_a_response(text)
         try:
@@ -12841,7 +12849,7 @@ class MainWindow(QMainWindow):
         text = self._clean_test_chat_answer(final_output)
         executed_count = self._count_executed_tools(tool_log)
         if executed_count > 0:
-            text += f"\n\n[Tools Used: {executed_count}]"
+            self._append_tool_chat_log(f"[B] Tools executed: {executed_count}")
         self._tool_chat_progress_b = text
         self.tool_chat_display.update_model_b_response(text)
         self._check_tool_chat_all_finished()
@@ -12858,7 +12866,7 @@ class MainWindow(QMainWindow):
         text = self._clean_test_chat_answer(final_output)
         executed_count = self._count_executed_tools(tool_log)
         if executed_count > 0:
-            text += f"\n\n[Tools Used: {executed_count}]"
+            self._append_tool_chat_log(f"[C] Tools executed: {executed_count}")
         self._tool_chat_progress_c = text
         self.tool_chat_display.update_model_c_response(text)
         self._check_tool_chat_all_finished()
@@ -13517,12 +13525,10 @@ class MainWindow(QMainWindow):
             lambda msg: self._on_tool_progress_update("a", msg)
         )
         self.tool_worker_a.tool_call_detected.connect(
-            lambda name, args, col: self.chat_display.add_tool_call(name, args, self._map_tool_column(col))
+            lambda name, args, col: self._on_test_chat_tool_call(name, args, col)
         )
         self.tool_worker_a.tool_result_received.connect(
-            lambda name, result, success, col: self.chat_display.add_tool_result(
-                {"tool": name, "result": result}, self._map_tool_column(col), success
-            )
+            lambda name, result, success, col: self._on_test_chat_tool_result(name, result, success, col)
         )
         self.tool_worker_a.inference_finished.connect(self._on_tool_inference_finished_a)
         self.tool_worker_a.inference_failed.connect(
@@ -13546,7 +13552,7 @@ class MainWindow(QMainWindow):
         text = self._clean_test_chat_answer(final_output)
         executed_count = self._count_executed_tools(tool_log)
         if executed_count > 0:
-            text += f"\n\n[Tools Used: {executed_count}]"
+            self._append_test_chat_log(f"[A] Tools executed: {executed_count}")
         self._tool_progress_a = text
         self.chat_display.update_model_a_response(text)
         # Persist assistant reply into Test chat memory
@@ -13712,47 +13718,8 @@ class MainWindow(QMainWindow):
         - remove XML tool-call/result fragments and repetitive stop tokens
         """
         try:
-            import re
-            cleaned = str(text or "")
-            # Remove echoed tool-instruction block when model parrots system text
-            cleaned = re.sub(
-                r"You are a helpful AI assistant with access to tools\..*?Only call tools when necessary\.",
-                "",
-                cleaned,
-                flags=re.DOTALL,
-            )
-            # Remove XML tool calls/results and repeated stop tokens
-            cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", cleaned, flags=re.DOTALL)
-            cleaned = re.sub(r"<tool_result[^>]*>.*?</tool_result>", "", cleaned, flags=re.DOTALL)
-            cleaned = cleaned.replace("</s>", " ")
-            cleaned = re.sub(r"<\|im_start\|>system.*?<\|im_end\|>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
-            cleaned = re.sub(r"<\|im_start\|>user.*?<\|im_end\|>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
-
-            # If the model emits role-scaffold transcripts, keep only the final assistant turn.
-            assistant_role_blocks = re.findall(
-                r"(?:^|\n)ASSISTANT:\s*(.*?)(?=\n(?:SYSTEM:|USER:|ASSISTANT:)|\Z)",
-                cleaned,
-                flags=re.DOTALL | re.IGNORECASE,
-            )
-            if assistant_role_blocks:
-                cleaned = (assistant_role_blocks[-1] or "").strip()
-
-            # ChatML fallback: keep last assistant block if present.
-            chatml_assistant_blocks = re.findall(
-                r"<\|im_start\|>assistant\s*(.*?)\s*<\|im_end\|>",
-                cleaned,
-                flags=re.DOTALL | re.IGNORECASE,
-            )
-            if chatml_assistant_blocks:
-                cleaned = (chatml_assistant_blocks[-1] or "").strip()
-
-            # Remove any remaining role-prefix lines that leak through.
-            cleaned = re.sub(r"(?im)^\s*(SYSTEM|USER|ASSISTANT)\s*:\s*$", "", cleaned)
-            cleaned = re.sub(r"(?im)^\s*(SYSTEM|USER)\s*:.*$", "", cleaned)
-            cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-            cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
-            cleaned = cleaned.strip()
-            return cleaned or "(No clean answer produced.)"
+            from core.inference import clean_display_answer
+            return clean_display_answer(text)
         except Exception:
             return (text or "").strip()
 
@@ -14201,12 +14168,10 @@ class MainWindow(QMainWindow):
             lambda msg: self._on_tool_progress_update("b", msg)
         )
         self.tool_worker_b.tool_call_detected.connect(
-            lambda name, args, col: self.chat_display.add_tool_call(name, args, self._map_tool_column(col))
+            lambda name, args, col: self._on_test_chat_tool_call(name, args, col)
         )
         self.tool_worker_b.tool_result_received.connect(
-            lambda name, result, success, col: self.chat_display.add_tool_result(
-                {"tool": name, "result": result}, self._map_tool_column(col), success
-            )
+            lambda name, result, success, col: self._on_test_chat_tool_result(name, result, success, col)
         )
         self.tool_worker_b.inference_finished.connect(self._on_tool_inference_finished_b)
         self.tool_worker_b.inference_failed.connect(
@@ -14229,7 +14194,7 @@ class MainWindow(QMainWindow):
         text = self._clean_test_chat_answer(final_output)
         executed_count = self._count_executed_tools(tool_log)
         if executed_count > 0:
-            text += f"\n\n[Tools Used: {executed_count}]"
+            self._append_test_chat_log(f"[B] Tools executed: {executed_count}")
         self._tool_progress_b = text
         self.chat_display.update_model_b_response(text)
         self._test_finish_pending_model("b", text or "")
@@ -14480,12 +14445,10 @@ class MainWindow(QMainWindow):
             lambda msg: self._on_tool_progress_update("c", msg)
         )
         self.tool_worker_c.tool_call_detected.connect(
-            lambda name, args, col: self.chat_display.add_tool_call(name, args, self._map_tool_column(col))
+            lambda name, args, col: self._on_test_chat_tool_call(name, args, col)
         )
         self.tool_worker_c.tool_result_received.connect(
-            lambda name, result, success, col: self.chat_display.add_tool_result(
-                {"tool": name, "result": result}, self._map_tool_column(col), success
-            )
+            lambda name, result, success, col: self._on_test_chat_tool_result(name, result, success, col)
         )
         self.tool_worker_c.inference_finished.connect(self._on_tool_inference_finished_c)
         self.tool_worker_c.inference_failed.connect(
@@ -14508,7 +14471,7 @@ class MainWindow(QMainWindow):
         text = self._clean_test_chat_answer(final_output)
         executed_count = self._count_executed_tools(tool_log)
         if executed_count > 0:
-            text += f"\n\n[Tools Used: {executed_count}]"
+            self._append_test_chat_log(f"[C] Tools executed: {executed_count}")
         self._tool_progress_c = text
         self.chat_display.update_model_c_response(text)
         self._test_finish_pending_model("c", text or "")

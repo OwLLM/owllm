@@ -123,6 +123,80 @@ def _strip_tool_instruction_block(prompt: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", cleaned)
 
 
+def clean_display_answer(text: str) -> str:
+    """
+    Strip tool transcript noise from model output for clean chat display.
+
+    This intentionally keeps only the human-readable answer and removes
+    tool-call/result scaffolding that belongs in unfiltered/log views.
+    """
+    cleaned = str(text or "")
+
+    # Remove echoed tool-instruction block when model parrots system text.
+    cleaned = re.sub(
+        r"You are a helpful AI assistant with access to tools\..*?Only call tools when necessary\.",
+        "",
+        cleaned,
+        flags=re.DOTALL,
+    )
+
+    # Remove XML tool calls/results and repeated stop tokens.
+    cleaned = re.sub(r"<tool_call>.*?</tool_call>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"<tool_result[^>]*>.*?</tool_result>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = cleaned.replace("</s>", " ")
+
+    # Drop quoted/plain tool transcript blocks the model may echo.
+    marker_re = re.compile(r'^\s*"?\s*[🔧✓✗]\s*(?:Calling|Tool Result)\b', re.IGNORECASE)
+    kept_lines: List[str] = []
+    in_tool_block = False
+    brace_depth = 0
+    for line in cleaned.splitlines():
+        if not in_tool_block and marker_re.search(line or ""):
+            in_tool_block = True
+            brace_depth = 0
+            continue
+
+        if in_tool_block:
+            brace_depth += line.count("{") - line.count("}")
+            line_strip = line.strip()
+            # Most leaked blocks are quoted JSON dumps; end when quote closes and braces are balanced.
+            if brace_depth <= 0 and (line_strip.endswith('"') or not line_strip):
+                in_tool_block = False
+            continue
+
+        kept_lines.append(line)
+    cleaned = "\n".join(kept_lines)
+    cleaned = re.sub(r"(?im)^\s*\[Tools Used:\s*\d+\]\s*$", "", cleaned)
+
+    # Remove role scaffolding.
+    cleaned = re.sub(r"<\|im_start\|>system.*?<\|im_end\|>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+    cleaned = re.sub(r"<\|im_start\|>user.*?<\|im_end\|>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
+
+    # If role transcript exists, keep only final assistant turn.
+    assistant_role_blocks = re.findall(
+        r"(?:^|\n)ASSISTANT:\s*(.*?)(?=\n(?:SYSTEM:|USER:|ASSISTANT:)|\Z)",
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if assistant_role_blocks:
+        cleaned = (assistant_role_blocks[-1] or "").strip()
+
+    chatml_assistant_blocks = re.findall(
+        r"<\|im_start\|>assistant\s*(.*?)\s*<\|im_end\|>",
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if chatml_assistant_blocks:
+        cleaned = (chatml_assistant_blocks[-1] or "").strip()
+
+    cleaned = re.sub(r"(?im)^\s*(SYSTEM|USER|ASSISTANT)\s*:\s*$", "", cleaned)
+    cleaned = re.sub(r"(?im)^\s*(SYSTEM|USER)\s*:.*$", "", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned or "(No clean answer produced.)"
+
+
 @dataclass
 class InferenceConfig:
     prompt: str
@@ -537,7 +611,15 @@ def run_inference_with_tools(
             
             # Call tool callback if provided
             if tool_callback:
-                tool_callback(tool_call.name, tool_call.arguments, result.result if result.success else result.error)
+                tool_callback(
+                    tool_call.name,
+                    tool_call.arguments,
+                    {
+                        "success": result.success,
+                        "result": result.result,
+                        "error": result.error,
+                    },
+                )
             
             # Format result for LLM and append to history
             result_text = format_tool_result_for_llm(tool_call, result)

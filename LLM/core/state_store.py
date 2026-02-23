@@ -452,6 +452,8 @@ class StateStore:
         model_id: str,
         base_model_path: str,
         adapter_dir: Optional[str] = None,
+        config_key: Optional[str] = None,
+        model_fingerprint: Optional[str] = None,
         env_key: Optional[str] = None,
         backend: Optional[str] = None,
         accelerator: Optional[str] = None,
@@ -478,13 +480,15 @@ class StateStore:
         
         conn.execute("""
             INSERT INTO model_onboarding (
-                model_id, base_model_path, adapter_dir, env_key, backend, accelerator,
+                model_id, base_model_path, adapter_dir, config_key, model_fingerprint, env_key, backend, accelerator,
                 status, last_error, healthcheck_log_path, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(model_id) DO UPDATE SET
                 base_model_path=excluded.base_model_path,
                 adapter_dir=excluded.adapter_dir,
+                config_key=excluded.config_key,
+                model_fingerprint=excluded.model_fingerprint,
                 env_key=excluded.env_key,
                 backend=excluded.backend,
                 accelerator=excluded.accelerator,
@@ -492,7 +496,7 @@ class StateStore:
                 last_error=excluded.last_error,
                 healthcheck_log_path=excluded.healthcheck_log_path,
                 updated_at=excluded.updated_at
-        """, (model_id, base_model_path, adapter_dir, env_key, backend, accelerator,
+        """, (model_id, base_model_path, adapter_dir, config_key, model_fingerprint, env_key, backend, accelerator,
               status, last_error, healthcheck_log_path, now))
         
         conn.commit()
@@ -564,6 +568,7 @@ class StateStore:
         conn = self._get_connection()
         report: Dict[str, Any] = {
             "duplicate_onboarding": [],
+            "duplicate_canonical": [],
             "missing_env_for_ready": [],
             "canonical_mismatch": [],
             "stale_building": [],
@@ -600,6 +605,27 @@ class StateStore:
                     })
         except Exception as e:
             report["errors"].append(f"duplicate_onboarding check: {e}")
+
+        # 1b) Duplicate onboarding rows by canonical identity derived from path/key.
+        try:
+            from core.model_id_resolver import to_canonical_id
+            rows = conn.execute(
+                "SELECT model_id, base_model_path FROM model_onboarding"
+            ).fetchall()
+            by_canonical: Dict[str, List[str]] = {}
+            for row in rows:
+                mid = str(row["model_id"] or "")
+                base = str(row["base_model_path"] or "")
+                canonical = to_canonical_id(mid, model_cfg=None, base_model_path=base)
+                by_canonical.setdefault(canonical, []).append(mid)
+            for canonical_id, model_ids in by_canonical.items():
+                uniq = sorted(set(model_ids))
+                if len(uniq) > 1:
+                    report["duplicate_canonical"].append(
+                        {"canonical_id": canonical_id, "model_ids": uniq}
+                    )
+        except Exception as e:
+            report["errors"].append(f"duplicate_canonical check: {e}")
         
         # 2) READY rows must have valid env at .envs/<env_key>/.venv
         if env_root is not None:
@@ -636,16 +662,27 @@ class StateStore:
         except Exception as e:
             report["errors"].append(f"canonical_mismatch check: {e}")
         
-        # 4) Safe repair: backfill models.canonical_model_id = model_id where NULL
+        # 4) Safe repair: backfill models.canonical_model_id from model_path when possible.
         if repair_safe:
             try:
+                from core.model_id_resolver import to_canonical_id
                 info = conn.execute("PRAGMA table_info(models)").fetchall()
                 if any(r[1] == "canonical_model_id" for r in info):
-                    conn.execute(
-                        "UPDATE models SET canonical_model_id = model_id WHERE canonical_model_id IS NULL"
-                    )
+                    rows = conn.execute(
+                        "SELECT model_id, model_path, canonical_model_id FROM models"
+                    ).fetchall()
+                    for row in rows:
+                        if (row["canonical_model_id"] or "").strip():
+                            continue
+                        mid = str(row["model_id"] or "")
+                        path = str(row["model_path"] or "")
+                        canonical = to_canonical_id(mid, model_cfg=None, base_model_path=path)
+                        conn.execute(
+                            "UPDATE models SET canonical_model_id = ? WHERE model_id = ?",
+                            (canonical or mid, mid),
+                        )
                     conn.commit()
-                    report["repaired"].append("backfill models.canonical_model_id where NULL")
+                    report["repaired"].append("backfill models.canonical_model_id from model_path")
             except Exception as e:
                 report["errors"].append(f"repair canonical backfill: {e}")
 

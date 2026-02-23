@@ -25,7 +25,7 @@ from typing import Dict, Optional, Tuple, IO
 
 from core.state_store import get_state_store
 from core.envs.env_registry import EnvSpec
-from core.model_id_resolver import to_canonical_id
+from core.model_id_resolver import to_canonical_id, resolve_onboarding_identity
 from core.envs.capability_matrix import classify_runtime_failure, get_runtime_fallback_packages
 from model_integrity_checker import ModelIntegrityChecker
 
@@ -407,40 +407,14 @@ class LLMServerManager:
             # RUNTIME GATE: Check onboarding status
             from core.model_onboarding import get_onboarding_service
             onboarding = get_onboarding_service()
-            onboarding_id = model_id
-            # IMPORTANT:
-            # - Onboarding is keyed by HF-style ids (org/repo)
-            # - Config keys can be sanitized ids (org_repo, org__repo, etc.)
-            # If a stale onboarding row exists under the sanitized key, it can incorrectly block runtime
-            # even when the canonical HF id is READY. Prefer the canonical HF id when it is READY.
-            if "/" not in (model_id or ""):
-                derived_id = model_id
-                try:
-                    derived_id = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
-                except Exception:
-                    derived_id = model_id
-
-                if derived_id and derived_id != model_id and "/" in derived_id:
-                    try:
-                        derived_status = onboarding.get_onboarding_status(derived_id)
-                    except Exception:
-                        derived_status = None
-                    try:
-                        model_status = onboarding.get_onboarding_status(model_id)
-                    except Exception:
-                        model_status = None
-
-                    if derived_status == "READY":
-                        onboarding_id = derived_id
-                    elif model_status == "READY":
-                        onboarding_id = model_id
-                    elif derived_status is not None:
-                        # Prefer derived id for better error messages (points to the real model identity).
-                        onboarding_id = derived_id
-                    else:
-                        onboarding_id = model_id
-
-            status = onboarding.get_onboarding_status(onboarding_id)
+            identity = resolve_onboarding_identity(
+                model_id,
+                model_cfg=model_cfg,
+                get_status=onboarding.get_onboarding_status,
+                strict=True,
+            )
+            onboarding_id = identity["onboarding_id"] or model_id
+            status = identity["status"]
             if status is None:
                 # Identity-drift fallback: if key lookups miss, match onboarding row by base_model_path.
                 # This keeps runtime gate aligned with _start_server() fallback behavior.
@@ -832,17 +806,17 @@ class LLMServerManager:
                         # Continue to warmup loop
                         port_has_our_server = True
                 # If different model is using this port, treat as conflict and allow reassignment
-                elif reported_model and reported_model not in {model_id, "local-llm", ""}:
+                elif reported_model and reported_model not in {model_id, ""}:
                     log(
                         f"Port {port} is already in use by model '{reported_model}'. "
                         f"Will search for an available port for '{model_id}'."
                     )
-                # If server is healthy and reports generic/local-llm, likely our server
-                elif status in {"ok", "loading"}:
-                    if not reported_model or reported_model in {"local-llm"}:
-                        log(f"Server already running on preferred port {port} (status={status}), reusing it")
-                        self.state_store.upsert_server(model_id, None, port, "RUNNING")
-                        return
+                # Generic model identity is ambiguous; do not reuse to avoid cross-model contamination.
+                elif status in {"ok", "loading"} and not reported_model:
+                    log(
+                        f"Port {port} has a healthy server with unknown model identity; "
+                        f"will not reuse for '{model_id}'."
+                    )
                 # If server is in error state but responding, wait for it to recover
                 elif status == "error":
                     log(f"Server on port {port} reports error status, waiting for recovery...")
@@ -973,7 +947,7 @@ class LLMServerManager:
                             # Unknown status - wait for it in warmup loop
                             log(f"Found our server on port {port} (status={status}), will wait for it")
                             break
-                    elif reported_model and reported_model not in {model_id, "local-llm", ""}:
+                    elif reported_model and reported_model not in {model_id, ""}:
                         # Different model is using this port - immediately search for new port
                         log(
                             f"Port {port} is already in use by a different model '{reported_model}'. "
@@ -982,11 +956,11 @@ class LLMServerManager:
                         # Break out of retry loop immediately - don't waste time retrying
                         port_needs_reassignment = True
                         break
-                    elif status in {"ok", "loading"}:
-                        # Server is healthy and reports generic/local-llm - likely our server
-                        log(f"Found server on port {port} (status={status}, model={reported_model or 'generic'}), reusing it")
-                        self.state_store.upsert_server(model_id, None, port, "RUNNING")
-                        return
+                    elif status in {"ok", "loading"} and not reported_model:
+                        log(
+                            f"Found healthy server on port {port} with unknown model identity; "
+                            f"will not reuse for '{model_id}'."
+                        )
                     elif status == "error":
                         # Server is in error state but responding - wait for recovery
                         log(f"Server on port {port} reports error status, waiting for recovery...")
@@ -1102,7 +1076,7 @@ class LLMServerManager:
             except Exception:
                 pass
             # Also check ports in the standard range (10500-10600)
-            candidate_ports = list(other_model_ports) + list(range(10500, 10601))
+            candidate_ports = sorted({int(p) for p in list(other_model_ports) + list(range(10500, 10601))})
             
             # Remove the current preferred port from candidates
             if preferred_port in candidate_ports:
@@ -1120,7 +1094,7 @@ class LLMServerManager:
                             data = response.json()
                             reported_model = str(data.get("model", "")).strip()
                             # If it's a different model's server, skip this port
-                            if reported_model and reported_model != model_id and reported_model not in {"local-llm", ""}:
+                            if reported_model and reported_model != model_id:
                                 continue
                     except Exception:
                         # Port is not responding to health checks, assume it's free
@@ -1215,7 +1189,10 @@ class LLMServerManager:
             except RuntimeError:
                 raise
             except Exception as integrity_ex:
-                log(f"Model integrity preflight warning: {integrity_ex}")
+                raise RuntimeError(
+                    f"Model integrity preflight failed unexpectedly: {integrity_ex}\n"
+                    f"Model path: {model_path}"
+                )
             
             log(f"Found {len(model_files)} model files, starting server...")
 
@@ -1232,14 +1209,15 @@ class LLMServerManager:
             # IMPORTANT: onboarding is usually keyed by HF id (org/repo), but
             # older/stale rows may still exist under sanitized config keys.
             # Be resilient to key drift by trying both key forms and path match.
-            derived_onboarding_id = self._resolve_onboarding_id(model_id, model_cfg=model_cfg)
-            onboarding_id = derived_onboarding_id
+            identity = resolve_onboarding_identity(
+                model_id,
+                model_cfg=model_cfg,
+                get_status=lambda mid: (self.state_store.get_onboarding(mid) or {}).get("status"),
+                strict=True,
+            )
+            derived_onboarding_id = identity["canonical_id"] or model_id
+            onboarding_id = identity["onboarding_id"] or model_id
             onboarding_entry = self.state_store.get_onboarding(onboarding_id)
-
-            if not onboarding_entry and model_id != onboarding_id:
-                onboarding_entry = self.state_store.get_onboarding(model_id)
-                if onboarding_entry:
-                    onboarding_id = model_id
 
             if not onboarding_entry:
                 # Last fallback: match onboarding rows by base_model_path.
@@ -1255,6 +1233,8 @@ class LLMServerManager:
                         row = matches[0]
                         onboarding_entry = row
                         onboarding_id = row.get("model_id") or onboarding_id
+                except RuntimeError:
+                    raise
                 except Exception:
                     pass
 
@@ -1276,34 +1256,10 @@ class LLMServerManager:
             onboarding_backend = str(onboarding_entry.get("backend") or "").strip().lower()
             use_bundled_backend = onboarding_backend == "llama_cpp_server"
             if not env_key:
-                # Self-heal: legacy/dirty states can have model env_key present while onboarding env_key is null.
-                fallback_model = self.state_store.get_model(onboarding_id) or self.state_store.get_model(model_id)
-                fallback_env_key = (fallback_model or {}).get("env_key")
-                if fallback_env_key:
-                    env_key = fallback_env_key
-                    try:
-                        self.state_store.upsert_onboarding(
-                            model_id=onboarding_id,
-                            base_model_path=onboarding_entry.get("base_model_path") or str(model_path),
-                            adapter_dir=onboarding_entry.get("adapter_dir"),
-                            env_key=env_key,
-                            backend=onboarding_entry.get("backend"),
-                            accelerator=onboarding_entry.get("accelerator"),
-                            status=onboarding_entry.get("status") or "READY",
-                            last_error=onboarding_entry.get("last_error"),
-                            healthcheck_log_path=onboarding_entry.get("healthcheck_log_path"),
-                        )
-                        onboarding_entry = self.state_store.get_onboarding(onboarding_id) or onboarding_entry
-                        log(
-                            f"Recovered missing onboarding env_key from models table: {env_key}"
-                        )
-                    except Exception as heal_ex:
-                        log(f"Failed to persist onboarding env_key recovery: {heal_ex}")
-                if not env_key:
-                    raise RuntimeError(
-                        f"Model '{onboarding_id}' has no env_key in onboarding entry. "
-                        f"Please re-run onboarding."
-                    )
+                raise RuntimeError(
+                    f"Model '{onboarding_id}' has no env_key in onboarding entry. "
+                    f"Please re-run onboarding."
+                )
             
             # Get env spec (should already exist from onboarding)
             python_exe = self.env_registry._get_env_python_executable(env_key)
@@ -2010,7 +1966,7 @@ class LLMServerManager:
                                     reused_data = reused_resp.json()
                                     reused_model = str(reused_data.get("model", "")).strip()
                                     reused_status = str(reused_data.get("status", "")).lower().strip()
-                                    if reused_model in {model_id, "", "local-llm"}:
+                                    if reused_model == model_id:
                                         log(
                                             f"Bind conflict recovered: reusing server on port {port} "
                                             f"(status={reused_status or 'unknown'}, model={reused_model or 'generic'})."
@@ -2509,6 +2465,7 @@ class LLMServerManager:
         start = time.time()
         health_timeout = 10  # higher read timeout during warmup
         last_log = 0.0
+        sleep_s = 1.5
         while time.time() - start < timeout_sec:
             try:
                 response = requests.get(f"{base_url}/health", timeout=health_timeout)
@@ -2524,7 +2481,8 @@ class LLMServerManager:
                 pass
             except Exception:
                 pass
-            time.sleep(2)
+            time.sleep(sleep_s)
+            sleep_s = min(8.0, sleep_s * 1.5)
         raise TimeoutError(
             f"Server for '{model_id}' did not become ready within {timeout_sec}s. "
             "Try freeing VRAM, switching GPU, or reducing max_new_tokens."

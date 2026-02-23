@@ -16,6 +16,7 @@ from core.model_id_resolver import (
     derive_from_model_path,
     to_canonical_id,
     resolve_config_key,
+    resolve_onboarding_identity,
 )
 
 
@@ -102,3 +103,33 @@ class TestIntegrityAndOnboardingAuthority:
         assert "errors" in report
         assert isinstance(report["duplicate_onboarding"], list)
         assert isinstance(report["errors"], list)
+
+
+class TestResolveOnboardingIdentity:
+    def test_prefers_ready_canonical_id(self):
+        statuses = {
+            "unsloth_gemma-2-2b-it-bnb-4bit": "BROKEN",
+            "unsloth/gemma-2-2b-it-bnb-4bit": "READY",
+        }
+
+        out = resolve_onboarding_identity(
+            "unsloth_gemma-2-2b-it-bnb-4bit",
+            model_cfg={"base_model": r"C:\models\unsloth__gemma-2-2b-it-bnb-4bit"},
+            get_status=lambda mid: statuses.get(mid),
+            strict=False,
+        )
+        assert out["onboarding_id"] == "unsloth/gemma-2-2b-it-bnb-4bit"
+        assert out["status"] == "READY"
+
+    def test_strict_mode_raises_on_conflicting_alias_statuses(self):
+        statuses = {
+            "deepseek-ai_deepseek-coder-6.7b-instruct": "READY",
+            "deepseek-ai/deepseek-coder-6.7b-instruct": "BROKEN",
+        }
+        with pytest.raises(RuntimeError):
+            resolve_onboarding_identity(
+                "deepseek-ai_deepseek-coder-6.7b-instruct",
+                model_cfg={"base_model": r"C:\models\deepseek-ai__deepseek-coder-6.7b-instruct"},
+                get_status=lambda mid: statuses.get(mid),
+                strict=True,
+            )

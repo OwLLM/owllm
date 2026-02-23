@@ -249,7 +249,7 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
     
     # RUNTIME GATE: Check onboarding status before attempting server start
     onboarding = get_onboarding_service()
-    from core.model_id_resolver import to_canonical_id
+    from core.model_id_resolver import resolve_onboarding_identity
     model_cfg = None
     if get_global_server_manager():
         try:
@@ -260,25 +260,14 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
             pass
     if not model_cfg and cfg.base_model:
         model_cfg = {"base_model": str(cfg.base_model)}
-    derived_id = to_canonical_id(cfg.model_id, model_cfg=model_cfg, base_model_path=str(cfg.base_model) if cfg.base_model else None)
-    onboarding_id = derived_id or cfg.model_id
-    # Prefer READY row when both canonical and config key exist
-    try:
-        cfg_status = onboarding.get_onboarding_status(cfg.model_id)
-    except Exception:
-        cfg_status = None
-    try:
-        derived_status = onboarding.get_onboarding_status(derived_id) if derived_id else None
-    except Exception:
-        derived_status = None
-    if derived_id and derived_status == "READY":
-        onboarding_id = derived_id
-    elif cfg_status == "READY":
-        onboarding_id = cfg.model_id
-    elif derived_id and derived_status is not None:
-        onboarding_id = derived_id
-
-    status = onboarding.get_onboarding_status(onboarding_id)
+    identity = resolve_onboarding_identity(
+        cfg.model_id,
+        model_cfg=model_cfg,
+        get_status=onboarding.get_onboarding_status,
+        strict=True,
+    )
+    onboarding_id = identity["onboarding_id"] or cfg.model_id
+    status = identity["status"]
     
     # Runtime policy: DO NOT repair/onboard during chat.
     # If the model is not READY, instruct the user to explicitly re-onboard/repair.

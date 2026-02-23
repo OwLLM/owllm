@@ -619,149 +619,25 @@ class SynchronizedChatDisplay(QWidget):
     
     def add_tool_call(self, tool_name: str, args: dict, column: str):
         """
-        Add a tool call indicator to the chat.
+        Deprecated: tool calls belong in side logs/unfiltered views, not clean chat.
         
         Args:
             tool_name: Name of the tool being called
             args: Tool arguments
             column: "a", "b", or "c" for which model column
         """
-        import json
-        
-        # Format arguments for display
-        args_str = json.dumps(args, indent=2) if args else "(no arguments)"
-        text = f"🔧 Calling {tool_name}\n\n{args_str}"
-        
-        # Create tool call bubble
-        bubble = ChatBubble(text, is_user=False)
-        bubble.set_theme(self.is_dark)
-        
-        # Style as tool call (slightly different color)
-        text_color = "white" if self.is_dark else "black"
-        bubble.setStyleSheet(f"""
-            ChatBubble {{
-                background: rgba(102, 126, 234, 0.3);
-                border: 1px solid rgba(102, 126, 234, 0.5);
-                border-radius: 12px;
-            }}
-            QLabel {{
-                background: transparent;
-                color: {text_color};
-                border: none;
-            }}
-        """)
-        
-        # Add to appropriate column
-        self._ensure_response_row_exists()
-        
-        if column.lower() == "a" and self.current_row_a_bubble is not None:
-            self.current_row_a_bubble.update_text(text)
-            self.current_row_a_bubble.setVisible(True)
-            # Apply tool call styling
-            self.current_row_a_bubble.setStyleSheet(bubble.styleSheet())
-        elif column.lower() == "b" and self.num_models >= 2 and self.current_row_b_bubble is not None:
-            self.current_row_b_bubble.update_text(text)
-            self.current_row_b_bubble.setVisible(True)
-            self.current_row_b_bubble.setStyleSheet(bubble.styleSheet())
-        elif column.lower() == "c" and self.num_models == 3 and self.current_row_c_bubble is not None:
-            self.current_row_c_bubble.update_text(text)
-            self.current_row_c_bubble.setVisible(True)
-            self.current_row_c_bubble.setStyleSheet(bubble.styleSheet())
-        
-        self._scroll_to_bottom()
+        return
     
     def add_tool_result(self, result: any, column: str, success: bool = True):
         """
-        Add a tool result to the chat.
+        Deprecated: tool results belong in side logs/unfiltered views, not clean chat.
         
         Args:
             result: Tool result (will be JSON formatted if dict/list)
             column: "a", "b", or "c" for which model column
             success: Whether the tool execution was successful
         """
-        import json
-        
-        # Format result
-        if isinstance(result, (dict, list)):
-            result_str = json.dumps(result, indent=2)
-        else:
-            result_str = str(result)
-        
-        status_icon = "✓" if success else "✗"
-        status_text = "Success" if success else "Error"
-        
-        text = f"{status_icon} Tool Result ({status_text})\n\n{result_str}"
-        
-        # Create new row for tool result - only create bubbles for visible columns
-        bubble_a = ChatBubble("", is_user=False)
-        bubble_a.set_theme(self.is_dark)
-        bubble_a.setVisible(False)
-        
-        bubble_b = None
-        if self.num_models >= 2:
-            bubble_b = ChatBubble("", is_user=False)
-            bubble_b.set_theme(self.is_dark)
-            bubble_b.setVisible(False)
-        
-        bubble_c = None
-        if self.num_models == 3:
-            bubble_c = ChatBubble("", is_user=False)
-            bubble_c.set_theme(self.is_dark)
-            bubble_c.setVisible(False)
-        
-        # Set text and styling for the appropriate column
-        result_text_color = "white" if self.is_dark else "black"
-        result_style = f"""
-            ChatBubble {{
-                background: rgba(76, 175, 80, 0.2);
-                border: 1px solid rgba(76, 175, 80, 0.4);
-                border-radius: 12px;
-            }}
-            QLabel {{
-                background: transparent;
-                color: {result_text_color};
-                border: none;
-                font-family: 'Consolas', 'Courier New', monospace;
-                font-size: 10pt;
-            }}
-        """ if success else f"""
-            ChatBubble {{
-                background: rgba(244, 67, 54, 0.2);
-                border: 1px solid rgba(244, 67, 54, 0.4);
-                border-radius: 12px;
-            }}
-            QLabel {{
-                background: transparent;
-                color: {result_text_color};
-                border: none;
-                font-family: 'Consolas', 'Courier New', monospace;
-                font-size: 10pt;
-            }}
-        """
-        
-        if column.lower() == "a":
-            bubble_a.update_text(text)
-            bubble_a.setVisible(True)
-            bubble_a.setStyleSheet(result_style)
-        elif column.lower() == "b" and bubble_b is not None:
-            bubble_b.update_text(text)
-            bubble_b.setVisible(True)
-            bubble_b.setStyleSheet(result_style)
-        elif column.lower() == "c" and bubble_c is not None:
-            bubble_c.update_text(text)
-            bubble_c.setVisible(True)
-            bubble_c.setStyleSheet(result_style)
-        
-        # Create row
-        row = self._create_message_row(bubble_a, bubble_b, bubble_c, is_user=False)
-        self.rows_layout.insertWidget(self.rows_layout.count() - 1, row)
-        
-        # Reset current row tracking so next response starts fresh
-        self.current_row_a_bubble = None
-        self.current_row_b_bubble = None
-        self.current_row_c_bubble = None
-        
-        self._scroll_to_bottom()
+        return
     
     def set_theme(self, dark_mode: bool):
         """Apply theme to all content"""

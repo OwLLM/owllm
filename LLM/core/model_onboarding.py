@@ -21,6 +21,7 @@ from core.envs.capability_matrix import (
 )
 from model_integrity_checker import ModelIntegrityChecker
 from core.runtime.self_heal_orchestrator import SelfHealOrchestrator
+from core.model_id_resolver import to_canonical_id
 
 logger = logging.getLogger(__name__)
 
@@ -140,14 +141,20 @@ class ModelOnboardingService:
         except Exception:
             pass
 
-        existing_entry = self.state_store.get_onboarding(model_id) or {}
+        model_cfg = _get_model_cfg(model_id)
+        onboarding_key = to_canonical_id(
+            model_id,
+            model_cfg=model_cfg,
+            base_model_path=base_model_path,
+        )
+        existing_entry = self.state_store.get_onboarding(onboarding_key) or {}
         known_env_key = existing_entry.get("env_key")
         known_backend = existing_entry.get("backend")
         known_accelerator = existing_entry.get("accelerator")
         
         # Set status to BUILDING
         self.state_store.upsert_onboarding(
-            model_id=model_id,
+            model_id=onboarding_key,
             base_model_path=base_model_path,
             adapter_dir=adapter_dir,
             env_key=known_env_key,
@@ -169,7 +176,6 @@ class ModelOnboardingService:
             log(f"Detected requirements: {req}")
             
             # Step 2: Resolve stable env_key (pure, no side effects; use capability matrix for parity with runtime)
-            model_cfg = _get_model_cfg(model_id)
             stable_env_key, accelerator, backend = self.env_registry.resolve_env_for_model(
                 base_model_path,
                 adapter_dir,
@@ -232,7 +238,7 @@ class ModelOnboardingService:
                     log(f"Model onboarding failed: {error_msg}")
                     
                     self.state_store.upsert_onboarding(
-                        model_id=model_id,
+                        model_id=onboarding_key,
                         base_model_path=base_model_path,
                         adapter_dir=adapter_dir,
                         env_key=stable_env_key,
@@ -342,7 +348,7 @@ class ModelOnboardingService:
                     error_msg = self._format_probe_missing_package_error(probe_error, log_path)
                     log(f"Model onboarding failed (missing package): {error_msg[:300]}")
                     self.state_store.upsert_onboarding(
-                        model_id=model_id,
+                        model_id=onboarding_key,
                         base_model_path=base_model_path,
                         adapter_dir=adapter_dir,
                         env_key=stable_env_key,
@@ -406,7 +412,7 @@ class ModelOnboardingService:
                         log(f"Model onboarding failed: {error_msg}")
                         
                         self.state_store.upsert_onboarding(
-                            model_id=model_id,
+                            model_id=onboarding_key,
                             base_model_path=base_model_path,
                             adapter_dir=adapter_dir,
                             env_key=edge_env_key,
@@ -430,7 +436,7 @@ class ModelOnboardingService:
                     error_msg = f"Stable env probe failed ({probe_reason}), edge fallback failed: {str(edge_error)[:500]}"
                     
                     self.state_store.upsert_onboarding(
-                        model_id=model_id,
+                        model_id=onboarding_key,
                         base_model_path=base_model_path,
                         adapter_dir=adapter_dir,
                         env_key=stable_env_key,
@@ -461,7 +467,7 @@ class ModelOnboardingService:
                 log(f"Model onboarding failed: {error_msg}")
                 
                 self.state_store.upsert_onboarding(
-                    model_id=model_id,
+                    model_id=onboarding_key,
                     base_model_path=base_model_path,
                     adapter_dir=adapter_dir,
                     env_key=stable_env_key,
@@ -521,7 +527,7 @@ class ModelOnboardingService:
                 log(f"Model onboarding failed: {error_msg}")
 
                 self.state_store.upsert_onboarding(
-                    model_id=model_id,
+                    model_id=onboarding_key,
                     base_model_path=base_model_path,
                     adapter_dir=adapter_dir,
                     env_key=final_env_key,
@@ -576,7 +582,7 @@ class ModelOnboardingService:
                     error_msg = f"Failed to create isolated environment for model-specific dependencies: {dedicated_error}"
                     
                     self.state_store.upsert_onboarding(
-                        model_id=model_id,
+                        model_id=onboarding_key,
                         base_model_path=base_model_path,
                         adapter_dir=adapter_dir,
                         env_key=final_env_key,
@@ -616,7 +622,7 @@ class ModelOnboardingService:
                         log(f"Model onboarding failed: {error_msg}")
                         
                         self.state_store.upsert_onboarding(
-                            model_id=model_id,
+                            model_id=onboarding_key,
                             base_model_path=base_model_path,
                             adapter_dir=adapter_dir,
                             env_key=final_env_key,
@@ -647,7 +653,7 @@ class ModelOnboardingService:
                         log(f"Model onboarding failed: {error_msg}")
                         
                         self.state_store.upsert_onboarding(
-                            model_id=model_id,
+                            model_id=onboarding_key,
                             base_model_path=base_model_path,
                             adapter_dir=adapter_dir,
                             env_key=final_env_key,
@@ -678,7 +684,7 @@ class ModelOnboardingService:
                             error_msg = f"auto-gptq CUDA kernels failed verification. Model startup would crash (0xC0000005). {verify_err}"
                             log(f"Model onboarding failed: {error_msg}")
                             self.state_store.upsert_onboarding(
-                                model_id=model_id,
+                                model_id=onboarding_key,
                                 base_model_path=base_model_path,
                                 adapter_dir=adapter_dir,
                                 env_key=final_env_key,
@@ -703,7 +709,7 @@ class ModelOnboardingService:
             # Success: mark as READY (all checks passed)
             log(f"Model {model_id} successfully onboarded (env: {final_env_key})")
             self.state_store.upsert_onboarding(
-                model_id=model_id,
+                model_id=onboarding_key,
                 base_model_path=base_model_path,
                 adapter_dir=adapter_dir,
                 env_key=final_env_key,
@@ -737,12 +743,12 @@ class ModelOnboardingService:
             error_msg = str(e)
             log(f"Onboarding failed with exception: {error_msg}")
 
-            current_entry = self.state_store.get_onboarding(model_id) or {}
+            current_entry = self.state_store.get_onboarding(onboarding_key) or {}
             persisted_env_key = known_env_key or current_entry.get("env_key")
             persisted_backend = known_backend or current_entry.get("backend")
             persisted_accelerator = known_accelerator or current_entry.get("accelerator")
             self.state_store.upsert_onboarding(
-                model_id=model_id,
+                model_id=onboarding_key,
                 base_model_path=base_model_path,
                 adapter_dir=adapter_dir,
                 env_key=persisted_env_key,
@@ -767,9 +773,17 @@ class ModelOnboardingService:
         return [m for m in all_models if m.get("status") != "READY"]
     
     def get_onboarding_status(self, model_id: str) -> Optional[str]:
-        """Get onboarding status for a model."""
+        """Get onboarding status for a model, preferring canonical identity."""
         entry = self.state_store.get_onboarding(model_id)
-        return entry.get("status") if entry else None
+        if entry:
+            return entry.get("status")
+        model_cfg = _get_model_cfg(model_id)
+        canonical_id = to_canonical_id(model_id, model_cfg=model_cfg, base_model_path=None)
+        if canonical_id and canonical_id != model_id:
+            entry = self.state_store.get_onboarding(canonical_id)
+            if entry:
+                return entry.get("status")
+        return None
     
     def _format_health_check_error(self, result) -> str:
         """Format health check error message."""

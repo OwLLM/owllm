@@ -1,4 +1,5 @@
 import sys
+import json
 from pathlib import Path
 
 
@@ -45,4 +46,29 @@ from dataclasses import dataclass
     cleaned = clean_display_answer(raw)
     assert "Calling read_file" not in cleaned
     assert "Tool Result (Error)" not in cleaned
+    assert "from __future__ import annotations" in cleaned
+
+
+def test_clean_display_answer_against_regression_fixture():
+    fixture = Path(__file__).parent / "fixtures" / "runtime_regression_prompts.json"
+    data = json.loads(fixture.read_text(encoding="utf-8"))
+    blocked = data["tool_read_file_first_lines"]["must_not_appear_in_clean_output"]
+    raw = """
+"🔧 Calling read_file
+
+{
+  "path": "LLM/core/inference.py"
+}"
+"✗ Tool Result (Error)
+
+{
+  "tool": "read_file"
+}"
+
+Here are the first lines:
+from __future__ import annotations
+"""
+    cleaned = clean_display_answer(raw)
+    for marker in blocked:
+        assert marker not in cleaned
     assert "from __future__ import annotations" in cleaned

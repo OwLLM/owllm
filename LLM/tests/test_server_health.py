@@ -5,6 +5,7 @@ import pytest
 import sys
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 # Add LLM to path
 llm_dir = Path(__file__).parent.parent
@@ -21,8 +22,8 @@ def config_path():
 @pytest.fixture
 def server_manager(config_path):
     """Get LLMServerManager instance"""
-    from core.llm_server_manager import get_llm_server_manager
-    return get_llm_server_manager(config_path)
+    from core.llm_server_manager import get_global_server_manager
+    return get_global_server_manager()
 
 
 def test_state_store_servers(server_manager):
@@ -88,6 +89,38 @@ def test_port_allocation(server_manager):
     
     assert free_port is not None
     assert free_port not in used_ports
+
+
+def test_wait_for_health_ok_uses_adaptive_backoff(server_manager):
+    """Polling sleep interval should grow while server reports loading."""
+    sleeps = []
+    fake_now = {"t": 0.0}
+
+    class Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"status": "loading", "model": "m"}
+
+    def fake_get(*args, **kwargs):
+        return Resp()
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        fake_now["t"] += seconds
+
+    def fake_time():
+        return fake_now["t"]
+
+    with patch("core.llm_server_manager.requests.get", side_effect=fake_get), \
+         patch("core.llm_server_manager.time.sleep", side_effect=fake_sleep), \
+         patch("core.llm_server_manager.time.time", side_effect=fake_time):
+        with pytest.raises(TimeoutError):
+            server_manager._wait_for_health_ok("dummy", timeout_sec=8, port=65535)
+
+    assert sleeps, "Expected polling sleeps to be recorded"
+    assert max(sleeps) > min(sleeps), "Expected adaptive (increasing) backoff"
 
 
 if __name__ == "__main__":

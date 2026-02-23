@@ -14,7 +14,7 @@ Conventions:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Callable
 
 
 def derive_from_model_path(base_model_path: str) -> Optional[str]:
@@ -134,3 +134,54 @@ def resolve_config_key(
         except Exception:
             continue
     return None
+
+
+def resolve_onboarding_identity(
+    model_id_or_key: str,
+    model_cfg: Optional[Dict[str, Any]],
+    get_status: Callable[[str], Optional[str]],
+    strict: bool = True,
+) -> Dict[str, Any]:
+    """
+    Resolve runtime onboarding identity deterministically.
+
+    Returns both candidate statuses and the selected onboarding key.
+    When strict=True and both ids exist with conflicting non-READY statuses,
+    raises RuntimeError instead of silently drifting between aliases.
+    """
+    cfg_id = (model_id_or_key or "").strip()
+    canonical_id = to_canonical_id(cfg_id, model_cfg=model_cfg, base_model_path=None)
+
+    cfg_status = get_status(cfg_id) if cfg_id else None
+    canonical_status = get_status(canonical_id) if canonical_id else None
+
+    # Prefer canonical when explicitly READY.
+    if canonical_id and canonical_status == "READY":
+        onboarding_id = canonical_id
+        status = canonical_status
+    elif cfg_status == "READY":
+        onboarding_id = cfg_id
+        status = cfg_status
+    elif canonical_id and canonical_status is not None:
+        onboarding_id = canonical_id
+        status = canonical_status
+    else:
+        onboarding_id = cfg_id
+        status = cfg_status
+
+    if strict and canonical_id and canonical_id != cfg_id:
+        if cfg_status is not None and canonical_status is not None and cfg_status != canonical_status:
+            raise RuntimeError(
+                "Model identity drift detected between config key and canonical id: "
+                f"config_key='{cfg_id}' (status={cfg_status}) vs canonical_id='{canonical_id}' "
+                f"(status={canonical_status}). Please consolidate onboarding state."
+            )
+
+    return {
+        "config_id": cfg_id,
+        "canonical_id": canonical_id,
+        "config_status": cfg_status,
+        "canonical_status": canonical_status,
+        "onboarding_id": onboarding_id,
+        "status": status,
+    }

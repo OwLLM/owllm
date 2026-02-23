@@ -13126,6 +13126,12 @@ class MainWindow(QMainWindow):
     
     def _filter_inference_output(self, buffer_text: str) -> str:
         """Shared filtering function for both models - removes unwanted log messages and technical output"""
+        from core.inference import clean_display_answer
+
+        def finalize(text: str) -> str:
+            # Keep one sanitizer as the source of truth for clean-chat safety.
+            return clean_display_answer(text or "")
+
         # First check for OUTPUT marker - this is the cleanest output
         if "--- OUTPUT ---" in buffer_text:
             parts = buffer_text.split("--- OUTPUT ---", 1)
@@ -13133,7 +13139,7 @@ class MainWindow(QMainWindow):
                 output = parts[1].strip()
                 # If output starts with [ERROR], it's an error message - show it
                 if output.startswith("[ERROR]"):
-                    return output
+                    return finalize(output)
                 
                 # EVEN with OUTPUT marker, we should still filter out any technical lines 
                 # that might have leaked into the output stream (e.g. from stderr)
@@ -13156,7 +13162,7 @@ class MainWindow(QMainWindow):
                         if not line_stripped.startswith('ERROR: '): # Keep actual errors but not just the prefix
                             continue
                     filtered_lines.append(line_stripped)
-                return '\n'.join(filtered_lines).strip()
+                return finalize('\n'.join(filtered_lines).strip())
         
         # Check if this looks like a traceback or error output
         # If we see Python traceback patterns, try to extract just the error message
@@ -13182,9 +13188,9 @@ class MainWindow(QMainWindow):
                     error_lines.append(line_stripped)
                     break
             if error_lines:
-                return f"[ERROR] {error_lines[0]}"
+                return finalize(f"[ERROR] {error_lines[0]}")
             # If we can't find a clear error, return a generic message
-            return "[ERROR] An error occurred during model execution. Check logs for details."
+            return finalize("[ERROR] An error occurred during model execution. Check logs for details.")
         
         # Filter out log lines and technical output
         lines = buffer_text.split('\n')
@@ -13253,10 +13259,10 @@ class MainWindow(QMainWindow):
             if any(m in lower for m in error_markers):
                 lines = [ln.strip() for ln in buffer_text.splitlines() if ln.strip()]
                 tail = lines[-8:] if len(lines) > 8 else lines
-                return "\n".join(tail).strip()
+                return finalize("\n".join(tail).strip())
             return ""
         
-        return result
+        return finalize(result)
     
     def _run_inference_a(self, model_path: str, prompt: str, system_prompt: str = ""):
         """Run inference for Model A using QProcess"""

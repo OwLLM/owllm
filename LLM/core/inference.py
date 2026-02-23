@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, List, Callable, Tuple
+from typing import Optional, List, Callable, Tuple, Any
 import subprocess
 import sys
 import os
@@ -195,6 +195,125 @@ def clean_display_answer(text: str) -> str:
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = cleaned.strip()
     return cleaned or "(No clean answer produced.)"
+
+
+_REFUSAL_PATTERNS = (
+    "i can't assist with that",
+    "i cannot assist with that",
+    "i'm sorry, but i can't assist",
+    "i'm sorry, i can't help",
+    "i cannot help with that",
+    "can't help with that",
+)
+
+
+def _is_unusable_final_answer(text: str) -> bool:
+    cleaned = clean_display_answer(text or "").strip()
+    if not cleaned or cleaned == "(No clean answer produced.)":
+        return True
+    # Treat mostly-empty/whitespace-noise outputs as unusable.
+    if not re.sub(r"[\s\r\n\t]+", "", cleaned):
+        return True
+    # Some models emit literal escaped whitespace sequences like "\\n\\n\\r\\n".
+    if re.fullmatch(r"(?:\\[rnt]|\\u000a|\\u000d|[\s\r\n\t])+", cleaned):
+        return True
+    low = cleaned.lower()
+    if any(p in low for p in _REFUSAL_PATTERNS):
+        return True
+    return False
+
+
+def _derive_answer_from_tool_log(tool_log: List[dict], user_msg: str) -> str:
+    """
+    Deterministic fallback answer from successful tool results.
+    Primarily used when model output after tool execution is blank/refusal.
+    """
+    for entry in reversed(tool_log or []):
+        if str((entry or {}).get("status", "")).lower() != "success":
+            continue
+        tool = str((entry or {}).get("tool", "") or "")
+        result = (entry or {}).get("result")
+        if tool == "read_file" and isinstance(result, dict):
+            content = str(result.get("content") or "")
+            if not content.strip():
+                continue
+            lines = content.splitlines()
+            if not lines:
+                continue
+            args = (entry or {}).get("args") or {}
+            requested_path = str(args.get("path") or "requested file")
+            # Match user intent "show first lines" with a short deterministic preview.
+            wanted = 12 if "first line" in (user_msg or "").lower() else 20
+            preview = "\n".join(lines[:wanted]).strip()
+            if preview:
+                return (
+                    f"Here are the first lines from `{requested_path}`:\n\n"
+                    f"```python\n{preview}\n```"
+                )
+    return ""
+
+
+def _extract_direct_read_file_path(user_msg: str) -> Optional[str]:
+    text = (user_msg or "").strip()
+    if not text:
+        return None
+    patterns = [
+        r"read_file\s+(?:on|for)?\s*([^\s,;]+)",
+        r"read\s+(?:the\s+)?file\s+([^\s,;]+)",
+        r"open\s+(?:the\s+)?file\s+([^\s,;]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+        path = (m.group(1) or "").strip().strip("\"'`")
+        # Trim trailing punctuation from natural language.
+        path = re.sub(r"[).,;:!?]+$", "", path)
+        if path:
+            return path
+    return None
+
+
+def _extract_direct_list_dir_path(user_msg: str) -> Optional[str]:
+    text = (user_msg or "").strip()
+    if not text:
+        return None
+    patterns = [
+        r"list_dir\s+(?:on|for|in)?\s*([^\s,;]+)",
+        r"(?:list|show)\s+(?:files|folders|directories|dir)\s+(?:in|under|at)\s+([^\s,;]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+        path = (m.group(1) or "").strip().strip("\"'`")
+        path = re.sub(r"[).,;:!?]+$", "", path)
+        if path:
+            return path
+    if re.search(r"\b(list|show)\s+(files|folders|directories|dir)\b", text, flags=re.IGNORECASE):
+        return "."
+    return None
+
+
+def _extract_direct_search_in_file_intent(user_msg: str) -> Optional[Tuple[str, str]]:
+    text = (user_msg or "").strip()
+    if not text:
+        return None
+    patterns = [
+        r"(?:search|find)\s+for\s+['\"]([^'\"]+)['\"]\s+in\s+([^\s,;]+)",
+        r"(?:search|find)\s+for\s+([^\s,;]+)\s+in\s+([^\s,;]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if not m:
+            continue
+        query = (m.group(1) or "").strip().strip("\"'`")
+        path = (m.group(2) or "").strip().strip("\"'`")
+        query = re.sub(r"[).,;:!?]+$", "", query)
+        path = re.sub(r"[).,;:!?]+$", "", path)
+        if query and path:
+            return path, query
+    return None
 
 
 @dataclass
@@ -443,6 +562,131 @@ def run_inference_with_tools(
         log(f"[ToolGuard] Bypassing tool mode ({reason})")
         output = run_inference(inference_cfg, env, log_callback=log_callback)
         return output, []
+
+    # Deterministic fast-path for explicit read_file requests.
+    # This avoids model-specific tool-call formatting quirks and guarantees a usable answer.
+    direct_read_path = _extract_direct_read_file_path(user_msg)
+    if direct_read_path:
+        from core.tool_calling import ToolCall, ToolCallFormat
+        direct_call = ToolCall(
+            name="read_file",
+            arguments={"path": direct_read_path},
+            format=ToolCallFormat.JSON,
+            raw_text='{"tool":"read_file","args":{"path":"..."},"id":"direct"}',
+            call_id=f"direct_{int(time.time() * 1000)}",
+        )
+        result = executor.execute(direct_call)
+        log_entry = {
+            "tool": "read_file",
+            "args": {"path": direct_read_path},
+            "status": "success" if result.success else "error",
+            "result": result.result if result.success else None,
+            "error": result.error if not result.success else None,
+            "iteration": 0,
+            "source": "direct_intent_fastpath",
+        }
+        tool_log.append(log_entry)
+        if tool_callback:
+            tool_callback(
+                "read_file",
+                {"path": direct_read_path},
+                {"success": result.success, "result": result.result, "error": result.error},
+            )
+        if result.success:
+            deterministic = _derive_answer_from_tool_log(tool_log, user_msg)
+            if deterministic:
+                return deterministic, tool_log
+        # Fall through to model loop only if direct fast-path did not succeed.
+
+    # Deterministic fast-path for explicit list directory intents.
+    direct_list_path = _extract_direct_list_dir_path(user_msg)
+    if direct_list_path is not None:
+        from core.tool_calling import ToolCall, ToolCallFormat
+        direct_call = ToolCall(
+            name="list_dir",
+            arguments={"path": direct_list_path},
+            format=ToolCallFormat.JSON,
+            raw_text='{"tool":"list_dir","args":{"path":"..."},"id":"direct"}',
+            call_id=f"direct_{int(time.time() * 1000)}",
+        )
+        result = executor.execute(direct_call)
+        log_entry = {
+            "tool": "list_dir",
+            "args": {"path": direct_list_path},
+            "status": "success" if result.success else "error",
+            "result": result.result if result.success else None,
+            "error": result.error if not result.success else None,
+            "iteration": 0,
+            "source": "direct_intent_fastpath",
+        }
+        tool_log.append(log_entry)
+        if tool_callback:
+            tool_callback(
+                "list_dir",
+                {"path": direct_list_path},
+                {"success": result.success, "result": result.result, "error": result.error},
+            )
+        if result.success and isinstance(result.result, dict):
+            items = result.result.get("items") or []
+            shown = []
+            for item in items[:40]:
+                name = str((item or {}).get("name") or "")
+                kind = str((item or {}).get("type") or "file")
+                if name:
+                    suffix = "/" if kind == "dir" else ""
+                    shown.append(f"- {name}{suffix}")
+            if shown:
+                return (
+                    f"Directory listing for `{direct_list_path}`:\n\n"
+                    + "\n".join(shown)
+                ), tool_log
+        # Fall through to model loop only if direct fast-path did not succeed.
+
+    # Deterministic fast-path for explicit search-in-file intents.
+    direct_search = _extract_direct_search_in_file_intent(user_msg)
+    if direct_search:
+        from core.tool_calling import ToolCall, ToolCallFormat
+        search_path, query = direct_search
+        read_call = ToolCall(
+            name="read_file",
+            arguments={"path": search_path},
+            format=ToolCallFormat.JSON,
+            raw_text='{"tool":"read_file","args":{"path":"..."},"id":"direct"}',
+            call_id=f"direct_{int(time.time() * 1000)}",
+        )
+        result = executor.execute(read_call)
+        log_entry = {
+            "tool": "read_file",
+            "args": {"path": search_path},
+            "status": "success" if result.success else "error",
+            "result": result.result if result.success else None,
+            "error": result.error if not result.success else None,
+            "iteration": 0,
+            "source": "direct_intent_fastpath",
+        }
+        tool_log.append(log_entry)
+        if tool_callback:
+            tool_callback(
+                "read_file",
+                {"path": search_path},
+                {"success": result.success, "result": result.result, "error": result.error},
+            )
+        if result.success and isinstance(result.result, dict):
+            content = str(result.result.get("content") or "")
+            matches: List[str] = []
+            qlow = query.lower()
+            for idx, line in enumerate(content.splitlines(), start=1):
+                if qlow in line.lower():
+                    matches.append(f"{idx}: {line}")
+                if len(matches) >= 20:
+                    break
+            if matches:
+                return (
+                    f"Matches for `{query}` in `{search_path}`:\n\n"
+                    + "\n".join(matches)
+                ), tool_log
+            return f"No matches for `{query}` in `{search_path}`.", tool_log
+        # Fall through to model loop only if direct fast-path did not succeed.
     
     # Add system prompt if provided
     if cfg.system_prompt:
@@ -463,6 +707,30 @@ def run_inference_with_tools(
             + f"Tool execution was stopped: {reason}.\n"
             + "Now provide your best final answer to the user without calling tools. "
             + "If required data is missing, say exactly what is missing in one short sentence."
+        )
+        inference_cfg = InferenceConfig(
+            prompt=finalize_prompt,
+            model_id=cfg.model_id,
+            base_model=cfg.base_model,
+            adapter_dir=cfg.adapter_dir,
+            max_new_tokens=cfg.max_new_tokens,
+            temperature=cfg.temperature,
+            images=cfg.images,
+        )
+        return run_inference(inference_cfg, env, log_callback=log_callback)
+
+    def _force_finalize_from_tool_results() -> str:
+        """
+        Ask model to synthesize a direct user answer from already-captured tool results.
+        No additional tool use should happen in this pass.
+        """
+        safe_prompt = _strip_tool_instruction_block(conversation_history)
+        finalize_prompt = (
+            safe_prompt
+            + "\n\n[Finalization directive]\n"
+            + "Use the latest tool results already present in the conversation.\n"
+            + "Do not call tools again.\n"
+            + "Answer the user request directly and concisely."
         )
         inference_cfg = InferenceConfig(
             prompt=finalize_prompt,
@@ -633,4 +901,19 @@ def run_inference_with_tools(
             final_output = _force_finalize_without_tools("tool_call_left_in_output")
         except Exception as finalize_ex:
             log(f"[ToolGuard] Final fallback finalize failed: {finalize_ex}")
+
+    # Hard guarantee for tool-enabled turns: if tools succeeded but final answer is blank/refusal,
+    # synthesize once from tool results; if still unusable, produce deterministic fallback from logs.
+    had_successful_tools = any(str((e or {}).get("status", "")).lower() == "success" for e in (tool_log or []))
+    if had_successful_tools and _is_unusable_final_answer(final_output):
+        try:
+            model_synth = _force_finalize_from_tool_results()
+            if not _is_unusable_final_answer(model_synth):
+                final_output = model_synth
+        except Exception as finalize_ex:
+            log(f"[ToolGuard] Tool-result synthesis finalize failed: {finalize_ex}")
+        if _is_unusable_final_answer(final_output):
+            deterministic = _derive_answer_from_tool_log(tool_log, user_msg)
+            if deterministic:
+                final_output = deterministic
     return final_output, tool_log

@@ -6,7 +6,16 @@ from pathlib import Path
 llm_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(llm_dir))
 
-from core.inference import _is_action_request, _is_low_intent_message, clean_display_answer
+from core.inference import (
+    _is_action_request,
+    _is_low_intent_message,
+    clean_display_answer,
+    _is_unusable_final_answer,
+    _derive_answer_from_tool_log,
+    _extract_direct_read_file_path,
+    _extract_direct_list_dir_path,
+    _extract_direct_search_in_file_intent,
+)
 
 
 def test_action_request_detects_read_file_tool_name():
@@ -72,3 +81,46 @@ from __future__ import annotations
     for marker in blocked:
         assert marker not in cleaned
     assert "from __future__ import annotations" in cleaned
+
+
+def test_unusable_answer_detection_for_refusal_and_blank():
+    assert _is_unusable_final_answer("I'm sorry, but I can't assist with that.")
+    assert _is_unusable_final_answer("\n\n\r\n\t")
+    assert not _is_unusable_final_answer("Here are the first lines:\nfrom __future__ import annotations")
+
+
+def test_deterministic_fallback_from_read_file_tool_log():
+    tool_log = [
+        {
+            "tool": "read_file",
+            "status": "success",
+            "args": {"path": "LLM/core/inference.py"},
+            "result": {
+                "content": "from __future__ import annotations\nfrom dataclasses import dataclass\nfrom pathlib import Path\n"
+            },
+        }
+    ]
+    out = _derive_answer_from_tool_log(tool_log, "show first lines")
+    assert "Here are the first lines" in out
+    assert "from __future__ import annotations" in out
+
+
+def test_extract_direct_read_file_path_from_user_text():
+    assert _extract_direct_read_file_path("hey, use read_file on LLM/core/inference.py and show first lines") == "LLM/core/inference.py"
+    assert _extract_direct_read_file_path("please read the file README.md") == "README.md"
+
+
+def test_extract_direct_list_dir_path_from_user_text():
+    assert _extract_direct_list_dir_path("list files in LLM/core") == "LLM/core"
+    assert _extract_direct_list_dir_path("show directories") == "."
+
+
+def test_extract_direct_search_intent_from_user_text():
+    assert _extract_direct_search_in_file_intent("search for _ACTION_KEYWORDS in LLM/core/inference.py") == (
+        "LLM/core/inference.py",
+        "_ACTION_KEYWORDS",
+    )
+    assert _extract_direct_search_in_file_intent('find for "run_inference" in LLM/core/inference.py') == (
+        "LLM/core/inference.py",
+        "run_inference",
+    )

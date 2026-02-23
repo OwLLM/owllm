@@ -96,6 +96,31 @@ def _is_action_request(user_msg: str) -> bool:
     return bool(_ACTION_INTENT_PATTERN.search(text))
 
 
+def _is_contextual_tool_followup(user_msg: str, prompt: str) -> bool:
+    """
+    Treat follow-up turns as action-capable when they clearly reference previous tool/file context.
+    This prevents non-action bypass for turns like "where did you look for it?".
+    """
+    text = (user_msg or "").strip().lower()
+    if not text:
+        return False
+    has_tool_context = "<tool_result" in str(prompt or "").lower() or "<tool_call>" in str(prompt or "").lower()
+    if not has_tool_context:
+        return False
+    followup_markers = (
+        "where did you look",
+        "which location",
+        "what location",
+        "where are you looking",
+        "look for it",
+        "that file",
+        "the file",
+        "path",
+        "location",
+    )
+    return any(m in text for m in followup_markers)
+
+
 def _is_transient_runtime_failure(last_error: str) -> bool:
     low = (last_error or "").strip().lower()
     if not low:
@@ -470,7 +495,7 @@ def run_inference_with_tools(
     conversation_history = cfg.prompt
     user_msg = _extract_last_user_message(cfg.prompt)
     low_intent = _is_low_intent_message(user_msg)
-    explicit_action_request = _is_action_request(user_msg)
+    explicit_action_request = _is_action_request(user_msg) or _is_contextual_tool_followup(user_msg, cfg.prompt)
 
     # Global default-safe behavior:
     # - For non-action prompts (including greetings), use plain model inference (no tool loop).

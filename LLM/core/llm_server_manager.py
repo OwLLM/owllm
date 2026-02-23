@@ -361,6 +361,61 @@ class LLMServerManager:
             if row_path == target_path:
                 matches.append(row)
         return matches
+
+    def _canonical_server_id(self, model_id: str) -> str:
+        """
+        Canonicalize server slot identity so alias IDs share one runtime slot.
+        """
+        cfg = (self.config.get("models") or {}).get(model_id) if isinstance(self.config, dict) else None
+        base_model_path = ""
+        try:
+            base_model_path = str((cfg or {}).get("base_model") or "")
+        except Exception:
+            base_model_path = ""
+        if not base_model_path:
+            try:
+                row = self.state_store.get_onboarding(model_id) or {}
+                base_model_path = str(row.get("base_model_path") or "")
+            except Exception:
+                base_model_path = ""
+        try:
+            return to_canonical_id(model_id, model_cfg=cfg, base_model_path=base_model_path) or model_id
+        except Exception:
+            return model_id
+
+    def _find_canonical_server_candidates(self, canonical_id: str) -> list[dict]:
+        """
+        Find active server rows (RUNNING/STARTING) that map to the same canonical model.
+        """
+        rows: list[dict] = []
+        for st in ("RUNNING", "STARTING"):
+            for row in (self.state_store.list_servers(status=st) or []):
+                rid = str((row or {}).get("model_id") or "")
+                if not rid:
+                    continue
+                if self._canonical_server_id(rid) == canonical_id:
+                    rows.append(row)
+        return rows
+
+    def _cleanup_canonical_duplicate_server_rows(self, canonical_id: str, keep_model_id: str):
+        """
+        Mark duplicate canonical server rows as STOPPED so UI/runtime don't show parallel aliases.
+        """
+        for row in self._find_canonical_server_candidates(canonical_id):
+            rid = str((row or {}).get("model_id") or "")
+            if not rid or rid == keep_model_id:
+                continue
+            try:
+                self.state_store.upsert_server(
+                    model_id=rid,
+                    pid=None,
+                    port=int((row or {}).get("port") or 0) or 10500,
+                    status="STOPPED",
+                    stopped_at=datetime.utcnow().isoformat(),
+                    last_error="Stopped duplicate alias server slot; canonical slot in use.",
+                )
+            except Exception:
+                pass
     
     def ensure_server_running(self, model_id: str, log_callback=None) -> str:
         """
@@ -414,6 +469,7 @@ class LLMServerManager:
                 strict=True,
             )
             onboarding_id = identity["onboarding_id"] or model_id
+            canonical_server_id = identity["canonical_id"] or onboarding_id or model_id
             status = identity["status"]
             if status is None:
                 # Identity-drift fallback: if key lookups miss, match onboarding row by base_model_path.
@@ -489,6 +545,42 @@ class LLMServerManager:
                     f"WARNING: Model '{model_id}' shares port {preferred_port} with: {', '.join(duplicate_models)}\n"
                     f"This may cause port conflicts. Consider assigning unique ports in llm_backends.yaml"
                 )
+
+            # Canonical reuse gate: if an alias of this same canonical model is already running/loading,
+            # reuse that server slot instead of starting another one.
+            canonical_candidates = self._find_canonical_server_candidates(canonical_server_id)
+            for row in canonical_candidates:
+                rid = str((row or {}).get("model_id") or "")
+                port = int((row or {}).get("port") or 0)
+                if not rid or port <= 0:
+                    continue
+                try:
+                    r = requests.get(f"http://127.0.0.1:{port}/health", timeout=2)
+                    if r.status_code != 200:
+                        continue
+                    data = r.json()
+                    health_status = str(data.get("status", "")).strip().lower()
+                    reported_model = str(data.get("model", "")).strip()
+                    reported_canonical = self._canonical_server_id(reported_model) if reported_model else ""
+                    if reported_canonical and reported_canonical != canonical_server_id:
+                        continue
+                    if health_status in {"ok", "loading"}:
+                        log(
+                            f"Reusing canonical server slot '{rid}' on port {port} "
+                            f"for requested model '{model_id}'."
+                        )
+                        self.state_store.upsert_server(
+                            model_id=model_id,
+                            pid=None,
+                            port=port,
+                            status="RUNNING" if health_status == "ok" else "STARTING",
+                        )
+                        self._cleanup_canonical_duplicate_server_rows(canonical_server_id, keep_model_id=model_id)
+                        if health_status == "loading":
+                            self._wait_for_health_ok(model_id, self.warmup_timeout, log_callback=log, port=port)
+                        return self._get_server_url(model_id)
+                except Exception:
+                    continue
             
             # Check if already running and healthy
             if model_id in self.running_servers:

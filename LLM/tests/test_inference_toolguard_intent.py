@@ -9,6 +9,7 @@ sys.path.insert(0, str(llm_dir))
 from core.inference import (
     _is_action_request,
     _is_low_intent_message,
+    _is_contextual_tool_followup,
     clean_display_answer,
     _is_unusable_final_answer,
     _derive_answer_from_tool_log,
@@ -31,6 +32,16 @@ def test_low_intent_greeting_with_action_is_not_low_intent():
 
 def test_low_intent_greeting_only_still_low_intent():
     assert _is_low_intent_message("hey")
+
+
+def test_contextual_tool_followup_detects_where_did_you_look():
+    prompt = """
+USER: Read the content of Dios.txt
+ASSISTANT: <tool_call>read_file(path="Dios.txt")</tool_call>
+<tool_result tool="read_file" error="true">File not found</tool_result>
+USER: where did you look for it ?
+"""
+    assert _is_contextual_tool_followup("where did you look for it ?", prompt)
 
 
 def test_clean_display_answer_removes_tool_transcript_noise():

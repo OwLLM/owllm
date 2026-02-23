@@ -474,7 +474,12 @@ class ToolInferenceWorker(QThread):
             def tool_callback(tool_name: str, args: dict, result):
                 self.tool_call_detected.emit(tool_name, args, self.model_column)
                 success = bool(isinstance(result, dict) and result.get("success"))
-                payload = result.get("result") if isinstance(result, dict) and "result" in result else result
+                if isinstance(result, dict):
+                    payload = result.get("result") if success else result.get("error")
+                    if payload is None and "result" in result:
+                        payload = result.get("result")
+                else:
+                    payload = result
                 self.tool_result_received.emit(tool_name, payload, success, self.model_column)
             
             self.progress_update.emit("[INFO] Preparing inference...")

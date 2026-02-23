@@ -12,9 +12,8 @@ from core.inference import (
     clean_display_answer,
     _is_unusable_final_answer,
     _derive_answer_from_tool_log,
-    _extract_direct_read_file_path,
-    _extract_direct_list_dir_path,
-    _extract_direct_search_in_file_intent,
+    ToolEnabledInferenceConfig,
+    run_inference_with_tools,
 )
 
 
@@ -114,24 +113,79 @@ def test_deterministic_fallback_from_read_file_tool_log():
     assert "from __future__ import annotations" in out
 
 
-def test_extract_direct_read_file_path_from_user_text():
-    assert _extract_direct_read_file_path("hey, use read_file on LLM/core/inference.py and show first lines") == "LLM/core/inference.py"
-    assert _extract_direct_read_file_path("please read the file README.md") == "README.md"
-    assert _extract_direct_read_file_path("fucking file name is Dios.txt") == "Dios.txt"
-    assert _extract_direct_read_file_path("Dios.txt") == "Dios.txt"
+def test_action_prompt_uses_model_loop_before_tool_execution(monkeypatch):
+    class _NativeExecutorStub:
+        def __init__(self):
+            self.calls = 0
 
+        def execute(self, tool_call):
+            self.calls += 1
+            raise AssertionError("Executor should not run when model emits no tool calls")
 
-def test_extract_direct_list_dir_path_from_user_text():
-    assert _extract_direct_list_dir_path("list files in LLM/core") == "LLM/core"
-    assert _extract_direct_list_dir_path("show directories") == "."
+    model_calls = {"count": 0}
 
+    def _fake_run_inference(cfg, env=None, log_callback=None):
+        model_calls["count"] += 1
+        return "Final answer with no tool call."
 
-def test_extract_direct_search_intent_from_user_text():
-    assert _extract_direct_search_in_file_intent("search for _ACTION_KEYWORDS in LLM/core/inference.py") == (
-        "LLM/core/inference.py",
-        "_ACTION_KEYWORDS",
+    monkeypatch.setattr("core.inference.run_inference", _fake_run_inference)
+
+    executor = _NativeExecutorStub()
+    cfg = ToolEnabledInferenceConfig(
+        prompt="use read_file on LLM/core/inference.py and show first lines",
+        model_id="dummy",
+        enable_tools=True,
+        native_executor=executor,
+        max_tool_iterations=1,
     )
-    assert _extract_direct_search_in_file_intent('find for "run_inference" in LLM/core/inference.py') == (
-        "LLM/core/inference.py",
-        "run_inference",
+    output, tool_log = run_inference_with_tools(cfg=cfg, tool_callback=None, approval_callback=None, log_callback=None)
+    assert model_calls["count"] == 1
+    assert executor.calls == 0
+    assert tool_log == []
+    assert "Final answer with no tool call." in output
+
+
+def test_post_tool_fallback_is_bounded_and_uses_tool_log(monkeypatch):
+    class _NativeExecutorStub:
+        def execute(self, tool_call):
+            return type(
+                "Result",
+                (),
+                {
+                    "success": True,
+                    "result": {
+                        "content": (
+                            "from __future__ import annotations\n"
+                            "from dataclasses import dataclass\n"
+                        )
+                    },
+                    "error": None,
+                },
+            )()
+
+    calls = {"count": 0}
+
+    def _fake_run_inference(cfg, env=None, log_callback=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return '<tool_call>read_file(path="LLM/core/inference.py")</tool_call>'
+        if calls["count"] == 2:
+            return "I'm sorry, but I can't assist with that."
+        # Finalization pass intentionally unusable -> deterministic tool-log fallback
+        return "\n\n\r\n\t"
+
+    monkeypatch.setattr("core.inference.run_inference", _fake_run_inference)
+
+    cfg = ToolEnabledInferenceConfig(
+        prompt="use read_file on LLM/core/inference.py and show first lines",
+        model_id="dummy",
+        enable_tools=True,
+        native_executor=_NativeExecutorStub(),
+        max_tool_iterations=3,
     )
+    output, tool_log = run_inference_with_tools(cfg=cfg, tool_callback=None, approval_callback=None, log_callback=None)
+
+    assert calls["count"] == 3  # model loop + one bounded finalization pass
+    assert any((e or {}).get("status") == "success" for e in tool_log)
+    assert "Here are the first lines" in output
+    assert "from __future__ import annotations" in output

@@ -137,6 +137,8 @@ def _is_contextual_tool_followup(user_msg: str, prompt: str) -> bool:
         "it's there",
         "it is in",
         "it's in",
+        "it does exist",
+        "does exist",
         "why you do not find",
         "why don't you find",
     )
@@ -148,6 +150,16 @@ def _is_contextual_tool_followup(user_msg: str, prompt: str) -> bool:
     # Path-bearing follow-up phrases like "it's in LLM/Dios.txt for the ..."
     if re.search(r"\b[A-Za-z0-9_.\-\\/]+\.[A-Za-z0-9]{1,16}\b", text):
         return True
+    # Absolute/relative directory paths without filename extension should still count.
+    # Examples: "C:\\1_Git\\LocaLLM\\LLM", "/workspace/project/src", "LLM/tools"
+    if re.fullmatch(r"[a-z]:\\[^\r\n]+", text.strip()):
+        return True
+    if ("\\" in text or "/" in text) and len(re.split(r"[\\/]+", text.strip())) >= 2:
+        return True
+    # Short confirmation replies in a file-context turn should remain actionable.
+    if has_file_context and len(text) <= 40:
+        if any(tok in text for tok in ("exist", "exists", "there", "here", "that file", "this file", "yes")):
+            return True
     return False
 
 
@@ -203,6 +215,10 @@ def clean_display_answer(text: str) -> str:
     cleaned = re.sub(r"(?im)^\s*`{0,3}\s*<\s*/\s*tool_call\s*>\s*`{0,3}\s*$", "", cleaned)
     # Remove malformed forms missing opening '<', e.g. ```tool_call>read_file(...)</tool_call>
     cleaned = re.sub(r"(?is)tool_call>\s*\w+\s*\(.*?\)\s*</\s*tool_call\s*>", "", cleaned)
+    # Remove malformed forms missing opening '<' for tool_result blocks too.
+    cleaned = re.sub(r"(?is)tool_result\b[^>]*>.*?</\s*tool_result\s*>", "", cleaned)
+    # Remove fenced snippets that are only malformed tool tags/results.
+    cleaned = re.sub(r"(?is)```+\s*tool_(?:call|result)\b[\s\S]*?```+", "", cleaned)
     cleaned = cleaned.replace("</s>", " ")
 
     # Drop quoted/plain tool transcript blocks the model may echo.
@@ -210,7 +226,19 @@ def clean_display_answer(text: str) -> str:
     kept_lines: List[str] = []
     in_tool_block = False
     brace_depth = 0
+    in_tool_tag_block = False
     for line in cleaned.splitlines():
+        line_low = (line or "").lower()
+        if not in_tool_tag_block and ("tool_result" in line_low or "tool_call" in line_low):
+            # Drop residual/malformed tag lines and continue until explicit closing appears.
+            in_tool_tag_block = True
+            if "</tool_result>" in line_low or "</tool_call>" in line_low:
+                in_tool_tag_block = False
+            continue
+        if in_tool_tag_block:
+            if "</tool_result>" in line_low or "</tool_call>" in line_low:
+                in_tool_tag_block = False
+            continue
         if not in_tool_block and marker_re.search(line or ""):
             in_tool_block = True
             brace_depth = 0
@@ -266,6 +294,22 @@ _REFUSAL_PATTERNS = (
     "can't help with that",
 )
 
+_TOOL_CONTRADICTION_PATTERNS = (
+    "i can't access external files",
+    "i cannot access external files",
+    "i can't read files from your system",
+    "i cannot read files from your system",
+    "i don't have access to external files",
+    "i don't have direct access to external files",
+    "i don't have the ability to directly read files",
+    "i cannot directly read files",
+    "i can't access local files",
+    "i cannot access local files",
+    "i cannot access or read files",
+    "i don't have the capability to read files",
+    "i don't have the ability to read files",
+)
+
 
 def _is_unusable_final_answer(text: str) -> bool:
     cleaned = clean_display_answer(text or "").strip()
@@ -281,6 +325,77 @@ def _is_unusable_final_answer(text: str) -> bool:
     if any(p in low for p in _REFUSAL_PATTERNS):
         return True
     return False
+
+
+def _is_tool_contradiction_answer(text: str) -> bool:
+    low = clean_display_answer(text or "").strip().lower()
+    if not low:
+        return False
+    return any(p in low for p in _TOOL_CONTRADICTION_PATTERNS)
+
+
+def _extract_path_candidates(text: str) -> List[str]:
+    s = str(text or "")
+    out: List[str] = []
+    for m in re.finditer(r"[A-Za-z]:\\[^\s\"'`]+", s):
+        out.append(m.group(0))
+    for m in re.finditer(r"\b(?:\./)?[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+\b", s):
+        out.append(m.group(0))
+    return out
+
+
+def _normalize_tool_arguments(tool_name: str, args: Dict[str, Any], user_msg: str) -> Dict[str, Any]:
+    """
+    Bounded self-healing for common model path mistakes.
+    Keeps model-driven tool selection intact while correcting obviously invalid path forms.
+    """
+    out = dict(args or {})
+    if str(tool_name or "") not in {"read_file", "list_dir", "write_file"}:
+        return out
+    path = str(out.get("path") or "").strip()
+    if not path:
+        return out
+
+    # Normalize accidental absolute-like root slash to workspace-relative.
+    if path.startswith("/") and not re.match(r"^[A-Za-z]:\\", path):
+        path = path.lstrip("/")
+
+    candidates = _extract_path_candidates(user_msg)
+    normalized_candidates: List[str] = []
+    for c in candidates:
+        c2 = c.replace("\\", "/")
+        # If absolute under app root, convert to relative.
+        try:
+            app_root = get_app_root().resolve()
+            cp = Path(c)
+            if cp.is_absolute():
+                cp_res = cp.resolve()
+                if str(cp_res).lower().startswith(str(app_root).lower()):
+                    c2 = str(cp_res.relative_to(app_root)).replace("\\", "/")
+        except Exception:
+            pass
+        normalized_candidates.append(c2)
+
+    path_norm = path.replace("\\", "/")
+    if "/" not in path_norm:
+        # Bare filename from model: prefer explicit user path with same basename.
+        for c in normalized_candidates:
+            if Path(c).name.lower() == Path(path_norm).name.lower() and "/" in c:
+                path_norm = c
+                break
+    else:
+        # Replace common placeholder paths emitted by models with explicit user-provided path.
+        placeholder_markers = ("path_to_your_file", "your_file_path", "<path>", "your/path", "path/to")
+        if any(m in path_norm.lower() for m in placeholder_markers):
+            for c in normalized_candidates:
+                if Path(c).name.lower() == Path(path_norm).name.lower() and "/" in c:
+                    path_norm = c
+                    break
+    if path_norm.startswith("/"):
+        path_norm = path_norm.lstrip("/")
+
+    out["path"] = path_norm
+    return out
 
 
 def _derive_answer_from_tool_log(tool_log: List[dict], user_msg: str) -> str:
@@ -302,8 +417,16 @@ def _derive_answer_from_tool_log(tool_log: List[dict], user_msg: str) -> str:
                 continue
             args = (entry or {}).get("args") or {}
             requested_path = str(args.get("path") or "requested file")
-            # Match user intent "show first lines" with a short deterministic preview.
-            wanted = 12 if "first line" in (user_msg or "").lower() else 20
+            low_req = (user_msg or "").lower()
+            # For explicit content requests, return full file content when reasonably small.
+            if any(k in low_req for k in ("content exactly", "show its content", "show content", "read the file")):
+                if len(content) <= 4000:
+                    return (
+                        f"Here is the content of `{requested_path}`:\n\n"
+                        f"```text\n{content.rstrip()}\n```"
+                    )
+            # Otherwise return a short deterministic preview.
+            wanted = 12 if "first line" in low_req else 20
             preview = "\n".join(lines[:wanted]).strip()
             if preview:
                 return (
@@ -363,6 +486,34 @@ def _is_generic_non_answer(text: str) -> bool:
         "clarify your request",
     )
     return any(m in low for m in generic_markers)
+
+
+def _has_successful_read_file(tool_log: List[dict]) -> bool:
+    return any(
+        str((e or {}).get("tool", "")).lower() == "read_file"
+        and str((e or {}).get("status", "")).lower() == "success"
+        for e in (tool_log or [])
+    )
+
+
+def _answer_includes_read_content(answer: str, tool_log: List[dict]) -> bool:
+    cleaned = clean_display_answer(answer or "").lower()
+    for entry in (tool_log or []):
+        if str((entry or {}).get("tool", "")).lower() != "read_file":
+            continue
+        if str((entry or {}).get("status", "")).lower() != "success":
+            continue
+        result = (entry or {}).get("result") or {}
+        if not isinstance(result, dict):
+            continue
+        content = str(result.get("content") or "").strip()
+        if not content:
+            continue
+        # Look for first non-empty line as a lightweight satisfaction check.
+        first_line = next((ln.strip() for ln in content.splitlines() if ln.strip()), "")
+        if first_line and first_line.lower() in cleaned:
+            return True
+    return False
 
 
 @dataclass
@@ -621,6 +772,7 @@ def run_inference_with_tools(
     previous_tool_signature: Optional[Tuple[str, ...]] = None
     repeated_signature_count = 0
     forced_finalize = False
+    tool_nudge_used = False
 
     def _force_finalize_without_tools(reason: str) -> str:
         """Force a final assistant reply after tool guard interruption."""
@@ -666,6 +818,42 @@ def run_inference_with_tools(
             images=cfg.images,
         )
         return run_inference(inference_cfg, env, log_callback=log_callback)
+
+    def _force_single_tool_call_attempt() -> str:
+        """
+        Bounded recovery pass for actionable requests when model did not emit any tool call.
+        This is still model-driven: the model must decide and emit the call text itself.
+        """
+        low_user = (user_msg or "").lower()
+        candidates = _extract_path_candidates(user_msg)
+        chosen_path = ""
+        if candidates:
+            # Prefer explicit relative path when present.
+            rel_candidates = [c.replace("\\", "/") for c in candidates if not re.match(r"^[A-Za-z]:\\", c)]
+            chosen_path = (rel_candidates[0] if rel_candidates else candidates[0]).replace("\\", "/").lstrip("/")
+        if "read" in low_user and ("file" in low_user or ".txt" in low_user or ".py" in low_user):
+            exemplar = f'<tool_call>read_file(path="{chosen_path or "LLM/Dios.txt"}")</tool_call>'
+        elif "list" in low_user and ("dir" in low_user or "folder" in low_user):
+            exemplar = '<tool_call>list_dir(path=".")</tool_call>'
+        else:
+            exemplar = '<tool_call>read_file(path="LLM/Dios.txt")</tool_call>'
+
+        forced_prompt = (
+            "You must output EXACTLY one XML tool call and nothing else.\n"
+            "Do not output explanations, markdown, or extra text.\n"
+            f"Required format example: {exemplar}\n"
+            f"User request: {user_msg}"
+        )
+        inference_cfg = InferenceConfig(
+            prompt=forced_prompt,
+            model_id=cfg.model_id,
+            base_model=cfg.base_model,
+            adapter_dir=cfg.adapter_dir,
+            max_new_tokens=min(256, int(cfg.max_new_tokens or 256)),
+            temperature=0.0,
+            images=cfg.images,
+        )
+        return run_inference(inference_cfg, env, log_callback=log_callback)
     
     while iteration < cfg.max_tool_iterations:
         iteration += 1
@@ -692,8 +880,28 @@ def run_inference_with_tools(
         tool_calls = detector.detect(assistant_text)
         
         if not tool_calls:
-            # No more tool calls, we're done
-            break
+            # On actionable prompts, some models refuse tools despite instructions.
+            # Give one bounded retry with an explicit tool-use directive.
+            if explicit_action_request and not tool_nudge_used and not tool_log:
+                tool_nudge_used = True
+                log("[ToolGuard] Action request without tool call; running one forced tool-call recovery pass.")
+                try:
+                    forced_tool_text = _force_single_tool_call_attempt()
+                    conversation_history += "\n" + str(forced_tool_text or "")
+                    final_output = forced_tool_text
+                    tool_calls = detector.detect(forced_tool_text or "")
+                    if tool_calls:
+                        # Continue current iteration and execute the recovered tool call(s).
+                        pass
+                    else:
+                        log("[ToolGuard] Forced tool-call recovery did not produce a tool call.")
+                        break
+                except Exception as forced_ex:
+                    log(f"[ToolGuard] Forced tool-call recovery failed: {forced_ex}")
+                    break
+            else:
+                # No more tool calls, we're done
+                break
 
         # Policy guardrails (model-agnostic):
         # - Never execute tools on casual/greeting turns
@@ -748,6 +956,11 @@ def run_inference_with_tools(
         # Process each tool call
         any_executed = False
         for tool_call in tool_calls:
+            # Normalize common model path mistakes before execution (bounded self-healing).
+            try:
+                tool_call.arguments = _normalize_tool_arguments(tool_call.name, tool_call.arguments, user_msg)
+            except Exception:
+                pass
             # Check if approval is needed
             requires_approval = approval_manager.requires_approval(tool_call.name) or tool_call.name in _SIDE_EFFECT_TOOLS
             if requires_approval:
@@ -829,17 +1042,26 @@ def run_inference_with_tools(
     # Hard guarantee for tool-enabled turns: if tools succeeded but final answer is blank/refusal,
     # synthesize once from tool results; if still unusable, produce deterministic fallback from logs.
     had_successful_tools = any(str((e or {}).get("status", "")).lower() == "success" for e in (tool_log or []))
-    if had_successful_tools and _is_unusable_final_answer(final_output):
+    if had_successful_tools and (_is_unusable_final_answer(final_output) or _is_tool_contradiction_answer(final_output)):
         try:
             model_synth = _force_finalize_from_tool_results()
-            if not _is_unusable_final_answer(model_synth):
+            if not _is_unusable_final_answer(model_synth) and not _is_tool_contradiction_answer(model_synth):
                 final_output = model_synth
         except Exception as finalize_ex:
             log(f"[ToolGuard] Tool-result synthesis finalize failed: {finalize_ex}")
-        if _is_unusable_final_answer(final_output):
+        if _is_unusable_final_answer(final_output) or _is_tool_contradiction_answer(final_output):
             deterministic = _derive_answer_from_tool_log(tool_log, user_msg)
             if deterministic:
                 final_output = deterministic
+
+    # Hard guarantee for read_file requests: if we did read successfully but final answer
+    # still omits file content, force deterministic tool-log rendering.
+    low_user = (user_msg or "").lower()
+    read_intent = any(k in low_user for k in ("read the file", "read_file", "show content", "content exactly"))
+    if read_intent and _has_successful_read_file(tool_log) and not _answer_includes_read_content(final_output, tool_log):
+        deterministic = _derive_answer_from_tool_log(tool_log, user_msg)
+        if deterministic:
+            final_output = deterministic
 
     # If read_file repeatedly fails, avoid generic/non-contextual replies.
     # Return a deterministic explanation including looked-up location and likely corrected path.

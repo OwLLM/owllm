@@ -3246,7 +3246,18 @@ class MainWindow(QMainWindow):
         model_dir_name = model_path_normalized.name
         model_path_str_normalized = str(model_path_normalized).lower()
         
+        def _model_id_rank(mid: str) -> tuple:
+            m = str(mid or "")
+            # Prefer canonical IDs with slash, then non-synthetic keys, then longer/stable names.
+            return (
+                0 if "/" in m else 1,
+                0 if not m.startswith("model_") else 1,
+                -len(m),
+                m.lower(),
+            )
+
         # First pass: exact path match (highest priority)
+        exact_matches = []
         for model_id, model_cfg in config["models"].items():
             existing_base = model_cfg.get("base_model", "")
             if not existing_base:
@@ -3254,12 +3265,15 @@ class MainWindow(QMainWindow):
             try:
                 existing_path_normalized = Path(existing_base).resolve()
                 if str(model_path_normalized) == str(existing_path_normalized):
-                    return model_id  # Exact match - return immediately
+                    exact_matches.append(model_id)
             except Exception as e:
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.debug(f"Path resolution error for {existing_base}: {e}")
                 continue
+        if exact_matches:
+            exact_matches.sort(key=_model_id_rank)
+            return exact_matches[0]
         
         # Second pass: directory name match (if no exact match found)
         # Collect all matches, then pick the best one
@@ -3295,8 +3309,8 @@ class MainWindow(QMainWindow):
         
         # Return the match with the most matching path components
         if directory_matches:
-            # Sort by matching components (descending), then by path string (for consistency)
-            directory_matches.sort(key=lambda x: (-x[1], x[2]))
+            # Sort by matching components (descending), then by preferred model-id rank.
+            directory_matches.sort(key=lambda x: (-x[1], _model_id_rank(x[0]), x[2]))
             return directory_matches[0][0]
         
         # No match found
@@ -3421,8 +3435,22 @@ class MainWindow(QMainWindow):
             # Deterministic registration for READY models only:
             # never create synthetic model_<timestamp> IDs in chat flows.
             onboarding_model_id = str((ready_match or {}).get("model_id") or "").strip()
-            if not onboarding_model_id:
+            base_model_path = str((ready_match or {}).get("base_model_path") or target).strip()
+            if not onboarding_model_id and not base_model_path:
                 raise
+            try:
+                from core.model_id_resolver import to_canonical_id
+                canonical_model_id = to_canonical_id(
+                    onboarding_model_id or base_model_path,
+                    model_cfg=None,
+                    base_model_path=base_model_path,
+                )
+            except Exception:
+                canonical_model_id = onboarding_model_id
+            # Prefer canonical/human-stable ID over legacy synthetic model_* aliases.
+            preferred_model_id = canonical_model_id or onboarding_model_id
+            if onboarding_model_id.startswith("model_") and canonical_model_id:
+                preferred_model_id = canonical_model_id
             config_path = self.root / "configs" / "llm_backends.yaml"
             import yaml
             try:
@@ -3431,7 +3459,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 raise ValueError(f"Failed to load config file: {e}")
             models = cfg.setdefault("models", {})
-            if onboarding_model_id not in models:
+            if preferred_model_id not in models:
                 used_ports = {
                     int(v.get("port", 10500))
                     for v in models.values()
@@ -3444,8 +3472,8 @@ class MainWindow(QMainWindow):
                 is_instruct = (
                     "instruct" in model_path_lower or "chat" in model_path_lower or "-it" in model_path_lower
                 )
-                models[onboarding_model_id] = {
-                    "base_model": str((ready_match or {}).get("base_model_path") or target),
+                models[preferred_model_id] = {
+                    "base_model": base_model_path or str(target),
                     "adapter_dir": str((ready_match or {}).get("adapter_dir") or "") or None,
                     "model_type": "instruct" if is_instruct else "base",
                     "port": preferred_port,
@@ -3460,7 +3488,7 @@ class MainWindow(QMainWindow):
                     get_global_server_manager()._load_config()
                 except Exception:
                     pass
-            return onboarding_model_id
+            return preferred_model_id
     
     def _create_status_widget(self, label: str, is_ok: bool, detail: str) -> QWidget:
         """Create a status indicator widget"""

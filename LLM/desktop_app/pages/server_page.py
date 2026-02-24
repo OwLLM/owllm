@@ -133,6 +133,16 @@ class ActiveServersProbeThread(QThread):
                 if not current.get("pid") and entry.get("pid"):
                     current["pid"] = entry.get("pid")
 
+            def _status_rank(status: str) -> int:
+                s = str(status or "").lower().strip()
+                if s == "ok":
+                    return 4
+                if s == "loading":
+                    return 3
+                if s == "unresponsive":
+                    return 2
+                return 1
+
             def _is_tcp_open(port: int) -> bool:
                 try:
                     with socket.create_connection(("127.0.0.1", int(port)), timeout=0.35):
@@ -221,7 +231,27 @@ class ActiveServersProbeThread(QThread):
                 except Exception:
                     pass
 
-            self.results_ready.emit(list(results_by_port.values()))
+            # Collapse duplicate ports that map to the same canonical model display name.
+            # Keep the healthiest entry to avoid showing duplicate model rows.
+            dedup_by_model = {}
+            for row in list(results_by_port.values()):
+                model_key = str((row or {}).get("model_from_health") or (row or {}).get("model_id") or "").strip().lower()
+                if not model_key:
+                    model_key = f"port::{int((row or {}).get('port') or 0)}"
+                existing = dedup_by_model.get(model_key)
+                if existing is None:
+                    dedup_by_model[model_key] = row
+                    continue
+                if _status_rank(row.get("status")) > _status_rank(existing.get("status")):
+                    dedup_by_model[model_key] = row
+                    continue
+                # If status rank ties, keep lower port for determinism.
+                if _status_rank(row.get("status")) == _status_rank(existing.get("status")):
+                    rp = int(row.get("port") or 0)
+                    ep = int(existing.get("port") or 0)
+                    if rp and ep and rp < ep:
+                        dedup_by_model[model_key] = row
+            self.results_ready.emit(list(dedup_by_model.values()))
         except Exception as e:
             self.probe_error.emit(str(e))
 

@@ -428,6 +428,42 @@ class LLMServerManager:
                 )
             except Exception:
                 pass
+
+    def _cleanup_orphan_canonical_ports(self, canonical_id: str, keep_port: int):
+        """
+        Best-effort cleanup for live orphan servers that share canonical identity
+        but are not currently represented as RUNNING/STARTING rows in StateStore.
+        """
+        try:
+            models = (self.config or {}).get("models") or {}
+            candidate_ports = set()
+            for mid, cfg in models.items():
+                try:
+                    if self._canonical_server_id(str(mid)) == canonical_id:
+                        p = int((cfg or {}).get("port") or 0)
+                        if p > 0 and p != int(keep_port):
+                            candidate_ports.add(p)
+                except Exception:
+                    continue
+            for port in sorted(candidate_ports):
+                try:
+                    r = requests.get(f"http://127.0.0.1:{port}/health", timeout=1.5)
+                    if r.status_code != 200:
+                        continue
+                    data = r.json()
+                    status = str(data.get("status", "")).strip().lower()
+                    if status not in {"ok", "loading"}:
+                        continue
+                    reported_model = str(data.get("model", "")).strip()
+                    if reported_model and reported_model.lower() not in {"local-llm", "unknown"}:
+                        reported_canonical = self._canonical_server_id(reported_model)
+                        if reported_canonical != canonical_id:
+                            continue
+                    self.shutdown_server_by_port(int(port))
+                except Exception:
+                    continue
+        except Exception:
+            pass
     
     def ensure_server_running(self, model_id: str, log_callback=None) -> str:
         """
@@ -595,6 +631,7 @@ class LLMServerManager:
                             keep_model_id=model_id,
                             keep_port=port,
                         )
+                        self._cleanup_orphan_canonical_ports(canonical_server_id, keep_port=port)
                         if health_status == "loading":
                             self._wait_for_health_ok(model_id, self.warmup_timeout, log_callback=log, port=port)
                         return self._get_server_url(model_id)

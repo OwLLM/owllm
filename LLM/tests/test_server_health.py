@@ -163,5 +163,30 @@ def test_cleanup_canonical_duplicate_server_rows_stops_duplicate_ports(server_ma
     )
 
 
+def test_cleanup_orphan_canonical_ports_stops_config_alias_ports(server_manager, monkeypatch):
+    server_manager.config = {
+        "models": {
+            "unsloth/gemma-2-2b-it-bnb-4bit": {"port": 10528},
+            "unsloth_gemma-2-2b-it-bnb-4bit": {"port": 10500},
+        }
+    }
+    monkeypatch.setattr(
+        server_manager,
+        "_canonical_server_id",
+        lambda mid: "unsloth/gemma-2-2b-it-bnb-4bit",
+    )
+    stopped = []
+    monkeypatch.setattr(server_manager, "shutdown_server_by_port", lambda p: stopped.append(int(p)) or True)
+
+    class _Resp:
+        status_code = 200
+        def json(self):
+            return {"status": "ok", "model": "unsloth/gemma-2-2b-it-bnb-4bit"}
+
+    monkeypatch.setattr("core.llm_server_manager.requests.get", lambda *a, **k: _Resp())
+    server_manager._cleanup_orphan_canonical_ports("unsloth/gemma-2-2b-it-bnb-4bit", keep_port=10528)
+    assert 10500 in stopped
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

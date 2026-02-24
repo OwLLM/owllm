@@ -67,6 +67,16 @@ USER: LLM/LAUNCHER.py
     assert _is_contextual_tool_followup("LLM/LAUNCHER.py", prompt)
 
 
+def test_contextual_tool_followup_detects_path_phrase_with_noise():
+    prompt = """
+USER: read the file Dios.txt
+ASSISTANT: The file "Dios.txt" was not found in the workspace.
+USER: where did you look for the file?
+ASSISTANT: I looked in the root directory of the workspace.
+"""
+    assert _is_contextual_tool_followup("it's in LLM/Dios.txt for the fuck sake", prompt)
+
+
 def test_clean_display_answer_removes_tool_transcript_noise():
     raw = """
 "🔧 Calling read_file

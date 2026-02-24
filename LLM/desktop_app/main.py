@@ -3395,7 +3395,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 raise
 
-            ready_match = False
+            ready_match = None
             try:
                 ready_rows = self.state_store.list_onboarding_by_status("READY") or []
                 for row in ready_rows:
@@ -3410,16 +3410,57 @@ class MainWindow(QMainWindow):
                     except Exception:
                         row_norm = str(base).lower()
                     if row_norm == target_norm:
-                        ready_match = True
+                        ready_match = row
                         break
             except Exception:
-                ready_match = False
+                ready_match = None
 
             if not ready_match:
                 raise
 
-            # One-time config registration for READY model, then return resolved key.
-            return self._resolve_model_id_from_path(model_path, allow_create=True)
+            # Deterministic registration for READY models only:
+            # never create synthetic model_<timestamp> IDs in chat flows.
+            onboarding_model_id = str((ready_match or {}).get("model_id") or "").strip()
+            if not onboarding_model_id:
+                raise
+            config_path = self.root / "configs" / "llm_backends.yaml"
+            import yaml
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+            except Exception as e:
+                raise ValueError(f"Failed to load config file: {e}")
+            models = cfg.setdefault("models", {})
+            if onboarding_model_id not in models:
+                used_ports = {
+                    int(v.get("port", 10500))
+                    for v in models.values()
+                    if isinstance(v, dict) and v.get("port") is not None
+                }
+                preferred_port = 10500
+                while preferred_port in used_ports:
+                    preferred_port += 1
+                model_path_lower = target_norm.lower()
+                is_instruct = (
+                    "instruct" in model_path_lower or "chat" in model_path_lower or "-it" in model_path_lower
+                )
+                models[onboarding_model_id] = {
+                    "base_model": str((ready_match or {}).get("base_model_path") or target),
+                    "adapter_dir": str((ready_match or {}).get("adapter_dir") or "") or None,
+                    "model_type": "instruct" if is_instruct else "base",
+                    "port": preferred_port,
+                    "use_4bit": True,
+                    "system_prompt": "",
+                }
+                with open(config_path, "w", encoding="utf-8") as f:
+                    yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
+                # keep runtime manager in sync with deterministic key we just inserted
+                try:
+                    from core.llm_server_manager import get_global_server_manager
+                    get_global_server_manager()._load_config()
+                except Exception:
+                    pass
+            return onboarding_model_id
     
     def _create_status_widget(self, label: str, is_ok: bool, detail: str) -> QWidget:
         """Create a status indicator widget"""
@@ -13098,15 +13139,15 @@ class MainWindow(QMainWindow):
         # Check and fix ports before starting inference
         try:
             if model_a_path:
-                model_a_id = self._resolve_model_id_from_path(model_a_path)
+                model_a_id = self._resolve_chat_model_id_from_path(model_a_path)
                 self._check_and_fix_port(model_a_id)
             
             if model_b_path:
-                model_b_id = self._resolve_model_id_from_path(model_b_path)
+                model_b_id = self._resolve_chat_model_id_from_path(model_b_path)
                 self._check_and_fix_port(model_b_id)
             
             if model_c_path:
-                model_c_id = self._resolve_model_id_from_path(model_c_path)
+                model_c_id = self._resolve_chat_model_id_from_path(model_c_path)
                 self._check_and_fix_port(model_c_id)
             
             # Update port displays after potential reassignments

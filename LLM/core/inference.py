@@ -135,6 +135,8 @@ def _is_contextual_tool_followup(user_msg: str, prompt: str) -> bool:
         "location",
         "it is there",
         "it's there",
+        "it is in",
+        "it's in",
         "why you do not find",
         "why don't you find",
     )
@@ -142,6 +144,9 @@ def _is_contextual_tool_followup(user_msg: str, prompt: str) -> bool:
         return True
     # Path-only follow-up messages like "LLM/LAUNCHER.py" should remain actionable.
     if re.fullmatch(r"[A-Za-z0-9_.\-\\/]+\.[A-Za-z0-9]{1,16}", text.strip()):
+        return True
+    # Path-bearing follow-up phrases like "it's in LLM/Dios.txt for the ..."
+    if re.search(r"\b[A-Za-z0-9_.\-\\/]+\.[A-Za-z0-9]{1,16}\b", text):
         return True
     return False
 

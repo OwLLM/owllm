@@ -13,6 +13,7 @@ from core.inference import (
     clean_display_answer,
     _is_unusable_final_answer,
     _derive_answer_from_tool_log,
+    _derive_read_file_error_answer_from_tool_log,
     ToolEnabledInferenceConfig,
     run_inference_with_tools,
 )
@@ -42,6 +43,28 @@ ASSISTANT: <tool_call>read_file(path="Dios.txt")</tool_call>
 USER: where did you look for it ?
 """
     assert _is_contextual_tool_followup("where did you look for it ?", prompt)
+
+
+def test_contextual_tool_followup_detects_path_only_reply():
+    prompt = """
+USER: read LAUNCHER.py
+ASSISTANT: <tool_call>read_file(path="LAUNCHER.py")</tool_call>
+<tool_result tool="read_file" error="true">File not found</tool_result>
+USER: LLM/LAUNCHER.py
+"""
+    assert _is_contextual_tool_followup("LLM/LAUNCHER.py", prompt)
+
+
+def test_contextual_tool_followup_with_clean_history_no_tool_tags():
+    prompt = """
+USER: read the file LAUNCHER.py, the first 5 lines
+ASSISTANT: The file "LAUNCHER.py" was not found.
+USER: which directory are you looking in ?
+ASSISTANT: I looked in the workspace root.
+USER: LLM/LAUNCHER.py
+"""
+    assert _is_contextual_tool_followup("which directory are you looking in ?", prompt)
+    assert _is_contextual_tool_followup("LLM/LAUNCHER.py", prompt)
 
 
 def test_clean_display_answer_removes_tool_transcript_noise():
@@ -130,6 +153,20 @@ def test_deterministic_fallback_from_read_file_tool_log():
     out = _derive_answer_from_tool_log(tool_log, "show first lines")
     assert "Here are the first lines" in out
     assert "from __future__ import annotations" in out
+
+
+def test_read_file_error_answer_reports_looked_location():
+    tool_log = [
+        {
+            "tool": "read_file",
+            "status": "error",
+            "args": {"path": "LAUNCHER.py"},
+            "error": "File not found (looked in: C:/1_Git/LocaLLM/LAUNCHER.py)",
+        }
+    ]
+    out = _derive_read_file_error_answer_from_tool_log(tool_log)
+    assert "LAUNCHER.py" in out
+    assert "looked in" in out.lower()
 
 
 def test_action_prompt_uses_model_loop_before_tool_execution(monkeypatch):

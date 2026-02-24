@@ -104,12 +104,28 @@ def _is_contextual_tool_followup(user_msg: str, prompt: str) -> bool:
     text = (user_msg or "").strip().lower()
     if not text:
         return False
-    has_tool_context = "<tool_result" in str(prompt or "").lower() or "<tool_call>" in str(prompt or "").lower()
-    if not has_tool_context:
+    prompt_low = str(prompt or "").lower()
+    has_tool_context = "<tool_result" in prompt_low or "<tool_call>" in prompt_low
+    # In UI flows the history may contain clean assistant text only, so infer file/tool context
+    # from role-formatted turns as well.
+    has_file_context = any(
+        marker in prompt_low for marker in (
+            "read the file",
+            "read_file",
+            "file path",
+            "directory",
+            ".py",
+            ".txt",
+            "/",
+            "\\",
+        )
+    )
+    if not (has_tool_context or has_file_context):
         return False
     followup_markers = (
         "where did you look",
         "which location",
+        "which directory",
         "what location",
         "where are you looking",
         "look for it",

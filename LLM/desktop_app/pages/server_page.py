@@ -73,8 +73,41 @@ class ActiveServersProbeThread(QThread):
     def run(self):
         try:
             from core.state_store import get_state_store
+            from core.model_id_resolver import to_canonical_id
             import requests
             import yaml
+
+            store = get_state_store()
+            config = {}
+            if self.config_path.exists():
+                try:
+                    with open(self.config_path, "r", encoding="utf-8") as f:
+                        config = yaml.safe_load(f) or {}
+                except Exception:
+                    config = {}
+            models_cfg = (config.get("models") or {}) if isinstance(config, dict) else {}
+            canonical_cache = {}
+
+            def _canonicalize_model_name(model_id: str) -> str:
+                mid = str(model_id or "").strip()
+                if not mid:
+                    return ""
+                if mid in canonical_cache:
+                    return canonical_cache[mid]
+                model_cfg = models_cfg.get(mid) if isinstance(models_cfg, dict) else None
+                base_model_path = str((model_cfg or {}).get("base_model") or "")
+                if not base_model_path:
+                    try:
+                        row = store.get_onboarding(mid) or {}
+                        base_model_path = str(row.get("base_model_path") or "")
+                    except Exception:
+                        base_model_path = ""
+                try:
+                    canonical = to_canonical_id(mid, model_cfg=model_cfg, base_model_path=base_model_path) or mid
+                except Exception:
+                    canonical = mid
+                canonical_cache[mid] = canonical
+                return canonical
 
             results_by_port = {}
             status_priority = {"ok": 4, "loading": 3, "unresponsive": 2, "unknown": 1}
@@ -128,9 +161,10 @@ class ActiveServersProbeThread(QThread):
                     data = r.json()
                     status = str(data.get("status", "")).lower().strip()
                     model_from_health = str(data.get("model", "")).strip() or model_id
+                    model_from_health = _canonicalize_model_name(model_from_health)
                     _upsert_result(
                         {
-                            "model_id": model_id,
+                            "model_id": _canonicalize_model_name(model_id),
                             "model_from_health": model_from_health,
                             "status": status,
                             "port": port,
@@ -141,8 +175,8 @@ class ActiveServersProbeThread(QThread):
                     if _is_tcp_open(port):
                         _upsert_result(
                             {
-                                "model_id": model_id,
-                                "model_from_health": model_id,
+                                "model_id": _canonicalize_model_name(model_id),
+                                "model_from_health": _canonicalize_model_name(model_id),
                                 "status": "unresponsive",
                                 "port": port,
                                 "pid": pid,
@@ -150,7 +184,6 @@ class ActiveServersProbeThread(QThread):
                         )
                     return
 
-            store = get_state_store()
             candidates = [
                 s for s in (store.list_servers() or [])
                 if (s.get("status") or "").upper() in ("STARTING", "RUNNING")
@@ -184,7 +217,7 @@ class ActiveServersProbeThread(QThread):
                             port = int(port)
                         except Exception:
                             continue
-                        _probe_health(port=port, model_id=model_id, pid=None)
+                        _probe_health(port=port, model_id=_canonicalize_model_name(model_id), pid=None)
                 except Exception:
                     pass
 

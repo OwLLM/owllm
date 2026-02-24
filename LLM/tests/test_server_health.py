@@ -123,5 +123,45 @@ def test_wait_for_health_ok_uses_adaptive_backoff(server_manager):
     assert max(sleeps) > min(sleeps), "Expected adaptive (increasing) backoff"
 
 
+def test_cleanup_canonical_duplicate_server_rows_stops_duplicate_ports(server_manager, monkeypatch):
+    """Duplicate canonical rows on different ports should be actively stopped."""
+    candidates = [
+        {"model_id": "deepseek-ai/deepseek-coder-6.7b-instruct", "port": 10516, "status": "RUNNING"},
+        {"model_id": "deepseek-ai_deepseek-coder-6.7b-instruct", "port": 10500, "status": "RUNNING"},
+    ]
+    killed_ports = []
+    upserts = []
+
+    monkeypatch.setattr(
+        server_manager,
+        "_find_canonical_server_candidates",
+        lambda canonical_id: candidates,
+    )
+    monkeypatch.setattr(
+        server_manager,
+        "shutdown_server_by_port",
+        lambda port: killed_ports.append(int(port)) or True,
+    )
+    monkeypatch.setattr(
+        server_manager.state_store,
+        "upsert_server",
+        lambda **kwargs: upserts.append(kwargs),
+    )
+
+    server_manager._cleanup_canonical_duplicate_server_rows(
+        canonical_id="deepseek-ai/deepseek-coder-6.7b-instruct",
+        keep_model_id="deepseek-ai/deepseek-coder-6.7b-instruct",
+        keep_port=10516,
+    )
+
+    assert 10500 in killed_ports
+    assert 10516 not in killed_ports
+    assert any(
+        str((u or {}).get("model_id") or "") == "deepseek-ai_deepseek-coder-6.7b-instruct"
+        and str((u or {}).get("status") or "") == "STOPPED"
+        for u in upserts
+    )
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

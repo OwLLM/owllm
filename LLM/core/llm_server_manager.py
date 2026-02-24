@@ -397,19 +397,31 @@ class LLMServerManager:
                     rows.append(row)
         return rows
 
-    def _cleanup_canonical_duplicate_server_rows(self, canonical_id: str, keep_model_id: str):
+    def _cleanup_canonical_duplicate_server_rows(
+        self,
+        canonical_id: str,
+        keep_model_id: str,
+        keep_port: Optional[int] = None,
+    ):
         """
-        Mark duplicate canonical server rows as STOPPED so UI/runtime don't show parallel aliases.
+        Stop and mark duplicate canonical server rows as STOPPED so UI/runtime don't
+        show parallel aliases of the same physical model.
         """
         for row in self._find_canonical_server_candidates(canonical_id):
             rid = str((row or {}).get("model_id") or "")
             if not rid or rid == keep_model_id:
                 continue
+            row_port = int((row or {}).get("port") or 0)
+            if keep_port and row_port and row_port != int(keep_port):
+                try:
+                    self.shutdown_server_by_port(int(row_port))
+                except Exception:
+                    pass
             try:
                 self.state_store.upsert_server(
                     model_id=rid,
                     pid=None,
-                    port=int((row or {}).get("port") or 0) or 10500,
+                    port=row_port or 10500,
                     status="STOPPED",
                     stopped_at=datetime.utcnow().isoformat(),
                     last_error="Stopped duplicate alias server slot; canonical slot in use.",
@@ -561,9 +573,12 @@ class LLMServerManager:
                     data = r.json()
                     health_status = str(data.get("status", "")).strip().lower()
                     reported_model = str(data.get("model", "")).strip()
-                    reported_canonical = self._canonical_server_id(reported_model) if reported_model else ""
-                    if reported_canonical and reported_canonical != canonical_server_id:
-                        continue
+                    # Some backends report placeholder model names like "local-llm" on /health.
+                    # Treat these as unknown and allow canonical-slot reuse checks to proceed.
+                    if reported_model and reported_model.lower() not in {"local-llm", "unknown"}:
+                        reported_canonical = self._canonical_server_id(reported_model)
+                        if reported_canonical and reported_canonical != canonical_server_id:
+                            continue
                     if health_status in {"ok", "loading"}:
                         log(
                             f"Reusing canonical server slot '{rid}' on port {port} "
@@ -575,7 +590,11 @@ class LLMServerManager:
                             port=port,
                             status="RUNNING" if health_status == "ok" else "STARTING",
                         )
-                        self._cleanup_canonical_duplicate_server_rows(canonical_server_id, keep_model_id=model_id)
+                        self._cleanup_canonical_duplicate_server_rows(
+                            canonical_server_id,
+                            keep_model_id=model_id,
+                            keep_port=port,
+                        )
                         if health_status == "loading":
                             self._wait_for_health_ok(model_id, self.warmup_timeout, log_callback=log, port=port)
                         return self._get_server_url(model_id)

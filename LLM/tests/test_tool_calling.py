@@ -71,6 +71,7 @@ def test_tool_failure_propagation():
     out = registry.call_tool("read_file", {"path": "nonexistent_file_xyz_123.txt"}, ctx)
     assert out.get("ok") is False, "read_file on missing path must yield ok=false"
     assert "error" in out and out["error"], "error message must be present"
+    assert "looked in:" in str(out["error"]).lower()
 
 
 @pytest.mark.skipif(True, reason="Requires running tool server")

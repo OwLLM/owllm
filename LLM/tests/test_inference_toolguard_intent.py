@@ -102,6 +102,14 @@ tool_call>```
     assert "tool_call" not in cleaned.lower()
 
 
+def test_clean_display_answer_removes_missing_open_bracket_tool_call():
+    raw = """
+```tool_call>read_file(path="LAUNCHER.py")</tool_call>```
+"""
+    cleaned = clean_display_answer(raw)
+    assert "tool_call>" not in cleaned.lower()
+
+
 def test_unusable_answer_detection_for_refusal_and_blank():
     assert _is_unusable_final_answer("I'm sorry, but I can't assist with that.")
     assert _is_unusable_final_answer("\n\n\r\n\t")

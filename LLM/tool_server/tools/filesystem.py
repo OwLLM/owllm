@@ -71,7 +71,9 @@ def read_file_handler(ctx: Any, path: str) -> Dict[str, Any]:
     safe_path = ctx._safe_path(path)
     
     if not safe_path.exists() or not safe_path.is_file():
-        return {"error": "File not found"}
+        return {
+            "error": f"File not found (looked in: {safe_path})"
+        }
     
     data = safe_path.read_bytes()
     try:

@@ -117,8 +117,17 @@ def _is_contextual_tool_followup(user_msg: str, prompt: str) -> bool:
         "the file",
         "path",
         "location",
+        "it is there",
+        "it's there",
+        "why you do not find",
+        "why don't you find",
     )
-    return any(m in text for m in followup_markers)
+    if any(m in text for m in followup_markers):
+        return True
+    # Path-only follow-up messages like "LLM/LAUNCHER.py" should remain actionable.
+    if re.fullmatch(r"[A-Za-z0-9_.\-\\/]+\.[A-Za-z0-9]{1,16}", text.strip()):
+        return True
+    return False
 
 
 def _is_transient_runtime_failure(last_error: str) -> bool:
@@ -171,6 +180,8 @@ def clean_display_answer(text: str) -> str:
     # Also remove malformed one-line tool tags that may miss proper closing shape.
     cleaned = re.sub(r"(?im)^\s*`{0,3}\s*<\s*tool_call\b.*$", "", cleaned)
     cleaned = re.sub(r"(?im)^\s*`{0,3}\s*<\s*/\s*tool_call\s*>\s*`{0,3}\s*$", "", cleaned)
+    # Remove malformed forms missing opening '<', e.g. ```tool_call>read_file(...)</tool_call>
+    cleaned = re.sub(r"(?is)tool_call>\s*\w+\s*\(.*?\)\s*</\s*tool_call\s*>", "", cleaned)
     cleaned = cleaned.replace("</s>", " ")
 
     # Drop quoted/plain tool transcript blocks the model may echo.
@@ -279,6 +290,58 @@ def _derive_answer_from_tool_log(tool_log: List[dict], user_msg: str) -> str:
                     f"```python\n{preview}\n```"
                 )
     return ""
+
+
+def _derive_read_file_error_answer_from_tool_log(tool_log: List[dict]) -> str:
+    """
+    Deterministic error explanation for repeated read_file failures.
+    """
+    last_read_err = None
+    for entry in reversed(tool_log or []):
+        if str((entry or {}).get("tool", "")).lower() != "read_file":
+            continue
+        if str((entry or {}).get("status", "")).lower() != "error":
+            continue
+        last_read_err = entry
+        break
+    if not last_read_err:
+        return ""
+
+    args = (last_read_err or {}).get("args") or {}
+    requested_path = str(args.get("path") or "").strip() or "the requested file"
+    err = str((last_read_err or {}).get("error") or "File not found")
+    looked_in = ""
+    m = re.search(r"looked in:\s*([^)]+)\)?", err, flags=re.IGNORECASE)
+    if m:
+        looked_in = (m.group(1) or "").strip()
+
+    suggestion = ""
+    if "/" not in requested_path and "\\" not in requested_path:
+        try_path = get_app_root() / requested_path
+        if try_path.exists():
+            suggestion = f" Try `LLM/{requested_path}`."
+
+    location_msg = f" I looked in: `{looked_in}`." if looked_in else ""
+    return (
+        f"I could not read `{requested_path}` because it was not found.{location_msg}"
+        f"{suggestion}"
+    ).strip()
+
+
+def _is_generic_non_answer(text: str) -> bool:
+    low = str(text or "").strip().lower()
+    if not low:
+        return True
+    generic_markers = (
+        "please provide more information",
+        "please provide more details",
+        "please provide context",
+        "could you please provide",
+        "your query seems to be incomplete",
+        "i need more information",
+        "clarify your request",
+    )
+    return any(m in low for m in generic_markers)
 
 
 @dataclass
@@ -756,4 +819,10 @@ def run_inference_with_tools(
             deterministic = _derive_answer_from_tool_log(tool_log, user_msg)
             if deterministic:
                 final_output = deterministic
+
+    # If read_file repeatedly fails, avoid generic/non-contextual replies.
+    # Return a deterministic explanation including looked-up location and likely corrected path.
+    read_file_failure_answer = _derive_read_file_error_answer_from_tool_log(tool_log)
+    if read_file_failure_answer and (_is_unusable_final_answer(final_output) or _is_generic_non_answer(final_output)):
+        final_output = read_file_failure_answer
     return final_output, tool_log

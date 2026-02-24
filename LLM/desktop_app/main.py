@@ -12494,6 +12494,24 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _build_tool_chat_prompt_from_history(self) -> str:
+        """
+        Build role-formatted prompt from Tool Chat memory.
+        Keeps follow-up turns contextual instead of stateless.
+        """
+        history = list(getattr(self, "_tool_chat_history", []) or [])
+        parts = []
+        for role, txt in history:
+            text = (txt or "").strip()
+            if not text:
+                continue
+            if role == "user":
+                parts.append(f"USER: {text}")
+            else:
+                parts.append(f"ASSISTANT: {text}")
+        parts.append("ASSISTANT:")
+        return "\n".join(parts).strip() + " "
+
     def _tool_chat_set_attachments_ui(self) -> None:
         try:
             n = len(getattr(self, "_tool_chat_images", []) or [])
@@ -12662,7 +12680,8 @@ class MainWindow(QMainWindow):
         self.tool_chat_display.start_model_a_response()
         images = list(getattr(self, "_tool_chat_images", []) or [])
         self._tool_chat_clear_attachments()
-        self._run_tool_chat_inference_a(model_a_path, message, images=images)
+        prompt_with_history = self._build_tool_chat_prompt_from_history()
+        self._run_tool_chat_inference_a(model_a_path, prompt_with_history, images=images)
     
     def _run_tool_chat_inference_a(self, model_path: str, prompt: str, system_prompt: str = "", images: Optional[List[str]] = None):
         """Run tool-enabled inference for Model A in tool chat"""

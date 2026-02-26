@@ -2,7 +2,7 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x15181f);
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
-camera.position.set(0, 5.5, 12);
+camera.position.set(0, 6.5, 16);
 camera.lookAt(0, 1.2, 0);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -431,11 +431,25 @@ window.addEventListener("pointerup", (event) => {
     }
 });
 
-window.addEventListener("resize", () => {
+function handleResize() {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
     renderer.setSize(window.innerWidth, window.innerHeight);
-});
+    
+    // Auto-adjust camera distance based on aspect ratio to keep characters visible
+    const targetWidth = 9.0;
+    const vFovTan = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+    const hFovTan = camera.aspect * vFovTan;
+    const requiredZ = (targetWidth / 2) / hFovTan;
+    
+    // Only pull back if needed, don't zoom in too much
+    if (requiredZ > 16) {
+        camera.position.z = requiredZ;
+    }
+}
+
+window.addEventListener("resize", handleResize);
+handleResize();
 
 function performInteraction(actorId, targetId, mode) {
     const actor = characters[actorId];

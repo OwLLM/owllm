@@ -12830,9 +12830,10 @@ class MainWindow(QMainWindow):
         b_page = self._create_m2m_model_settings_page("B", is_arena=True)
         c_page = self._create_m2m_model_settings_page("C", is_arena=True)
         for i in range(min(3, self.arena_model_settings_stack.count())):
-            old = self.arena_model_settings_stack.widget(i)
-            self.arena_model_settings_stack.removeWidget(old)
-            old.deleteLater()
+            old = self.arena_model_settings_stack.widget(0) # Always remove index 0
+            if old is not None:
+                self.arena_model_settings_stack.removeWidget(old)
+                old.deleteLater()
         self.arena_model_settings_stack.insertWidget(0, a_page)
         self.arena_model_settings_stack.insertWidget(1, b_page)
         self.arena_model_settings_stack.insertWidget(2, c_page)

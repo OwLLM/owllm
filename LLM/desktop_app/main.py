@@ -11998,7 +11998,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(100, self._load_m2m_models)
         return w
 
-    def _create_m2m_model_settings_page(self, model_name: str) -> QWidget:
+    def _create_m2m_model_settings_page(self, model_name: str, is_arena: bool = False) -> QWidget:
         """Build one M2M right-panel settings page (used for lazy-loaded stack)."""
         page = QWidget()
         page.setObjectName("modelSettingsPage")
@@ -12017,6 +12017,86 @@ class MainWindow(QMainWindow):
         scroll_layout = QVBoxLayout(scroll_content)
         scroll_layout.setContentsMargins(10, 10, 10, 10)
         scroll_layout.setSpacing(12)
+
+        if is_arena:
+            # Add Character visual selection
+            char_group = QGroupBox("🧙 Character Visual")
+            char_layout = QVBoxLayout(char_group)
+            
+            # Create grid for round selection
+            grid_widget = QWidget()
+            grid_layout = QGridLayout(grid_widget)
+            grid_layout.setSpacing(5)
+            
+            # List of characters (10 stylized, 10 sci-fi) - Keys match main.js
+            char_keys = [
+                # Stylized (A)
+                "soldier", "paladin", "mage", "archer", "rogue",
+                "cleric", "berserker", "druid", "monk", "bard",
+                # Sci-Fi (B)
+                "robot", "xbot", "cyborg", "mech", "android",
+                "hologram", "neon", "titan", "scout", "drone"
+            ]
+            
+            # Keep a reference to buttons to update selection styling
+            btn_dict = {}
+            
+            def make_selector(key, is_selected=False):
+                btn = QPushButton()
+                btn.setFixedSize(40, 40)
+                btn.setToolTip(key.capitalize())
+                
+                # Assign base color based on key for the UI
+                is_scifi = char_keys.index(key) >= 10
+                base_col = "#3b82f6" if is_scifi else "#ef4444"
+                if key in ["paladin", "titan"]: base_col = "#eab308"
+                if key in ["mage", "cyborg"]: base_col = "#a855f7"
+                if key in ["rogue", "neon"]: base_col = "#10b981"
+                
+                border = "2px solid white" if is_selected else "2px solid transparent"
+                btn.setStyleSheet(f"QPushButton {{ background-color: {base_col}; border-radius: 20px; border: {border}; }} "
+                                 f"QPushButton:hover {{ border: 2px solid #94a3b8; }}")
+                return btn
+                
+            def select_char(key):
+                for k, b in btn_dict.items():
+                    is_scifi = char_keys.index(k) >= 10
+                    base_col = "#3b82f6" if is_scifi else "#ef4444"
+                    if k in ["paladin", "titan"]: base_col = "#eab308"
+                    if k in ["mage", "cyborg"]: base_col = "#a855f7"
+                    if k in ["rogue", "neon"]: base_col = "#10b981"
+                    b.setStyleSheet(f"QPushButton {{ background-color: {base_col}; border-radius: 20px; border: 2px solid transparent; }} "
+                                   f"QPushButton:hover {{ border: 2px solid #94a3b8; }}")
+                
+                is_scifi = char_keys.index(key) >= 10
+                base_col = "#3b82f6" if is_scifi else "#ef4444"
+                if key in ["paladin", "titan"]: base_col = "#eab308"
+                if key in ["mage", "cyborg"]: base_col = "#a855f7"
+                if key in ["rogue", "neon"]: base_col = "#10b981"
+                btn_dict[key].setStyleSheet(f"QPushButton {{ background-color: {base_col}; border-radius: 20px; border: 2px solid white; }}")
+                
+                # Send to JS via main app reference if we have arena_scene_view
+                if hasattr(self, 'arena_scene_view'):
+                    self.arena_scene_view.page().runJavaScript(f"window.assignVisual('{model_name}', '{key}');")
+            
+            row, col = 0, 0
+            for i, c_key in enumerate(char_keys):
+                is_initial = False
+                if model_name == "A" and c_key == "robot": is_initial = True
+                if model_name == "B" and c_key == "soldier": is_initial = True
+                if model_name == "C" and c_key == "xbot": is_initial = True
+                
+                btn = make_selector(c_key, is_initial)
+                btn.clicked.connect(lambda checked, k=c_key: select_char(k))
+                btn_dict[c_key] = btn
+                grid_layout.addWidget(btn, row, col)
+                col += 1
+                if col >= 5:
+                    col = 0
+                    row += 1
+            
+            char_layout.addWidget(grid_widget)
+            scroll_layout.addWidget(char_group)
 
         template_group = QGroupBox("📋 Instruction Templates")
         template_layout = QVBoxLayout(template_group)
@@ -12565,12 +12645,12 @@ class MainWindow(QMainWindow):
         title_row.addStretch(1)
         title_row.addWidget(QLabel("Number of models:"))
         self.arena_model_count_2 = QCheckBox("2")
-        self.arena_model_count_2.setChecked(True)
+        self.arena_model_count_2.setChecked(False)
         self.arena_model_count_2.setTristate(False)
         self.arena_model_count_2.toggled.connect(self._on_arena_model_count_2_toggled)
         title_row.addWidget(self.arena_model_count_2)
         self.arena_model_count_3 = QCheckBox("3")
-        self.arena_model_count_3.setChecked(False)
+        self.arena_model_count_3.setChecked(True)
         self.arena_model_count_3.setTristate(False)
         self.arena_model_count_3.toggled.connect(self._on_arena_model_count_3_toggled)
         title_row.addWidget(self.arena_model_count_3)
@@ -12639,7 +12719,7 @@ class MainWindow(QMainWindow):
             setattr(self, f"arena_model_{key}_header_widget", hw)
             setattr(self, f"arena_model_{key}_header", header)
             setattr(self, f"arena_model_{key}", combo)
-        self.arena_model_c_header_widget.setVisible(False)
+        self.arena_model_c_header_widget.setVisible(True)
         left_layout.addLayout(headers_layout)
 
         self.arena_scene_view = QWebEngineView()
@@ -12746,9 +12826,9 @@ class MainWindow(QMainWindow):
             return
         if not hasattr(self, "arena_model_settings_stack") or self.arena_model_settings_stack is None:
             return
-        a_page = self._create_m2m_model_settings_page("A")
-        b_page = self._create_m2m_model_settings_page("B")
-        c_page = self._create_m2m_model_settings_page("C")
+        a_page = self._create_m2m_model_settings_page("A", is_arena=True)
+        b_page = self._create_m2m_model_settings_page("B", is_arena=True)
+        c_page = self._create_m2m_model_settings_page("C", is_arena=True)
         for i in range(min(3, self.arena_model_settings_stack.count())):
             old = self.arena_model_settings_stack.widget(i)
             self.arena_model_settings_stack.removeWidget(old)

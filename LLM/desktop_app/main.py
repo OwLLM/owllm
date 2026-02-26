@@ -33,6 +33,7 @@ from desktop_app.process_utils import apply_create_no_window
 from desktop_app.pages.server_page import ServerPage
 from desktop_app.pages.mcp_page import MCPPage
 from desktop_app.pages.github_import_page import GitHubImportPage
+from desktop_app.pages.characters_3d_page import Characters3DPage
 
 from system_detector import SystemDetector
 from smart_installer import SmartInstaller
@@ -2727,11 +2728,12 @@ class MainWindow(QMainWindow):
         self.server_btn = QPushButton("🖧 Server")
         self.mcp_btn = QPushButton("🧩 MCP")
         self.envs_btn = QPushButton("⚙️ Environment")
+        self.characters_btn = QPushButton("🧙‍♂️ Characters")
         self.info_btn = QPushButton("ℹ️ Info")
         
         # Navigation buttons will be styled by theme system
         
-        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.info_btn]:
+        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.characters_btn, self.info_btn]:
             btn.setCheckable(True)
             # Navigation buttons will be styled by theme system
         
@@ -2743,6 +2745,7 @@ class MainWindow(QMainWindow):
         navbar_layout.addWidget(self.server_btn)
         navbar_layout.addWidget(self.mcp_btn)
         navbar_layout.addWidget(self.envs_btn)
+        navbar_layout.addWidget(self.characters_btn)
         
         # Add stretch to consume remaining space
         navbar_layout.addStretch(1)
@@ -2768,6 +2771,7 @@ class MainWindow(QMainWindow):
             "logs": "Logs",
             "server": "Server",
             "mcp": "MCP",
+            "characters": "Characters",
             "github_import": "GitHub Import",
             "environment": "Environment Manager",
             "info": "Info"
@@ -2793,6 +2797,9 @@ class MainWindow(QMainWindow):
         tabs.addTab(_timed_build("MCP", lambda: MCPPage(self)), "MCP")
         tabs.addTab(_timed_build("GitHub Import", lambda: GitHubImportPage(self)), "GitHub Import")
         
+        # 3D Characters page
+        tabs.addTab(_timed_build("Characters", lambda: Characters3DPage(self)), "Characters")
+        
         # Lazy-init Environment Manager page (can be expensive on startup due environment scans).
         self._env_page_initialized = False
         self.env_page = QWidget()
@@ -2811,6 +2818,7 @@ class MainWindow(QMainWindow):
         self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, "logs"))
         self.server_btn.clicked.connect(lambda: self._switch_tab(tabs, "server"))
         self.mcp_btn.clicked.connect(lambda: self._switch_tab(tabs, "mcp"))
+        self.characters_btn.clicked.connect(lambda: self._switch_tab(tabs, "characters"))
         self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, "environment"))
         self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, "info"))
         
@@ -10898,9 +10906,11 @@ class MainWindow(QMainWindow):
         test_page = self._build_test_sub_tab()
         tool_chat_page = self._build_tool_chat_sub_tab()
         model_to_model_page = self._build_model_to_model_sub_tab()
+        arena_page = self._build_arena_sub_tab()
         sub_tabs.addTab(test_page, "🧪 Test")
         sub_tabs.addTab(tool_chat_page, "🔧 Tool Chat")
         sub_tabs.addTab(model_to_model_page, "Model To Model")
+        sub_tabs.addTab(arena_page, "Arena")
         sub_tabs.currentChanged.connect(self._on_test_sub_tab_changed)
 
         layout.addWidget(sub_tabs)
@@ -10908,9 +10918,11 @@ class MainWindow(QMainWindow):
         return w
 
     def _on_test_sub_tab_changed(self, index: int) -> None:
-        """When user switches to Model To Model (index 2), ensure settings stack is built."""
+        """Ensure settings stacks are built when opening advanced test sub-tabs."""
         if index == 2:
             self._ensure_m2m_settings_built()
+        elif index == 3:
+            self._ensure_arena_settings_built()
     
     def _lazy_load_test_sub_page(self, index: int):
         """Lazy-load test sub-page when tab is first accessed"""
@@ -12531,6 +12543,503 @@ class MainWindow(QMainWindow):
         self.m2m_stop_resume_btn.setChecked(self.m2m_paused)
         self.m2m_stop_resume_btn.setText("▶ Resume" if self.m2m_paused else "⏹ Stop")
 
+    def _build_arena_sub_tab(self) -> QWidget:
+        """Build Arena sub-tab by reusing M2M structure with a 3D playground instead of chat."""
+        from PySide6.QtWebEngineWidgets import QWebEngineView
+
+        w = QWidget()
+        main_layout = QHBoxLayout(w)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
+
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(15)
+        self.arena_left_layout = left_layout
+
+        title_row = QHBoxLayout()
+        arena_title = QLabel("Arena - Model To Model 3D")
+        arena_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
+        title_row.addWidget(arena_title)
+        title_row.addStretch(1)
+        title_row.addWidget(QLabel("Number of models:"))
+        self.arena_model_count_2 = QCheckBox("2")
+        self.arena_model_count_2.setChecked(True)
+        self.arena_model_count_2.setTristate(False)
+        self.arena_model_count_2.toggled.connect(self._on_arena_model_count_2_toggled)
+        title_row.addWidget(self.arena_model_count_2)
+        self.arena_model_count_3 = QCheckBox("3")
+        self.arena_model_count_3.setChecked(False)
+        self.arena_model_count_3.setTristate(False)
+        self.arena_model_count_3.toggled.connect(self._on_arena_model_count_3_toggled)
+        title_row.addWidget(self.arena_model_count_3)
+        left_layout.addLayout(title_row)
+
+        settings_row = QHBoxLayout()
+        settings_row.setSpacing(15)
+        gpu_frame = QGroupBox("Hardware Settings")
+        gpu_layout = QVBoxLayout(gpu_frame)
+        gpu_row = QHBoxLayout()
+        gpu_row.addWidget(QLabel("GPU for Inference:"))
+        self.arena_gpu_select = QComboBox()
+        self.arena_gpu_index_map = []
+        gpus = self._sort_gpus_by_memory(self._get_filtered_gpus())
+        if gpus:
+            for idx, gpu in enumerate(gpus):
+                gpu_name = gpu.get("name", f"GPU {idx}")
+                vram = gpu.get("memory", "N/A")
+                orig_idx = gpu.get("_orig_index", idx)
+                self.arena_gpu_select.addItem(f"GPU {orig_idx}: {gpu_name} ({vram})")
+                self.arena_gpu_index_map.append(orig_idx)
+            info_text = f"{len(gpus)} GPU(s) detected - select one for inference"
+        else:
+            self.arena_gpu_select.addItem("No GPUs available - CPU mode")
+            self.arena_gpu_select.setEnabled(False)
+            info_text = "No GPUs detected (CPU mode)"
+        gpu_row.addWidget(self.arena_gpu_select, 1)
+        gpu_layout.addLayout(gpu_row)
+        self.arena_gpu_info = QLabel(info_text)
+        self.arena_gpu_info.setWordWrap(True)
+        self.arena_gpu_info.setStyleSheet("color: #888; padding: 5px; font-size: 10pt;")
+        gpu_layout.addWidget(self.arena_gpu_info)
+        settings_row.addWidget(gpu_frame, 2)
+
+        conv_frame = QGroupBox("Conversation")
+        conv_layout = QHBoxLayout(conv_frame)
+        conv_layout.addWidget(QLabel("Max turns:"))
+        self.arena_max_turns = QSpinBox()
+        self.arena_max_turns.setRange(1, 200)
+        self.arena_max_turns.setValue(20)
+        self.arena_max_turns.setMinimumWidth(60)
+        conv_layout.addWidget(self.arena_max_turns)
+        settings_row.addWidget(conv_frame, 1)
+        left_layout.addLayout(settings_row)
+
+        headers_layout = QHBoxLayout()
+        headers_layout.setContentsMargins(0, 0, 0, 0)
+        headers_layout.setSpacing(6)
+        colors = self._get_theme_colors()
+        for key, icon in [("a", "🔵"), ("b", "🟢"), ("c", "🟣")]:
+            hw = QWidget()
+            hl = QVBoxLayout(hw)
+            hl.setContentsMargins(0, 0, 0, 0)
+            hl.setSpacing(6)
+            header = QLabel(f"{icon} <b>Model {key.upper()}</b> <span style='font-size:16pt;color:#000000;'>(Port: -)</span>")
+            header.setStyleSheet(
+                f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;"
+            )
+            combo = QComboBox()
+            combo.setEditable(False)
+            combo.currentTextChanged.connect(self._update_arena_model_header_ports)
+            combo.currentTextChanged.connect(lambda _t, k=key: self._update_arena_scene_label(k))
+            hl.addWidget(header)
+            hl.addWidget(combo)
+            headers_layout.addWidget(hw, 1)
+            setattr(self, f"arena_model_{key}_header_widget", hw)
+            setattr(self, f"arena_model_{key}_header", header)
+            setattr(self, f"arena_model_{key}", combo)
+        self.arena_model_c_header_widget.setVisible(False)
+        left_layout.addLayout(headers_layout)
+
+        self.arena_scene_view = QWebEngineView()
+        scene_path = self.root / "desktop_app" / "assets" / "3d" / "index.html"
+        if scene_path.exists():
+            self.arena_scene_view.setUrl(QUrl.fromLocalFile(str(scene_path)))
+        left_layout.addWidget(self.arena_scene_view, 1)
+
+        prompt_layout = QVBoxLayout()
+        prompt_layout.addWidget(QLabel("<b>Type your message:</b>"))
+        input_row = QHBoxLayout()
+        self.arena_prompt = QTextEdit()
+        self.arena_prompt.setPlaceholderText("Type your message here...")
+        self.arena_prompt.setMinimumHeight(90)
+        self.arena_prompt.setMaximumHeight(90)
+        input_row.addWidget(self.arena_prompt, 1)
+        btn_grid = QWidget()
+        btn_layout = QHBoxLayout(btn_grid)
+        btn_layout.setSpacing(8)
+        col1 = QVBoxLayout()
+        self.arena_start_btn = QPushButton("Start")
+        self.arena_start_btn.setMinimumHeight(40)
+        self.arena_start_btn.clicked.connect(self._start_arena_conversation)
+        col1.addWidget(self.arena_start_btn)
+        self.arena_stop_resume_btn = QPushButton("Stop")
+        self.arena_stop_resume_btn.setCheckable(True)
+        self.arena_stop_resume_btn.setEnabled(False)
+        self.arena_stop_resume_btn.setMinimumHeight(40)
+        self.arena_stop_resume_btn.clicked.connect(self._arena_stop_resume)
+        col1.addWidget(self.arena_stop_resume_btn)
+        btn_layout.addLayout(col1)
+        col2 = QVBoxLayout()
+        self.arena_clear_btn = QPushButton("Clear")
+        self.arena_clear_btn.setMinimumHeight(40)
+        self.arena_clear_btn.clicked.connect(self._clear_arena_session)
+        col2.addWidget(self.arena_clear_btn)
+        self.arena_save_btn = QPushButton("Save")
+        self.arena_save_btn.setMinimumHeight(40)
+        self.arena_save_btn.clicked.connect(self._save_arena_chat)
+        col2.addWidget(self.arena_save_btn)
+        btn_layout.addLayout(col2)
+        input_row.addWidget(btn_grid)
+        prompt_layout.addLayout(input_row)
+        left_layout.addLayout(prompt_layout)
+
+        right_widget = QWidget()
+        right_widget.setMinimumWidth(360)
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(12)
+        model_selector_layout = QHBoxLayout()
+        model_selector_layout.setSpacing(5)
+        self.arena_model_a_btn = QPushButton("🔵 A")
+        self.arena_model_a_btn.setCheckable(True)
+        self.arena_model_a_btn.setChecked(True)
+        self.arena_model_a_btn.clicked.connect(lambda: self._arena_switch_model_settings(0))
+        self.arena_model_b_btn = QPushButton("🟢 B")
+        self.arena_model_b_btn.setCheckable(True)
+        self.arena_model_b_btn.clicked.connect(lambda: self._arena_switch_model_settings(1))
+        self.arena_model_c_btn = QPushButton("🟣 C")
+        self.arena_model_c_btn.setCheckable(True)
+        self.arena_model_c_btn.clicked.connect(lambda: self._arena_switch_model_settings(2))
+        self.arena_model_c_btn.setVisible(True)
+        model_selector_layout.addWidget(self.arena_model_a_btn)
+        model_selector_layout.addWidget(self.arena_model_b_btn)
+        model_selector_layout.addWidget(self.arena_model_c_btn)
+        right_layout.addLayout(model_selector_layout)
+
+        self.arena_model_settings_stack = QStackedWidget()
+        self._arena_settings_built = False
+        for _ in range(3):
+            ph = QWidget()
+            ph_layout = QVBoxLayout(ph)
+            ph_label = QLabel("Loading...")
+            ph_label.setStyleSheet("color: #888;")
+            ph_layout.addStretch(1)
+            ph_layout.addWidget(ph_label, 0, Qt.AlignCenter)
+            ph_layout.addStretch(1)
+            self.arena_model_settings_stack.addWidget(ph)
+        self.arena_model_a_settings = None
+        self.arena_model_b_settings = None
+        self.arena_model_c_settings = None
+        right_layout.addWidget(self.arena_model_settings_stack, 0)
+
+        self.arena_right_tabs = QTabWidget()
+        self.arena_chat_log_display = QTextEdit()
+        self.arena_chat_log_display.setReadOnly(True)
+        self.arena_unfiltered_display = QTextEdit()
+        self.arena_unfiltered_display.setReadOnly(True)
+        self.arena_right_tabs.addTab(self.arena_chat_log_display, "Logs")
+        self.arena_right_tabs.addTab(self.arena_unfiltered_display, "Unfiltered Answer")
+        right_layout.addWidget(self.arena_right_tabs, 1)
+
+        main_layout.addWidget(left_widget, 1)
+        main_layout.addWidget(right_widget, 0)
+
+        self.arena_worker = None
+        self.arena_paused = False
+        QTimer.singleShot(100, self._load_arena_models)
+        return w
+
+    def _ensure_arena_settings_built(self) -> None:
+        if getattr(self, "_arena_settings_built", False):
+            return
+        if not hasattr(self, "arena_model_settings_stack") or self.arena_model_settings_stack is None:
+            return
+        a_page = self._create_m2m_model_settings_page("A")
+        b_page = self._create_m2m_model_settings_page("B")
+        c_page = self._create_m2m_model_settings_page("C")
+        for i in range(min(3, self.arena_model_settings_stack.count())):
+            old = self.arena_model_settings_stack.widget(i)
+            self.arena_model_settings_stack.removeWidget(old)
+            old.deleteLater()
+        self.arena_model_settings_stack.insertWidget(0, a_page)
+        self.arena_model_settings_stack.insertWidget(1, b_page)
+        self.arena_model_settings_stack.insertWidget(2, c_page)
+        self.arena_model_a_settings = a_page
+        self.arena_model_b_settings = b_page
+        self.arena_model_c_settings = c_page
+        self._arena_settings_built = True
+        self._arena_switch_model_settings(0)
+
+    def _arena_switch_model_settings(self, index: int):
+        self._ensure_arena_settings_built()
+        if not hasattr(self, "arena_model_settings_stack"):
+            return
+        self.arena_model_settings_stack.setCurrentIndex(index)
+        self.arena_model_a_btn.setChecked(index == 0)
+        self.arena_model_b_btn.setChecked(index == 1)
+        self.arena_model_c_btn.setChecked(index == 2)
+
+    def _on_arena_model_count_2_toggled(self, checked: bool) -> None:
+        if checked:
+            self.arena_model_count_3.blockSignals(True)
+            self.arena_model_count_3.setChecked(False)
+            self.arena_model_count_3.blockSignals(False)
+            self._on_arena_model_count_changed("2")
+        elif not self.arena_model_count_3.isChecked():
+            self.arena_model_count_3.blockSignals(True)
+            self.arena_model_count_3.setChecked(True)
+            self.arena_model_count_3.blockSignals(False)
+            self._on_arena_model_count_changed("3")
+
+    def _on_arena_model_count_3_toggled(self, checked: bool) -> None:
+        if checked:
+            self.arena_model_count_2.blockSignals(True)
+            self.arena_model_count_2.setChecked(False)
+            self.arena_model_count_2.blockSignals(False)
+            self._on_arena_model_count_changed("3")
+        elif not self.arena_model_count_2.isChecked():
+            self.arena_model_count_2.blockSignals(True)
+            self.arena_model_count_2.setChecked(True)
+            self.arena_model_count_2.blockSignals(False)
+            self._on_arena_model_count_changed("2")
+
+    def _on_arena_model_count_changed(self, count_str: str) -> None:
+        use_three = count_str == "3"
+        self.arena_model_c_header_widget.setVisible(use_three)
+        if use_three:
+            self.arena_model_c_btn.setVisible(True)
+            self.arena_model_a_btn.setText("🔵 A")
+            self.arena_model_b_btn.setText("🟢 B")
+            self.arena_model_c_btn.setText("🟣 C")
+        else:
+            if self.arena_model_c_btn.isChecked():
+                self._arena_switch_model_settings(0)
+            self.arena_model_c_btn.setVisible(False)
+            self.arena_model_a_btn.setText("🔵 Model A")
+            self.arena_model_b_btn.setText("🟢 Model B")
+
+    def _update_arena_model_header_ports(self) -> None:
+        if not hasattr(self, "arena_model_a_header"):
+            return
+        import yaml
+
+        config = {}
+        config_path = self.root / "configs" / "llm_backends.yaml"
+        if config_path.exists():
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+            except Exception:
+                config = {}
+        models_cfg = config.get("models", {})
+
+        def get_port(combo):
+            try:
+                idx = combo.currentIndex()
+                path = combo.itemData(idx) if idx >= 0 else None
+                if not path:
+                    return "-"
+                model_id = self._resolve_model_id_from_path(path)
+                if model_id in models_cfg:
+                    return models_cfg[model_id].get("port", "-")
+            except Exception:
+                pass
+            return "-"
+
+        for label, header, combo in [
+            ("Model A", self.arena_model_a_header, self.arena_model_a),
+            ("Model B", self.arena_model_b_header, self.arena_model_b),
+            ("Model C", self.arena_model_c_header, self.arena_model_c),
+        ]:
+            icon = "🔵" if "A" in label else "🟢" if "B" in label else "🟣"
+            header.setText(f"{icon} <b>{label}</b> <span style='font-size:16pt;color:#000000;'>(Port: {get_port(combo)})</span>")
+
+    def _update_arena_scene_label(self, model_key: str) -> None:
+        try:
+            combo = getattr(self, f"arena_model_{str(model_key).lower()[:1]}", None)
+            if combo is None:
+                return
+            text = (combo.currentText() or "").strip()
+            label = text
+            for p in ("✓ 📦 ", "📦 ", "🎯 "):
+                if label.startswith(p):
+                    label = label[len(p):].strip()
+            if len(label) > 24:
+                label = label[:21] + "..."
+            if not label or label.startswith("(No models"):
+                label = f"Model {str(model_key).upper()[:1]}"
+            if hasattr(self, "arena_scene_view") and self.arena_scene_view:
+                safe_label = label.replace("\\", "\\\\").replace("'", "\\'")
+                self.arena_scene_view.page().runJavaScript(
+                    f"window.updateLabels('{str(model_key).upper()[:1]}','{safe_label}');"
+                )
+        except Exception:
+            pass
+
+    def _load_arena_models(self):
+        self._refresh_locals()
+
+    def _clear_arena_session(self):
+        try:
+            self.arena_chat_log_display.clear()
+            self.arena_unfiltered_display.clear()
+            self._arena_history = []
+        except Exception:
+            pass
+
+    def _save_arena_chat(self) -> None:
+        try:
+            history = list(getattr(self, "_arena_history", []) or [])
+            if not history:
+                QMessageBox.information(self, "Arena", "No Arena conversation to save.")
+                return
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Arena Conversation",
+                str(self.root / "logs" / "arena_conversation.md"),
+                "Markdown Files (*.md);;Text Files (*.txt)",
+            )
+            if not path:
+                return
+            lines = ["# Arena Export", ""]
+            for role, text in history:
+                if role == "seed":
+                    lines.append(f"## Prompt\n{text}\n")
+                else:
+                    lines.append(f"### Model {str(role).upper()}\n{text}\n")
+            Path(path).write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
+        except Exception as e:
+            QMessageBox.warning(self, "Arena", f"Failed to save Arena conversation: {e}")
+
+    def _start_arena_conversation(self):
+        self._ensure_arena_settings_built()
+        seed = (self.arena_prompt.toPlainText() or "").strip()
+        if not seed:
+            QMessageBox.warning(self, "Arena", "Please enter a topic or initial prompt.")
+            return
+        use_three = self.arena_model_count_3.isChecked()
+        model_ids = []
+        paths_by_key = {}
+        entries = [(self.arena_model_a, "a"), (self.arena_model_b, "b"), (self.arena_model_c if use_three else None, "c")]
+        for combo, key in entries:
+            if combo is None:
+                break
+            path = combo.currentData()
+            if not path or (isinstance(path, str) and path.startswith("(")):
+                QMessageBox.warning(self, "Arena", f"Please select a valid model for {key.upper()}.")
+                return
+            paths_by_key[key] = str(path)
+            try:
+                model_id = self._resolve_chat_model_id_from_path(path)
+            except Exception as e:
+                QMessageBox.warning(self, "Arena", f"Could not resolve model for {key.upper()}: {e}")
+                return
+            model_ids.append((key, model_id))
+        if not model_ids:
+            return
+
+        sys_prompts, temps, tokens = {}, {}, {}
+        try:
+            if self.arena_model_a_settings:
+                sys_prompts["a"] = self.arena_model_a_settings.system_prompt.toPlainText().strip()
+                temps["a"] = float(self.arena_model_a_settings.temperature.value())
+                tokens["a"] = int(self.arena_model_a_settings.max_tokens.value())
+            if self.arena_model_b_settings:
+                sys_prompts["b"] = self.arena_model_b_settings.system_prompt.toPlainText().strip()
+                temps["b"] = float(self.arena_model_b_settings.temperature.value())
+                tokens["b"] = int(self.arena_model_b_settings.max_tokens.value())
+            if self.arena_model_c_settings:
+                sys_prompts["c"] = self.arena_model_c_settings.system_prompt.toPlainText().strip()
+                temps["c"] = float(self.arena_model_c_settings.temperature.value())
+                tokens["c"] = int(self.arena_model_c_settings.max_tokens.value())
+        except Exception:
+            pass
+
+        self.arena_paused = False
+        self.arena_stop_resume_btn.setEnabled(True)
+        self.arena_stop_resume_btn.setChecked(False)
+        self.arena_stop_resume_btn.setText("⏹ Stop")
+        self.arena_start_btn.setEnabled(False)
+        self._clear_arena_session()
+        self._arena_history = [("seed", seed)]
+        self._arena_active_paths = paths_by_key
+        self._arena_last_speaker = None
+        self._arena_scene_say("A", seed)
+
+        from desktop_app.model_to_model_worker import ModelToModelWorker
+
+        self.arena_worker = ModelToModelWorker(
+            seed=seed,
+            model_ids=[m[1] for m in model_ids],
+            model_keys=[m[0] for m in model_ids],
+            max_turns=self.arena_max_turns.value(),
+            system_prompts=sys_prompts,
+            temperatures=temps,
+            max_new_tokens=tokens,
+        )
+        self.arena_worker.turn_started.connect(self._on_arena_turn_started)
+        self.arena_worker.turn_finished.connect(self._on_arena_turn_finished)
+        self.arena_worker.finished_signal.connect(self._on_arena_finished)
+        self.arena_worker.error_signal.connect(self._on_arena_error)
+        self.arena_worker.log_signal.connect(self._append_arena_log)
+        self.arena_worker.start()
+
+    def _arena_scene_say(self, key: str, text: str):
+        if not hasattr(self, "arena_scene_view") or self.arena_scene_view is None:
+            return
+        cleaned = self._clean_test_chat_answer(text or "").replace("\\", "\\\\").replace("'", "\\'")
+        char_id = (key or "a").upper()[:1]
+        self.arena_scene_view.page().runJavaScript(f"window.characterSay('{char_id}','{cleaned}');")
+
+    def _on_arena_turn_started(self, model_key: str):
+        self._append_arena_log(f"[TURN] Model {str(model_key or '').upper()} started")
+
+    def _on_arena_turn_finished(self, model_key: str, text: str):
+        key = (model_key or "a").lower()[:1]
+        clean_text = self._clean_test_chat_answer(text or "")
+        try:
+            prev_key = getattr(self, "_arena_last_speaker", None)
+            if prev_key and prev_key != key and hasattr(self, "arena_scene_view") and self.arena_scene_view:
+                self.arena_scene_view.page().runJavaScript(
+                    f"window.sceneInteract('{str(prev_key).upper()[:1]}','{key.upper()[:1]}','talk');"
+                )
+        except Exception:
+            pass
+        self._append_arena_unfiltered(key, text or "")
+        self._arena_scene_say(key, clean_text)
+        self._append_arena_log(f"[{key.upper()}] {clean_text}")
+        self._arena_last_speaker = key
+        try:
+            self._arena_history.append((key, clean_text))
+        except Exception:
+            pass
+
+    def _on_arena_finished(self):
+        self.arena_start_btn.setEnabled(True)
+        self.arena_stop_resume_btn.setEnabled(False)
+        self.arena_stop_resume_btn.setText("⏹ Stop")
+        self.arena_worker = None
+
+    def _append_arena_log(self, text: str) -> None:
+        try:
+            self.arena_chat_log_display.append((text or "").strip())
+        except Exception:
+            pass
+
+    def _append_arena_unfiltered(self, model_key: str, text: str) -> None:
+        try:
+            prefix = f"[Model {str(model_key or '').upper()}]"
+            self.arena_unfiltered_display.append(f"{prefix}\n{text}\n")
+        except Exception:
+            pass
+
+    def _on_arena_error(self, message: str, model_id: str = "", model_key: str = ""):
+        self._append_arena_log(f"[ERROR] {message or 'Unknown error'}")
+        QMessageBox.critical(self, "Arena", message or "An error occurred.")
+        self.arena_start_btn.setEnabled(True)
+        self.arena_stop_resume_btn.setEnabled(False)
+        self.arena_worker = None
+
+    def _arena_stop_resume(self):
+        if self.arena_worker is None:
+            return
+        self.arena_paused = not self.arena_paused
+        self.arena_worker.set_paused(self.arena_paused)
+        self.arena_stop_resume_btn.setChecked(self.arena_paused)
+        self.arena_stop_resume_btn.setText("▶ Resume" if self.arena_paused else "⏹ Stop")
+
     def _map_tool_column(self, col: str) -> str:
         """
         Map worker/UI column identifiers to SynchronizedChatDisplay columns.
@@ -13123,13 +13632,22 @@ class MainWindow(QMainWindow):
         
         model_a_text = self.test_model_a.currentText().strip()
         model_b_text = self.test_model_b.currentText().strip()
-        model_c_text = self.test_model_c.currentText().strip() if hasattr(self, 'test_model_c') else ""
+        use_model_c = bool(
+            hasattr(self, "test_model_count_3")
+            and self.test_model_count_3 is not None
+            and self.test_model_count_3.isChecked()
+        )
+        model_c_text = (
+            self.test_model_c.currentText().strip()
+            if use_model_c and hasattr(self, "test_model_c")
+            else ""
+        )
         
         # Check if at least one model is selected
         has_model = (
             (not model_a_text.startswith("(No models") and model_a_text) or
             (not model_b_text.startswith("(No models") and model_b_text) or
-            (hasattr(self, 'test_model_c') and not model_c_text.startswith("(No models") and model_c_text)
+            (use_model_c and hasattr(self, "test_model_c") and not model_c_text.startswith("(No models") and model_c_text)
         )
         
         if not has_model:
@@ -13147,7 +13665,7 @@ class MainWindow(QMainWindow):
         if not model_b_text.startswith("(No models") and model_b_text:
             model_b_path = self._get_model_path_from_combo(self.test_model_b)
         
-        if hasattr(self, 'test_model_c') and not model_c_text.startswith("(No models") and model_c_text:
+        if use_model_c and hasattr(self, 'test_model_c') and not model_c_text.startswith("(No models") and model_c_text:
             model_c_path = self._get_model_path_from_combo(self.test_model_c)
         
         
@@ -13161,7 +13679,7 @@ class MainWindow(QMainWindow):
             system_prompt_b = self.test_model_b_settings.system_prompt.toPlainText().strip()
         
         system_prompt_c = ""
-        if model_c_path and hasattr(self, 'test_model_c_settings') and hasattr(self.test_model_c_settings, 'system_prompt'):
+        if use_model_c and model_c_path and hasattr(self, 'test_model_c_settings') and hasattr(self.test_model_c_settings, 'system_prompt'):
             system_prompt_c = self.test_model_c_settings.system_prompt.toPlainText().strip()
         
         # Check and fix ports before starting inference
@@ -19873,6 +20391,28 @@ respective package directories or official repositories.
 
             self.m2m_gpu_select.blockSignals(False)
 
+        # Arena tab GPU selector (same format as M2M)
+        if hasattr(self, "arena_gpu_select") and hasattr(self, "arena_gpu_info"):
+            self.arena_gpu_select.blockSignals(True)
+            self.arena_gpu_select.clear()
+            self.arena_gpu_index_map = []
+
+            if gpus:
+                for idx, gpu in enumerate(gpus):
+                    gpu_name = gpu.get("name", f"GPU {idx}")
+                    vram = gpu.get("memory", "N/A")
+                    orig_idx = gpu.get("_orig_index", idx)
+                    self.arena_gpu_select.addItem(f"GPU {orig_idx}: {gpu_name} ({vram})")
+                    self.arena_gpu_index_map.append(orig_idx)
+                self.arena_gpu_select.setEnabled(True)
+                self.arena_gpu_info.setText(f"✅ {len(gpus)} GPU(s) detected - select one for inference")
+            else:
+                self.arena_gpu_select.addItem("No GPUs available - CPU mode")
+                self.arena_gpu_select.setEnabled(False)
+                self.arena_gpu_info.setText("⚠️ No GPUs detected (CPU mode)")
+
+            self.arena_gpu_select.blockSignals(False)
+
     def _refresh_ready_model_selectors(self) -> None:
         """
         Single source: fetch READY models once and refresh Test, M2M, and Tool Chat selectors.
@@ -19918,6 +20458,12 @@ respective package directories or official repositories.
             self._fill_model_combo(self.m2m_model_c, downloaded_models, models_dir, ready_paths, adapter_dir)
             if hasattr(self, "_update_m2m_model_header_ports"):
                 self._update_m2m_model_header_ports()
+        if hasattr(self, "arena_model_a") and self.arena_model_a is not None:
+            self._fill_model_combo(self.arena_model_a, downloaded_models, models_dir, ready_paths, adapter_dir)
+            self._fill_model_combo(self.arena_model_b, downloaded_models, models_dir, ready_paths, adapter_dir)
+            self._fill_model_combo(self.arena_model_c, downloaded_models, models_dir, ready_paths, adapter_dir)
+            if hasattr(self, "_update_arena_model_header_ports"):
+                self._update_arena_model_header_ports()
         if hasattr(self, "_update_model_header_ports"):
             self._update_model_header_ports()
         if hasattr(self, "tool_chat_model_a"):

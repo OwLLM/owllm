@@ -15,6 +15,7 @@ from core.inference import (
     _derive_answer_from_tool_log,
     _derive_read_file_error_answer_from_tool_log,
     _normalize_tool_arguments,
+    _looks_like_path_only_turn,
     ToolEnabledInferenceConfig,
     run_inference_with_tools,
 )
@@ -406,6 +407,17 @@ def test_normalize_tool_arguments_replaces_placeholder_path_with_user_path():
     assert out.get("path") == "LLM/Dios.txt"
 
 
+def test_normalize_tool_arguments_write_file_directory_path_becomes_file_path():
+    args = {"path": "."}
+    out = _normalize_tool_arguments(
+        "write_file",
+        args,
+        "write a txt file in the same folder you find Dios.txt. The content is cake recipe",
+    )
+    assert out.get("path", "").startswith("LLM/")
+    assert out.get("path", "").endswith("Dios_new.txt")
+
+
 def test_successful_read_file_without_content_in_answer_forces_deterministic_content(monkeypatch):
     class _NativeExecutorStub:
         def execute(self, tool_call):
@@ -439,3 +451,152 @@ def test_successful_read_file_without_content_in_answer_forces_deterministic_con
     output, tool_log = run_inference_with_tools(cfg=cfg, tool_callback=None, approval_callback=None, log_callback=None)
     assert any((e or {}).get("status") == "success" for e in tool_log)
     assert "Ciao come stai?" in output
+
+
+def test_path_only_turn_with_successful_read_forces_content(monkeypatch):
+    class _NativeExecutorStub:
+        def execute(self, tool_call):
+            return type(
+                "Result",
+                (),
+                {
+                    "success": True,
+                    "result": {"content": "Ciao come stai?"},
+                    "error": None,
+                },
+            )()
+
+    calls = {"count": 0}
+
+    def _fake_run_inference(cfg, env=None, log_callback=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return '<tool_call>read_file(path="LLM/Dios.txt")</tool_call>'
+        return "The file may not be accessible in this environment."
+
+    monkeypatch.setattr("core.inference.run_inference", _fake_run_inference)
+    cfg = ToolEnabledInferenceConfig(
+        prompt="USER: read the file Dios.txt\nASSISTANT: not found\nUSER: LLM/Dios.txt\nASSISTANT: ",
+        model_id="dummy",
+        enable_tools=True,
+        native_executor=_NativeExecutorStub(),
+        max_tool_iterations=3,
+    )
+    output, tool_log = run_inference_with_tools(cfg=cfg, tool_callback=None, approval_callback=None, log_callback=None)
+    assert any((e or {}).get("status") == "success" for e in tool_log)
+    assert "Ciao come stai?" in output
+
+
+def test_looks_like_path_only_turn_helper():
+    assert _looks_like_path_only_turn(r"C:\1_Git\LocaLLM\LLM\Dios.txt")
+    assert _looks_like_path_only_turn("LLM/Dios.txt")
+    assert not _looks_like_path_only_turn("please summarize this")
+
+
+def test_successful_write_file_contradiction_answer_forces_written_confirmation(monkeypatch):
+    class _NativeExecutorStub:
+        def execute(self, tool_call):
+            return type(
+                "Result",
+                (),
+                {
+                    "success": True,
+                    "result": {"written": "LLM/cake_recipe.txt", "size": 14},
+                    "error": None,
+                },
+            )()
+
+    calls = {"count": 0}
+
+    def _fake_run_inference(cfg, env=None, log_callback=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return '<tool_call>write_file(path="LLM/cake_recipe.txt", content="Cake recipe")</tool_call>'
+        return "I can't create a file."
+
+    monkeypatch.setattr("core.inference.run_inference", _fake_run_inference)
+    cfg = ToolEnabledInferenceConfig(
+        prompt="write a txt file in the same folder you find Dios.txt. The content is a cake's recipe",
+        model_id="dummy",
+        enable_tools=True,
+        native_executor=_NativeExecutorStub(),
+        max_tool_iterations=3,
+    )
+    output, tool_log = run_inference_with_tools(cfg=cfg, tool_callback=None, approval_callback=None, log_callback=None)
+    assert any((e or {}).get("tool") == "write_file" and (e or {}).get("status") == "success" for e in tool_log)
+    assert "Wrote `LLM/cake_recipe.txt` successfully" in output
+
+
+def test_successful_write_file_nonconfirming_answer_forces_written_confirmation(monkeypatch):
+    class _NativeExecutorStub:
+        def execute(self, tool_call):
+            return type(
+                "Result",
+                (),
+                {
+                    "success": True,
+                    "result": {"written": "LLM/cake_recipe.txt", "size": 14},
+                    "error": None,
+                },
+            )()
+
+    calls = {"count": 0}
+
+    def _fake_run_inference(cfg, env=None, log_callback=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return '<tool_call>write_file(path="LLM/cake_recipe.txt", content="Cake recipe")</tool_call>'
+        return "You can create files using Python open(...)."
+
+    monkeypatch.setattr("core.inference.run_inference", _fake_run_inference)
+    cfg = ToolEnabledInferenceConfig(
+        prompt="write a txt file in the same folder you find Dios.txt. The content is a cake's recipe",
+        model_id="dummy",
+        enable_tools=True,
+        native_executor=_NativeExecutorStub(),
+        max_tool_iterations=3,
+    )
+    output, tool_log = run_inference_with_tools(cfg=cfg, tool_callback=None, approval_callback=None, log_callback=None)
+    assert any((e or {}).get("tool") == "write_file" and (e or {}).get("status") == "success" for e in tool_log)
+    assert "Wrote `LLM/cake_recipe.txt` successfully" in output
+
+
+def test_write_file_not_auto_denied_without_approval_callback(monkeypatch):
+    class _NativeExecutorStub:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, tool_call):
+            self.calls += 1
+            assert tool_call.name == "write_file"
+            return type(
+                "Result",
+                (),
+                {
+                    "success": True,
+                    "result": {"written": "LLM/tmp_out.txt", "size": 5},
+                    "error": None,
+                },
+            )()
+
+    calls = {"count": 0}
+
+    def _fake_run_inference(cfg, env=None, log_callback=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return '<tool_call>write_file(path="LLM/tmp_out.txt", content="hello")</tool_call>'
+        return "Done."
+
+    monkeypatch.setattr("core.inference.run_inference", _fake_run_inference)
+    ex = _NativeExecutorStub()
+    cfg = ToolEnabledInferenceConfig(
+        prompt="write file LLM/tmp_out.txt with hello",
+        model_id="dummy",
+        enable_tools=True,
+        native_executor=ex,
+        max_tool_iterations=3,
+    )
+    output, tool_log = run_inference_with_tools(cfg=cfg, tool_callback=None, approval_callback=None, log_callback=None)
+    assert ex.calls == 1
+    assert any((e or {}).get("tool") == "write_file" and (e or {}).get("status") == "success" for e in tool_log)
+    assert "Wrote `LLM/tmp_out.txt` successfully" in output

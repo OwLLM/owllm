@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Characters</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #1e1e1e; /* Matches PySide dark theme */
+            font-family: sans-serif;
+            user-select: none;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        .bubble {
+            position: absolute;
+            background: white;
+            color: #333;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            max-width: 200px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s, transform 0.2s;
+            transform: translate(-50%, -100%);
+            z-index: 10;
+        }
+        .bubble::after {
+            content: '';
+            position: absolute;
+            bottom: -8px;
+            left: 50%;
+            margin-left: -8px;
+            border-width: 8px 8px 0;
+            border-style: solid;
+            border-color: white transparent transparent transparent;
+        }
+        #labels {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 5;
+        }
+        .name-label {
+            position: absolute;
+            color: white;
+            font-weight: bold;
+            font-size: 12px;
+            text-shadow: 1px 1px 2px black;
+            transform: translate(-50%, -50%);
+            opacity: 0.8;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    <div id="labels"></div>
+    <script src="js/three.min.js"></script>
+    <script src="js/OrbitControls.js"></script>
+    <script src="js/GLTFLoader.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>

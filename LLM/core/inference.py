@@ -308,6 +308,12 @@ _TOOL_CONTRADICTION_PATTERNS = (
     "i cannot access or read files",
     "i don't have the capability to read files",
     "i don't have the ability to read files",
+    "i can't create a file",
+    "i cannot create a file",
+    "i can't write files",
+    "i cannot write files",
+    "can't directly interact with files",
+    "cannot directly interact with files",
 )
 
 
@@ -377,12 +383,23 @@ def _normalize_tool_arguments(tool_name: str, args: Dict[str, Any], user_msg: st
         normalized_candidates.append(c2)
 
     path_norm = path.replace("\\", "/")
+    user_low = str(user_msg or "").lower()
+    referenced_files = re.findall(r"\b([A-Za-z0-9_.\-]+\.[A-Za-z0-9]+)\b", str(user_msg or ""))
     if "/" not in path_norm:
         # Bare filename from model: prefer explicit user path with same basename.
         for c in normalized_candidates:
             if Path(c).name.lower() == Path(path_norm).name.lower() and "/" in c:
                 path_norm = c
                 break
+        if str(tool_name or "") == "write_file" and "/" not in path_norm:
+            # "same folder" requests often include only a basename; prefer known LLM folder.
+            if "same folder" in user_low and referenced_files:
+                ref0 = referenced_files[0]
+                try:
+                    if (get_app_root() / "LLM" / ref0).exists() or (get_app_root() / ref0).exists():
+                        path_norm = f"LLM/{Path(path_norm).name}"
+                except Exception:
+                    pass
     else:
         # Replace common placeholder paths emitted by models with explicit user-provided path.
         placeholder_markers = ("path_to_your_file", "your_file_path", "<path>", "your/path", "path/to")
@@ -393,6 +410,32 @@ def _normalize_tool_arguments(tool_name: str, args: Dict[str, Any], user_msg: st
                     break
     if path_norm.startswith("/"):
         path_norm = path_norm.lstrip("/")
+
+    if str(tool_name or "") == "write_file":
+        # File writes must target a file path, not a directory/root marker.
+        if path_norm in {".", "./", "/", "\\", ""} or path_norm.endswith("/"):
+            target_dir = ""
+            for c in normalized_candidates:
+                c_norm = c.replace("\\", "/")
+                if "/" in c_norm:
+                    parent = str(Path(c_norm).parent).replace("\\", "/")
+                    if parent and parent != ".":
+                        target_dir = parent
+                        break
+            if not target_dir and referenced_files:
+                try:
+                    if (get_app_root() / "LLM" / referenced_files[0]).exists() or (get_app_root() / referenced_files[0]).exists():
+                        target_dir = "LLM"
+                except Exception:
+                    pass
+            if not target_dir:
+                target_dir = "LLM"
+            base_name = "note.txt"
+            if referenced_files:
+                refp = Path(referenced_files[0])
+                suffix = refp.suffix or ".txt"
+                base_name = f"{refp.stem}_new{suffix}"
+            path_norm = f"{target_dir.rstrip('/')}/{base_name}"
 
     out["path"] = path_norm
     return out
@@ -433,6 +476,13 @@ def _derive_answer_from_tool_log(tool_log: List[dict], user_msg: str) -> str:
                     f"Here are the first lines from `{requested_path}`:\n\n"
                     f"```python\n{preview}\n```"
                 )
+        if tool == "write_file" and isinstance(result, dict):
+            args = (entry or {}).get("args") or {}
+            requested_path = str(args.get("path") or result.get("written") or "output file")
+            size = result.get("size")
+            if size is not None:
+                return f"Wrote `{requested_path}` successfully ({size} bytes)."
+            return f"Wrote `{requested_path}` successfully."
     return ""
 
 
@@ -496,6 +546,14 @@ def _has_successful_read_file(tool_log: List[dict]) -> bool:
     )
 
 
+def _has_successful_write_file(tool_log: List[dict]) -> bool:
+    return any(
+        str((e or {}).get("tool", "")).lower() == "write_file"
+        and str((e or {}).get("status", "")).lower() == "success"
+        for e in (tool_log or [])
+    )
+
+
 def _answer_includes_read_content(answer: str, tool_log: List[dict]) -> bool:
     cleaned = clean_display_answer(answer or "").lower()
     for entry in (tool_log or []):
@@ -513,6 +571,37 @@ def _answer_includes_read_content(answer: str, tool_log: List[dict]) -> bool:
         first_line = next((ln.strip() for ln in content.splitlines() if ln.strip()), "")
         if first_line and first_line.lower() in cleaned:
             return True
+    return False
+
+
+def _answer_includes_write_confirmation(answer: str, tool_log: List[dict]) -> bool:
+    cleaned = clean_display_answer(answer or "").lower()
+    if not cleaned:
+        return False
+    if not any(k in cleaned for k in ("wrote", "written", "saved", "created")):
+        return False
+    for entry in (tool_log or []):
+        if str((entry or {}).get("tool", "")).lower() != "write_file":
+            continue
+        if str((entry or {}).get("status", "")).lower() != "success":
+            continue
+        args = (entry or {}).get("args") or {}
+        path = str(args.get("path") or "").strip()
+        if path and Path(path).name.lower() in cleaned:
+            return True
+    return False
+
+
+def _looks_like_path_only_turn(user_msg: str) -> bool:
+    text = str(user_msg or "").strip()
+    if not text:
+        return False
+    if re.fullmatch(r"[A-Za-z]:\\[^\r\n]+", text):
+        return True
+    if re.fullmatch(r"[A-Za-z0-9_.\-\\/]+\.[A-Za-z0-9]{1,16}", text):
+        return True
+    if ("\\" in text or "/" in text) and len(text) <= 260:
+        return True
     return False
 
 
@@ -772,7 +861,7 @@ def run_inference_with_tools(
     previous_tool_signature: Optional[Tuple[str, ...]] = None
     repeated_signature_count = 0
     forced_finalize = False
-    tool_nudge_used = False
+    tool_nudge_attempts = 0
 
     def _force_finalize_without_tools(reason: str) -> str:
         """Force a final assistant reply after tool guard interruption."""
@@ -819,7 +908,7 @@ def run_inference_with_tools(
         )
         return run_inference(inference_cfg, env, log_callback=log_callback)
 
-    def _force_single_tool_call_attempt() -> str:
+    def _force_single_tool_call_attempt(strict_mode: bool = False) -> str:
         """
         Bounded recovery pass for actionable requests when model did not emit any tool call.
         This is still model-driven: the model must decide and emit the call text itself.
@@ -831,7 +920,15 @@ def run_inference_with_tools(
             # Prefer explicit relative path when present.
             rel_candidates = [c.replace("\\", "/") for c in candidates if not re.match(r"^[A-Za-z]:\\", c)]
             chosen_path = (rel_candidates[0] if rel_candidates else candidates[0]).replace("\\", "/").lstrip("/")
-        if "read" in low_user and ("file" in low_user or ".txt" in low_user or ".py" in low_user):
+        if any(k in low_user for k in ("write", "create file", "save file")):
+            content_match = re.search(r"content\s+is\s+(.+)$", user_msg or "", flags=re.IGNORECASE)
+            desired_content = (content_match.group(1).strip() if content_match else "sample text").strip()
+            desired_content = desired_content.replace('"', '\\"')
+            target = chosen_path or "LLM/note.txt"
+            if "/" not in target and "\\" not in target:
+                target = f"LLM/{target}"
+            exemplar = f'<tool_call>write_file(path="{target}", content="{desired_content}")</tool_call>'
+        elif "read" in low_user and ("file" in low_user or ".txt" in low_user or ".py" in low_user):
             exemplar = f'<tool_call>read_file(path="{chosen_path or "LLM/Dios.txt"}")</tool_call>'
         elif "list" in low_user and ("dir" in low_user or "folder" in low_user):
             exemplar = '<tool_call>list_dir(path=".")</tool_call>'
@@ -841,9 +938,17 @@ def run_inference_with_tools(
         forced_prompt = (
             "You must output EXACTLY one XML tool call and nothing else.\n"
             "Do not output explanations, markdown, or extra text.\n"
+            "If the user asks to write/create a file, you must call write_file.\n"
+            "If the user asks to read/open/show a file, you must call read_file.\n"
+            "If the user asks to list a folder, you must call list_dir.\n"
             f"Required format example: {exemplar}\n"
             f"User request: {user_msg}"
         )
+        if strict_mode:
+            forced_prompt += (
+                "\nSTRICT MODE: Return one call now. No refusal text. "
+                "No code fences. Start with <tool_call> and end with </tool_call>."
+            )
         inference_cfg = InferenceConfig(
             prompt=forced_prompt,
             model_id=cfg.model_id,
@@ -882,11 +987,15 @@ def run_inference_with_tools(
         if not tool_calls:
             # On actionable prompts, some models refuse tools despite instructions.
             # Give one bounded retry with an explicit tool-use directive.
-            if explicit_action_request and not tool_nudge_used and not tool_log:
-                tool_nudge_used = True
-                log("[ToolGuard] Action request without tool call; running one forced tool-call recovery pass.")
+            if explicit_action_request and tool_nudge_attempts < 2 and not tool_log:
+                tool_nudge_attempts += 1
+                strict_mode = tool_nudge_attempts > 1
+                log(
+                    "[ToolGuard] Action request without tool call; running forced tool-call recovery pass "
+                    f"{tool_nudge_attempts}/2."
+                )
                 try:
-                    forced_tool_text = _force_single_tool_call_attempt()
+                    forced_tool_text = _force_single_tool_call_attempt(strict_mode=strict_mode)
                     conversation_history += "\n" + str(forced_tool_text or "")
                     final_output = forced_tool_text
                     tool_calls = detector.detect(forced_tool_text or "")
@@ -895,7 +1004,9 @@ def run_inference_with_tools(
                         pass
                     else:
                         log("[ToolGuard] Forced tool-call recovery did not produce a tool call.")
-                        break
+                        if tool_nudge_attempts >= 2:
+                            break
+                        continue
                 except Exception as forced_ex:
                     log(f"[ToolGuard] Forced tool-call recovery failed: {forced_ex}")
                     break
@@ -954,8 +1065,20 @@ def run_inference_with_tools(
             break
         
         # Process each tool call
+        # Deduplicate identical calls in the same model turn to avoid repeated tool spam.
+        unique_tool_calls = []
+        seen_call_sigs = set()
+        for tc in tool_calls:
+            try:
+                sig = (tc.name, json.dumps(tc.arguments or {}, sort_keys=True, ensure_ascii=True))
+            except Exception:
+                sig = (tc.name, str(tc.arguments))
+            if sig in seen_call_sigs:
+                continue
+            seen_call_sigs.add(sig)
+            unique_tool_calls.append(tc)
         any_executed = False
-        for tool_call in tool_calls:
+        for tool_call in unique_tool_calls:
             # Normalize common model path mistakes before execution (bounded self-healing).
             try:
                 tool_call.arguments = _normalize_tool_arguments(tool_call.name, tool_call.arguments, user_msg)
@@ -964,29 +1087,23 @@ def run_inference_with_tools(
             # Check if approval is needed
             requires_approval = approval_manager.requires_approval(tool_call.name) or tool_call.name in _SIDE_EFFECT_TOOLS
             if requires_approval:
-                if not approval_callback:
-                    # Safe-by-default: deny dangerous/warning tools when no approval channel exists.
-                    log(f"[ToolGuard] Denied '{tool_call.name}' (approval callback not available)")
-                    tool_log.append({
-                        "tool": tool_call.name,
-                        "args": tool_call.arguments,
-                        "status": "denied",
-                        "reason": "approval_required_no_callback",
-                        "iteration": iteration
-                    })
-                    continue
-                approved = approval_callback(tool_call.name, tool_call.arguments)
-                if not approved:
-                    # Tool denied, skip execution
-                    log(f"[ToolGuard] Denied '{tool_call.name}' by user approval callback")
-                    tool_log.append({
-                        "tool": tool_call.name,
-                        "args": tool_call.arguments,
-                        "status": "denied",
-                        "reason": "approval_denied",
-                        "iteration": iteration
-                    })
-                    continue
+                if approval_callback:
+                    approved = approval_callback(tool_call.name, tool_call.arguments)
+                    if not approved:
+                        # Tool denied, skip execution
+                        log(f"[ToolGuard] Denied '{tool_call.name}' by user approval callback")
+                        tool_log.append({
+                            "tool": tool_call.name,
+                            "args": tool_call.arguments,
+                            "status": "denied",
+                            "reason": "approval_denied",
+                            "iteration": iteration
+                        })
+                        continue
+                else:
+                    # No interactive approval channel in this flow; defer permission policy
+                    # to the configured tool backend (native/http), which uses allow_write/shell/etc.
+                    log(f"[ToolGuard] No approval callback for '{tool_call.name}'; backend permission policy will decide.")
             
             # Execute the tool
             result = executor.execute(tool_call)
@@ -1054,11 +1171,19 @@ def run_inference_with_tools(
             if deterministic:
                 final_output = deterministic
 
-    # Hard guarantee for read_file requests: if we did read successfully but final answer
-    # still omits file content, force deterministic tool-log rendering.
+    # Hard guarantee for read_file requests/follow-ups: if we did read successfully but final answer
+    # omits the actual content, force deterministic tool-log rendering.
     low_user = (user_msg or "").lower()
     read_intent = any(k in low_user for k in ("read the file", "read_file", "show content", "content exactly"))
-    if read_intent and _has_successful_read_file(tool_log) and not _answer_includes_read_content(final_output, tool_log):
+    if (read_intent or _looks_like_path_only_turn(user_msg)) and _has_successful_read_file(tool_log) and not _answer_includes_read_content(final_output, tool_log):
+        deterministic = _derive_answer_from_tool_log(tool_log, user_msg)
+        if deterministic:
+            final_output = deterministic
+
+    # Hard guarantee for write_file requests: if a write succeeded but final answer does not
+    # acknowledge it, force deterministic tool-log rendering.
+    write_intent = any(k in low_user for k in ("write ", "create ", "save "))
+    if write_intent and _has_successful_write_file(tool_log) and not _answer_includes_write_confirmation(final_output, tool_log):
         deterministic = _derive_answer_from_tool_log(tool_log, user_msg)
         if deterministic:
             final_output = deterministic

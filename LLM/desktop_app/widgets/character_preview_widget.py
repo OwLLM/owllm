@@ -66,7 +66,7 @@ class CharacterPreviewWidget(QWidget):
         self._scale_label = QLabel("Scale: 1.00x")
         self._scale_label.setAlignment(Qt.AlignCenter)
         self._scale_slider = QSlider(Qt.Horizontal)
-        self._scale_slider.setMinimum(3)
+        self._scale_slider.setMinimum(1)
         self._scale_slider.setMaximum(200)
         self._scale_slider.setValue(100)
         self._scale_slider.valueChanged.connect(self._on_scale_changed)

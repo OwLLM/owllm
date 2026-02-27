@@ -1,8 +1,9 @@
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x1e222b);
+scene.background = new THREE.Color(0xaed1ff);
+scene.fog = new THREE.Fog(0xaed1ff, 10, 36);
 
 const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 100);
-camera.position.set(0, 1.5, 4.5);
+camera.position.set(0, 0.15, 4.5);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
@@ -16,36 +17,89 @@ controls.dampingFactor = 0.05;
 controls.autoRotate = true;
 controls.autoRotateSpeed = 2.0;
 
-scene.add(new THREE.HemisphereLight(0xcce4ff, 0x1a1a1a, 1.0));
-const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+scene.add(new THREE.HemisphereLight(0xcde5ff, 0x5d7f40, 0.9));
+const dirLight = new THREE.DirectionalLight(0xfff2da, 1.2);
 dirLight.position.set(5, 10, 7);
 dirLight.castShadow = true;
 scene.add(dirLight);
+const fillLight = new THREE.DirectionalLight(0xf4e6c8, 0.32);
+fillLight.position.set(-6, 4, 2);
+scene.add(fillLight);
+const rimLight = new THREE.DirectionalLight(0xffd5a0, 0.4);
+rimLight.position.set(0, 5, -6);
+scene.add(rimLight);
 
 const floor = new THREE.Mesh(
-    new THREE.CircleGeometry(3, 32),
-    new THREE.MeshStandardMaterial({ color: 0x2a313d, roughness: 0.8, metalness: 0.1 })
+    new THREE.CircleGeometry(18, 96),
+    new THREE.MeshStandardMaterial({ color: 0x6ea957, roughness: 0.9, metalness: 0.02 })
 );
 floor.rotation.x = -Math.PI / 2;
 floor.receiveShadow = true;
 scene.add(floor);
 
+const pedestal = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.75, 1.95, 0.45, 64),
+    new THREE.MeshStandardMaterial({ color: 0xb5b0a2, roughness: 0.8, metalness: 0.08 })
+);
+pedestal.position.y = -0.22;
+pedestal.receiveShadow = true;
+scene.add(pedestal);
+
+const backdrop = new THREE.Mesh(
+    new THREE.CylinderGeometry(7.5, 7.5, 8.8, 64, 1, true, Math.PI * 0.1, Math.PI * 0.8),
+    new THREE.MeshStandardMaterial({ color: 0xd8e2cc, roughness: 0.96, metalness: 0.01, side: THREE.DoubleSide })
+);
+backdrop.position.set(0, 3.1, -2.8);
+backdrop.rotation.y = Math.PI;
+scene.add(backdrop);
+
 const MODEL_CATALOG = {
-    soldier: { path: "models/soldier.glb", scale: 1.2 },
-    robot: { path: "models/robot.glb", scale: 0.4 },
-    xbot: { path: "models/xbot.glb", scale: 0.013 },
-    cesium_man: { path: "models/cesium_man.glb", scale: 1.2 },
-    robot_expressive: { path: "models/robot_expressive.glb", scale: 0.3 },
-    rigged_figure: { path: "models/rigged_figure.glb", scale: 1.5 },
-    kira: { path: "models/kira.glb", scale: 1.0 },
-    readyplayer: { path: "models/readyplayer.me.glb", scale: 1.0 },
-    michelle: { path: "models/michelle.glb", scale: 1.0 },
+    fantasy_knight: { path: "models/fantasy_knight.glb", scale: 1.2, yOffset: 0, camY: 1.0, camDist: 3.8, aura: 0xe2c488 },
+    fantasy_mage: { path: "models/fantasy_mage.glb", scale: 1.0, yOffset: 0, camY: 0.95, camDist: 3.6, aura: 0xa58ee2 },
+    fantasy_rogue: { path: "models/fantasy_rogue.glb", scale: 0.013, yOffset: 0, camY: 1.0, camDist: 3.8, aura: 0x8fc9cf },
+    fantasy_guardian: { path: "models/rigged_figure.glb", scale: 1.5, yOffset: 0, camY: 1.15, camDist: 4.4, aura: 0xcac7b8 },
+    anime_blade: { path: "models/kira.glb", scale: 1.0, yOffset: 0, camY: 0.95, camDist: 3.5, aura: 0xffd7ba },
+    anime_guardian: { path: "models/michelle.glb", scale: 1.0, yOffset: 0, camY: 0.95, camDist: 3.5, aura: 0xffdcc2 },
+    anime_urban: { path: "models/readyplayer.me.glb", scale: 1.0, yOffset: 0, camY: 0.95, camDist: 3.5, aura: 0xffddc4 },
+    anime_tokyo: { path: "models/littlest_tokyo.glb", scale: 0.012, yOffset: 0, camY: 1.5, camDist: 5.0, aura: 0xd6c8ff },
+    anime_android: { path: "models/robot_expressive.glb", scale: 0.3, yOffset: 0, camY: 0.8, camDist: 3.0, aura: 0xa8b9ff },
+    anime_scout: { path: "models/rigged_simple.glb", scale: 1.0, yOffset: 0, camY: 0.85, camDist: 3.3, aura: 0xf2d7bb },
 };
 
 const loader = new THREE.GLTFLoader();
+const dracoLoader = new THREE.DRACOLoader();
+dracoLoader.setDecoderPath('js/draco/');
+loader.setDRACOLoader(dracoLoader);
 let currentModel = null;
 let mixer = null;
 const clock = new THREE.Clock();
+const auraRing = new THREE.Mesh(
+    new THREE.TorusGeometry(1.65, 0.05, 16, 96),
+    new THREE.MeshStandardMaterial({ color: 0xeed8ad, emissive: 0xc69844, emissiveIntensity: 0.35, roughness: 0.55, metalness: 0.15 })
+);
+auraRing.rotation.x = Math.PI * 0.5;
+auraRing.position.y = 0.03;
+scene.add(auraRing);
+
+function frameModelToBodyCenter(root, cfg) {
+    // Reset rotations and force manual offsets for absolute reliability
+    root.rotation.set(0, 0, 0);
+    root.position.set(0, cfg.yOffset || 0, 0);
+
+    const targetY = cfg.camY || 1.0;
+    const distance = cfg.camDist || 3.5;
+
+    controls.target.set(0, targetY, 0);
+    camera.position.set(0, targetY + 0.2, distance);
+    camera.lookAt(controls.target);
+    controls.minDistance = distance * 0.5;
+    controls.maxDistance = distance * 2.5;
+}
+
+function applyStyle(root, cfg) {
+    // Keep original artist textures/materials for visual fidelity.
+    return;
+}
 
 window.setPreviewModel = (key) => {
     if (currentModel) {
@@ -58,8 +112,8 @@ window.setPreviewModel = (key) => {
 
     loader.load(cfg.path, (gltf) => {
         currentModel = gltf.scene;
-        // Make it slightly larger for the preview
-        currentModel.scale.setScalar(cfg.scale * 1.3);
+        // Make it larger for the preview
+        currentModel.scale.setScalar(cfg.scale * 1.5);
         
         currentModel.traverse(n => {
             if (n.isMesh) { 
@@ -67,14 +121,18 @@ window.setPreviewModel = (key) => {
                 n.receiveShadow = true; 
             }
         });
+        applyStyle(currentModel, cfg);
         
-        currentModel.position.y = 0;
-
         scene.add(currentModel);
+        frameModelToBodyCenter(currentModel, cfg);
+        if (cfg.aura) {
+            auraRing.material.color.setHex(cfg.aura);
+            auraRing.material.emissive.setHex(cfg.aura);
+        }
 
-        if (gltf.animations && gltf.animations.length > 0) {
+        const clip = gltf.animations.find(c => c.name.toLowerCase().includes('idle') || c.name.toLowerCase().includes('stand') || c.name.toLowerCase().includes('breath')) || gltf.animations[0];
+        if (clip) {
             mixer = new THREE.AnimationMixer(currentModel);
-            const clip = gltf.animations.find(c => c.name.toLowerCase().includes('idle')) || gltf.animations[0];
             mixer.clipAction(clip).play();
         }
     });
@@ -90,6 +148,8 @@ function animate() {
     requestAnimationFrame(animate);
     const dt = clock.getDelta();
     if (mixer) mixer.update(dt);
+    auraRing.rotation.z += dt * 0.55;
+    auraRing.material.emissiveIntensity = 0.6 + Math.sin(performance.now() * 0.003) * 0.2;
     controls.update();
     renderer.render(scene, camera);
 }

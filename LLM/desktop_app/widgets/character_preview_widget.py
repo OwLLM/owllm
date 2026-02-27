@@ -13,21 +13,22 @@ class CharacterPreviewWidget(QWidget):
     characterSelected = Signal(str, str)  # model_name, character_key
 
     CHARACTER_KEYS = [
-        "soldier",
-        "robot",
-        "xbot",
-        "cesium_man",
-        "robot_expressive",
-        "rigged_figure",
-        "kira",
-        "readyplayer",
-        "michelle"
+        "fantasy_knight",
+        "fantasy_mage",
+        "fantasy_rogue",
+        "fantasy_guardian",
+        "anime_blade",
+        "anime_guardian",
+        "anime_urban",
+        "anime_tokyo",
+        "anime_android",
+        "anime_scout",
     ]
 
     DEFAULTS = {
-        "A": "soldier",
-        "B": "robot",
-        "C": "xbot",
+        "A": "fantasy_knight",
+        "B": "anime_android",
+        "C": "fantasy_mage",
     }
 
     def __init__(self, model_name: str, root_path: Path, parent: QWidget | None = None) -> None:

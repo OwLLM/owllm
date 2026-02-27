@@ -1,5 +1,6 @@
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x15181f);
+scene.background = new THREE.Color(0x9bc7ff);
+scene.fog = new THREE.Fog(0x9bc7ff, 28, 90);
 
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 500);
 camera.position.set(0, 6.5, 16);
@@ -13,21 +14,56 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputEncoding = THREE.sRGBEncoding;
 document.getElementById("canvas-container").appendChild(renderer.domElement);
 
-scene.add(new THREE.HemisphereLight(0xcce4ff, 0x1a1a1a, 0.7));
-const keyLight = new THREE.DirectionalLight(0xffffff, 1.05);
+scene.add(new THREE.HemisphereLight(0xbfdcff, 0x4f7f3a, 0.95));
+const keyLight = new THREE.DirectionalLight(0xfff4dd, 1.2);
 keyLight.position.set(8, 12, 6);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(2048, 2048);
 scene.add(keyLight);
+const fillLight = new THREE.DirectionalLight(0xe3ffd0, 0.38);
+fillLight.position.set(-10, 7, -4);
+scene.add(fillLight);
+const rimLight = new THREE.DirectionalLight(0xffefc8, 0.28);
+rimLight.position.set(0, 5, -10);
+scene.add(rimLight);
 
 const floor = new THREE.Mesh(
-    new THREE.CircleGeometry(11, 80),
-    new THREE.MeshStandardMaterial({ color: 0x212733, roughness: 0.92, metalness: 0.05 })
+    new THREE.CircleGeometry(42, 96),
+    new THREE.MeshStandardMaterial({ color: 0x69aa4f, roughness: 0.93, metalness: 0.02 })
 );
-floor.rotation.x = -Math.PI * 0.5;
+floor.rotation.x = -Math.PI / 2;
 floor.receiveShadow = true;
 scene.add(floor);
-scene.add(new THREE.GridHelper(20, 30, 0x30384a, 0x222836));
+
+const stoneArena = new THREE.Mesh(
+    new THREE.CircleGeometry(8.8, 72),
+    new THREE.MeshStandardMaterial({ color: 0xb9b7a8, roughness: 0.78, metalness: 0.08 })
+);
+stoneArena.rotation.x = Math.PI * 0.5;
+stoneArena.position.y = 0.015;
+stoneArena.receiveShadow = true;
+scene.add(stoneArena);
+
+for (let i = 0; i < 28; i += 1) {
+    const angle = (i / 28) * Math.PI * 2;
+    const fence = new THREE.Mesh(
+        new THREE.BoxGeometry(1.2, 0.45, 0.12),
+        new THREE.MeshStandardMaterial({ color: 0x8d5f33, roughness: 0.92, metalness: 0.02 })
+    );
+    const radius = 12.2;
+    fence.position.set(Math.cos(angle) * radius, 0.24, Math.sin(angle) * radius);
+    fence.lookAt(0, 0.24, 0);
+    scene.add(fence);
+
+    if (i % 2 === 0) {
+        const post = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.09, 0.09, 0.8, 10),
+            new THREE.MeshStandardMaterial({ color: 0x6f4727, roughness: 0.9, metalness: 0.03 })
+        );
+        post.position.set(Math.cos(angle) * radius, 0.4, Math.sin(angle) * radius);
+        scene.add(post);
+    }
+}
 
 const labelsRoot = document.getElementById("labels");
 const loader = new THREE.GLTFLoader();
@@ -57,16 +93,42 @@ window.addEventListener("keyup", (e) => {
 });
 
 const MODEL_CATALOG = {
-    soldier: { path: "models/soldier.glb", scale: 1.2 },
-    robot: { path: "models/robot.glb", scale: 0.4 },
-    xbot: { path: "models/xbot.glb", scale: 0.013 },
-    cesium_man: { path: "models/cesium_man.glb", scale: 1.2 },
-    robot_expressive: { path: "models/robot_expressive.glb", scale: 0.3 },
-    rigged_figure: { path: "models/rigged_figure.glb", scale: 1.5 },
-    kira: { path: "models/kira.glb", scale: 1.0 },
-    readyplayer: { path: "models/readyplayer.me.glb", scale: 1.0 },
-    michelle: { path: "models/michelle.glb", scale: 1.0 },
+    fantasy_knight: { path: "models/fantasy_knight.glb", scale: 1.2, yOffset: 0 },
+    fantasy_mage: { path: "models/fantasy_mage.glb", scale: 1.0, yOffset: 0 },
+    fantasy_rogue: { path: "models/fantasy_rogue.glb", scale: 0.013, yOffset: 0 },
+    fantasy_guardian: { path: "models/rigged_figure.glb", scale: 1.5, yOffset: 0 },
+    anime_blade: { path: "models/kira.glb", scale: 1.0, yOffset: 0 },
+    anime_guardian: { path: "models/michelle.glb", scale: 1.0, yOffset: 0 },
+    anime_urban: { path: "models/readyplayer.me.glb", scale: 1.0, yOffset: 0 },
+    anime_tokyo: { path: "models/littlest_tokyo.glb", scale: 0.012, yOffset: 0 },
+    anime_android: { path: "models/robot_expressive.glb", scale: 0.3, yOffset: 0 },
+    anime_scout: { path: "models/rigged_simple.glb", scale: 1.0, yOffset: 0 },
 };
+
+const dracoLoader = new THREE.DRACOLoader();
+dracoLoader.setDecoderPath('js/draco/');
+loader.setDRACOLoader(dracoLoader);
+
+function applyStyle(root, cfg) {
+    if (!cfg || (!cfg.tint && !cfg.emissive && cfg.metalness === undefined && cfg.roughness === undefined)) {
+        return;
+    }
+    root.traverse((node) => {
+        if (!node.isMesh || !node.material) return;
+        node.material = node.material.clone();
+        if (cfg.tint) node.material.color.setHex(cfg.tint);
+        if (cfg.emissive && node.material.emissive) {
+            node.material.emissive.setHex(cfg.emissive);
+            node.material.emissiveIntensity = cfg.emissiveIntensity || 0.15;
+        }
+        if (cfg.metalness !== undefined && node.material.metalness !== undefined) {
+            node.material.metalness = cfg.metalness;
+        }
+        if (cfg.roughness !== undefined && node.material.roughness !== undefined) {
+            node.material.roughness = cfg.roughness;
+        }
+    });
+}
 
 function norm(s) {
     return String(s || "").trim().toLowerCase();
@@ -111,7 +173,7 @@ class CharacterActor {
     }
 
     _loadVisual(visualKey) {
-        const modelCfg = MODEL_CATALOG[visualKey] || MODEL_CATALOG.robot;
+        const modelCfg = MODEL_CATALOG[visualKey] || MODEL_CATALOG.fantasy_knight;
         loader.load(
             modelCfg.path,
             (gltf) => {
@@ -125,6 +187,8 @@ class CharacterActor {
                 }
                 this.rootMesh = gltf.scene;
                 this.rootMesh.scale.setScalar(modelCfg.scale);
+                this.rootMesh.position.y = modelCfg.yOffset || 0;
+                applyStyle(this.rootMesh, modelCfg);
                 this.rootMesh.traverse((node) => {
                     if (node.isMesh) {
                         node.castShadow = true;
@@ -313,9 +377,9 @@ class CharacterActor {
 }
 
 const characters = {
-    A: new CharacterActor("A", "Arc", new THREE.Vector3(-2.8, 0, 1.2), "soldier"),
-    B: new CharacterActor("B", "Nova", new THREE.Vector3(0, 0, -1.0), "robot"),
-    C: new CharacterActor("C", "Rune", new THREE.Vector3(2.8, 0, 1.2), "xbot"),
+    A: new CharacterActor("A", "Arc", new THREE.Vector3(-2.8, 0, 1.2), "fantasy_knight"),
+    B: new CharacterActor("B", "Nova", new THREE.Vector3(0, 0, -1.0), "anime_blade"),
+    C: new CharacterActor("C", "Rune", new THREE.Vector3(2.8, 0, 1.2), "fantasy_mage"),
 };
 
 let isPointerDown = false;

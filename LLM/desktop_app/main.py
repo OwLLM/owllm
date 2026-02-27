@@ -12020,82 +12020,82 @@ class MainWindow(QMainWindow):
 
         if is_arena:
             # Add Character visual selection
-            char_group = QGroupBox("🧙 Character Visual")
+            char_group = QGroupBox("🧙 Avatar Selection")
             char_layout = QVBoxLayout(char_group)
             
-            # Create grid for round selection
-            grid_widget = QWidget()
-            grid_layout = QGridLayout(grid_widget)
-            grid_layout.setSpacing(5)
+            nav_layout = QHBoxLayout()
+            btn_prev = QPushButton("◀")
+            btn_prev.setFixedSize(40, 40)
+            btn_next = QPushButton("▶")
+            btn_next.setFixedSize(40, 40)
+            name_label = QLabel("Loading...")
+            from PySide6.QtCore import Qt
+            name_label.setAlignment(Qt.AlignCenter)
+            name_label.setStyleSheet("font-size: 14pt; font-weight: bold; text-transform: capitalize;")
             
-            # List of characters (10 stylized, 10 sci-fi) - Keys match main.js
+            nav_layout.addWidget(btn_prev)
+            nav_layout.addWidget(name_label, 1)
+            nav_layout.addWidget(btn_next)
+            char_layout.addLayout(nav_layout)
+            
+            from PySide6.QtWebEngineWidgets import QWebEngineView
+            from PySide6.QtCore import QUrl
+            import os
+            
+            preview_view = QWebEngineView()
+            preview_view.setMinimumHeight(280)
+            preview_view.setMaximumHeight(350)
+            
+            # Using lists mutable closure to hold state because Python closures are weird
+            state = {"idx": 0}
+            
             char_keys = [
-                # Stylized (A)
-                "soldier", "paladin", "mage", "archer", "rogue",
-                "cleric", "berserker", "druid", "monk", "bard",
-                # Sci-Fi (B)
-                "robot", "xbot", "cyborg", "mech", "android",
-                "hologram", "neon", "titan", "scout", "drone"
+                "soldier", "robot", "xbot", "parrot", "fox", "cesium_man", 
+                "brainstem", "robot_expressive", "flamingo", "horse", "stork", 
+                "duck", "rigged_figure"
             ]
             
-            # Keep a reference to buttons to update selection styling
-            btn_dict = {}
+            initial_char = "soldier"
+            if model_name == "B": initial_char = "robot"
+            if model_name == "C": initial_char = "xbot"
+            state["idx"] = char_keys.index(initial_char) if initial_char in char_keys else 0
             
-            def make_selector(key, is_selected=False):
-                btn = QPushButton()
-                btn.setFixedSize(40, 40)
-                btn.setToolTip(key.capitalize())
+            preview_path = self.root / "desktop_app" / "assets" / "3d" / "character_preview.html"
+            if preview_path.exists():
+                url = QUrl.fromLocalFile(str(preview_path))
+                preview_view.setUrl(url)
+            
+            def update_char():
+                idx = state["idx"]
+                key = char_keys[idx]
+                name_label.setText(key.replace("_", " ").title())
                 
-                # Assign base color based on key for the UI
-                is_scifi = char_keys.index(key) >= 10
-                base_col = "#3b82f6" if is_scifi else "#ef4444"
-                if key in ["paladin", "titan"]: base_col = "#eab308"
-                if key in ["mage", "cyborg"]: base_col = "#a855f7"
-                if key in ["rogue", "neon"]: base_col = "#10b981"
+                # Update Preview
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(20, lambda: preview_view.page().runJavaScript(f"window.setPreviewModel('{key}');"))
                 
-                border = "2px solid white" if is_selected else "2px solid transparent"
-                btn.setStyleSheet(f"QPushButton {{ background-color: {base_col}; border-radius: 20px; border: {border}; }} "
-                                 f"QPushButton:hover {{ border: 2px solid #94a3b8; }}")
-                return btn
-                
-            def select_char(key):
-                for k, b in btn_dict.items():
-                    is_scifi = char_keys.index(k) >= 10
-                    base_col = "#3b82f6" if is_scifi else "#ef4444"
-                    if k in ["paladin", "titan"]: base_col = "#eab308"
-                    if k in ["mage", "cyborg"]: base_col = "#a855f7"
-                    if k in ["rogue", "neon"]: base_col = "#10b981"
-                    b.setStyleSheet(f"QPushButton {{ background-color: {base_col}; border-radius: 20px; border: 2px solid transparent; }} "
-                                   f"QPushButton:hover {{ border: 2px solid #94a3b8; }}")
-                
-                is_scifi = char_keys.index(key) >= 10
-                base_col = "#3b82f6" if is_scifi else "#ef4444"
-                if key in ["paladin", "titan"]: base_col = "#eab308"
-                if key in ["mage", "cyborg"]: base_col = "#a855f7"
-                if key in ["rogue", "neon"]: base_col = "#10b981"
-                btn_dict[key].setStyleSheet(f"QPushButton {{ background-color: {base_col}; border-radius: 20px; border: 2px solid white; }}")
-                
-                # Send to JS via main app reference if we have arena_scene_view
-                if hasattr(self, 'arena_scene_view'):
+                # Update Arena
+                if hasattr(self, 'arena_scene_view') and self.arena_scene_view:
                     self.arena_scene_view.page().runJavaScript(f"window.assignVisual('{model_name}', '{key}');")
             
-            row, col = 0, 0
-            for i, c_key in enumerate(char_keys):
-                is_initial = False
-                if model_name == "A" and c_key == "robot": is_initial = True
-                if model_name == "B" and c_key == "soldier": is_initial = True
-                if model_name == "C" and c_key == "xbot": is_initial = True
+            def on_prev():
+                state["idx"] = (state["idx"] - 1) % len(char_keys)
+                update_char()
                 
-                btn = make_selector(c_key, is_initial)
-                btn.clicked.connect(lambda checked, k=c_key: select_char(k))
-                btn_dict[c_key] = btn
-                grid_layout.addWidget(btn, row, col)
-                col += 1
-                if col >= 5:
-                    col = 0
-                    row += 1
+            def on_next():
+                state["idx"] = (state["idx"] + 1) % len(char_keys)
+                update_char()
+                
+            btn_prev.clicked.connect(on_prev)
+            btn_next.clicked.connect(on_next)
             
-            char_layout.addWidget(grid_widget)
+            def on_load_finished(ok):
+                if ok:
+                    update_char()
+                    
+            preview_view.loadFinished.connect(on_load_finished)
+            
+            char_layout.addWidget(preview_view)
             scroll_layout.addWidget(char_group)
 
         template_group = QGroupBox("📋 Instruction Templates")

@@ -56,36 +56,20 @@ window.addEventListener("keyup", (e) => {
     if (keys.hasOwnProperty(e.key)) keys[e.key] = false;
 });
 
-const BASE_MODELS = {
-    robot: { path: "models/robot.glb", scale: 0.4 },
-    soldier: { path: "models/soldier.glb", scale: 1.2 },
-    xbot: { path: "models/xbot.glb", scale: 0.013 },
-};
-
 const MODEL_CATALOG = {
-    // A - Stylized RPG classes (Based on Soldier/Xbot with tints)
-    soldier: { base: "soldier", tint: null },
-    paladin: { base: "soldier", tint: 0xeab308, scale: 1.25 },
-    mage: { base: "soldier", tint: 0xa855f7, scale: 1.15 },
-    archer: { base: "soldier", tint: 0x22c55e, scale: 1.1 },
-    rogue: { base: "xbot", tint: 0x10b981, scale: 0.012 },
-    cleric: { base: "soldier", tint: 0xf8fafc, scale: 1.18 },
-    berserker: { base: "soldier", tint: 0xdc2626, scale: 1.35 },
-    druid: { base: "soldier", tint: 0x65a30d, scale: 1.2 },
-    monk: { base: "xbot", tint: 0xf59e0b, scale: 0.013 },
-    bard: { base: "xbot", tint: 0xec4899, scale: 0.013 },
-    
-    // B - Sci-Fi / Mechs (Based on Robot/Xbot with tints)
-    robot: { base: "robot", tint: null },
-    xbot: { base: "xbot", tint: null },
-    cyborg: { base: "robot", tint: 0xa855f7, scale: 0.42 },
-    mech: { base: "robot", tint: 0x475569, scale: 0.55 },
-    android: { base: "xbot", tint: 0xe2e8f0, scale: 0.014 },
-    hologram: { base: "xbot", tint: 0x06b6d4, scale: 0.013, opacity: 0.6 },
-    neon: { base: "robot", tint: 0x10b981, scale: 0.4 },
-    titan: { base: "robot", tint: 0xeab308, scale: 0.6 },
-    scout: { base: "xbot", tint: 0x3b82f6, scale: 0.011 },
-    drone: { base: "robot", tint: 0x8b5cf6, scale: 0.35 }
+    soldier: { path: "models/soldier.glb", scale: 1.2 },
+    robot: { path: "models/robot.glb", scale: 0.4 },
+    xbot: { path: "models/xbot.glb", scale: 0.013 },
+    parrot: { path: "models/parrot.glb", scale: 0.02 },
+    fox: { path: "models/fox.glb", scale: 0.015 },
+    cesium_man: { path: "models/cesium_man.glb", scale: 1.2 },
+    brainstem: { path: "models/brainstem.glb", scale: 1.2 },
+    robot_expressive: { path: "models/robot_expressive.glb", scale: 0.3 },
+    flamingo: { path: "models/flamingo.glb", scale: 0.015 },
+    horse: { path: "models/horse.glb", scale: 0.008 },
+    stork: { path: "models/stork.glb", scale: 0.015 },
+    duck: { path: "models/duck.glb", scale: 0.8 },
+    rigged_figure: { path: "models/rigged_figure.glb", scale: 1.5 },
 };
 
 function norm(s) {
@@ -131,10 +115,9 @@ class CharacterActor {
     }
 
     _loadVisual(visualKey) {
-        const charCfg = MODEL_CATALOG[visualKey] || MODEL_CATALOG.robot;
-        const baseCfg = BASE_MODELS[charCfg.base];
+        const modelCfg = MODEL_CATALOG[visualKey] || MODEL_CATALOG.robot;
         loader.load(
-            baseCfg.path,
+            modelCfg.path,
             (gltf) => {
                 if (this.rootMesh) {
                     this.group.remove(this.rootMesh);
@@ -145,25 +128,11 @@ class CharacterActor {
                     });
                 }
                 this.rootMesh = gltf.scene;
-                const finalScale = charCfg.scale || baseCfg.scale;
-                this.rootMesh.scale.setScalar(finalScale);
-                
+                this.rootMesh.scale.setScalar(modelCfg.scale);
                 this.rootMesh.traverse((node) => {
                     if (node.isMesh) {
                         node.castShadow = true;
                         node.receiveShadow = true;
-                        if (charCfg.tint || charCfg.opacity) {
-                            if (node.material) {
-                                node.material = node.material.clone(); // clone to avoid affecting others
-                                if (charCfg.tint) {
-                                    node.material.color.setHex(charCfg.tint);
-                                }
-                                if (charCfg.opacity) {
-                                    node.material.transparent = true;
-                                    node.material.opacity = charCfg.opacity;
-                                }
-                            }
-                        }
                     }
                     node.userData.id = this.id;
                 });
@@ -348,9 +317,9 @@ class CharacterActor {
 }
 
 const characters = {
-    A: new CharacterActor("A", "Arc", new THREE.Vector3(-3.7, 0, 1.6), "robot"),
-    B: new CharacterActor("B", "Nova", new THREE.Vector3(0, 0, -1.3), "soldier"),
-    C: new CharacterActor("C", "Rune", new THREE.Vector3(3.7, 0, 1.6), "xbot"),
+    A: new CharacterActor("A", "Arc", new THREE.Vector3(-2.8, 0, 1.2), "soldier"),
+    B: new CharacterActor("B", "Nova", new THREE.Vector3(0, 0, -1.0), "robot"),
+    C: new CharacterActor("C", "Rune", new THREE.Vector3(2.8, 0, 1.2), "xbot"),
 };
 
 let isPointerDown = false;

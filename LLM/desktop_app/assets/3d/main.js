@@ -77,23 +77,6 @@ const floor = new THREE.Mesh(
 floor.receiveShadow = true;
 scene.add(floor);
 
-const dirtRing = new THREE.Mesh(
-    new THREE.RingGeometry(8.6, 12.6, 96),
-    new THREE.MeshStandardMaterial({ color: 0xa98f6f, roughness: 0.95, metalness: 0.02, side: THREE.DoubleSide })
-);
-dirtRing.rotation.x = -Math.PI / 2;
-dirtRing.position.y = 0.03;
-scene.add(dirtRing);
-
-const stoneArena = new THREE.Mesh(
-    new THREE.CircleGeometry(8.8, 72),
-    new THREE.MeshStandardMaterial({ color: 0xb9b7a8, roughness: 0.78, metalness: 0.08 })
-);
-stoneArena.rotation.x = Math.PI * 0.5;
-stoneArena.position.y = 0.015;
-stoneArena.receiveShadow = true;
-scene.add(stoneArena);
-
 for (let i = 0; i < 28; i += 1) {
     const angle = (i / 28) * Math.PI * 2;
     const fence = new THREE.Mesh(

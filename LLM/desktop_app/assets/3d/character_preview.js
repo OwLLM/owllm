@@ -123,13 +123,6 @@ loader.setDRACOLoader(dracoLoader);
 let currentModel = null;
 let mixer = null;
 const clock = new THREE.Clock();
-const auraRing = new THREE.Mesh(
-    new THREE.TorusGeometry(1.65, 0.05, 16, 96),
-    new THREE.MeshStandardMaterial({ color: 0xeed8ad, emissive: 0xc69844, emissiveIntensity: 0.35, roughness: 0.55, metalness: 0.15 })
-);
-auraRing.rotation.x = Math.PI * 0.5;
-auraRing.position.y = 0.03;
-scene.add(auraRing);
 
 function frameModelToBodyCenter(root, cfg) {
     // Reset rotations and force manual offsets for absolute reliability
@@ -258,10 +251,6 @@ window.setPreviewModel = (key) => {
             
             scene.add(currentModel);
             frameModelToBodyCenter(currentModel, cfg);
-            if (cfg.aura) {
-                auraRing.material.color.setHex(cfg.aura);
-                auraRing.material.emissive.setHex(cfg.aura);
-            }
 
             const clip = gltf.animations.find(c => c.name.toLowerCase().includes('idle') || c.name.toLowerCase().includes('stand') || c.name.toLowerCase().includes('breath')) || gltf.animations[0];
             if (clip) {
@@ -303,8 +292,6 @@ function animate() {
     requestAnimationFrame(animate);
     const dt = clock.getDelta();
     if (mixer) mixer.update(dt);
-    auraRing.rotation.z += dt * 0.55;
-    auraRing.material.emissiveIntensity = 0.6 + Math.sin(performance.now() * 0.003) * 0.2;
     controls.update();
     renderer.render(scene, camera);
 }

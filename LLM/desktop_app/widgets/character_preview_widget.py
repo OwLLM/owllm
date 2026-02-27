@@ -16,16 +16,12 @@ class CharacterPreviewWidget(QWidget):
         "soldier",
         "robot",
         "xbot",
-        "parrot",
-        "fox",
         "cesium_man",
-        "brainstem",
         "robot_expressive",
-        "flamingo",
-        "horse",
-        "stork",
-        "duck",
         "rigged_figure",
+        "kira",
+        "readyplayer",
+        "michelle"
     ]
 
     DEFAULTS = {

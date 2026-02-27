@@ -34,16 +34,12 @@ const MODEL_CATALOG = {
     soldier: { path: "models/soldier.glb", scale: 1.2 },
     robot: { path: "models/robot.glb", scale: 0.4 },
     xbot: { path: "models/xbot.glb", scale: 0.013 },
-    parrot: { path: "models/parrot.glb", scale: 0.02 },
-    fox: { path: "models/fox.glb", scale: 0.015 },
     cesium_man: { path: "models/cesium_man.glb", scale: 1.2 },
-    brainstem: { path: "models/brainstem.glb", scale: 1.2 },
     robot_expressive: { path: "models/robot_expressive.glb", scale: 0.3 },
-    flamingo: { path: "models/flamingo.glb", scale: 0.015 },
-    horse: { path: "models/horse.glb", scale: 0.008 },
-    stork: { path: "models/stork.glb", scale: 0.015 },
-    duck: { path: "models/duck.glb", scale: 0.8 },
     rigged_figure: { path: "models/rigged_figure.glb", scale: 1.5 },
+    kira: { path: "models/kira.glb", scale: 1.0 },
+    readyplayer: { path: "models/readyplayer.me.glb", scale: 1.0 },
+    michelle: { path: "models/michelle.glb", scale: 1.0 },
 };
 
 const loader = new THREE.GLTFLoader();
@@ -72,12 +68,7 @@ window.setPreviewModel = (key) => {
             }
         });
         
-        // Offset Y if needed (e.g. for birds)
-        if (["parrot", "flamingo", "stork"].includes(key)) {
-            currentModel.position.y = 1.0;
-        } else {
-            currentModel.position.y = 0;
-        }
+        currentModel.position.y = 0;
 
         scene.add(currentModel);
 

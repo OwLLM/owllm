@@ -85,35 +85,35 @@ scene.add(backdrop);
 
 const MODEL_CATALOG = {
     // FANTASY HUMANOIDS (Baseline height ~1.8 units)
-    fantasy_knight: { path: "models/fantasy_knight.glb", scale: 1.0, yOffset: 0, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xe2c488 },
-    fantasy_mage: { path: "models/fantasy_mage.glb", scale: 1.0, yOffset: 0, speedMul: 1.0, camY: 0.95, camDist: 3.6, aura: 0xa58ee2 },
-    fantasy_rogue: { path: "models/fantasy_rogue.glb", scale: 0.012, yOffset: 0, speedMul: 1.15, camY: 1.0, camDist: 3.8, aura: 0x8fc9cf },
-    fantasy_guardian: { path: "models/rigged_figure.glb", scale: 1.2, yOffset: 0, speedMul: 0.95, camY: 1.15, camDist: 4.4, aura: 0xcac7b8 },
+    fantasy_knight: { path: "models/fantasy_knight.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xe2c488 },
+    fantasy_mage: { path: "models/fantasy_mage.glb", scale: 460.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 0.95, camDist: 3.6, aura: 0xa58ee2 },
+    fantasy_rogue: { path: "models/fantasy_rogue.glb", scale: 100.0, yOffset: 0, autoGround: true, speedMul: 1.15, camY: 1.0, camDist: 3.8, aura: 0x8fc9cf },
+    fantasy_guardian: { path: "models/rigged_figure.glb", scale: 1.25, yOffset: 0, autoGround: true, speedMul: 0.95, camY: 1.15, camDist: 4.4, aura: 0xcac7b8 },
     
     // ANIME HUMANOIDS
-    anime_blade: { path: "models/kira.glb", scale: 1.0, yOffset: 0, speedMul: 1.0, camY: 0.95, camDist: 3.5, aura: 0xffd7ba },
-    anime_guardian: { path: "models/michelle.glb", scale: 1.0, yOffset: 0, speedMul: 1.0, camY: 0.95, camDist: 3.5, aura: 0xffdcc2 },
-    anime_urban: { path: "models/readyplayer.me.glb", scale: 1.0, yOffset: 0, speedMul: 1.0, camY: 0.95, camDist: 3.5, aura: 0xffddc4 },
-    anime_tokyo: { path: "models/littlest_tokyo.glb", scale: 0.01, yOffset: 0, speedMul: 1.05, camY: 1.5, camDist: 5.0, aura: 0xd6c8ff },
-    anime_android: { path: "models/robot_expressive.glb", scale: 0.35, yOffset: 0, speedMul: 1.05, camY: 0.8, camDist: 3.0, aura: 0xa8b9ff },
-    anime_scout: { path: "models/rigged_simple.glb", scale: 0.9, yOffset: 0, speedMul: 1.0, camY: 0.85, camDist: 3.3, aura: 0xf2d7bb },
+    anime_blade: { path: "models/kira.glb", scale: 0.42, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 0.95, camDist: 3.5, aura: 0xffd7ba },
+    anime_guardian: { path: "models/michelle.glb", scale: 460.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 0.95, camDist: 3.5, aura: 0xffdcc2 },
+    anime_urban: { path: "models/readyplayer.me.glb", scale: 0.96, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 0.95, camDist: 3.5, aura: 0xffddc4 },
+    anime_tokyo: { path: "models/littlest_tokyo.glb", scale: 0.004, yOffset: 0, autoGround: true, speedMul: 1.05, camY: 1.5, camDist: 5.0, aura: 0xd6c8ff },
+    anime_android: { path: "models/robot_expressive.glb", scale: 0.38, yOffset: 0, autoGround: true, speedMul: 1.05, camY: 0.8, camDist: 3.0, aura: 0xa8b9ff },
+    anime_scout: { path: "models/rigged_simple.glb", scale: 0.2, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 0.85, camDist: 3.3, aura: 0xf2d7bb },
     
     // CLASSIC
-    classic_soldier: { path: "models/soldier.glb", scale: 1.0, yOffset: 0, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xdcc99a },
-    classic_xbot: { path: "models/xbot.glb", scale: 0.012, yOffset: 0, speedMul: 1.15, camY: 1.0, camDist: 3.8, aura: 0xb9d4df },
-    classic_cesium: { path: "models/cesium_man.glb", scale: 1.0, yOffset: 0, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xd8c6a6 },
-    classic_robot: { path: "models/robot.glb", scale: 0.45, yOffset: 0, speedMul: 1.0, camY: 0.85, camDist: 3.1, aura: 0xb1bfdf },
+    classic_soldier: { path: "models/soldier.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xdcc99a },
+    classic_xbot: { path: "models/xbot.glb", scale: 100.0, yOffset: 0, autoGround: true, speedMul: 1.15, camY: 1.0, camDist: 3.8, aura: 0xb9d4df },
+    classic_cesium: { path: "models/cesium_man.glb", scale: 1.2, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xd8c6a6 },
+    classic_robot: { path: "models/robot.glb", scale: 0.38, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 0.85, camDist: 3.1, aura: 0xb1bfdf },
     
     // CREATURES / MONSTERS (Tuned to roughly match humanoid height)
-    wild_fox: { path: "models/fox.glb", scale: 0.018, yOffset: 0.18, speedMul: 1.2, camY: 0.74, camDist: 3.0, aura: 0xffc48d },
-    wild_horse: { path: "models/horse.glb", scale: 0.012, yOffset: 0.12, speedMul: 1.15, camY: 1.0, camDist: 3.8, aura: 0xb9936a },
-    wild_flamingo: { path: "models/flamingo.glb", scale: 0.015, yOffset: 0.42, speedMul: 1.2, camY: 1.3, camDist: 4.3, aura: 0xffaec6 },
-    wild_parrot: { path: "models/parrot.glb", scale: 0.015, yOffset: 0.28, speedMul: 1.25, camY: 0.95, camDist: 3.1, aura: 0x9fd8ff },
-    wild_stork: { path: "models/stork.glb", scale: 0.015, yOffset: 0.35, speedMul: 1.2, camY: 1.2, camDist: 3.9, aura: 0xffd7bf },
-    mystic_brainstem: { path: "models/brainstem.glb", scale: 0.18, yOffset: 0.06, speedMul: 1.0, camY: 0.98, camDist: 3.2, aura: 0xa58dff },
+    wild_fox: { path: "models/fox.glb", scale: 0.015, yOffset: 0, autoGround: true, speedMul: 1.2, camY: 0.74, camDist: 3.0, aura: 0xffc48d },
+    wild_horse: { path: "models/horse.glb", scale: 0.006, yOffset: 0, autoGround: true, speedMul: 1.15, camY: 1.0, camDist: 3.8, aura: 0xb9936a },
+    wild_flamingo: { path: "models/flamingo.glb", scale: 0.004, yOffset: 0, autoGround: true, speedMul: 1.2, camY: 1.3, camDist: 4.3, aura: 0xffaec6 },
+    wild_parrot: { path: "models/parrot.glb", scale: 0.006, yOffset: 0, autoGround: true, speedMul: 1.25, camY: 0.95, camDist: 3.1, aura: 0x9fd8ff },
+    wild_stork: { path: "models/stork.glb", scale: 0.008, yOffset: 0, autoGround: true, speedMul: 1.2, camY: 1.2, camDist: 3.9, aura: 0xffd7bf },
+    mystic_brainstem: { path: "models/brainstem.glb", scale: 0.87, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 0.98, camDist: 3.2, aura: 0xa58dff },
     
     // D-REX
-    d_rex: { path: "models/T-Rex_Spider.glb", scale: 0.045, yOffset: 0.06, autoGround: true, speedMul: 0.95, turnLerp: 0.28, headingLerp: 0.16, camY: 1.3, camDist: 4.5, aura: 0xff8f70 },
+    d_rex: { path: "models/T-Rex_Spider.glb", scale: 120.0, yOffset: 0, autoGround: true, speedMul: 0.95, turnLerp: 0.28, headingLerp: 0.16, camY: 1.3, camDist: 4.5, aura: 0xff8f70 },
 };
 
 const loader = new THREE.GLTFLoader();

@@ -236,6 +236,7 @@ const MODEL_CATALOG = {
     wild_flamingo: { path: "models/flamingo.glb", scale: 0.02, yOffset: 0.42, speedMul: 1.2 },
     wild_parrot: { path: "models/parrot.glb", scale: 0.02, yOffset: 0.28, speedMul: 1.25 },
     wild_stork: { path: "models/stork.glb", scale: 0.02, yOffset: 0.35, speedMul: 1.2 },
+    d_rex: { path: "models/T-Rex_Spider.glb", scale: 1.0, yOffset: 0.0, targetHeight: 2.2, speedMul: 0.95, turnLerp: 0.28, headingLerp: 0.16 },
     mystic_brainstem: { path: "models/brainstem.glb", scale: 0.18, yOffset: 0.06, speedMul: 1.0 },
 };
 
@@ -273,6 +274,16 @@ function applyStyle(root, cfg) {
     });
 }
 
+function normalizeModelHeight(root, targetHeight) {
+    if (!targetHeight || targetHeight <= 0) return;
+    root.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(root);
+    const size = box.getSize(new THREE.Vector3());
+    if (!isFinite(size.y) || size.y <= 0.0001) return;
+    const factor = targetHeight / size.y;
+    root.scale.multiplyScalar(factor);
+}
+
 function norm(s) {
     return String(s || "").trim().toLowerCase();
 }
@@ -301,6 +312,8 @@ class CharacterActor {
         this.moveTarget = null;
         this.moveSpeed = 2.6;
         this.moveSpeedMul = 1.0;
+        this.turnLerp = 0.2;
+        this.headingLerp = 0.11;
         this.onMoveDone = null;
 
         this.label = document.createElement("div");
@@ -319,6 +332,8 @@ class CharacterActor {
     _loadVisual(visualKey) {
         const modelCfg = MODEL_CATALOG[visualKey] || MODEL_CATALOG.fantasy_knight;
         this.moveSpeedMul = modelCfg.speedMul || 1.0;
+        this.turnLerp = modelCfg.turnLerp || 0.2;
+        this.headingLerp = modelCfg.headingLerp || 0.11;
         loader.load(
             modelCfg.path,
             (gltf) => {
@@ -332,6 +347,7 @@ class CharacterActor {
                 }
                 this.rootMesh = gltf.scene;
                 this.rootMesh.scale.setScalar(modelCfg.scale);
+                normalizeModelHeight(this.rootMesh, modelCfg.targetHeight);
                 this.rootMesh.position.y = modelCfg.yOffset || 0;
                 applyStyle(this.rootMesh, modelCfg);
                 this.rootMesh.traverse((node) => {
@@ -473,7 +489,7 @@ class CharacterActor {
                 this.anchorPos.copy(this.group.position);
                 
                 const lookAngle = Math.atan2(finalMove.x, finalMove.z);
-                this.group.rotation.y = THREE.MathUtils.lerp(this.group.rotation.y, lookAngle, 0.2);
+                this.group.rotation.y = THREE.MathUtils.lerp(this.group.rotation.y, lookAngle, this.turnLerp);
                 
                 this.play("walk");
             } else {
@@ -505,7 +521,7 @@ class CharacterActor {
         if (this.headingTarget && !isManualMoving && !this.moveTarget) {
             const look = new THREE.Vector3().subVectors(this.headingTarget, this.group.position);
             const angle = Math.atan2(look.x, look.z);
-            this.group.rotation.y = THREE.MathUtils.lerp(this.group.rotation.y, angle, 0.11);
+            this.group.rotation.y = THREE.MathUtils.lerp(this.group.rotation.y, angle, this.headingLerp);
         }
 
         const worldPos = new THREE.Vector3();

@@ -95,6 +95,7 @@ const MODEL_CATALOG = {
     wild_flamingo: { path: "models/flamingo.glb", scale: 0.02, yOffset: 0.42, camY: 1.3, camDist: 4.3, aura: 0xffaec6 },
     wild_parrot: { path: "models/parrot.glb", scale: 0.02, yOffset: 0.28, camY: 0.95, camDist: 3.1, aura: 0x9fd8ff },
     wild_stork: { path: "models/stork.glb", scale: 0.02, yOffset: 0.35, camY: 1.2, camDist: 3.9, aura: 0xffd7bf },
+    d_rex: { path: "models/T-Rex_Spider.glb", scale: 1.0, yOffset: 0.0, targetHeight: 2.2, camY: 1.35, camDist: 4.6, aura: 0xff8f70 },
     mystic_brainstem: { path: "models/brainstem.glb", scale: 0.18, yOffset: 0.06, camY: 0.98, camDist: 3.2, aura: 0xa58dff },
 };
 
@@ -131,6 +132,16 @@ function frameModelToBodyCenter(root, cfg) {
 function applyStyle(root, cfg) {
     // Keep original artist textures/materials for visual fidelity.
     return;
+}
+
+function normalizeModelHeight(root, targetHeight) {
+    if (!targetHeight || targetHeight <= 0) return;
+    root.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(root);
+    const size = box.getSize(new THREE.Vector3());
+    if (!isFinite(size.y) || size.y <= 0.0001) return;
+    const factor = targetHeight / size.y;
+    root.scale.multiplyScalar(factor);
 }
 
 function createFallbackPreviewMesh() {
@@ -173,6 +184,7 @@ window.setPreviewModel = (key) => {
             currentModel = gltf.scene;
             // Make it larger for the preview
             currentModel.scale.setScalar(cfg.scale * 1.5);
+            normalizeModelHeight(currentModel, cfg.targetHeight);
             
             currentModel.traverse(n => {
                 if (n.isMesh) { 

@@ -32,6 +32,7 @@ class CharacterPreviewWidget(QWidget):
         "wild_flamingo",
         "wild_parrot",
         "wild_stork",
+        "d_rex",
         "mystic_brainstem",
     ]
 

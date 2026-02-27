@@ -34,6 +34,7 @@ from desktop_app.pages.server_page import ServerPage
 from desktop_app.pages.mcp_page import MCPPage
 from desktop_app.pages.github_import_page import GitHubImportPage
 from desktop_app.pages.characters_3d_page import Characters3DPage
+from desktop_app.widgets.character_preview_widget import CharacterPreviewWidget
 
 from system_detector import SystemDetector
 from smart_installer import SmartInstaller
@@ -12019,83 +12020,11 @@ class MainWindow(QMainWindow):
         scroll_layout.setSpacing(12)
 
         if is_arena:
-            # Add Character visual selection
             char_group = QGroupBox("🧙 Avatar Selection")
             char_layout = QVBoxLayout(char_group)
-            
-            nav_layout = QHBoxLayout()
-            btn_prev = QPushButton("◀")
-            btn_prev.setFixedSize(40, 40)
-            btn_next = QPushButton("▶")
-            btn_next.setFixedSize(40, 40)
-            name_label = QLabel("Loading...")
-            from PySide6.QtCore import Qt
-            name_label.setAlignment(Qt.AlignCenter)
-            name_label.setStyleSheet("font-size: 14pt; font-weight: bold; text-transform: capitalize;")
-            
-            nav_layout.addWidget(btn_prev)
-            nav_layout.addWidget(name_label, 1)
-            nav_layout.addWidget(btn_next)
-            char_layout.addLayout(nav_layout)
-            
-            from PySide6.QtWebEngineWidgets import QWebEngineView
-            from PySide6.QtCore import QUrl
-            import os
-            
-            preview_view = QWebEngineView()
-            preview_view.setMinimumHeight(280)
-            preview_view.setMaximumHeight(350)
-            
-            # Using lists mutable closure to hold state because Python closures are weird
-            state = {"idx": 0}
-            
-            char_keys = [
-                "soldier", "robot", "xbot", "parrot", "fox", "cesium_man", 
-                "brainstem", "robot_expressive", "flamingo", "horse", "stork", 
-                "duck", "rigged_figure"
-            ]
-            
-            initial_char = "soldier"
-            if model_name == "B": initial_char = "robot"
-            if model_name == "C": initial_char = "xbot"
-            state["idx"] = char_keys.index(initial_char) if initial_char in char_keys else 0
-            
-            preview_path = self.root / "desktop_app" / "assets" / "3d" / "character_preview.html"
-            if preview_path.exists():
-                url = QUrl.fromLocalFile(str(preview_path))
-                preview_view.setUrl(url)
-            
-            def update_char():
-                idx = state["idx"]
-                key = char_keys[idx]
-                name_label.setText(key.replace("_", " ").title())
-                
-                # Update Preview
-                from PySide6.QtCore import QTimer
-                QTimer.singleShot(20, lambda: preview_view.page().runJavaScript(f"window.setPreviewModel('{key}');"))
-                
-                # Update Arena
-                if hasattr(self, 'arena_scene_view') and self.arena_scene_view:
-                    self.arena_scene_view.page().runJavaScript(f"window.assignVisual('{model_name}', '{key}');")
-            
-            def on_prev():
-                state["idx"] = (state["idx"] - 1) % len(char_keys)
-                update_char()
-                
-            def on_next():
-                state["idx"] = (state["idx"] + 1) % len(char_keys)
-                update_char()
-                
-            btn_prev.clicked.connect(on_prev)
-            btn_next.clicked.connect(on_next)
-            
-            def on_load_finished(ok):
-                if ok:
-                    update_char()
-                    
-            preview_view.loadFinished.connect(on_load_finished)
-            
-            char_layout.addWidget(preview_view)
+            selector_widget = CharacterPreviewWidget(model_name=model_name, root_path=self.root, parent=char_group)
+            selector_widget.characterSelected.connect(self._on_arena_character_selected)
+            char_layout.addWidget(selector_widget)
             scroll_layout.addWidget(char_group)
 
         template_group = QGroupBox("📋 Instruction Templates")
@@ -12820,6 +12749,15 @@ class MainWindow(QMainWindow):
         self.arena_paused = False
         QTimer.singleShot(100, self._load_arena_models)
         return w
+
+    def _on_arena_character_selected(self, model_name: str, character_key: str) -> None:
+        if not hasattr(self, "arena_scene_view") or self.arena_scene_view is None:
+            return
+        safe_model = str(model_name or "").replace("\\", "\\\\").replace("'", "\\'")
+        safe_key = str(character_key or "").replace("\\", "\\\\").replace("'", "\\'")
+        self.arena_scene_view.page().runJavaScript(
+            f"window.assignVisual('{safe_model}', '{safe_key}');"
+        )
 
     def _ensure_arena_settings_built(self) -> None:
         if getattr(self, "_arena_settings_built", False):

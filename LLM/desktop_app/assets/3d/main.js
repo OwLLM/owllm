@@ -12,6 +12,7 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.domElement.tabIndex = 1;
 document.getElementById("canvas-container").appendChild(renderer.domElement);
 
 scene.add(new THREE.HemisphereLight(0xbfdcff, 0x4f7f3a, 0.95));
@@ -131,31 +132,40 @@ window.addEventListener("keyup", (e) => {
 });
 
 const MODEL_CATALOG = {
-    fantasy_knight: { path: "models/fantasy_knight.glb", scale: 1.2, yOffset: 0 },
-    fantasy_mage: { path: "models/fantasy_mage.glb", scale: 1.0, yOffset: 0 },
-    fantasy_rogue: { path: "models/fantasy_rogue.glb", scale: 0.013, yOffset: 0 },
-    fantasy_guardian: { path: "models/rigged_figure.glb", scale: 1.5, yOffset: 0 },
-    anime_blade: { path: "models/kira.glb", scale: 1.0, yOffset: 0 },
-    anime_guardian: { path: "models/michelle.glb", scale: 1.0, yOffset: 0 },
-    anime_urban: { path: "models/readyplayer.me.glb", scale: 1.0, yOffset: 0 },
-    anime_tokyo: { path: "models/littlest_tokyo.glb", scale: 0.012, yOffset: 0 },
-    anime_android: { path: "models/robot_expressive.glb", scale: 0.3, yOffset: 0 },
-    anime_scout: { path: "models/rigged_simple.glb", scale: 1.0, yOffset: 0 },
-    classic_soldier: { path: "models/soldier.glb", scale: 1.2, yOffset: 0 },
-    classic_xbot: { path: "models/xbot.glb", scale: 0.013, yOffset: 0 },
-    classic_cesium: { path: "models/cesium_man.glb", scale: 1.2, yOffset: 0 },
-    classic_robot: { path: "models/robot.glb", scale: 0.4, yOffset: 0 },
-    wild_fox: { path: "models/fox.glb", scale: 0.025, yOffset: 0 },
-    wild_horse: { path: "models/horse.glb", scale: 0.018, yOffset: 0 },
-    wild_flamingo: { path: "models/flamingo.glb", scale: 0.02, yOffset: 0 },
-    wild_parrot: { path: "models/parrot.glb", scale: 0.02, yOffset: 0 },
-    wild_stork: { path: "models/stork.glb", scale: 0.02, yOffset: 0 },
-    mystic_brainstem: { path: "models/brainstem.glb", scale: 0.18, yOffset: 0 },
+    fantasy_knight: { path: "models/fantasy_knight.glb", scale: 1.2, yOffset: 0, speedMul: 1.0 },
+    fantasy_mage: { path: "models/fantasy_mage.glb", scale: 1.0, yOffset: 0, speedMul: 1.0 },
+    fantasy_rogue: { path: "models/fantasy_rogue.glb", scale: 0.013, yOffset: 0, speedMul: 1.15 },
+    fantasy_guardian: { path: "models/rigged_figure.glb", scale: 1.5, yOffset: 0, speedMul: 0.95 },
+    anime_blade: { path: "models/kira.glb", scale: 1.0, yOffset: 0, speedMul: 1.0 },
+    anime_guardian: { path: "models/michelle.glb", scale: 1.0, yOffset: 0, speedMul: 1.0 },
+    anime_urban: { path: "models/readyplayer.me.glb", scale: 1.0, yOffset: 0, speedMul: 1.0 },
+    anime_tokyo: { path: "models/littlest_tokyo.glb", scale: 0.012, yOffset: 0, speedMul: 1.05 },
+    anime_android: { path: "models/robot_expressive.glb", scale: 0.3, yOffset: 0, speedMul: 1.05 },
+    anime_scout: { path: "models/rigged_simple.glb", scale: 1.0, yOffset: 0, speedMul: 1.0 },
+    classic_soldier: { path: "models/soldier.glb", scale: 1.2, yOffset: 0, speedMul: 1.0 },
+    classic_xbot: { path: "models/xbot.glb", scale: 0.013, yOffset: 0, speedMul: 1.15 },
+    classic_cesium: { path: "models/cesium_man.glb", scale: 1.2, yOffset: 0, speedMul: 1.0 },
+    classic_robot: { path: "models/robot.glb", scale: 0.4, yOffset: 0, speedMul: 1.0 },
+    wild_fox: { path: "models/fox.glb", scale: 0.025, yOffset: 0.18, speedMul: 1.2 },
+    wild_horse: { path: "models/horse.glb", scale: 0.018, yOffset: 0.12, speedMul: 1.15 },
+    wild_flamingo: { path: "models/flamingo.glb", scale: 0.02, yOffset: 0.42, speedMul: 1.2 },
+    wild_parrot: { path: "models/parrot.glb", scale: 0.02, yOffset: 0.28, speedMul: 1.25 },
+    wild_stork: { path: "models/stork.glb", scale: 0.02, yOffset: 0.35, speedMul: 1.2 },
+    mystic_brainstem: { path: "models/brainstem.glb", scale: 0.18, yOffset: 0.06, speedMul: 1.0 },
 };
 
 const dracoLoader = new THREE.DRACOLoader();
 dracoLoader.setDecoderPath('js/draco/');
 loader.setDRACOLoader(dracoLoader);
+
+function prewarmModelCache() {
+    const seen = new Set();
+    Object.values(MODEL_CATALOG).forEach((cfg) => {
+        if (!cfg || !cfg.path || seen.has(cfg.path)) return;
+        seen.add(cfg.path);
+        loader.load(cfg.path, () => {}, undefined, () => {});
+    });
+}
 
 function applyStyle(root, cfg) {
     if (!cfg || (!cfg.tint && !cfg.emissive && cfg.metalness === undefined && cfg.roughness === undefined)) {
@@ -205,6 +215,7 @@ class CharacterActor {
         this.headingTarget = null;
         this.moveTarget = null;
         this.moveSpeed = 2.6;
+        this.moveSpeedMul = 1.0;
         this.onMoveDone = null;
 
         this.label = document.createElement("div");
@@ -222,6 +233,7 @@ class CharacterActor {
 
     _loadVisual(visualKey) {
         const modelCfg = MODEL_CATALOG[visualKey] || MODEL_CATALOG.fantasy_knight;
+        this.moveSpeedMul = modelCfg.speedMul || 1.0;
         loader.load(
             modelCfg.path,
             (gltf) => {
@@ -370,7 +382,7 @@ class CharacterActor {
                     .addScaledVector(camRight, dx)
                     .addScaledVector(camForward, -dz)
                     .normalize()
-                    .multiplyScalar(this.moveSpeed * delta);
+                    .multiplyScalar(this.moveSpeed * this.moveSpeedMul * delta);
 
                 this.group.position.add(finalMove);
                 this.anchorPos.copy(this.group.position);
@@ -400,7 +412,7 @@ class CharacterActor {
             } else {
                 this.play("walk");
                 deltaVec.normalize();
-                this.group.position.addScaledVector(deltaVec, this.moveSpeed * delta);
+                this.group.position.addScaledVector(deltaVec, this.moveSpeed * this.moveSpeedMul * delta);
                 this.faceTowards(this.moveTarget);
             }
         }
@@ -436,6 +448,7 @@ let clickMoved = false;
 window.addEventListener("pointerdown", (event) => {
     isPointerDown = true;
     clickMoved = false;
+    renderer.domElement.focus();
 
     mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
@@ -469,7 +482,26 @@ window.addEventListener("pointerdown", (event) => {
         }
     }
 
-    // Deselect if clicked on nothing
+    // Fallback: pick nearest actor to clicked ground point.
+    const groundHit = new THREE.Vector3();
+    raycaster.ray.intersectPlane(dragPlane, groundHit);
+    let nearest = null;
+    let minDist = Infinity;
+    Object.values(characters).forEach((actor) => {
+        const d = actor.group.position.distanceTo(groundHit);
+        if (d < minDist) {
+            minDist = d;
+            nearest = actor;
+        }
+    });
+    if (nearest && minDist <= 2.2) {
+        selectedCharacter = nearest;
+        Object.values(characters).forEach(c => c.label.style.textShadow = "1px 1px 2px black");
+        nearest.label.style.textShadow = "0px 0px 8px #4ade80, 0px 0px 4px #4ade80";
+        return;
+    }
+
+    // Deselect if clicked on nothing relevant.
     selectedCharacter = null;
     Object.values(characters).forEach(c => c.label.style.textShadow = "1px 1px 2px black");
 });
@@ -527,6 +559,7 @@ function handleResize() {
 
 window.addEventListener("resize", handleResize);
 handleResize();
+prewarmModelCache();
 
 function performInteraction(actorId, targetId, mode) {
     const actor = characters[actorId];

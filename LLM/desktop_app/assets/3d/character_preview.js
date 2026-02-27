@@ -86,12 +86,12 @@ const MODEL_CATALOG = {
     classic_xbot: { path: "models/xbot.glb", scale: 0.013, yOffset: 0, camY: 1.0, camDist: 3.8, aura: 0xb9d4df },
     classic_cesium: { path: "models/cesium_man.glb", scale: 1.2, yOffset: 0, camY: 1.0, camDist: 3.8, aura: 0xd8c6a6 },
     classic_robot: { path: "models/robot.glb", scale: 0.4, yOffset: 0, camY: 0.85, camDist: 3.1, aura: 0xb1bfdf },
-    wild_fox: { path: "models/fox.glb", scale: 0.025, yOffset: 0, camY: 0.65, camDist: 2.9, aura: 0xffc48d },
-    wild_horse: { path: "models/horse.glb", scale: 0.018, yOffset: 0, camY: 1.0, camDist: 3.8, aura: 0xb9936a },
-    wild_flamingo: { path: "models/flamingo.glb", scale: 0.02, yOffset: 0, camY: 1.25, camDist: 4.2, aura: 0xffaec6 },
-    wild_parrot: { path: "models/parrot.glb", scale: 0.02, yOffset: 0, camY: 0.85, camDist: 3.0, aura: 0x9fd8ff },
-    wild_stork: { path: "models/stork.glb", scale: 0.02, yOffset: 0, camY: 1.15, camDist: 3.8, aura: 0xffd7bf },
-    mystic_brainstem: { path: "models/brainstem.glb", scale: 0.18, yOffset: 0, camY: 0.95, camDist: 3.2, aura: 0xa58dff },
+    wild_fox: { path: "models/fox.glb", scale: 0.025, yOffset: 0.18, camY: 0.74, camDist: 3.0, aura: 0xffc48d },
+    wild_horse: { path: "models/horse.glb", scale: 0.018, yOffset: 0.12, camY: 1.0, camDist: 3.8, aura: 0xb9936a },
+    wild_flamingo: { path: "models/flamingo.glb", scale: 0.02, yOffset: 0.42, camY: 1.3, camDist: 4.3, aura: 0xffaec6 },
+    wild_parrot: { path: "models/parrot.glb", scale: 0.02, yOffset: 0.28, camY: 0.95, camDist: 3.1, aura: 0x9fd8ff },
+    wild_stork: { path: "models/stork.glb", scale: 0.02, yOffset: 0.35, camY: 1.2, camDist: 3.9, aura: 0xffd7bf },
+    mystic_brainstem: { path: "models/brainstem.glb", scale: 0.18, yOffset: 0.06, camY: 0.98, camDist: 3.2, aura: 0xa58dff },
 };
 
 const loader = new THREE.GLTFLoader();
@@ -129,6 +129,28 @@ function applyStyle(root, cfg) {
     return;
 }
 
+function createFallbackPreviewMesh() {
+    const group = new THREE.Group();
+    const body = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.42, 1.3, 8, 16),
+        new THREE.MeshStandardMaterial({ color: 0x7ca8ff, roughness: 0.46, metalness: 0.14 })
+    );
+    body.castShadow = true;
+    body.receiveShadow = true;
+    body.position.y = 0.88;
+    group.add(body);
+    return group;
+}
+
+function prewarmModelCache() {
+    const seen = new Set();
+    Object.values(MODEL_CATALOG).forEach((cfg) => {
+        if (!cfg || !cfg.path || seen.has(cfg.path)) return;
+        seen.add(cfg.path);
+        loader.load(cfg.path, () => {}, undefined, () => {});
+    });
+}
+
 window.setPreviewModel = (key) => {
     if (currentModel) {
         scene.remove(currentModel);
@@ -138,32 +160,41 @@ window.setPreviewModel = (key) => {
     const cfg = MODEL_CATALOG[key];
     if (!cfg) return;
 
-    loader.load(cfg.path, (gltf) => {
-        currentModel = gltf.scene;
-        // Make it larger for the preview
-        currentModel.scale.setScalar(cfg.scale * 1.5);
-        
-        currentModel.traverse(n => {
-            if (n.isMesh) { 
-                n.castShadow = true; 
-                n.receiveShadow = true; 
+    loader.load(
+        cfg.path,
+        (gltf) => {
+            currentModel = gltf.scene;
+            // Make it larger for the preview
+            currentModel.scale.setScalar(cfg.scale * 1.5);
+            
+            currentModel.traverse(n => {
+                if (n.isMesh) { 
+                    n.castShadow = true; 
+                    n.receiveShadow = true; 
+                }
+            });
+            applyStyle(currentModel, cfg);
+            
+            scene.add(currentModel);
+            frameModelToBodyCenter(currentModel, cfg);
+            if (cfg.aura) {
+                auraRing.material.color.setHex(cfg.aura);
+                auraRing.material.emissive.setHex(cfg.aura);
             }
-        });
-        applyStyle(currentModel, cfg);
-        
-        scene.add(currentModel);
-        frameModelToBodyCenter(currentModel, cfg);
-        if (cfg.aura) {
-            auraRing.material.color.setHex(cfg.aura);
-            auraRing.material.emissive.setHex(cfg.aura);
-        }
 
-        const clip = gltf.animations.find(c => c.name.toLowerCase().includes('idle') || c.name.toLowerCase().includes('stand') || c.name.toLowerCase().includes('breath')) || gltf.animations[0];
-        if (clip) {
-            mixer = new THREE.AnimationMixer(currentModel);
-            mixer.clipAction(clip).play();
+            const clip = gltf.animations.find(c => c.name.toLowerCase().includes('idle') || c.name.toLowerCase().includes('stand') || c.name.toLowerCase().includes('breath')) || gltf.animations[0];
+            if (clip) {
+                mixer = new THREE.AnimationMixer(currentModel);
+                mixer.clipAction(clip).play();
+            }
+        },
+        undefined,
+        () => {
+            currentModel = createFallbackPreviewMesh();
+            scene.add(currentModel);
+            frameModelToBodyCenter(currentModel, { yOffset: 0, camY: 0.95, camDist: 3.1 });
         }
-    });
+    );
 };
 
 window.addEventListener("resize", () => {
@@ -182,3 +213,4 @@ function animate() {
     renderer.render(scene, camera);
 }
 animate();
+prewarmModelCache();

@@ -12024,6 +12024,7 @@ class MainWindow(QMainWindow):
             char_layout = QVBoxLayout(char_group)
             selector_widget = CharacterPreviewWidget(model_name=model_name, root_path=self.root, parent=char_group)
             selector_widget.characterSelected.connect(self._on_arena_character_selected)
+            selector_widget.scaleChanged.connect(self._on_arena_character_scale_changed)
             char_layout.addWidget(selector_widget)
             scroll_layout.addWidget(char_group)
 
@@ -12757,6 +12758,14 @@ class MainWindow(QMainWindow):
         safe_key = str(character_key or "").replace("\\", "\\\\").replace("'", "\\'")
         self.arena_scene_view.page().runJavaScript(
             f"window.assignVisual('{safe_model}', '{safe_key}');"
+        )
+
+    def _on_arena_character_scale_changed(self, model_name: str, scale_mult: float) -> None:
+        if not hasattr(self, "arena_scene_view") or self.arena_scene_view is None:
+            return
+        safe_model = str(model_name or "").replace("\\", "\\\\").replace("'", "\\'")
+        self.arena_scene_view.page().runJavaScript(
+            f"window.setCharacterScale('{safe_model}', {scale_mult});"
         )
 
     def _ensure_arena_settings_built(self) -> None:

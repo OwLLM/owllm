@@ -208,8 +208,25 @@ function prewarmModelCache() {
     });
 }
 
+let currentModelKey = null;
+let currentBaseScale = 1.0;
+let dynamicScaleMultiplier = 1.0;
+
+window.setPreviewScale = (mult) => {
+    dynamicScaleMultiplier = mult;
+    if (currentModel && currentModelKey) {
+        const cfg = MODEL_CATALOG[currentModelKey];
+        if (cfg) {
+            currentModel.scale.setScalar(cfg.scale * 1.5 * dynamicScaleMultiplier);
+            applyGroundOffset(currentModel, cfg.yOffset, cfg.autoGround);
+        }
+    }
+};
+
 let loadToken = 0;
 window.setPreviewModel = (key) => {
+    currentModelKey = key;
+    dynamicScaleMultiplier = 1.0;
     const cfg = MODEL_CATALOG[key];
     if (!cfg) return;
     const token = ++loadToken;
@@ -226,7 +243,7 @@ window.setPreviewModel = (key) => {
             }
             currentModel = gltf.scene;
             // Make it larger for the preview
-            currentModel.scale.setScalar(cfg.scale * 1.5);
+            currentModel.scale.setScalar(cfg.scale * 1.5 * dynamicScaleMultiplier);
             normalizeModelHeight(currentModel, cfg.targetHeight);
             clampModelScale(currentModel, cfg.minScale, cfg.maxScale);
             applyGroundOffset(currentModel, cfg.yOffset, cfg.autoGround);

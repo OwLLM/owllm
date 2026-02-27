@@ -771,6 +771,17 @@ window.assignVisual = (id, visualKey) => {
     actor._loadVisual(key);
 };
 
+window.setCharacterScale = (id, mult) => {
+    const actor = characters[id];
+    if (actor && actor.rootMesh && actor.visualKey) {
+        const cfg = MODEL_CATALOG[actor.visualKey];
+        if (cfg) {
+            actor.rootMesh.scale.setScalar(cfg.scale * mult);
+            applyGroundOffset(actor.rootMesh, cfg.yOffset, cfg.autoGround);
+        }
+    }
+};
+
 window.getSceneReady = () => true;
 
 function animate() {

@@ -10,6 +10,10 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.outputEncoding = THREE.sRGBEncoding;
 document.getElementById("canvas-container").appendChild(renderer.domElement);
+const statusLabel = document.createElement("div");
+statusLabel.style.cssText = "position:absolute;top:10px;left:50%;transform:translateX(-50%);background:rgba(20,25,35,0.72);color:#f7f1dc;padding:4px 10px;border-radius:10px;font:12px sans-serif;pointer-events:none;opacity:0;transition:opacity 0.2s;";
+statusLabel.textContent = "Loading...";
+document.body.appendChild(statusLabel);
 
 const controls = new THREE.OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
@@ -143,26 +147,29 @@ function createFallbackPreviewMesh() {
 }
 
 function prewarmModelCache() {
-    const seen = new Set();
-    Object.values(MODEL_CATALOG).forEach((cfg) => {
-        if (!cfg || !cfg.path || seen.has(cfg.path)) return;
-        seen.add(cfg.path);
+    ["anime_android", "fantasy_knight", "anime_blade", "wild_fox"].forEach((key) => {
+        const cfg = MODEL_CATALOG[key];
+        if (!cfg || !cfg.path) return;
         loader.load(cfg.path, () => {}, undefined, () => {});
     });
 }
 
+let loadToken = 0;
 window.setPreviewModel = (key) => {
-    if (currentModel) {
-        scene.remove(currentModel);
-        currentModel = null;
-        mixer = null;
-    }
     const cfg = MODEL_CATALOG[key];
     if (!cfg) return;
+    const token = ++loadToken;
+    statusLabel.style.opacity = "1";
 
     loader.load(
         cfg.path,
         (gltf) => {
+            if (token !== loadToken) return;
+            if (currentModel) {
+                scene.remove(currentModel);
+                currentModel = null;
+                mixer = null;
+            }
             currentModel = gltf.scene;
             // Make it larger for the preview
             currentModel.scale.setScalar(cfg.scale * 1.5);
@@ -187,12 +194,27 @@ window.setPreviewModel = (key) => {
                 mixer = new THREE.AnimationMixer(currentModel);
                 mixer.clipAction(clip).play();
             }
+            statusLabel.style.opacity = "0";
         },
         undefined,
         () => {
+            if (token !== loadToken) return;
+            if (currentModel) {
+                scene.remove(currentModel);
+                currentModel = null;
+                mixer = null;
+            }
             currentModel = createFallbackPreviewMesh();
             scene.add(currentModel);
             frameModelToBodyCenter(currentModel, { yOffset: 0, camY: 0.95, camDist: 3.1 });
+            statusLabel.textContent = "Model failed - using fallback";
+            statusLabel.style.opacity = "1";
+            setTimeout(() => {
+                if (token === loadToken) {
+                    statusLabel.textContent = "Loading...";
+                    statusLabel.style.opacity = "0";
+                }
+            }, 1200);
         }
     );
 };
@@ -213,4 +235,4 @@ function animate() {
     renderer.render(scene, camera);
 }
 animate();
-prewarmModelCache();
+setTimeout(prewarmModelCache, 150);

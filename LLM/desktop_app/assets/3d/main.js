@@ -15,18 +15,24 @@ renderer.outputEncoding = THREE.sRGBEncoding;
 renderer.domElement.tabIndex = 1;
 document.getElementById("canvas-container").appendChild(renderer.domElement);
 
-scene.add(new THREE.HemisphereLight(0xbfdcff, 0x4f7f3a, 0.95));
-const keyLight = new THREE.DirectionalLight(0xfff4dd, 1.2);
-keyLight.position.set(8, 12, 6);
+scene.add(new THREE.HemisphereLight(0xc9e5ff, 0x567642, 0.95));
+const keyLight = new THREE.DirectionalLight(0xfff1d2, 1.1);
+keyLight.position.set(10, 14, 7);
 keyLight.castShadow = true;
 keyLight.shadow.mapSize.set(2048, 2048);
 scene.add(keyLight);
-const fillLight = new THREE.DirectionalLight(0xe3ffd0, 0.38);
-fillLight.position.set(-10, 7, -4);
+const fillLight = new THREE.DirectionalLight(0xe6ffd5, 0.35);
+fillLight.position.set(-12, 8, -6);
 scene.add(fillLight);
-const rimLight = new THREE.DirectionalLight(0xffefc8, 0.28);
-rimLight.position.set(0, 5, -10);
+const rimLight = new THREE.DirectionalLight(0xffe6bd, 0.24);
+rimLight.position.set(0, 6, -12);
 scene.add(rimLight);
+
+const skyDome = new THREE.Mesh(
+    new THREE.SphereGeometry(120, 40, 30),
+    new THREE.MeshBasicMaterial({ color: 0xa8d6ff, side: THREE.BackSide })
+);
+scene.add(skyDome);
 
 const grassCanvas = document.createElement("canvas");
 grassCanvas.width = 256;
@@ -46,13 +52,30 @@ grassTexture.wrapS = THREE.RepeatWrapping;
 grassTexture.wrapT = THREE.RepeatWrapping;
 grassTexture.repeat.set(22, 22);
 
+const terrainGeom = new THREE.PlaneGeometry(92, 92, 72, 72);
+const terrainPos = terrainGeom.attributes.position;
+for (let i = 0; i < terrainPos.count; i += 1) {
+    const x = terrainPos.getX(i);
+    const z = terrainPos.getY(i);
+    const noise = Math.sin(x * 0.14) * 0.15 + Math.cos(z * 0.17) * 0.13 + Math.sin((x + z) * 0.09) * 0.1;
+    terrainPos.setZ(i, noise);
+}
+terrainGeom.rotateX(-Math.PI / 2);
+terrainGeom.computeVertexNormals();
 const floor = new THREE.Mesh(
-    new THREE.CircleGeometry(42, 128),
+    terrainGeom,
     new THREE.MeshStandardMaterial({ map: grassTexture, roughness: 0.98, metalness: 0.0 })
 );
-floor.rotation.x = -Math.PI / 2;
 floor.receiveShadow = true;
 scene.add(floor);
+
+const dirtRing = new THREE.Mesh(
+    new THREE.RingGeometry(8.6, 12.6, 96),
+    new THREE.MeshStandardMaterial({ color: 0xa98f6f, roughness: 0.95, metalness: 0.02, side: THREE.DoubleSide })
+);
+dirtRing.rotation.x = -Math.PI / 2;
+dirtRing.position.y = 0.03;
+scene.add(dirtRing);
 
 const stoneArena = new THREE.Mesh(
     new THREE.CircleGeometry(8.8, 72),
@@ -84,7 +107,7 @@ for (let i = 0; i < 28; i += 1) {
     }
 }
 
-for (let i = 0; i < 42; i += 1) {
+for (let i = 0; i < 44; i += 1) {
     const angle = Math.random() * Math.PI * 2;
     const radius = 14 + Math.random() * 20;
     const trunk = new THREE.Mesh(
@@ -102,6 +125,62 @@ for (let i = 0; i < 42; i += 1) {
     crown.position.set(trunk.position.x, 1.18 + Math.random() * 0.2, trunk.position.z);
     crown.castShadow = true;
     scene.add(crown);
+}
+
+function addVillageHouse(x, z, rotY, wallColor, roofColor) {
+    const base = new THREE.Group();
+    base.position.set(x, 0, z);
+    base.rotation.y = rotY;
+    const body = new THREE.Mesh(
+        new THREE.BoxGeometry(2.6, 1.8, 2.2),
+        new THREE.MeshStandardMaterial({ color: wallColor, roughness: 0.84, metalness: 0.04 })
+    );
+    body.position.y = 0.95;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    base.add(body);
+    const roof = new THREE.Mesh(
+        new THREE.ConeGeometry(1.95, 1.25, 4),
+        new THREE.MeshStandardMaterial({ color: roofColor, roughness: 0.88, metalness: 0.03 })
+    );
+    roof.position.y = 2.4;
+    roof.rotation.y = Math.PI * 0.25;
+    roof.castShadow = true;
+    base.add(roof);
+    const door = new THREE.Mesh(
+        new THREE.BoxGeometry(0.48, 0.85, 0.08),
+        new THREE.MeshStandardMaterial({ color: 0x4f3722, roughness: 0.9, metalness: 0.02 })
+    );
+    door.position.set(0, 0.5, 1.13);
+    base.add(door);
+    scene.add(base);
+}
+
+addVillageHouse(-16, -10, 0.2, 0xc5b69f, 0x6e4b2a);
+addVillageHouse(15, -12, -0.4, 0xbfae94, 0x714c2b);
+addVillageHouse(-18, 13, 0.5, 0xcab99f, 0x6a4729);
+addVillageHouse(17, 12, -0.25, 0xb8aa93, 0x684727);
+
+for (let i = 0; i < 6; i += 1) {
+    const a = (i / 6) * Math.PI * 2;
+    const lamp = new THREE.Group();
+    lamp.position.set(Math.cos(a) * 11.8, 0, Math.sin(a) * 11.8);
+    const pole = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.06, 0.06, 1.7, 8),
+        new THREE.MeshStandardMaterial({ color: 0x5f482d, roughness: 0.9, metalness: 0.02 })
+    );
+    pole.position.y = 0.85;
+    lamp.add(pole);
+    const glow = new THREE.Mesh(
+        new THREE.SphereGeometry(0.14, 10, 10),
+        new THREE.MeshStandardMaterial({ color: 0xffdc9e, emissive: 0xffb65b, emissiveIntensity: 0.7, roughness: 0.35, metalness: 0.0 })
+    );
+    glow.position.y = 1.72;
+    lamp.add(glow);
+    const point = new THREE.PointLight(0xffd49a, 0.5, 7);
+    point.position.y = 1.72;
+    lamp.add(point);
+    scene.add(lamp);
 }
 
 const labelsRoot = document.getElementById("labels");
@@ -125,10 +204,16 @@ const dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
 const keys = { w: false, a: false, s: false, d: false, ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
 
 window.addEventListener("keydown", (e) => {
-    if (keys.hasOwnProperty(e.key)) keys[e.key] = true;
+    if (keys.hasOwnProperty(e.key)) {
+        keys[e.key] = true;
+        if (e.key.startsWith("Arrow")) e.preventDefault();
+    }
 });
 window.addEventListener("keyup", (e) => {
-    if (keys.hasOwnProperty(e.key)) keys[e.key] = false;
+    if (keys.hasOwnProperty(e.key)) {
+        keys[e.key] = false;
+        if (e.key.startsWith("Arrow")) e.preventDefault();
+    }
 });
 
 const MODEL_CATALOG = {
@@ -159,10 +244,10 @@ dracoLoader.setDecoderPath('js/draco/');
 loader.setDRACOLoader(dracoLoader);
 
 function prewarmModelCache() {
-    const seen = new Set();
-    Object.values(MODEL_CATALOG).forEach((cfg) => {
-        if (!cfg || !cfg.path || seen.has(cfg.path)) return;
-        seen.add(cfg.path);
+    // Prewarm only likely-first models; loading every asset at startup causes delays.
+    ["fantasy_knight", "anime_android", "anime_blade", "fantasy_mage"].forEach((key) => {
+        const cfg = MODEL_CATALOG[key];
+        if (!cfg || !cfg.path) return;
         loader.load(cfg.path, () => {}, undefined, () => {});
     });
 }
@@ -441,6 +526,8 @@ const characters = {
     B: new CharacterActor("B", "Nova", new THREE.Vector3(0, 0, -1.0), "anime_blade"),
     C: new CharacterActor("C", "Rune", new THREE.Vector3(2.8, 0, 1.2), "fantasy_mage"),
 };
+selectedCharacter = characters.A;
+characters.A.label.style.textShadow = "0px 0px 8px #4ade80, 0px 0px 4px #4ade80";
 
 let isPointerDown = false;
 let clickMoved = false;
@@ -559,7 +646,7 @@ function handleResize() {
 
 window.addEventListener("resize", handleResize);
 handleResize();
-prewarmModelCache();
+setTimeout(prewarmModelCache, 150);
 
 function performInteraction(actorId, targetId, mode) {
     const actor = characters[actorId];

@@ -23,6 +23,16 @@ class CharacterPreviewWidget(QWidget):
         "anime_tokyo",
         "anime_android",
         "anime_scout",
+        "classic_soldier",
+        "classic_xbot",
+        "classic_cesium",
+        "classic_robot",
+        "wild_fox",
+        "wild_horse",
+        "wild_flamingo",
+        "wild_parrot",
+        "wild_stork",
+        "mystic_brainstem",
     ]
 
     DEFAULTS = {

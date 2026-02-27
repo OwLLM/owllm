@@ -27,9 +27,27 @@ const rimLight = new THREE.DirectionalLight(0xffefc8, 0.28);
 rimLight.position.set(0, 5, -10);
 scene.add(rimLight);
 
+const grassCanvas = document.createElement("canvas");
+grassCanvas.width = 256;
+grassCanvas.height = 256;
+const grassCtx = grassCanvas.getContext("2d");
+grassCtx.fillStyle = "#6faa4e";
+grassCtx.fillRect(0, 0, 256, 256);
+for (let i = 0; i < 4200; i += 1) {
+    const x = Math.floor(Math.random() * 256);
+    const y = Math.floor(Math.random() * 256);
+    const g = 88 + Math.floor(Math.random() * 92);
+    grassCtx.fillStyle = `rgb(${34 + Math.floor(Math.random() * 35)},${g},${24 + Math.floor(Math.random() * 26)})`;
+    grassCtx.fillRect(x, y, 1 + (i % 2), 1 + ((i + 1) % 2));
+}
+const grassTexture = new THREE.CanvasTexture(grassCanvas);
+grassTexture.wrapS = THREE.RepeatWrapping;
+grassTexture.wrapT = THREE.RepeatWrapping;
+grassTexture.repeat.set(22, 22);
+
 const floor = new THREE.Mesh(
-    new THREE.CircleGeometry(42, 96),
-    new THREE.MeshStandardMaterial({ color: 0x69aa4f, roughness: 0.93, metalness: 0.02 })
+    new THREE.CircleGeometry(42, 128),
+    new THREE.MeshStandardMaterial({ map: grassTexture, roughness: 0.98, metalness: 0.0 })
 );
 floor.rotation.x = -Math.PI / 2;
 floor.receiveShadow = true;
@@ -63,6 +81,26 @@ for (let i = 0; i < 28; i += 1) {
         post.position.set(Math.cos(angle) * radius, 0.4, Math.sin(angle) * radius);
         scene.add(post);
     }
+}
+
+for (let i = 0; i < 42; i += 1) {
+    const angle = Math.random() * Math.PI * 2;
+    const radius = 14 + Math.random() * 20;
+    const trunk = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.08, 0.12, 0.95, 10),
+        new THREE.MeshStandardMaterial({ color: 0x7b4e2c, roughness: 0.9, metalness: 0.02 })
+    );
+    trunk.position.set(Math.cos(angle) * radius, 0.48, Math.sin(angle) * radius);
+    trunk.castShadow = true;
+    scene.add(trunk);
+
+    const crown = new THREE.Mesh(
+        new THREE.SphereGeometry(0.55 + Math.random() * 0.25, 12, 10),
+        new THREE.MeshStandardMaterial({ color: 0x5b8f3f, roughness: 0.95, metalness: 0.0 })
+    );
+    crown.position.set(trunk.position.x, 1.18 + Math.random() * 0.2, trunk.position.z);
+    crown.castShadow = true;
+    scene.add(crown);
 }
 
 const labelsRoot = document.getElementById("labels");
@@ -103,6 +141,16 @@ const MODEL_CATALOG = {
     anime_tokyo: { path: "models/littlest_tokyo.glb", scale: 0.012, yOffset: 0 },
     anime_android: { path: "models/robot_expressive.glb", scale: 0.3, yOffset: 0 },
     anime_scout: { path: "models/rigged_simple.glb", scale: 1.0, yOffset: 0 },
+    classic_soldier: { path: "models/soldier.glb", scale: 1.2, yOffset: 0 },
+    classic_xbot: { path: "models/xbot.glb", scale: 0.013, yOffset: 0 },
+    classic_cesium: { path: "models/cesium_man.glb", scale: 1.2, yOffset: 0 },
+    classic_robot: { path: "models/robot.glb", scale: 0.4, yOffset: 0 },
+    wild_fox: { path: "models/fox.glb", scale: 0.025, yOffset: 0 },
+    wild_horse: { path: "models/horse.glb", scale: 0.018, yOffset: 0 },
+    wild_flamingo: { path: "models/flamingo.glb", scale: 0.02, yOffset: 0 },
+    wild_parrot: { path: "models/parrot.glb", scale: 0.02, yOffset: 0 },
+    wild_stork: { path: "models/stork.glb", scale: 0.02, yOffset: 0 },
+    mystic_brainstem: { path: "models/brainstem.glb", scale: 0.18, yOffset: 0 },
 };
 
 const dracoLoader = new THREE.DRACOLoader();

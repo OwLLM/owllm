@@ -29,9 +29,27 @@ const rimLight = new THREE.DirectionalLight(0xffd5a0, 0.4);
 rimLight.position.set(0, 5, -6);
 scene.add(rimLight);
 
+const grassCanvas = document.createElement("canvas");
+grassCanvas.width = 256;
+grassCanvas.height = 256;
+const grassCtx = grassCanvas.getContext("2d");
+grassCtx.fillStyle = "#6da750";
+grassCtx.fillRect(0, 0, 256, 256);
+for (let i = 0; i < 2600; i += 1) {
+    const x = Math.floor(Math.random() * 256);
+    const y = Math.floor(Math.random() * 256);
+    const g = 90 + Math.floor(Math.random() * 85);
+    grassCtx.fillStyle = `rgb(${28 + Math.floor(Math.random() * 38)},${g},${26 + Math.floor(Math.random() * 24)})`;
+    grassCtx.fillRect(x, y, 1, 1);
+}
+const grassTexture = new THREE.CanvasTexture(grassCanvas);
+grassTexture.wrapS = THREE.RepeatWrapping;
+grassTexture.wrapT = THREE.RepeatWrapping;
+grassTexture.repeat.set(8, 8);
+
 const floor = new THREE.Mesh(
     new THREE.CircleGeometry(18, 96),
-    new THREE.MeshStandardMaterial({ color: 0x6ea957, roughness: 0.9, metalness: 0.02 })
+    new THREE.MeshStandardMaterial({ map: grassTexture, roughness: 0.95, metalness: 0.0 })
 );
 floor.rotation.x = -Math.PI / 2;
 floor.receiveShadow = true;
@@ -64,6 +82,16 @@ const MODEL_CATALOG = {
     anime_tokyo: { path: "models/littlest_tokyo.glb", scale: 0.012, yOffset: 0, camY: 1.5, camDist: 5.0, aura: 0xd6c8ff },
     anime_android: { path: "models/robot_expressive.glb", scale: 0.3, yOffset: 0, camY: 0.8, camDist: 3.0, aura: 0xa8b9ff },
     anime_scout: { path: "models/rigged_simple.glb", scale: 1.0, yOffset: 0, camY: 0.85, camDist: 3.3, aura: 0xf2d7bb },
+    classic_soldier: { path: "models/soldier.glb", scale: 1.2, yOffset: 0, camY: 1.0, camDist: 3.8, aura: 0xdcc99a },
+    classic_xbot: { path: "models/xbot.glb", scale: 0.013, yOffset: 0, camY: 1.0, camDist: 3.8, aura: 0xb9d4df },
+    classic_cesium: { path: "models/cesium_man.glb", scale: 1.2, yOffset: 0, camY: 1.0, camDist: 3.8, aura: 0xd8c6a6 },
+    classic_robot: { path: "models/robot.glb", scale: 0.4, yOffset: 0, camY: 0.85, camDist: 3.1, aura: 0xb1bfdf },
+    wild_fox: { path: "models/fox.glb", scale: 0.025, yOffset: 0, camY: 0.65, camDist: 2.9, aura: 0xffc48d },
+    wild_horse: { path: "models/horse.glb", scale: 0.018, yOffset: 0, camY: 1.0, camDist: 3.8, aura: 0xb9936a },
+    wild_flamingo: { path: "models/flamingo.glb", scale: 0.02, yOffset: 0, camY: 1.25, camDist: 4.2, aura: 0xffaec6 },
+    wild_parrot: { path: "models/parrot.glb", scale: 0.02, yOffset: 0, camY: 0.85, camDist: 3.0, aura: 0x9fd8ff },
+    wild_stork: { path: "models/stork.glb", scale: 0.02, yOffset: 0, camY: 1.15, camDist: 3.8, aura: 0xffd7bf },
+    mystic_brainstem: { path: "models/brainstem.glb", scale: 0.18, yOffset: 0, camY: 0.95, camDist: 3.2, aura: 0xa58dff },
 };
 
 const loader = new THREE.GLTFLoader();
@@ -86,8 +114,8 @@ function frameModelToBodyCenter(root, cfg) {
     root.rotation.set(0, 0, 0);
     root.position.set(0, cfg.yOffset || 0, 0);
 
-    const targetY = cfg.camY || 1.0;
-    const distance = cfg.camDist || 3.5;
+    const targetY = (cfg.camY || 1.0) + 0.22;
+    const distance = (cfg.camDist || 3.5) * 1.15;
 
     controls.target.set(0, targetY, 0);
     camera.position.set(0, targetY + 0.2, distance);

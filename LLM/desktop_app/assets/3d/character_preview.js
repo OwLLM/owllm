@@ -183,6 +183,19 @@ function applyGroundOffset(root, yOffset, autoGround) {
     root.position.y = (yOffset || 0) - box.min.y;
 }
 
+function norm(s) {
+    return String(s || "").trim().toLowerCase();
+}
+
+function pickClip(clips, candidates) {
+    const names = candidates.map(norm);
+    for (const name of names) {
+        const found = clips.find((clip) => norm(clip.name).includes(name));
+        if (found) return found;
+    }
+    return null;
+}
+
 function createFallbackPreviewMesh() {
     const group = new THREE.Group();
     const body = new THREE.Mesh(
@@ -255,12 +268,7 @@ window.setPreviewModel = (key) => {
             scene.add(currentModel);
             frameModelToBodyCenter(currentModel, cfg);
 
-            const clip = gltf.animations.find(c => 
-                c.name.toLowerCase().includes('idle') || 
-                c.name.toLowerCase().includes('stand') || 
-                c.name.toLowerCase().includes('breath') ||
-                c.name.toLowerCase().includes('agree')
-            ) || gltf.animations[0];
+            const clip = pickClip(gltf.animations, ["idle", "standing", "breath", "pose", "agree"]) || gltf.animations[0];
             if (clip) {
                 mixer = new THREE.AnimationMixer(currentModel);
                 mixer.clipAction(clip).play();

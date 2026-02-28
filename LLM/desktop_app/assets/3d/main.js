@@ -319,7 +319,11 @@ function norm(s) {
 
 function pickClip(clips, candidates) {
     const names = candidates.map(norm);
-    return clips.find((clip) => names.some((name) => norm(clip.name).includes(name))) || null;
+    for (const name of names) {
+        const found = clips.find((clip) => norm(clip.name).includes(name));
+        if (found) return found;
+    }
+    return null;
 }
 
 class CharacterActor {

@@ -255,7 +255,12 @@ window.setPreviewModel = (key) => {
             scene.add(currentModel);
             frameModelToBodyCenter(currentModel, cfg);
 
-            const clip = gltf.animations.find(c => c.name.toLowerCase().includes('idle') || c.name.toLowerCase().includes('stand') || c.name.toLowerCase().includes('breath')) || gltf.animations[0];
+            const clip = gltf.animations.find(c => 
+                c.name.toLowerCase().includes('idle') || 
+                c.name.toLowerCase().includes('stand') || 
+                c.name.toLowerCase().includes('breath') ||
+                c.name.toLowerCase().includes('agree')
+            ) || gltf.animations[0];
             if (clip) {
                 mixer = new THREE.AnimationMixer(currentModel);
                 mixer.clipAction(clip).play();

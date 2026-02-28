@@ -421,7 +421,7 @@ class CharacterActor {
             return;
         }
         this.mixer = new THREE.AnimationMixer(this.rootMesh);
-        const idleClip = pickClip(clips, ["idle", "standing", "breath", "pose"]) || clips[0];
+        const idleClip = pickClip(clips, ["idle", "standing", "breath", "pose", "agree"]) || clips[0];
         const walkClip = pickClip(clips, ["walk", "jog", "run", "locomotion"]);
         const waveClip = pickClip(clips, ["wave", "greet", "hello", "taunt", "attack", "punch"]);
 

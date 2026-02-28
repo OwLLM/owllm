@@ -35,6 +35,7 @@ class CharacterPreviewWidget(QWidget):
         "wild_stork",
         "d_rex",
         "mystic_brainstem",
+        "julio_cesar",
     ]
 
     DEFAULTS = {

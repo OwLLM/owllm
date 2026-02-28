@@ -114,6 +114,9 @@ const MODEL_CATALOG = {
     
     // D-REX
     d_rex: { path: "models/T-Rex_Spider.glb", scale: 120.0, yOffset: 0, autoGround: true, speedMul: 0.95, turnLerp: 0.28, headingLerp: 0.16, camY: 1.3, camDist: 4.5, aura: 0xff8f70 },
+    
+    // CUSTOM
+    julio_cesar: { path: "models/Julio_Cesar.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xe2c488 },
 };
 
 const loader = new THREE.GLTFLoader();

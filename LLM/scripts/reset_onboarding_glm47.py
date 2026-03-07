@@ -20,13 +20,13 @@ def main() -> int:
         raise SystemExit(f"Model folder not found: {model_dir}")
 
     model_path = str(model_dir)
-        # Execute cleanup
-        print(f"Connecting to database: {db}...")
-        try:
-            # Connect but with short timeout so it dies quickly if locked
-            con = sqlite3.connect(str(db), timeout=5.0)
-            con.row_factory = sqlite3.Row
-            cur = con.cursor()
+    # Execute cleanup
+    print(f"Connecting to database: {db}...")
+    try:
+        # Connect but with short timeout so it dies quickly if locked
+        con = sqlite3.connect(str(db), timeout=5.0)
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
         
         print("Executing cleanup queries...")
         # Delete any onboarding rows that point at this folder (including old/synthetic IDs).

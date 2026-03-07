@@ -2695,7 +2695,7 @@ sys.exit(0)
                     # Prefer binary wheels from official llama-cpp wheel index to avoid local C++ build requirements.
                     # This avoids nmake/MSVC hard failures on Windows.
                     llama_index = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
-                    min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.8").strip() or "0.3.8"
+                    min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.2").strip() or "0.3.2"
                     pip_cmd = [
                         str(python_exe), "-m", "pip", "install", "--upgrade",
                         "--only-binary", ":all:",
@@ -2732,7 +2732,7 @@ sys.exit(0)
                     log(f"Successfully installed {pkg}")
                     # llama-cpp-python: success from pip is not enough; enforce minimum runtime version.
                     if pkg_norm.startswith("llama-cpp-python"):
-                        min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.8").strip() or "0.3.8"
+                        min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.2").strip() or "0.3.2"
                         installed = _get_installed_version("llama-cpp-python")
                         if (not installed) or (_parse_version_tuple(installed) < _parse_version_tuple(min_llama)):
                             pip_cmd_str = " ".join(str(x) for x in pip_cmd)
@@ -2865,7 +2865,7 @@ sys.exit(0)
                                     str(rebuilt_python), "-m", "pip", "install", "--upgrade",
                                     "--only-binary", ":all:",
                                     "--prefer-binary",
-                                    f"llama-cpp-python>={os.getenv('LLM_MIN_LLAMA_CPP_VERSION', '0.3.8').strip() or '0.3.8'}",
+                                    f"llama-cpp-python>={os.getenv('LLM_MIN_LLAMA_CPP_VERSION', '0.3.2').strip() or '0.3.2'}",
                                     "--extra-index-url", llama_index,
                                 ]
                                 retry = subprocess.run(

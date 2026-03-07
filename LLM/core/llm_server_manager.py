@@ -216,7 +216,7 @@ class LLMServerManager:
         """
         if not self._is_gguf_path(model_path):
             return
-        min_version = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.8").strip() or "0.3.8"
+        min_version = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.2").strip() or "0.3.2"
         current = self._get_env_package_version(env_spec.python_executable, "llama-cpp-python")
         if not current:
             return

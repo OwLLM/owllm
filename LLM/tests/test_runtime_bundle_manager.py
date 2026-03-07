@@ -25,7 +25,7 @@ def test_ensure_gguf_runtime_already_ready(monkeypatch):
 
     monkeypatch.setattr(mgr, "_run_python", fake_run_python)
     monkeypatch.setattr(mgr, "_run_pip", fake_run_pip)
-    monkeypatch.setattr(mgr, "_llama_version_ok", lambda *_args, **_kwargs: (True, "0.3.16", "0.3.8"))
+    monkeypatch.setattr(mgr, "_llama_version_ok", lambda *_args, **_kwargs: (True, "0.3.16", "0.3.2"))
 
     ok, err = mgr.ensure_gguf_runtime(Path(sys.executable))
     assert ok is True
@@ -46,7 +46,7 @@ def test_ensure_gguf_runtime_fails_when_no_backend(monkeypatch):
 
     monkeypatch.setattr(mgr, "_run_python", fake_run_python)
     monkeypatch.setattr(mgr, "_run_pip", fake_run_pip)
-    monkeypatch.setattr(mgr, "_llama_version_ok", lambda *_args, **_kwargs: (False, None, "0.3.8"))
+    monkeypatch.setattr(mgr, "_llama_version_ok", lambda *_args, **_kwargs: (False, None, "0.3.2"))
 
     ok, err = mgr.ensure_gguf_runtime(Path(sys.executable))
     assert ok is False

@@ -78,7 +78,8 @@ class RuntimeBundleManager:
         return value or None
 
     def _llama_version_ok(self, python_exe: Path) -> tuple[bool, Optional[str], str]:
-        min_version = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.8").strip() or "0.3.8"
+        # 0.3.2 is the latest wheel currently available on abetlen cpu index for windows.
+        min_version = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.2").strip() or "0.3.2"
         installed = self._get_installed_version(python_exe, "llama-cpp-python")
         if not installed:
             return False, None, min_version
@@ -221,7 +222,8 @@ class RuntimeBundleManager:
 
         # 2) Try latest binary wheel first, then explicit wheel index fallback.
         llama_index = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
-        min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.8").strip() or "0.3.8"
+        # 0.3.2 is the latest wheel currently available on abetlen cpu index for windows.
+        min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.2").strip() or "0.3.2"
         install_attempts = [
             [
                 "install",

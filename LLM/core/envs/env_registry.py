@@ -824,7 +824,7 @@ try:
                 print("GGUF_BACKEND: llama-cpp-python(import)")
                 backend_ready = True
         except Exception as e:
-            backend_errors.append("llama-cpp-python: " + str(e)[:400])
+            backend_errors.append("llama-cpp-python: " + str(e))
 
         # 2) ctransformers backend
         # Explicitly turn off ctransformers by default if it's causing missing arch issues to bubble up poorly
@@ -845,7 +845,7 @@ try:
                     print("GGUF_BACKEND: ctransformers(import)")
                 backend_ready = True
             except Exception as e:
-                backend_errors.append("ctransformers: " + str(e)[:400])
+                backend_errors.append("ctransformers: " + str(e))
         elif not enable_ctransformers:
             backend_errors.append("ctransformers: skipped (LLM_ENABLE_CTRANSFORMERS_FALLBACK not enabled)")
 
@@ -883,12 +883,12 @@ try:
                         except Exception as tf_ex:
                             last_tf_err = tf_ex
                     if not backend_ready:
-                        backend_errors.append("transformers: " + str(last_tf_err)[:400] if last_tf_err else "transformers: no candidate base model id")
+                        backend_errors.append("transformers: " + str(last_tf_err) if last_tf_err else "transformers: no candidate base model id")
                 else:
                     print("GGUF_BACKEND: transformers(import)")
                     backend_ready = True
             except Exception as e:
-                backend_errors.append("transformers: " + str(e)[:400])
+                backend_errors.append("transformers: " + str(e))
 
         if backend_ready:
             print("PROBE: SUCCESS (GGUF)")

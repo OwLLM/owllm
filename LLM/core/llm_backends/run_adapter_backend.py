@@ -300,10 +300,8 @@ def _load_gguf_model(model_dir: Path):
     if "glm-4.7-flash" in primary_id.lower() and "zai-org/GLM-4.7-Flash" not in base_candidates:
         base_candidates.append("zai-org/GLM-4.7-Flash")
     folder_id = model_dir.name.replace("__", "/")
-        if folder_id not in base_candidates:
-            base_candidates.append(folder_id)
-        if "glm-4.7-flash" in primary_id.lower() and "zai-org/GLM-4.7-Flash" not in base_candidates:
-            base_candidates.append("zai-org/GLM-4.7-Flash")
+    if folder_id not in base_candidates:
+        base_candidates.append(folder_id)
     base_candidates = base_candidates[:_MAX_GGUF_TRANSFORMERS_BASE_CANDIDATES]
 
     for gguf_path in gguf_candidates:

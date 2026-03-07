@@ -827,7 +827,8 @@ try:
             backend_errors.append("llama-cpp-python: " + str(e)[:400])
 
         # 2) ctransformers backend
-        enable_ctransformers = (os.environ.get("LLM_ENABLE_CTRANSFORMERS_FALLBACK", "1").strip().lower() not in ("0", "false", "no"))
+        # Explicitly turn off ctransformers by default if it's causing missing arch issues to bubble up poorly
+        enable_ctransformers = (os.environ.get("LLM_ENABLE_CTRANSFORMERS_FALLBACK", "0").strip().lower() not in ("0", "false", "no"))
         if not backend_ready and enable_ctransformers:
             try:
                 from ctransformers import AutoModelForCausalLM
@@ -851,6 +852,7 @@ try:
         # 3) transformers GGUF fallback backend
         if not backend_ready:
             try:
+                # Fallback to transformers gguf backend
                 from transformers import AutoTokenizer, AutoModelForCausalLM
 
                 candidates = []
@@ -891,6 +893,13 @@ try:
         if backend_ready:
             print("PROBE: SUCCESS (GGUF)")
             sys.exit(0)
+
+        # Re-raise the missing arch so the caller explicitly sees it
+        for err in backend_errors:
+            if "does not recognize this architecture" in err or "unsupported arch" in err:
+                print("REASON: UNSUPPORTED_ARCH")
+                print("ERROR: " + err)
+                sys.exit(1)
 
         print("REASON: OTHER")
         print("ERROR: GGUF runtime backend failed for probe. File: " + str(gguf_path) + ". Tried llama-cpp-python, ctransformers, and transformers. Details: " + " | ".join(backend_errors))

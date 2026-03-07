@@ -36,6 +36,8 @@ class CharacterPreviewWidget(QWidget):
         "d_rex",
         "mystic_brainstem",
         "julio_cesar",
+        "napoleon",
+        "bonaparte",
     ]
 
     DEFAULTS = {

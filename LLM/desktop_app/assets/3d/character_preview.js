@@ -116,7 +116,9 @@ const MODEL_CATALOG = {
     d_rex: { path: "models/T-Rex_Spider.glb", scale: 120.0, yOffset: 0, autoGround: true, speedMul: 0.95, turnLerp: 0.28, headingLerp: 0.16, camY: 1.3, camDist: 4.5, aura: 0xff8f70 },
     
     // CUSTOM
-    julio_cesar: { path: "models/Julio_Cesar.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xe2c488 },
+    julio_cesar: { path: "models/Julio_Cesar.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xe2c488, noIdle: true },
+    napoleon: { path: "models/Napoleon.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0x4169e1, noIdle: true },
+    bonaparte: { path: "models/Bonaparte.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xff0000, noIdle: true },
 };
 
 const loader = new THREE.GLTFLoader();
@@ -159,28 +161,35 @@ function normalizeModelHeight(root, targetHeight) {
 
 function clampModelScale(root, minScale, maxScale) {
     if (!minScale && !maxScale) return;
-    const s = root.scale.x;
-    let clamped = s;
-    if (minScale) clamped = Math.max(clamped, minScale);
-    if (maxScale) clamped = Math.min(clamped, maxScale);
-    if (Math.abs(clamped - s) > 1e-6) {
-        const ratio = clamped / s;
-        root.scale.multiplyScalar(ratio);
+        const s = root.scale.x;
+        let clamped = s;
+        if (minScale) clamped = Math.max(clamped, minScale);
+        if (maxScale) clamped = Math.min(clamped, maxScale);
+        if (Math.abs(clamped - s) > 1e-6) {
+            const ratio = clamped / s;
+            root.scale.multiplyScalar(ratio);
+        }
     }
-}
-
+    
 function applyGroundOffset(root, yOffset, autoGround) {
+    // Reset to 0 first in case this gets called multiple times
+    root.position.y = 0;
+    
     if (!autoGround) {
         root.position.y = yOffset || 0;
         return;
     }
+    
     root.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(root);
+    
     if (!isFinite(box.min.y)) {
         root.position.y = yOffset || 0;
         return;
     }
-    root.position.y = (yOffset || 0) - box.min.y;
+    
+    const offset = (yOffset || 0) - box.min.y;
+    root.position.y = offset;
 }
 
 function norm(s) {
@@ -257,6 +266,9 @@ window.setPreviewModel = (key) => {
             clampModelScale(currentModel, cfg.minScale, cfg.maxScale);
             applyGroundOffset(currentModel, cfg.yOffset, cfg.autoGround);
             
+            // Re-apply pedestal offset for the selection view
+            currentModel.position.y += 0.45;
+            
             currentModel.traverse(n => {
                 if (n.isMesh) { 
                     n.castShadow = true; 
@@ -271,7 +283,11 @@ window.setPreviewModel = (key) => {
             const clip = pickClip(gltf.animations, ["idle", "standing", "breath", "pose", "agree"]) || gltf.animations[0];
             if (clip) {
                 mixer = new THREE.AnimationMixer(currentModel);
-                mixer.clipAction(clip).play();
+                const action = mixer.clipAction(clip);
+                if (cfg.noIdle) {
+                    action.timeScale = 0;
+                }
+                action.play();
             }
             statusLabel.style.opacity = "0";
         },

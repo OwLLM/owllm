@@ -607,13 +607,38 @@ class DownloadedModelCard(QFrame):
         layout.addLayout(middle_layout)
         
         # Model path
-        path_label = QLabel(f"📂 {model_path}")
+        # Using a layout so the folder icon and text can be together, but the text is a clickable hyperlink
+        path_layout = QHBoxLayout()
+        path_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Determine actual absolute path for the link
+        import os
+        import urllib.parse
+        abs_path = os.path.abspath(model_path)
+        # Handle Windows paths correctly for file:// URLs
+        file_url = f"file:///{urllib.parse.quote(abs_path.replace(os.sep, '/'))}"
+        
+        path_label = QLabel(f'📂 <a href="{file_url}" style="color: #667eea; text-decoration: none;">{model_path}</a>')
+        path_label.setOpenExternalLinks(True)
+        path_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
         path_font = QFont()
         path_font.setPointSize(11)
         path_label.setFont(path_font)
-        path_label.setStyleSheet("color: #888;")
+        # Remove the global stylesheet that overwrites the link color
+        # path_label.setStyleSheet("color: #888;")
         path_label.setWordWrap(True)
-        layout.addWidget(path_label)
+        
+        # Prevent link clicks from selecting the card
+        def link_hovered(link):
+            if link:
+                path_label.setCursor(Qt.PointingHandCursor)
+            else:
+                path_label.setCursor(Qt.ArrowCursor)
+                
+        path_label.linkHovered.connect(link_hovered)
+        
+        path_layout.addWidget(path_label)
+        layout.addLayout(path_layout)
         
         layout.addStretch(1)
         

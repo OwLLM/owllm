@@ -139,6 +139,51 @@ class _LlamaCppWrapper:
         self.model_path = model_path
         self._is_llamacpp = True
 
+    def generate(self, prompt: str, **kwargs):
+        # Translate transformers gen kwargs to llama-cpp args
+        max_tokens = kwargs.get("max_new_tokens", 256)
+        temperature = kwargs.get("temperature", 0.8)
+        top_p = kwargs.get("top_p", 0.95)
+        top_k = kwargs.get("top_k", 40)
+        repetition_penalty = kwargs.get("repetition_penalty", 1.1)
+
+        result = self.llm(
+            prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repeat_penalty=repetition_penalty,
+            stop=kwargs.get("stop", []),
+        )
+        return result["choices"][0]["text"]
+
+
+class _CTransformersWrapper:
+    """Small wrapper so generate_text can route GGUF calls to ctransformers."""
+    
+    def __init__(self, llm, model_path: str):
+        self.llm = llm
+        self.model_path = model_path
+        self._is_ctransformers = True
+
+    def generate(self, prompt: str, **kwargs):
+        max_tokens = kwargs.get("max_new_tokens", 256)
+        temperature = kwargs.get("temperature", 0.8)
+        top_p = kwargs.get("top_p", 0.95)
+        top_k = kwargs.get("top_k", 40)
+        repetition_penalty = kwargs.get("repetition_penalty", 1.1)
+        
+        return self.llm(
+            prompt,
+            max_new_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            stop=kwargs.get("stop", []),
+        )
+
 
 def _extract_base_model_id_for_gguf(model_dir: Path) -> str:
     """Best-effort base model id for transformers GGUF loading."""
@@ -255,8 +300,10 @@ def _load_gguf_model(model_dir: Path):
     if "glm-4.7-flash" in primary_id.lower() and "zai-org/GLM-4.7-Flash" not in base_candidates:
         base_candidates.append("zai-org/GLM-4.7-Flash")
     folder_id = model_dir.name.replace("__", "/")
-    if folder_id not in base_candidates:
-        base_candidates.append(folder_id)
+        if folder_id not in base_candidates:
+            base_candidates.append(folder_id)
+        if "glm-4.7-flash" in primary_id.lower() and "zai-org/GLM-4.7-Flash" not in base_candidates:
+            base_candidates.append("zai-org/GLM-4.7-Flash")
     base_candidates = base_candidates[:_MAX_GGUF_TRANSFORMERS_BASE_CANDIDATES]
 
     for gguf_path in gguf_candidates:
@@ -291,7 +338,36 @@ def _load_gguf_model(model_dir: Path):
             backend_outcomes.append(f"llama-cpp-python: {err_snip}")
             logging.info("llama-cpp-python failed for %s, trying transformers fallback: %s", gguf_path.name, llama_err)
 
-        # 2) Fallback: transformers with robust tokenizer (sentencepiece/tiktoken use_fast=False)
+        # 2) Fallback: ctransformers backend (disabled by default to avoid masking arch errors)
+        if not enable_ctransformers:
+            backend_errors.append("ctransformers: skipped (LLM_ENABLE_CTRANSFORMERS_FALLBACK not enabled)")
+            backend_outcomes.append("ctransformers: skipped")
+        else:
+            try:
+                from ctransformers import AutoModelForCausalLM  # type: ignore
+
+                logging.info(
+                    "Loading GGUF via ctransformers fallback: dir=%s, file=%s",
+                    str(model_dir),
+                    gguf_path.name,
+                )
+                llm = AutoModelForCausalLM.from_pretrained(
+                    str(model_dir),
+                    model_file=gguf_path.name,
+                    gpu_layers=0,
+                    context_length=n_ctx,
+                    threads=n_threads,
+                )
+                backend_outcomes.append("ctransformers: ok")
+                variant_outcomes.append({"variant": gguf_path.name, "backends": backend_outcomes})
+                return None, _CTransformersWrapper(llm, str(gguf_path)), None
+            except Exception as ctrans_err:
+                err_snip = str(ctrans_err)[:300]
+                backend_errors.append(f"ctransformers: {err_snip}")
+                backend_outcomes.append(f"ctransformers: {err_snip}")
+                logging.info("ctransformers fallback failed for %s", gguf_path.name, exc_info=True)
+
+        # 3) Fallback: transformers with robust tokenizer (sentencepiece/tiktoken use_fast=False)
         # Load tokenizer/config from a compatible base repo, but always load GGUF weights from local model_dir.
         tf_last_err = None
         for base_model_id in base_candidates:

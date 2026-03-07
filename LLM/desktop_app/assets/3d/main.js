@@ -240,7 +240,9 @@ const MODEL_CATALOG = {
     d_rex: { path: "models/T-Rex_Spider.glb", scale: 120.0, yOffset: 0, autoGround: true, speedMul: 0.95, turnLerp: 0.28, headingLerp: 0.16, camY: 1.3, camDist: 4.5, aura: 0xff8f70 },
 
     // CUSTOM
-    julio_cesar: { path: "models/Julio_Cesar.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xe2c488 },
+    julio_cesar: { path: "models/Julio_Cesar.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xe2c488, noIdle: true },
+    napoleon: { path: "models/Napoleon.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0x4169e1, noIdle: true },
+    bonaparte: { path: "models/Bonaparte.glb", scale: 1.0, yOffset: 0, autoGround: true, speedMul: 1.0, camY: 1.0, camDist: 3.8, aura: 0xff0000, noIdle: true },
 };
 
 const dracoLoader = new THREE.DRACOLoader();
@@ -300,17 +302,24 @@ function clampModelScale(root, minScale, maxScale) {
 }
 
 function applyGroundOffset(root, yOffset, autoGround) {
+    // Reset to 0 first in case this gets called multiple times
+    root.position.y = 0;
+    
     if (!autoGround) {
         root.position.y = yOffset || 0;
         return;
     }
+    
     root.updateMatrixWorld(true);
     const box = new THREE.Box3().setFromObject(root);
+    
     if (!isFinite(box.min.y)) {
         root.position.y = yOffset || 0;
         return;
     }
-    root.position.y = (yOffset || 0) - box.min.y;
+    
+    const offset = (yOffset || 0) - box.min.y;
+    root.position.y = offset;
 }
 
 function norm(s) {
@@ -433,6 +442,8 @@ class CharacterActor {
         this.actions.walk = walkClip ? this.mixer.clipAction(walkClip) : this.actions.idle;
         this.actions.wave = waveClip ? this.mixer.clipAction(waveClip) : this.actions.idle;
 
+        const modelCfg = MODEL_CATALOG[this.visualKey] || {};
+
         Object.values(this.actions).forEach((act) => {
             if (act) {
                 act.enabled = true;
@@ -440,6 +451,11 @@ class CharacterActor {
                 act.loop = THREE.LoopRepeat;
             }
         });
+        
+        if (this.actions.idle && modelCfg.noIdle) {
+            this.actions.idle.timeScale = 0;
+        }
+
         this.play("idle");
     }
 
@@ -778,7 +794,57 @@ function animate() {
     requestAnimationFrame(animate);
     const dt = Math.min(clock.getDelta(), 0.05);
     controls.update(); // Update orbit controls
-    Object.values(characters).forEach((c) => c.update(dt));
+    Object.values(characters).forEach((c) => {
+        c.update(dt);
+        
+        // Dynamic floor height adjustment based on noise function!
+        const x = c.group.position.x;
+        const z = c.group.position.z;
+        // Same noise function used in terrain generation
+        const noise = Math.sin(x * 0.14) * 0.15 + Math.cos(z * 0.17) * 0.13 + Math.sin((x + z) * 0.09) * 0.1;
+        
+        // Add the noise to whatever the base Y is for the character
+        // We do this by setting group.position.y exactly to noise
+        c.group.position.y = noise; 
+    });
+
+    const chars = Object.values(characters);
+    
+    // Collision magic: character vs character
+    const minD = 0.85; // minimum distance between characters
+    for (let i = 0; i < chars.length; i++) {
+        for (let j = i + 1; j < chars.length; j++) {
+            const c1 = chars[i];
+            const c2 = chars[j];
+            const dx = c1.group.position.x - c2.group.position.x;
+            const dz = c1.group.position.z - c2.group.position.z;
+            const dist = Math.sqrt(dx * dx + dz * dz);
+            if (dist > 0 && dist < minD) {
+                const push = (minD - dist) * 0.5;
+                const nx = (dx / dist) * push;
+                const nz = (dz / dist) * push;
+                c1.group.position.x += nx;
+                c1.group.position.z += nz;
+                c2.group.position.x -= nx;
+                c2.group.position.z -= nz;
+                
+                if (!c1.moveTarget) c1.anchorPos.copy(c1.group.position);
+                if (!c2.moveTarget) c2.anchorPos.copy(c2.group.position);
+            }
+        }
+    }
+    
+    // Collision magic: character vs environment (the village fence at radius 11.2)
+    chars.forEach(c => {
+        const radLimit = 11.2;
+        const len = Math.sqrt(c.group.position.x * c.group.position.x + c.group.position.z * c.group.position.z);
+        if (len > radLimit) {
+            c.group.position.x *= radLimit / len;
+            c.group.position.z *= radLimit / len;
+            if (!c.moveTarget) c.anchorPos.copy(c.group.position);
+        }
+    });
+
     renderer.render(scene, camera);
 }
 

@@ -252,29 +252,13 @@ def _patch_os_system_popen() -> bool:
 
 
 def _swap_python_exe_to_pythonw(program: str) -> str:
-    """Return ``pythonw.exe`` equivalent if ``program`` is a ``python.exe``.
-
-    Used for QProcess patching: PySide6 6.8.1 does not expose
-    ``setCreateProcessArgumentsModifier``, so the only portable way to
-    prevent a console flash on a QProcess-spawned Python child is to swap
-    the CONSOLE-subsystem ``python.exe`` for the GUI-subsystem
-    ``pythonw.exe``. Windows never allocates a console for GUI-subsystem
-    binaries, and QProcess pipes for stdin/stdout/stderr continue to work
-    with pythonw.exe.
-    """
-    if sys.platform != "win32" or not program:
-        return program
+    """Delegate to :func:`core.python_exe_swap.swap_console_python_to_pythonw`."""
     try:
-        norm = os.path.normcase(os.path.abspath(program))
+        from core.python_exe_swap import swap_console_python_to_pythonw
+
+        return swap_console_python_to_pythonw(program)
     except Exception:
         return program
-    base = os.path.basename(norm)
-    if base not in ("python.exe", "python3.exe", "python3.11.exe", "python3.12.exe"):
-        return program
-    candidate = os.path.join(os.path.dirname(norm), "pythonw.exe")
-    if os.path.isfile(candidate):
-        return candidate
-    return program
 
 
 def _patch_qprocess() -> bool:

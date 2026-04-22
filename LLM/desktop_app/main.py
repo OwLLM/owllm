@@ -6,6 +6,19 @@ import shutil
 import json
 import subprocess
 import time
+
+# Install Windows subprocess no-window guard BEFORE any third-party import
+# that may spawn console children (pip/hf_hub/torch/transformers). See
+# core/win_subprocess_guard.py for rationale.
+try:
+    _app_root = os.path.dirname(os.path.abspath(__file__))
+    _llm_root = os.path.dirname(_app_root)
+    if _llm_root not in sys.path:
+        sys.path.insert(0, _llm_root)
+    from core.win_subprocess_guard import install_windows_subprocess_guard
+    install_windows_subprocess_guard()
+except Exception as _guard_exc:
+    print(f"[main] Could not install Windows subprocess guard: {_guard_exc!r}", file=sys.stderr)
 from functools import partial
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +32,15 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap, QPainter, QPen, QColor, QBrush
 
+# After PySide6 has loaded, re-run the QProcess portion of the guard so
+# every QProcess gets CREATE_NO_WINDOW by default (not just sites that
+# remember to call ``apply_create_no_window``).
+try:
+    from core.win_subprocess_guard import reinstall_after_qt_import as _reinstall_after_qt
+    _reinstall_after_qt()
+except Exception as _guard_qt_exc:
+    print(f"[main] Could not apply Qt portion of subprocess guard: {_guard_qt_exc!r}", file=sys.stderr)
+
 # Feature flag for hybrid frame wrapper (enabled by default)
 # To disable: set USE_HYBRID_FRAME=0 before running
 USE_HYBRID_FRAME = os.getenv("USE_HYBRID_FRAME", "1") == "1"
@@ -29,7 +51,11 @@ _APP_INSTANCE_LOCK = None
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
 from desktop_app.training_widgets import MetricCard
 from desktop_app.splash_screen import SplashScreen
-from desktop_app.process_utils import apply_create_no_window
+from desktop_app.process_utils import (
+    HiddenSubprocessRunner,
+    apply_create_no_window,
+    qprocess_environment_to_environ,
+)
 from desktop_app.pages.server_page import ServerPage
 from desktop_app.pages.mcp_page import MCPPage
 from desktop_app.pages.github_import_page import GitHubImportPage
@@ -395,6 +421,7 @@ class ToolInferenceWorker(QThread):
         prompt: str,
         model_id: str,
         model_column: str,
+        base_model: str = "",
         system_prompt: str = "",
         max_new_tokens: int = 1024,
         temperature: float = 0.7,
@@ -404,6 +431,7 @@ class ToolInferenceWorker(QThread):
         self.prompt = prompt
         self.model_id = model_id
         self.model_column = model_column
+        self.base_model = str(base_model or "").strip()
         self.system_prompt = system_prompt
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
@@ -460,6 +488,7 @@ class ToolInferenceWorker(QThread):
             cfg = ToolEnabledInferenceConfig(
                 prompt=self.prompt,
                 model_id=self.model_id,
+                base_model=self.base_model or None,
                 enable_tools=True,
                 tool_server_url=tool_server_url or "",  # Empty string if native mode
                 tool_server_token=tool_server_token or "",  # Empty string if native mode
@@ -2881,7 +2910,7 @@ class MainWindow(QMainWindow):
         border_container.installEventFilter(self)
         main_widget.installEventFilter(self)
 
-        self.train_proc: QProcess | None = None
+        self.train_proc: QProcess | HiddenSubprocessRunner | None = None
         
         # Initialize card lists
         self.model_cards = []
@@ -3920,6 +3949,14 @@ class MainWindow(QMainWindow):
                 if proc is not None and proc.poll() is None:
                     has_running = True
                     break
+            if not has_running:
+                try:
+                    has_running = bool(
+                        (manager.state_store.list_servers(status="RUNNING") or [])
+                        or (manager.state_store.list_servers(status="STARTING") or [])
+                    )
+                except Exception:
+                    has_running = False
             if has_running:
                 reply = QMessageBox.question(
                     self,
@@ -3939,15 +3976,14 @@ class MainWindow(QMainWindow):
             from core.llm_server_manager import get_global_server_manager
             import threading
             manager = get_global_server_manager()
-            if manager.running_servers:
-                def _shutdown_servers():
-                    try:
-                        manager.shutdown_all()
-                    except Exception as e:
-                        print(f"[DEBUG] Error shutting down LLM servers: {e}")
-                t = threading.Thread(target=_shutdown_servers, daemon=True)
-                t.start()
-                t.join(timeout=5)
+            def _shutdown_servers():
+                try:
+                    manager.shutdown_all()
+                except Exception as e:
+                    print(f"[DEBUG] Error shutting down LLM servers: {e}")
+            t = threading.Thread(target=_shutdown_servers, daemon=True)
+            t.start()
+            t.join(timeout=5)
 
             # HARD STOP: if anything is still around, force-kill known server PIDs/ports from StateStore.
             # This prevents orphan GPU processes from surviving app exit.
@@ -4009,7 +4045,7 @@ class MainWindow(QMainWindow):
                                 "-NoProfile",
                                 "-Command",
                                 "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\") | "
-                                "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.server_app:app' } | "
+                                "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.(server_app|bundled_proxy_server):app' } | "
                                 "Select-Object -ExpandProperty ProcessId",
                             ],
                             capture_output=True,
@@ -4142,7 +4178,7 @@ class MainWindow(QMainWindow):
                                 "-NoProfile",
                                 "-Command",
                                 "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\") | "
-                                "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.server_app:app' } | "
+                                "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.(server_app|bundled_proxy_server):app' } | "
                                 "Select-Object -ExpandProperty ProcessId",
                             ],
                             capture_output=True,
@@ -7376,7 +7412,8 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel(
             f"'{model_id}' has multiple GGUF variants.\n"
-            "Select one or more to download (or select 'Download all')."
+            "Select one or more to download.\n"
+            "Green entries are estimated to fit your VRAM. Use the first row only if you really want every GGUF variant."
         ))
         list_widget = QListWidget()
         list_widget.setMinimumHeight(280)
@@ -7387,14 +7424,14 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(label_text)
             item.setForeground(QBrush(QColor("#4CAF50") if fits else QColor("#f44336")))
             list_widget.addItem(item)
-        # Sensible default: choose all known FITS entries. If none, keep "download all".
-        selected_any = False
+        # Do not preselect multiple variants for the user.
+        # Just focus the first recommended item (or "download all" as a fallback).
+        focused_row = 0
         for idx, (_, fits) in enumerate(labels_with_fit, start=1):
             if fits:
-                list_widget.item(idx).setSelected(True)
-                selected_any = True
-        if not selected_any:
-            list_widget.item(0).setSelected(True)
+                focused_row = idx
+                break
+        list_widget.setCurrentRow(focused_row)
         layout.addWidget(list_widget)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(dialog.accept)
@@ -7407,8 +7444,13 @@ class MainWindow(QMainWindow):
 
         selected_rows = sorted({i.row() for i in list_widget.selectedIndexes()})
         if not selected_rows:
-            self._log_models("User selected: download all GGUF variants.")
-            return True, None
+            QMessageBox.information(
+                self,
+                "Choose GGUF quantization",
+                "Select one or more GGUF variants, or explicitly choose 'Download all GGUF variants'.",
+            )
+            self._log_models("User closed GGUF selection without choosing any variant.")
+            return False, None
         specific_rows = [r for r in selected_rows if r > 0]
         if 0 in selected_rows and specific_rows:
             # Explicit file picks always win over accidental mixed selection with row 0.
@@ -7531,15 +7573,17 @@ class MainWindow(QMainWindow):
             self._log_models(f"[WARNING] Could not write selected weights marker: {e}")
         return payload
 
-    def _prompt_additional_gguf_variant_selection(
+    def _prompt_manage_gguf_variant_selection(
         self,
         model_id: str,
         token: Optional[str],
-        existing_filenames: set[str],
+        existing_patterns: List[str],
+        active_variant: Optional[str] = None,
     ) -> tuple[bool, Optional[List[str]]]:
         """
-        Ask user which *missing* GGUF variants to add to an existing local model.
-        Returns: (proceed, selected_patterns). selected_patterns is always a list when proceed=True.
+        Ask user which GGUF variants should exist locally for a downloaded model.
+        Selected local variants are kept, selected missing variants are downloaded, and
+        deselected local variants are removed after successful updates.
         """
         from core.model_file_utils import list_repo_files
         try:
@@ -7547,26 +7591,39 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(
                 self,
-                "Add Weights",
+                "Weights",
                 f"Could not load GGUF variants for '{model_id}'.\n\nError: {e}",
             )
             return False, None
 
-        existing_lower = {x.lower() for x in existing_filenames if isinstance(x, str) and x}
+        normalized_existing = []
+        for rel in existing_patterns or []:
+            if isinstance(rel, str) and rel.strip():
+                normalized_existing.append(rel.strip().replace("\\", "/"))
+        existing_set = set(normalized_existing)
+        existing_names = {Path(rel).name.lower() for rel in normalized_existing}
+        active_rel = str(active_variant or "").strip().replace("\\", "/")
+        active_name = Path(active_rel).name.lower() if active_rel else ""
+
         gguf_rows: List[Tuple[str, int, str]] = []
         for s in siblings:
             name = s.get("rfilename", "")
             if not (isinstance(name, str) and name.lower().endswith(".gguf")):
                 continue
-            if Path(name).name.lower() in existing_lower:
-                continue
             quant = self._guess_gguf_quant(name)
             gguf_rows.append((name, int(s.get("size", 0) or 0), quant))
+
+        repo_relpaths = {name for name, _size, _quant in gguf_rows}
+        repo_basenames = {Path(name).name.lower() for name in repo_relpaths}
+        for rel in normalized_existing:
+            if rel in repo_relpaths or Path(rel).name.lower() in repo_basenames:
+                continue
+            gguf_rows.append((rel, 0, self._guess_gguf_quant(rel)))
 
         if not gguf_rows:
             QMessageBox.information(
                 self,
-                "Add Weights",
+                "Weights",
                 "No additional GGUF variants are available. All repo GGUF files already exist locally.",
             )
             return False, None
@@ -7593,28 +7650,30 @@ class MainWindow(QMainWindow):
             labels_with_fit.append((f"{prefix}  {Path(name).name}  [{quant}]  ({size_str})", fits))
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Add GGUF weights")
+        dialog.setWindowTitle("Manage GGUF weights")
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel(
-            f"Select additional GGUF variants for '{model_id}'.\n"
-            "Only missing files will be downloaded into the existing model folder."
+            f"Select the GGUF variants you want to keep for '{model_id}'.\n"
+            "Selected missing files will be downloaded. Deselected local files will be removed after successful updates."
         ))
         list_widget = QListWidget()
         list_widget.setMinimumHeight(280)
         list_widget.setSelectionMode(QAbstractItemView.MultiSelection)
-        list_widget.addItem(QListWidgetItem("Select all missing GGUF variants"))
-        for label_text, fits in labels_with_fit:
-            item = QListWidgetItem(label_text)
+        list_widget.addItem(QListWidgetItem("Select all GGUF variants"))
+        for idx, (name, _size, _quant) in enumerate(gguf_rows):
+            label_text, fits = labels_with_fit[idx]
+            is_local = name in existing_set or Path(name).name.lower() in existing_names
+            is_active = (
+                active_rel == name
+                or (active_name and Path(name).name.lower() == active_name)
+            )
+            state = "LOCAL" if is_local else "MISSING"
+            active_suffix = "  [ACTIVE]" if is_active else ""
+            item = QListWidgetItem(f"[{state}] {label_text}{active_suffix}")
             item.setForeground(QBrush(QColor("#4CAF50") if fits else QColor("#f44336")))
             list_widget.addItem(item)
-
-        selected_any = False
-        for idx, (_, fits) in enumerate(labels_with_fit, start=1):
-            if fits:
-                list_widget.item(idx).setSelected(True)
-                selected_any = True
-        if not selected_any:
-            list_widget.item(0).setSelected(True)
+            if is_local:
+                list_widget.item(idx + 1).setSelected(True)
 
         layout.addWidget(list_widget)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -7627,7 +7686,16 @@ class MainWindow(QMainWindow):
 
         selected_rows = sorted({i.row() for i in list_widget.selectedIndexes()})
         if not selected_rows:
-            return True, list(file_list)
+            reply = QMessageBox.question(
+                self,
+                "Remove all GGUF weights?",
+                "This will remove all local GGUF weights for this model and leave it incomplete.\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply == QMessageBox.Yes:
+                return True, []
+            return False, None
         specific_rows = [r for r in selected_rows if r > 0]
         if 0 in selected_rows and specific_rows:
             selected_rows = specific_rows
@@ -7642,14 +7710,44 @@ class MainWindow(QMainWindow):
             if 0 <= idx < len(file_list):
                 selected_patterns.append(file_list[idx])
         if not selected_patterns:
-            return True, list(file_list)
+            return False, None
         return True, selected_patterns
 
+    def _delete_local_gguf_variants(self, model_dir: Path, relpaths: List[str]) -> Tuple[List[str], List[str]]:
+        """Delete specific local GGUF variants and prune now-empty parent folders."""
+        root = Path(model_dir)
+        deleted: List[str] = []
+        failed: List[str] = []
+        for rel in relpaths or []:
+            normalized = str(rel or "").strip().replace("\\", "/")
+            if not normalized:
+                continue
+            target = root / normalized
+            if not target.exists():
+                by_name = Path(normalized).name
+                matches = [p for p in root.rglob("*.gguf") if p.name == by_name]
+                target = matches[0] if matches else target
+            try:
+                if target.exists() and target.is_file():
+                    parent = target.parent
+                    target.unlink()
+                    while parent != root and parent.exists():
+                        try:
+                            next(parent.iterdir())
+                            break
+                        except StopIteration:
+                            parent.rmdir()
+                            parent = parent.parent
+                deleted.append(normalized)
+            except Exception:
+                failed.append(normalized)
+        return deleted, failed
+
     def _on_add_weights(self, model_path: str):
-        """Download additional GGUF variants into an already downloaded model directory."""
+        """Manage GGUF variants for an already downloaded model directory."""
         path_obj = Path(model_path)
         if not path_obj.exists() or not path_obj.is_dir():
-            QMessageBox.warning(self, "Add Weights", "Model folder was not found.")
+            QMessageBox.warning(self, "Weights", "Model folder was not found.")
             return
 
         status = self.model_checker.check_model(path_obj)
@@ -7657,7 +7755,7 @@ class MainWindow(QMainWindow):
         if not model_id:
             QMessageBox.warning(
                 self,
-                "Add Weights",
+                "Weights",
                 f"Could not determine Hugging Face model ID for '{path_obj.name}'.",
             )
             return
@@ -7665,7 +7763,7 @@ class MainWindow(QMainWindow):
         if model_id in self.active_downloads or f"repair_{model_id}" in self.active_downloads:
             QMessageBox.information(
                 self,
-                "Add Weights",
+                "Weights",
                 f"A download/repair is already active for '{model_id}'. Please wait for it to finish.",
             )
             return
@@ -7686,44 +7784,102 @@ class MainWindow(QMainWindow):
 
         token = self._resolve_hf_token()
         try:
-            local_gguf_names = {Path(p).name for p in path_obj.rglob("*.gguf")}
+            marker_data = self._sync_selected_weights_marker(path_obj, model_id=model_id)
         except Exception:
-            local_gguf_names = set()
+            marker_data = {}
 
-        # Ensure marker stays in sync with manually added local files too.
-        try:
-            self._sync_selected_weights_marker(path_obj, model_id=model_id)
-        except Exception:
-            pass
-
-        proceed, selected_patterns = self._prompt_additional_gguf_variant_selection(model_id, token, local_gguf_names)
-        if not proceed or not selected_patterns:
+        current_local_patterns = self._list_local_gguf_relpaths(path_obj)
+        active_variant = str((marker_data or {}).get("active_variant") or "").strip().replace("\\", "/")
+        proceed, desired_patterns = self._prompt_manage_gguf_variant_selection(
+            model_id,
+            token,
+            current_local_patterns,
+            active_variant=active_variant,
+        )
+        if not proceed or desired_patterns is None:
             if add_btn is not None:
                 add_btn.setEnabled(True)
-                add_btn.setText("➕ Weights")
+                add_btn.setText("⚖️ Weights")
             return
 
-        selected_names = [Path(p).name for p in selected_patterns]
-        self._log_models(f"➕ Adding GGUF variants for {model_id}: {selected_names}")
-        self._log_models(f"➕ Resolved add-weights patterns: {selected_patterns}")
+        desired_patterns = [
+            str(p).strip().replace("\\", "/")
+            for p in desired_patterns
+            if isinstance(p, str) and str(p).strip()
+        ]
+        # Deduplicate while preserving order.
+        desired_patterns = list(dict.fromkeys(desired_patterns))
+        current_local_set = set(current_local_patterns)
+        desired_set = set(desired_patterns)
+        to_add = [p for p in desired_patterns if p not in current_local_set]
+        to_delete = [p for p in current_local_patterns if p not in desired_set]
+        preferred_active = active_variant if active_variant in desired_set else (desired_patterns[0] if desired_patterns else "")
 
-        # Persist merged subset so runtime picker and future repairs remain consistent.
-        try:
-            self._sync_selected_weights_marker(
-                path_obj,
-                model_id=model_id,
-                append_patterns=selected_patterns,
-                preferred_active=None,
+        if not to_add and not to_delete:
+            self._log_models(f"ℹ No GGUF weight changes selected for {model_id}.")
+            if add_btn is not None:
+                add_btn.setEnabled(True)
+                add_btn.setText("⚖️ Weights")
+            return
+
+        if to_delete:
+            action_parts = []
+            if to_add:
+                action_parts.append(f"download {len(to_add)} new weight(s)")
+            action_parts.append(f"delete {len(to_delete)} local weight(s)")
+            sample = ", ".join(Path(p).name for p in to_delete[:5])
+            if len(to_delete) > 5:
+                sample += ", ..."
+            reply = QMessageBox.question(
+                self,
+                "Update GGUF weights",
+                f"Do you want to {', and '.join(action_parts)} for '{model_id}'?\n\n"
+                f"Will delete: {sample}",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
             )
-        except Exception as e:
-            self._log_models(f"[WARNING] Could not update selected weights marker: {e}")
+            if reply != QMessageBox.Yes:
+                if add_btn is not None:
+                    add_btn.setEnabled(True)
+                    add_btn.setText("⚖️ Weights")
+                return
+
+        if not to_add:
+            deleted, failed = self._delete_local_gguf_variants(path_obj, to_delete)
+            if deleted:
+                self._log_models(f"⚖️ Removed GGUF variants for {model_id}: {[Path(p).name for p in deleted]}")
+            if failed:
+                self._log_models(f"[WARNING] Could not remove some GGUF variants: {[Path(p).name for p in failed]}")
+                QMessageBox.warning(
+                    self,
+                    "Weights",
+                    "Some GGUF variants could not be removed. They may be in use by another process.",
+                )
+            try:
+                self._sync_selected_weights_marker(
+                    path_obj,
+                    model_id=model_id,
+                    append_patterns=desired_patterns,
+                    preferred_active=preferred_active or None,
+                )
+            except Exception as e:
+                self._log_models(f"[WARNING] Could not update selected weights marker: {e}")
+            if add_btn is not None:
+                add_btn.setEnabled(True)
+                add_btn.setText("⚖️ Weights")
+            QTimer.singleShot(100, self._refresh_models)
+            QTimer.singleShot(150, self._refresh_locals)
+            return
+
+        selected_names = [Path(p).name for p in to_add]
+        self._log_models(f"⚖️ Updating GGUF variants for {model_id}: add={selected_names}, delete={[Path(p).name for p in to_delete]}")
 
         progress_bar = QProgressBar()
         progress_bar.setMinimum(0)
         progress_bar.setMaximum(100)
         progress_bar.setValue(0)
         progress_bar.setTextVisible(True)
-        progress_bar.setFormat("Adding weights... %p%")
+        progress_bar.setFormat("Updating weights... %p%")
         progress_bar.setStyleSheet("""
             QProgressBar {
                 border: none;
@@ -7742,7 +7898,7 @@ class MainWindow(QMainWindow):
         """)
         card.layout().addWidget(progress_bar)
 
-        status_label = QLabel("Preparing additional weights download...")
+        status_label = QLabel("Preparing weight update...")
         status_label.setStyleSheet("color: #ccc; font-size: 11pt; padding: 6px;")
         status_label.setWordWrap(True)
         card.layout().addWidget(status_label)
@@ -7754,13 +7910,13 @@ class MainWindow(QMainWindow):
             force_fresh_only=False,
             cache_dir=self.hf_cache_dir,
             token=token,
-            allow_patterns=selected_patterns,
+            allow_patterns=to_add,
         )
         self.active_downloads[repair_key] = (thread, card)
 
         thread.progress.connect(lambda p: self._safe_progress_set(progress_bar, p))
         thread.status.connect(lambda msg: self._safe_label_set(status_label, msg))
-        thread.status.connect(lambda msg: self._safe_progress_text(progress_bar, "Adding weights", msg))
+        thread.status.connect(lambda msg: self._safe_progress_text(progress_bar, "Updating weights", msg))
         thread.finished.connect(lambda dest: self._on_repair_complete(model_id, dest, card, progress_bar, repair_key, status_label))
 
         if not hasattr(self, "_repair_info"):
@@ -7772,6 +7928,9 @@ class MainWindow(QMainWindow):
             "status_label": status_label,
             "model_path": path_obj,
             "operation": "add_weights",
+            "weights_to_delete": to_delete,
+            "desired_patterns": desired_patterns,
+            "preferred_active": preferred_active,
         }
         thread.error.connect(lambda err, rk=repair_key: self._handle_repair_error(rk, err))
         thread.start()
@@ -8649,10 +8808,24 @@ class MainWindow(QMainWindow):
                 f"Technical details:\n{error_msg[:700]}"
             )
         if "[BACKEND_INCOMPATIBLE_MODEL]" in error_msg:
+            if "GGUF_BACKEND_INCOMPATIBLE" in error_msg or ".gguf" in error_msg.lower():
+                return (
+                    "❌ GGUF Backend Incompatible\n\n"
+                    "The selected GGUF variant could not be loaded by the available GGUF runtime backend.\n"
+                    "Trying a newer Transformers build will not help here. Pick a different GGUF variant or repair/update the GGUF runtime backend.\n\n"
+                    f"Technical details:\n{error_msg[:700]}"
+                )
             return (
                 "❌ Backend Incompatible With Model Variant\n\n"
                 "The selected model variant cannot be parsed/loaded by the available runtime backend.\n"
                 "Try another variant or repair backend runtime.\n\n"
+                f"Technical details:\n{error_msg[:700]}"
+            )
+        if "GGUF_BACKEND_INCOMPATIBLE" in error_msg:
+            return (
+                "❌ GGUF Backend Incompatible\n\n"
+                "The selected GGUF variant could not be loaded by the available GGUF runtime backend.\n"
+                "Trying a newer Transformers build will not help here. Pick a different GGUF variant or repair/update the GGUF runtime backend.\n\n"
                 f"Technical details:\n{error_msg[:700]}"
             )
         if "[MODEL_FILE_CORRUPT]" in error_msg:
@@ -8758,6 +8931,44 @@ class MainWindow(QMainWindow):
     def _on_repair_complete(self, model_id: str, dest: str, card, progress_bar, repair_key: str, status_label=None):
         """Handle successful repair"""
         self._log_models(f"✓ Repair complete: {dest}")
+        repair_info = {}
+        if hasattr(self, "_repair_info"):
+            repair_info = self._repair_info.get(repair_key) or {}
+
+        if str(repair_info.get("operation") or "") == "add_weights":
+            weights_to_delete = [
+                str(p).strip().replace("\\", "/")
+                for p in (repair_info.get("weights_to_delete") or [])
+                if isinstance(p, str) and str(p).strip()
+            ]
+            desired_patterns = [
+                str(p).strip().replace("\\", "/")
+                for p in (repair_info.get("desired_patterns") or [])
+                if isinstance(p, str) and str(p).strip()
+            ]
+            preferred_active = str(repair_info.get("preferred_active") or "").strip().replace("\\", "/")
+            dest_path = Path(dest)
+            if weights_to_delete:
+                deleted, failed = self._delete_local_gguf_variants(dest_path, weights_to_delete)
+                if deleted:
+                    self._log_models(f"⚖️ Removed GGUF variants after download: {[Path(p).name for p in deleted]}")
+                if failed:
+                    self._log_models(f"[WARNING] Could not remove some GGUF variants after download: {[Path(p).name for p in failed]}")
+                    QMessageBox.warning(
+                        self,
+                        "Weights",
+                        "Some GGUF variants could not be removed after updating. They may be in use by another process.",
+                    )
+            try:
+                self._sync_selected_weights_marker(
+                    dest_path,
+                    model_id=model_id,
+                    append_patterns=desired_patterns,
+                    preferred_active=preferred_active or None,
+                )
+            except Exception as e:
+                self._log_models(f"[WARNING] Could not finalize selected weights marker: {e}")
+
         # Auto-start onboarding in the background (silent) so badges/env association update
         try:
             # Add-weights operation should not retrigger onboarding flow.
@@ -8846,7 +9057,7 @@ class MainWindow(QMainWindow):
             if hasattr(card, "add_weights_btn"):
                 card.add_weights_btn.setVisible(True)
                 card.add_weights_btn.setEnabled(True)
-                card.add_weights_btn.setText("➕ Weights")
+                card.add_weights_btn.setText("⚖️ Weights")
         except Exception:
             pass
     
@@ -8939,8 +9150,8 @@ class MainWindow(QMainWindow):
             self._restore_model_card_action_buttons(card, prefer_fix_text=False)
             QMessageBox.warning(
                 self,
-                "Add Weights Failed",
-                f"Could not add selected weight(s) for '{model_id}'.\n\n{error[:350]}",
+                "Update Weights Failed",
+                f"Could not update the selected weight set for '{model_id}'.\n\n{error[:350]}",
             )
             return
 
@@ -9491,7 +9702,7 @@ class MainWindow(QMainWindow):
                             "-NoProfile",
                             "-Command",
                             "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\") | "
-                            "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.server_app:app' } | "
+                            "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.(server_app|bundled_proxy_server):app' } | "
                             "Select-Object -ExpandProperty ProcessId",
                         ],
                         capture_output=True,
@@ -9516,18 +9727,23 @@ class MainWindow(QMainWindow):
             else:
                 self._log_models("✓ All servers stopped. VRAM should free up shortly.")
 
-            QTimer.singleShot(1500, self._update_gpu_vram_display)
+            QTimer.singleShot(1500, lambda: self._update_gpu_vram_display(force_refresh=True))
         except Exception as e:
             self._log_models(f"Failed to free VRAM: {e}")
             QMessageBox.warning(self, "Free VRAM", f"Could not stop servers: {e}")
 
-    def _update_gpu_vram_display(self) -> None:
-        """Update GPU VRAM label with live usage (total and free) from nvidia-smi for selected GPU."""
+    def _update_gpu_vram_display(self, force_refresh: bool = False) -> None:
+        """Update GPU VRAM label with live usage (total and free) from nvidia-smi for selected GPU.
+
+        Pass ``force_refresh=True`` to bypass the module-level TTL cache in
+        ``SystemDetector`` (e.g. after explicitly freeing VRAM so the user
+        sees the updated value immediately).
+        """
         if not hasattr(self, "gpu_vram_label") or not self.gpu_vram_label:
             return
         try:
             detector = SystemDetector()
-            usage = detector.get_gpu_memory_usage()
+            usage = detector.get_gpu_memory_usage(force_refresh=force_refresh)
             if not usage:
                 self.gpu_vram_label.setText(f"{self.user_vram_gb:.0f} GB")
                 return
@@ -10732,24 +10948,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
-        proc = QProcess(self)
-        proc.setProgram(cmd[0])
-        proc.setArguments(cmd[1:])
-        proc.setWorkingDirectory(str(self.root))
-        proc.setProcessChannelMode(QProcess.MergedChannels)
-        
-        # Set UTF-8 encoding for Windows to handle emojis in transformers/unsloth output
-        # CRITICAL: Force unbuffered output for real-time GUI updates
+        # HiddenSubprocessRunner uses subprocess.Popen so win_subprocess_guard applies.
+        # QProcess delegates to Qt6Core CreateProcess and ignores our Python-side patches;
+        # PySide6 6.8.1 also lacks setCreateProcessArgumentsModifier.
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONIOENCODING", "utf-8")
         env.insert("PYTHONUTF8", "1")
         env.insert("PYTHONUNBUFFERED", "1")  # Force unbuffered output (even stronger than -u)
         env.insert("PYTHONLEGACYWINDOWSSTDIO", "0")  # Use new Windows stdio for better real-time output
-        
-        # Set GPU selection from Train tab dropdown
         if hasattr(self, 'gpu_select') and self.gpu_select.isEnabled():
             selected_display_idx = self.gpu_select.currentIndex()
-            # Map displayed index to original CUDA index
             real_cuda_idx = None
             if hasattr(self, 'gpu_index_map') and self.gpu_index_map and selected_display_idx < len(self.gpu_index_map):
                 real_cuda_idx = self.gpu_index_map[selected_display_idx]
@@ -10758,9 +10966,8 @@ class MainWindow(QMainWindow):
             env.insert("CUDA_VISIBLE_DEVICES", str(real_cuda_idx))
             env.insert("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
             self.train_log.appendPlainText(f"[INFO] Using GPU {real_cuda_idx}: {self.gpu_select.currentText()}")
-        
-        proc.setProcessEnvironment(env)
-        
+
+        proc = HiddenSubprocessRunner(self)
         proc.readyReadStandardOutput.connect(lambda: self._append_training_output(proc))
         proc.errorOccurred.connect(lambda err: self._on_training_error(proc, err))
         proc.finished.connect(lambda code, status: self._train_finished(code, status))
@@ -10769,21 +10976,21 @@ class MainWindow(QMainWindow):
         self.train_log.appendPlainText("=== Starting Training ===")
         self.train_log.appendPlainText(f"Command: {' '.join(cmd)}")
         self.train_log.appendPlainText("=" * 50)
-        
-        # Enable/disable buttons
+
         self.train_start.setEnabled(False)
         self.train_stop.setEnabled(True)
-        
-        apply_create_no_window(proc)
-        # Start process
-        proc.start()
-        
+
+        proc.start(
+            cmd,
+            working_directory=str(self.root),
+            process_environment=qprocess_environment_to_environ(env),
+        )
         if not proc.waitForStarted(5000):
             self.train_log.appendPlainText("\n[ERROR] Failed to start training process!")
             self.train_start.setEnabled(True)
             self.train_stop.setEnabled(False)
             return
-            
+
         self.train_proc = proc
         self.train_log.appendPlainText("[INFO] Training process started successfully")
         
@@ -10829,7 +11036,7 @@ class MainWindow(QMainWindow):
             
         # READ ANY REMAINING DATA from the process
         if self.train_proc:
-            remaining_data = self.train_proc.readAllStandardOutput().data()
+            remaining_data = bytes(self.train_proc.readAllStandardOutput())
             if remaining_data:
                 text = remaining_data.decode("utf-8", errors="replace")
                 if not hasattr(self, '_train_output_buffer'):
@@ -13315,7 +13522,7 @@ class MainWindow(QMainWindow):
         max_tokens = self.tool_chat_max_tokens.value() if hasattr(self, "tool_chat_max_tokens") and self.tool_chat_max_tokens else 1024
         temperature = self.tool_chat_temperature.value() if hasattr(self, "tool_chat_temperature") and self.tool_chat_temperature else 0.7
         self.tool_chat_worker_a = ToolInferenceWorker(
-            prompt, model_id, "model_a", system_prompt,
+            prompt, model_id, "model_a", model_path, system_prompt,
             max_new_tokens=max_tokens,
             temperature=temperature,
             images=images,
@@ -13361,7 +13568,7 @@ class MainWindow(QMainWindow):
             self.tool_chat_worker_b.quit()
             self.tool_chat_worker_b.wait()
         
-        self.tool_chat_worker_b = ToolInferenceWorker(prompt, model_id, "model_b", system_prompt)
+        self.tool_chat_worker_b = ToolInferenceWorker(prompt, model_id, "model_b", model_path, system_prompt)
         self._tool_chat_progress_b = ""
         self.tool_chat_worker_b.progress_update.connect(
             lambda msg: self._on_tool_chat_progress_update("b", msg)
@@ -13403,7 +13610,7 @@ class MainWindow(QMainWindow):
             self.tool_chat_worker_c.quit()
             self.tool_chat_worker_c.wait()
         
-        self.tool_chat_worker_c = ToolInferenceWorker(prompt, model_id, "model_c", system_prompt)
+        self.tool_chat_worker_c = ToolInferenceWorker(prompt, model_id, "model_c", model_path, system_prompt)
         self._tool_chat_progress_c = ""
         self.tool_chat_worker_c.progress_update.connect(
             lambda msg: self._on_tool_chat_progress_update("c", msg)
@@ -13993,14 +14200,6 @@ class MainWindow(QMainWindow):
             # Load as base model only
             cmd += ["--base-model", model_path_str, "--no-adapter"]
         
-        # Create QProcess
-        proc = QProcess(self)
-        proc.setProgram(cmd[0])
-        proc.setArguments(cmd[1:])
-        proc.setWorkingDirectory(str(self.root))
-        proc.setProcessChannelMode(QProcess.MergedChannels)
-        
-        # Set GPU selection via environment variable
         env = QProcessEnvironment.systemEnvironment()
         if hasattr(self, 'test_gpu_select') and self.test_gpu_select.isEnabled():
             # IMPORTANT: use the real CUDA device index (not the combobox index)
@@ -14014,8 +14213,6 @@ class MainWindow(QMainWindow):
                 pass
             env.insert("CUDA_VISIBLE_DEVICES", str(real_cuda_idx))
             env.insert("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-        
-        proc.setProcessEnvironment(env)
 
         # Prepare inference log (raw subprocess output)
         try:
@@ -14029,19 +14226,22 @@ class MainWindow(QMainWindow):
                 f.write("OUTPUT:\n")
         except Exception:
             self._inference_log_path_a = None
-        
-        # Connect to read output and update last bubble
+
+        proc = HiddenSubprocessRunner(self)
         proc.readyReadStandardOutput.connect(
             lambda: self._update_inference_output_a(proc)
         )
         proc.finished.connect(lambda code, status: self._on_inference_finished_a(code, status))
-        
-        apply_create_no_window(proc)
-        proc.start()
+
+        proc.start(
+            cmd,
+            working_directory=str(self.root),
+            process_environment=qprocess_environment_to_environ(env),
+        )
         self.test_proc_a = proc
     
     
-    def _update_inference_output_a(self, proc: QProcess):
+    def _update_inference_output_a(self, proc: QProcess | HiddenSubprocessRunner):
         """Update Model A chat bubble with streaming output"""
         # Read output from process
         data = proc.readAllStandardOutput()
@@ -14160,6 +14360,7 @@ class MainWindow(QMainWindow):
             prompt=prompt,
             model_id=model_id,
             model_column="model_a",
+            base_model=model_path,
             system_prompt=system_prompt,
             max_new_tokens=max_tokens_a,
             temperature=temperature_a
@@ -14645,14 +14846,6 @@ class MainWindow(QMainWindow):
             # Load as base model only
             cmd += ["--base-model", model_path_str, "--no-adapter"]
         
-        # Create QProcess
-        proc = QProcess(self)
-        proc.setProgram(cmd[0])
-        proc.setArguments(cmd[1:])
-        proc.setWorkingDirectory(str(self.root))
-        proc.setProcessChannelMode(QProcess.MergedChannels)
-        
-        # Set GPU selection via environment variable
         env = QProcessEnvironment.systemEnvironment()
         if hasattr(self, 'test_gpu_select') and self.test_gpu_select.isEnabled():
             selected_display_idx = self.test_gpu_select.currentIndex()
@@ -14665,8 +14858,6 @@ class MainWindow(QMainWindow):
                 pass
             env.insert("CUDA_VISIBLE_DEVICES", str(real_cuda_idx))
             env.insert("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-        
-        proc.setProcessEnvironment(env)
 
         # Prepare inference log (raw subprocess output)
         try:
@@ -14680,18 +14871,21 @@ class MainWindow(QMainWindow):
                 f.write("OUTPUT:\n")
         except Exception:
             self._inference_log_path_b = None
-        
-        # Connect to read output and update last bubble
+
+        proc = HiddenSubprocessRunner(self)
         proc.readyReadStandardOutput.connect(
             lambda: self._update_inference_output_b(proc)
         )
         proc.finished.connect(lambda code, status: self._on_inference_finished_b(code, status))
-        
-        apply_create_no_window(proc)
-        proc.start()
+
+        proc.start(
+            cmd,
+            working_directory=str(self.root),
+            process_environment=qprocess_environment_to_environ(env),
+        )
         self.test_proc_b = proc
     
-    def _update_inference_output_b(self, proc: QProcess):
+    def _update_inference_output_b(self, proc: QProcess | HiddenSubprocessRunner):
         """Update Model B chat bubble with streaming output"""
         # Read output from process
         data = proc.readAllStandardOutput()
@@ -14804,6 +14998,7 @@ class MainWindow(QMainWindow):
             prompt=prompt,
             model_id=model_id,
             model_column="model_b",
+            base_model=model_path,
             system_prompt=system_prompt,
             max_new_tokens=max_tokens_b,
             temperature=temperature_b
@@ -14938,14 +15133,6 @@ class MainWindow(QMainWindow):
             # Load as base model only
             cmd += ["--base-model", model_path_str, "--no-adapter"]
         
-        # Create QProcess
-        proc = QProcess(self)
-        proc.setProgram(cmd[0])
-        proc.setArguments(cmd[1:])
-        proc.setWorkingDirectory(str(self.root))
-        proc.setProcessChannelMode(QProcess.MergedChannels)
-        
-        # Set GPU selection via environment variable
         env = QProcessEnvironment.systemEnvironment()
         if hasattr(self, 'test_gpu_select') and self.test_gpu_select.isEnabled():
             selected_display_idx = self.test_gpu_select.currentIndex()
@@ -14958,8 +15145,6 @@ class MainWindow(QMainWindow):
                 pass
             env.insert("CUDA_VISIBLE_DEVICES", str(real_cuda_idx))
             env.insert("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-        
-        proc.setProcessEnvironment(env)
 
         # Prepare inference log (raw subprocess output)
         try:
@@ -14973,18 +15158,21 @@ class MainWindow(QMainWindow):
                 f.write("OUTPUT:\n")
         except Exception:
             self._inference_log_path_c = None
-        
-        # Connect to read output and update last bubble
+
+        proc = HiddenSubprocessRunner(self)
         proc.readyReadStandardOutput.connect(
             lambda: self._update_inference_output_c(proc)
         )
         proc.finished.connect(lambda code, status: self._on_inference_finished_c(code, status))
-        
-        apply_create_no_window(proc)
-        proc.start()
+
+        proc.start(
+            cmd,
+            working_directory=str(self.root),
+            process_environment=qprocess_environment_to_environ(env),
+        )
         self.test_proc_c = proc
     
-    def _update_inference_output_c(self, proc: QProcess):
+    def _update_inference_output_c(self, proc: QProcess | HiddenSubprocessRunner):
         """Update Model C chat bubble with streaming output"""
         # Read output from process
         data = proc.readAllStandardOutput()
@@ -15081,6 +15269,7 @@ class MainWindow(QMainWindow):
             prompt=prompt,
             model_id=model_id,
             model_column="model_c",
+            base_model=model_path,
             system_prompt=system_prompt,
             max_new_tokens=max_tokens_c,
             temperature=temperature_c
@@ -16022,7 +16211,7 @@ class MainWindow(QMainWindow):
         models_cfg = config.get("models", {})
 
         def get_port_for_model(combo_box, model_text):
-            """Get port for model selected in combo box (uses pre-loaded models_cfg)."""
+            """Get live runtime port for selected model, falling back to configured YAML port."""
             if not model_text or model_text.startswith("(No models"):
                 return "-"
             try:
@@ -16032,7 +16221,30 @@ class MainWindow(QMainWindow):
                 model_path_data = combo_box.itemData(current_idx)
                 if not model_path_data:
                     return "-"
-                model_id = self._resolve_model_id_from_path(model_path_data)
+                runtime_model_path = self._resolve_runtime_model_payload(model_path_data)
+                model_id = self._resolve_chat_model_id_from_path(runtime_model_path or model_path_data)
+                if model_id:
+                    try:
+                        from core.llm_server_manager import get_global_server_manager
+
+                        manager = get_global_server_manager()
+                        if manager is not None:
+                            manager._load_config()
+                            model_cfg = ((manager.config or {}).get("models") or {}).get(model_id) or {}
+                            canonical_id = manager._canonical_server_id(model_id)
+                            server_id = manager._resolve_runtime_server_id(
+                                model_id=model_id,
+                                canonical_id=canonical_id,
+                                model_cfg=model_cfg,
+                                runtime_base_model=runtime_model_path,
+                            )
+                            server_state = manager.state_store.get_server(server_id) or {}
+                            live_port = server_state.get("port")
+                            live_status = str(server_state.get("status") or "").upper()
+                            if live_port and int(live_port) > 0 and live_status in {"RUNNING", "STARTING"}:
+                                return int(live_port)
+                    except Exception:
+                        pass
                 if not model_id:
                     clean_name = model_text.replace("✓ 📦 ", "").replace("🎯 ", "").split(" (")[0].strip()
                     model_id_candidate = clean_name.replace("/", "__")
@@ -19748,13 +19960,13 @@ respective package directories or official repositories.
             self.logs_view.setPlainText(f"[ERROR] Could not read {path}: {e}")
 
     # ---------------- Helpers ----------------
-    def _append_training_output(self, proc: QProcess) -> None:
+    def _append_training_output(self, proc: QProcess | HiddenSubprocessRunner) -> None:
         """Parse training output and update dashboard metrics + filtered logs"""
         # Read available data
-        data = proc.readAllStandardOutput().data()
+        data = bytes(proc.readAllStandardOutput())
         if not data:
             return
-            
+
         # Decode text
         new_text = data.decode("utf-8", errors="replace")
         
@@ -20202,8 +20414,8 @@ respective package directories or official repositories.
             from system_detector import SystemDetector
             detector = SystemDetector()
             
-            # Update GPU memory
-            gpu_stats = detector.get_gpu_memory_usage()
+            # Training tab wants live VRAM, so bypass the module-level cache.
+            gpu_stats = detector.get_gpu_memory_usage(force_refresh=True)
             if gpu_stats and hasattr(self, 'gpu_mem_card'):
                 # For simplicity, if multiple GPUs, show the one with highest usage (usually the one training)
                 # Or if we have CUDA_VISIBLE_DEVICES, we could try to match it.
@@ -20227,9 +20439,9 @@ respective package directories or official repositories.
                     label.setText(value)
                     return
     
-    def _append_proc_output(self, proc: QProcess, widget: QPlainTextEdit) -> None:
+    def _append_proc_output(self, proc: QProcess | HiddenSubprocessRunner, widget: QPlainTextEdit) -> None:
         """Generic output appender for non-training processes"""
-        data = proc.readAllStandardOutput().data().decode("utf-8", errors="replace")
+        data = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace")
         if data:
             widget.appendPlainText(data.rstrip("\n"))
 

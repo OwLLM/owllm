@@ -215,13 +215,8 @@ class EnvRegistry:
         
         debug_dump_written = False
 
-        # Create unique temp directory
-        tmp_id = str(uuid.uuid4())[:8]
-        tmp_dir = self.envs_dir / ".tmp" / f"{env_key}-{tmp_id}"
-        tmp_dir.parent.mkdir(exist_ok=True)
-        
         final_dir = self.envs_dir / env_key
-        
+
         # Mark as CREATING in StateStore
         self.state_store.upsert_env(
             env_key=env_key,
@@ -229,10 +224,24 @@ class EnvRegistry:
         )
         
         try:
-            log(f"Creating environment in temp location: {tmp_dir}")
-            
             required_packages = required_packages or self._infer_required_packages_for_env_key(env_key)
             requires_constrained_python = self._requires_constrained_python(required_packages)
+            direct_create_final = (
+                sys.platform == "win32"
+                and requires_constrained_python
+                and "--dedicated--" in env_key
+            )
+
+            if direct_create_final:
+                tmp_dir = final_dir
+                if tmp_dir.exists():
+                    self._rmtree_windows_safe(tmp_dir)
+                log(f"Creating constrained dedicated environment directly in final location: {tmp_dir}")
+            else:
+                tmp_id = str(uuid.uuid4())[:8]
+                tmp_dir = self.envs_dir / ".tmp" / f"{env_key}-{tmp_id}"
+                tmp_dir.parent.mkdir(exist_ok=True)
+                log(f"Creating environment in temp location: {tmp_dir}")
 
             # Create venv (optionally using a specific base Python)
             venv_path = tmp_dir / ".venv"
@@ -280,6 +289,10 @@ class EnvRegistry:
 
             if not has_venv:
                 log("Base Python lacks stdlib venv; using virtualenv to create isolated environment.")
+                virtualenv_app_data = self.envs_dir / ".virtualenv-app-data"
+                virtualenv_app_data.mkdir(parents=True, exist_ok=True)
+                virtualenv_env = os.environ.copy()
+                virtualenv_env["VIRTUALENV_OVERRIDE_APP_DATA"] = str(virtualenv_app_data)
                 # Best-effort: ensure virtualenv is installed in the creator runtime
                 try:
                     subprocess.run(
@@ -287,17 +300,29 @@ class EnvRegistry:
                         capture_output=True,
                         text=True,
                         timeout=300,
+                        env=virtualenv_env,
                         **self.subprocess_flags
                     )
                 except Exception:
                     pass
-                create_cmd = [str(creator_python), "-m", "virtualenv", str(venv_path), "--clear"]
+                create_cmd = [
+                    str(creator_python),
+                    "-m",
+                    "virtualenv",
+                    str(venv_path),
+                    "--clear",
+                    "--app-data",
+                    str(virtualenv_app_data),
+                ]
+            else:
+                virtualenv_env = None
 
             result = subprocess.run(
                 create_cmd,
                 capture_output=True,
                 text=True,
                 timeout=120,
+                env=virtualenv_env,
                 **self.subprocess_flags
             )
             
@@ -313,7 +338,19 @@ class EnvRegistry:
             
             if not python_exe.exists():
                 raise RuntimeError(f"Python executable not found after venv creation: {python_exe}")
-            
+
+            # Install the Windows subprocess guard into the freshly-created venv.
+            # This makes python.exe inside this venv auto-install the no-window
+            # guard at startup, so any pip/setup.py/compiler grandchildren it
+            # spawns during the install below do not flash console windows.
+            # Root cause: without this, per-model venvs bypass the main venv's
+            # guard because site-packages is not shared across venvs.
+            try:
+                from core.win_subprocess_guard import install_guard_into_venv
+                install_guard_into_venv(str(venv_path))
+            except Exception as _guard_exc:
+                log(f"[warn] Could not install subprocess guard into {venv_path}: {_guard_exc!r}")
+
             log(f"Virtual environment created, installing dependencies...")
             pip_exe = self._get_env_pip_executable(python_exe)
             if not pip_exe:
@@ -434,21 +471,24 @@ class EnvRegistry:
             log("Generating constraints file...")
             self._generate_constraints(python_exe, env_key)
             
-            # Move to final location (atomic on same filesystem)
-            log(f"Moving environment to final location: {final_dir}")
-            if final_dir.exists():
-                # Remove old version
-                log("Removing old environment...")
-                self._rmtree_windows_safe(final_dir)
-            
-            # Promote temp environment to final location.
-            if sys.platform == 'win32':
-                self._promote_env_dir_windows(tmp_dir, final_dir, log)
-                # Clean up temp after successful copy
-                self._rmtree_windows_safe(tmp_dir)
+            if tmp_dir != final_dir:
+                # Move to final location (atomic on same filesystem)
+                log(f"Moving environment to final location: {final_dir}")
+                if final_dir.exists():
+                    # Remove old version
+                    log("Removing old environment...")
+                    self._rmtree_windows_safe(final_dir)
+                
+                # Promote temp environment to final location.
+                if sys.platform == 'win32':
+                    self._promote_env_dir_windows(tmp_dir, final_dir, log)
+                    # Clean up temp after successful copy
+                    self._rmtree_windows_safe(tmp_dir)
+                else:
+                    # On Unix, rename is atomic and fast
+                    tmp_dir.rename(final_dir)
             else:
-                # On Unix, rename is atomic and fast
-                tmp_dir.rename(final_dir)
+                log(f"Environment created directly in final location: {final_dir}")
             
             # Update StateStore
             torch_version, cuda_available = self._get_torch_info(self._get_env_python_executable(env_key))
@@ -494,6 +534,16 @@ class EnvRegistry:
         attempts = 4
         last_error = None
         for attempt in range(1, attempts + 1):
+            try:
+                # Temp and final env directories live on the same workspace volume.
+                # Prefer an atomic rename first so we do not reopen freshly-imported
+                # .pyd files during a full tree copy on Windows.
+                tmp_dir.replace(final_dir)
+                return
+            except Exception as rename_ex:
+                last_error = rename_ex
+                log(f"Atomic env promote via rename failed on attempt {attempt}/{attempts}: {rename_ex}")
+
             try:
                 # Prefer robocopy on Windows for resilient large-tree copies.
                 # Exit codes <= 7 are considered success by robocopy docs.
@@ -701,6 +751,7 @@ class EnvRegistry:
                             python_exe=python_exe,
                             model_path=str(gguf),
                             adapter_dir=adapter_dir,
+                            deep_probe=deep_probe,
                             log_callback=log_callback,
                         )
                         if ok:
@@ -721,7 +772,7 @@ class EnvRegistry:
                         failures.append(f"bundled_probe_error: {str(bundled_ex)[:160]}")
                     return (
                         False,
-                        "UNSUPPORTED_ARCH",
+                        "GGUF_BACKEND_INCOMPATIBLE",
                         "All local GGUF variants failed backend probe. "
                         f"Tried {len(ordered)} variant(s). "
                         + " | ".join(failures[:6]),
@@ -741,6 +792,7 @@ class EnvRegistry:
             if gguf_detected:
                 ok, runtime_err = self.runtime_bundle_manager.ensure_gguf_runtime(
                     python_exe,
+                    model_path=model_path_obj,
                     log_callback=log_callback,
                 )
                 if not ok:
@@ -862,8 +914,8 @@ try:
                 folder_id = gguf_root.name.replace("__", "/")
                 if folder_id and folder_id not in candidates:
                     candidates.append(folder_id)
-                if "glm-4.7-flash" in folder_id.lower() and "zai-org/GLM-4.7-Flash" not in candidates:
-                    candidates.append("zai-org/GLM-4.7-Flash")
+                if "glm-4.7-flash" in folder_id.lower() and "THUDM/glm-4-9b-chat" not in candidates:
+                    candidates.append("THUDM/glm-4-9b-chat")
 
                 if deep_probe:
                     last_tf_err = None
@@ -894,10 +946,11 @@ try:
             print("PROBE: SUCCESS (GGUF)")
             sys.exit(0)
 
-        # Re-raise the missing arch so the caller explicitly sees it
+        # GGUF backend incompatibility is not a transformers architecture upgrade problem.
+        # Surface a dedicated reason so onboarding can avoid irrelevant edge-env fallback.
         for err in backend_errors:
             if "does not recognize this architecture" in err or "unsupported arch" in err:
-                print("REASON: UNSUPPORTED_ARCH")
+                print("REASON: GGUF_BACKEND_INCOMPATIBLE")
                 print("ERROR: " + err)
                 sys.exit(1)
 
@@ -1045,7 +1098,11 @@ except Exception as e:
                 explicit_error = line.replace("ERROR:", "").strip()
                 break
 
-        if "REASON: UNSUPPORTED_ARCH" in combined:
+        if "REASON: GGUF_BACKEND_INCOMPATIBLE" in combined:
+            reason_code = "GGUF_BACKEND_INCOMPATIBLE"
+            if explicit_error:
+                error_msg = explicit_error
+        elif "REASON: UNSUPPORTED_ARCH" in combined:
             reason_code = "UNSUPPORTED_ARCH"
             # Extract the actual error message
             if explicit_error:
@@ -1093,7 +1150,7 @@ except Exception as e:
                 "Repair/rebuild GGUF runtime components in this environment."
             )
         if "gguf_init_from_file" in low and "block size" in low:
-            reason_code = "UNSUPPORTED_ARCH"
+            reason_code = "GGUF_BACKEND_INCOMPATIBLE"
             error_msg = (
                 "GGUF backend cannot parse this quantized file "
                 "(gguf_init_from_file block-size mismatch). "
@@ -1517,6 +1574,23 @@ except Exception as e:
         if needs_fresh_specialized:
             log("Specialized runtime: creating dedicated env fresh with constrained Python runtime (no copy)")
             dedicated_env_path = self.envs_dir / dedicated_env_key
+            dedicated_python_exe = self._get_env_python_executable(dedicated_env_key)
+            if dedicated_python_exe and dedicated_python_exe.exists():
+                verify_packages = ["torch", "transformers", "fastapi", "uvicorn", *required_packages]
+                missing = self.check_missing_packages(dedicated_python_exe, verify_packages)
+                if not missing:
+                    torch_version, _ = self._get_torch_info(dedicated_python_exe)
+                    self.state_store.upsert_env(
+                        env_key=dedicated_env_key,
+                        python_path=str(dedicated_python_exe),
+                        torch_version=torch_version,
+                        cuda_version=profile_data.get("cuda_version", "cpu"),
+                        backend="transformers",
+                        status="READY"
+                    )
+                    log("Reusing existing constrained dedicated environment; critical packages verified.")
+                    return dedicated_env_path
+                log(f"Existing constrained dedicated env is incomplete; rebuilding. Missing: {missing}")
             if dedicated_env_path.exists():
                 log("Removing existing dedicated env for fresh constrained-runtime build")
                 self._rmtree_windows_safe(dedicated_env_path)
@@ -2695,7 +2769,7 @@ sys.exit(0)
                     # Prefer binary wheels from official llama-cpp wheel index to avoid local C++ build requirements.
                     # This avoids nmake/MSVC hard failures on Windows.
                     llama_index = "https://abetlen.github.io/llama-cpp-python/whl/cpu"
-                    min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.2").strip() or "0.3.2"
+                    min_llama = self.runtime_bundle_manager.resolve_required_llama_cpp_version(None)
                     pip_cmd = [
                         str(python_exe), "-m", "pip", "install", "--upgrade",
                         "--only-binary", ":all:",
@@ -2732,7 +2806,7 @@ sys.exit(0)
                     log(f"Successfully installed {pkg}")
                     # llama-cpp-python: success from pip is not enough; enforce minimum runtime version.
                     if pkg_norm.startswith("llama-cpp-python"):
-                        min_llama = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.2").strip() or "0.3.2"
+                        min_llama = self.runtime_bundle_manager.resolve_required_llama_cpp_version(None)
                         installed = _get_installed_version("llama-cpp-python")
                         if (not installed) or (_parse_version_tuple(installed) < _parse_version_tuple(min_llama)):
                             pip_cmd_str = " ".join(str(x) for x in pip_cmd)
@@ -2865,7 +2939,7 @@ sys.exit(0)
                                     str(rebuilt_python), "-m", "pip", "install", "--upgrade",
                                     "--only-binary", ":all:",
                                     "--prefer-binary",
-                                    f"llama-cpp-python>={os.getenv('LLM_MIN_LLAMA_CPP_VERSION', '0.3.2').strip() or '0.3.2'}",
+                                    f"llama-cpp-python>={self.runtime_bundle_manager.resolve_required_llama_cpp_version(None)}",
                                     "--extra-index-url", llama_index,
                                 ]
                                 retry = subprocess.run(

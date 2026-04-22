@@ -153,7 +153,17 @@ class EnvironmentManager:
             
             if not venv_python.exists():
                 return False, f"Venv created but Python not found at {venv_python}"
-            
+
+            # Install the Windows subprocess-guard bootstrap into this venv so
+            # its python.exe auto-suppresses console windows for grandchildren
+            # (pip build workers, setup.py compilers, etc). See root-cause note
+            # in core/win_subprocess_guard.py::install_guard_into_venv.
+            try:
+                from core.win_subprocess_guard import install_guard_into_venv
+                install_guard_into_venv(str(venv_path))
+            except Exception:
+                pass
+
             # Get Python version for metadata
             python_version = None
             try:
@@ -303,7 +313,13 @@ class EnvironmentManager:
             
             if not venv_python.exists():
                 return False, f"Venv created but Python not found at {venv_python}"
-            
+
+            try:
+                from core.win_subprocess_guard import install_guard_into_venv
+                install_guard_into_venv(str(venv_path))
+            except Exception:
+                pass
+
             log(f"🔍 Venv Python: {venv_python}")
             
             # Get Python version

@@ -1247,19 +1247,19 @@ print(device_name)
             except Exception:
                 pass
         
-        # Check for GUI app (desktop_app/main.py or launcher.exe)
+        # Check for GUI app (desktop_app/main.py or launcher.exe / launcher_worker.exe)
         try:
             if sys.platform == "win32":
-                # Check for launcher.exe or main.py processes
-                result = subprocess.run(
-                    ["tasklist", "/FI", "IMAGENAME eq launcher.exe", "/FO", "CSV", "/NH"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                    **self.subprocess_flags
-                )
-                if result.returncode == 0 and "launcher.exe" in result.stdout:
-                    running_processes.append("GUI launcher (launcher.exe) is running")
+                for image in ("launcher.exe", "launcher_worker.exe"):
+                    result = subprocess.run(
+                        ["tasklist", "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
+                        capture_output=True,
+                        text=True,
+                        timeout=5,
+                        **self.subprocess_flags
+                    )
+                    if result.returncode == 0 and image in result.stdout:
+                        running_processes.append(f"Native launcher ({image}) is running")
         except Exception:
             pass
         
@@ -1356,7 +1356,8 @@ print(device_name)
                         ['cmd', '/c', 'rmdir', '/S', '/Q', str(directory)],
                         capture_output=True,
                         text=True,
-                        timeout=30
+                        timeout=30,
+                        **self.subprocess_flags,
                     )
                     if result.returncode == 0 or not directory.exists():
                         self.log(f"✓ Directory deleted (attempt {attempt}/{max_retries})")
@@ -2137,6 +2138,7 @@ print(device_name)
                         capture_output=True,
                         text=True,
                         timeout=1800,  # 30 minutes timeout
+                        **self.subprocess_flags,
                     )
                     
                     if result.returncode != 0:

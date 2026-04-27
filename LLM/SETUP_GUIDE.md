@@ -91,7 +91,8 @@ LAUNCHER.bat
 ```
 LLM/
 ├── LAUNCHER.bat              # Main entry point
-├── launcher.exe              # Native Windows launcher (optional)
+├── launcher.exe              # Native Windows GUI launcher stub (optional)
+├── launcher_worker.exe       # Hidden-console worker started by launcher.exe (optional)
 ├── first_run_setup.py        # First-time setup wizard (GUI)
 ├── system_detector.py        # Hardware/software detection
 ├── smart_installer.py        # Intelligent dependency installer

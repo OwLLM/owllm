@@ -303,7 +303,8 @@ bool RunBootstrapLauncher(const std::wstring& exeDir) {
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpFile = bootstrapBat.c_str();
     sei.lpDirectory = exeDir.c_str();
-    sei.nShow = SW_SHOW;
+    sei.fMask |= SEE_MASK_FLAG_NO_UI;
+    sei.nShow = SW_HIDE;
     
     if (!ShellExecuteExW(&sei)) {
         return false;
@@ -503,19 +504,27 @@ int LaunchPythonApp(const std::wstring& exeDir, const std::wstring& pythonExe,
     return exitCode;
 }
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, 
-                   LPSTR lpCmdLine, int nCmdShow) {
-    // Get the directory where this .exe is located
+#if defined(LOCALLLM_LAUNCHER_WORKER)
+
+// Full bootstrap + health checks + desktop app launch (console subsystem, hidden).
+static int RunLauncherWorker() {
+    // Own a console but keep it invisible so child console tools inherit a hidden console.
+    HWND consoleHwnd = GetConsoleWindow();
+    if (consoleHwnd != NULL) {
+        ShowWindow(consoleHwnd, SW_HIDE);
+    }
+
+    // Get the directory where this .exe is located (LLM folder)
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    
+
     // Extract directory path
     std::wstring exeDir(exePath);
     size_t lastSlash = exeDir.find_last_of(L"\\/");
     if (lastSlash != std::wstring::npos) {
         exeDir = exeDir.substr(0, lastSlash);
     }
-    
+
     // Ensure logs directory exists
     EnsureLogsDirectory(exeDir);
     
@@ -901,26 +910,18 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
     
     if (exitCode != 0) {
-        // App failed - try automatic fallback to debug launcher or installer
-        std::wstring debugLauncher = exeDir + L"\\LAUNCHER_DEBUG.bat";
+        // App failed - try silent installer/bootstrap fallbacks (no visible CMD).
+        // For interactive debugging, run LAUNCHER_DEBUG.bat manually from Explorer.
         std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
         std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
         std::wstring installerGui = exeDir + L"\\installer_gui.py";
-        
-        // Try debug launcher first (most helpful for troubleshooting)
-        if (FileExists(debugLauncher)) {
-            ShellExecuteW(NULL, L"open", debugLauncher.c_str(), NULL, exeDir.c_str(), SW_SHOW);
-            return 0;
-        }
-        
-        // Fallback to installer (no console window)
+
         if (FileExists(runInstallerBat) && RunBatchNoWindow(runInstallerBat, exeDir))
             return 0;
         if (FileExists(bootstrapBat) && RunBatchNoWindow(bootstrapBat, exeDir))
             return 0;
-        
+
         if (FileExists(installerGui)) {
-            // Try to find Python to run installer (use systemPython from earlier in function)
             std::wstring pythonToUse = systemPython;
             if (pythonToUse.empty()) {
                 pythonToUse = CheckSelfContainedPython(exeDir);
@@ -934,13 +935,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                 return 0;
             }
         }
-        
-        // Last resort: show error and open log
-        MessageBoxW(NULL, 
+
+        MessageBoxW(NULL,
                    L"Application failed to start!\n\n"
-                   L"Attempting to launch debug launcher or installer...\n"
-                   L"If that doesn't work, the error log will open in Notepad.",
-                   L"Application Error", 
+                   L"The installer could not be launched automatically.\n"
+                   L"The application log will open in Notepad.\n\n"
+                   L"For a visible console debug run, open LAUNCHER_DEBUG.bat manually.",
+                   L"Application Error",
                    MB_OK | MB_ICONERROR);
         OpenLogInNotepad(logFile);
         return exitCode;
@@ -948,3 +949,86 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     return exitCode;
 }
+
+int main() {
+    return RunLauncherWorker();
+}
+
+#elif defined(LOCALLLM_LAUNCHER_GUI)
+
+// Minimal GUI-subsystem stub: spawns hidden-console worker and propagates its exit code.
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
+                   LPSTR lpCmdLine, int nCmdShow) {
+    (void)hInstance;
+    (void)hPrevInstance;
+    (void)lpCmdLine;
+    (void)nCmdShow;
+
+    wchar_t exePath[MAX_PATH];
+    if (!GetModuleFileNameW(NULL, exePath, MAX_PATH)) {
+        MessageBoxW(NULL, L"Could not determine launcher directory.", L"OWLLM Launcher", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+
+    std::wstring exeDir(exePath);
+    size_t lastSlash = exeDir.find_last_of(L"\\/");
+    if (lastSlash != std::wstring::npos) {
+        exeDir = exeDir.substr(0, lastSlash);
+    }
+
+    std::wstring worker = exeDir + L"\\launcher_worker.exe";
+    if (!FileExists(worker)) {
+        MessageBoxW(
+            NULL,
+            L"launcher_worker.exe was not found next to launcher.exe.\n\n"
+            L"Run LLM\\build_launcher.bat to build both executables.",
+            L"OWLLM Launcher",
+            MB_OK | MB_ICONERROR);
+        return 1;
+    }
+
+    std::wstring cmdLine = L"\"" + worker + L"\"";
+    std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
+    cmdBuf.push_back(L'\0');
+
+    STARTUPINFOW si = {0};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi = {0};
+    DWORD creationFlags = CREATE_NO_WINDOW;
+
+    BOOL ok = CreateProcessW(
+        worker.c_str(),
+        cmdBuf.data(),
+        NULL,
+        NULL,
+        FALSE,
+        creationFlags,
+        NULL,
+        exeDir.c_str(),
+        &si,
+        &pi
+    );
+
+    if (!ok) {
+        DWORD err = GetLastError();
+        std::wstring msg =
+            L"Could not start launcher_worker.exe (Windows error " + std::to_wstring((unsigned long)err) +
+            L").\n\nReinstall or run LLM\\build_launcher.bat.";
+        MessageBoxW(NULL, msg.c_str(), L"OWLLM Launcher", MB_OK | MB_ICONERROR);
+        return 1;
+    }
+
+    CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    return (int)exitCode;
+}
+
+#else
+#error "Build launcher with -DLOCALLLM_LAUNCHER_GUI or -DLOCALLLM_LAUNCHER_WORKER"
+#endif

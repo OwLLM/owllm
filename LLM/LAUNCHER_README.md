@@ -5,13 +5,12 @@ This directory contains a professional Windows launcher system that provides a c
 ## 📁 Launcher Files
 
 ### Primary Entry Points
-- **`launcher.exe`** - Native Windows executable (recommended)
-  - Embedded rocket icon
-  - No console window
-  - Automatic first-run setup detection
-  - Logs to `logs/setup.log` and `logs/app.log`
-  - Opens Notepad with logs on errors
-  - Fully standalone (static linking)
+- **`launcher.exe`** - Native Windows GUI stub (recommended double-click target)
+  - Embedded icon (via `launcher.rc`)
+  - No console window; starts **`launcher_worker.exe`** next to it with `CREATE_NO_WINDOW` so the full bootstrap runs under a hidden inherited console (reduces CMD flashes from child tools)
+- **`launcher_worker.exe`** - Console worker (not for direct double-click)
+  - Contains the full venv / health-check / `python -m desktop_app.main` logic
+  - Shipped next to `launcher.exe`; rebuilt by `build_launcher.bat`
 
 - **`LAUNCHER.bat`** - Batch script launcher (alternative)
   - Shows brief console then closes
@@ -38,6 +37,8 @@ This directory contains a professional Windows launcher system that provides a c
 ```
 User double-clicks launcher.exe
   ↓
+launcher.exe starts launcher_worker.exe (hidden console)
+  ↓
 Check if .setup_complete exists
   ↓
 NO → Run first_run_setup.py
@@ -58,8 +59,8 @@ On error: Opens Notepad with log file
 ### Key Features
 
 1. **No Lingering Console**
-   - Uses `pythonw.exe` (GUI mode Python)
-   - Launcher exits immediately after starting app
+   - Uses `pythonw.exe` (GUI mode Python) for the PySide6 app
+   - `launcher.exe` stays resident until you close the app (it waits on `launcher_worker.exe`, which waits on Python)
    - Professional Windows application behavior
 
 2. **Automatic Setup Routing**
@@ -120,13 +121,14 @@ notepad logs\setup.log
 **Modifying the launcher:**
 1. Edit `launcher.cpp`
 2. Run `build_launcher.bat`
-3. Commit the new `launcher.exe`
+3. Commit the new `launcher.exe` **and** `launcher_worker.exe`
 
 ## 📂 Directory Structure
 
 ```
 LLM/
-├── launcher.exe              # Compiled native launcher
+├── launcher.exe              # GUI stub (double-click this)
+├── launcher_worker.exe       # Full bootstrap + app launch (hidden)
 ├── launcher.cpp              # C++ source
 ├── launcher.rc               # Resource file
 ├── rocket.ico                # Custom icon

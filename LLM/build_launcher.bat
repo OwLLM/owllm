@@ -33,14 +33,15 @@ if not exist "%ICO_ICON%" (
     exit /b 1
 )
 
-REM Kill any running launcher.exe processes to unlock the file
+REM Kill any running launcher processes to unlock the files
 echo.
-echo Checking for running launcher.exe processes...
+echo Checking for running launcher.exe / launcher_worker.exe...
 taskkill /F /IM launcher.exe >nul 2>&1
+taskkill /F /IM launcher_worker.exe >nul 2>&1
 if errorlevel 1 (
-    echo No running launcher.exe found (or already closed)
+    echo No running launcher processes found (or already closed)
 ) else (
-    echo Closed running launcher.exe processes
+    echo Closed running launcher processes
 )
 timeout /t 1 /nobreak >nul
 
@@ -61,7 +62,7 @@ if not exist "owl_launcher.ico" (
 )
 
 echo.
-echo [1/3] Compiling resource file...
+echo [1/4] Compiling resource file...
 echo Using icon: owl_launcher.ico
 REM Use absolute path in resource file to ensure it's found
 windres -i launcher.rc -o launcher_res.o --input-format=rc --output-format=coff
@@ -74,35 +75,47 @@ if errorlevel 1 (
 echo SUCCESS: Resource compiled
 
 echo.
-echo [2/3] Compiling C++ source with static linking...
-g++ -O2 -s -mwindows launcher.cpp launcher_res.o -o launcher.exe -static -static-libgcc -static-libstdc++ -lshlwapi -lurlmon
+echo [2/4] Compiling launcher_worker.exe (console, hidden)...
+g++ -O2 -s -mconsole -DLOCALLLM_LAUNCHER_WORKER launcher.cpp -o launcher_worker.exe -static -static-libgcc -static-libstdc++ -lshlwapi -lurlmon -luser32
 if errorlevel 1 (
-    echo ERROR: Failed to compile launcher
+    echo ERROR: Failed to compile launcher_worker.exe
     pause
     del launcher_res.o
     exit /b 1
 )
-echo SUCCESS: Launcher compiled (fully static, no DLL dependencies)
+echo SUCCESS: launcher_worker.exe built
 
 echo.
-echo [3/3] Cleaning up temporary files...
+echo [3/4] Compiling launcher.exe (GUI stub)...
+g++ -O2 -s -mwindows -DLOCALLLM_LAUNCHER_GUI launcher.cpp launcher_res.o -o launcher.exe -static -static-libgcc -static-libstdc++ -lshlwapi -lurlmon -luser32
+if errorlevel 1 (
+    echo ERROR: Failed to compile launcher.exe
+    pause
+    del launcher_res.o
+    exit /b 1
+)
+echo SUCCESS: launcher.exe built
+
+echo.
+echo [4/4] Cleaning up temporary files...
 del launcher_res.o
 del owl_launcher.ico
 echo SUCCESS: Cleanup complete
 
 echo.
 echo =============================================
-echo   launcher.exe created successfully!
+echo   launcher.exe + launcher_worker.exe created!
 echo =============================================
 echo.
 
-REM Show file size
-for %%A in (launcher.exe) do echo File size: %%~zA bytes (%%~zAKB)
+REM Show file sizes
+for %%A in (launcher.exe) do echo launcher.exe size: %%~zA bytes
+for %%A in (launcher_worker.exe) do echo launcher_worker.exe size: %%~zA bytes
 
 echo.
 echo You can now:
-echo 1. Test it: Double-click launcher.exe
-echo 2. Commit it: git add launcher.exe
+echo 1. Test: Double-click launcher.exe (it starts launcher_worker.exe hidden)
+echo 2. Commit: git add launcher.exe launcher_worker.exe
 echo.
 pause
 

@@ -2,7 +2,7 @@
 
 ## [Unreleased]
 ### Changed
-- **Windows native launcher split (GUI + worker)**: `launcher.exe` is now a minimal `-mwindows` stub that starts `launcher_worker.exe` with `CREATE_NO_WINDOW` so the real bootstrap (venv checks, `desktop_app.main`) runs under a hidden inherited console process tree. This addresses persistent CMD flashes that bypass Python-side guards. Build both with `LLM/build_launcher.bat`. Debug: run `LAUNCHER_DEBUG.bat` manually if you need a visible console.
+- **Windows native launcher split (GUI + worker)**: `launcher.exe` is now a minimal `-mwindows` stub that starts `launcher_worker.exe` with `CREATE_NEW_CONSOLE` plus `SW_HIDE`; the worker then launches the real app with console Python (`python.exe`), not `pythonw.exe`, so the desktop process and unguarded console grandchildren inherit a hidden console instead of allocating visible throwaway consoles. Build both with `LLM/build_launcher.bat`. Debug: run `LAUNCHER_DEBUG.bat` manually if you need a visible console.
 
 ### Added
 - **3D Characters Page**: Added a new tab featuring cute 3D fantasy characters (Slime, Wizard, Knight) mapped to installed models. Features interactive "poke" and "say hi" interactions via embedded Three.js scene. Handles graceful fallback on missing assets.

@@ -44,27 +44,29 @@ void OpenLogInNotepad(const std::wstring& logPath) {
     ShellExecuteW(NULL, L"open", L"notepad.exe", logPath.c_str(), NULL, SW_SHOW);
 }
 
-// Prefer pythonw.exe for GUI scripts to avoid console flash. If pythonExe path points to
-// python.exe, returns path to pythonw.exe in same dir if it exists, else returns pythonExe.
-std::wstring PreferPythonWForGui(const std::wstring& pythonExe) {
+// In the hidden worker, keep Python as a console-subsystem process. Running the
+// desktop app through pythonw.exe would detach it from the worker's hidden console,
+// putting us back in the "GUI parent with no console" state that causes flashes.
+std::wstring PreferConsolePythonForHiddenWorker(const std::wstring& pythonExe) {
     if (pythonExe.empty()) return pythonExe;
     size_t n = pythonExe.size();
-    if (n < 11) return pythonExe;
+    if (n < 12) return pythonExe;
     const wchar_t* p = pythonExe.c_str();
-    if (_wcsicmp(p + n - 10, L"python.exe") != 0)
+    if (_wcsicmp(p + n - 11, L"pythonw.exe") != 0)
         return pythonExe;
-    std::wstring pythonw = pythonExe.substr(0, n - 10) + L"pythonw.exe";
-    return FileExists(pythonw) ? pythonw : pythonExe;
+    std::wstring consolePython = pythonExe.substr(0, n - 11) + L"python.exe";
+    return FileExists(consolePython) ? consolePython : pythonExe;
 }
 
-// Run a batch file with no console window (CREATE_NO_WINDOW). Used for installer fallbacks
-// so Launcher.exe does not flash CMD. Returns true if process was started successfully.
+// Run a batch file from the hidden worker. Do not use CREATE_NO_WINDOW here:
+// cmd.exe should inherit the worker's hidden console so its descendants also
+// have a console and do not allocate visible throwaway consoles.
 bool RunBatchNoWindow(const std::wstring& batPath, const std::wstring& workingDir) {
     std::wstring cmd = L"cmd.exe /c \"" + batPath + L"\"";
     STARTUPINFOW si = {0};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi = {0};
-    BOOL ok = CreateProcessW(NULL, &cmd[0], NULL, NULL, FALSE, CREATE_NO_WINDOW,
+    BOOL ok = CreateProcessW(NULL, &cmd[0], NULL, NULL, FALSE, 0,
         NULL, workingDir.c_str(), &si, &pi);
     if (ok) {
         CloseHandle(pi.hProcess);
@@ -422,8 +424,10 @@ int LaunchPythonApp(const std::wstring& exeDir, const std::wstring& pythonExe,
     // Ensure logs directory exists before creating log file
     EnsureLogsDirectory(exeDir);
     
-    // Build command line: "pythonw.exe" <args>
-    std::wstring cmdLine = L"\"" + pythonExe + L"\" " + scriptArgs;
+    // Build command line. Force console Python when running under launcher_worker.exe:
+    // the worker owns a hidden console and the real app must inherit it.
+    std::wstring launchPython = PreferConsolePythonForHiddenWorker(pythonExe);
+    std::wstring cmdLine = L"\"" + launchPython + L"\" " + scriptArgs;
     
     // Setup startup info with redirected output
     STARTUPINFOW si = {0};
@@ -471,12 +475,12 @@ int LaunchPythonApp(const std::wstring& exeDir, const std::wstring& pythonExe,
     // Create the process
     PROCESS_INFORMATION pi = {0};
     BOOL success = CreateProcessW(
-        pythonExe.c_str(),          // Application name
+        launchPython.c_str(),       // Application name
         &cmdLine[0],                // Command line (must be writable)
         NULL,                       // Process security attributes
         NULL,                       // Thread security attributes
         TRUE,                       // Inherit handles (for log redirection)
-        CREATE_NO_WINDOW,           // Creation flags - no console window
+        0,                          // Inherit worker's hidden console; do not detach.
         NULL,                       // Environment
         exeDir.c_str(),             // Working directory
         &si,                        // Startup info
@@ -661,11 +665,11 @@ static int RunLauncherWorker() {
     
     // Check if venv is complete: must have both Python executable AND pyvenv.cfg
     bool venvComplete = false;
-    if (FileExists(pythonwExe) && FileExists(pyvenvCfg)) {
-        venvPython = pythonwExe;
-        venvComplete = true;
-    } else if (FileExists(pythonExe) && FileExists(pyvenvCfg)) {
+    if (FileExists(pythonExe) && FileExists(pyvenvCfg)) {
         venvPython = pythonExe;
+        venvComplete = true;
+    } else if (FileExists(pythonwExe) && FileExists(pyvenvCfg)) {
+        venvPython = pythonwExe;
         venvComplete = true;
     }
     
@@ -695,7 +699,7 @@ static int RunLauncherWorker() {
                     pythonToUse = FindSystemPython();
                 }
                 if (!pythonToUse.empty()) {
-                    std::wstring guiPython = PreferPythonWForGui(pythonToUse);
+                    std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
                     ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
                     return 0;
                 }
@@ -737,7 +741,7 @@ static int RunLauncherWorker() {
             if (pythonToUse.empty())
                 pythonToUse = FindSystemPython();
             if (!pythonToUse.empty()) {
-                std::wstring guiPython = PreferPythonWForGui(pythonToUse);
+                std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
                 ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
                 return 0;
             }
@@ -775,7 +779,7 @@ static int RunLauncherWorker() {
                 if (pythonToUse.empty())
                     pythonToUse = FindSystemPython();
                 if (!pythonToUse.empty()) {
-                    std::wstring guiPython = PreferPythonWForGui(pythonToUse);
+                    std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
                     ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
                     return 0;
                 }
@@ -930,7 +934,7 @@ static int RunLauncherWorker() {
                 pythonToUse = FindSystemPython();
             }
             if (!pythonToUse.empty()) {
-                std::wstring guiPython = PreferPythonWForGui(pythonToUse);
+                std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
                 ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
                 return 0;
             }
@@ -997,7 +1001,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     si.wShowWindow = SW_HIDE;
 
     PROCESS_INFORMATION pi = {0};
-    DWORD creationFlags = CREATE_NO_WINDOW;
+    DWORD creationFlags = CREATE_NEW_CONSOLE;
 
     BOOL ok = CreateProcessW(
         worker.c_str(),

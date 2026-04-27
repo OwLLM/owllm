@@ -22,6 +22,20 @@ def test_launcher_cpp_defines_worker_and_gui_modes() -> None:
     assert "LOCALLLM_LAUNCHER_GUI" in cpp
     assert "launcher_worker.exe" in cpp
     assert "static int RunLauncherWorker()" in cpp
+    assert "CREATE_NEW_CONSOLE" in cpp
+    assert "PreferConsolePythonForHiddenWorker" in cpp
+    assert 'venvPython = pythonExe;' in cpp
+
+
+def test_launcher_worker_does_not_detach_app_from_hidden_console() -> None:
+    cpp = (_llm_root() / "launcher.cpp").read_text(encoding="utf-8", errors="replace")
+    launch_python_start = cpp.index("int LaunchPythonApp")
+    launch_python_end = cpp.index("#if defined(LOCALLLM_LAUNCHER_WORKER)")
+    launch_python = cpp[launch_python_start:launch_python_end]
+
+    assert "PreferConsolePythonForHiddenWorker(pythonExe)" in launch_python
+    assert "Inherit worker's hidden console" in launch_python
+    assert "CREATE_NO_WINDOW" not in launch_python
 
 
 def test_build_launcher_produces_both_binaries() -> None:

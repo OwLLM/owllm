@@ -7,9 +7,10 @@ This directory contains a professional Windows launcher system that provides a c
 ### Primary Entry Points
 - **`launcher.exe`** - Native Windows GUI stub (recommended double-click target)
   - Embedded icon (via `launcher.rc`)
-  - No console window; starts **`launcher_worker.exe`** next to it with `CREATE_NO_WINDOW` so the full bootstrap runs under a hidden inherited console (reduces CMD flashes from child tools)
+  - No visible console window; starts **`launcher_worker.exe`** next to it with `CREATE_NEW_CONSOLE` + `SW_HIDE`
 - **`launcher_worker.exe`** - Console worker (not for direct double-click)
-  - Contains the full venv / health-check / `python -m desktop_app.main` logic
+  - Contains the full venv / health-check / `python.exe -m desktop_app.main` logic
+  - Owns a hidden inherited console so unguarded console tools do not allocate visible CMD windows
   - Shipped next to `launcher.exe`; rebuilt by `build_launcher.bat`
 
 - **`LAUNCHER.bat`** - Batch script launcher (alternative)
@@ -59,7 +60,7 @@ On error: Opens Notepad with log file
 ### Key Features
 
 1. **No Lingering Console**
-   - Uses `pythonw.exe` (GUI mode Python) for the PySide6 app
+   - Uses `python.exe` under `launcher_worker.exe`'s hidden console for the PySide6 app
    - `launcher.exe` stays resident until you close the app (it waits on `launcher_worker.exe`, which waits on Python)
    - Professional Windows application behavior
 
@@ -149,7 +150,7 @@ LLM/
 
 ### Launcher doesn't start
 1. Run `LAUNCHER_DEBUG.bat` to see errors
-2. Check if Python venv exists: `.venv\Scripts\pythonw.exe`
+2. Check if Python venv exists: `.venv\Scripts\python.exe`
 3. Check logs: `logs\app.log`
 
 ### Icon doesn't show

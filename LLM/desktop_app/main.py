@@ -28,7 +28,7 @@ from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnviro
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
-    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox, QStyleOptionButton, QDialog, QDialogButtonBox, QAbstractItemView
+    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox, QStyleOptionButton, QDialog, QDialogButtonBox, QAbstractItemView, QDockWidget
 )
 from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap, QPainter, QPen, QColor, QBrush
 
@@ -61,6 +61,7 @@ from desktop_app.pages.mcp_page import MCPPage
 from desktop_app.pages.github_import_page import GitHubImportPage
 from desktop_app.pages.characters_3d_page import Characters3DPage
 from desktop_app.widgets.character_preview_widget import CharacterPreviewWidget
+from desktop_app.widgets.process_console_widget import ProcessConsoleWidget
 
 from system_detector import SystemDetector
 from smart_installer import SmartInstaller
@@ -2759,11 +2760,12 @@ class MainWindow(QMainWindow):
         self.mcp_btn = QPushButton("🧩 MCP")
         self.envs_btn = QPushButton("⚙️ Environment")
         self.characters_btn = QPushButton("🧙‍♂️ Characters")
+        self.terminal_btn = QPushButton("Terminal")
         self.info_btn = QPushButton("ℹ️ Info")
         
         # Navigation buttons will be styled by theme system
         
-        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.characters_btn, self.info_btn]:
+        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.characters_btn, self.terminal_btn, self.info_btn]:
             btn.setCheckable(True)
             # Navigation buttons will be styled by theme system
         
@@ -2781,6 +2783,7 @@ class MainWindow(QMainWindow):
         navbar_layout.addStretch(1)
         
         # Add Logs and Info buttons on far right
+        navbar_layout.addWidget(self.terminal_btn)
         navbar_layout.addWidget(self.logs_btn)
         navbar_layout.addWidget(self.info_btn)
         
@@ -2850,6 +2853,7 @@ class MainWindow(QMainWindow):
         self.mcp_btn.clicked.connect(lambda: self._switch_tab(tabs, "mcp"))
         self.characters_btn.clicked.connect(lambda: self._switch_tab(tabs, "characters"))
         self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, "environment"))
+        self.terminal_btn.clicked.connect(self._toggle_process_console)
         self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, "info"))
         
         # Also connect to tab widget's currentChanged signal to handle programmatic changes
@@ -2873,6 +2877,7 @@ class MainWindow(QMainWindow):
         border_layout.addWidget(main_widget)
         
         self.setCentralWidget(border_container)
+        self._setup_process_console()
         
         # Add build number in bottom right corner (overlay)
         build_label = QLabel(f"[{_APP_BUILD}]", border_container)
@@ -2917,6 +2922,7 @@ class MainWindow(QMainWindow):
         
         # Auto-run system diagnostics on startup (delayed to allow UI to render first)
         QTimer.singleShot(500, self._auto_check_system)
+
         self.downloaded_model_cards = []
         self.metric_cards = []
         
@@ -2928,6 +2934,43 @@ class MainWindow(QMainWindow):
             print(f"[WARNING] _refresh_locals() failed (this is normal on first startup): {e}")
         
         self._apply_theme()
+
+    def _setup_process_console(self) -> None:
+        """Add the built-in process terminal to the main window."""
+        self.process_console = ProcessConsoleWidget(self)
+        dock = QDockWidget("Terminal", self)
+        dock.setObjectName("processTerminalDock")
+        dock.setWidget(self.process_console)
+        dock.setAllowedAreas(Qt.BottomDockWidgetArea)
+        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        dock.setMinimumHeight(190)
+        self.process_console_dock = dock
+        try:
+            self.terminal_btn.setChecked(True)
+            dock.visibilityChanged.connect(lambda visible: self.terminal_btn.setChecked(bool(visible)))
+        except Exception:
+            pass
+        self._append_terminal("OWLLM terminal attached. Process output will appear here.", source="terminal")
+
+    def _append_terminal(self, message: str, *, source: str = "app") -> None:
+        """Best-effort append to the built-in terminal."""
+        try:
+            console = getattr(self, "process_console", None)
+            if console is not None:
+                console.append(message, source=source)
+        except Exception:
+            pass
+
+    def _toggle_process_console(self) -> None:
+        dock = getattr(self, "process_console_dock", None)
+        if dock is None:
+            return
+        dock.setVisible(not dock.isVisible())
+        try:
+            self.terminal_btn.setChecked(dock.isVisible())
+        except Exception:
+            pass
 
     def _get_text_color(self) -> str:
         """Get appropriate text color based on theme"""
@@ -4732,7 +4775,9 @@ class MainWindow(QMainWindow):
         
         # Start installer thread
         self.installer_thread = InstallerThread("pytorch")
-        self.installer_thread.log_output.connect(lambda msg: self.install_log.appendPlainText(msg))
+        self.installer_thread.log_output.connect(
+            lambda msg: (self.install_log.appendPlainText(msg), self._append_terminal(msg, source="install"))
+        )
         self.installer_thread.finished_signal.connect(self._on_install_complete)
         self.installer_thread.start()
     
@@ -8568,6 +8613,7 @@ class MainWindow(QMainWindow):
     
     def _on_onboarding_progress(self, msg: str):
         """Handle onboarding progress updates"""
+        self._append_terminal(msg, source="onboarding")
         if hasattr(self, 'onboarding_log_display'):
             self.onboarding_log_display.appendPlainText(msg)
             # Auto-scroll to bottom
@@ -9951,6 +9997,7 @@ class MainWindow(QMainWindow):
     
     def _log_models(self, msg: str) -> None:
         self.models_status.appendPlainText(msg)
+        self._append_terminal(msg, source="models")
 
     # ---------------- Train tab ----------------
     def _build_train_tab(self) -> QWidget:
@@ -10976,6 +11023,8 @@ class MainWindow(QMainWindow):
         self.train_log.appendPlainText("=== Starting Training ===")
         self.train_log.appendPlainText(f"Command: {' '.join(cmd)}")
         self.train_log.appendPlainText("=" * 50)
+        self._append_terminal("=== Starting Training ===", source="train")
+        self._append_terminal(f"Command: {' '.join(cmd)}", source="train")
 
         self.train_start.setEnabled(False)
         self.train_stop.setEnabled(True)
@@ -10987,12 +11036,14 @@ class MainWindow(QMainWindow):
         )
         if not proc.waitForStarted(5000):
             self.train_log.appendPlainText("\n[ERROR] Failed to start training process!")
+            self._append_terminal("[ERROR] Failed to start training process!", source="train")
             self.train_start.setEnabled(True)
             self.train_stop.setEnabled(False)
             return
 
         self.train_proc = proc
         self.train_log.appendPlainText("[INFO] Training process started successfully")
+        self._append_terminal("[INFO] Training process started successfully", source="train")
         
         # Start background timer for GPU stats during training
         if not hasattr(self, '_train_stats_timer'):
@@ -11013,6 +11064,7 @@ class MainWindow(QMainWindow):
         }
         error_msg = error_msgs.get(error, f"Error code: {error}")
         self.train_log.appendPlainText(f"\n[ERROR] {error_msg}")
+        self._append_terminal(f"[ERROR] {error_msg}", source="train")
         self.train_start.setEnabled(True)
         self.train_stop.setEnabled(False)
 
@@ -11060,6 +11112,7 @@ class MainWindow(QMainWindow):
             
         status_str = "NormalExit" if exit_status == QProcess.NormalExit else "CrashExit"
         self.train_log.appendPlainText(f"\n[INFO] Training process finished. exit_code={exit_code}, status={status_str}")
+        self._append_terminal(f"[INFO] Training process finished. exit_code={exit_code}, status={status_str}", source="train")
         self.train_proc = None
         self.train_start.setEnabled(True)
         self.train_stop.setEnabled(False)
@@ -14246,6 +14299,7 @@ class MainWindow(QMainWindow):
         # Read output from process
         data = proc.readAllStandardOutput()
         text = bytes(data).decode('utf-8', errors='replace')
+        self._append_terminal(text, source="model-a")
         
         # Accumulate text in buffer
         self.inference_buffer_a += text
@@ -14890,6 +14944,7 @@ class MainWindow(QMainWindow):
         # Read output from process
         data = proc.readAllStandardOutput()
         text = bytes(data).decode('utf-8', errors='replace')
+        self._append_terminal(text, source="model-b")
         
         # Accumulate text in buffer
         self.inference_buffer_b += text
@@ -15177,6 +15232,7 @@ class MainWindow(QMainWindow):
         # Read output from process
         data = proc.readAllStandardOutput()
         text = bytes(data).decode('utf-8', errors='replace')
+        self._append_terminal(text, source="model-c")
         
         # Accumulate text in buffer
         if not hasattr(self, 'inference_buffer_c'):
@@ -17737,7 +17793,9 @@ except Exception as e:
         # Treat "repair" as a reinstall attempt for this one package.
         pip_action = "uninstall" if action == "uninstall" else "install"
         self.pip_thread = PipPackageThread(pip_action, package_spec, python_exe=str(target_python))
-        self.pip_thread.log_output.connect(lambda m: self.requirements_log.append(m))
+        self.pip_thread.log_output.connect(
+            lambda m: (self.requirements_log.append(m), self._append_terminal(m, source="pip"))
+        )
         self.pip_thread.finished_signal.connect(self._on_pip_task_finished)
         self.pip_thread.start()
 
@@ -17754,7 +17812,9 @@ except Exception as e:
             llm_dir = str(Path(__file__).parent.parent)
             target_python = self._get_target_venv_python() or sys.executable
             self.cuda_bootstrap_thread = CudaBootstrapThread(str(target_python), llm_dir)
-            self.cuda_bootstrap_thread.log_output.connect(lambda m: self.requirements_log.append(m))
+            self.cuda_bootstrap_thread.log_output.connect(
+                lambda m: (self.requirements_log.append(m), self._append_terminal(m, source="cuda"))
+            )
             self.cuda_bootstrap_thread.finished_signal.connect(
                 lambda ok: self._after_cuda_bootstrap_refresh(ok)
             )
@@ -17853,7 +17913,9 @@ except Exception as e:
                 llm_dir = str(Path(__file__).parent.parent)
                 target_python = self._get_target_venv_python() or sys.executable
                 self.cuda_bootstrap_thread = CudaBootstrapThread(str(target_python), llm_dir)
-                self.cuda_bootstrap_thread.log_output.connect(lambda m: self.requirements_log.append(m))
+                self.cuda_bootstrap_thread.log_output.connect(
+                    lambda m: (self.requirements_log.append(m), self._append_terminal(m, source="cuda"))
+                )
                 self.cuda_bootstrap_thread.finished_signal.connect(lambda ok: self._after_cuda_bootstrap_refresh(ok))
                 self.cuda_bootstrap_thread.start()
                 return
@@ -17913,7 +17975,9 @@ except Exception as e:
             self.requirements_log.append(f"<b>Installing {pkg_name}...</b><br>")
 
         self.pip_thread = PipPackageThread("install", package_spec, python_exe=str(target_python))
-        self.pip_thread.log_output.connect(lambda m: self.requirements_log.append(m))
+        self.pip_thread.log_output.connect(
+            lambda m: (self.requirements_log.append(m), self._append_terminal(m, source="pip"))
+        )
         self.pip_thread.finished_signal.connect(lambda success, pkg=pkg_name: self._on_selected_install_finished(pkg, success))
         self.pip_thread.start()
 
@@ -17967,6 +18031,7 @@ except Exception as e:
         def _capture_and_append(m: str):
             try:
                 self.requirements_log.append(m)
+                self._append_terminal(m, source="installer")
             except Exception:
                 pass
             try:
@@ -19969,6 +20034,7 @@ respective package directories or official repositories.
 
         # Decode text
         new_text = data.decode("utf-8", errors="replace")
+        self._append_terminal(new_text, source="train")
         
         # Add to buffer
         if not hasattr(self, '_train_output_buffer'):
@@ -20451,6 +20517,7 @@ respective package directories or official repositories.
 
     def _log_to_app_log(self, message: str) -> None:
         """Best-effort logger for pythonw launches (no console)."""
+        self._append_terminal(message, source="app")
         try:
             logs_dir = self.root / "logs"
             logs_dir.mkdir(parents=True, exist_ok=True)

@@ -5,6 +5,7 @@
 - **Windows native launcher split (GUI + worker)**: `launcher.exe` is now a minimal `-mwindows` stub that starts `launcher_worker.exe` with `CREATE_NEW_CONSOLE` plus `SW_HIDE`; the worker then launches the real app with console Python (`python.exe`), not `pythonw.exe`, so the desktop process and unguarded console grandchildren inherit a hidden console instead of allocating visible throwaway consoles. Build both with `LLM/build_launcher.bat`. Debug: run `LAUNCHER_DEBUG.bat` manually if you need a visible console.
 
 ### Added
+- **Built-in Terminal panel**: Added a docked Terminal on the main OWLLM screen for process output and app activity. It captures app logs plus key installer, pip/CUDA bootstrap, onboarding, training, model, and inference output so users can see process activity inside the UI instead of relying on external CMD windows.
 - **3D Characters Page**: Added a new tab featuring cute 3D fantasy characters (Slime, Wizard, Knight) mapped to installed models. Features interactive "poke" and "say hi" interactions via embedded Three.js scene. Handles graceful fallback on missing assets.
 - **Arena Avatar Selector**: Added a dedicated 3D avatar preview selector in Arena model settings with previous/next controls and live assignment to Arena actors.
 - **Expanded Arena Model Library**: Added additional local GLB assets for richer Arena character choices.

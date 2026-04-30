@@ -312,17 +312,41 @@ def _load_gguf_model(model_dir: Path):
         try:
             from llama_cpp import Llama  # type: ignore
 
-            # Default to full GPU offload (-1) when the parent runtime has
-            # pinned a real CUDA device via CUDA_VISIBLE_DEVICES. Without this
-            # the model loads entirely into RAM and inference is so slow that
-            # Cline (and any other OpenAI-protocol client) times out before
-            # the first token. Explicit LLM_LLAMACPP_N_GPU_LAYERS overrides.
+            # Default to full GPU offload (-1) when an NVIDIA GPU is usable.
+            # Resolution order: explicit env override -> CUDA_VISIBLE_DEVICES
+            # -> nvidia-smi probe -> CPU. The CUDA_VISIBLE_DEVICES-only check
+            # was too strict: the launcher doesn't always preset it, and the
+            # model would silently load into RAM and take forever, causing
+            # Cline (or any OpenAI client) to time out before the first token.
             _raw_ngl = str(os.environ.get("LLM_LLAMACPP_N_GPU_LAYERS", "")).strip()
             if _raw_ngl:
                 n_gpu_layers = int(_raw_ngl)
             else:
                 _cvd = str(os.environ.get("CUDA_VISIBLE_DEVICES", "")).strip().lower()
-                n_gpu_layers = -1 if (_cvd and _cvd not in {"-1", "cpu", "none", ""}) else 0
+                if _cvd:
+                    n_gpu_layers = 0 if _cvd in {"-1", "cpu", "none"} else -1
+                else:
+                    # Probe for an actual NVIDIA GPU. Lightweight: nvidia-smi
+                    # is in PATH on any working CUDA install, completes in
+                    # <100ms, and we cache nothing — this runs once per load.
+                    _have_gpu = False
+                    try:
+                        import subprocess as _sp
+                        _flags = 0x08000000 if os.name == "nt" else 0
+                        _r = _sp.run(
+                            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                            capture_output=True, text=True, timeout=4, creationflags=_flags,
+                        )
+                        _have_gpu = _r.returncode == 0 and bool(_r.stdout.strip())
+                    except Exception:
+                        _have_gpu = False
+                    if not _have_gpu:
+                        try:
+                            import torch  # type: ignore
+                            _have_gpu = bool(torch.cuda.is_available())
+                        except Exception:
+                            pass
+                    n_gpu_layers = -1 if _have_gpu else 0
             logging.info(
                 "Loading GGUF via llama-cpp-python: file=%s, n_ctx=%s, n_threads=%s, n_gpu_layers=%s",
                 str(gguf_path),

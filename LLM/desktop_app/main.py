@@ -4121,7 +4121,12 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-                # 3) Kill orphan OWLLM uvicorn servers not recorded in StateStore
+                # 3) Kill orphan OWLLM workers not recorded in StateStore.
+                #    The previous filter was too narrow (only server_app /
+                #    bundled_proxy_server), which left run_adapter_backend
+                #    and other in-process model loaders alive — visible as a
+                #    multi-GB python.exe still holding the model after the
+                #    GUI exits.
                 if os.name == "nt":
                     try:
                         ps = subprocess.run(
@@ -4130,7 +4135,9 @@ class MainWindow(QMainWindow):
                                 "-NoProfile",
                                 "-Command",
                                 "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\") | "
-                                "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.(server_app|bundled_proxy_server):app' } | "
+                                "Where-Object { $_.CommandLine -match "
+                                "'core\\.llm_backends\\.|run_adapter_backend|llama_cpp|llama-cpp-python|"
+                                "owllm[_\\-]server|model_server|inference_worker' } | "
                                 "Select-Object -ExpandProperty ProcessId",
                             ],
                             capture_output=True,
@@ -4142,6 +4149,56 @@ class MainWindow(QMainWindow):
                             line = line.strip()
                             if line.isdigit():
                                 subprocess.run(["taskkill", "/F", "/PID", line], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
+                    except Exception:
+                        pass
+
+                # 4) Kill native llama-server.exe instances. The bundled proxy
+                #    spawns one of these per loaded GGUF; it's not a Python
+                #    process so the python.exe filters above never see it,
+                #    and it's the actual GPU-VRAM holder.
+                if os.name == "nt":
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/F", "/IM", "llama-server.exe", "/T"],
+                            capture_output=True, timeout=10, **SUBPROCESS_FLAGS,
+                        )
+                    except Exception:
+                        pass
+
+                # 5) Last-resort: walk the process tree from THIS app's PID
+                #    and force-kill every descendant. This catches orphan
+                #    children of children regardless of executable name —
+                #    which is the only reliable way to clean up native
+                #    workers (llama-server.exe), python child processes, and
+                #    anything else the app spawned indirectly.
+                if os.name == "nt":
+                    try:
+                        my_pid = os.getpid()
+                        # `taskkill /T` kills the process and its entire
+                        # subtree. Doing it on /our/ pid would kill us, so we
+                        # only walk descendants via WMIC parent lookup.
+                        ps = subprocess.run(
+                            [
+                                "powershell",
+                                "-NoProfile",
+                                "-Command",
+                                # Recursive descendant enumeration, BFS.
+                                "$root=" + str(int(my_pid)) + "; "
+                                "$todo = @($root); $seen = @(); "
+                                "while ($todo.Count -gt 0) { "
+                                "  $cur = $todo[0]; $todo = $todo[1..($todo.Count-1)]; "
+                                "  if ($seen -contains $cur) { continue }; "
+                                "  $seen += $cur; "
+                                "  $kids = (Get-CimInstance Win32_Process -Filter \"ParentProcessId=$cur\") | Select-Object -ExpandProperty ProcessId; "
+                                "  foreach ($k in $kids) { if ($k -ne $root) { $todo += $k; Write-Output $k } }"
+                                "}",
+                            ],
+                            capture_output=True, text=True, timeout=15, **SUBPROCESS_FLAGS,
+                        )
+                        for line in (ps.stdout or "").splitlines():
+                            line = line.strip()
+                            if line.isdigit() and int(line) != my_pid:
+                                subprocess.run(["taskkill", "/F", "/PID", line], capture_output=True, timeout=5, **SUBPROCESS_FLAGS)
                     except Exception:
                         pass
             except Exception as e:

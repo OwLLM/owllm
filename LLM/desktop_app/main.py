@@ -6238,10 +6238,17 @@ class MainWindow(QMainWindow):
             if base_dir.exists():
                 for model_dir in sorted(base_dir.iterdir()):
                     if model_dir.is_dir():
-                        model_name = model_dir.name
-                        
+                        raw_dir_name = model_dir.name
+
                         # Try to extract model ID from directory name (e.g., unsloth__model -> unsloth/model)
-                        model_id = model_name.replace("__", "/")
+                        model_id = raw_dir_name.replace("__", "/")
+
+                        # Friendly display name: "unsloth__gemma-2-2b-it" -> "Gemma 2 2B Instruct (unsloth)"
+                        try:
+                            from core.model_compatibility import pretty_model_name
+                            model_name = pretty_model_name(raw_dir_name) or raw_dir_name
+                        except Exception:
+                            model_name = raw_dir_name
                         
                         # Skip if this model is currently downloading/repairing (don't mark as complete)
                         is_active_download = False
@@ -6312,10 +6319,12 @@ class MainWindow(QMainWindow):
                             compatibility_badge = None
                         else:
                             size = get_model_size(str(model_dir))
-                            capabilities = detect_model_capabilities(model_name=model_name, model_path=str(model_dir))
+                            # Capability/compat detectors do substring matches on the raw
+                            # slug (e.g. "bnb-4bit", "instruct"); feed them the unaltered
+                            # directory name, NOT the prettified display title.
+                            capabilities = detect_model_capabilities(model_name=raw_dir_name, model_path=str(model_dir))
                             icons = get_capability_icons(capabilities)
-                            # Get compatibility badge for downloaded models
-                            compatibility_badge = get_model_compatibility_badge(model_id, model_name, self.user_vram_gb)
+                            compatibility_badge = get_model_compatibility_badge(model_id, raw_dir_name, self.user_vram_gb)
                         
                         # Get cached stats if available
                         from core.models import get_cached_model_stats
@@ -6330,6 +6339,7 @@ class MainWindow(QMainWindow):
                             compatibility_badge=compatibility_badge,
                             onboarding_status=display_onboarding_status,
                             env_key=env_key,
+                            is_active_download=is_active_download,
                             parent=self.downloaded_container,
                         )
                         if cached_stats and (cached_stats.get("gated") or cached_stats.get("private")):
@@ -6339,7 +6349,10 @@ class MainWindow(QMainWindow):
                         card.delete_clicked.connect(self._on_delete_model)
                         card.add_weights_clicked.connect(self._on_add_weights)
                         card.dedicated_env_clicked.connect(self._on_create_dedicated_env)
-                        if is_incomplete:
+                        # Wire Repair only for genuinely broken models. A card that is
+                        # still actively downloading is "incomplete" by definition; it
+                        # should not invite the user to repair an in-progress download.
+                        if is_incomplete and not is_active_download:
                             card.repair_clicked.connect(self._on_repair_model)
                         # Store model_id in card for later updates
                         card.model_id = model_id
@@ -17687,11 +17700,26 @@ except Exception as e:
         except Exception:
             pass
         
-        # Startup popup (option C): if we found issues on startup, explain and redirect to fix.
+        # Startup popup: only fire for *critical* failures — packages the
+        # launcher's check_dependencies.py also gates on. Optional extras
+        # (triton-windows, mamba_ssm, open-clip-torch, unsloth, ...) are
+        # commonly absent on working installs, and a modal "Repair
+        # Environment" prompt every launch is the wrong UX for that. The
+        # Requirements tab still shows the full list and the in-tab notice
+        # banner, so users who want to fix optional gaps can still do so.
         try:
-            if not getattr(self, "_startup_env_popup_shown", False) and len(needs_attention) > 0:
+            critical_pkgs = {
+                "torch", "transformers", "tokenizers", "huggingface-hub",
+                "huggingface_hub", "datasets", "numpy", "PySide6",
+                "PySide6-Essentials", "shiboken6",
+            }
+            failing_names = {
+                name for name, card in self.package_cards.items()
+                if getattr(card, "needs_attention", False) and name in critical_pkgs
+            }
+            if not getattr(self, "_startup_env_popup_shown", False) and failing_names:
                 self._startup_env_popup_shown = True
-                summary = f"{len(needs_attention)} requirement(s) need attention."
+                summary = f"{len(failing_names)} critical requirement(s) need attention: {', '.join(sorted(failing_names))}"
                 QTimer.singleShot(0, lambda: self._show_env_issue_popup(
                     "Environment needs attention",
                     "Some required components are missing/broken.\n\n"
@@ -20664,6 +20692,15 @@ respective package directories or official repositories.
         Server lists are read in-process from the global LLMServerManager.
         """
         # --- Servers --------------------------------------------------------
+        try:
+            from core.model_compatibility import pretty_model_name as _pretty
+        except Exception:
+            _pretty = lambda s, **_: (s or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+        def _label_for(cfg: dict, cfg_id: str) -> str:
+            base_model = cfg.get("base_model") or cfg_id or ""
+            return _pretty(base_model, include_org=False) or cfg_id
+
         if hasattr(self, "header_servers_label"):
             running_pairs: list[tuple[str, int, str]] = []
             try:
@@ -20673,10 +20710,8 @@ respective package directories or official repositories.
                 # 1) In-memory: servers this session started directly.
                 for cfg_id in list(getattr(mgr, "running_servers", {}).keys()):
                     cfg = mgr.config.get("models", {}).get(cfg_id, {}) or {}
-                    base_model = cfg.get("base_model") or ""
-                    display = base_model.replace("\\", "/").rsplit("/", 1)[-1] or cfg_id
                     port = int(cfg.get("port") or 0)
-                    running_pairs.append((display, port, cfg_id))
+                    running_pairs.append((_label_for(cfg, cfg_id), port, cfg_id))
                     seen_cfg_ids.add(cfg_id)
                 # 2) StateStore: servers adopted via fast-path reuse, or
                 #    started by an external test/CLI process. Without this
@@ -20691,10 +20726,8 @@ respective package directories or official repositories.
                     if not cfg_id or cfg_id in seen_cfg_ids:
                         continue
                     cfg = mgr.config.get("models", {}).get(cfg_id, {}) or {}
-                    base_model = cfg.get("base_model") or ""
-                    display = base_model.replace("\\", "/").rsplit("/", 1)[-1] or cfg_id
                     port = int(row.get("port") or cfg.get("port") or 0)
-                    running_pairs.append((display, port, cfg_id))
+                    running_pairs.append((_label_for(cfg, cfg_id), port, cfg_id))
                     seen_cfg_ids.add(cfg_id)
             except Exception:
                 running_pairs = []
@@ -20733,8 +20766,7 @@ respective package directories or official repositories.
                 state_store = getattr(self, "state_store", None)
                 for cfg_id, tup in running.items():
                     cfg = (mgr.config.get("models", {}) or {}).get(cfg_id, {}) or {}
-                    base_model = (cfg.get("base_model") or "").replace("\\", "/")
-                    label = base_model.rsplit("/", 1)[-1] or cfg_id
+                    label = _label_for(cfg, cfg_id)
                     pid: int = 0
                     if state_store is not None:
                         try:
@@ -20754,9 +20786,21 @@ respective package directories or official repositories.
                 server_pid_to_label = {}
 
             if not totals:
-                self.header_vram_label.setText("💾 VRAM: querying…")
-                self.header_vram_label.setToolTip("Waiting for nvidia-smi response.")
+                # nvidia-smi failed or returned no GPUs. On AMD/Intel/no-GPU systems
+                # it never will, so refusing to leave "querying…" makes the header
+                # look broken. After a few empty ticks, switch to a clearer state.
+                self._vram_empty_ticks = int(getattr(self, "_vram_empty_ticks", 0)) + 1
+                if self._vram_empty_ticks <= 2:
+                    self.header_vram_label.setText("💾 VRAM: querying…")
+                    self.header_vram_label.setToolTip("Waiting for nvidia-smi response.")
+                else:
+                    self.header_vram_label.setText("💾 VRAM: N/A")
+                    self.header_vram_label.setToolTip(
+                        "No NVIDIA GPU detected (or nvidia-smi unavailable).\n"
+                        "VRAM accounting is currently NVIDIA-only."
+                    )
             else:
+                self._vram_empty_ticks = 0
                 used_total = sum(t[0] for t in totals)
                 cap_total = sum(t[1] for t in totals)
                 self.header_vram_label.setText(

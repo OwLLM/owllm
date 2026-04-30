@@ -59,7 +59,7 @@ def detect_model_type(model_name: str) -> Dict[str, any]:
 def _extract_model_family(model_name: str) -> str:
     """Extract model family from model name."""
     model_lower = model_name.lower()
-    
+
     if "qwen" in model_lower:
         return "qwen"
     elif "llama" in model_lower:
@@ -74,6 +74,137 @@ def _extract_model_family(model_name: str) -> str:
         return "hermes"
     else:
         return "unknown"
+
+
+# --------- Pretty display names for the UI ---------
+# Family canonicalisation: lowercase token -> the spelling humans recognise.
+_FAMILY_CANONICAL = {
+    "gemma": "Gemma", "llama": "Llama", "qwen": "Qwen", "qwen2": "Qwen2",
+    "qwen3": "Qwen3", "mistral": "Mistral", "mixtral": "Mixtral",
+    "phi": "Phi", "phi3": "Phi3", "hermes": "Hermes", "deepseek": "DeepSeek",
+    "yi": "Yi", "tinyllama": "TinyLlama", "starcoder": "StarCoder",
+    "starcoder2": "StarCoder2", "codellama": "CodeLlama", "openchat": "OpenChat",
+    "zephyr": "Zephyr", "vicuna": "Vicuna", "orca": "Orca", "solar": "SOLAR",
+    "stablelm": "StableLM", "minicpm": "MiniCPM", "internlm": "InternLM",
+    "glm": "GLM", "smol": "Smol", "smollm": "SmolLM", "smollm2": "SmolLM2",
+    "neo": "Neo", "openhermes": "OpenHermes", "wizardlm": "WizardLM",
+    "wizardcoder": "WizardCoder", "deepseekcoder": "DeepSeekCoder",
+}
+
+# Suffix tokens we know expand to a familiar word.
+_SUFFIX_LABELS = {
+    "it": "Instruct", "instruct": "Instruct", "chat": "Chat", "base": "Base",
+    "code": "Code", "math": "Math", "vision": "Vision", "vl": "Vision",
+    "rl": "RL", "dpo": "DPO", "sft": "SFT", "uncensored": "Uncensored",
+    "abliterated": "Abliterated", "heretic": "Heretic", "flash": "Flash",
+}
+
+# Quantisation / format tags (matched as a whole token).
+_QUANT_PATTERNS = [
+    (re.compile(r"^Q(\d)_K_M$", re.IGNORECASE), lambda m: f"Q{m.group(1)}_K_M"),
+    (re.compile(r"^Q(\d)_K_S$", re.IGNORECASE), lambda m: f"Q{m.group(1)}_K_S"),
+    (re.compile(r"^Q(\d)_0$", re.IGNORECASE),   lambda m: f"Q{m.group(1)}_0"),
+    (re.compile(r"^IQ(\d)$", re.IGNORECASE),     lambda m: f"IQ{m.group(1)}"),
+    (re.compile(r"^bnb$", re.IGNORECASE),        lambda m: "bnb"),
+    (re.compile(r"^4bit$", re.IGNORECASE),       lambda m: "4-bit"),
+    (re.compile(r"^8bit$", re.IGNORECASE),       lambda m: "8-bit"),
+    (re.compile(r"^awq$", re.IGNORECASE),        lambda m: "AWQ"),
+    (re.compile(r"^gptq$", re.IGNORECASE),       lambda m: "GPTQ"),
+    (re.compile(r"^gguf$", re.IGNORECASE),       lambda m: "GGUF"),
+    (re.compile(r"^fp(8|16|32)$", re.IGNORECASE), lambda m: f"FP{m.group(1)}"),
+    (re.compile(r"^bf16$", re.IGNORECASE),       lambda m: "BF16"),
+]
+
+# Orgs that ARE the upstream weights — appending "(google)" next to "Gemma 2"
+# is just noise. Other orgs (unsloth, TheBloke, bartowski, ...) are fine-tuners
+# or quantisers and worth showing so users can tell variants apart.
+_UPSTREAM_ORGS = {"google", "meta-llama", "qwen", "mistralai", "microsoft",
+                  "deepseek-ai", "stabilityai", "huggingfaceh4", "01-ai",
+                  "internlm", "thudm", "openchat"}
+
+
+def split_org_and_repo(folder_or_id: str) -> Tuple[Optional[str], str]:
+    """``unsloth__gemma-2-2b-it`` -> ``("unsloth", "gemma-2-2b-it")``.
+
+    Accepts both filesystem-encoded names (``org__repo``) and HF-style
+    identifiers (``org/repo``). Returns ``(None, name)`` when no org is
+    encoded.
+    """
+    if not folder_or_id:
+        return None, ""
+    s = folder_or_id.replace("\\", "/").strip("/")
+    if "/" in s:
+        org, _, repo = s.partition("/")
+        return org or None, repo
+    if "__" in s:
+        org, _, repo = s.partition("__")
+        return org or None, repo
+    return None, s
+
+
+def pretty_model_name(folder_or_id: str, *, include_org: bool = True) -> str:
+    """Turn a filesystem/HF identifier into a human-friendly title.
+
+    Examples::
+
+        pretty_model_name("unsloth__gemma-2-2b-it")
+            -> "Gemma 2 2B Instruct (unsloth)"
+        pretty_model_name("meta-llama/Llama-3.1-8B-Instruct")
+            -> "Llama 3.1 8B Instruct"
+        pretty_model_name("TheBloke/Mistral-7B-v0.1-GGUF")
+            -> "Mistral 7B v0.1 GGUF (TheBloke)"
+
+    The ``include_org`` flag lets compact callers (e.g. the header VRAM
+    tooltip) suppress the parenthetical when space is tight.
+    """
+    if not folder_or_id:
+        return ""
+    org, repo = split_org_and_repo(folder_or_id)
+    if not repo:
+        return folder_or_id
+
+    tokens: list[str] = []
+    for tok in repo.split("-"):
+        if not tok:
+            continue
+        lower = tok.lower()
+        if lower in _FAMILY_CANONICAL:
+            tokens.append(_FAMILY_CANONICAL[lower])
+            continue
+        # Parameter size: 7b / 70b / 1.5b / 100m -> 7B / 70B / 1.5B / 100M.
+        if re.fullmatch(r"\d+(?:\.\d+)?[bBmM]", tok):
+            tokens.append(tok.upper())
+            continue
+        if lower in _SUFFIX_LABELS:
+            tokens.append(_SUFFIX_LABELS[lower])
+            continue
+        matched = False
+        for pat, formatter in _QUANT_PATTERNS:
+            m = pat.match(tok)
+            if m:
+                tokens.append(formatter(m))
+                matched = True
+                break
+        if matched:
+            continue
+        # Versions (v0.1 / v2 / v2.0) — keep as-is, lowercased v.
+        if re.fullmatch(r"v\d+(?:\.\d+)*", lower):
+            tokens.append(tok.lower())
+            continue
+        # Pure numeric or version-ish (3.1, 2.5) — keep as-is.
+        if re.fullmatch(r"\d+(?:\.\d+)*", tok):
+            tokens.append(tok)
+            continue
+        # Fallback: capitalise simple tokens, leave mixed-case alone.
+        if tok.isupper() or tok.islower():
+            tokens.append(tok.capitalize())
+        else:
+            tokens.append(tok)
+
+    title = " ".join(tokens) if tokens else repo
+    if include_org and org and org.lower() not in _UPSTREAM_ORGS:
+        return f"{title} ({org})"
+    return title
 
 
 def _extract_base_model_name(model_name: str) -> str:

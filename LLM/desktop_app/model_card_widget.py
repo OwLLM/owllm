@@ -43,7 +43,7 @@ class ModelCard(QFrame):
         header_layout.setSpacing(15)
         
         # Author/Model Icon
-        self.icon_label = QLabel()
+        self.icon_label = QLabel(self)
         self.icon_label.setFixedSize(50, 50)
         self.icon_label.setAlignment(Qt.AlignCenter)
         self._set_model_icon(model_id, author_icon)
@@ -57,7 +57,7 @@ class ModelCard(QFrame):
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
         
-        name_label = QLabel(model_name)
+        name_label = QLabel(model_name, self)
         name_font = QFont()
         name_font.setPointSize(14)
         name_font.setBold(True)
@@ -86,7 +86,7 @@ class ModelCard(QFrame):
                 bg_color = "#888"  # Gray for unknown
                 text_color = "white"
             
-            compat_badge = QLabel(badge_text)
+            compat_badge = QLabel(badge_text, self)
             compat_badge.setToolTip(badge_tooltip)
             compat_badge.setStyleSheet(f"""
                 QLabel {{
@@ -103,7 +103,7 @@ class ModelCard(QFrame):
             top_row.addWidget(compat_badge)
         
         if is_new:
-            new_badge = QLabel("NEW")
+            new_badge = QLabel("NEW", self)
             new_badge.setStyleSheet("""
                 QLabel {
                     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #ff6b6b, stop:1 #ee5a6f);
@@ -124,11 +124,11 @@ class ModelCard(QFrame):
         stats_row = QHBoxLayout()
         stats_row.setSpacing(15)
         
-        self.dl_stat = QLabel()
+        self.dl_stat = QLabel(self)
         self.dl_stat.setStyleSheet("color: #888; font-size: 11px;")
         stats_row.addWidget(self.dl_stat)
         
-        self.like_stat = QLabel()
+        self.like_stat = QLabel(self)
         self.like_stat.setStyleSheet("color: #888; font-size: 11px;")
         stats_row.addWidget(self.like_stat)
         
@@ -153,7 +153,7 @@ class ModelCard(QFrame):
         
         # Description
         if description:
-            desc_label = QLabel(description)
+            desc_label = QLabel(description, self)
             desc_font = QFont()
             desc_font.setPointSize(13)
             desc_label.setFont(desc_font)
@@ -164,7 +164,7 @@ class ModelCard(QFrame):
         # Size and icons row
         middle_layout = QHBoxLayout()
         
-        size_label = QLabel(f"📦 {size}")
+        size_label = QLabel(f"📦 {size}", self)
         size_font = QFont()
         size_font.setPointSize(13)
         size_label.setFont(size_font)
@@ -172,7 +172,7 @@ class ModelCard(QFrame):
         
         middle_layout.addStretch(1)
         
-        icons_label = QLabel(icons)
+        icons_label = QLabel(icons, self)
         icons_font = QFont()
         icons_font.setPointSize(18)
         icons_label.setFont(icons_font)
@@ -186,7 +186,7 @@ class ModelCard(QFrame):
             .replace("-", "- ")
             .replace("_", "_ ")
         )
-        id_label = QLabel(f"📂 {model_id_display}")
+        id_label = QLabel(f"📂 {model_id_display}", self)
         id_font = QFont()
         id_font.setPointSize(11)
         id_label.setFont(id_font)
@@ -201,7 +201,7 @@ class ModelCard(QFrame):
         button_layout.setSpacing(8)
         
         # Download button (sized to fit text+icon)
-        self.download_btn = QPushButton("📥 Download" if not is_downloaded else "✓ Downloaded")
+        self.download_btn = QPushButton("📥 Download" if not is_downloaded else "✓ Downloaded", self)
         self.download_btn.setEnabled(not is_downloaded)
         self.download_btn.clicked.connect(lambda: self.download_clicked.emit(model_id))
         self.download_btn.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
@@ -373,13 +373,17 @@ class DownloadedModelCard(QFrame):
     add_weights_clicked = Signal(str)  # Emits model path
     dedicated_env_clicked = Signal(str)  # Emits model path
     
-    def __init__(self, model_name: str, model_path: str, size: str, icons: str, 
-                 is_incomplete: bool = False, compatibility_badge: dict = None, 
-                 onboarding_status: str = None, env_key: str = None, parent=None):
+    def __init__(self, model_name: str, model_path: str, size: str, icons: str,
+                 is_incomplete: bool = False, compatibility_badge: dict = None,
+                 onboarding_status: str = None, env_key: str = None,
+                 is_active_download: bool = False, parent=None):
         super().__init__(parent)
         self.model_path = model_path
         self.model_name = model_name
         self.is_incomplete = is_incomplete
+        # An "in-progress download" is incomplete by definition but should NOT
+        # offer a Repair button — the download itself is what is filling it.
+        self.is_active_download = is_active_download
         self.is_dark = True
         self.compatibility_badge = compatibility_badge
         self.onboarding_status = onboarding_status or "NEW"
@@ -402,7 +406,7 @@ class DownloadedModelCard(QFrame):
         header_layout.setSpacing(15)
         
         # Model Icon (using first letter or emoji based on model family)
-        icon_label = QLabel()
+        icon_label = QLabel(self)
         icon_label.setFixedSize(50, 50)
         icon_label.setAlignment(Qt.AlignCenter)
         self._set_model_icon(model_name, icon_label)
@@ -416,7 +420,7 @@ class DownloadedModelCard(QFrame):
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
         
-        name_label = QLabel(model_name)
+        name_label = QLabel(model_name, self)
         name_font = QFont()
         name_font.setPointSize(14)
         name_font.setBold(True)
@@ -445,7 +449,7 @@ class DownloadedModelCard(QFrame):
                 bg_color = "#888"
                 text_color = "white"
             
-            compat_badge = QLabel(badge_text)
+            compat_badge = QLabel(badge_text, self)
             compat_badge.setToolTip(badge_tooltip)
             compat_badge.setStyleSheet(f"""
                 QLabel {{
@@ -468,11 +472,11 @@ class DownloadedModelCard(QFrame):
         stats_row = QHBoxLayout()
         stats_row.setSpacing(15)
         
-        self.dl_stat = QLabel()
+        self.dl_stat = QLabel(self)
         self.dl_stat.setStyleSheet("color: #888; font-size: 11px;")
         stats_row.addWidget(self.dl_stat)
         
-        self.like_stat = QLabel()
+        self.like_stat = QLabel(self)
         self.like_stat.setStyleSheet("color: #888; font-size: 11px;")
         stats_row.addWidget(self.like_stat)
         
@@ -504,7 +508,7 @@ class DownloadedModelCard(QFrame):
         except Exception:
             pass
 
-        local_badge = QLabel(badge_text)
+        local_badge = QLabel(badge_text, self)
         local_badge.setStyleSheet(f"""
             QLabel {{
                 background: {bg};
@@ -519,7 +523,7 @@ class DownloadedModelCard(QFrame):
         
         # Environment badge (if env_key exists)
         if self.env_key:
-            env_badge = QLabel(f"🔧 {self.env_key}")
+            env_badge = QLabel(f"🔧 {self.env_key}", self)
             env_badge.setStyleSheet("""
                 QLabel {
                     background: rgba(102, 126, 234, 0.3);
@@ -541,7 +545,7 @@ class DownloadedModelCard(QFrame):
             # Don't show inline badge for READY - use ribbon instead
             pass
         elif self.onboarding_status == "BUILDING":
-            onboarding_badge = QLabel("⏳ Building...")
+            onboarding_badge = QLabel("⏳ Building...", self)
             onboarding_badge.setStyleSheet("""
                 QLabel {
                     background: #FF9800;
@@ -554,7 +558,7 @@ class DownloadedModelCard(QFrame):
             """)
             status_row.addWidget(onboarding_badge)
         elif self.onboarding_status == "BROKEN":
-            onboarding_badge = QLabel("❌ Broken")
+            onboarding_badge = QLabel("❌ Broken", self)
             onboarding_badge.setStyleSheet("""
                 QLabel {
                     background: #f44336;
@@ -567,7 +571,7 @@ class DownloadedModelCard(QFrame):
             """)
             status_row.addWidget(onboarding_badge)
         else:  # NEW or None
-            onboarding_badge = QLabel("🆕 Not Onboarded")
+            onboarding_badge = QLabel("🆕 Not Onboarded", self)
             onboarding_badge.setStyleSheet("""
                 QLabel {
                     background: #888;
@@ -588,7 +592,7 @@ class DownloadedModelCard(QFrame):
         # Size and icons row
         middle_layout = QHBoxLayout()
         
-        size_label = QLabel(f"📦 {size}")
+        size_label = QLabel(f"📦 {size}", self)
         size_font = QFont()
         size_font.setPointSize(13)
         size_label.setFont(size_font)
@@ -598,7 +602,7 @@ class DownloadedModelCard(QFrame):
         
         middle_layout.addStretch(1)
         
-        icons_label = QLabel(icons)
+        icons_label = QLabel(icons, self)
         icons_font = QFont()
         icons_font.setPointSize(18)
         icons_label.setFont(icons_font)
@@ -618,7 +622,7 @@ class DownloadedModelCard(QFrame):
         # Handle Windows paths correctly for file:// URLs
         file_url = f"file:///{urllib.parse.quote(abs_path.replace(os.sep, '/'))}"
         
-        path_label = QLabel(f'📂 <a href="{file_url}" style="color: #667eea; text-decoration: none;">{model_path}</a>')
+        path_label = QLabel(f'📂 <a href="{file_url}" style="color: #667eea; text-decoration: none;">{model_path}</a>', self)
         path_label.setOpenExternalLinks(True)
         path_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
         path_font = QFont()
@@ -669,19 +673,22 @@ class DownloadedModelCard(QFrame):
             }
         """
         
-        # Repair button for incomplete models
-        if is_incomplete:
-            self.repair_btn = QPushButton("🔧 Repair")
+        # Repair button — only for genuinely broken cards. While a download is
+        # actively running the card is "incomplete" but offering Repair is
+        # confusing (and historically tempted users to stomp on their own
+        # in-flight download).
+        if is_incomplete and not self.is_active_download:
+            self.repair_btn = QPushButton("🔧 Repair", self)
             self.repair_btn.setToolTip("Repair / Resume download for this model")
             self.repair_btn.setMinimumHeight(35)
             self.repair_btn.setCursor(Qt.ArrowCursor)
             self.repair_btn.clicked.connect(lambda: self.repair_clicked.emit(self.model_path))
             self.repair_btn.setStyleSheet(button_style)
             button_layout.addWidget(self.repair_btn)
-        else:
-            # Download additional GGUF variants for already-downloaded models.
-            self.add_weights_btn = QPushButton("➕ Weights")
-            self.add_weights_btn.setToolTip("Download additional GGUF weight variants for this model")
+        elif not is_incomplete:
+            # Manage GGUF variants for already-downloaded models.
+            self.add_weights_btn = QPushButton("⚖️ Weights", self)
+            self.add_weights_btn.setToolTip("Add or remove GGUF weight variants for this model")
             self.add_weights_btn.setMinimumHeight(35)
             self.add_weights_btn.setCursor(Qt.ArrowCursor)
             self.add_weights_btn.clicked.connect(lambda: self.add_weights_clicked.emit(self.model_path))
@@ -730,7 +737,7 @@ class DownloadedModelCard(QFrame):
                     "3. Isolate this model from shared environments"
                 )
             
-            self.dedicated_btn = QPushButton(button_text)
+            self.dedicated_btn = QPushButton(button_text, self)
             self.dedicated_btn.setToolTip(tooltip_text)
             self.dedicated_btn.setMinimumHeight(35)
             self.dedicated_btn.setCursor(Qt.ArrowCursor)
@@ -739,7 +746,7 @@ class DownloadedModelCard(QFrame):
             button_layout.addWidget(self.dedicated_btn)
         
         # Delete button
-        self.delete_btn = QPushButton("🗑️ Delete")
+        self.delete_btn = QPushButton("🗑️ Delete", self)
         self.delete_btn.setToolTip("Delete this model")
         self.delete_btn.setMinimumHeight(35)
         self.delete_btn.setCursor(Qt.ArrowCursor)
@@ -983,7 +990,7 @@ class ModelDetailsPanel(QWidget):
         header_row = QHBoxLayout()
         header_row.setSpacing(12)
 
-        self.avatar_label = QLabel()
+        self.avatar_label = QLabel(self)
         self.avatar_label.setFixedSize(96, 96)
         self.avatar_label.setAlignment(Qt.AlignCenter)
         self.avatar_label.setStyleSheet(
@@ -994,7 +1001,7 @@ class ModelDetailsPanel(QWidget):
         title_col = QVBoxLayout()
         title_col.setSpacing(4)
 
-        self.title_label = QLabel()
+        self.title_label = QLabel(self)
         self.title_label.setAlignment(Qt.AlignLeft)
         title_font = QFont()
         title_font.setPointSize(15)
@@ -1003,13 +1010,13 @@ class ModelDetailsPanel(QWidget):
         self.title_label.setWordWrap(True)
         title_col.addWidget(self.title_label)
 
-        self.author_label = QLabel()
+        self.author_label = QLabel(self)
         self.author_label.setAlignment(Qt.AlignLeft)
         self.author_label.setStyleSheet("color: #9aa4b2; font-size: 10.5pt;")
         self.author_label.setWordWrap(True)
         title_col.addWidget(self.author_label)
 
-        self.repo_label = QLabel()
+        self.repo_label = QLabel(self)
         self.repo_label.setAlignment(Qt.AlignLeft)
         self.repo_label.setStyleSheet("color: #7d8696; font-size: 9.5pt;")
         self.repo_label.setWordWrap(True)
@@ -1025,7 +1032,7 @@ class ModelDetailsPanel(QWidget):
         layout.addWidget(separator)
         
         # Description (compact)
-        self.description_label = QLabel()
+        self.description_label = QLabel(self)
         self.description_label.setWordWrap(True)
         self.description_label.setStyleSheet(
             "color: #d7dde7; font-size: 10.5pt; padding: 8px 10px; background: rgba(255,255,255,0.04); border-radius: 8px;"
@@ -1037,10 +1044,10 @@ class ModelDetailsPanel(QWidget):
         self.stats_grid.setHorizontalSpacing(10)
         self.stats_grid.setVerticalSpacing(6)
 
-        self.stats_left = QLabel()
+        self.stats_left = QLabel(self)
         self.stats_left.setStyleSheet("color: #b6c0cf; font-size: 10pt;")
         self.stats_left.setWordWrap(True)
-        self.stats_right = QLabel()
+        self.stats_right = QLabel(self)
         self.stats_right.setStyleSheet("color: #b6c0cf; font-size: 10pt;")
         self.stats_right.setWordWrap(True)
 
@@ -1049,20 +1056,20 @@ class ModelDetailsPanel(QWidget):
         layout.addLayout(self.stats_grid)
         
         # Tags (chips)
-        tags_header = QLabel("Tags")
+        tags_header = QLabel("Tags", self)
         tags_header.setStyleSheet("font-weight: 600; font-size: 10.5pt; color: #8ea2ff; margin-top: 4px;")
         layout.addWidget(tags_header)
-        self.tags_label = QLabel()
+        self.tags_label = QLabel(self)
         self.tags_label.setWordWrap(True)
         self.tags_label.setTextFormat(Qt.RichText)
         self.tags_label.setStyleSheet("color: #c2cad6; font-size: 9.5pt;")
         layout.addWidget(self.tags_label)
         
         # License (kept, but compact)
-        license_header = QLabel("License")
+        license_header = QLabel("License", self)
         license_header.setStyleSheet("font-weight: 600; font-size: 10.5pt; color: #8ea2ff; margin-top: 4px;")
         layout.addWidget(license_header)
-        self.license_label = QLabel()
+        self.license_label = QLabel(self)
         self.license_label.setWordWrap(True)
         self.license_label.setStyleSheet("color: #c2cad6; font-size: 9.5pt;")
         layout.addWidget(self.license_label)
@@ -1071,16 +1078,16 @@ class ModelDetailsPanel(QWidget):
         files_header = QLabel("Files (top)")
         files_header.setStyleSheet("font-weight: 600; font-size: 10.5pt; color: #8ea2ff; margin-top: 4px;")
         layout.addWidget(files_header)
-        self.files_label = QLabel()
+        self.files_label = QLabel(self)
         self.files_label.setWordWrap(True)
         self.files_label.setStyleSheet("color: #b6c0cf; font-size: 9pt; font-family: Consolas, monospace;")
         layout.addWidget(self.files_label)
         
         # Additional info
-        info_header = QLabel("Info")
+        info_header = QLabel("Info", self)
         info_header.setStyleSheet("font-weight: 600; font-size: 10.5pt; color: #8ea2ff; margin-top: 4px;")
         layout.addWidget(info_header)
-        self.info_label = QLabel()
+        self.info_label = QLabel(self)
         self.info_label.setWordWrap(True)
         self.info_label.setStyleSheet("color: #b6c0cf; font-size: 9.5pt;")
         layout.addWidget(self.info_label)
@@ -1164,9 +1171,14 @@ class ModelDetailsPanel(QWidget):
             self.avatar_label.clear()
             self.avatar_label.setText("🤖")
         
-        # Title
+        # Title — show the human-readable name; the raw HF repo id is kept
+        # underneath in repo_label for users who need the exact identifier.
         model_id = details.get("model_id", "Unknown Model")
-        model_name = model_id.split("/")[-1] if "/" in model_id else model_id
+        try:
+            from core.model_compatibility import pretty_model_name
+            model_name = pretty_model_name(model_id, include_org=False) or model_id
+        except Exception:
+            model_name = model_id.split("/")[-1] if "/" in model_id else model_id
         self.title_label.setText(model_name)
         self.title_label.setStyleSheet("color: white; font-size: 16pt; font-weight: bold;")
         self.repo_label.setText(model_id if "/" in model_id else "")

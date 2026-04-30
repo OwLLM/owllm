@@ -2949,7 +2949,14 @@ class MainWindow(QMainWindow):
             if getattr(self, "_code_page", None) is not None:
                 return
             self._code_tab_initializing = True
-            page = CodePage(parent=self, owllm_base_url="http://127.0.0.1:9100/v1")
+            # Use cline_proxy's stable-port URL (9999/v1). The previous
+            # hardcode pointed Cline at 9100, which is the per-model
+            # backend port — that port only exists when a specific model
+            # is loaded and is volatile across loads. The proxy at 9999
+            # is the stable shim Cline is supposed to talk to; it
+            # forwards to whichever model port is currently active.
+            from desktop_app import cline_proxy
+            page = CodePage(parent=self, owllm_base_url=cline_proxy.PROXY_BASE_URL)
             self._code_page = page  # set BEFORE tab swap so any re-fire short-circuits
             tabs.removeTab(self._code_tab_index)
             self._code_tab_index = tabs.insertTab(idx, page, "Code")

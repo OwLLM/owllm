@@ -9,9 +9,12 @@ import logging
 import time
 import threading
 from typing import Optional, List, Literal, Union, Dict, Any
+import json
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field
 
 # Configure logging
 logging.basicConfig(
@@ -177,11 +180,25 @@ class DebugGenerateResponse(BaseModel):
 # ============================================================================
 
 class ChatMessage(BaseModel):
-    role: Literal["system", "user", "assistant"]
-    content: str
+    # Allow extra fields ("name", "tool_calls", "tool_call_id", etc.) so
+    # OpenAI-protocol clients like Cline that include them don't 422 here.
+    model_config = ConfigDict(extra="ignore")
+    role: Literal["system", "user", "assistant", "tool", "function", "developer"]
+    # Cline / OpenAI-protocol clients sometimes send ``content`` as a list of
+    # parts ([{"type":"text","text":"..."},{"type":"image_url",...}]) instead
+    # of a plain string. Accept both; we render to plain text downstream.
+    content: Union[str, List[Any], None] = ""
 
 
 class ChatCompletionRequest(BaseModel):
+    # Cline 3.81 (and any modern OpenAI-protocol client) sends a superset of
+    # the fields below — ``tools``, ``tool_choice``, ``top_p``,
+    # ``response_format``, ``seed``, ``frequency_penalty``,
+    # ``presence_penalty``, ``n``, ``user``, ``logprobs``, etc. Pydantic's
+    # default behaviour is to reject extras with HTTP 422, which is exactly
+    # the symptom we hit ("[openai] 422 status code (no body)"). Switch to
+    # ``extra="ignore"`` so unknown fields are silently dropped.
+    model_config = ConfigDict(extra="ignore")
     model: str = "local-llm"
     messages: List[ChatMessage]
     temperature: float = 0.7
@@ -621,35 +638,67 @@ async def list_models():
     )
 
 
-@app.post("/v1/chat/completions", response_model=ChatCompletionResponse)
+@app.post("/v1/chat/completions")
 async def chat_completions(request: ChatCompletionRequest):
-    """Chat completions endpoint (OpenAI-compatible)"""
+    """Chat completions endpoint (OpenAI-compatible).
+
+    Supports both blocking responses (``stream=false``) and Server-Sent
+    Events streaming (``stream=true``). Streaming is required by Cline 3.81
+    and most modern OpenAI-protocol clients — without it they get HTTP 400.
+
+    Streaming implementation: we still generate the full text in one shot
+    (the underlying transformers/exllama backends here are not
+    incremental), then break the result into chunked SSE events on the way
+    out. Token-level streaming is a future enhancement; chunk-level keeps
+    Cline happy and feels responsive enough for short replies.
+    """
     if model is None or (tokenizer is None and processor is None) or _load_state != "ready":
         detail = "Model not ready"
         if _load_state == "error" and _load_error:
             detail = f"Model load failed: {_load_error}"
         raise HTTPException(status_code=503, detail=detail)
-    
-    if request.stream:
-        raise HTTPException(status_code=400, detail="Streaming not yet supported")
-    
+
+    def _flatten_content(c) -> str:
+        """OpenAI-protocol clients (Cline 3.81 included) sometimes send
+        ``content`` as a list of parts like
+        ``[{"type":"text","text":"..."},{"type":"image_url","image_url":{...}}]``
+        instead of a plain string. Concatenate text parts and drop the rest
+        — image parts are routed through ``request.images`` separately for
+        models that support them."""
+        if c is None:
+            return ""
+        if isinstance(c, str):
+            return c
+        if isinstance(c, list):
+            out = []
+            for part in c:
+                if isinstance(part, dict):
+                    t = part.get("type")
+                    if t == "text" and isinstance(part.get("text"), str):
+                        out.append(part["text"])
+                elif isinstance(part, str):
+                    out.append(part)
+            return "\n".join(out)
+        return str(c)
+
     try:
         # Build prompt from messages
         prompt_parts = []
-        
+
         # Add system messages
-        system_messages = [msg.content for msg in request.messages if msg.role == "system"]
+        system_messages = [_flatten_content(msg.content) for msg in request.messages if msg.role == "system"]
         if system_messages:
             prompt_parts.append(system_messages[0])  # Use first system message
         elif system_prompt:
             prompt_parts.append(system_prompt)
-        
+
         # Add conversation history
         for msg in request.messages:
+            text = _flatten_content(msg.content)
             if msg.role == "user":
-                prompt_parts.append(f"User: {msg.content}")
+                prompt_parts.append(f"User: {text}")
             elif msg.role == "assistant":
-                prompt_parts.append(f"Assistant: {msg.content}")
+                prompt_parts.append(f"Assistant: {text}")
         
         # Add final prompt
         prompt_parts.append("Assistant:")
@@ -660,6 +709,99 @@ async def chat_completions(request: ChatCompletionRequest):
         if _gptq_backend == "exllamav2" and request.images:
             raise HTTPException(status_code=400, detail="This backend does not support images (GPTQ ExLlamaV2).")
 
+        completion_id = f"chatcmpl-{int(time.time())}"
+        created_ts = int(time.time())
+        prompt_tok = len(full_prompt.split())
+
+        # ---- Streaming branch (REAL token-level streaming) ------------
+        # The previous implementation ran model.generate() to completion
+        # before yielding anything, then chopped the finished string into
+        # SSE-shaped chunks. With Cline-style 12k-token prompts, that's
+        # several minutes of total silence and Cline's UI gives up before
+        # the first byte arrives. For the transformers / llama-cpp paths
+        # we now use generate_text_streaming(), which yields each token
+        # as the model emits it. Multimodal + ExLlamaV2 still use the
+        # old path because they don't expose token-level streaming yet.
+        can_stream_real = (
+            request.stream
+            and processor is None
+            and _gptq_backend != "exllamav2"
+        )
+        if can_stream_real:
+            from core.llm_backends.run_adapter_backend import generate_text_streaming
+
+            def _sse_iter_real():
+                # First chunk advertises the assistant role.
+                first = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": request.model,
+                    "choices": [
+                        {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+                    ],
+                }
+                yield f"data: {json.dumps(first)}\n\n"
+
+                produced_words = 0
+                try:
+                    for piece in generate_text_streaming(
+                        tokenizer=tokenizer,
+                        model=model,
+                        prompt=full_prompt,
+                        max_new_tokens=request.max_tokens,
+                        temperature=request.temperature,
+                        model_type=model_type,
+                        system_prompt="",
+                    ):
+                        if not piece:
+                            continue
+                        produced_words += len(piece.split())
+                        msg = {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created_ts,
+                            "model": request.model,
+                            "choices": [
+                                {"index": 0, "delta": {"content": piece}, "finish_reason": None}
+                            ],
+                        }
+                        yield f"data: {json.dumps(msg)}\n\n"
+                except Exception as gen_err:
+                    logger.error(f"Streaming generation error: {gen_err}")
+                    err_payload = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_ts,
+                        "model": request.model,
+                        "choices": [
+                            {"index": 0, "delta": {"content": f"\n[server error: {gen_err}]"}, "finish_reason": "stop"}
+                        ],
+                    }
+                    yield f"data: {json.dumps(err_payload)}\n\n"
+                    yield "data: [DONE]\n\n"
+                    return
+
+                final = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": request.model,
+                    "choices": [
+                        {"index": 0, "delta": {}, "finish_reason": "stop"}
+                    ],
+                    "usage": {
+                        "prompt_tokens": prompt_tok,
+                        "completion_tokens": produced_words,
+                        "total_tokens": prompt_tok + produced_words,
+                    },
+                }
+                yield f"data: {json.dumps(final)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(_sse_iter_real(), media_type="text/event-stream")
+
+        # ---- Non-streaming generation (and multimodal/ExLlamaV2) ------
         if processor is not None:
             from core.llm_backends.run_adapter_backend import generate_multimodal
             pil_images = _decode_images_to_pil(request.images) if request.images else []
@@ -687,31 +829,78 @@ async def chat_completions(request: ChatCompletionRequest):
                 model_type=model_type,
                 system_prompt=""  # Already included in prompt
             )
-        
-        # Create response in OpenAI format
+
+        text = generated_text.strip()
+        completion_tok = len(text.split())
+
+        # Multimodal/ExLlamaV2 still go through the old chunked-streaming
+        # path (their backends don't expose per-token streaming yet).
+        if request.stream:
+            def _sse_iter_chunked():
+                first = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": request.model,
+                    "choices": [
+                        {"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}
+                    ],
+                }
+                yield f"data: {json.dumps(first)}\n\n"
+
+                CHUNK = 64
+                for i in range(0, len(text), CHUNK):
+                    piece = text[i : i + CHUNK]
+                    msg = {
+                        "id": completion_id,
+                        "object": "chat.completion.chunk",
+                        "created": created_ts,
+                        "model": request.model,
+                        "choices": [
+                            {"index": 0, "delta": {"content": piece}, "finish_reason": None}
+                        ],
+                    }
+                    yield f"data: {json.dumps(msg)}\n\n"
+
+                final = {
+                    "id": completion_id,
+                    "object": "chat.completion.chunk",
+                    "created": created_ts,
+                    "model": request.model,
+                    "choices": [
+                        {"index": 0, "delta": {}, "finish_reason": "stop"}
+                    ],
+                    "usage": {
+                        "prompt_tokens": prompt_tok,
+                        "completion_tokens": completion_tok,
+                        "total_tokens": prompt_tok + completion_tok,
+                    },
+                }
+                yield f"data: {json.dumps(final)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(_sse_iter_chunked(), media_type="text/event-stream")
+
+        # ---- Non-streaming branch ------------------------------------
         response = ChatCompletionResponse(
-            id=f"chatcmpl-{int(time.time())}",
-            created=int(time.time()),
+            id=completion_id,
+            created=created_ts,
             model=request.model,
             choices=[
                 ChatCompletionChoice(
                     index=0,
-                    message=ChatMessage(
-                        role="assistant",
-                        content=generated_text.strip()
-                    ),
+                    message=ChatMessage(role="assistant", content=text),
                     finish_reason="stop"
                 )
             ],
             usage=ChatCompletionUsage(
-                prompt_tokens=len(full_prompt.split()),  # Rough estimate
-                completion_tokens=len(generated_text.split()),  # Rough estimate
-                total_tokens=len(full_prompt.split()) + len(generated_text.split())
+                prompt_tokens=prompt_tok,
+                completion_tokens=completion_tok,
+                total_tokens=prompt_tok + completion_tok,
             )
         )
-        
         return response
-        
+
     except Exception as e:
         logger.error(f"Chat completion failed: {e}")
         raise HTTPException(status_code=500, detail=f"Chat completion failed: {str(e)}")
@@ -732,6 +921,20 @@ async def root():
         },
         "status": "ready" if model is not None else "loading"
     }
+
+
+def _schedule_process_exit(delay_s: float = 0.2) -> None:
+    def _exit() -> None:
+        time.sleep(max(0.0, float(delay_s)))
+        os._exit(0)
+
+    threading.Thread(target=_exit, daemon=True).start()
+
+
+@app.post("/shutdown")
+async def shutdown_server():
+    _schedule_process_exit()
+    return {"status": "shutting_down", "model": model_name}
 
 
 if __name__ == "__main__":

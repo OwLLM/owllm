@@ -1840,6 +1840,189 @@ def generate_text(tokenizer, model, prompt, max_new_tokens=128, temperature=0.7,
     return text_clean
 
 
+def generate_text_streaming(tokenizer, model, prompt, max_new_tokens=128,
+                            temperature=0.7, model_type="base", system_prompt=""):
+    """Yield decoded text fragments as the model produces them.
+
+    The non-streaming ``generate_text`` runs ``model.generate`` to
+    completion before returning anything — for a 32B 4-bit transformers
+    model on a long prompt, that's minutes of silence and any HTTP client
+    expecting SSE (Cline, Continue, Open WebUI) will time out before the
+    first byte arrives.
+
+    This generator uses ``transformers.TextIteratorStreamer`` plus a
+    background thread for ``model.generate`` so each new token is
+    decoded and yielded as soon as the model emits it.
+
+    Falls back to the non-streaming path (yielding the full result at
+    the end) for backends that don't expose token-level streaming —
+    llama-cpp / ctransformers paths handle their own streaming
+    elsewhere; for transformers without TextIteratorStreamer (very old
+    versions) we degrade gracefully rather than failing.
+    """
+    # llama-cpp / ctransformers wrappers: use llama-cpp's native streaming.
+    if getattr(model, "_is_llamacpp", False):
+        if model_type == "instruct" and system_prompt:
+            formatted_prompt = f"{system_prompt}\n\nUser: {prompt}\nAssistant:"
+        else:
+            formatted_prompt = f"{prompt}"
+        try:
+            if getattr(model, "_is_ctransformers", False):
+                # ctransformers' Llama is iterable when called with stream=True.
+                stream = model.llm(
+                    formatted_prompt,
+                    max_new_tokens=int(max_new_tokens),
+                    temperature=float(temperature),
+                    stream=True,
+                )
+                for piece in stream:
+                    if piece:
+                        yield piece
+                return
+            stream = model.llm.create_completion(
+                prompt=formatted_prompt,
+                max_tokens=int(max_new_tokens),
+                temperature=float(temperature),
+                stream=True,
+            )
+            for chunk in stream:
+                try:
+                    piece = ((chunk or {}).get("choices") or [{}])[0].get("text", "")
+                except Exception:
+                    piece = ""
+                if piece:
+                    yield piece
+            return
+        except Exception as e:
+            # Fall back to non-streaming on backend error.
+            text = generate_text(tokenizer, model, prompt,
+                                 max_new_tokens=max_new_tokens,
+                                 temperature=temperature,
+                                 model_type=model_type,
+                                 system_prompt=system_prompt)
+            if text:
+                yield text
+            return
+
+    # Transformers path — real token-level streaming via TextIteratorStreamer.
+    try:
+        from transformers import TextIteratorStreamer
+    except Exception:
+        # Old transformers without the streamer — fall back to non-streaming.
+        text = generate_text(tokenizer, model, prompt,
+                             max_new_tokens=max_new_tokens,
+                             temperature=temperature,
+                             model_type=model_type,
+                             system_prompt=system_prompt)
+        if text:
+            yield text
+        return
+
+    import threading
+    model.eval()
+    device = next(model.parameters()).device
+
+    # Build the prompt the same way generate_text does. Kept inline to
+    # avoid a wider refactor of generate_text's massive body.
+    use_chat_template = (
+        model_type == "instruct"
+        and tokenizer is not None
+        and (
+            getattr(tokenizer, "chat_template", None) is not None
+            or hasattr(tokenizer, "apply_chat_template")
+        )
+    )
+    if use_chat_template:
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        try:
+            formatted_prompt = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+        except Exception:
+            formatted_prompt = (
+                f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+            )
+    else:
+        formatted_prompt = (
+            f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+        )
+
+    add_specials = not use_chat_template
+    inputs = tokenizer(formatted_prompt, return_tensors="pt",
+                       add_special_tokens=add_specials)
+    try:
+        eos_id = tokenizer.eos_token_id
+        if (eos_id is not None and inputs.get("input_ids") is not None
+                and inputs["input_ids"].shape[1] > 0
+                and int(inputs["input_ids"][0, -1].item()) == int(eos_id)):
+            inputs["input_ids"] = inputs["input_ids"][:, :-1]
+            if "attention_mask" in inputs and inputs["attention_mask"] is not None:
+                inputs["attention_mask"] = inputs["attention_mask"][:, :-1]
+    except Exception:
+        pass
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+
+    streamer = TextIteratorStreamer(
+        tokenizer, skip_prompt=True, skip_special_tokens=True,
+    )
+    gen_kwargs = {
+        **inputs,
+        "streamer": streamer,
+        "max_new_tokens": int(max_new_tokens),
+        "pad_token_id": tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
+        "eos_token_id": tokenizer.eos_token_id,
+        "use_cache": True,
+    }
+    if temperature and temperature > 0:
+        gen_kwargs["do_sample"] = True
+        gen_kwargs["temperature"] = float(temperature)
+    else:
+        gen_kwargs["do_sample"] = False
+
+    max_time_sec = _resolve_generate_max_time_seconds(model=model, model_type=model_type)
+    if max_time_sec is not None:
+        gen_kwargs["max_time"] = max_time_sec
+
+    error_holder: dict = {}
+
+    def _run():
+        try:
+            with torch.no_grad():
+                model.generate(**gen_kwargs)
+        except Exception as e:
+            error_holder["err"] = e
+            # Make sure the consumer wakes up.
+            try:
+                streamer.end()
+            except Exception:
+                pass
+
+    logging.info("Generate(streaming) start: input_tokens=%s, max_new_tokens=%s",
+                 inputs["input_ids"].shape[1], max_new_tokens)
+    t0 = time.time()
+    thread = threading.Thread(target=_run, name="hf-stream-generate", daemon=True)
+    thread.start()
+
+    produced_any = False
+    for piece in streamer:
+        if piece:
+            produced_any = True
+            yield piece
+
+    thread.join(timeout=10)
+    if "err" in error_holder:
+        # Surface the error after the thread finishes; clients see whatever
+        # was emitted before, then a logged error in the server.
+        logging.error("Streaming generation failed: %s", error_holder["err"])
+        if not produced_any:
+            raise error_holder["err"]
+
+    logging.info("Generate(streaming) done: elapsed=%.2fs", time.time() - t0)
+
+
 def generate_multimodal(processor, model, prompt, images, max_new_tokens=128, temperature=0.7):
     """Generate text from prompt and images using a vision model and processor.
 

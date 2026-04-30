@@ -5,20 +5,21 @@ import os
 import shutil
 import json
 import subprocess
+import threading
 import time
 
-# Install Windows subprocess no-window guard BEFORE any third-party import
-# that may spawn console children (pip/hf_hub/torch/transformers). See
-# core/win_subprocess_guard.py for rationale.
-try:
-    _app_root = os.path.dirname(os.path.abspath(__file__))
-    _llm_root = os.path.dirname(_app_root)
-    if _llm_root not in sys.path:
-        sys.path.insert(0, _llm_root)
-    from core.win_subprocess_guard import install_windows_subprocess_guard
-    install_windows_subprocess_guard()
-except Exception as _guard_exc:
-    print(f"[main] Could not install Windows subprocess guard: {_guard_exc!r}", file=sys.stderr)
+_app_root = os.path.dirname(os.path.abspath(__file__))
+_llm_root = os.path.dirname(_app_root)
+if _llm_root not in sys.path:
+    sys.path.insert(0, _llm_root)
+
+if os.environ.get("LOCALLLM_TRACE_WIDGETS") == "1":
+    try:
+        from tools.trace_window_creation import install as _install_widget_trace
+        _install_widget_trace()
+    except Exception:
+        pass
+
 from functools import partial
 from datetime import datetime
 from pathlib import Path
@@ -32,15 +33,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap, QPainter, QPen, QColor, QBrush
 
-# After PySide6 has loaded, re-run the QProcess portion of the guard so
-# every QProcess gets CREATE_NO_WINDOW by default (not just sites that
-# remember to call ``apply_create_no_window``).
-try:
-    from core.win_subprocess_guard import reinstall_after_qt_import as _reinstall_after_qt
-    _reinstall_after_qt()
-except Exception as _guard_qt_exc:
-    print(f"[main] Could not apply Qt portion of subprocess guard: {_guard_qt_exc!r}", file=sys.stderr)
-
 # Feature flag for hybrid frame wrapper (enabled by default)
 # To disable: set USE_HYBRID_FRAME=0 before running
 USE_HYBRID_FRAME = os.getenv("USE_HYBRID_FRAME", "1") == "1"
@@ -53,13 +45,13 @@ from desktop_app.training_widgets import MetricCard
 from desktop_app.splash_screen import SplashScreen
 from desktop_app.process_utils import (
     HiddenSubprocessRunner,
-    apply_create_no_window,
     qprocess_environment_to_environ,
 )
 from desktop_app.pages.server_page import ServerPage
 from desktop_app.pages.mcp_page import MCPPage
 from desktop_app.pages.github_import_page import GitHubImportPage
 from desktop_app.pages.characters_3d_page import Characters3DPage
+from desktop_app.pages.code_page import CodePage
 from desktop_app.widgets.character_preview_widget import CharacterPreviewWidget
 from desktop_app.widgets.process_console_widget import ProcessConsoleWidget
 
@@ -99,16 +91,8 @@ HF_TOKEN_NEW_PREFILLED_URL_BROAD = (
 )
 HF_TOKEN_DOCS_URL = "https://huggingface.co/docs/hub/en/security-tokens"
 
-# Windows subprocess flags to prevent CMD window flashing
+# Do not hide subprocess console windows.
 SUBPROCESS_FLAGS = {}
-if sys.platform == 'win32':
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = subprocess.SW_HIDE
-    SUBPROCESS_FLAGS = {
-        'startupinfo': startupinfo,
-        'creationflags': subprocess.CREATE_NO_WINDOW
-    }
 
 
 class InstallerThread(QThread):
@@ -1264,7 +1248,7 @@ class PackageCard(QFrame):
         header.setSpacing(12)
         
         # Checkbox for selection (show for all packages so user can select any)
-        self.checkbox = QCheckBox()
+        self.checkbox = QCheckBox(self)
         # Auto-check packages that need attention
         if needs_attention:
             self.checkbox.setChecked(True)
@@ -1350,21 +1334,21 @@ class PackageCard(QFrame):
         self.checkbox.mousePressEvent = lambda e: QCheckBox.mousePressEvent(self.checkbox, e)
         header.addWidget(self.checkbox)
         
-        name_label = QLabel(pkg_name)
+        name_label = QLabel(pkg_name, self)
         name_label.setWordWrap(True)
         name_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         name_label.setStyleSheet("""
-            font-size: 15pt; 
-            font-weight: 700; 
-            color: #ffffff; 
+            font-size: 15pt;
+            font-weight: 700;
+            color: #ffffff;
             background: transparent;
             letter-spacing: 0.5px;
         """)
         header.addWidget(name_label, 1)
         header.addStretch()
-        
+
         # Status badge with rounded background
-        self.status_badge = QLabel(status_text)
+        self.status_badge = QLabel(status_text, self)
         if is_loading:
             self.status_badge.setText("CHECKING...")
             self.status_badge.setStyleSheet("""
@@ -1390,7 +1374,7 @@ class PackageCard(QFrame):
         layout.addLayout(header)
         
         # Version info - vertical layout for proper wrapping
-        self.inst_label = QLabel()
+        self.inst_label = QLabel(self)
         self.inst_label.setWordWrap(True)
         if is_loading:
             self.inst_label.setText("Checking installation...")
@@ -1404,14 +1388,14 @@ class PackageCard(QFrame):
         layout.addWidget(self.inst_label)
         
         if required_version:
-            self.req_label = QLabel(f"Required: {required_version}")
+            self.req_label = QLabel(f"Required: {required_version}", self)
             self.req_label.setWordWrap(True)
             self.req_label.setStyleSheet("color: #aaa; font-size: 9pt; background: transparent;")
             layout.addWidget(self.req_label)
-        
+
         # Description
         if description:
-            desc = QLabel(description)
+            desc = QLabel(description, self)
             desc.setWordWrap(True)
             desc.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             desc.setStyleSheet("""
@@ -2627,49 +2611,43 @@ class MainWindow(QMainWindow):
         sys_info_layout.setContentsMargins(0, 0, 0, 0)
         sys_info_layout.setSpacing(4)
         
-        # Get real system info
-        python_info = self.system_info.get("python", {})
-        pytorch_info = self.system_info.get("pytorch", {})
-        hardware_info = self.system_info.get("hardware", {})
-        
-        python_ver = python_info.get("version", "Unknown")
-        python_label = QLabel(f"🐍 Python {python_ver}")
-        python_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
-        sys_info_layout.addWidget(python_label)
-        self.header_python_label = python_label
-        
-        # PyTorch info
-        if pytorch_info.get("found"):
-            pytorch_ver = pytorch_info.get("version", "Unknown")
-            if pytorch_info.get("cuda_available"):
-                cuda_ver = pytorch_info.get("cuda_version", "Unknown")
-                pytorch_label = QLabel(f"🔥 PyTorch {pytorch_ver} (CUDA {cuda_ver})")
-            else:
-                pytorch_label = QLabel(f"🔥 PyTorch {pytorch_ver} (CPU)")
-        else:
-            pytorch_label = QLabel("🔥 PyTorch: Not found")
-        pytorch_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
-        sys_info_layout.addWidget(pytorch_label)
-        self.header_pytorch_label = pytorch_label
-        
-        # RAM info (round to nearest power of 2 for cleaner display)
-        ram_gb = hardware_info.get("ram_gb", 0)
-        # Round to nearest common RAM size (e.g., 63.8 -> 64)
-        if ram_gb > 60:
-            ram_display = 64
-        elif ram_gb > 30:
-            ram_display = 32
-        elif ram_gb > 14:
-            ram_display = 16
-        elif ram_gb > 6:
-            ram_display = 8
-        else:
-            ram_display = round(ram_gb)
-        
-        ram_label = QLabel(f"💾 RAM: {ram_display} GB")
-        ram_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
-        sys_info_layout.addWidget(ram_label)
-        self.header_ram_label = ram_label
+        # Runtime info (replaces static Python/PyTorch/RAM with live operational
+        # state: which servers are up, the API key clients use, and the VRAM
+        # each server is consuming). Populated by _update_header_runtime_info()
+        # — fires on a 2-second QTimer, with VRAM queried on a worker thread.
+        servers_label = QLabel("🟢 Servers: …", self)
+        servers_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
+        servers_label.setToolTip("Models with an inference server currently running.")
+        sys_info_layout.addWidget(servers_label)
+        self.header_servers_label = servers_label
+
+        apikey_label = QLabel("🔑 API key: owllm-local", self)
+        apikey_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
+        apikey_label.setCursor(Qt.PointingHandCursor)
+        apikey_label.setToolTip(
+            "API key clients use to talk to OWLLM's OpenAI-compatible proxy at "
+            "http://127.0.0.1:9999/v1.\nClick to copy."
+        )
+        # Click to copy api key to clipboard.
+        def _copy_apikey(_event=None):
+            try:
+                QApplication.clipboard().setText("owllm-local")
+                apikey_label.setText("🔑 API key: copied!")
+                QTimer.singleShot(1200, lambda: apikey_label.setText("🔑 API key: owllm-local"))
+            except Exception:
+                pass
+        apikey_label.mousePressEvent = _copy_apikey
+        sys_info_layout.addWidget(apikey_label)
+        self.header_apikey_label = apikey_label
+
+        vram_label = QLabel("💾 VRAM: …", self)
+        vram_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
+        vram_label.setToolTip("Total GPU VRAM in use; per-server breakdown in tooltip when servers are running.")
+        sys_info_layout.addWidget(vram_label)
+        self.header_vram_label = vram_label
+
+        # Cached VRAM stats — populated by _vram_worker_run on a worker thread.
+        self._vram_stats: dict = {"per_pid": {}, "totals": []}
         
         # Right column (system info + window buttons)
         header_right = QWidget()
@@ -2760,15 +2738,15 @@ class MainWindow(QMainWindow):
         self.mcp_btn = QPushButton("🧩 MCP")
         self.envs_btn = QPushButton("⚙️ Environment")
         self.characters_btn = QPushButton("🧙‍♂️ Characters")
-        self.terminal_btn = QPushButton("Terminal")
+        self.code_btn = QPushButton("💻 Code")
         self.info_btn = QPushButton("ℹ️ Info")
-        
+
         # Navigation buttons will be styled by theme system
-        
-        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.characters_btn, self.terminal_btn, self.info_btn]:
+
+        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.characters_btn, self.code_btn, self.info_btn]:
             btn.setCheckable(True)
             # Navigation buttons will be styled by theme system
-        
+
         # Add left-side buttons
         navbar_layout.addWidget(self.home_btn)
         navbar_layout.addWidget(self.download_btn)
@@ -2778,12 +2756,12 @@ class MainWindow(QMainWindow):
         navbar_layout.addWidget(self.mcp_btn)
         navbar_layout.addWidget(self.envs_btn)
         navbar_layout.addWidget(self.characters_btn)
-        
+        navbar_layout.addWidget(self.code_btn)
+
         # Add stretch to consume remaining space
         navbar_layout.addStretch(1)
-        
+
         # Add Logs and Info buttons on far right
-        navbar_layout.addWidget(self.terminal_btn)
         navbar_layout.addWidget(self.logs_btn)
         navbar_layout.addWidget(self.info_btn)
         
@@ -2805,6 +2783,7 @@ class MainWindow(QMainWindow):
             "server": "Server",
             "mcp": "MCP",
             "characters": "Characters",
+            "code": "Code",
             "github_import": "GitHub Import",
             "environment": "Environment Manager",
             "info": "Info"
@@ -2832,6 +2811,17 @@ class MainWindow(QMainWindow):
         
         # 3D Characters page
         tabs.addTab(_timed_build("Characters", lambda: Characters3DPage(self)), "Characters")
+
+        # Code tab — bundled VSCodium + Cline embedded in OWLLM. Lazy-built
+        # so the (potentially first-run) bootstrap doesn't block startup.
+        self._code_page = None
+        self._code_tab_placeholder = QWidget()
+        _code_placeholder_layout = QVBoxLayout(self._code_tab_placeholder)
+        _code_placeholder_layout.setContentsMargins(20, 20, 20, 20)
+        _code_placeholder_layout.addWidget(QLabel("Code editor loads when opened…"))
+        _code_placeholder_layout.addStretch(1)
+        self._code_tab_index = tabs.addTab(self._code_tab_placeholder, "Code")
+        tabs.currentChanged.connect(lambda idx: self._init_code_page_if_needed(tabs, idx))
         
         # Lazy-init Environment Manager page (can be expensive on startup due environment scans).
         self._env_page_initialized = False
@@ -2853,7 +2843,7 @@ class MainWindow(QMainWindow):
         self.mcp_btn.clicked.connect(lambda: self._switch_tab(tabs, "mcp"))
         self.characters_btn.clicked.connect(lambda: self._switch_tab(tabs, "characters"))
         self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, "environment"))
-        self.terminal_btn.clicked.connect(self._toggle_process_console)
+        self.code_btn.clicked.connect(lambda: self._switch_tab(tabs, "code"))
         self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, "info"))
         
         # Also connect to tab widget's currentChanged signal to handle programmatic changes
@@ -2877,7 +2867,6 @@ class MainWindow(QMainWindow):
         border_layout.addWidget(main_widget)
         
         self.setCentralWidget(border_container)
-        self._setup_process_console()
         
         # Add build number in bottom right corner (overlay)
         build_label = QLabel(f"[{_APP_BUILD}]", border_container)
@@ -2923,6 +2912,14 @@ class MainWindow(QMainWindow):
         # Auto-run system diagnostics on startup (delayed to allow UI to render first)
         QTimer.singleShot(500, self._auto_check_system)
 
+        # Header runtime info (servers / API key / VRAM) refreshes every 2s.
+        # First tick fired ~750ms after construction so the GUI has settled.
+        self._runtime_header_timer = QTimer(self)
+        self._runtime_header_timer.setInterval(2000)
+        self._runtime_header_timer.timeout.connect(self._update_header_system_info)
+        self._runtime_header_timer.start()
+        QTimer.singleShot(750, self._update_header_system_info)
+
         self.downloaded_model_cards = []
         self.metric_cards = []
         
@@ -2934,6 +2931,36 @@ class MainWindow(QMainWindow):
             print(f"[WARNING] _refresh_locals() failed (this is normal on first startup): {e}")
         
         self._apply_theme()
+
+    def _init_code_page_if_needed(self, tabs, idx: int) -> None:
+        """Lazily build the Code tab the first time it is selected.
+
+        Re-entrancy guard: ``removeTab`` / ``insertTab`` / ``setCurrentIndex``
+        each re-fire ``QTabWidget.currentChanged`` synchronously, which calls
+        this handler again. Without the guard we'd build a fresh ``CodePage``
+        on every re-fire and blow the stack ("maximum recursion depth
+        exceeded") before the first build completes.
+        """
+        if getattr(self, "_code_tab_initializing", False):
+            return
+        try:
+            if idx != getattr(self, "_code_tab_index", -1):
+                return
+            if getattr(self, "_code_page", None) is not None:
+                return
+            self._code_tab_initializing = True
+            page = CodePage(parent=self, owllm_base_url="http://127.0.0.1:9100/v1")
+            self._code_page = page  # set BEFORE tab swap so any re-fire short-circuits
+            tabs.removeTab(self._code_tab_index)
+            self._code_tab_index = tabs.insertTab(idx, page, "Code")
+            tabs.setCurrentIndex(self._code_tab_index)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            self._log_to_app_log(f"[CODE TAB] init failed: {e}\n{tb}")
+            self._code_page = None
+        finally:
+            self._code_tab_initializing = False
 
     def _setup_process_console(self) -> None:
         """Add the built-in process terminal to the main window."""
@@ -3657,7 +3684,11 @@ class MainWindow(QMainWindow):
         """Retry CUDA detection after initial failure"""
         print("=== CUDA Detection Retry ===")
         detector = SystemDetector()
-        cuda_result = detector.detect_cuda()
+        # force_refresh=True bypasses the module-level cache; without it a
+        # stale enumeration (e.g. missing the new uuid/pci_bus_id fields after
+        # a hot patch) keeps coming back and gpu_config.json migration silently
+        # skips the UUID path.
+        cuda_result = detector.detect_cuda(force_refresh=True)
         
         # Update system_info with new CUDA detection
         self.system_info["cuda"] = cuda_result
@@ -3693,9 +3724,11 @@ class MainWindow(QMainWindow):
             sender.setText("🔄 Refreshing...")
             sender.repaint()  # Force UI update
         
-        # Re-detect system info
+        # Re-detect system info. force_refresh=True bypasses the module-level
+        # cache so the home tab actually gets fresh GPU data (including uuid +
+        # pci_bus_id) instead of whatever was detected at app startup.
         try:
-            self.system_info = SystemDetector().detect_all()
+            self.system_info = SystemDetector().detect_all(force_refresh=True)
             cuda_info = self.system_info.get("cuda", {})
             
             # Show success message
@@ -3968,6 +4001,15 @@ class MainWindow(QMainWindow):
             event.accept()
             return
 
+        # Tear down the embedded VSCodium (Code tab) so it doesn't outlive
+        # OWLLM as a ghost window.
+        try:
+            cp = getattr(self, "_code_page", None)
+            if cp is not None:
+                cp.shutdown()
+        except Exception:
+            pass
+
         # Ensure requirements checker thread is not left running at shutdown.
         try:
             t = getattr(self, "_req_check_thread", None)
@@ -4211,7 +4253,7 @@ class MainWindow(QMainWindow):
                                 subprocess.run(["taskkill", "/F", "/PID", found_pid], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
                     except Exception:
                         pass
-                
+
                 # Kill orphan OWLLM uvicorn servers not recorded in StateStore
                 if os.name == "nt":
                     try:
@@ -4782,65 +4824,29 @@ class MainWindow(QMainWindow):
         self.installer_thread.start()
     
     def _install_dependencies(self):
-        """Fix Issues: Launch installer GUI for repair"""
-        import subprocess
-        from pathlib import Path
-        
-        # Find run_installer.bat (preferred) or installer_gui.py (fallback)
-        app_dir = Path(__file__).parent.parent
-        run_installer_bat = app_dir / "run_installer.bat"
-        installer_gui = app_dir / "installer_gui.py"
-        
-        # Prefer run_installer.bat which ensures bootstrap is used (explicit cmd to avoid shell window)
-        if run_installer_bat.exists():
-            try:
-                print("[MAIN] process_start: install_deps run_installer.bat", file=sys.stderr)
-                if sys.platform == "win32":
-                    subprocess.Popen(
-                        ["cmd", "/c", str(run_installer_bat)],
-                        cwd=str(app_dir),
-                        **SUBPROCESS_FLAGS
-                    )
-                else:
-                    subprocess.Popen(
-                        [str(run_installer_bat)],
-                        cwd=str(app_dir),
-                        **SUBPROCESS_FLAGS
-                    )
-                # Close main app - installer will handle everything
-                self.close()
-                return
-            except Exception as e:
-                # Fall through to installer_gui.py fallback
-                pass
-        
-        # Fallback: launch installer_gui.py directly (it has bootstrap guard)
-        if installer_gui.exists():
-            python_exe = sys.executable
-            try:
-                print("[MAIN] process_start: install_deps installer_gui.py", file=sys.stderr)
-                subprocess.Popen(
-                    [python_exe, str(installer_gui)],
-                    cwd=str(app_dir),
-                    **SUBPROCESS_FLAGS
-                )
-                # Close main app - installer will handle everything
-                self.close()
-                return
-            except Exception as e:
-                QMessageBox.critical(
-                    self,
-                    "Launch Failed",
-                    f"Failed to launch installer GUI:\n{str(e)}\n\n"
-                    "Please run run_installer.bat or installer_gui.py manually."
-                )
-        else:
-            QMessageBox.critical(
-                self,
-                "Installer Not Found",
-                f"Installer not found.\n\n"
-                "Please ensure run_installer.bat or installer_gui.py is in the LLM directory."
-            )
+        """Fix Issues: run repair inside the main app without opening another console/window."""
+        if getattr(self, "installer_thread", None) is not None and self.installer_thread.isRunning():
+            QMessageBox.information(self, "Repair Running", "A repair task is already running.")
+            return
+
+        btn = self.sender()
+        if isinstance(btn, QPushButton):
+            self.fix_issues_btn = btn
+            btn.setEnabled(False)
+            btn.setText("Repairing...")
+
+        if hasattr(self, "install_log"):
+            self.install_log.setVisible(True)
+            self.install_log.clear()
+            self.install_log.appendPlainText("=== Fix Issues: in-app repair ===")
+
+        self._append_terminal("Starting in-app repair. No external installer window will be launched.", source="install")
+        self.installer_thread = InstallerThread("repair")
+        self.installer_thread.log_output.connect(
+            lambda msg: (self.install_log.appendPlainText(msg) if hasattr(self, "install_log") else None, self._append_terminal(msg, source="install"))
+        )
+        self.installer_thread.finished_signal.connect(self._on_install_complete)
+        self.installer_thread.start()
     
     def _on_install_complete(self, success: bool):
         """Handle installation completion"""
@@ -4903,6 +4909,9 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'install_pytorch_btn'):
             self.install_pytorch_btn.setEnabled(True)
             self.install_pytorch_btn.setText("Install CUDA Version")
+        if hasattr(self, 'fix_issues_btn'):
+            self.fix_issues_btn.setEnabled(True)
+            self.fix_issues_btn.setText("🛠️ Fix Issues (Recommended)")
     
     def _restart_application(self):
         """Restart the application"""
@@ -5581,11 +5590,16 @@ class MainWindow(QMainWindow):
         
         setup_layout.addLayout(pytorch_row)
         
-        # CUDA drivers status
+        # CUDA drivers status — prefer the runtime version (parsed from nvidia-smi
+        # / nvcc), fall back to the driver version. ``driver_version`` is often
+        # ``None`` on systems that report only the CUDA runtime, which would
+        # otherwise display "Version None" while the header bar shows the actual
+        # CUDA version from torch.
+        _cuda_ver = cuda_info.get("version") or cuda_info.get("driver_version") or "N/A"
         cuda_status = self._create_status_row(
             "🎮 CUDA Drivers",
             cuda_info.get("found", False),
-            f"Version {cuda_info.get('driver_version', 'N/A')}" if cuda_info.get("found") else "Not found"
+            f"Version {_cuda_ver}" if cuda_info.get("found") else "Not found"
         )
         setup_layout.addLayout(cuda_status)
         
@@ -6308,14 +6322,15 @@ class MainWindow(QMainWindow):
                         cached_stats = get_cached_model_stats(model_id)
                         
                         card = DownloadedModelCard(
-                            model_name, 
-                            str(model_dir), 
-                            size, 
-                            icons, 
+                            model_name,
+                            str(model_dir),
+                            size,
+                            icons,
                             is_incomplete=is_incomplete,
                             compatibility_badge=compatibility_badge,
                             onboarding_status=display_onboarding_status,
-                            env_key=env_key
+                            env_key=env_key,
+                            parent=self.downloaded_container,
                         )
                         if cached_stats and (cached_stats.get("gated") or cached_stats.get("private")):
                             card.set_requires_token(True)
@@ -6442,9 +6457,10 @@ class MainWindow(QMainWindow):
                 if cached_stats.get("likes") is not None:
                     likes_str = f"{cached_stats['likes']:,}"
             
-            card = ModelCard(name, model_id, desc, size, icons, is_downloaded, is_new, 
+            card = ModelCard(name, model_id, desc, size, icons, is_downloaded, is_new,
                            downloads=downloads_str, likes=likes_str,
-                           compatibility_badge=compatibility_badge)
+                           compatibility_badge=compatibility_badge,
+                           parent=self.curated_container)
             if cached_stats and (cached_stats.get("gated") or cached_stats.get("private")):
                 card.set_requires_token(True)
             card.set_theme(self.dark_mode)
@@ -8811,7 +8827,8 @@ class MainWindow(QMainWindow):
             is_incomplete=not status_check.is_complete,
             compatibility_badge=compatibility_badge,
             onboarding_status=display_fresh_status,
-            env_key=env_key
+            env_key=env_key,
+            parent=self.downloaded_container,
         )
         new_card.set_theme(self.dark_mode)
         new_card.selected.connect(self._on_model_selected)
@@ -8946,7 +8963,7 @@ class MainWindow(QMainWindow):
         elif clicked == btn_reboot:
             try:
                 import subprocess
-                subprocess.Popen(["shutdown", "/r", "/t", "10", "/c", "LLM Studio: restarting for VC++ runtime"], creationflags=subprocess.CREATE_NO_WINDOW)
+                subprocess.Popen(["shutdown", "/r", "/t", "10", "/c", "LLM Studio: restarting for VC++ runtime"])
             except Exception:
                 pass
 
@@ -9459,15 +9476,16 @@ class MainWindow(QMainWindow):
                 
                 # Create card with download functionality
                 card = ModelCard(
-                    model_name, 
-                    model_id, 
-                    "", # No description for search results yet
-                    "Unknown size", 
-                    icons, 
-                    is_downloaded, 
-                    downloads=dl_text, 
+                    model_name,
+                    model_id,
+                    "",
+                    "Unknown size",
+                    icons,
+                    is_downloaded,
+                    downloads=dl_text,
                     likes=likes_text,
-                    compatibility_badge=compatibility_badge
+                    compatibility_badge=compatibility_badge,
+                    parent=self.search_results_container,
                 )
                 # Keep search cards visually consistent with curated cards.
                 # Curated cards often render taller because they include descriptions.
@@ -9836,65 +9854,81 @@ class MainWindow(QMainWindow):
             self._log_models(f"⚠️ Failed to save GPU VRAM override: {e}")
     
     def _get_selected_gpu_indices(self) -> list:
-        """Get list of selected GPU indices from config file."""
+        """Get list of selected GPU indices from config file.
+
+        Identity is stored as ``selected_gpu_uuids`` (stable across driver/BIOS
+        reorderings). Legacy ``selected_gpu_indices`` are honored as a fallback
+        and migrated to UUIDs on first read.
+        """
         cuda_info = self.system_info.get("cuda", {})
         all_gpus = cuda_info.get("gpus", []) or []
-        
-        # Ensure all GPUs have _orig_index set
+
         for idx, gpu in enumerate(all_gpus):
             if "_orig_index" not in gpu:
                 gpu["_orig_index"] = idx
-        
+
         if not all_gpus:
             return []
-        
-        # Find the most powerful GPU
+
         sorted_gpus = self._sort_gpus_by_memory(all_gpus)
-        most_powerful_idx = None
-        if sorted_gpus:
-            most_powerful_idx = sorted_gpus[0].get("_orig_index")
-        
+        most_powerful_idx = sorted_gpus[0].get("_orig_index") if sorted_gpus else None
+
+        # Build uuid → current _orig_index map for resolution.
+        uuid_to_idx: dict = {}
+        for gpu in all_gpus:
+            u = gpu.get("uuid")
+            if u:
+                uuid_to_idx[u] = gpu.get("_orig_index")
+
         config_path = self.root / "desktop_app" / "config" / "gpu_config.json"
         if config_path.exists():
             try:
                 with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    if "selected_gpu_indices" in config:
-                        selected = config["selected_gpu_indices"]
-                        # Validate that selected indices still exist
-                        valid_indices = [gpu.get("_orig_index", idx) for idx, gpu in enumerate(all_gpus)]
-                        # Filter to only valid indices
-                        filtered = [idx for idx in selected if idx in valid_indices]
-                        if filtered:
-                            # If we have a saved selection but it's not the most powerful, reset to most powerful
-                            # (This ensures default is always most powerful on first run)
-                            if most_powerful_idx is not None and most_powerful_idx not in filtered:
-                                # Reset to most powerful if current selection doesn't include it
-                                print(f"[DEBUG] Saved selection {filtered} doesn't include most powerful GPU {most_powerful_idx}, resetting")
-                                self._save_selected_gpu_indices([most_powerful_idx])
-                                return [most_powerful_idx]
-                            return filtered
+                    config = json.load(f) or {}
+
+                # Preferred: UUID-based identity.
+                saved_uuids = config.get("selected_gpu_uuids")
+                if isinstance(saved_uuids, list) and saved_uuids and uuid_to_idx:
+                    resolved = [uuid_to_idx[u] for u in saved_uuids if u in uuid_to_idx]
+                    if resolved:
+                        # Indices may have shifted since last save — rewrite.
+                        self._save_selected_gpu_indices(resolved)
+                        return resolved
+                    print(f"[DEBUG] Saved UUIDs {saved_uuids} not present in current enumeration; falling back")
+
+                # Legacy: positional indices.
+                if "selected_gpu_indices" in config:
+                    selected = config["selected_gpu_indices"]
+                    valid_indices = [gpu.get("_orig_index", idx) for idx, gpu in enumerate(all_gpus)]
+                    filtered = [idx for idx in selected if idx in valid_indices]
+                    if filtered:
+                        # Migrate to UUID-based storage so the next driver
+                        # re-enumeration cannot silently flip the selection.
+                        self._save_selected_gpu_indices(filtered)
+                        return filtered
             except Exception as e:
                 print(f"[DEBUG] Error reading GPU config: {e}")
                 import traceback
                 traceback.print_exc()
-        
-        # Default: if no config or invalid selection, select the most powerful GPU (highest VRAM)
+
         if most_powerful_idx is not None:
-            # Save this as default selection
             self._save_selected_gpu_indices([most_powerful_idx])
             print(f"[DEBUG] Defaulting to most powerful GPU: {most_powerful_idx}")
             return [most_powerful_idx]
-        
+
         return []
     
     def _save_selected_gpu_indices(self, indices: list) -> None:
-        """Save selected GPU indices to config file."""
+        """Save selected GPU indices to config file.
+
+        Also writes ``selected_gpu_uuids`` (the stable identity used by
+        ``core/gpu_config.py``). Indices are kept for human readability but the
+        UUID list is what survives driver/BIOS re-enumerations.
+        """
         config_path = self.root / "desktop_app" / "config" / "gpu_config.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         try:
-            # Load existing config to preserve vram_gb
             config = {}
             if config_path.exists():
                 try:
@@ -9902,44 +9936,68 @@ class MainWindow(QMainWindow):
                         config = json.load(f)
                 except Exception:
                     config = {}
-            
-            config["selected_gpu_indices"] = sorted(indices)  # Sort for consistency
+
+            sorted_indices = sorted(indices)
+            config["selected_gpu_indices"] = sorted_indices
+
+            # Resolve indices → UUIDs via system_info so the next read survives reordering.
+            cuda_info = self.system_info.get("cuda", {})
+            all_gpus = cuda_info.get("gpus", []) or []
+            for i, gpu in enumerate(all_gpus):
+                if "_orig_index" not in gpu:
+                    gpu["_orig_index"] = i
+            idx_to_uuid = {gpu.get("_orig_index"): gpu.get("uuid") for gpu in all_gpus if gpu.get("uuid")}
+            uuids = [idx_to_uuid[i] for i in sorted_indices if i in idx_to_uuid]
+            if uuids:
+                config["selected_gpu_uuids"] = uuids
+            elif "selected_gpu_uuids" in config:
+                # No UUID known for any selected index — drop stale UUID list.
+                del config["selected_gpu_uuids"]
+
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
-            print(f"[DEBUG] Saved GPU indices to config: {sorted(indices)}")
+            print(f"[DEBUG] Saved GPU selection: indices={sorted_indices} uuids={uuids}")
         except Exception as e:
             print(f"⚠️ Failed to save GPU selection: {e}")
             import traceback
             traceback.print_exc()
     
     def _on_gpu_selection_changed(self, gpu_index: int, state: int) -> None:
-        """Handle GPU checkbox state change."""
-        # Get current selection (force fresh read)
-        selected = list(self._get_selected_gpu_indices())  # Make a copy
-        
-        print(f"[DEBUG] GPU selection changed: GPU {gpu_index}, state={state}, current selection={selected}")
-        
-        if state == Qt.Checked:
-            if gpu_index not in selected:
+        """Handle GPU checkbox state change.
+
+        Source of truth for the new selection is the live checkbox row, not
+        the on-disk config — otherwise stale config from before a hot-fix can
+        bounce the user's clicks back ("I unchecked the A2000 and it comes
+        back"). We compute the intended selection from the actual checkbox
+        states, then validate before saving.
+        """
+        # Read live state from the checkboxes themselves.
+        selected: list[int] = []
+        if hasattr(self, "gpu_checkboxes"):
+            for orig_idx, cb in self.gpu_checkboxes.items():
+                if cb is None:
+                    continue
+                if cb.isChecked():
+                    selected.append(int(orig_idx))
+        # bool(state) is robust across PyQt5/PyQt6 enum differences.
+        is_checked = bool(state)
+        print(f"[DEBUG] GPU selection changed: GPU {gpu_index}, checked={is_checked}, live selection={selected}")
+
+        if not is_checked and not selected:
+            # User just unchecked the last selected GPU. Block, since at least
+            # one must stay selected.
+            QMessageBox.warning(
+                self,
+                "GPU Selection",
+                "At least one GPU must be selected. Please select another GPU before deselecting this one."
+            )
+            if hasattr(self, "gpu_checkboxes") and gpu_index in self.gpu_checkboxes:
+                self.gpu_checkboxes[gpu_index].blockSignals(True)
+                self.gpu_checkboxes[gpu_index].setChecked(True)
+                self.gpu_checkboxes[gpu_index].blockSignals(False)
                 selected.append(gpu_index)
-                print(f"[DEBUG] GPU {gpu_index} added to selection. New selection: {selected}")
-        else:
-            # Ensure at least one GPU is selected
-            if len(selected) <= 1:
-                QMessageBox.warning(
-                    self,
-                    "GPU Selection",
-                    "At least one GPU must be selected. Please select another GPU before deselecting this one."
-                )
-                # Re-check the checkbox
-                if hasattr(self, 'gpu_checkboxes') and gpu_index in self.gpu_checkboxes:
-                    self.gpu_checkboxes[gpu_index].blockSignals(True)
-                    self.gpu_checkboxes[gpu_index].setChecked(True)
-                    self.gpu_checkboxes[gpu_index].blockSignals(False)
+            else:
                 return
-            if gpu_index in selected:
-                selected.remove(gpu_index)
-                print(f"[DEBUG] GPU {gpu_index} removed from selection. New selection: {selected}")
         
         # Save the updated selection
         self._save_selected_gpu_indices(selected)
@@ -10995,9 +11053,6 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
-        # HiddenSubprocessRunner uses subprocess.Popen so win_subprocess_guard applies.
-        # QProcess delegates to Qt6Core CreateProcess and ignores our Python-side patches;
-        # PySide6 6.8.1 also lacks setCreateProcessArgumentsModifier.
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONIOENCODING", "utf-8")
         env.insert("PYTHONUTF8", "1")
@@ -17318,13 +17373,17 @@ except Exception as e:
         col1_pkgs = sorted_packages[::2]
         col2_pkgs = sorted_packages[1::2]
         
-        # Create all cards in LOADING state immediately
+        # Create all cards in LOADING state immediately. Pass the column's
+        # parent widget so each PackageCard is parented before any HWND can
+        # be created — without it Qt briefly treats each card as a top-level
+        # window, producing one OWLLM-titled flash per package.
         for pkg_list, layout in [(col1_pkgs, self.requirements_col1), (col2_pkgs, self.requirements_col2)]:
+            parent_widget = layout.parentWidget()
             for pkg_name in pkg_list:
                 req_ver = required_packages.get(pkg_name, "")
                 card = PackageCard(
-                    pkg_name, req_ver, "", False, "checking", "#667eea", "CHECKING...", 
-                    descriptions.get(pkg_name, ""), is_loading=True
+                    pkg_name, req_ver, "", False, "checking", "#667eea", "CHECKING...",
+                    descriptions.get(pkg_name, ""), is_loading=True, parent=parent_widget,
                 )
                 card.clicked.connect(self._on_package_card_clicked)
                 card.checkbox_toggled.connect(self._on_package_checkbox_toggled)
@@ -20593,43 +20652,196 @@ respective package directories or official repositories.
         t.start()
     
     def _update_header_system_info(self):
-        """Update the header system info labels with detected values"""
-        python_info = self.system_info.get("python", {})
-        pytorch_info = self.system_info.get("pytorch", {})
-        hardware_info = self.system_info.get("hardware", {})
+        """Refresh the header runtime info labels (servers, API key, VRAM).
 
-        # Python label
-        if hasattr(self, "header_python_label"):
-            pyver = python_info.get("version", "Unknown")
-            self.header_python_label.setText(f"🐍 Python {pyver}")
+        Replaces the old static Python / PyTorch / RAM display. Driven by:
+         - the 2-second :attr:`_runtime_header_timer` started in __init__
+         - a one-shot kick from :meth:`_start_background_detection` so the
+           initial values appear ASAP after the GUI shows.
 
-        # PyTorch label
-        if hasattr(self, "header_pytorch_label"):
-            if pytorch_info.get("found"):
-                ptver = pytorch_info.get("version", "Unknown")
-                if pytorch_info.get("cuda_available"):
-                    cuver = pytorch_info.get("cuda_version", "Unknown")
-                    self.header_pytorch_label.setText(f"🔥 PyTorch {ptver} (CUDA {cuver})")
-                else:
-                    self.header_pytorch_label.setText(f"🔥 PyTorch {ptver} (CPU)")
+        VRAM numbers are populated asynchronously by :meth:`_kick_vram_query`
+        which spawns a worker thread to call ``nvidia-smi`` (200–500 ms).
+        Server lists are read in-process from the global LLMServerManager.
+        """
+        # --- Servers --------------------------------------------------------
+        if hasattr(self, "header_servers_label"):
+            running_pairs: list[tuple[str, int, str]] = []
+            try:
+                from core.llm_server_manager import get_global_server_manager
+                mgr = get_global_server_manager()
+                seen_cfg_ids: set[str] = set()
+                # 1) In-memory: servers this session started directly.
+                for cfg_id in list(getattr(mgr, "running_servers", {}).keys()):
+                    cfg = mgr.config.get("models", {}).get(cfg_id, {}) or {}
+                    base_model = cfg.get("base_model") or ""
+                    display = base_model.replace("\\", "/").rsplit("/", 1)[-1] or cfg_id
+                    port = int(cfg.get("port") or 0)
+                    running_pairs.append((display, port, cfg_id))
+                    seen_cfg_ids.add(cfg_id)
+                # 2) StateStore: servers adopted via fast-path reuse, or
+                #    started by an external test/CLI process. Without this
+                #    merge the header counts 0 even when the proxy is happily
+                #    forwarding to a healthy upstream.
+                try:
+                    rows = mgr.state_store.list_servers(status="RUNNING") or []
+                except Exception:
+                    rows = []
+                for row in rows:
+                    cfg_id = row.get("model_id")
+                    if not cfg_id or cfg_id in seen_cfg_ids:
+                        continue
+                    cfg = mgr.config.get("models", {}).get(cfg_id, {}) or {}
+                    base_model = cfg.get("base_model") or ""
+                    display = base_model.replace("\\", "/").rsplit("/", 1)[-1] or cfg_id
+                    port = int(row.get("port") or cfg.get("port") or 0)
+                    running_pairs.append((display, port, cfg_id))
+                    seen_cfg_ids.add(cfg_id)
+            except Exception:
+                running_pairs = []
+
+            if not running_pairs:
+                self.header_servers_label.setText("🟢 Servers: 0")
+                self.header_servers_label.setToolTip("No inference servers running. Start one in the Server or Code tab.")
             else:
-                self.header_pytorch_label.setText("🔥 PyTorch: Not found")
+                summary = ", ".join(d for d, _, _ in running_pairs[:2])
+                if len(running_pairs) > 2:
+                    summary += f", +{len(running_pairs) - 2}"
+                self.header_servers_label.setText(f"🟢 Servers: {len(running_pairs)} ({summary})")
+                tooltip_lines = [f"{d}  :  port {p}  ({cfg_id})" for d, p, cfg_id in running_pairs]
+                self.header_servers_label.setToolTip("\n".join(tooltip_lines))
 
-        # RAM label
-        if hasattr(self, "header_ram_label"):
-            ram_gb = hardware_info.get("ram_gb", 0) or 0
-            # Round to nearest common RAM size for display
-            if ram_gb > 60:
-                ram_display = 64
-            elif ram_gb > 30:
-                ram_display = 32
-            elif ram_gb > 14:
-                ram_display = 16
-            elif ram_gb > 6:
-                ram_display = 8
+        # --- API key (static; click to copy is wired in __init__) ----------
+        # Nothing to recompute here per-tick; left in place for completeness.
+
+        # --- VRAM ----------------------------------------------------------
+        if hasattr(self, "header_vram_label"):
+            stats = getattr(self, "_vram_stats", {}) or {}
+            totals = stats.get("totals") or []
+            per_pid = stats.get("per_pid") or {}
+
+            # Aggregate "running model PIDs" so we can map each MB to a server.
+            try:
+                from core.llm_server_manager import get_global_server_manager
+                mgr = get_global_server_manager()
+                running = getattr(mgr, "running_servers", {})
+            except Exception:
+                running = {}
+
+            # Try state_store for actual server PID; fall back to Popen.pid.
+            server_pid_to_label: dict[int, str] = {}
+            try:
+                state_store = getattr(self, "state_store", None)
+                for cfg_id, tup in running.items():
+                    cfg = (mgr.config.get("models", {}) or {}).get(cfg_id, {}) or {}
+                    base_model = (cfg.get("base_model") or "").replace("\\", "/")
+                    label = base_model.rsplit("/", 1)[-1] or cfg_id
+                    pid: int = 0
+                    if state_store is not None:
+                        try:
+                            row = state_store.get_server(cfg_id)
+                            pid = int((row or {}).get("pid") or 0)
+                        except Exception:
+                            pid = 0
+                    if pid <= 0:
+                        try:
+                            proc = tup[0]
+                            pid = int(getattr(proc, "pid", 0) or 0)
+                        except Exception:
+                            pid = 0
+                    if pid > 0:
+                        server_pid_to_label[pid] = label
+            except Exception:
+                server_pid_to_label = {}
+
+            if not totals:
+                self.header_vram_label.setText("💾 VRAM: querying…")
+                self.header_vram_label.setToolTip("Waiting for nvidia-smi response.")
             else:
-                ram_display = round(ram_gb)
-            self.header_ram_label.setText(f"💾 RAM: {ram_display} GB")
+                used_total = sum(t[0] for t in totals)
+                cap_total = sum(t[1] for t in totals)
+                self.header_vram_label.setText(
+                    f"💾 VRAM: {used_total / 1024:.1f} / {cap_total / 1024:.1f} GB"
+                )
+                tooltip = []
+                for i, (used, cap) in enumerate(totals):
+                    tooltip.append(f"GPU {i}: {used / 1024:.1f} / {cap / 1024:.1f} GB")
+                if server_pid_to_label and per_pid:
+                    tooltip.append("")
+                    tooltip.append("By server:")
+                    for pid, label in server_pid_to_label.items():
+                        mb = per_pid.get(pid, 0)
+                        tooltip.append(f"  {label}: {mb / 1024:.2f} GB")
+                if not server_pid_to_label:
+                    tooltip.append("")
+                    tooltip.append("(no OWLLM server VRAM use detected)")
+                self.header_vram_label.setToolTip("\n".join(tooltip))
+
+        # Kick a fresh nvidia-smi query for the next tick.
+        self._kick_vram_query()
+
+    def _kick_vram_query(self) -> None:
+        """Spawn a non-blocking thread that runs nvidia-smi to refresh
+        :attr:`_vram_stats`. Cheaper than calling nvidia-smi on the GUI
+        thread (200–500 ms blocking is noticeable on slow drivers)."""
+        if getattr(self, "_vram_query_in_flight", False):
+            return
+        self._vram_query_in_flight = True
+
+        def _run() -> None:
+            try:
+                stats = self._vram_query_blocking()
+            except Exception:
+                stats = {"per_pid": {}, "totals": []}
+            QTimer.singleShot(0, lambda: self._on_vram_stats(stats))
+
+        t = threading.Thread(target=_run, name="vram-query", daemon=True)
+        t.start()
+
+    def _on_vram_stats(self, stats: dict) -> None:
+        self._vram_stats = stats or {"per_pid": {}, "totals": []}
+        self._vram_query_in_flight = False
+
+    def _vram_query_blocking(self) -> dict:
+        """Single nvidia-smi shell-out. Returns
+        ``{"per_pid": {pid: mb}, "totals": [(used_mb, cap_mb), ...]}``."""
+        per_pid: dict[int, int] = {}
+        totals: list[tuple[int, int]] = []
+        creationflags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=4, creationflags=creationflags,
+            )
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        per_pid[int(parts[0])] = int(parts[1])
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=4, creationflags=creationflags,
+            )
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) < 2:
+                        continue
+                    try:
+                        totals.append((int(parts[0]), int(parts[1])))
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+        return {"per_pid": per_pid, "totals": totals}
 
     def _refresh_gpu_selectors(self) -> None:
         """Refresh Train/Test GPU dropdowns based on latest detection results."""
@@ -21036,21 +21248,32 @@ def main() -> int:
         app_font.setPointSize(14)
         app.setFont(app_font)
         
-        # Show splash screen with minimal info
+        # Show splash screen with minimal info.
+        #
+        # NOTE: never call ``app.processEvents()`` from this startup section.
+        # Between ``MainWindow(...)`` construction and ``win.show()`` the Qt
+        # event queue is full of pending HWND-creation / show / paint events
+        # for every QWidget the MainWindow built (pages, dock, tabs, web
+        # views, etc.). ``processEvents()`` would flush ALL of them at once,
+        # rendering each transient widget on screen for one frame as a flash
+        # — what the user sees as "dozens of flashes" precisely at progress-
+        # bar phase changes (50%, before 100%, at 100%). Use the splash's
+        # synchronous ``repaint()`` instead: it repaints ONLY the splash
+        # widget, no events from other widgets get processed.
         splash = SplashScreen()
         splash.show()
         splash.update_progress(10, "Starting up", "Initializing OWLLM...")
-        app.processEvents()  # Force display
-        
+        splash.repaint()
+
         # Create main window quickly (NO detection during init - pass None for splash)
         splash.update_progress(50, "Creating interface", "")
-        app.processEvents()
-        
+        splash.repaint()
+
         win = MainWindow(splash=None)  # Don't pass splash to skip slow detection
-        
+
         # Show main window IMMEDIATELY
         splash.update_progress(100, "Ready!", "")
-        app.processEvents()
+        splash.repaint()
         
         # Apply decorative frame overlay if enabled
         if USE_HYBRID_FRAME:

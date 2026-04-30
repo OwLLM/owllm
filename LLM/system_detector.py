@@ -15,6 +15,36 @@ from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 from datetime import datetime
 
+# ---------------------------------------------------------------------------
+# Module-level caches to avoid spamming nvidia-smi / wmic on every page render.
+#
+# Background: before this cache, the desktop app spawned nvidia-smi 8+ times
+# and wmic 3 times during a ~15s startup because every widget that showed
+# GPU info created a fresh ``SystemDetector`` and called ``detect_all()`` or
+# ``get_gpu_memory_usage()``. On Windows, even with ``CREATE_NO_WINDOW``,
+# certain driver / WDDM combinations briefly flash a console window for
+# these console-subsystem children. Caching removes the polling pressure
+# entirely.
+#
+# Two TTLs:
+#   * ``_VRAM_USAGE_TTL_SEC``: fast-changing data (live VRAM usage). Short
+#     TTL so UI refreshes still reflect real changes when users explicitly
+#     click "Refresh" a few seconds apart.
+#   * ``_DETECT_ALL_TTL_SEC``: immutable-during-app-lifetime data (GPU model,
+#     CUDA version, compute capability, driver version, CPU name). Long TTL
+#     because these do not change while the app is running.
+# ---------------------------------------------------------------------------
+
+_VRAM_USAGE_TTL_SEC = 30.0
+_DETECT_ALL_TTL_SEC = 300.0
+_DETECT_CUDA_TTL_SEC = 300.0
+_DETECT_HARDWARE_TTL_SEC = 300.0
+_VRAM_CACHE: Dict[str, object] = {"ts": 0.0, "value": None}
+_DETECT_ALL_CACHE: Dict[str, object] = {"ts": 0.0, "value": None}
+_DETECT_CUDA_CACHE: Dict[str, object] = {"ts": 0.0, "value": None}
+_DETECT_HARDWARE_CACHE: Dict[str, object] = {"ts": 0.0, "value": None}
+
+
 class SystemDetector:
     """Detects system components and hardware capabilities"""
     
@@ -22,16 +52,8 @@ class SystemDetector:
         self.platform = platform.system().lower()
         self.detection_results = {}
         
-        # Windows subprocess flags to prevent CMD window flashing
+        # Do not hide subprocess console windows.
         self.subprocess_flags = {}
-        if sys.platform == 'win32':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-            self.subprocess_flags = {
-                'startupinfo': startupinfo,
-                'creationflags': subprocess.CREATE_NO_WINDOW
-            }
     
     def _log_cuda_detection(self, result: Dict, success: bool):
         """Log CUDA detection attempts to logs/cuda_detection.log"""
@@ -69,17 +91,31 @@ class SystemDetector:
         except Exception:
             pass  # Don't fail detection if logging fails
     
-    def detect_all(self) -> Dict:
-        """Run all detection methods and return results."""
+    def detect_all(self, force_refresh: bool = False) -> Dict:
+        """Run all detection methods and return results.
+
+        Uses a module-level cache with TTL ``_DETECT_ALL_TTL_SEC`` to avoid
+        re-spawning nvidia-smi / wmic on repeated calls. Pass
+        ``force_refresh=True`` after a hardware/driver change (e.g. user
+        installed CUDA) to bypass the cache.
+        """
+        now = time.time()
+        if not force_refresh:
+            cached = _DETECT_ALL_CACHE.get("value")
+            cached_ts = float(_DETECT_ALL_CACHE.get("ts", 0.0) or 0.0)
+            if cached is not None and (now - cached_ts) < _DETECT_ALL_TTL_SEC:
+                self.detection_results = cached
+                return cached
+
         python_info = self.detect_python()
         pytorch_info = self.detect_pytorch()
-        cuda_info = self.detect_cuda()
+        cuda_info = self.detect_cuda(force_refresh=force_refresh)
         results = {
             "python": python_info,
             "pytorch": pytorch_info,
             "cuda": cuda_info,
             # Reuse already-detected CUDA info to avoid duplicate nvidia-smi scans.
-            "hardware": self.detect_hardware(cuda_info=cuda_info),
+            "hardware": self.detect_hardware(cuda_info=cuda_info, force_refresh=force_refresh),
             "vcredist": self.detect_vcredist() if self.platform == "windows" else None,
             "recommendations": {}
         }
@@ -88,6 +124,8 @@ class SystemDetector:
         results["recommendations"] = self.get_recommendations(results)
         
         self.detection_results = results
+        _DETECT_ALL_CACHE["value"] = results
+        _DETECT_ALL_CACHE["ts"] = now
         return results
     
     def detect_python(self) -> Dict:
@@ -201,7 +239,6 @@ class SystemDetector:
             try:
                 with (log_dir / "debug.log").open("a", encoding="utf-8") as log_file:
                     import json
-                    import time
                     log_file.write(json.dumps({"id": f"log_{int(time.time() * 1000)}_detect_python_error", "timestamp": int(time.time() * 1000), "location": "system_detector.py:89", "message": "Exception in detect_python", "data": {"error_type": type(e).__name__, "error_msg": str(e), "traceback": traceback.format_exc()}, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
             except Exception:
                 pass
@@ -248,7 +285,6 @@ class SystemDetector:
             try:
                 with (log_dir / "debug.log").open("a", encoding="utf-8") as log_file:
                     import json
-                    import time
                     log_file.write(json.dumps({"id": f"log_{int(time.time() * 1000)}_detect_pytorch_error", "timestamp": int(time.time() * 1000), "location": "system_detector.py:192", "message": "Exception in detect_pytorch", "data": {"error_type": type(e).__name__, "error_msg": str(e), "traceback": traceback.format_exc()}, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
             except Exception:
                 pass
@@ -268,9 +304,23 @@ class SystemDetector:
                     time.sleep(delay)
                 
                 timeout = timeouts[min(attempt, len(timeouts) - 1)]
+                # Batched query: retrieves everything detect_cuda needs in a single
+                # nvidia-smi spawn (name, memory, driver, cuda version, compute cap,
+                # uuid, pci.bus_id). uuid + pci.bus_id are the stable identity used
+                # by gpu_config.py to survive driver/BIOS reorderings — without
+                # them, "selected_gpu_indices: [0]" silently changes meaning when
+                # the OS re-enumerates the bus.
+                # Pin CUDA_DEVICE_ORDER=PCI_BUS_ID so any child CUDA runtime sees
+                # the same numbering nvidia-smi reports.
+                env = dict(os.environ)
+                env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
                 nvidia_smi = subprocess.run(
-                    ["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"],
-                    capture_output=True, text=True, timeout=timeout, **self.subprocess_flags
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=name,memory.total,driver_version,cuda_version,compute_cap,uuid,pci.bus_id",
+                        "--format=csv,noheader",
+                    ],
+                    capture_output=True, text=True, timeout=timeout, env=env, **self.subprocess_flags
                 )
                 
                 if nvidia_smi.returncode == 0:
@@ -325,12 +375,33 @@ class SystemDetector:
                     if current_part:
                         parts.append(current_part.strip())
                     
+                    # Batched query returns up to 7 fields: name, memory.total,
+                    # driver_version, cuda_version, compute_cap, uuid, pci.bus_id.
+                    # uuid + pci.bus_id are stable identifiers — gpu_config saves
+                    # the UUID, not the positional index, so a driver/BIOS
+                    # re-enumeration cannot silently flip "GPU 0" between cards.
                     if len(parts) >= 3:
                         gpu_info = {
                             "name": parts[0].strip('"'),
                             "memory": parts[1].strip('"'),
                             "driver_version": parts[2].strip('"')
                         }
+                        if len(parts) >= 5:
+                            cuda_ver_raw = parts[3].strip('"')
+                            if cuda_ver_raw and not cuda_ver_raw.lower().startswith("not"):
+                                if not result.get("version"):
+                                    result["version"] = cuda_ver_raw
+                            compute_cap_raw = parts[4].strip('"')
+                            if compute_cap_raw:
+                                gpu_info["compute_capability"] = compute_cap_raw
+                        if len(parts) >= 6:
+                            uuid_raw = parts[5].strip('"')
+                            if uuid_raw:
+                                gpu_info["uuid"] = uuid_raw
+                        if len(parts) >= 7:
+                            pci_raw = parts[6].strip('"')
+                            if pci_raw:
+                                gpu_info["pci_bus_id"] = pci_raw
                         result["gpus"].append(gpu_info)
                         if not result["driver_version"]:
                             result["driver_version"] = parts[2].strip('"')
@@ -338,34 +409,6 @@ class SystemDetector:
             if result["gpus"]:
                 result["found"] = True
                 result["available"] = True
-                
-                # Try to get CUDA version from nvidia-smi
-                try:
-                    cuda_version_cmd = subprocess.run(
-                        ["nvidia-smi", "--query-gpu=cuda_version", "--format=csv,noheader"],
-                        capture_output=True, text=True, timeout=10, **self.subprocess_flags
-                    )
-                    if cuda_version_cmd.returncode == 0 and cuda_version_cmd.stdout.strip():
-                        cuda_ver_raw = cuda_version_cmd.stdout.strip().split('\n')[0].strip()
-                        # Filter out "Not Supported" or similar messages
-                        if cuda_ver_raw and not cuda_ver_raw.lower().startswith("not"):
-                            result["version"] = cuda_ver_raw
-                except Exception as e:
-                    result.setdefault("warnings", []).append(f"Could not get CUDA version from nvidia-smi: {str(e)[:100]}")
-                
-                # Get compute capability for each GPU
-                try:
-                    compute_cmd = subprocess.run(
-                        ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
-                        capture_output=True, text=True, timeout=10, **self.subprocess_flags
-                    )
-                    if compute_cmd.returncode == 0 and compute_cmd.stdout.strip():
-                        compute_caps = compute_cmd.stdout.strip().split('\n')
-                        for idx, cap in enumerate(compute_caps):
-                            if idx < len(result["gpus"]):
-                                result["gpus"][idx]["compute_capability"] = cap.strip()
-                except Exception as e:
-                    result.setdefault("warnings", []).append(f"Could not get compute capability: {str(e)[:100]}")
                 
                 # If CUDA version not detected but we have driver, that's still useful
                 if not result.get("version") and result.get("driver_version"):
@@ -395,7 +438,26 @@ class SystemDetector:
                 if torch.version.cuda:
                     if not result.get("version"):
                         result["version"] = torch.version.cuda
-                    return True
+                
+                gpus = []
+                try:
+                    for idx in range(torch.cuda.device_count()):
+                        props = torch.cuda.get_device_properties(idx)
+                        total_mb = int(getattr(props, "total_memory", 0) // (1024 * 1024))
+                        major = getattr(props, "major", None)
+                        minor = getattr(props, "minor", None)
+                        gpu_info = {
+                            "name": torch.cuda.get_device_name(idx),
+                            "memory": f"{total_mb} MiB" if total_mb > 0 else "",
+                        }
+                        if major is not None and minor is not None:
+                            gpu_info["compute_capability"] = f"{int(major)}.{int(minor)}"
+                        gpus.append(gpu_info)
+                except Exception as e:
+                    result.setdefault("warnings", []).append(f"PyTorch GPU property check failed: {str(e)[:100]}")
+                if gpus:
+                    result["gpus"] = gpus
+                return True
         except ImportError:
             pass  # PyTorch not installed
         except Exception as e:
@@ -485,8 +547,22 @@ class SystemDetector:
         
         return False
     
-    def detect_cuda(self) -> Dict:
-        """Detect CUDA installation and GPU hardware with multiple methods and retry logic"""
+    def detect_cuda(self, force_refresh: bool = False) -> Dict:
+        """Detect CUDA installation and GPU hardware with multiple methods and retry logic.
+
+        Uses a module-level cache with TTL ``_DETECT_CUDA_TTL_SEC``. Every
+        call into ``detect_cuda`` spawns at least one ``nvidia-smi`` process
+        on Windows; on some driver / WDDM configurations these briefly flash
+        a console window even with ``CREATE_NO_WINDOW``, so repeat-calling
+        across widgets during startup must be avoided. Pass
+        ``force_refresh=True`` from explicit "Retry detection" flows.
+        """
+        now = time.time()
+        if not force_refresh:
+            cached = _DETECT_CUDA_CACHE.get("value")
+            cached_ts = float(_DETECT_CUDA_CACHE.get("ts", 0.0) or 0.0)
+            if cached is not None and (now - cached_ts) < _DETECT_CUDA_TTL_SEC:
+                return cached
         result = {
             "found": False,
             "available": False,
@@ -500,13 +576,14 @@ class SystemDetector:
         }
         
         try:
-            # Method 1: nvidia-smi (primary, most reliable)
-            if self._detect_cuda_via_nvidia_smi(result):
-                result["detection_methods"].append("nvidia-smi")
-            
-            # Method 2: PyTorch CUDA check (verification)
+            # Method 1: PyTorch CUDA check (no external console process).
             if self._detect_cuda_via_pytorch(result):
                 result["detection_methods"].append("pytorch")
+
+            # Method 2: nvidia-smi. Only use this on explicit refresh/repair
+            # flows; normal startup must not spawn console-subsystem tools.
+            if force_refresh and self._detect_cuda_via_nvidia_smi(result):
+                result["detection_methods"].append("nvidia-smi")
             
             # Method 3: File system detection (fallback)
             if self._detect_cuda_via_filesystem(result):
@@ -530,6 +607,8 @@ class SystemDetector:
             success = result["found"] and result.get("available", False)
             self._log_cuda_detection(result, success)
             
+            _DETECT_CUDA_CACHE["value"] = result
+            _DETECT_CUDA_CACHE["ts"] = now
             return result
         except Exception as e:
             import traceback
@@ -539,12 +618,13 @@ class SystemDetector:
             try:
                 with (log_dir / "debug.log").open("a", encoding="utf-8") as log_file:
                     import json
-                    import time
                     log_file.write(json.dumps({"id": f"log_{int(time.time() * 1000)}_detect_cuda_error", "timestamp": int(time.time() * 1000), "location": "system_detector.py:452", "message": "Exception in detect_cuda", "data": {"error_type": type(e).__name__, "error_msg": str(e), "traceback": traceback.format_exc()}, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
             except Exception:
                 pass
             result["error"] = str(e)
             result["traceback"] = traceback.format_exc()
+            _DETECT_CUDA_CACHE["value"] = result
+            _DETECT_CUDA_CACHE["ts"] = now
             return result
     
     def verify_cuda_health(self) -> Dict:
@@ -595,9 +675,23 @@ class SystemDetector:
         
         return health
     
-    def get_gpu_memory_usage(self) -> List[Dict]:
-        """Get current GPU memory usage for all detected GPUs"""
-        result = []
+    def get_gpu_memory_usage(self, force_refresh: bool = False) -> List[Dict]:
+        """Get current GPU memory usage for all detected GPUs.
+
+        Uses a module-level cache with TTL ``_VRAM_USAGE_TTL_SEC`` so that
+        multiple widgets/pages calling this within a short window share
+        a single nvidia-smi spawn. Pass ``force_refresh=True`` to bypass
+        the cache (e.g. from an explicit "Refresh VRAM" button).
+        """
+        now = time.time()
+        if not force_refresh:
+            cached = _VRAM_CACHE.get("value")
+            cached_ts = float(_VRAM_CACHE.get("ts", 0.0) or 0.0)
+            if cached is not None and (now - cached_ts) < _VRAM_USAGE_TTL_SEC:
+                return list(cached)  # defensive copy
+            return []
+
+        result: List[Dict] = []
         try:
             nvidia_smi = subprocess.run(
                 ["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"],
@@ -618,14 +712,27 @@ class SystemDetector:
                             })
         except:
             pass
+        _VRAM_CACHE["value"] = list(result)
+        _VRAM_CACHE["ts"] = now
         return result
 
-    def detect_hardware(self, cuda_info: Optional[Dict] = None) -> Dict:
+    def detect_hardware(self, cuda_info: Optional[Dict] = None, force_refresh: bool = False) -> Dict:
         """Detect hardware capabilities.
 
         Args:
             cuda_info: Optional precomputed CUDA detection result to reuse.
+            force_refresh: If True, bypass the module-level cache.
+
+        Spawns ``wmic cpu get name`` on Windows, which can briefly flash a
+        console. Results are immutable for the app lifetime so we cache
+        with TTL ``_DETECT_HARDWARE_TTL_SEC`` to avoid repeat spawns.
         """
+        now = time.time()
+        if not force_refresh:
+            cached = _DETECT_HARDWARE_CACHE.get("value")
+            cached_ts = float(_DETECT_HARDWARE_CACHE.get("ts", 0.0) or 0.0)
+            if cached is not None and (now - cached_ts) < _DETECT_HARDWARE_TTL_SEC:
+                return cached
         result = {
             "cpu_name": None,  # Add top-level cpu_name for easy access
             "cpu": {
@@ -647,26 +754,32 @@ class SystemDetector:
             # Get CPU name/processor info
             try:
                 if self.platform == "windows":
+                    # Avoid WMI during normal startup; it can spawn a visible
+                    # console on some systems. Use it only for explicit refresh.
+                    if not force_refresh:
+                        result["cpu_name"] = platform.processor() or "Unknown CPU"
+                        result["cpu"]["processor"] = result["cpu_name"]
                     # Use WMI to get actual CPU name on Windows
-                    try:
-                        cpu_cmd = subprocess.run(
-                            ["wmic", "cpu", "get", "name"],
-                            capture_output=True, text=True, timeout=5, **self.subprocess_flags
-                        )
-                        if cpu_cmd.returncode == 0:
-                            lines = [line.strip() for line in cpu_cmd.stdout.strip().split('\n') if line.strip()]
-                            # First line is "Name", second is the actual CPU name
-                            if len(lines) > 1 and lines[1]:
-                                result["cpu_name"] = lines[1]
-                            elif len(lines) > 0 and lines[0] and lines[0] != "Name":
-                                result["cpu_name"] = lines[0]
+                    elif force_refresh:
+                        try:
+                            cpu_cmd = subprocess.run(
+                                ["wmic", "cpu", "get", "name"],
+                                capture_output=True, text=True, timeout=5, **self.subprocess_flags
+                            )
+                            if cpu_cmd.returncode == 0:
+                                lines = [line.strip() for line in cpu_cmd.stdout.strip().split('\n') if line.strip()]
+                                # First line is "Name", second is the actual CPU name
+                                if len(lines) > 1 and lines[1]:
+                                    result["cpu_name"] = lines[1]
+                                elif len(lines) > 0 and lines[0] and lines[0] != "Name":
+                                    result["cpu_name"] = lines[0]
+                                else:
+                                    result["cpu_name"] = platform.processor()
                             else:
                                 result["cpu_name"] = platform.processor()
-                        else:
-                            result["cpu_name"] = platform.processor()
-                    except Exception as e:
-                        # Fallback to platform.processor() on error
-                        result["cpu_name"] = platform.processor() or "Unknown CPU"
+                        except Exception as e:
+                            # Fallback to platform.processor() on error
+                            result["cpu_name"] = platform.processor() or "Unknown CPU"
                 else:
                     processor = platform.processor()
                     if processor:
@@ -762,6 +875,8 @@ class SystemDetector:
             except:
                 pass
             
+            _DETECT_HARDWARE_CACHE["value"] = result
+            _DETECT_HARDWARE_CACHE["ts"] = now
             return result
         except Exception as e:
             import traceback
@@ -771,12 +886,13 @@ class SystemDetector:
             try:
                 with (log_dir / "debug.log").open("a", encoding="utf-8") as log_file:
                     import json
-                    import time
                     log_file.write(json.dumps({"id": f"log_{int(time.time() * 1000)}_detect_hardware_error", "timestamp": int(time.time() * 1000), "location": "system_detector.py:594", "message": "Exception in detect_hardware", "data": {"error_type": type(e).__name__, "error_msg": str(e), "traceback": traceback.format_exc()}, "sessionId": "debug-session", "runId": "run1", "hypothesisId": "A"}) + "\n")
             except Exception:
                 pass
             result["error"] = str(e)
             result["traceback"] = traceback.format_exc()
+            _DETECT_HARDWARE_CACHE["value"] = result
+            _DETECT_HARDWARE_CACHE["ts"] = now
             return result
     
     def detect_vcredist(self) -> Dict:

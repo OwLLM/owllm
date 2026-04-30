@@ -19,6 +19,7 @@ import logging
 import os
 import threading
 import re
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple, IO
@@ -57,16 +58,8 @@ class LLMServerManager:
         from core.envs.env_registry import EnvRegistry
         self.env_registry = EnvRegistry()
         
-        # Windows subprocess flags to prevent CMD window flashing
+        # Do not hide child console windows.
         self.subprocess_flags = {}
-        if sys.platform == 'win32':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-            self.subprocess_flags = {
-                'startupinfo': startupinfo,
-                'creationflags': subprocess.CREATE_NO_WINDOW
-            }
         
         # THREAD SAFETY: Lock for all server operations
         # Prevents race conditions when multiple chat threads access manager
@@ -216,7 +209,7 @@ class LLMServerManager:
         """
         if not self._is_gguf_path(model_path):
             return
-        min_version = os.getenv("LLM_MIN_LLAMA_CPP_VERSION", "0.3.2").strip() or "0.3.2"
+        min_version = self.env_registry.runtime_bundle_manager.resolve_required_llama_cpp_version(model_path)
         current = self._get_env_package_version(env_spec.python_executable, "llama-cpp-python")
         if not current:
             return
@@ -383,6 +376,112 @@ class LLMServerManager:
         except Exception:
             return model_id
 
+    def _resolve_runtime_server_id(
+        self,
+        model_id: str,
+        canonical_id: str,
+        model_cfg: Optional[dict] = None,
+        runtime_base_model: Optional[str] = None,
+    ) -> str:
+        """
+        Derive a distinct runtime slot for exact GGUF file selections while keeping
+        directory-backed models on the shared model_id slot.
+        """
+        runtime_base_model = str(runtime_base_model or "").strip()
+        if not runtime_base_model:
+            return model_id
+        try:
+            runtime_path = Path(runtime_base_model).resolve()
+        except Exception:
+            return model_id
+        if runtime_path.suffix.lower() != ".gguf":
+            return model_id
+
+        variant_rel = runtime_path.name
+        configured_base = str((model_cfg or {}).get("base_model") or "").strip()
+        if configured_base:
+            try:
+                configured_path = Path(configured_base).resolve()
+                if configured_path.is_dir():
+                    variant_rel = str(runtime_path.relative_to(configured_path)).replace("\\", "/")
+            except Exception:
+                pass
+
+        variant_slug = re.sub(r"[^A-Za-z0-9._-]+", "__", variant_rel).strip("._-") or runtime_path.name
+        return f"{canonical_id or model_id}__gguf__{variant_slug}"
+
+    def _validate_runtime_model_target(self, model_path: Path) -> list[Path]:
+        """
+        Validate the exact runtime model target that will be launched.
+
+        For explicit GGUF file selections, validate that exact file instead of relying on
+        directory marker state. For directory-backed models, keep existing recursive discovery.
+        """
+        model_path = Path(model_path)
+        if not model_path.exists():
+            raise RuntimeError(
+                f"Model path does not exist: {model_path}\n"
+                f"Please check the model path in llm_backends.yaml"
+            )
+
+        if model_path.is_file():
+            suffix = model_path.suffix.lower()
+            if suffix not in {".gguf", ".safetensors", ".bin"}:
+                raise RuntimeError(
+                    f"Unsupported model file target: {model_path}\n"
+                    "Expected a .gguf, .safetensors, or .bin file."
+                )
+            if suffix == ".gguf":
+                try:
+                    size_bytes = model_path.stat().st_size
+                except Exception as exc:
+                    raise RuntimeError(f"GGUF file is unreadable: {model_path} ({exc})") from exc
+                if size_bytes < ModelIntegrityChecker.MIN_GGUF_BYTES:
+                    raise RuntimeError(
+                        f"GGUF file appears truncated: {model_path} ({size_bytes} bytes).\n"
+                        "Please repair or redownload this variant."
+                    )
+                try:
+                    with open(model_path, "rb") as fh:
+                        magic = fh.read(4)
+                except Exception as exc:
+                    raise RuntimeError(f"Failed to read GGUF header: {model_path} ({exc})") from exc
+                if magic != b"GGUF":
+                    raise RuntimeError(
+                        f"GGUF file has invalid header: {model_path}\n"
+                        "Please repair or redownload this variant."
+                    )
+            return [model_path]
+
+        model_files = (
+            list(model_path.rglob("*.safetensors"))
+            + list(model_path.rglob("*.bin"))
+            + list(model_path.rglob("*.gguf"))
+        )
+        if not model_files:
+            raise RuntimeError(
+                f"No model files found in {model_path}\n"
+                f"Expected .safetensors, .bin, or .gguf files. The model may not be downloaded correctly."
+            )
+
+        try:
+            integrity_status = ModelIntegrityChecker().check_model(model_path)
+            if not integrity_status.is_complete:
+                details = ", ".join(integrity_status.missing_files) or "unknown model file issue"
+                raise RuntimeError(
+                    f"Model files failed integrity check: {details}\n"
+                    f"Please use 'Repair model files' or re-onboard this model.\n"
+                    f"Model path: {model_path}"
+                )
+        except RuntimeError:
+            raise
+        except Exception as integrity_ex:
+            raise RuntimeError(
+                f"Model integrity preflight failed unexpectedly: {integrity_ex}\n"
+                f"Model path: {model_path}"
+            )
+        return model_files
+
     def _find_canonical_server_candidates(self, canonical_id: str) -> list[dict]:
         """
         Find active server rows (RUNNING/STARTING) that map to the same canonical model.
@@ -465,7 +564,12 @@ class LLMServerManager:
         except Exception:
             pass
     
-    def ensure_server_running(self, model_id: str, log_callback=None) -> str:
+    def ensure_server_running(
+        self,
+        model_id: str,
+        log_callback=None,
+        runtime_base_model: Optional[str] = None,
+    ) -> str:
         """
         Ensure server is running for given model_id, start if needed.
         THREAD SAFE: Uses lock to prevent concurrent starts.
@@ -582,6 +686,21 @@ class LLMServerManager:
                         f"Error: {error_msg}"
                     )
             
+            server_id = self._resolve_runtime_server_id(
+                model_id=model_id,
+                canonical_id=canonical_server_id,
+                model_cfg=model_cfg,
+                runtime_base_model=runtime_base_model,
+            )
+            if server_id != model_id:
+                try:
+                    log(
+                        f"Using GGUF runtime slot '{server_id}' for model '{model_id}' "
+                        f"(base_model={runtime_base_model})."
+                    )
+                except Exception:
+                    pass
+
             # Check for duplicate ports and warn
             preferred_port = model_cfg.get("port", 10500)
             duplicate_models = [
@@ -621,51 +740,51 @@ class LLMServerManager:
                             f"for requested model '{model_id}'."
                         )
                         self.state_store.upsert_server(
-                            model_id=model_id,
+                            model_id=server_id,
                             pid=None,
                             port=port,
                             status="RUNNING" if health_status == "ok" else "STARTING",
                         )
                         self._cleanup_canonical_duplicate_server_rows(
                             canonical_server_id,
-                            keep_model_id=model_id,
+                            keep_model_id=server_id,
                             keep_port=port,
                         )
                         self._cleanup_orphan_canonical_ports(canonical_server_id, keep_port=port)
                         if health_status == "loading":
-                            self._wait_for_health_ok(model_id, self.warmup_timeout, log_callback=log, port=port)
-                        return self._get_server_url(model_id)
+                            self._wait_for_health_ok(server_id, self.warmup_timeout, log_callback=log, port=port)
+                        return self._get_server_url(server_id)
                 except Exception:
                     continue
             
             # Check if already running and healthy
-            if model_id in self.running_servers:
-                process, _, _ = self.running_servers[model_id]
+            if server_id in self.running_servers:
+                process, _, _ = self.running_servers[server_id]
                 if process.poll() is None:  # Process is alive
-                    health_status, _ = self._check_health(model_id, return_status=True)
+                    health_status, _ = self._check_health(server_id, return_status=True)
                     if health_status == "ok":
-                        log(f"Server '{model_id}' already running and healthy")
-                        return self._get_server_url(model_id)
+                        log(f"Server '{server_id}' already running and healthy")
+                        return self._get_server_url(server_id)
                     if health_status == "loading":
                         # Prefer waiting for loading to finish rather than killing/restarting
-                        log(f"Server '{model_id}' is loading, waiting for it to become ready...")
+                        log(f"Server '{server_id}' is loading, waiting for it to become ready...")
                         try:
-                            self._wait_for_health_ok(model_id, self.warmup_timeout, log_callback=log)
-                            return self._get_server_url(model_id)
+                            self._wait_for_health_ok(server_id, self.warmup_timeout, log_callback=log)
+                            return self._get_server_url(server_id)
                         except TimeoutError:
-                            log(f"Server '{model_id}' did not become ready in time, will restart")
+                            log(f"Server '{server_id}' did not become ready in time, will restart")
                             process.kill()
-                            del self.running_servers[model_id]
+                            del self.running_servers[server_id]
                     else:
-                        log(f"Server '{model_id}' process alive but not healthy (status={health_status}), restarting")
+                        log(f"Server '{server_id}' process alive but not healthy (status={health_status}), restarting")
                         process.kill()
-                        del self.running_servers[model_id]
+                        del self.running_servers[server_id]
                 else:
-                    log(f"Server '{model_id}' process died, restarting")
-                    del self.running_servers[model_id]
+                    log(f"Server '{server_id}' process died, restarting")
+                    del self.running_servers[server_id]
 
             # If another slot already started this model (STARTING), wait for it instead of starting duplicate
-            server_state = self.state_store.get_server(model_id)
+            server_state = self.state_store.get_server(server_id)
             if server_state and server_state.get("status") == "STARTING":
                 port = server_state.get("port")
                 pid = server_state.get("pid")
@@ -687,7 +806,7 @@ class LLMServerManager:
                         )
                         try:
                             self.state_store.upsert_server(
-                                model_id=model_id,
+                                model_id=server_id,
                                 pid=pid if isinstance(pid, int) else None,
                                 port=int(port),
                                 status="FAILED",
@@ -701,12 +820,12 @@ class LLMServerManager:
                             pass
                     else:
                         log(
-                            f"Server for '{model_id}' is already starting (port {port}), "
+                            f"Server for '{server_id}' is already starting (port {port}), "
                             f"waiting up to {wait_timeout}s for readiness..."
                         )
                         try:
-                            self._wait_for_health_ok(model_id, wait_timeout, log_callback=log, port=port)
-                            return self._get_server_url(model_id)
+                            self._wait_for_health_ok(server_id, wait_timeout, log_callback=log, port=port)
+                            return self._get_server_url(server_id)
                         except TimeoutError:
                             log(f"Existing start did not become ready in {wait_timeout}s, will start server")
             
@@ -716,17 +835,22 @@ class LLMServerManager:
                 r = requests.get(f"http://127.0.0.1:{preferred_port}/health", timeout=2)
                 if r.status_code == 200:
                     data = r.json()
-                    if (str(data.get("model", "")).strip() == model_id and
+                    if (str(data.get("model", "")).strip() == server_id and
                             str(data.get("status", "")).lower().strip() == "ok"):
                         log(f"Server already running on port {preferred_port}, reusing it")
-                        self.state_store.upsert_server(model_id, None, preferred_port, "RUNNING")
-                        return self._get_server_url(model_id)
+                        self.state_store.upsert_server(server_id, None, preferred_port, "RUNNING")
+                        return self._get_server_url(server_id)
             except Exception:
                 pass  # Fall through to _start_server
             
             # Start new server
-            self._start_server(model_id, log_callback=log_callback)
-            return self._get_server_url(model_id)
+            self._start_server(
+                model_id,
+                log_callback=log_callback,
+                server_id=server_id,
+                runtime_base_model=runtime_base_model,
+            )
+            return self._get_server_url(server_id)
     
     def _check_port_available(self, port: int) -> bool:
         """
@@ -812,7 +936,13 @@ class LLMServerManager:
         except Exception:
             return None
 
-    def _start_server(self, model_id: str, log_callback=None):
+    def _start_server(
+        self,
+        model_id: str,
+        log_callback=None,
+        server_id: Optional[str] = None,
+        runtime_base_model: Optional[str] = None,
+    ):
         """
         Start server in correct environment with warmup polling.
         PHASE 1: Uses StateStore for port allocation instead of rewriting YAML.
@@ -867,7 +997,8 @@ class LLMServerManager:
             logger.debug("Could not check VRAM usage: %s", e)
 
         model_cfg = self.config["models"][model_id]
-        base_model = model_cfg["base_model"]
+        server_id = str(server_id or model_id)
+        base_model = str(runtime_base_model or model_cfg["base_model"])
         # Single key for all BROKEN writes this run (set when we load onboarding; fallback when we only wait).
         authoritative_onboarding_id = None
 
@@ -877,7 +1008,7 @@ class LLMServerManager:
         port_has_our_server = False  # Flag: if True, skip starting new server and go to warmup loop
         port_needs_reassignment = False  # Flag: if True, skip retries and search for new port immediately
         
-        log(f"Starting server for model '{model_id}' on preferred port {port} (from YAML config)")
+        log(f"Starting server for model '{server_id}' on preferred port {port} (from YAML config)")
         
         # CRITICAL: First check if our server is already running on the PREFERRED port
         # This prevents reassigning when server is already active on the correct port
@@ -890,10 +1021,10 @@ class LLMServerManager:
                 reported_model = str(data.get("model", "")).strip()
                 
                 # If this is definitely our model, check if it's healthy before reusing
-                if reported_model == model_id:
+                if reported_model == server_id:
                     if status == "ok":
                         log(f"Server already running on preferred port {port} (status=ok), reusing it")
-                        self.state_store.upsert_server(model_id, None, port, "RUNNING")
+                        self.state_store.upsert_server(server_id, None, port, "RUNNING")
                         return
                     elif status == "loading":
                         log(f"Server on preferred port {port} is loading, will wait for it to become ready")
@@ -904,7 +1035,7 @@ class LLMServerManager:
                         log(f"Server on preferred port {port} is in error state, attempting to kill and restart")
                         # Try to kill the existing server so we can start fresh
                         try:
-                            server_state = self.state_store.get_server(model_id)
+                            server_state = self.state_store.get_server(server_id)
                             pid = None
                             if server_state and server_state.get('pid'):
                                 pid = server_state.get('pid')
@@ -954,7 +1085,7 @@ class LLMServerManager:
                         # Continue to warmup loop
                         port_has_our_server = True
                 # If different model is using this port, treat as conflict and allow reassignment
-                elif reported_model and reported_model not in {model_id, ""}:
+                elif reported_model and reported_model not in {server_id, ""}:
                     log(
                         f"Port {port} is already in use by model '{reported_model}'. "
                         f"Will search for an available port for '{model_id}'."
@@ -981,7 +1112,7 @@ class LLMServerManager:
                                 new_status = str(data.get("status", "")).lower().strip()
                                 if new_status == "ok":
                                     log(f"Server recovered on port {port}, reusing it")
-                                    self.state_store.upsert_server(model_id, None, port, "RUNNING")
+                                    self.state_store.upsert_server(server_id, None, port, "RUNNING")
                                     return
                                 elif new_status != "error":
                                     # Status changed (e.g., to "loading") - continue waiting
@@ -1016,11 +1147,11 @@ class LLMServerManager:
                     reported_model = str(data.get("model", "")).strip()
                     
                     # Check if this is our server (by model ID match)
-                    if reported_model and reported_model == model_id:
+                    if reported_model and reported_model == server_id:
                         if status == "ok":
                             # Server is healthy - reuse it
                             log(f"Found our server on port {port} (status=ok), reusing it")
-                            self.state_store.upsert_server(model_id, None, port, "RUNNING")
+                            self.state_store.upsert_server(server_id, None, port, "RUNNING")
                             return
                         elif status == "loading":
                             # Server is loading - we'll wait for it in warmup loop
@@ -1035,7 +1166,7 @@ class LLMServerManager:
                             try:
                                 # Try to find and kill the process on this port
                                 # Get PID from StateStore if available
-                                server_state = self.state_store.get_server(model_id)
+                                server_state = self.state_store.get_server(server_id)
                                 pid = None
                                 if server_state and server_state.get('pid'):
                                     pid = server_state.get('pid')
@@ -1065,7 +1196,8 @@ class LLMServerManager:
                                                 ['netstat', '-ano'],
                                                 capture_output=True,
                                                 text=True,
-                                                timeout=5
+                                                timeout=5,
+                                                **self.subprocess_flags,
                                             )
                                             for line in result.stdout.split('\n'):
                                                 if f':{port}' in line and 'LISTENING' in line:
@@ -1095,7 +1227,7 @@ class LLMServerManager:
                             # Unknown status - wait for it in warmup loop
                             log(f"Found our server on port {port} (status={status}), will wait for it")
                             break
-                    elif reported_model and reported_model not in {model_id, ""}:
+                    elif reported_model and reported_model not in {server_id, ""}:
                         # Different model is using this port - immediately search for new port
                         log(
                             f"Port {port} is already in use by a different model '{reported_model}'. "
@@ -1125,7 +1257,7 @@ class LLMServerManager:
                                     new_status = str(data.get("status", "")).lower().strip()
                                     if new_status == "ok":
                                         log(f"Server recovered on port {port}, reusing it")
-                                        self.state_store.upsert_server(model_id, None, port, "RUNNING")
+                                        self.state_store.upsert_server(server_id, None, port, "RUNNING")
                                         return
                                     elif new_status != "error":
                                         # Status changed (e.g., to "loading") - continue waiting
@@ -1136,7 +1268,7 @@ class LLMServerManager:
                         log(f"Server on port {port} did not recover from error state, killing it to restart")
                         try:
                             # Try to kill the process on this port
-                            server_state = self.state_store.get_server(model_id)
+                            server_state = self.state_store.get_server(server_id)
                             pid = None
                             if server_state and server_state.get('pid'):
                                 pid = server_state.get('pid')
@@ -1280,7 +1412,8 @@ class LLMServerManager:
                             ['netstat', '-ano'],
                             capture_output=True,
                             text=True,
-                            timeout=5
+                            timeout=5,
+                            **self.subprocess_flags,
                         )
                         for line in result.stdout.split('\n'):
                             if f':{port}' in line and 'LISTENING' in line:
@@ -1297,9 +1430,8 @@ class LLMServerManager:
                     log(f"Failed to kill process on port {port}: {e}")
                     # Continue anyway - will fail with clear error if port still bound
             
-            # Validate model files exist before starting server
-            # Use base_model field (YAML uses base_model, not path)
-            model_path_str = model_cfg.get("base_model", "")
+            # Validate the exact runtime model target that will be launched.
+            model_path_str = str(base_model or "").strip()
             if not model_path_str:
                 raise RuntimeError(
                     f"Model path (base_model) not specified in config for '{model_id}'\n"
@@ -1307,40 +1439,7 @@ class LLMServerManager:
                 )
             
             model_path = Path(model_path_str)
-            if not model_path.exists():
-                raise RuntimeError(
-                    f"Model path does not exist: {model_path}\n"
-                    f"Please check the model path in llm_backends.yaml"
-                )
-            
-            # Check for common model file patterns (HF + GGUF).
-            # Use rglob so nested layouts are accepted too.
-            model_files = (
-                list(model_path.rglob("*.safetensors"))
-                + list(model_path.rglob("*.bin"))
-                + list(model_path.rglob("*.gguf"))
-            )
-            if not model_files:
-                raise RuntimeError(
-                    f"No model files found in {model_path}\n"
-                    f"Expected .safetensors, .bin, or .gguf files. The model may not be downloaded correctly."
-                )
-            try:
-                integrity_status = ModelIntegrityChecker().check_model(model_path)
-                if not integrity_status.is_complete:
-                    details = ", ".join(integrity_status.missing_files) or "unknown model file issue"
-                    raise RuntimeError(
-                        f"Model files failed integrity check: {details}\n"
-                        f"Please use 'Repair model files' or re-onboard this model.\n"
-                        f"Model path: {model_path}"
-                    )
-            except RuntimeError:
-                raise
-            except Exception as integrity_ex:
-                raise RuntimeError(
-                    f"Model integrity preflight failed unexpectedly: {integrity_ex}\n"
-                    f"Model path: {model_path}"
-                )
+            model_files = self._validate_runtime_model_target(model_path)
             
             log(f"Found {len(model_files)} model files, starting server...")
 
@@ -1370,7 +1469,8 @@ class LLMServerManager:
             if not onboarding_entry:
                 # Last fallback: match onboarding rows by base_model_path.
                 try:
-                    matches = self._find_onboarding_entries_by_base_model_path(str(model_path))
+                    onboarding_lookup_path = model_path.parent if model_path.is_file() else model_path
+                    matches = self._find_onboarding_entries_by_base_model_path(str(onboarding_lookup_path))
                     if len(matches) > 1:
                         ids = sorted((m.get("model_id") or "") for m in matches if m.get("model_id"))
                         raise RuntimeError(
@@ -1563,7 +1663,7 @@ class LLMServerManager:
                     log_dir = app_root / "logs" / "server_startup"
                     log_dir.mkdir(parents=True, exist_ok=True)
                     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                    safe_model_id = model_id.replace("/", "__").replace("\\", "__")
+                    safe_model_id = server_id.replace("/", "__").replace("\\", "__")
                     preflight_log_path = log_dir / f"{safe_model_id}_{timestamp}_env_preflight.log"
                     try:
                         preflight_log_path.write_text(
@@ -1639,7 +1739,7 @@ class LLMServerManager:
                         f"Environment may be corrupted. Please repair it in the Environment/Requirements tab."
                     )
                 log("Environment health check passed")
-                logger.info("RUNTIME_EVENT health_ready model_id=%s env_key=%s", model_id, env_spec.key)
+                logger.info("RUNTIME_EVENT health_ready model_id=%s env_key=%s", server_id, env_spec.key)
             except Exception as e:
                 log(f"Environment health check error: {e}")
                 raise RuntimeError(
@@ -1664,7 +1764,7 @@ class LLMServerManager:
                     model_path,
                     log_callback=log,
                 )
-                probe_reason = None if probe_ok else "UNSUPPORTED_ARCH"
+                probe_reason = None if probe_ok else "GGUF_BACKEND_INCOMPATIBLE"
                 probe_error = None if probe_ok else bundled_msg
             else:
                 probe_ok, probe_reason, probe_error = self.env_registry.run_model_load_probe(
@@ -1675,11 +1775,44 @@ class LLMServerManager:
                     log_callback=log,
                 )
             if not probe_ok:
+                if not use_bundled_backend and is_gguf_model:
+                    try:
+                        bundled_ok, bundled_msg = self.env_registry.runtime_bundle_manager.probe_bundled_gguf_runtime(
+                            model_path,
+                            log_callback=log,
+                        )
+                        if bundled_ok:
+                            use_bundled_backend = True
+                            onboarding_backend = "llama_cpp_server"
+                            probe_ok = True
+                            probe_reason = None
+                            probe_error = None
+                            log(
+                                "Switching runtime route to bundled llama.cpp backend because "
+                                f"the python GGUF runtime probe failed. {bundled_msg}"
+                            )
+                            try:
+                                self.state_store.upsert_onboarding(
+                                    model_id=onboarding_id,
+                                    base_model_path=str(model_path),
+                                    adapter_dir=adapter_dir,
+                                    env_key=env_spec.key,
+                                    backend="llama_cpp_server",
+                                    accelerator=onboarding_entry.get("accelerator"),
+                                    status=onboarding_entry.get("status") or "READY",
+                                    last_error=onboarding_entry.get("last_error"),
+                                    healthcheck_log_path=onboarding_entry.get("healthcheck_log_path"),
+                                )
+                            except Exception:
+                                pass
+                    except Exception as bundled_switch_ex:
+                        log(f"Bundled runtime switch attempt after GGUF probe failure failed: {bundled_switch_ex}")
+            if not probe_ok:
                 from datetime import datetime
                 log_dir = app_root / "logs" / "server_startup"
                 log_dir.mkdir(parents=True, exist_ok=True)
                 timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                safe_model_id = model_id.replace("/", "__").replace("\\", "__")
+                safe_model_id = server_id.replace("/", "__").replace("\\", "__")
                 probe_log_path = log_dir / f"{safe_model_id}_{timestamp}_runtime_probe.log"
                 try:
                     probe_log_path.write_text(
@@ -1699,7 +1832,7 @@ class LLMServerManager:
                 action = norm.get("action", "")
                 full_error = (
                     f"[{category}] Runtime probe failed before server launch.\n"
-                    f"Model: {model_id}\n"
+                    f"Model: {server_id}\n"
                     f"Reason: {probe_reason or 'OTHER'}\n"
                     f"Error: {probe_error or 'Unknown'}\n"
                     f"Startup log: {probe_log_path}\n"
@@ -1734,7 +1867,7 @@ class LLMServerManager:
                     log_dir = app_root / "logs" / "server_startup"
                     log_dir.mkdir(parents=True, exist_ok=True)
                     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                    safe_model_id = model_id.replace("/", "__").replace("\\", "__")
+                    safe_model_id = server_id.replace("/", "__").replace("\\", "__")
                     preflight_log_path = log_dir / f"{safe_model_id}_{timestamp}_gptq_preflight.log"
                     try:
                         preflight_log_path.write_text(
@@ -1780,9 +1913,9 @@ class LLMServerManager:
             
             # PHASE 1: Record server starting in StateStore
             from datetime import datetime
-            logger.info("RUNTIME_EVENT startup_starting model_id=%s port=%s interpreter=%s", model_id, port, env_spec.python_executable)
+            logger.info("RUNTIME_EVENT startup_starting model_id=%s port=%s interpreter=%s", server_id, port, env_spec.python_executable)
             self.state_store.upsert_server(
-                model_id=model_id,
+                model_id=server_id,
                 pid=None,  # Will update after process starts
                 port=port,
                 status="STARTING",
@@ -1795,7 +1928,7 @@ class LLMServerManager:
             
             # Generate log file path with timestamp
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            safe_model_id = model_id.replace("/", "__").replace("\\", "__")
+            safe_model_id = server_id.replace("/", "__").replace("\\", "__")
             log_path = log_dir / f"{safe_model_id}_{timestamp}.log"
             
             # Open log file for writing (will be closed after startup completes or fails)
@@ -1807,12 +1940,20 @@ class LLMServerManager:
             env['SERVER_PORT'] = str(port)
             # Pin the intended model environment interpreter for launcher -> uvicorn handoff.
             env["LLM_SERVER_PYTHON"] = str(env_spec.python_executable)
+            env["LLM_RUNTIME_BASE_MODEL"] = str(base_model)
+            env["LLM_RUNTIME_MODEL_NAME"] = server_id
             if use_bundled_backend:
                 env["LLM_RUNTIME_BACKEND"] = "llama_cpp_server"
             # Force server process to use the selected GPU (or highest-VRAM default)
             if chosen_gpu is not None:
                 env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
                 env["CUDA_VISIBLE_DEVICES"] = str(chosen_gpu)
+                # Default GGUF backends to full-GPU offload. Without this,
+                # llama-cpp-python loads weights into RAM and inference is so
+                # slow Cline times out. setdefault so a power user can pin a
+                # specific layer count via env without us clobbering it.
+                env.setdefault("LLM_LLAMACPP_N_GPU_LAYERS", "-1")
+                env.setdefault("LLM_BUNDLED_N_GPU_LAYERS", "-1")
             # Reduce CUDA allocator fragmentation issues.
             # NOTE: expandable_segments is not supported on Windows builds (PyTorch warns). Use max_split_size_mb instead.
             env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
@@ -1830,14 +1971,6 @@ class LLMServerManager:
                 'env': env
             }
             
-            # Windows-specific: Hide CMD window and prevent blocking
-            if os.name == 'nt':  # Windows
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-                subprocess_kwargs['startupinfo'] = startupinfo
-                subprocess_kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-            
             try:
                 process = subprocess.Popen(
                     [str(env_spec.python_executable), 
@@ -1846,13 +1979,13 @@ class LLMServerManager:
                     **subprocess_kwargs
                 )
                 # Store process with log file handle and path
-                self.running_servers[model_id] = (process, log_file, str(log_path))
+                self.running_servers[server_id] = (process, log_file, str(log_path))
                 log(f"Server process started with PID: {process.pid}")
                 log(f"Startup logs being captured to: {log_path}")
                 
                 # PHASE 1: Update StateStore with PID
                 self.state_store.upsert_server(
-                    model_id=model_id,
+                    model_id=server_id,
                     pid=process.pid,
                     port=port,
                     status="STARTING"
@@ -1863,7 +1996,7 @@ class LLMServerManager:
                 logger.error(error_msg)
                 # PHASE 1: Record failure in StateStore
                 self.state_store.upsert_server(
-                    model_id=model_id,
+                    model_id=server_id,
                     pid=None,
                     port=port,
                     status="FAILED",
@@ -1893,8 +2026,8 @@ class LLMServerManager:
             
             # Check server logs for errors (every 30 seconds)
             if elapsed >= 30 and elapsed % 30 < 2:  # Check roughly every 30 seconds
-                if model_id in self.running_servers:
-                    _, log_file_handle, log_file_path = self.running_servers[model_id]
+                if server_id in self.running_servers:
+                    _, log_file_handle, log_file_path = self.running_servers[server_id]
                     if log_file_path and os.path.exists(log_file_path):
                         try:
                             with open(log_file_path, 'r', encoding='utf-8', errors='replace') as f:
@@ -2055,16 +2188,16 @@ class LLMServerManager:
             
             # Check if process died (only if we started a new process)
             if not port_has_our_server:
-                if model_id not in self.running_servers:
+                if server_id not in self.running_servers:
                     # Process was never started or was cleaned up
                     break
-                process, _, _ = self.running_servers[model_id]
+                process, _, _ = self.running_servers[server_id]
                 if process.poll() is not None:
                     # Process died - read log file for error details
                     log_output = ""
                     log_file_path_for_user = None
-                    if model_id in self.running_servers:
-                        _, log_file_handle, log_file_path = self.running_servers[model_id]
+                    if server_id in self.running_servers:
+                        _, log_file_handle, log_file_path = self.running_servers[server_id]
                         log_file_path_for_user = log_file_path
                         
                         # Close and flush log file
@@ -2092,7 +2225,7 @@ class LLMServerManager:
                             log_output = f"(Failed to read log file: {e})"
                         
                         # Clean up
-                        del self.running_servers[model_id]
+                        del self.running_servers[server_id]
                         # IMPORTANT: Do NOT delete the startup log on failure.
                         # Users need the full file to diagnose native crashes (e.g. 0xC0000005).
                     
@@ -2114,17 +2247,17 @@ class LLMServerManager:
                                     reused_data = reused_resp.json()
                                     reused_model = str(reused_data.get("model", "")).strip()
                                     reused_status = str(reused_data.get("status", "")).lower().strip()
-                                    if reused_model == model_id:
+                                    if reused_model == server_id:
                                         log(
                                             f"Bind conflict recovered: reusing server on port {port} "
                                             f"(status={reused_status or 'unknown'}, model={reused_model or 'generic'})."
                                         )
                                         if reused_status == "ok":
-                                            self.state_store.upsert_server(model_id, None, port, "RUNNING")
+                                            self.state_store.upsert_server(server_id, None, port, "RUNNING")
                                             return
                                         # loading/error/unknown: keep warmup loop alive and wait for next /health check
                                         port_has_our_server = True
-                                        self.state_store.upsert_server(model_id, None, port, "STARTING")
+                                        self.state_store.upsert_server(server_id, None, port, "STARTING")
                                         break
                             except Exception:
                                 pass
@@ -2134,7 +2267,7 @@ class LLMServerManager:
 
                     # PHASE 1: Record failure in StateStore
                     self.state_store.upsert_server(
-                        model_id=model_id,
+                        model_id=server_id,
                         pid=process.pid,
                         port=port,
                         status="FAILED",
@@ -2226,8 +2359,8 @@ class LLMServerManager:
                             # Get model path for error message
                             model_path = model_cfg.get("base_model", "unknown")
                             log_path_for_error = None
-                            if model_id in self.running_servers:
-                                _, _, log_path_for_error = self.running_servers[model_id]
+                            if server_id in self.running_servers:
+                                _, _, log_path_for_error = self.running_servers[server_id]
                             norm = classify_runtime_failure("OTHER", str(error_msg))
                             category = norm.get("category", "ENVIRONMENT_CORRUPT")
                             action = norm.get("action", "")
@@ -2320,8 +2453,8 @@ class LLMServerManager:
 
                                         if installed_any:
                                             # Restart server so it runs with updated env
-                                            if model_id in self.running_servers:
-                                                old_process, old_log_file, _ = self.running_servers[model_id]
+                                            if server_id in self.running_servers:
+                                                old_process, old_log_file, _ = self.running_servers[server_id]
                                                 try:
                                                     if old_process and old_process.poll() is None:
                                                         old_process.kill()
@@ -2333,19 +2466,23 @@ class LLMServerManager:
                                                         old_log_file.close()
                                                 except Exception:
                                                     pass
-                                                del self.running_servers[model_id]
+                                                del self.running_servers[server_id]
                                             log_dir = app_root / "logs" / "server_startup"
                                             log_dir.mkdir(parents=True, exist_ok=True)
                                             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                                            safe_model_id = model_id.replace("/", "__").replace("\\", "__")
+                                            safe_model_id = server_id.replace("/", "__").replace("\\", "__")
                                             log_path2 = log_dir / f"{safe_model_id}_{timestamp}_selfheal.log"
                                             log_file2 = open(log_path2, "w", encoding="utf-8", errors="replace")
                                             env2 = os.environ.copy()
                                             env2["SERVER_PORT"] = str(port)
                                             env2["LLM_SERVER_PYTHON"] = str(env_spec.python_executable)
+                                            env2["LLM_RUNTIME_BASE_MODEL"] = str(base_model)
+                                            env2["LLM_RUNTIME_MODEL_NAME"] = server_id
                                             if chosen_gpu is not None:
                                                 env2["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
                                                 env2["CUDA_VISIBLE_DEVICES"] = str(chosen_gpu)
+                                                env2.setdefault("LLM_LLAMACPP_N_GPU_LAYERS", "-1")
+                                                env2.setdefault("LLM_BUNDLED_N_GPU_LAYERS", "-1")
                                             env2.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
                                             if use_exllamav2_gptq:
                                                 env2["USE_EXLLAMAV2_GPTQ"] = "true"
@@ -2358,20 +2495,14 @@ class LLMServerManager:
                                                 "errors": "replace",
                                                 "env": env2,
                                             }
-                                            if os.name == "nt":
-                                                startupinfo = subprocess.STARTUPINFO()
-                                                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                                                startupinfo.wShowWindow = subprocess.SW_HIDE
-                                                subprocess_kwargs2["startupinfo"] = startupinfo
-                                                subprocess_kwargs2["creationflags"] = subprocess.CREATE_NO_WINDOW
                                             process2 = subprocess.Popen(
                                                 [str(env_spec.python_executable), str(launcher_script), model_id],
                                                 **subprocess_kwargs2,
                                             )
-                                            self.running_servers[model_id] = (process2, log_file2, str(log_path2))
+                                            self.running_servers[server_id] = (process2, log_file2, str(log_path2))
                                             process = process2
                                             self.state_store.upsert_server(
-                                                model_id=model_id,
+                                                model_id=server_id,
                                                 pid=process2.pid,
                                                 port=port,
                                                 status="STARTING",
@@ -2420,11 +2551,11 @@ class LLMServerManager:
                         if status == "ok":
                             elapsed = time.time() - start_time
                             log(f"Server is healthy at {server_url} (startup took {elapsed:.1f}s)")
-                            logger.info(f"Server '{model_id}' is ready at {server_url} (took {elapsed:.1f}s)")
+                            logger.info(f"Server '{server_id}' is ready at {server_url} (took {elapsed:.1f}s)")
                             
                             # Close and clean up log file after successful startup
-                            if model_id in self.running_servers:
-                                _, log_file_handle, log_file_path = self.running_servers[model_id]
+                            if server_id in self.running_servers:
+                                _, log_file_handle, log_file_path = self.running_servers[server_id]
                                 try:
                                     if log_file_handle:
                                         log_file_handle.flush()
@@ -2444,11 +2575,11 @@ class LLMServerManager:
                                     logger.debug("Keeping server startup log (LLM_KEEP_SERVER_STARTUP_LOGS): %s", log_file_path)
                                 
                                 # Update to remove log file references (keep only process)
-                                self.running_servers[model_id] = (process, None, None)
+                                self.running_servers[server_id] = (process, None, None)
                             
                             # PHASE 1: Record success in StateStore
                             self.state_store.upsert_server(
-                                model_id=model_id,
+                                model_id=server_id,
                                 pid=process.pid,
                                 port=port,
                                 status="RUNNING"
@@ -2471,7 +2602,7 @@ class LLMServerManager:
             time.sleep(2)
         
         # Timeout reached - kill process and raise error
-        logger.error(f"Server '{model_id}' failed to become healthy within {self.warmup_timeout}s")
+        logger.error(f"Server '{server_id}' failed to become healthy within {self.warmup_timeout}s")
         
         # Check if server is still in "loading" state
         server_status = "unknown"
@@ -2486,8 +2617,8 @@ class LLMServerManager:
         # Read log file for error details
         log_output = ""
         log_path = None
-        if model_id in self.running_servers:
-            _, log_file_handle, log_file_path = self.running_servers[model_id]
+        if server_id in self.running_servers:
+            _, log_file_handle, log_file_path = self.running_servers[server_id]
             log_path = log_file_path
             
             # Close and flush log file
@@ -2515,8 +2646,8 @@ class LLMServerManager:
                 log_output = f"(Failed to read log file: {e})"
         
         # Kill process (only if we started a new process)
-        if not port_has_our_server and model_id in self.running_servers:
-            process, _, _ = self.running_servers[model_id]
+        if not port_has_our_server and server_id in self.running_servers:
+            process, _, _ = self.running_servers[server_id]
             try:
                 process.kill()
                 process.wait(timeout=5)
@@ -2524,8 +2655,8 @@ class LLMServerManager:
                 pass
         
         # Clean up (preserve startup log for diagnostics; user-facing errors reference log path)
-        if model_id in self.running_servers:
-            del self.running_servers[model_id]
+        if server_id in self.running_servers:
+            del self.running_servers[server_id]
             # Do not remove startup log on timeout/failure so users can inspect it
 
         # Build error message
@@ -2563,7 +2694,7 @@ class LLMServerManager:
         # Deterministic state transition: STARTING -> FAILED on timeout
         try:
             self.state_store.upsert_server(
-                model_id=model_id,
+                model_id=server_id,
                 pid=None,
                 port=port,
                 status="FAILED",
@@ -2685,8 +2816,47 @@ class LLMServerManager:
             # Fallback to YAML port
             port = self.config["models"][model_id].get("port", 10500)
         return f"http://127.0.0.1:{port}"
+
+    def _request_graceful_http_shutdown(
+        self,
+        server_id: str,
+        port: Optional[int],
+        process: Optional[subprocess.Popen] = None,
+    ) -> bool:
+        """
+        Ask the server to shut itself down so app shutdown hooks can run.
+
+        This is critical on Windows because Popen.terminate() is forceful there and does
+        not give the bundled proxy a chance to stop its child llama-server.exe process.
+        """
+        try:
+            port_i = int(port or 0)
+        except Exception:
+            port_i = 0
+        if port_i <= 0:
+            return False
+
+        try:
+            response = requests.post(f"http://127.0.0.1:{port_i}/shutdown", timeout=2)
+            if response.status_code not in (200, 202):
+                return False
+        except Exception:
+            return False
+
+        deadline = time.time() + 5.0
+        while time.time() < deadline:
+            proc_dead = False
+            if process is not None:
+                try:
+                    proc_dead = process.poll() is not None
+                except Exception:
+                    proc_dead = False
+            if proc_dead or self._check_port_available(port_i):
+                return True
+            time.sleep(0.2)
+        return False
     
-    def shutdown_server(self, model_id: str):
+    def shutdown_server(self, model_id: str, runtime_base_model: Optional[str] = None):
         """
         Shutdown server for given model.
         THREAD SAFE: Uses lock to prevent concurrent shutdown.
@@ -2696,8 +2866,22 @@ class LLMServerManager:
         """
         # THREAD SAFETY: Acquire lock for shutdown operation
         with self._server_lock:
-            if model_id in self.running_servers:
-                process, log_file_handle, log_file_path = self.running_servers[model_id]
+            model_cfg = (self.config.get("models") or {}).get(model_id) if isinstance(self.config, dict) else None
+            canonical_id = self._canonical_server_id(model_id)
+            server_id = self._resolve_runtime_server_id(
+                model_id=model_id,
+                canonical_id=canonical_id,
+                model_cfg=model_cfg,
+                runtime_base_model=runtime_base_model,
+            )
+            try:
+                server_state = self.state_store.get_server(server_id) or {}
+            except Exception:
+                server_state = {}
+            state_port = server_state.get("port")
+
+            if server_id in self.running_servers:
+                process, log_file_handle, log_file_path = self.running_servers[server_id]
                 
                 # Close log file if still open
                 try:
@@ -2707,25 +2891,28 @@ class LLMServerManager:
                 except Exception:
                     pass
                 
-                logger.info(f"Shutting down server '{model_id}'")
-                
-                # Graceful shutdown with timeout
-                if process.poll() is None:  # Process is still running
-                    process.terminate()
-                    try:
-                        process.wait(timeout=2)  # Wait 2 seconds for graceful shutdown
-                        logger.info(f"Server '{model_id}' terminated gracefully")
-                    except subprocess.TimeoutExpired:
-                        # Force kill if graceful shutdown failed
-                        logger.warning(f"Server '{model_id}' didn't terminate gracefully within 2s, force killing")
+                logger.info(f"Shutting down server '{server_id}'")
+
+                if self._request_graceful_http_shutdown(server_id, state_port, process=process):
+                    logger.info(f"Server '{server_id}' exited via HTTP shutdown")
+                else:
+                    # Graceful shutdown with timeout
+                    if process.poll() is None:  # Process is still running
+                        process.terminate()
                         try:
-                            process.kill()
-                            process.wait(timeout=1)  # Wait briefly for kill to complete
-                            logger.info(f"Server '{model_id}' force killed")
+                            process.wait(timeout=2)  # Wait 2 seconds for graceful shutdown
+                            logger.info(f"Server '{server_id}' terminated gracefully")
                         except subprocess.TimeoutExpired:
-                            logger.error(f"Server '{model_id}' could not be killed")
-                        except Exception as e:
-                            logger.error(f"Error killing server '{model_id}': {e}")
+                            # Force kill if graceful shutdown failed
+                            logger.warning(f"Server '{server_id}' didn't terminate gracefully within 2s, force killing")
+                            try:
+                                process.kill()
+                                process.wait(timeout=1)  # Wait briefly for kill to complete
+                                logger.info(f"Server '{server_id}' force killed")
+                            except subprocess.TimeoutExpired:
+                                logger.error(f"Server '{server_id}' could not be killed")
+                            except Exception as e:
+                                logger.error(f"Error killing server '{server_id}': {e}")
                 
                 # Delete log file if it exists
                 try:
@@ -2734,12 +2921,12 @@ class LLMServerManager:
                 except Exception:
                     pass
                 
-                del self.running_servers[model_id]
+                del self.running_servers[server_id]
                 
                 # PHASE 1: Update StateStore
                 from datetime import datetime
                 self.state_store.upsert_server(
-                    model_id=model_id,
+                    model_id=server_id,
                     pid=None,
                     port=0,  # Mark as stopped
                     status="STOPPED",
@@ -2750,15 +2937,25 @@ class LLMServerManager:
             # Fallback: server may be running but NOT tracked in running_servers.
             # This happens when we "reuse" an already-running server found via /health.
             # In that case we still need a way to force-stop it (by PID or by port).
-            try:
-                server_state = self.state_store.get_server(model_id) or {}
-            except Exception:
-                server_state = {}
-
             pid = server_state.get("pid")
             port = server_state.get("port")
 
-            logger.info(f"Shutting down untracked server '{model_id}' (pid={pid}, port={port})")
+            logger.info(f"Shutting down untracked server '{server_id}' (pid={pid}, port={port})")
+
+            if self._request_graceful_http_shutdown(server_id, port):
+                logger.info(f"Untracked server '{server_id}' exited via HTTP shutdown")
+                try:
+                    from datetime import datetime
+                    self.state_store.upsert_server(
+                        model_id=server_id,
+                        pid=None,
+                        port=0,
+                        status="STOPPED",
+                        stopped_at=datetime.utcnow().isoformat()
+                    )
+                except Exception:
+                    pass
+                return
 
             # 1) Try killing by PID if known
             killed_any = False
@@ -2776,9 +2973,9 @@ class LLMServerManager:
                         except Exception:
                             pass
                     killed_any = True
-                    logger.info(f"Killed server PID {pid} for '{model_id}'")
+                    logger.info(f"Killed server PID {pid} for '{server_id}'")
                 except Exception as e:
-                    logger.warning(f"Failed to kill PID {pid} for '{model_id}': {e}")
+                    logger.warning(f"Failed to kill PID {pid} for '{server_id}': {e}")
 
             # 2) If PID missing (or kill failed), try killing by port (Windows only)
             if (not killed_any) and port and os.name == "nt":
@@ -2794,16 +2991,16 @@ class LLMServerManager:
                                 pids_to_kill.add(parts[-1])
                     for found_pid in sorted(pids_to_kill):
                         subprocess.run(["taskkill", "/F", "/PID", found_pid], capture_output=True, timeout=10, **self.subprocess_flags)
-                        logger.info(f"Killed PID {found_pid} on port {port} for '{model_id}'")
+                        logger.info(f"Killed PID {found_pid} on port {port} for '{server_id}'")
                         killed_any = True
                 except Exception as e:
-                    logger.warning(f"Failed to kill by port {port} for '{model_id}': {e}")
+                    logger.warning(f"Failed to kill by port {port} for '{server_id}': {e}")
 
             # 3) Update StateStore regardless (best-effort)
             try:
                 from datetime import datetime
                 self.state_store.upsert_server(
-                    model_id=model_id,
+                    model_id=server_id,
                     pid=None,
                     port=0,
                     status="STOPPED",
@@ -2895,6 +3092,61 @@ class LLMServerManager:
                 logger.warning(f"Failed to update StateStore for port {port}: {e}")
 
             return True
+
+    def _kill_orphan_bundled_llama_servers(self) -> int:
+        """
+        Kill orphan bundled llama-server.exe child processes that are no longer represented
+        by a live proxy/state row.
+        """
+        if os.name != "nt":
+            return 0
+
+        llm_root = Path(__file__).resolve().parents[1]
+        bundled_root = str((llm_root / "runtime" / "llama.cpp").resolve()).lower()
+        killed = 0
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance Win32_Process -Filter \"Name='llama-server.exe'\") | "
+                    "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                **self.subprocess_flags,
+            )
+            raw = (result.stdout or "").strip()
+            if not raw:
+                return 0
+            data = json.loads(raw)
+            rows = data if isinstance(data, list) else [data]
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                pid = row.get("ProcessId")
+                exe = str(row.get("ExecutablePath") or "").lower()
+                cmd = str(row.get("CommandLine") or "").lower()
+                if bundled_root not in exe and bundled_root not in cmd:
+                    continue
+                if not pid:
+                    continue
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/PID", str(int(pid))],
+                        capture_output=True,
+                        timeout=10,
+                        **self.subprocess_flags,
+                    )
+                    killed += 1
+                    logger.info("Killed orphan bundled llama-server.exe PID %s", pid)
+                except Exception as e:
+                    logger.warning("Failed to kill orphan bundled llama-server.exe PID %s: %s", pid, e)
+        except Exception as e:
+            logger.warning("Failed orphan bundled llama-server cleanup: %s", e)
+        return killed
     
     def shutdown_all(self):
         """Shutdown all running servers"""
@@ -2911,7 +3163,11 @@ class LLMServerManager:
             pass
 
         if not model_ids:
-            logger.info("No servers to shutdown")
+            killed = self._kill_orphan_bundled_llama_servers()
+            if killed:
+                logger.info("Killed %s orphan bundled llama-server process(es)", killed)
+            else:
+                logger.info("No servers to shutdown")
             return
 
         logger.info(f"Shutting down all {len(model_ids)} server(s)")
@@ -2920,6 +3176,9 @@ class LLMServerManager:
                 self.shutdown_server(model_id)
             except Exception as e:
                 logger.error(f"Error shutting down server '{model_id}': {e}")
+        killed = self._kill_orphan_bundled_llama_servers()
+        if killed:
+            logger.info("Killed %s orphan bundled llama-server process(es) after shutdown", killed)
         logger.info("All servers shutdown complete")
 
 # Global instance with thread-safe singleton pattern

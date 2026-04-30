@@ -297,8 +297,8 @@ def _load_gguf_model(model_dir: Path):
     variant_outcomes: list[dict] = []  # Per-variant diagnostics: [{ "variant": name, "backends": [...] }]
     primary_id = _extract_base_model_id_for_gguf(model_dir)
     base_candidates = [primary_id]
-    if "glm-4.7-flash" in primary_id.lower() and "zai-org/GLM-4.7-Flash" not in base_candidates:
-        base_candidates.append("zai-org/GLM-4.7-Flash")
+    if "glm-4.7-flash" in primary_id.lower() and "THUDM/glm-4-9b-chat" not in base_candidates:
+        base_candidates.append("THUDM/glm-4-9b-chat")
     folder_id = model_dir.name.replace("__", "/")
     if folder_id not in base_candidates:
         base_candidates.append(folder_id)
@@ -312,7 +312,17 @@ def _load_gguf_model(model_dir: Path):
         try:
             from llama_cpp import Llama  # type: ignore
 
-            n_gpu_layers = int(os.environ.get("LLM_LLAMACPP_N_GPU_LAYERS", "0"))
+            # Default to full GPU offload (-1) when the parent runtime has
+            # pinned a real CUDA device via CUDA_VISIBLE_DEVICES. Without this
+            # the model loads entirely into RAM and inference is so slow that
+            # Cline (and any other OpenAI-protocol client) times out before
+            # the first token. Explicit LLM_LLAMACPP_N_GPU_LAYERS overrides.
+            _raw_ngl = str(os.environ.get("LLM_LLAMACPP_N_GPU_LAYERS", "")).strip()
+            if _raw_ngl:
+                n_gpu_layers = int(_raw_ngl)
+            else:
+                _cvd = str(os.environ.get("CUDA_VISIBLE_DEVICES", "")).strip().lower()
+                n_gpu_layers = -1 if (_cvd and _cvd not in {"-1", "cpu", "none", ""}) else 0
             logging.info(
                 "Loading GGUF via llama-cpp-python: file=%s, n_ctx=%s, n_threads=%s, n_gpu_layers=%s",
                 str(gguf_path),

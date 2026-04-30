@@ -108,19 +108,31 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             resp = urllib.request.urlopen(req, timeout=600)  # generous, chat completions can take a while
         except urllib.error.HTTPError as e:
             # Forward upstream HTTP errors verbatim with their body.
-            self.send_response(e.code)
-            for k, v in e.headers.items():
-                if k.lower() in _HOP_BY_HOP:
-                    continue
-                self.send_header(k, v)
-            self.end_headers()
             try:
-                self.wfile.write(e.read())
-            except Exception:
+                self.send_response(e.code)
+                for k, v in e.headers.items():
+                    if k.lower() in _HOP_BY_HOP:
+                        continue
+                    self.send_header(k, v)
+                self.end_headers()
+                try:
+                    self.wfile.write(e.read())
+                except Exception:
+                    pass
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # Client (Cline) disconnected before we could write — nothing
+                # actionable; suppress to keep logs clean.
                 pass
             return
         except (urllib.error.URLError, OSError) as e:
-            self.send_error(502, f"Upstream unreachable: {e}")
+            # Upstream is gone or reset the connection (commonly: model server
+            # crashed mid-request, e.g. when loaded on CPU and OOM'd on a
+            # large prompt). send_error itself can raise BrokenPipe if the
+            # caller has already disconnected — wrap it.
+            try:
+                self.send_error(502, f"Upstream unreachable: {e}")
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
             return
 
         # Stream the response body. Don't trust Content-Length on streaming

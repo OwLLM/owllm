@@ -44,23 +44,12 @@ void OpenLogInNotepad(const std::wstring& logPath) {
     ShellExecuteW(NULL, L"open", L"notepad.exe", logPath.c_str(), NULL, SW_SHOW);
 }
 
-// In the hidden worker, keep Python as a console-subsystem process. Running the
-// desktop app through pythonw.exe would detach it from the worker's hidden console,
-// putting us back in the "GUI parent with no console" state that causes flashes.
+// Preserve the selected Python executable.
 std::wstring PreferConsolePythonForHiddenWorker(const std::wstring& pythonExe) {
-    if (pythonExe.empty()) return pythonExe;
-    size_t n = pythonExe.size();
-    if (n < 12) return pythonExe;
-    const wchar_t* p = pythonExe.c_str();
-    if (_wcsicmp(p + n - 11, L"pythonw.exe") != 0)
-        return pythonExe;
-    std::wstring consolePython = pythonExe.substr(0, n - 11) + L"python.exe";
-    return FileExists(consolePython) ? consolePython : pythonExe;
+    return pythonExe;
 }
 
-// Run a batch file from the hidden worker. Do not use CREATE_NO_WINDOW here:
-// cmd.exe should inherit the worker's hidden console so its descendants also
-// have a console and do not allocate visible throwaway consoles.
+// Run a batch file with normal Windows console behavior.
 bool RunBatchNoWindow(const std::wstring& batPath, const std::wstring& workingDir) {
     std::wstring cmd = L"cmd.exe /c \"" + batPath + L"\"";
     STARTUPINFOW si = {0};
@@ -138,7 +127,7 @@ bool DeleteDirectoryWithRetries(const std::wstring& dirPath, int maxAttempts = 5
         si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
         si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
         si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-        
+
         PROCESS_INFORMATION pi = {0};
         BOOL success = CreateProcessW(
             NULL,
@@ -146,7 +135,7 @@ bool DeleteDirectoryWithRetries(const std::wstring& dirPath, int maxAttempts = 5
             NULL,
             NULL,
             FALSE,
-            CREATE_NO_WINDOW,
+            0,
             NULL,
             NULL,
             &si,
@@ -173,7 +162,7 @@ bool DeleteDirectoryWithRetries(const std::wstring& dirPath, int maxAttempts = 5
             psi.cb = sizeof(psi);
             psi.dwFlags = STARTF_USESTDHANDLES;
             PROCESS_INFORMATION ppi = {0};
-            if (CreateProcessW(NULL, &psCmd[0], NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &psi, &ppi)) {
+            if (CreateProcessW(NULL, &psCmd[0], NULL, NULL, FALSE, 0, NULL, NULL, &psi, &ppi)) {
                 WaitForSingleObject(ppi.hProcess, 30000);
                 CloseHandle(ppi.hProcess);
                 CloseHandle(ppi.hThread);
@@ -219,17 +208,17 @@ std::wstring GetPythonVersion(const std::wstring& pythonExe) {
     si.hStdOutput = hWritePipe;
     si.hStdError = hWritePipe;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    
+
     PROCESS_INFORMATION pi = {0};
     std::wstring cmdLine = L"\"" + pythonExe + L"\" --version";
-    
+
     BOOL success = CreateProcessW(
         NULL,
         &cmdLine[0],
         NULL,
         NULL,
         TRUE,
-        CREATE_NO_WINDOW,
+        0,
         NULL,
         NULL,
         &si,
@@ -305,8 +294,7 @@ bool RunBootstrapLauncher(const std::wstring& exeDir) {
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpFile = bootstrapBat.c_str();
     sei.lpDirectory = exeDir.c_str();
-    sei.fMask |= SEE_MASK_FLAG_NO_UI;
-    sei.nShow = SW_HIDE;
+    sei.nShow = SW_SHOW;
     
     if (!ShellExecuteExW(&sei)) {
         return false;
@@ -392,11 +380,11 @@ bool InstallPython(const std::wstring& installerPath) {
     
     SHELLEXECUTEINFOW sei = {0};
     sei.cbSize = sizeof(sei);
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = L"runas";  // Run as administrator (may be needed)
     sei.lpFile = installerPath.c_str();
     sei.lpParameters = L"/quiet PrependPath=1 InstallAllUsers=1";
-    sei.nShow = SW_HIDE;
+    sei.nShow = SW_SHOW;
     
     if (!ShellExecuteExW(&sei)) {
         // Try without runas if that fails
@@ -419,20 +407,24 @@ bool InstallPython(const std::wstring& installerPath) {
 }
 
 // Main launcher function
-int LaunchPythonApp(const std::wstring& exeDir, const std::wstring& pythonExe, 
-                    const std::wstring& scriptArgs, const std::wstring& logFile) {
+int LaunchPythonApp(const std::wstring& exeDir, const std::wstring& pythonExe,
+                    const std::wstring& scriptArgs, const std::wstring& logFile,
+                    bool hideConsole = false) {
     // Ensure logs directory exists before creating log file
     EnsureLogsDirectory(exeDir);
-    
-    // Build command line. Force console Python when running under launcher_worker.exe:
-    // the worker owns a hidden console and the real app must inherit it.
+
+    // Build command line with normal Windows console behavior.
     std::wstring launchPython = PreferConsolePythonForHiddenWorker(pythonExe);
     std::wstring cmdLine = L"\"" + launchPython + L"\" " + scriptArgs;
-    
+
     // Setup startup info with redirected output
     STARTUPINFOW si = {0};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
+    if (hideConsole) {
+        si.dwFlags |= STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+    }
     
     // Create log file for output
     SECURITY_ATTRIBUTES sa = {0};
@@ -474,13 +466,14 @@ int LaunchPythonApp(const std::wstring& exeDir, const std::wstring& pythonExe,
     
     // Create the process
     PROCESS_INFORMATION pi = {0};
+    DWORD creationFlags = hideConsole ? 0x08000000u /* hide console for brief health checks */ : 0u;
     BOOL success = CreateProcessW(
         launchPython.c_str(),       // Application name
         &cmdLine[0],                // Command line (must be writable)
         NULL,                       // Process security attributes
         NULL,                       // Thread security attributes
         TRUE,                       // Inherit handles (for log redirection)
-        0,                          // Inherit worker's hidden console; do not detach.
+        creationFlags,
         NULL,                       // Environment
         exeDir.c_str(),             // Working directory
         &si,                        // Startup info
@@ -508,16 +501,10 @@ int LaunchPythonApp(const std::wstring& exeDir, const std::wstring& pythonExe,
     return exitCode;
 }
 
-#if defined(LOCALLLM_LAUNCHER_WORKER)
+#if defined(LOCALLLM_LAUNCHER_WORKER) || defined(LOCALLLM_LAUNCHER_GUI)
 
-// Full bootstrap + health checks + desktop app launch (console subsystem, hidden).
+// Full bootstrap + health checks + desktop app launch.
 static int RunLauncherWorker() {
-    // Own a console but keep it invisible so child console tools inherit a hidden console.
-    HWND consoleHwnd = GetConsoleWindow();
-    if (consoleHwnd != NULL) {
-        ShowWindow(consoleHwnd, SW_HIDE);
-    }
-
     // Get the directory where this .exe is located (LLM folder)
     wchar_t exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
@@ -658,18 +645,14 @@ static int RunLauncherWorker() {
     
     use_python:
     // Step 2: Check if venv exists and is complete, if not, launch installer GUI
-    std::wstring pythonwExe = exeDir + L"\\.venv\\Scripts\\pythonw.exe";
     std::wstring pythonExe = exeDir + L"\\.venv\\Scripts\\python.exe";
     std::wstring pyvenvCfg = exeDir + L"\\.venv\\pyvenv.cfg";
     std::wstring venvPython = systemPython;  // Default to system Python
-    
-    // Check if venv is complete: must have both Python executable AND pyvenv.cfg
+
+    // Use python.exe (console-attached) so child processes are visible.
     bool venvComplete = false;
     if (FileExists(pythonExe) && FileExists(pyvenvCfg)) {
         venvPython = pythonExe;
-        venvComplete = true;
-    } else if (FileExists(pythonwExe) && FileExists(pyvenvCfg)) {
-        venvPython = pythonwExe;
         venvComplete = true;
     }
     
@@ -700,7 +683,7 @@ static int RunLauncherWorker() {
                 }
                 if (!pythonToUse.empty()) {
                     std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
-                    ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
+                    ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
                     return 0;
                 }
             } else {
@@ -723,7 +706,7 @@ static int RunLauncherWorker() {
     std::wstring healthCheckCmd = L"-c \"import PySide6.QtCore; print('OK')\"";
     std::wstring healthCheckLog = exeDir + L"\\logs\\health_check.log";
     
-    int healthCheckResult = LaunchPythonApp(exeDir, venvPython, healthCheckCmd, healthCheckLog);
+    int healthCheckResult = LaunchPythonApp(exeDir, venvPython, healthCheckCmd, healthCheckLog, /*hideConsole=*/true);
     
     if (healthCheckResult != 0) {
         // PySide6 is broken - launch installer GUI via bootstrap (no console window)
@@ -742,7 +725,7 @@ static int RunLauncherWorker() {
                 pythonToUse = FindSystemPython();
             if (!pythonToUse.empty()) {
                 std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
-                ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
+                ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
                 return 0;
             }
         }
@@ -761,7 +744,7 @@ static int RunLauncherWorker() {
     if (FileExists(dependencyCheckScript)) {
         // Run check_dependencies.py as a script
         std::wstring dependencyCheckCmd = L"\"" + dependencyCheckScript + L"\"";
-        int dependencyCheckResult = LaunchPythonApp(exeDir, venvPython, dependencyCheckCmd, dependencyCheckLog);
+        int dependencyCheckResult = LaunchPythonApp(exeDir, venvPython, dependencyCheckCmd, dependencyCheckLog, /*hideConsole=*/true);
         
         if (dependencyCheckResult != 0) {
             // Dependencies are missing or wrong - launch installer GUI via bootstrap (no console window)
@@ -780,7 +763,7 @@ static int RunLauncherWorker() {
                     pythonToUse = FindSystemPython();
                 if (!pythonToUse.empty()) {
                     std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
-                    ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
+                    ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
                     return 0;
                 }
             }
@@ -914,37 +897,51 @@ static int RunLauncherWorker() {
     }
     
     if (exitCode != 0) {
-        // App failed - try silent installer/bootstrap fallbacks (no visible CMD).
-        // For interactive debugging, run LAUNCHER_DEBUG.bat manually from Explorer.
-        std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
-        std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
-        std::wstring installerGui = exeDir + L"\\installer_gui.py";
-
-        if (FileExists(runInstallerBat) && RunBatchNoWindow(runInstallerBat, exeDir))
-            return 0;
-        if (FileExists(bootstrapBat) && RunBatchNoWindow(bootstrapBat, exeDir))
-            return 0;
-
-        if (FileExists(installerGui)) {
-            std::wstring pythonToUse = systemPython;
-            if (pythonToUse.empty()) {
-                pythonToUse = CheckSelfContainedPython(exeDir);
-            }
-            if (pythonToUse.empty()) {
-                pythonToUse = FindSystemPython();
-            }
-            if (!pythonToUse.empty()) {
-                std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
-                ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_HIDE);
+        // The app exited non-zero. Previously this auto-launched the
+        // installer GUI on every non-zero exit, which is wrong: the dep
+        // check + health check just passed, so a non-zero exit here is a
+        // real app crash, not a missing dependency. Auto-launching the
+        // installer turned ordinary crashes into "your install is broken,
+        // run repair" — which is misleading and often the user's wrong
+        // first move.
+        //
+        // The expected uses of non-zero exit are:
+        //   42  -> cleanup-and-restart (already handled above)
+        //   3   -> reserved for "deps drifted at runtime, please reinstall"
+        //          (set by desktop_app.main when an ImportError-class
+        //          failure happens during startup; the installer is the
+        //          right answer in that one case).
+        //   anything else -> real crash. Show the log, do NOT spawn the
+        //          installer.
+        const int DEPS_DRIFTED_AT_RUNTIME = 3;
+        if (exitCode == DEPS_DRIFTED_AT_RUNTIME) {
+            std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
+            std::wstring bootstrapBat    = exeDir + L"\\bootstrap_launcher.bat";
+            std::wstring installerGui    = exeDir + L"\\installer_gui.py";
+            if (FileExists(runInstallerBat) && RunBatchNoWindow(runInstallerBat, exeDir))
                 return 0;
+            if (FileExists(bootstrapBat) && RunBatchNoWindow(bootstrapBat, exeDir))
+                return 0;
+            if (FileExists(installerGui)) {
+                std::wstring pythonToUse = systemPython;
+                if (pythonToUse.empty()) pythonToUse = CheckSelfContainedPython(exeDir);
+                if (pythonToUse.empty()) pythonToUse = FindSystemPython();
+                if (!pythonToUse.empty()) {
+                    std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
+                    ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+                    return 0;
+                }
             }
         }
 
+        // Generic crash: just open the log in Notepad and exit. Do NOT
+        // spawn the installer — it is misleading when deps are fine.
         MessageBoxW(NULL,
-                   L"Application failed to start!\n\n"
-                   L"The installer could not be launched automatically.\n"
-                   L"The application log will open in Notepad.\n\n"
-                   L"For a visible console debug run, open LAUNCHER_DEBUG.bat manually.",
+                   L"Application exited unexpectedly.\n\n"
+                   L"The most recent log will open in Notepad. Look at the "
+                   L"end of it for the actual error.\n\n"
+                   L"If you suspect a dependency is broken, run "
+                   L"run_installer.bat manually.",
                    L"Application Error",
                    MB_OK | MB_ICONERROR);
         OpenLogInNotepad(logFile);
@@ -954,85 +951,26 @@ static int RunLauncherWorker() {
     return exitCode;
 }
 
+#if defined(LOCALLLM_LAUNCHER_WORKER)
 int main() {
     return RunLauncherWorker();
 }
 
 #elif defined(LOCALLLM_LAUNCHER_GUI)
 
-// Minimal GUI-subsystem stub: spawns hidden-console worker and propagates its exit code.
+// GUI-subsystem launcher: run the launcher flow directly. No launcher_worker.exe
+// is started during normal app startup.
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow) {
     (void)hInstance;
     (void)hPrevInstance;
     (void)lpCmdLine;
     (void)nCmdShow;
-
-    wchar_t exePath[MAX_PATH];
-    if (!GetModuleFileNameW(NULL, exePath, MAX_PATH)) {
-        MessageBoxW(NULL, L"Could not determine launcher directory.", L"OWLLM Launcher", MB_OK | MB_ICONERROR);
-        return 1;
-    }
-
-    std::wstring exeDir(exePath);
-    size_t lastSlash = exeDir.find_last_of(L"\\/");
-    if (lastSlash != std::wstring::npos) {
-        exeDir = exeDir.substr(0, lastSlash);
-    }
-
-    std::wstring worker = exeDir + L"\\launcher_worker.exe";
-    if (!FileExists(worker)) {
-        MessageBoxW(
-            NULL,
-            L"launcher_worker.exe was not found next to launcher.exe.\n\n"
-            L"Run LLM\\build_launcher.bat to build both executables.",
-            L"OWLLM Launcher",
-            MB_OK | MB_ICONERROR);
-        return 1;
-    }
-
-    std::wstring cmdLine = L"\"" + worker + L"\"";
-    std::vector<wchar_t> cmdBuf(cmdLine.begin(), cmdLine.end());
-    cmdBuf.push_back(L'\0');
-
-    STARTUPINFOW si = {0};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-
-    PROCESS_INFORMATION pi = {0};
-    DWORD creationFlags = CREATE_NEW_CONSOLE;
-
-    BOOL ok = CreateProcessW(
-        worker.c_str(),
-        cmdBuf.data(),
-        NULL,
-        NULL,
-        FALSE,
-        creationFlags,
-        NULL,
-        exeDir.c_str(),
-        &si,
-        &pi
-    );
-
-    if (!ok) {
-        DWORD err = GetLastError();
-        std::wstring msg =
-            L"Could not start launcher_worker.exe (Windows error " + std::to_wstring((unsigned long)err) +
-            L").\n\nReinstall or run LLM\\build_launcher.bat.";
-        MessageBoxW(NULL, msg.c_str(), L"OWLLM Launcher", MB_OK | MB_ICONERROR);
-        return 1;
-    }
-
-    CloseHandle(pi.hThread);
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD exitCode = 1;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess);
-    return (int)exitCode;
+    return RunLauncherWorker();
 }
 
 #else
 #error "Build launcher with -DLOCALLLM_LAUNCHER_GUI or -DLOCALLLM_LAUNCHER_WORKER"
+#endif
+
 #endif

@@ -20698,8 +20698,21 @@ respective package directories or official repositories.
             _pretty = lambda s, **_: (s or "").replace("\\", "/").rsplit("/", 1)[-1]
 
         def _label_for(cfg: dict, cfg_id: str) -> str:
-            base_model = cfg.get("base_model") or cfg_id or ""
-            return _pretty(base_model, include_org=False) or cfg_id
+            # base_model may be:
+            #   - a HF repo id        ("unsloth/gemma-2-2b-it")
+            #   - a filesystem-encoded folder name ("unsloth__gemma-2-2b-it")
+            #   - an ABSOLUTE PATH    ("C:\\...\\models\\unsloth__gemma-2-2b-it")
+            # Strip path components first so pretty_model_name only ever sees
+            # the model identifier itself — otherwise the drive letter looks
+            # like an "org" and the prettifier produces junk.
+            raw = (cfg.get("base_model") or cfg_id or "").replace("\\", "/").strip("/")
+            if "/" in raw:
+                last = raw.rsplit("/", 1)[-1]
+                # If the basename encodes org__repo we keep it; if the parent
+                # path is just `models/`, we discard the parent. Either way,
+                # only the trailing segment ever reaches the prettifier.
+                raw = last
+            return _pretty(raw, include_org=False) or cfg_id
 
         if hasattr(self, "header_servers_label"):
             running_pairs: list[tuple[str, int, str]] = []

@@ -314,10 +314,19 @@ class SystemDetector:
                 # the same numbering nvidia-smi reports.
                 env = dict(os.environ)
                 env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+                # `cuda_version` is NOT a valid --query-gpu field — querying it
+                # made nvidia-smi exit non-zero with no stdout, which silently
+                # killed the batched query and dropped UUIDs from the GPU
+                # list. Without UUIDs, gpu_config can't pin a stable identity
+                # across driver/BIOS reorderings, and the fallback torch.cuda
+                # enumeration (FASTEST_FIRST) numbers GPUs in the OPPOSITE
+                # order from core/gpu_config.py (PCI_BUS_ID), causing
+                # "select the 4090 in the UI -> model lands on the A2000".
+                # CUDA toolkit version comes from a separate query elsewhere.
                 nvidia_smi = subprocess.run(
                     [
                         "nvidia-smi",
-                        "--query-gpu=name,memory.total,driver_version,cuda_version,compute_cap,uuid,pci.bus_id",
+                        "--query-gpu=name,memory.total,driver_version,compute_cap,uuid,pci.bus_id",
                         "--format=csv,noheader",
                     ],
                     capture_output=True, text=True, timeout=timeout, env=env, **self.subprocess_flags
@@ -386,20 +395,21 @@ class SystemDetector:
                             "memory": parts[1].strip('"'),
                             "driver_version": parts[2].strip('"')
                         }
-                        if len(parts) >= 5:
-                            cuda_ver_raw = parts[3].strip('"')
-                            if cuda_ver_raw and not cuda_ver_raw.lower().startswith("not"):
-                                if not result.get("version"):
-                                    result["version"] = cuda_ver_raw
-                            compute_cap_raw = parts[4].strip('"')
+                        # Field order after dropping the invalid `cuda_version`
+                        # column: name, memory.total, driver_version,
+                        # compute_cap, uuid, pci.bus_id. CUDA toolkit version
+                        # is fetched from a separate top-level nvidia-smi
+                        # call elsewhere — it isn't per-GPU.
+                        if len(parts) >= 4:
+                            compute_cap_raw = parts[3].strip('"')
                             if compute_cap_raw:
                                 gpu_info["compute_capability"] = compute_cap_raw
-                        if len(parts) >= 6:
-                            uuid_raw = parts[5].strip('"')
+                        if len(parts) >= 5:
+                            uuid_raw = parts[4].strip('"')
                             if uuid_raw:
                                 gpu_info["uuid"] = uuid_raw
-                        if len(parts) >= 7:
-                            pci_raw = parts[6].strip('"')
+                        if len(parts) >= 6:
+                            pci_raw = parts[5].strip('"')
                             if pci_raw:
                                 gpu_info["pci_bus_id"] = pci_raw
                         result["gpus"].append(gpu_info)
@@ -577,13 +587,29 @@ class SystemDetector:
         
         try:
             # Method 1: PyTorch CUDA check (no external console process).
+            # Provides a fast initial answer but enumerates GPUs in
+            # FASTEST_FIRST order with no UUIDs / PCI bus ids.
             if self._detect_cuda_via_pytorch(result):
                 result["detection_methods"].append("pytorch")
 
-            # Method 2: nvidia-smi. Only use this on explicit refresh/repair
-            # flows; normal startup must not spawn console-subsystem tools.
-            if force_refresh and self._detect_cuda_via_nvidia_smi(result):
+            # Method 2: nvidia-smi. This is the ONLY source of UUIDs and the
+            # canonical PCI_BUS_ID ordering — both required so the home
+            # tab's GPU selector saves identities the model launcher will
+            # resolve to the same physical card. Previously gated behind
+            # force_refresh out of console-flash worries on some WDDM
+            # drivers, but `self.subprocess_flags` already passes
+            # CREATE_NO_WINDOW, so the gate cost users a critical bug
+            # ("select 4090 → model lands on A2000") with no real upside.
+            # If nvidia-smi populates GPUs, treat its list as authoritative
+            # and replace the PyTorch-derived list (PyTorch's order is
+            # FASTEST_FIRST and has no UUIDs).
+            pytorch_gpus = list(result.get("gpus", []))
+            result["gpus"] = []
+            if self._detect_cuda_via_nvidia_smi(result):
                 result["detection_methods"].append("nvidia-smi")
+            else:
+                # nvidia-smi failed — fall back to whatever pytorch saw.
+                result["gpus"] = pytorch_gpus
             
             # Method 3: File system detection (fallback)
             if self._detect_cuda_via_filesystem(result):

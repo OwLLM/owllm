@@ -36,3 +36,15 @@ streamlit==1.41.1
 uvicorn>=0.30.0,<1.0.0
 fastapi>=0.115.0,<1.0.0
 pydantic>=2.0.0,<3.0.0
+# OWLLM Agents tab — backend SDKs.
+# anthropic powers the Claude API route; openai powers the Codex/GPT API route.
+# These ship as MANDATORY dependencies because the Agents tab cannot let
+# the user *select* an API backend if the SDK isn't already importable.
+anthropic>=0.40.0,<1.0.0
+openai>=1.50.0,<2.0.0
+# OWLLM multimodal — voice-message transcription for in-app chat and the
+# Telegram / WhatsApp bridges. CTranslate2-backed Whisper, no compile,
+# downloads the chosen model file (~145 MB for "base") into
+# LLM/runtime/whisper/ on first use. If absent, audio attachments still
+# flow through the pipeline but arrive without a transcript.
+faster-whisper>=1.0.0,<2.0.0

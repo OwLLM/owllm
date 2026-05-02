@@ -156,24 +156,40 @@ def ensure_python312_runtime() -> None:
 
 
 def create_venv_with_virtualenv(venv_dir: Path) -> None:
-    """Use python3.11 + vendored virtualenv to create a Python 3.12 venv.
+    """Use python3.11 + vendored virtualenv to create a Python 3.12 venv,
+    then bootstrap pip ourselves with the bundled ``get-pip.py``.
 
-    python_runtime/python3.12 is the embeddable distribution (no
-    ``Lib/venv`` module), so ``-m venv`` against it doesn't work.
-    python_runtime/python3.11 is a regular Python with the bundled
-    ``virtualenv`` package — we use that as the bootstrapper, pointed
-    at the python3.12 interpreter.
+    Why we don't let virtualenv seed pip:
+      The bundled ``virtualenv 21.2`` ships pre-built pip / setuptools /
+      wheel seed wheels that pre-date Python 3.12. When virtualenv
+      copies those into a 3.12 venv, the seeded pip can't even
+      ``import ctypes`` because its compiled bits don't match the
+      3.12 runtime ABI — that was the
+      ``AttributeError: class must define a '_type_' attribute`` you
+      saw on the previous attempt.
+
+    So:
+      1. ``virtualenv -p python3.12 --no-pip --no-setuptools --no-wheel``
+         to create an empty Python 3.12 venv.
+      2. Run ``get-pip.py`` (shipped with python_runtime/python3.12/
+         and therefore version-matched) against the new venv's
+         ``python.exe`` to install a 3.12-compatible pip / setuptools
+         / wheel from the bundled get-pip.
+      3. From that point on every pip call uses the freshly bootstrapped
+         3.12 pip — no more ABI mismatch.
     """
     if not PY311.exists():
         fail(
             f"Bundled Python 3.11 not found at {PY311}.\n"
             "Re-run the OWLLM installer to refresh the python_runtime/ folder."
         )
-    print(f"  Creating Python 3.12 venv at {venv_dir} via virtualenv …")
+    print(f"  Creating empty Python 3.12 venv at {venv_dir} (no seeded packages)…")
     cmd = [
         str(PY311), "-m", "virtualenv",
         "-p", str(PY312),
-        "--no-download",
+        "--no-pip",
+        "--no-setuptools",
+        "--no-wheel",
         "--no-periodic-update",
         str(venv_dir),
     ]
@@ -186,12 +202,46 @@ def create_venv_with_virtualenv(venv_dir: Path) -> None:
     new_python = venv_dir / "Scripts" / "python.exe"
     if not new_python.exists():
         fail(f"Venv created but python.exe missing at {new_python}")
-    # Sanity check: it really IS Python 3.12.
+
+    # Verify the venv's Python is truly 3.12 AND its stdlib (ctypes etc.)
+    # imports cleanly. This is the gate that detects the abi-mismatch
+    # condition before we hit it via pip.
     sanity = subprocess.run(
-        [str(new_python), "-c", "import sys; print(sys.version_info[:2])"],
+        [
+            str(new_python),
+            "-c",
+            "import sys, ctypes; print(sys.version_info[:2]); ctypes.c_int(0)",
+        ],
         capture_output=True, text=True, timeout=30,
     )
-    print(f"  ✓ New venv reports: {sanity.stdout.strip() or sanity.stderr.strip()}")
+    if sanity.returncode != 0:
+        fail(
+            "New venv's stdlib import failed (ctypes / runtime mismatch).\n"
+            f"stderr: {sanity.stderr[-1000:]}"
+        )
+    print(f"  ✓ New venv reports: {sanity.stdout.strip()}")
+
+    # Bootstrap pip using the version-matched get-pip.py shipped with
+    # python_runtime/python3.12. This installs pip + setuptools + wheel
+    # using the new venv's own runtime, so the resulting pip can import
+    # ctypes correctly.
+    get_pip = SCRIPT_DIR / "python_runtime" / "python3.12" / "get-pip.py"
+    if not get_pip.exists():
+        fail(
+            f"get-pip.py not found at {get_pip}. Re-run the OWLLM installer "
+            "to refresh the python_runtime/ folder."
+        )
+    print(f"  Bootstrapping pip via {get_pip.name} …")
+    boot = subprocess.run(
+        [str(new_python), str(get_pip), "--no-cache-dir", "--no-warn-script-location"],
+        capture_output=True, text=True, timeout=300,
+    )
+    if boot.returncode != 0:
+        fail(
+            "get-pip.py failed.\n"
+            f"stdout: {boot.stdout[-500:]}\nstderr: {boot.stderr[-1000:]}"
+        )
+    print("  ✓ pip bootstrapped")
 
 
 def install_from_wheelhouse(venv_dir: Path, wheelhouse_dir: Path) -> None:

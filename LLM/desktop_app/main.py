@@ -52,6 +52,10 @@ from desktop_app.pages.mcp_page import MCPPage
 from desktop_app.pages.github_import_page import GitHubImportPage
 from desktop_app.pages.characters_3d_page import Characters3DPage
 from desktop_app.pages.code_page import CodePage
+from desktop_app.pages.agents_page import AgentsPage
+from desktop_app.pages.accounts_page import AccountsPage
+from desktop_app.pages.agent_studio_page import AgentStudioPage
+from desktop_app.pages.bridges_page import BridgesPage
 from desktop_app.widgets.character_preview_widget import CharacterPreviewWidget
 from desktop_app.widgets.process_console_widget import ProcessConsoleWidget
 
@@ -93,6 +97,90 @@ HF_TOKEN_DOCS_URL = "https://huggingface.co/docs/hub/en/security-tokens"
 
 # Do not hide subprocess console windows.
 SUBPROCESS_FLAGS = {}
+
+
+def _enumerate_descendants_winapi(root_pid):
+    """Return a list of descendant PIDs of ``root_pid`` using Toolhelp32.
+
+    Used by the shutdown path INSTEAD of spawning ``powershell.exe`` to walk
+    the process tree. Spawning powershell during app shutdown was triggering
+    ``0xc0000142`` (STATUS_DLL_INIT_FAILED) popups on some Windows 10/11
+    boxes — likely a race between us tearing down DLLs and the new shell
+    trying to load them. Toolhelp32Snapshot is in-process, kernel32-only,
+    and has none of those startup costs.
+
+    Returns ``[]`` on non-Windows or on any failure (callers already handle
+    that gracefully).
+    """
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return []
+
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+    class PROCESSENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_void_p),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    try:
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32First.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+        kernel32.Process32Next.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32)]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        snap = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == INVALID_HANDLE_VALUE:
+            return []
+
+        try:
+            entry = PROCESSENTRY32()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32)
+            parent_of = {}
+            if not kernel32.Process32First(snap, ctypes.byref(entry)):
+                return []
+            while True:
+                parent_of[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+                if not kernel32.Process32Next(snap, ctypes.byref(entry)):
+                    break
+        finally:
+            kernel32.CloseHandle(snap)
+
+        # BFS from root_pid through parent_of inverted lookup.
+        children_of = {}
+        for pid, ppid in parent_of.items():
+            children_of.setdefault(ppid, []).append(pid)
+
+        seen = set()
+        result = []
+        todo = [int(root_pid)]
+        while todo:
+            cur = todo.pop(0)
+            if cur in seen:
+                continue
+            seen.add(cur)
+            for kid in children_of.get(cur, ()):
+                if kid != int(root_pid) and kid not in seen:
+                    result.append(kid)
+                    todo.append(kid)
+        return result
+    except Exception:
+        return []
 
 
 class InstallerThread(QThread):
@@ -2566,8 +2654,54 @@ class MainWindow(QMainWindow):
         
         color_layout.addLayout(row1)
         color_layout.addLayout(row2)
-        
+
         theme_layout.addWidget(color_selector)
+
+        # ---- Advanced toggle (sits next to the color selector) -------
+        # Real QPushButton.clicked, not mousePressEvent on a custom layout.
+        # Why: the previous version used a QWidget with QLabel children and
+        # `mousePressEvent = lambda ...`. The header_widget had its own
+        # event filter (for window-drag), and QLabel children intercepted
+        # the press before the container's override ran — net effect was
+        # "the click does nothing". A QPushButton emits ``clicked`` via Qt's
+        # signal/slot mechanism, which is unaffected by parent event filters
+        # or child label propagation, so it just works.
+        advanced_btn = QPushButton()
+        advanced_btn.setFixedSize(70, 50)
+        advanced_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        advanced_btn.setCheckable(True)
+        # Two-line label inside the button via rich Unicode (Qt renders
+        # text on QPushButton in one line, but a vertical look comes
+        # through fine with a tall font + a tiny gap).
+        advanced_btn.setText("⚙\nAdvanced")
+        advanced_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(60, 60, 80, 0.85), stop:1 rgba(40, 40, 60, 0.85));
+                border: 1px solid rgba(255, 255, 255, 0.2);
+                border-radius: 6px;
+                color: white;
+                font-size: 9pt;
+                font-weight: bold;
+                padding: 0;
+                text-align: center;
+            }
+            QPushButton:hover {
+                border: 1px solid rgba(255, 255, 255, 0.4);
+            }
+            QPushButton:checked {
+                border: 1px solid #ffd080;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(80, 70, 50, 0.85), stop:1 rgba(60, 50, 30, 0.85));
+            }
+        """)
+        advanced_btn.clicked.connect(self._toggle_advanced)
+        self.advanced_btn = advanced_btn
+        self._advanced_visible = False
+        # 6px gap from the color selector — outside the stylesheet because
+        # QPushButton stylesheet margins are unreliable on Windows.
+        theme_layout.addSpacing(6)
+        theme_layout.addWidget(advanced_btn)
 
         # Left column (theme controls)
         header_left = QWidget()
@@ -2607,6 +2741,13 @@ class MainWindow(QMainWindow):
         # Right: System info (compact)
         sys_info_widget = QWidget()
         sys_info_widget.setStyleSheet("background: transparent; border: none;")
+        # The Servers line includes the prettified running-model name(s) —
+        # e.g. "🟢 Servers: 1 (Gemma 4 E4B Instruct GGUF)" — which easily
+        # runs 380–500 px. Without a minimum width the right column collapses
+        # to the shortest label's sizeHint, clipping API/VRAM/Servers text
+        # and leaving them looking blank.
+        sys_info_widget.setMinimumWidth(520)
+        sys_info_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         sys_info_layout = QVBoxLayout(sys_info_widget)
         sys_info_layout.setContentsMargins(0, 0, 0, 0)
         sys_info_layout.setSpacing(4)
@@ -2618,11 +2759,17 @@ class MainWindow(QMainWindow):
         servers_label = QLabel("🟢 Servers: …", self)
         servers_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         servers_label.setToolTip("Models with an inference server currently running.")
+        # MinimumExpanding — let the label grow with the model name; full
+        # text is also available in the tooltip.
+        servers_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+        servers_label.setMinimumWidth(520)
         sys_info_layout.addWidget(servers_label)
         self.header_servers_label = servers_label
 
         apikey_label = QLabel("🔑 API key: owllm-local", self)
         apikey_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
+        apikey_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+        apikey_label.setMinimumWidth(520)
         apikey_label.setCursor(Qt.PointingHandCursor)
         apikey_label.setToolTip(
             "API key clients use to talk to OWLLM's OpenAI-compatible proxy at "
@@ -2643,6 +2790,8 @@ class MainWindow(QMainWindow):
         vram_label = QLabel("💾 VRAM: …", self)
         vram_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         vram_label.setToolTip("Total GPU VRAM in use; per-server breakdown in tooltip when servers are running.")
+        vram_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
+        vram_label.setMinimumWidth(520)
         sys_info_layout.addWidget(vram_label)
         self.header_vram_label = vram_label
 
@@ -2730,6 +2879,12 @@ class MainWindow(QMainWindow):
         
         # Tab buttons
         self.home_btn = QPushButton("🏠 Home")
+        # Group buttons — replace the flat-list navbar. They toggle the
+        # visibility of their sub-buttons so the bar isn't a 14-button
+        # river. Default state is "home only" — sub-buttons stay hidden
+        # until the user clicks a group or one of the launcher cards.
+        self.finetuning_group_btn = QPushButton("🛠  Fine Tuning")
+        self.agentic_group_btn = QPushButton("🎭  Agentic Team")
         self.download_btn = QPushButton("📦 Models")
         self.train_btn = QPushButton("🎯 Train")
         self.test_btn = QPushButton("🧪 Test")
@@ -2739,29 +2894,79 @@ class MainWindow(QMainWindow):
         self.envs_btn = QPushButton("⚙️ Environment")
         self.characters_btn = QPushButton("🧙‍♂️ Characters")
         self.code_btn = QPushButton("💻 Code")
+        self.agents_btn = QPushButton("🤖 Agents")
+        self.studio_btn = QPushButton("🎭 Studio")
+        self.accounts_btn = QPushButton("🔐 Accounts")
+        self.bridges_btn = QPushButton("📱 Bridges")
         self.info_btn = QPushButton("ℹ️ Info")
 
         # Navigation buttons will be styled by theme system
 
-        for btn in [self.home_btn, self.train_btn, self.download_btn, self.test_btn, self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn, self.characters_btn, self.code_btn, self.info_btn]:
+        for btn in [
+            self.home_btn,
+            self.finetuning_group_btn, self.agentic_group_btn,
+            self.train_btn, self.download_btn, self.test_btn,
+            self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn,
+            self.characters_btn, self.code_btn, self.agents_btn,
+            self.studio_btn, self.accounts_btn, self.bridges_btn, self.info_btn,
+        ]:
             btn.setCheckable(True)
-            # Navigation buttons will be styled by theme system
+            # Strong active-tab highlight — the theme's default :checked
+            # style only flips a gradient direction, which is nearly
+            # invisible on dark backgrounds. Inject an explicit per-button
+            # stylesheet so the active tab is unambiguous: brighter fill,
+            # bright cyan bottom border, white bold text.
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: rgba(255, 255, 255, 0.04);
+                    color: #cbd2e0;
+                    border: none;
+                    border-bottom: 3px solid transparent;
+                    padding: 8px 14px;
+                    font-size: 11pt;
+                    font-weight: 500;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 255, 255, 0.10);
+                    color: #ffffff;
+                }
+                QPushButton:checked {
+                    background: rgba(116, 164, 255, 0.18);
+                    color: #ffffff;
+                    font-weight: bold;
+                    border-bottom: 3px solid #74a4ff;
+                }
+                QPushButton:checked:hover {
+                    background: rgba(116, 164, 255, 0.28);
+                }
+            """)
 
-        # Add left-side buttons
+        # Layout — order matters because we toggle visibility on the
+        # individual buttons below.
         navbar_layout.addWidget(self.home_btn)
+        navbar_layout.addWidget(self.finetuning_group_btn)
+        # Fine Tuning sub-tabs — hidden until the user activates the group.
         navbar_layout.addWidget(self.download_btn)
         navbar_layout.addWidget(self.train_btn)
         navbar_layout.addWidget(self.test_btn)
-        navbar_layout.addWidget(self.server_btn)
-        navbar_layout.addWidget(self.mcp_btn)
-        navbar_layout.addWidget(self.envs_btn)
+        navbar_layout.addWidget(self.agentic_group_btn)
+        # Agentic Team sub-tabs — hidden until the user activates the group.
         navbar_layout.addWidget(self.characters_btn)
         navbar_layout.addWidget(self.code_btn)
+        navbar_layout.addWidget(self.agents_btn)
+        navbar_layout.addWidget(self.studio_btn)
+        navbar_layout.addWidget(self.bridges_btn)
+        navbar_layout.addWidget(self.server_btn)
 
         # Add stretch to consume remaining space
         navbar_layout.addStretch(1)
 
-        # Add Logs and Info buttons on far right
+        # Right-side buttons — Info always visible. Advanced sub-tabs
+        # (MCP / Environment / Accounts / Logs) appear here only when the
+        # Advanced toggle in the header is on.
+        navbar_layout.addWidget(self.mcp_btn)
+        navbar_layout.addWidget(self.envs_btn)
+        navbar_layout.addWidget(self.accounts_btn)
         navbar_layout.addWidget(self.logs_btn)
         navbar_layout.addWidget(self.info_btn)
         
@@ -2784,6 +2989,10 @@ class MainWindow(QMainWindow):
             "mcp": "MCP",
             "characters": "Characters",
             "code": "Code",
+            "agents": "Agents",
+            "studio": "Studio",
+            "accounts": "Accounts",
+            "bridges": "Bridges",
             "github_import": "GitHub Import",
             "environment": "Environment Manager",
             "info": "Info"
@@ -2822,6 +3031,48 @@ class MainWindow(QMainWindow):
         _code_placeholder_layout.addStretch(1)
         self._code_tab_index = tabs.addTab(self._code_tab_placeholder, "Code")
         tabs.currentChanged.connect(lambda idx: self._init_code_page_if_needed(tabs, idx))
+
+        # Agents tab — multi-agent OWLLM runtime (orchestrator + specialists).
+        # Lazy-built so importing PySide-heavy modules doesn't slow startup.
+        self._agents_page = None
+        self._agents_tab_placeholder = QWidget()
+        _agents_placeholder_layout = QVBoxLayout(self._agents_tab_placeholder)
+        _agents_placeholder_layout.setContentsMargins(20, 20, 20, 20)
+        _agents_placeholder_layout.addWidget(QLabel("Agents runtime loads when opened…"))
+        _agents_placeholder_layout.addStretch(1)
+        self._agents_tab_index = tabs.addTab(self._agents_tab_placeholder, "Agents")
+        tabs.currentChanged.connect(lambda idx: self._init_agents_page_if_needed(tabs, idx))
+
+        # Accounts tab — top-level. Lazy-built like the others to keep
+        # startup snappy.
+        self._accounts_page = None
+        self._accounts_tab_placeholder = QWidget()
+        _ap_layout = QVBoxLayout(self._accounts_tab_placeholder)
+        _ap_layout.setContentsMargins(20, 20, 20, 20)
+        _ap_layout.addWidget(QLabel("Accounts loads when opened…"))
+        _ap_layout.addStretch(1)
+        self._accounts_tab_index = tabs.addTab(self._accounts_tab_placeholder, "Accounts")
+        tabs.currentChanged.connect(lambda idx: self._init_accounts_page_if_needed(tabs, idx))
+
+        # Studio tab — agent definition editor.
+        self._studio_page = None
+        self._studio_tab_placeholder = QWidget()
+        _stdo_layout = QVBoxLayout(self._studio_tab_placeholder)
+        _stdo_layout.setContentsMargins(20, 20, 20, 20)
+        _stdo_layout.addWidget(QLabel("Studio loads when opened…"))
+        _stdo_layout.addStretch(1)
+        self._studio_tab_index = tabs.addTab(self._studio_tab_placeholder, "Studio")
+        tabs.currentChanged.connect(lambda idx: self._init_studio_page_if_needed(tabs, idx))
+
+        # Bridges tab — Telegram + WhatsApp control panel under Advanced.
+        self._bridges_page = None
+        self._bridges_tab_placeholder = QWidget()
+        _br_layout = QVBoxLayout(self._bridges_tab_placeholder)
+        _br_layout.setContentsMargins(20, 20, 20, 20)
+        _br_layout.addWidget(QLabel("Bridges loads when opened…"))
+        _br_layout.addStretch(1)
+        self._bridges_tab_index = tabs.addTab(self._bridges_tab_placeholder, "Bridges")
+        tabs.currentChanged.connect(lambda idx: self._init_bridges_page_if_needed(tabs, idx))
         
         # Lazy-init Environment Manager page (can be expensive on startup due environment scans).
         self._env_page_initialized = False
@@ -2844,6 +3095,27 @@ class MainWindow(QMainWindow):
         self.characters_btn.clicked.connect(lambda: self._switch_tab(tabs, "characters"))
         self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, "environment"))
         self.code_btn.clicked.connect(lambda: self._switch_tab(tabs, "code"))
+        self.agents_btn.clicked.connect(lambda: self._switch_tab(tabs, "agents"))
+        self.accounts_btn.clicked.connect(lambda: self._switch_tab(tabs, "accounts"))
+        self.studio_btn.clicked.connect(lambda: self._switch_tab(tabs, "studio"))
+        self.bridges_btn.clicked.connect(lambda: self._switch_tab(tabs, "bridges"))
+        # Group buttons: switch to first tab in their group AND show that
+        # group's sub-buttons (collapsing the other group).
+        self.finetuning_group_btn.clicked.connect(
+            lambda: self._activate_navbar_group("finetuning", tabs)
+        )
+        self.agentic_group_btn.clicked.connect(
+            lambda: self._activate_navbar_group("agentic", tabs)
+        )
+        # Home button collapses both groups so the navbar reads cleanly.
+        self.home_btn.clicked.connect(
+            lambda: self._activate_navbar_group("home", tabs)
+        )
+
+        # Initial state: home group, advanced hidden.
+        self._navbar_group = "home"
+        self._apply_navbar_group_visibility()
+        self._apply_advanced_visibility()
         self.info_btn.clicked.connect(lambda: self._switch_tab(tabs, "info"))
         
         # Also connect to tab widget's currentChanged signal to handle programmatic changes
@@ -2968,6 +3240,454 @@ class MainWindow(QMainWindow):
             self._code_page = None
         finally:
             self._code_tab_initializing = False
+
+    def _init_agents_page_if_needed(self, tabs, idx: int) -> None:
+        """Lazily build the Agents tab the first time it is selected.
+
+        Two-phase boot so the user always sees motion:
+
+        1. Immediately swap the bland "Agents runtime loads…" placeholder
+           for an animated :class:`AgentCanvasLoader`. This paints on the
+           next event-loop turn so the user gets visual feedback in <100ms.
+        2. Schedule the heavy ``AgentsPage(...)`` construction for the
+           NEXT event-loop turn. When construction finishes, swap the
+           loader for the real page. If construction raises, swap the
+           loader for an error widget that names the failure — not a
+           silent dead placeholder.
+
+        Same re-entrancy shape as ``_init_code_page_if_needed`` — see that
+        method for the recursion-guard rationale.
+        """
+        if getattr(self, "_agents_tab_initializing", False):
+            return
+        if idx != getattr(self, "_agents_tab_index", -1):
+            return
+        if getattr(self, "_agents_page", None) is not None:
+            return
+        self._agents_tab_initializing = True
+
+        # Phase 1: animated loader in place of the placeholder.
+        # IMPORTANT: block tab signals around removeTab/insertTab. Qt fires
+        # ``currentChanged`` for the intermediate state when the previously
+        # selected tab is removed, and that signal cascades into every
+        # other lazy ``_init_*_if_needed`` callback in this file. Those
+        # callbacks each call ``tabs.setCurrentIndex(self._OTHER_tab_index)``
+        # to swap themselves into view — which is why a working loader
+        # would flash for ~half a second and then the user would land on
+        # an unrelated tab (e.g. "Accounts loads when opened…").
+        try:
+            from desktop_app.widgets.agent_canvas_loader import AgentCanvasLoader
+            loader = AgentCanvasLoader()
+            loader.set_status("Loading agents runtime")
+            loader.set_sub_status("Building canvas, probing the cu121 profile env, wiring the bus.")
+            tabs.blockSignals(True)
+            try:
+                tabs.removeTab(self._agents_tab_index)
+                self._agents_tab_index = tabs.insertTab(idx, loader, "Agents")
+                tabs.setCurrentIndex(self._agents_tab_index)
+            finally:
+                tabs.blockSignals(False)
+            self._agents_loader_widget = loader
+            # Manually run the on-tab-changed effects we suppressed above
+            # (navbar highlight + corner image) so the UI stays consistent.
+            try:
+                self._sync_navbar_buttons_for_index(self._agents_tab_index, tab_widget=tabs)
+                self._update_frame_corner_br(self._agents_tab_index)
+            except Exception:
+                pass
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                self._log_to_app_log(f"[AGENTS TAB] loader init failed: {e}\n{tb}")
+            except Exception:
+                pass
+            self._agents_loader_widget = None
+
+        # Phase 2: defer heavy construction so the loader paints first.
+        QTimer.singleShot(50, lambda: self._build_agents_page_async(tabs, idx))
+
+    def _build_agents_page_async(self, tabs, idx: int) -> None:
+        """Construct ``AgentsPage`` and swap it in for the loader.
+
+        Runs on the GUI thread (a QThread subprocess construction would
+        be safer but ``AgentsPage`` is full of QWidgets which must be
+        created on the GUI thread). Keeping this on the GUI thread is OK
+        because the loader is already painting and the construction is
+        bounded — if it goes >10s, that's a real bug, not a UX issue.
+        """
+        try:
+            page = AgentsPage(main_window=self, parent=self)
+            self._agents_page = page
+            # Locate the loader by current tab — it might have moved if
+            # other lazy tabs initialized in between.
+            cur_idx = -1
+            for i in range(tabs.count()):
+                if tabs.widget(i) is getattr(self, "_agents_loader_widget", None):
+                    cur_idx = i
+                    break
+            if cur_idx < 0:
+                cur_idx = self._agents_tab_index
+            try:
+                # Stop the loader's animation timer so it doesn't keep
+                # repainting in the background after being hidden.
+                if self._agents_loader_widget is not None:
+                    self._agents_loader_widget.stop()
+            except Exception:
+                pass
+            # Block signals around the swap so lazy-init handlers for
+            # OTHER tabs (Accounts/Studio/Bridges/Code) don't fire on the
+            # intermediate currentChanged and steal the selection.
+            tabs.blockSignals(True)
+            try:
+                tabs.removeTab(cur_idx)
+                self._agents_tab_index = tabs.insertTab(cur_idx, page, "Agents")
+                tabs.setCurrentIndex(self._agents_tab_index)
+            finally:
+                tabs.blockSignals(False)
+            self._agents_loader_widget = None
+            try:
+                self._sync_navbar_buttons_for_index(self._agents_tab_index, tab_widget=tabs)
+                self._update_frame_corner_br(self._agents_tab_index)
+            except Exception:
+                pass
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                self._log_to_app_log(f"[AGENTS TAB] init failed: {e}\n{tb}")
+            except Exception:
+                pass
+            self._agents_page = None
+            self._show_agents_init_error(tabs, str(e), tb)
+        finally:
+            self._agents_tab_initializing = False
+
+    def _show_agents_init_error(self, tabs, message: str, traceback_text: str) -> None:
+        """Replace the loader with a visible error pane.
+
+        The previous failure mode left the placeholder ("Agents runtime
+        loads when opened…") in place and the user staring at a white-on-black
+        line forever, with the actual error buried in app.log. Now the
+        error widget shows what broke and what to do about it.
+        """
+        try:
+            from PySide6.QtWidgets import QFrame, QLabel, QPushButton, QVBoxLayout, QTextEdit
+            from PySide6.QtCore import Qt
+            err = QFrame()
+            err.setStyleSheet("background:#0f1218;")
+            v = QVBoxLayout(err)
+            v.setContentsMargins(40, 40, 40, 40)
+            v.setSpacing(14)
+            title = QLabel("⚠ Agents page failed to initialize")
+            title.setStyleSheet("color:#ff8c8c; font-size:18pt; font-weight:bold; background:transparent;")
+            v.addWidget(title)
+            msg = QLabel(message)
+            msg.setStyleSheet("color:#cbd2e0; font-size:12pt; background:transparent;")
+            msg.setWordWrap(True)
+            v.addWidget(msg)
+            tail_box = QTextEdit()
+            tail_box.setReadOnly(True)
+            tail_box.setStyleSheet(
+                "background:#181b22; color:#cbd2e0; border:none; border-radius:6px; "
+                "padding:10px; font-family:Consolas,monospace; font-size:11px;"
+            )
+            tail_box.setText(traceback_text[-3000:])
+            v.addWidget(tail_box, 1)
+            retry = QPushButton("🔄 Retry")
+            retry.setStyleSheet("""
+                QPushButton {
+                    background:#74a4ff; color:white;
+                    border:none; border-radius:8px;
+                    padding:8px 24px; font-weight:bold;
+                }
+                QPushButton:hover { background:#9bb9ff; }
+            """)
+            retry.clicked.connect(lambda: self._retry_agents_init(tabs))
+            v.addWidget(retry, 0, Qt.AlignLeft)
+            cur_idx = -1
+            for i in range(tabs.count()):
+                if tabs.widget(i) is getattr(self, "_agents_loader_widget", None):
+                    cur_idx = i
+                    break
+            if cur_idx < 0:
+                cur_idx = self._agents_tab_index
+            # See _build_agents_page_async for why blockSignals matters here.
+            tabs.blockSignals(True)
+            try:
+                tabs.removeTab(cur_idx)
+                self._agents_tab_index = tabs.insertTab(cur_idx, err, "Agents")
+                tabs.setCurrentIndex(self._agents_tab_index)
+            finally:
+                tabs.blockSignals(False)
+            self._agents_loader_widget = None
+            try:
+                self._sync_navbar_buttons_for_index(self._agents_tab_index, tab_widget=tabs)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _retry_agents_init(self, tabs) -> None:
+        """Reset the lazy-init guards so clicking the tab tries again."""
+        self._agents_page = None
+        self._agents_loader_widget = None
+        self._agents_tab_initializing = False
+        self._init_agents_page_if_needed(tabs, self._agents_tab_index)
+
+    def _init_accounts_page_if_needed(self, tabs, idx: int) -> None:
+        """Lazily build the Accounts tab the first time it is selected.
+
+        Same re-entrancy guard pattern as the other lazy tabs.
+        """
+        if getattr(self, "_accounts_tab_initializing", False):
+            return
+        try:
+            if idx != getattr(self, "_accounts_tab_index", -1):
+                return
+            if getattr(self, "_accounts_page", None) is not None:
+                return
+            self._accounts_tab_initializing = True
+            page = AccountsPage(parent=self)
+            self._accounts_page = page
+            tabs.removeTab(self._accounts_tab_index)
+            self._accounts_tab_index = tabs.insertTab(idx, page, "Accounts")
+            tabs.setCurrentIndex(self._accounts_tab_index)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                self._log_to_app_log(f"[ACCOUNTS TAB] init failed: {e}\n{tb}")
+            except Exception:
+                pass
+            self._accounts_page = None
+        finally:
+            self._accounts_tab_initializing = False
+
+    # ------------------------------------------------------------------
+    # Home launcher cards
+    # ------------------------------------------------------------------
+
+    _LAUNCHER_CARDS = (
+        {
+            "key": "finetuning",
+            "title": "Fine Tuning",
+            "icon": "🛠",
+            "tagline": "Models · Train · Test",
+            "blurb": "Download base models, fine-tune adapters, and test prompts.",
+            "accent_top": "#23304a",
+            "accent_bottom": "#161c2c",
+            "accent_line": "#7989ff",
+        },
+        {
+            "key": "agentic",
+            "title": "Agentic Team",
+            "icon": "🎭",
+            "tagline": "Agents · Studio · Code · Characters",
+            "blurb": "Design agents, give them models and tools, and run multi-agent projects.",
+            "accent_top": "#1f3a3a",
+            "accent_bottom": "#16252a",
+            "accent_line": "#56d3c8",
+        },
+    )
+
+    def _build_home_launcher_cards(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(20)
+        for spec in self._LAUNCHER_CARDS:
+            card = self._build_launcher_card(spec)
+            row.addWidget(card, 1)
+        return row
+
+    def _build_launcher_card(self, spec: dict) -> QFrame:
+        """One big clickable card. Click activates the matching navbar
+        group via ``_activate_navbar_group``."""
+        card = QFrame()
+        card.setObjectName("LauncherCard")
+        card.setMinimumHeight(150)
+        card.setCursor(QCursor(Qt.PointingHandCursor))
+        card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        card.setStyleSheet(f"""
+            QFrame#LauncherCard {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {spec['accent_top']}, stop:1 {spec['accent_bottom']});
+                border: none;
+                border-left: 4px solid {spec['accent_line']};
+                border-radius: 14px;
+            }}
+            QFrame#LauncherCard:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 {spec['accent_top']}, stop:1 {spec['accent_top']});
+            }}
+        """)
+        layout = QHBoxLayout(card)
+        layout.setContentsMargins(24, 18, 24, 18)
+        layout.setSpacing(18)
+
+        icon_lbl = QLabel(spec["icon"])
+        f = QFont()
+        f.setPointSize(40)
+        icon_lbl.setFont(f)
+        icon_lbl.setStyleSheet("background:transparent;")
+        layout.addWidget(icon_lbl)
+
+        text_box = QVBoxLayout()
+        text_box.setSpacing(4)
+        title_lbl = QLabel(spec["title"])
+        tf = QFont()
+        tf.setPointSize(20)
+        tf.setBold(True)
+        title_lbl.setFont(tf)
+        title_lbl.setStyleSheet(f"color:{spec['accent_line']}; background:transparent;")
+        text_box.addWidget(title_lbl)
+        tagline_lbl = QLabel(spec["tagline"])
+        tagline_lbl.setStyleSheet(
+            "color:#9aa0a6; background:transparent; font-size:11px; "
+            "letter-spacing:0.6px; text-transform:uppercase;"
+        )
+        text_box.addWidget(tagline_lbl)
+        blurb_lbl = QLabel(spec["blurb"])
+        blurb_lbl.setStyleSheet("color:#dadcdf; background:transparent; font-size:13px;")
+        blurb_lbl.setWordWrap(True)
+        text_box.addWidget(blurb_lbl)
+        layout.addLayout(text_box, 1)
+
+        chevron = QLabel("›")
+        chevron.setStyleSheet("color:#9aa0a6; background:transparent; font-size:32pt;")
+        layout.addWidget(chevron)
+
+        # Click → activate group + navigate.
+        group_key = spec["key"]
+        card.mousePressEvent = (
+            lambda _e, k=group_key: self._activate_navbar_group(k, self.tabs)
+        )
+        return card
+
+    # ------------------------------------------------------------------
+    # Navbar groups + Advanced toggle
+    # ------------------------------------------------------------------
+
+    # Sub-buttons that belong to each group. Edit this map to change which
+    # buttons appear under which group label — no other code touches it.
+    _NAVBAR_GROUPS = {
+        "finetuning": ("download_btn", "train_btn", "test_btn"),
+        "agentic":   ("characters_btn", "code_btn", "agents_btn", "studio_btn", "bridges_btn"),
+    }
+    # Buttons revealed by the Advanced toggle.
+    _ADVANCED_BUTTONS = ("mcp_btn", "envs_btn", "accounts_btn", "logs_btn")
+    # First-tab landing per group when the group button is clicked.
+    _GROUP_FIRST_TAB = {
+        "finetuning": "models",
+        "agentic":   "agents",
+    }
+
+    def _activate_navbar_group(self, group: str, tabs) -> None:
+        """Switch which group's sub-buttons are visible, and navigate to
+        the group's primary tab. ``group`` is 'home' / 'finetuning' /
+        'agentic'."""
+        self._navbar_group = group
+        self._apply_navbar_group_visibility()
+        if group == "home":
+            self._switch_tab(tabs, "home")
+        else:
+            target = self._GROUP_FIRST_TAB.get(group)
+            if target:
+                self._switch_tab(tabs, target)
+
+    def _apply_navbar_group_visibility(self) -> None:
+        """Show only the active group's sub-buttons; hide the rest.
+
+        Idempotent — safe to call any time.
+        """
+        active_group = getattr(self, "_navbar_group", "home")
+        for group_name, attr_names in self._NAVBAR_GROUPS.items():
+            visible = (group_name == active_group)
+            for attr in attr_names:
+                btn = getattr(self, attr, None)
+                if btn is not None:
+                    btn.setVisible(visible)
+        # Group-button "checked" state mirrors the active group so the
+        # navbar visually highlights which group you're in.
+        for attr, expected in (
+            ("finetuning_group_btn", "finetuning"),
+            ("agentic_group_btn", "agentic"),
+        ):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                try:
+                    btn.setChecked(active_group == expected)
+                except Exception:
+                    pass
+
+    def _toggle_advanced(self) -> None:
+        self._advanced_visible = not getattr(self, "_advanced_visible", False)
+        self._apply_advanced_visibility()
+        # Sync the QPushButton's checked state so the amber border accent
+        # reflects the toggle even if the user toggled programmatically.
+        try:
+            if hasattr(self, "advanced_btn"):
+                self.advanced_btn.setChecked(self._advanced_visible)
+        except Exception:
+            pass
+
+    def _apply_advanced_visibility(self) -> None:
+        visible = getattr(self, "_advanced_visible", False)
+        for attr in self._ADVANCED_BUTTONS:
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                btn.setVisible(visible)
+
+    def _init_bridges_page_if_needed(self, tabs, idx: int) -> None:
+        """Lazily build the Bridges tab on first open."""
+        if getattr(self, "_bridges_tab_initializing", False):
+            return
+        try:
+            if idx != getattr(self, "_bridges_tab_index", -1):
+                return
+            if getattr(self, "_bridges_page", None) is not None:
+                return
+            self._bridges_tab_initializing = True
+            page = BridgesPage(parent=self)
+            self._bridges_page = page
+            tabs.removeTab(self._bridges_tab_index)
+            self._bridges_tab_index = tabs.insertTab(idx, page, "Bridges")
+            tabs.setCurrentIndex(self._bridges_tab_index)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                self._log_to_app_log(f"[BRIDGES TAB] init failed: {e}\n{tb}")
+            except Exception:
+                pass
+            self._bridges_page = None
+        finally:
+            self._bridges_tab_initializing = False
+
+    def _init_studio_page_if_needed(self, tabs, idx: int) -> None:
+        """Lazily build the Studio tab on first open."""
+        if getattr(self, "_studio_tab_initializing", False):
+            return
+        try:
+            if idx != getattr(self, "_studio_tab_index", -1):
+                return
+            if getattr(self, "_studio_page", None) is not None:
+                return
+            self._studio_tab_initializing = True
+            page = AgentStudioPage(parent=self)
+            self._studio_page = page
+            tabs.removeTab(self._studio_tab_index)
+            self._studio_tab_index = tabs.insertTab(idx, page, "Studio")
+            tabs.setCurrentIndex(self._studio_tab_index)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            try:
+                self._log_to_app_log(f"[STUDIO TAB] init failed: {e}\n{tb}")
+            except Exception:
+                pass
+            self._studio_page = None
+        finally:
+            self._studio_tab_initializing = False
 
     def _setup_process_console(self) -> None:
         """Add the built-in process terminal to the main window."""
@@ -3152,35 +3872,51 @@ class MainWindow(QMainWindow):
     def _get_target_venv_python(self, model_id: str = None, model_path: str = None) -> str:
         """
         Get the target venv Python executable path for a model.
-        Uses per-model isolated environment if available, otherwise falls back to shared .venv.
-        
-        Args:
-            model_id: HuggingFace model ID (e.g., "nvidia/Nemotron-3-30B")
-            model_path: Local model path
-            
-        Returns:
-            Path to Python executable
+
+        Order:
+          1. Per-model isolated environment if ``model_id`` / ``model_path``
+             is given AND the env_manager already created it.
+          2. The CANONICAL OWLLM Python — single source of truth from
+             ``core.runtime.owllm_python.get_owllm_python``. This is the
+             interpreter the app itself runs on; any "what packages does
+             OWLLM see?" probe (e.g. the Requirements tab scan) MUST use
+             this one. The previous fallback to ``LLM/.venv`` (legacy)
+             caused the Requirements scan to report the entire critical
+             dep list as "MISSING" and pop up "Environment needs
+             attention" 1-2 minutes after opening Agents — even though
+             the app was running fine on cu121.
+          3. Legacy ``LLM/.venv`` only as the absolute-last fallback for
+             pre-profile-split installs.
+          4. ``sys.executable`` if even that doesn't exist.
         """
         import sys
         from pathlib import Path
-        
+
         # Try per-model environment first if model is specified
         if model_id or model_path:
             python_exe = self.env_manager.get_python_executable(model_id=model_id, model_path=model_path)
             if python_exe and python_exe.exists():
                 return str(python_exe)
-        
-        # Fallback to shared LLM/.venv (for backward compatibility)
+
+        # Canonical OWLLM Python — same resolver every launcher uses.
+        try:
+            from core.runtime.owllm_python import get_owllm_python, OwllmEnvNotInstalled
+            try:
+                canonical = get_owllm_python(self.root)
+                return str(canonical)
+            except OwllmEnvNotInstalled:
+                pass
+        except Exception:
+            pass
+
+        # Last-resort fallbacks.
         llm_venv = self.root / ".venv"
         if sys.platform == "win32":
             venv_python = llm_venv / "Scripts" / "python.exe"
         else:
             venv_python = llm_venv / "bin" / "python"
-        
         if venv_python.exists():
             return str(venv_python)
-        
-        # Last resort: current Python
         return sys.executable
     
     def _ensure_model_environment(self, model_id: str = None, model_path: str = None) -> Tuple[bool, Optional[str]]:
@@ -4128,36 +4864,15 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-                # 3) Kill orphan OWLLM workers not recorded in StateStore.
-                #    The previous filter was too narrow (only server_app /
-                #    bundled_proxy_server), which left run_adapter_backend
-                #    and other in-process model loaders alive — visible as a
-                #    multi-GB python.exe still holding the model after the
-                #    GUI exits.
-                if os.name == "nt":
-                    try:
-                        ps = subprocess.run(
-                            [
-                                "powershell",
-                                "-NoProfile",
-                                "-Command",
-                                "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\") | "
-                                "Where-Object { $_.CommandLine -match "
-                                "'core\\.llm_backends\\.|run_adapter_backend|llama_cpp|llama-cpp-python|"
-                                "owllm[_\\-]server|model_server|inference_worker' } | "
-                                "Select-Object -ExpandProperty ProcessId",
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=10,
-                            **SUBPROCESS_FLAGS,
-                        )
-                        for line in (ps.stdout or "").splitlines():
-                            line = line.strip()
-                            if line.isdigit():
-                                subprocess.run(["taskkill", "/F", "/PID", line], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
-                    except Exception:
-                        pass
+                # 3) (Removed) The orphan-python-by-cmdline scan used to live
+                #    here. It spawned powershell.exe to filter
+                #    Get-CimInstance Win32_Process by CommandLine. During app
+                #    shutdown, that powershell launch occasionally tripped
+                #    0xc0000142 (DLL init failed) and put up an undismissable
+                #    error dialog. The descendant-walker in step (5) already
+                #    catches every worker we actually spawned; cmdline
+                #    matching only added orphans-from-prior-runs, which the
+                #    "Stop All Servers" UI button handles when the user wants.
 
                 # 4) Kill native llama-server.exe instances. The bundled proxy
                 #    spawns one of these per loaded GGUF; it's not a Python
@@ -4181,31 +4896,16 @@ class MainWindow(QMainWindow):
                 if os.name == "nt":
                     try:
                         my_pid = os.getpid()
-                        # `taskkill /T` kills the process and its entire
-                        # subtree. Doing it on /our/ pid would kill us, so we
-                        # only walk descendants via WMIC parent lookup.
-                        ps = subprocess.run(
-                            [
-                                "powershell",
-                                "-NoProfile",
-                                "-Command",
-                                # Recursive descendant enumeration, BFS.
-                                "$root=" + str(int(my_pid)) + "; "
-                                "$todo = @($root); $seen = @(); "
-                                "while ($todo.Count -gt 0) { "
-                                "  $cur = $todo[0]; $todo = $todo[1..($todo.Count-1)]; "
-                                "  if ($seen -contains $cur) { continue }; "
-                                "  $seen += $cur; "
-                                "  $kids = (Get-CimInstance Win32_Process -Filter \"ParentProcessId=$cur\") | Select-Object -ExpandProperty ProcessId; "
-                                "  foreach ($k in $kids) { if ($k -ne $root) { $todo += $k; Write-Output $k } }"
-                                "}",
-                            ],
-                            capture_output=True, text=True, timeout=15, **SUBPROCESS_FLAGS,
-                        )
-                        for line in (ps.stdout or "").splitlines():
-                            line = line.strip()
-                            if line.isdigit() and int(line) != my_pid:
-                                subprocess.run(["taskkill", "/F", "/PID", line], capture_output=True, timeout=5, **SUBPROCESS_FLAGS)
+                        # In-process descendant walk via Toolhelp32 — replaces
+                        # the previous powershell BFS, which on shutdown could
+                        # fail with 0xc0000142 (DLL init failed) and pop a
+                        # blocking error dialog the user couldn't dismiss.
+                        for desc_pid in _enumerate_descendants_winapi(my_pid):
+                            if desc_pid != my_pid:
+                                subprocess.run(
+                                    ["taskkill", "/F", "/PID", str(desc_pid)],
+                                    capture_output=True, timeout=5, **SUBPROCESS_FLAGS,
+                                )
                     except Exception:
                         pass
             except Exception as e:
@@ -4318,29 +5018,11 @@ class MainWindow(QMainWindow):
                     except Exception:
                         pass
 
-                # Kill orphan OWLLM uvicorn servers not recorded in StateStore
-                if os.name == "nt":
-                    try:
-                        ps = subprocess.run(
-                            [
-                                "powershell",
-                                "-NoProfile",
-                                "-Command",
-                                "(Get-CimInstance Win32_Process -Filter \"Name='python.exe'\") | "
-                                "Where-Object { $_.CommandLine -match 'core\\.llm_backends\\.(server_app|bundled_proxy_server):app' } | "
-                                "Select-Object -ExpandProperty ProcessId",
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=10,
-                            **SUBPROCESS_FLAGS,
-                        )
-                        for line in (ps.stdout or "").splitlines():
-                            line = line.strip()
-                            if line.isdigit():
-                                subprocess.run(["taskkill", "/F", "/PID", line], capture_output=True, timeout=10, **SUBPROCESS_FLAGS)
-                    except Exception:
-                        pass
+                # (Removed) The "kill orphan uvicorn by cmdline match" scan
+                # also spawned powershell on shutdown. Same 0xc0000142 issue
+                # as step (3) above. The descendant walker handles workers
+                # we own; truly orphaned servers from prior crashed runs
+                # are reaped by "Stop All Servers" in the Server page UI.
             except Exception as e:
                 print(f"[DEBUG] Error force-killing on close: {e}")
             
@@ -4693,6 +5375,16 @@ class MainWindow(QMainWindow):
     
     def _on_tab_changed(self, index: int):
         """Update UI when tabs are switched."""
+        # Sync the navbar button highlight to whichever tab is now active.
+        # Lazy init paths call ``tabs.setCurrentIndex`` directly without
+        # going through ``_switch_tab``; this hook makes sure the button
+        # state stays in lockstep with the visible tab regardless of how
+        # the tab change happened.
+        try:
+            self._sync_navbar_buttons_for_index(index)
+        except Exception:
+            pass
+
         # Handle corner image update
         self._update_frame_corner_br(index)
         
@@ -4767,24 +5459,69 @@ class MainWindow(QMainWindow):
             index = page_identifier
         
         tab_widget.setCurrentIndex(index)
-        
-        # Update button checked states
-        buttons = [
-            self.home_btn,
-            self.download_btn,
-            self.train_btn,
-            self.test_btn,
-            self.logs_btn,
-            self.server_btn,
-            self.mcp_btn,
-            self.envs_btn,
-            self.info_btn
-        ]
-        for i, btn in enumerate(buttons):
-            btn.setChecked(i == index)
-        
-        # Update corner_br image based on current tab
+        self._sync_navbar_buttons_for_index(index, tab_widget=tab_widget)
         self._update_frame_corner_br(index)
+
+    # Map page identifier → navbar button attribute. Used by
+    # ``_sync_navbar_buttons_for_index`` to highlight whichever button
+    # owns the currently active tab. Previous code used a positional list
+    # that had drifted from real tab order AND was missing half the
+    # buttons, so most tabs never highlighted anything.
+    _PAGE_TO_BUTTON_ATTR = {
+        "home":        "home_btn",
+        "models":      "download_btn",
+        "train":       "train_btn",
+        "test":        "test_btn",
+        "logs":        "logs_btn",
+        "server":      "server_btn",
+        "mcp":         "mcp_btn",
+        "characters":  "characters_btn",
+        "code":        "code_btn",
+        "agents":      "agents_btn",
+        "studio":      "studio_btn",
+        "accounts":    "accounts_btn",
+        "bridges":     "bridges_btn",
+        "environment": "envs_btn",
+        "info":        "info_btn",
+    }
+    # Group buttons stay lit when any of their children is active.
+    _GROUP_MEMBERSHIP = {
+        "finetuning_group_btn": {"models", "train", "test"},
+        "agentic_group_btn":    {"characters", "code", "agents", "studio", "bridges"},
+    }
+
+    def _sync_navbar_buttons_for_index(self, index: int, *, tab_widget: Optional[QTabWidget] = None) -> None:
+        """Update navbar button checked states to match the currently active tab.
+
+        Called from ``_switch_tab`` (button click path) AND ``_on_tab_changed``
+        (programmatic ``setCurrentIndex`` path) so the highlight stays in
+        sync regardless of how the tab change happened.
+        """
+        tw = tab_widget or getattr(self, "tabs", None)
+        if tw is None:
+            return
+        try:
+            active_label = tw.tabText(index)
+        except Exception:
+            return
+        active_page_id = next(
+            (pid for pid, lbl in self.tab_page_names.items() if lbl == active_label),
+            None,
+        )
+        for pid, attr in self._PAGE_TO_BUTTON_ATTR.items():
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                try:
+                    btn.setChecked(pid == active_page_id)
+                except Exception:
+                    pass
+        for attr, members in self._GROUP_MEMBERSHIP.items():
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                try:
+                    btn.setChecked(active_page_id in members)
+                except Exception:
+                    pass
 
     def _open_requirements_tab(self):
         """Navigate to the Environment -> Requirements sub-tab reliably."""
@@ -5243,7 +5980,15 @@ class MainWindow(QMainWindow):
         layout = QVBoxLayout(w)
         layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(20)
-        
+
+        # ---- New: launcher cards -------------------------------------
+        # Two big clickable cards group the rest of the app into themed
+        # sections. Clicking one activates the corresponding navbar group
+        # and lands on its primary tab. The existing Welcome/Status block
+        # below stays — it's still useful, just no longer the dominant
+        # visual element.
+        layout.addLayout(self._build_home_launcher_cards())
+
         # Welcome title in a styled container
         title_frame = QFrame()
         title_frame.setFrameShape(QFrame.StyledPanel)
@@ -10937,15 +11682,6 @@ class MainWindow(QMainWindow):
         else:
             self.batch_size_auto.setText("Manual batch size")
     
-    def _toggle_advanced(self):
-        """Toggle advanced settings visibility"""
-        is_visible = self.advanced_btn.isChecked()
-        self.advanced_container.setVisible(is_visible)
-        if is_visible:
-            self.advanced_btn.setText("▼ Advanced Settings")
-        else:
-            self.advanced_btn.setText("▶ Advanced Settings")
-    
     def _create_3d_metric_card(self, title: str, icon: str, value: str, bg_color: str):
         """Create a compact 3D metric card with semi-transparent gradients"""
         card = QWidget()
@@ -11085,6 +11821,23 @@ class MainWindow(QMainWindow):
         else:
             model_name_hf = model_name
         
+        # Self-heal preflight — block on GGUF (we offer to switch) and
+        # auto-install missing training-env packages (we don't dump
+        # "go run pip" instructions on the user). Per OWLLM's rules:
+        # auto-repair first, then run.
+        if not self._preflight_training_or_repair(model_name_hf):
+            return
+
+        # If the user accepted the GGUF auto-switch, the dropdown was
+        # rewritten — re-read for the actual launch.
+        model_name_hf = self.train_base_model.currentText().strip()
+        if "__" in model_name_hf:
+            model_name_hf = model_name_hf.replace("__", "/")
+        elif "/" not in model_name_hf and "_" in model_name_hf:
+            parts = model_name_hf.split("_", 1)
+            if len(parts) == 2:
+                model_name_hf = f"{parts[0]}/{parts[1]}"
+
         cfg = TrainingConfig(
             base_model=model_name_hf,
             data_path=Path(data_path),
@@ -11183,6 +11936,143 @@ class MainWindow(QMainWindow):
             self._train_stats_timer.timeout.connect(self._update_training_stats_periodic)
         
         self._train_stats_timer.start(2000) # Update every 2 seconds
+
+    def _preflight_training_or_repair(self, model_name_hf: str) -> bool:
+        """Self-heal the training launch pipeline. Returns True if the
+        caller should proceed; False if the user cancelled or the repair
+        couldn't recover.
+
+        Two heals:
+
+        1. **GGUF guard with auto-switch.** GGUF is quantised inference-only
+           weights; Unsloth needs the bf16 source. We offer to switch the
+           model dropdown to the matching non-GGUF id with a single click.
+        2. **Missing training packages auto-install.** ``unsloth`` / ``trl``
+           / ``peft`` / ``bitsandbytes`` install on demand into the
+           training venv with a progress dialog — no "open a terminal and
+           run pip" hand-off.
+        """
+        from desktop_app import training_env_manager as tem
+
+        # ---- GGUF guard ------------------------------------------------
+        if "gguf" in model_name_hf.lower():
+            replacement = tem.non_gguf_variant(model_name_hf)
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Warning)
+            box.setWindowTitle("GGUF cannot be fine-tuned")
+            box.setText(
+                "GGUF files are quantised, inference-only weights for "
+                "llama.cpp. Fine-tuning needs the original (non-GGUF) model."
+            )
+            box.setInformativeText(
+                f"<b>You picked:</b>  {model_name_hf}<br>"
+                f"<b>Switch to:</b>  {replacement}"
+            )
+            switch_btn = box.addButton("Switch to non-GGUF", QMessageBox.AcceptRole)
+            box.addButton(QMessageBox.Cancel)
+            box.exec()
+            if box.clickedButton() is not switch_btn:
+                return False
+            # Apply the swap to the dropdown.
+            try:
+                idx = self.train_base_model.findText(replacement)
+                if idx >= 0:
+                    self.train_base_model.setCurrentIndex(idx)
+                else:
+                    # Editable combo — just set the text. The model picker
+                    # will show this as a "you'll need to download it"
+                    # state on next refresh; cleaner than blocking here.
+                    self.train_base_model.setEditText(replacement)
+            except Exception:
+                pass
+            self.train_log.appendPlainText(
+                f"[INFO] Switched model from {model_name_hf} → {replacement}"
+            )
+
+        # ---- Training-env auto-install --------------------------------
+        try:
+            cur = tem.status(Path(self.root))
+        except Exception as exc:
+            QMessageBox.warning(self, "Training env check", str(exc))
+            return False
+
+        if not cur.venv_python_exists:
+            QMessageBox.warning(
+                self,
+                "Training environment missing",
+                f"OWLLM Python interpreter not found:\n  {cur.venv_python_path}\n\n"
+                "OWLLM expects the canonical environment under LLM/.envs/"
+                "<profile>/.venv (e.g. cu121-stable). Re-run the OWLLM "
+                "installer to recreate it — that step also installs the "
+                "heavy ML deps (unsloth, torch+CUDA, trl, peft, "
+                "bitsandbytes).",
+            )
+            return False
+
+        if cur.fully_ready:
+            return True
+
+        # Modal progress dialog while pip installs the missing packages.
+        # Indeterminate range (0,0) — no per-step progress from pip
+        # without parsing its output, but the install is bounded to 15min
+        # in the manager and the user sees status text per package.
+        from PySide6.QtWidgets import QProgressDialog
+        progress = QProgressDialog(
+            f"Installing {len(cur.missing_packages)} training package(s)…",
+            "Cancel",
+            0, 0, self,
+        )
+        progress.setWindowTitle("Self-installing training environment")
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.show()
+
+        # Run the install on a worker thread so the UI keeps painting.
+        import threading
+        result = {"err": None}
+
+        def progress_cb(msg: str) -> None:
+            from PySide6.QtCore import QMetaObject, Q_ARG, Qt
+            QMetaObject.invokeMethod(
+                progress, "setLabelText",
+                Qt.QueuedConnection, Q_ARG(str, msg),
+            )
+            self._append_terminal(f"[train-env] {msg}", source="train")
+
+        def worker():
+            try:
+                tem.ensure_ready(Path(self.root), progress=progress_cb)
+            except Exception as exc:  # noqa: BLE001
+                result["err"] = exc
+            finally:
+                from PySide6.QtCore import QMetaObject, Qt
+                QMetaObject.invokeMethod(
+                    progress, "close", Qt.QueuedConnection,
+                )
+
+        t = threading.Thread(target=worker, daemon=True, name="train-env-install")
+        t.start()
+        # Block the GUI on the dialog (modal). It closes itself on success
+        # / failure via QMetaObject.invokeMethod above.
+        progress.exec()
+        t.join(timeout=2)
+
+        if result["err"] is not None:
+            QMessageBox.critical(
+                self,
+                "Training env install failed",
+                f"Could not auto-install training packages:\n\n{result['err']}",
+            )
+            return False
+
+        self.train_log.appendPlainText(
+            "[INFO] Training environment auto-installed successfully."
+        )
+        self._append_terminal(
+            "[INFO] Training environment auto-installed successfully.",
+            source="train",
+        )
+        return True
 
     def _on_training_error(self, proc, error):
         """Handle training process errors"""
@@ -19832,21 +20722,24 @@ except Exception as e:
         layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(20)
         
-        # Title
+        # Title — fixed compact height so it doesn't eat the viewport
+        # when the window grows. The three info columns below are what
+        # should expand to fill the page.
         title_container = QWidget()
         title_container.setStyleSheet("background: transparent;")
+        title_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        title_container.setMaximumHeight(60)
         title_layout = QHBoxLayout(title_container)
         title_layout.setContentsMargins(0, 0, 0, 0)
         title_layout.setSpacing(0)
-        
-        # Title text (centered)
+
         title = QLabel("ℹ️ About OWLLM")
         title.setAlignment(Qt.AlignCenter)
-        title.setStyleSheet("font-size: 24pt; font-weight: bold; text-decoration: none;")
+        title.setStyleSheet("font-size: 20pt; font-weight: bold; text-decoration: none;")
         title_layout.addWidget(title)
-        
-        layout.addWidget(title_container)
-        
+
+        layout.addWidget(title_container, 0)
+
         # Three-column layout using QSplitter
         splitter = QSplitter(Qt.Horizontal)
         
@@ -20046,9 +20939,13 @@ respective package directories or official repositories.
             splitter.setSizes([third, third, max(1, w - (third * 2))])
         
         QTimer.singleShot(0, _apply_equal_split)
-        
-        layout.addWidget(splitter)
-        
+
+        # stretch=1 on the splitter so the three info columns absorb every
+        # vertical pixel the window grows into. Without this, the title
+        # stays fixed but the splitter ignores extra space and a giant
+        # empty band appears between title and columns.
+        layout.addWidget(splitter, 1)
+
         # Note: Corner bottom-right image is handled by hybrid_frame system via _update_frame_corner_br()
         # which uses corner_br_owl_info for Info tab (index 8) and sizes it to 150px width (height adaptable)
         
@@ -20757,26 +21654,21 @@ respective package directories or official repositories.
         """
         # --- Servers --------------------------------------------------------
         try:
-            from core.model_compatibility import pretty_model_name as _pretty
+            from core.model_compatibility import pretty_server_label as _pretty_label
         except Exception:
-            _pretty = lambda s, **_: (s or "").replace("\\", "/").rsplit("/", 1)[-1]
+            _pretty_label = None
 
         def _label_for(cfg: dict, cfg_id: str) -> str:
-            # base_model may be:
-            #   - a HF repo id        ("unsloth/gemma-2-2b-it")
-            #   - a filesystem-encoded folder name ("unsloth__gemma-2-2b-it")
-            #   - an ABSOLUTE PATH    ("C:\\...\\models\\unsloth__gemma-2-2b-it")
-            # Strip path components first so pretty_model_name only ever sees
-            # the model identifier itself — otherwise the drive letter looks
-            # like an "org" and the prettifier produces junk.
-            raw = (cfg.get("base_model") or cfg_id or "").replace("\\", "/").strip("/")
-            if "/" in raw:
-                last = raw.rsplit("/", 1)[-1]
-                # If the basename encodes org__repo we keep it; if the parent
-                # path is just `models/`, we discard the parent. Either way,
-                # only the trailing segment ever reaches the prettifier.
-                raw = last
-            return _pretty(raw, include_org=False) or cfg_id
+            # Route every header surface through the single canonical helper
+            # so server page, header tooltip and copy-name buttons agree.
+            if _pretty_label is None:
+                raw = (cfg.get("base_model") or cfg_id or "").replace("\\", "/").strip("/")
+                return raw.rsplit("/", 1)[-1] if "/" in raw else (raw or cfg_id)
+            return _pretty_label(
+                base_model=cfg.get("base_model") or "",
+                model_id=cfg_id,
+                include_port=False,
+            ) or cfg_id
 
         if hasattr(self, "header_servers_label"):
             running_pairs: list[tuple[str, int, str]] = []
@@ -21295,6 +22187,36 @@ respective package directories or official repositories.
 
 
 def main() -> int:
+    # ── Sanity check: are we running on the canonical OWLLM Python? ──
+    #
+    # If we're not, the rest of startup will technically succeed but the
+    # home page will lie about CUDA / PyTorch / dependencies (because the
+    # interpreter doing the imports is the WRONG one — bootstrap, legacy,
+    # whatever). Surface that loudly rather than letting the user chase
+    # ghosts in the UI for an hour like last time.
+    try:
+        from core.runtime.owllm_python import get_owllm_python, OwllmEnvNotInstalled
+        _owllm_root = Path(__file__).resolve().parent.parent
+        try:
+            _canonical = get_owllm_python(_owllm_root).resolve()
+            _actual = Path(sys.executable).resolve()
+            if str(_canonical).lower() != str(_actual).lower():
+                msg = (
+                    "[OWLLM] WRONG PYTHON INTERPRETER\n"
+                    f"  running on : {_actual}\n"
+                    f"  should be  : {_canonical}\n"
+                    "Launch via launcher.exe (the canonical OWLLM launcher) "
+                    "or the installer's Launch App button. The home page's "
+                    "CUDA / dependency status will be inaccurate until the "
+                    "app is launched from the correct interpreter.\n"
+                )
+                print(msg, file=sys.stderr)
+        except OwllmEnvNotInstalled as _exc:
+            print(f"[OWLLM] {_exc}", file=sys.stderr)
+    except Exception:
+        # Resolver itself broke — don't block startup, just continue.
+        pass
+
     # Setup error logging FIRST before anything else
     logs_dir = get_app_root() / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)

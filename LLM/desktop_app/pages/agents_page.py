@@ -26,6 +26,7 @@ Account management lives in its own top-level "🔐 Accounts" tab.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Dict, Optional
 
 from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, Signal, Slot
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFrame,
     QGraphicsDropShadowEffect,
     QGridLayout,
@@ -44,6 +46,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStackedWidget,
@@ -54,6 +57,12 @@ from PySide6.QtWidgets import (
 
 from core.agents.agent_definitions import AgentDefinition, list_all_definitions
 from core.agents.agent_graph import AgentGraph
+from core.agents.attachments import (
+    Attachment,
+    KIND_AUDIO,
+    KIND_IMAGE,
+    adopt_local_path,
+)
 from core.agents.bus import get_bus
 from core.agents.message import Message, MessageKind
 from core.agents.orchestrator import Team, build_team
@@ -101,6 +110,52 @@ _STATUS_IDLE = "idle"
 _STATUS_THINKING = "thinking"
 _STATUS_WORKING = "working"
 _STATUS_ERROR = "error"
+
+
+# ---------------------------------------------------------------------------
+# Goal line edit — accepts file drops so the user can drag images / audio
+# straight onto the prompt instead of going through the 📎 picker.
+# ---------------------------------------------------------------------------
+
+
+class _GoalLineEdit(QLineEdit):
+    """QLineEdit that forwards dropped file URIs to a callback.
+
+    Plain QLineEdit rejects file drops — its default drag handlers only
+    accept text. This subclass overrides drag-enter / drop so the page
+    can intercept image and audio files dropped from the OS file
+    manager.
+    """
+
+    def __init__(self, on_files_dropped, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self._on_files_dropped = on_files_dropped
+
+    def dragEnterEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):  # noqa: N802
+        if event.mimeData().hasUrls():
+            paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+            paths = [p for p in paths if p]
+            if paths and self._on_files_dropped:
+                try:
+                    self._on_files_dropped(paths)
+                except Exception:
+                    logger.exception("attachment drop handler crashed")
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
 
 _STATUS_COLOR = {
     _STATUS_IDLE: "#4caf50",
@@ -582,8 +637,9 @@ class AgentsPage(QWidget):
         # here was redundant noise.
         outer.addWidget(self._build_project_strip())
 
-        # Goal row.
+        # Goal row + (initially-hidden) attachment chip strip beneath it.
         outer.addLayout(self._build_goal_row())
+        outer.addWidget(self._build_attachment_strip())
 
         # Roster fills the page. The stream panel is gone — each card now
         # carries its own embedded log, so the active agent's output reads
@@ -661,9 +717,34 @@ class AgentsPage(QWidget):
     def _build_goal_row(self) -> QHBoxLayout:
         top = QHBoxLayout()
         top.setSpacing(10)
-        self.goal_input = QLineEdit()
+        # Pending attachments — picked via the 📎 button or dropped onto
+        # the goal input. Cleared after each Run. Stored as raw paths so
+        # we only call adopt_local_path() at submit time and don't keep a
+        # bunch of half-prepared Attachment objects around.
+        self._pending_attachment_paths: List[str] = []
+
+        # 📎 attach button — opens a file picker that filters to audio
+        # and image types (no video, the bridges don't accept video either).
+        self.attach_btn = QPushButton("📎")
+        self.attach_btn.setMinimumHeight(38)
+        self.attach_btn.setMinimumWidth(44)
+        self.attach_btn.setToolTip("Attach an image or audio file")
+        self.attach_btn.setStyleSheet("""
+            QPushButton {
+                background:#14171d;
+                color:#dadcdf;
+                border:none;
+                border-radius:10px;
+                font-size:16px;
+            }
+            QPushButton:hover { background:#1a1d24; }
+        """)
+        self.attach_btn.clicked.connect(self._on_attach_clicked)
+
+        self.goal_input = _GoalLineEdit(on_files_dropped=self._add_attachment_paths)
         self.goal_input.setPlaceholderText(
-            "Goal — e.g. 'summarise the last commit and propose a follow-up'"
+            "Goal — e.g. 'summarise the last commit and propose a follow-up' "
+            "(drop an image / audio here)"
         )
         self.goal_input.setMinimumHeight(38)
         self.goal_input.setStyleSheet("""
@@ -705,10 +786,138 @@ class AgentsPage(QWidget):
         """)
         self.cancel_btn.clicked.connect(self._cancel_clicked)
         self.cancel_btn.setEnabled(False)
+        top.addWidget(self.attach_btn)
         top.addWidget(self.goal_input, 1)
         top.addWidget(self.run_btn)
         top.addWidget(self.cancel_btn)
         return top
+
+    # ------------------------------------------------------------------
+    # Attachment chip strip — appears below the goal row when files
+    # are attached, hidden when the queue is empty.
+    # ------------------------------------------------------------------
+
+    def _build_attachment_strip(self) -> QWidget:
+        self.attachment_strip = QFrame()
+        self.attachment_strip.setFrameShape(QFrame.NoFrame)
+        self.attachment_strip.setStyleSheet("background:transparent;")
+        self.attachment_strip.setVisible(False)
+        layout = QHBoxLayout(self.attachment_strip)
+        layout.setContentsMargins(46, 0, 0, 0)  # align under the prompt input
+        layout.setSpacing(6)
+        layout.addStretch(1)
+        self._attachment_strip_layout = layout
+        return self.attachment_strip
+
+    def _on_attach_clicked(self) -> None:
+        """Pop a file picker filtered to the supported audio + image types."""
+        filters = (
+            "Audio or images (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.heic "
+            "*.ogg *.oga *.opus *.mp3 *.wav *.m4a *.aac *.flac *.mp4)"
+            ";;All files (*)"
+        )
+        paths, _ = QFileDialog.getOpenFileNames(self, "Attach files", "", filters)
+        if paths:
+            self._add_attachment_paths(paths)
+
+    def _add_attachment_paths(self, paths: List[str]) -> None:
+        """Append paths to the pending queue, dropping unsupported files."""
+        added = 0
+        for p in paths or []:
+            if not p or p in self._pending_attachment_paths:
+                continue
+            # We can't fully validate without reading bytes; do the
+            # cheap MIME guess up-front so a stray .pdf doesn't sit in
+            # the strip pretending it'll be sent.
+            from core.agents.attachments import classify_mime
+            guess = classify_mime("", p)
+            if guess is None:
+                logger.info("ignoring unsupported attachment: %s", p)
+                continue
+            self._pending_attachment_paths.append(p)
+            added += 1
+        if added:
+            self._refresh_attachment_strip()
+
+    def _remove_attachment_path(self, path: str) -> None:
+        try:
+            self._pending_attachment_paths.remove(path)
+        except ValueError:
+            return
+        self._refresh_attachment_strip()
+
+    def _refresh_attachment_strip(self) -> None:
+        # Wipe existing chips, keeping the trailing stretch.
+        layout = self._attachment_strip_layout
+        while layout.count() > 1:
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        for path in self._pending_attachment_paths:
+            chip = self._make_attachment_chip(path)
+            layout.insertWidget(layout.count() - 1, chip)
+        self.attachment_strip.setVisible(bool(self._pending_attachment_paths))
+
+    def _make_attachment_chip(self, path: str) -> QWidget:
+        from core.agents.attachments import classify_mime
+        kind = classify_mime("", path) or KIND_AUDIO
+        glyph = "🖼️" if kind == KIND_IMAGE else "🎵"
+        name = os.path.basename(path)
+
+        chip = QFrame()
+        chip.setStyleSheet("""
+            QFrame {
+                background:#1a1f2c;
+                border:1px solid #2a3142;
+                border-radius:14px;
+            }
+            QLabel { background:transparent; color:#dadcdf; }
+            QPushButton {
+                background:transparent;
+                color:#9aa3b2;
+                border:none;
+                font-size:14px;
+                padding:0 4px;
+            }
+            QPushButton:hover { color:#ff7777; }
+        """)
+        chip_layout = QHBoxLayout(chip)
+        chip_layout.setContentsMargins(10, 4, 6, 4)
+        chip_layout.setSpacing(6)
+        chip_layout.addWidget(QLabel(glyph))
+        label = QLabel(name)
+        label.setMaximumWidth(220)
+        chip_layout.addWidget(label)
+        remove = QPushButton("×")
+        remove.setCursor(Qt.PointingHandCursor)
+        remove.setToolTip(f"Remove {name}")
+        remove.clicked.connect(lambda _=False, p=path: self._remove_attachment_path(p))
+        chip_layout.addWidget(remove)
+        return chip
+
+    def _consume_pending_attachments(self) -> List[Attachment]:
+        """Move pending paths into ``Attachment`` objects + reset the strip.
+
+        Called at submit time. Files that fail validation (oversized,
+        wrong mime after a closer look, unreadable) are silently dropped.
+        Returns an empty list when nothing is queued.
+        """
+        out: List[Attachment] = []
+        # The real goal id is created inside ``team.run_goal``; we don't
+        # know it yet, so save under the "chat-pending" slot. The runtime
+        # cleanup script can sweep that dir on app start later.
+        for path in list(self._pending_attachment_paths):
+            att = adopt_local_path(
+                "chat-pending",
+                path,
+                source="chat",
+            )
+            if att is not None:
+                out.append(att)
+        self._pending_attachment_paths.clear()
+        self._refresh_attachment_strip()
+        return out
 
     def _build_roster(self) -> QWidget:
         """Two-pane workspace: canvas (left) + per-agent log (right).
@@ -1860,7 +2069,12 @@ class AgentsPage(QWidget):
 
     def _run_clicked(self) -> None:
         goal = self.goal_input.text().strip()
-        if not goal:
+        # Snapshot pending attachments now so removing the last
+        # in-flight attachment doesn't race with submit.
+        attachments = self._consume_pending_attachments()
+        # Allow submit when there is media even with no typed goal —
+        # a voice-only message is a perfectly valid request.
+        if not goal and not attachments:
             return
         if self._team is None:
             try:
@@ -1930,7 +2144,7 @@ class AgentsPage(QWidget):
         def runner():
             try:
                 team = self._team
-                reply = team.run_goal(goal)
+                reply = team.run_goal(goal, attachments=attachments or None)
                 self._current_goal_id = reply.goal_id
                 # Belt-and-suspenders: the watchdog already tagged in flight,
                 # but re-tag at completion in case the watchdog missed (e.g.

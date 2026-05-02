@@ -1204,6 +1204,14 @@ class AgentsPage(QWidget):
             saved.autolayout_grid()
 
         self.canvas.load_graph(saved, orchestrator=leader_name)
+        # Push each agent's icon onto its canvas node so the title line
+        # shows the same emoji the agent definition declares (instead of
+        # the canvas's generic crown / robot fallback).
+        for d in team_defs:
+            try:
+                self.canvas.set_node_icon(d.name, d.icon or "🤖")
+            except Exception:
+                pass
         # Sync the loading-screen constellation to the real team so the
         # placeholder ("orchestrator/researcher/...") doesn't show during
         # the wait.
@@ -1800,20 +1808,20 @@ class AgentsPage(QWidget):
             pass
 
     def _update_canvas_model_label(self, role_name: str) -> None:
-        """Mirror the picker's current selection text under the agent's
-        canvas node title. Falls back to the composite id if the picker's
-        label getter isn't available."""
+        """Mirror the picker's current selection under the agent's
+        canvas node title. Reads ``current_label()`` directly so we don't
+        scrape the button text (which carries the ``▾`` glyph) and so a
+        not-yet-selected picker doesn't show a placeholder on the node.
+        """
         picker = self._model_picker_buttons.get(role_name)
         if picker is None:
             return
-        # Prefer human-readable picker text; trim provider prefix for
-        # display so the node line stays compact.
+        label = ""
         try:
-            label = picker.text() or ""
+            label = picker.current_label() or ""
         except Exception:
             label = ""
-        # The picker text is something like "🧠 Claude · Opus 4.7". Keep
-        # only the part after the middle dot when present.
+        # Trim provider prefix when present so the node line stays compact.
         if "·" in label:
             label = label.split("·", 1)[1].strip()
         if not label:
@@ -1821,6 +1829,13 @@ class AgentsPage(QWidget):
                 label = picker.current_id() or ""
             except Exception:
                 pass
+        # Last resort: read straight from the project override so we never
+        # show "no model" when the user has actually picked one but the
+        # picker entry-list hasn't caught up yet.
+        if not label and self._active_project is not None:
+            saved = self._active_project.model_overrides.get(role_name) or ""
+            if saved:
+                label = saved.split("/", 1)[-1] if "/" in saved else saved
         self.canvas.set_node_model_label(role_name, label)
 
     # ------------------------------------------------------------------

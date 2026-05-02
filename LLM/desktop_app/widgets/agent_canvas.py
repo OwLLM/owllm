@@ -70,19 +70,19 @@ STATUS_ERROR = "error"
 
 _STATUS_FILL = {
     STATUS_IDLE:    "#2a3142",
-    STATUS_ACTIVE:  "#1f8a4c",
+    STATUS_ACTIVE:  "#3cf26b",   # vivid lightning lime — pops at a glance
     STATUS_PENDING: "#7a6a32",
     STATUS_ERROR:   "#7a2f2f",
 }
 _STATUS_BORDER = {
     STATUS_IDLE:    "#3d4660",
-    STATUS_ACTIVE:  "#48d486",
+    STATUS_ACTIVE:  "#d6ffe0",   # almost-white halo around the lime
     STATUS_PENDING: "#e0c060",
     STATUS_ERROR:   "#ee7474",
 }
 _STATUS_GLOW = {
     STATUS_IDLE:    QColor(0, 0, 0, 0),
-    STATUS_ACTIVE:  QColor(80, 220, 130, 140),
+    STATUS_ACTIVE:  QColor(60, 242, 107, 230),   # bright green halo
     STATUS_PENDING: QColor(220, 190, 80, 100),
     STATUS_ERROR:   QColor(230, 100, 100, 120),
 }
@@ -230,6 +230,10 @@ class _AgentNode(QGraphicsItem):
         self._model_label = ""
         self._selected_visual = False
         self._layer = 0 if is_orchestrator else 1
+        # Default icon: crown for the orchestrator, generic robot for
+        # specialists. Overridden by ``set_icon`` once the page knows
+        # the agent definition's own icon.
+        self._icon = "👑" if is_orchestrator else "🤖"
 
         self.setFlags(
             QGraphicsItem.ItemIsMovable
@@ -251,7 +255,7 @@ class _AgentNode(QGraphicsItem):
     def boundingRect(self) -> QRectF:  # noqa: N802
         # Pad enough for the active-glow halo. Ports are CHILDREN, so they
         # don't have to be in our bounding rect.
-        return QRectF(-12, -12, _NODE_W + 24, _NODE_H + 24)
+        return QRectF(-28, -28, _NODE_W + 56, _NODE_H + 56)
 
     def shape(self) -> QPainterPath:
         path = QPainterPath()
@@ -307,13 +311,29 @@ class _AgentNode(QGraphicsItem):
         painter.fillPath(stripe, QBrush(layer_col))
 
         pen = QPen(border_col)
-        pen.setWidth(2)
+        pen.setWidth(3 if self._status == STATUS_ACTIVE else 2)
         painter.setPen(pen)
         painter.drawPath(path)
 
-        # Title.
-        title_text = ("👑 " if self.is_orchestrator else "") + self.name
-        painter.setPen(QColor("#ffffff"))
+        # Title — icon (always) on the same line as the name, with the
+        # crown badge overlaid for the orchestrator so the role still
+        # reads even when the def's icon isn't a crown.
+        icon_glyph = self._icon or ("👑" if self.is_orchestrator else "🤖")
+        prefix = f"{icon_glyph} "
+        if self.is_orchestrator and "👑" not in icon_glyph:
+            prefix = f"👑 {icon_glyph} "
+        title_text = prefix + self.name
+        # Pick text colours that contrast with the current fill — the
+        # bright lime active fill needs near-black text to stay legible.
+        if self._status == STATUS_ACTIVE:
+            title_col = QColor("#0c1a10")
+            body_col = QColor("#0c1a10")
+            status_col = QColor("#0c1a10")
+        else:
+            title_col = QColor("#ffffff")
+            body_col = QColor("#b8c3d8")
+            status_col = QColor("#cbd2e0")
+        painter.setPen(title_col)
         font = QFont()
         font.setPointSize(11)
         font.setBold(True)
@@ -324,7 +344,7 @@ class _AgentNode(QGraphicsItem):
         font2 = QFont()
         font2.setPointSize(9)
         painter.setFont(font2)
-        painter.setPen(QColor("#b8c3d8"))
+        painter.setPen(body_col)
         painter.drawText(
             QRectF(14, 32, _NODE_W - 28, 20),
             Qt.AlignLeft | Qt.AlignVCenter,
@@ -332,7 +352,7 @@ class _AgentNode(QGraphicsItem):
         )
 
         # Status.
-        painter.setPen(QColor("#cbd2e0"))
+        painter.setPen(status_col)
         painter.drawText(
             QRectF(14, 54, _NODE_W - 28, 22),
             Qt.AlignLeft | Qt.AlignVCenter,
@@ -371,6 +391,14 @@ class _AgentNode(QGraphicsItem):
             layer = 0
         if layer != self._layer:
             self._layer = layer
+            self.update()
+
+    def set_icon(self, icon: str) -> None:
+        icon = (icon or "").strip()
+        if not icon:
+            return
+        if icon != self._icon:
+            self._icon = icon
             self.update()
 
     @property
@@ -640,6 +668,11 @@ class AgentCanvas(QGraphicsView):
         node = self._nodes.get(name)
         if node is not None:
             node.set_model_label(label)
+
+    def set_node_icon(self, name: str, icon: str) -> None:
+        node = self._nodes.get(name)
+        if node is not None:
+            node.set_icon(icon)
 
     def reset_all_status(self) -> None:
         for n in self._nodes.values():

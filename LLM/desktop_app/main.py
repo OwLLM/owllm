@@ -3493,7 +3493,9 @@ class MainWindow(QMainWindow):
 
     def _build_home_launcher_cards(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        row.setSpacing(20)
+        # Bigger gap between the two big cards now that they have more
+        # vertical real estate.
+        row.setSpacing(28)
         for spec in self._LAUNCHER_CARDS:
             card = self._build_launcher_card(spec)
             row.addWidget(card, 1)
@@ -3501,10 +3503,15 @@ class MainWindow(QMainWindow):
 
     def _build_launcher_card(self, spec: dict) -> QFrame:
         """One big clickable card. Click activates the matching navbar
-        group via ``_activate_navbar_group``."""
+        group via ``_activate_navbar_group``. Sized generously so the
+        Fine-tuning / Agentic Team entry points are the page's focal
+        points (the user explicitly asked for this after the left
+        column was reclaimed for System Status)."""
         card = QFrame()
         card.setObjectName("LauncherCard")
-        card.setMinimumHeight(150)
+        # Min height bumped from 150 → 220; cards are now the page's
+        # primary visual element.
+        card.setMinimumHeight(220)
         card.setCursor(QCursor(Qt.PointingHandCursor))
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         card.setStyleSheet(f"""
@@ -3512,8 +3519,8 @@ class MainWindow(QMainWindow):
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 {spec['accent_top']}, stop:1 {spec['accent_bottom']});
                 border: none;
-                border-left: 4px solid {spec['accent_line']};
-                border-radius: 14px;
+                border-left: 6px solid {spec['accent_line']};
+                border-radius: 18px;
             }}
             QFrame#LauncherCard:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -3521,39 +3528,39 @@ class MainWindow(QMainWindow):
             }}
         """)
         layout = QHBoxLayout(card)
-        layout.setContentsMargins(24, 18, 24, 18)
-        layout.setSpacing(18)
+        layout.setContentsMargins(34, 26, 34, 26)
+        layout.setSpacing(26)
 
         icon_lbl = QLabel(spec["icon"])
         f = QFont()
-        f.setPointSize(40)
+        f.setPointSize(56)
         icon_lbl.setFont(f)
         icon_lbl.setStyleSheet("background:transparent;")
         layout.addWidget(icon_lbl)
 
         text_box = QVBoxLayout()
-        text_box.setSpacing(4)
+        text_box.setSpacing(6)
         title_lbl = QLabel(spec["title"])
         tf = QFont()
-        tf.setPointSize(20)
+        tf.setPointSize(26)
         tf.setBold(True)
         title_lbl.setFont(tf)
         title_lbl.setStyleSheet(f"color:{spec['accent_line']}; background:transparent;")
         text_box.addWidget(title_lbl)
         tagline_lbl = QLabel(spec["tagline"])
         tagline_lbl.setStyleSheet(
-            "color:#9aa0a6; background:transparent; font-size:11px; "
+            "color:#9aa0a6; background:transparent; font-size:12px; "
             "letter-spacing:0.6px; text-transform:uppercase;"
         )
         text_box.addWidget(tagline_lbl)
         blurb_lbl = QLabel(spec["blurb"])
-        blurb_lbl.setStyleSheet("color:#dadcdf; background:transparent; font-size:13px;")
+        blurb_lbl.setStyleSheet("color:#dadcdf; background:transparent; font-size:14px;")
         blurb_lbl.setWordWrap(True)
         text_box.addWidget(blurb_lbl)
         layout.addLayout(text_box, 1)
 
         chevron = QLabel("›")
-        chevron.setStyleSheet("color:#9aa0a6; background:transparent; font-size:32pt;")
+        chevron.setStyleSheet("color:#9aa0a6; background:transparent; font-size:42pt;")
         layout.addWidget(chevron)
 
         # Click → activate group + navigate.
@@ -6050,75 +6057,16 @@ class MainWindow(QMainWindow):
         left_layout = QVBoxLayout(left_container)
         left_layout.setSpacing(15)
         left_layout.setContentsMargins(15, 15, 15, 15)
-        
-        # Features section
-        text_color = self._get_text_color()
-        features_header = QLabel("🚀 Features")
-        features_header.setObjectName("homeFeaturesHeader")
-        features_header.setStyleSheet(f"background: transparent; color: {text_color}; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
-        font = features_header.font()
-        font.setUnderline(False)
-        features_header.setFont(font)
-        self.themed_widgets["labels"].append(features_header)
-        left_layout.addWidget(features_header)
-        features_text = QLabel("""
-<p style="text-decoration: none; border: none; border-bottom: none;"><span style="text-decoration: none; border: none; border-bottom: none;">This application provides a beautiful, user-friendly interface to:</span></p>
-<ul style="line-height: 1.8; text-decoration: none; border: none; border-bottom: none;">
-<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">🎯 Train Models:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Select from popular pre-trained models and fine-tune them with your data</span></li>
-<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">📥 Upload Datasets:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Easy drag-and-drop for JSONL format datasets</span></li>
-<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">🧪 Test Models:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Interactive chat interface to test your fine-tuned models</span></li>
-<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">✅ Validate Performance:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Run validation tests and view detailed results</span></li>
-<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">📊 Track History:</span> <span style="text-decoration: none; border: none; border-bottom: none;">View all your trained models and training logs</span></li>
-</ul>
-        """)
-        features_text.setObjectName("homeFeaturesText")
-        features_text.setWordWrap(True)
-        features_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        features_text.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
-        font = features_text.font()
-        font.setUnderline(False)
-        features_text.setFont(font)
-        self.themed_widgets["labels"].append(features_text)
-        left_layout.addWidget(features_text)
-        
-        # Quick Start Guide section
-        guide_header = QLabel("📋 Quick Start Guide")
-        guide_header.setObjectName("homeGuideHeader")
-        guide_header.setStyleSheet(f"background: transparent; color: {text_color}; font-size: 18pt; font-weight: bold; text-decoration: none; border: none; border-bottom: none;")
-        font = guide_header.font()
-        font.setUnderline(False)
-        font = guide_header.font()
-        font.setUnderline(False)
-        guide_header.setFont(font)
-        self.themed_widgets["labels"].append(guide_header)
-        left_layout.addWidget(guide_header)
-        guide_text = QLabel("""
-<ol style="line-height: 2; text-decoration: none; border: none; border-bottom: none;">
-<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Prepare Your Dataset:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Create a JSONL file with format:</span>
-<pre style="background: #2a2a2a; padding: 10px; border-radius: 5px; margin: 10px 0; text-decoration: none; border: none; border-bottom: none;">
-{"instruction": "Your instruction here", "output": "Expected output here"}
-</pre>
-</li>
-<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Go to Train Model:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Select a base model and upload your dataset</span></li>
-<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Configure Training:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Adjust epochs, batch size, and LoRA parameters</span></li>
-<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Start Training:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Click the train button and monitor progress</span></li>
-<li style="text-decoration: none; border: none; border-bottom: none;"><span style="font-weight: bold; text-decoration: none; border: none; border-bottom: none;">Test Your Model:</span> <span style="text-decoration: none; border: none; border-bottom: none;">Use the Test Model tab to try your fine-tuned model</span></li>
-</ol>
-        """)
-        guide_text.setObjectName("homeGuideText")
-        guide_text.setWordWrap(True)
-        guide_text.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        guide_text.setStyleSheet(f"background: transparent; color: {text_color}; text-decoration: none; border: none; border-bottom: none;")
-        font = guide_text.font()
-        font.setUnderline(False)
-        guide_text.setFont(font)
-        self.themed_widgets["labels"].append(guide_text)
-        left_layout.addWidget(guide_text)
-        
-        left_layout.addStretch(1)
-        
-        # Add left container with 40% stretch (2 parts out of 5 total = 40%)
-        columns_layout.addWidget(left_container, 2)
+
+        # The Features + Quick Start Guide blocks that used to live here
+        # were removed by user request — System Status now occupies the
+        # left column. The actual System Status widgets are built further
+        # down inside the same _build_home_tab method; their addWidget
+        # calls target ``left_layout`` so the section lands here.
+
+        # Add left container with 50% stretch — System Status now lives
+        # here and the right column carries Software Requirements only.
+        columns_layout.addWidget(left_container, 1)
         
         # RIGHT COLUMN: System Status + Software Requirements (60% width)
         right_container = QFrame()
@@ -6180,7 +6128,8 @@ class MainWindow(QMainWindow):
         refresh_btn.clicked.connect(self._refresh_gpu_detection)
         self.themed_widgets["buttons"].append(refresh_btn)
         sys_status_header_row.addWidget(refresh_btn)
-        right_layout.addLayout(sys_status_header_row)
+        # System Status now lives in the LEFT column.
+        left_layout.addLayout(sys_status_header_row)
 
         # System info cards
         sys_frame = QWidget()
@@ -6338,8 +6287,12 @@ class MainWindow(QMainWindow):
         status_row.addStretch(1)
         sys_layout.addLayout(status_row)
 
-        right_layout.addWidget(sys_frame)
-        
+        # System Status sits in the LEFT column; the trailing stretch
+        # keeps it pinned to the top so the column doesn't grow taller
+        # than its content.
+        left_layout.addWidget(sys_frame)
+        left_layout.addStretch(1)
+
         # Software Requirements section
         requirements_header = QLabel("⚙️ Software Requirements & Setup")
         requirements_header.setObjectName("homeRequirementsHeader")
@@ -6500,7 +6453,7 @@ class MainWindow(QMainWindow):
         right_layout.addStretch(1)
         
         # Add right container with 60% stretch (3 parts out of 5 total = 60%)
-        columns_layout.addWidget(right_container, 3)
+        columns_layout.addWidget(right_container, 1)
         
         # Add columns to main layout
         layout.addLayout(columns_layout)

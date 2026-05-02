@@ -827,6 +827,15 @@ class AgentCanvas(QGraphicsView):
         # the mouse — Qt's default RubberBandDrag mode interferes with our
         # custom edge drag, so disable.
         self.setDragMode(QGraphicsView.NoDrag)
+        # Anchor zoom on the cursor so Ctrl+wheel feels natural — the
+        # point under the mouse stays put while everything else scales
+        # around it.
+        self.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
+        self.setResizeAnchor(QGraphicsView.AnchorUnderMouse)
+        # Track the cumulative zoom level so we can clamp it to a
+        # sensible range (don't let users scroll into oblivion or
+        # invert the canvas accidentally).
+        self._zoom_factor: float = 1.0
         self._nodes: Dict[str, _AgentNode] = {}
         self._edges: Dict[Tuple[str, str], _AgentEdge] = {}
 
@@ -1032,6 +1041,50 @@ class AgentCanvas(QGraphicsView):
                 event.accept()
                 return
         super().keyPressEvent(event)
+
+    # ------------------------------------------------------------------
+    # Zoom — Ctrl+wheel on the canvas scales the view in/out around
+    # the cursor. Plain wheel keeps the QGraphicsView default (vertical
+    # scroll) so users can still pan without holding modifiers.
+    # ------------------------------------------------------------------
+
+    _ZOOM_MIN = 0.25
+    _ZOOM_MAX = 4.0
+    _ZOOM_STEP = 1.15  # 15% per notch — Maya / Blender / Figma feel
+
+    def wheelEvent(self, event):  # noqa: N802
+        if event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta == 0:
+                event.accept()
+                return
+            factor = self._ZOOM_STEP if delta > 0 else 1.0 / self._ZOOM_STEP
+            new_factor = self._zoom_factor * factor
+            # Clamp without letting tiny over-shoots accumulate — if the
+            # next step would cross a bound, cap factor so we land
+            # exactly on it.
+            if new_factor < self._ZOOM_MIN:
+                factor = self._ZOOM_MIN / self._zoom_factor
+                new_factor = self._ZOOM_MIN
+            elif new_factor > self._ZOOM_MAX:
+                factor = self._ZOOM_MAX / self._zoom_factor
+                new_factor = self._ZOOM_MAX
+            if abs(factor - 1.0) < 1e-4:
+                event.accept()
+                return
+            self.scale(factor, factor)
+            self._zoom_factor = new_factor
+            event.accept()
+            return
+        super().wheelEvent(event)
+
+    def reset_zoom(self) -> None:
+        """Reset the canvas to 1:1 (called from the page if a "fit"
+        button is added later)."""
+        if abs(self._zoom_factor - 1.0) < 1e-4:
+            return
+        self.resetTransform()
+        self._zoom_factor = 1.0
 
     # ------------------------------------------------------------------
     # Internals

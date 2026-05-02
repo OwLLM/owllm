@@ -550,14 +550,27 @@ class _AgentEdge(QGraphicsPathItem):
         except Exception:
             return
 
-        # Direct routing for same-row AND adjacent-row edges (the
-        # orchestrator → its immediate downstream specialists). Loop
-        # around only when the layer gap is bigger than one — those
-        # are the long-range arrows that previously cluttered the
-        # canvas centre.
+        # Routing rules:
+        #   * same layer                              → direct curve
+        #   * adjacent layer DOWNWARD  (gap == 1, target deeper)
+        #                                             → direct curve
+        #   * adjacent layer UPWARD    (gap == 1, target shallower)
+        #                                             → loop UNDER source
+        #   * any layer gap > 1, either direction     → loop UNDER source
+        # The "loop under" path is what keeps backward arrows from
+        # cutting through the source's body.
         direct_route = True
         try:
-            direct_route = abs(self.source.layer - self.target.layer) <= 1
+            src_layer = self.source.layer
+            tgt_layer = self.target.layer
+            gap = abs(src_layer - tgt_layer)
+            if gap == 0:
+                direct_route = True
+            elif gap == 1 and tgt_layer > src_layer:
+                # going DOWN one layer — clean direct curve is fine.
+                direct_route = True
+            else:
+                direct_route = False
         except (RuntimeError, AttributeError):
             direct_route = True
 
@@ -597,14 +610,27 @@ class _AgentEdge(QGraphicsPathItem):
             # Stagger the detour distance so multiple cross-layer arrows
             # from the same source don't overlap. Sibling order is
             # deterministic so a given edge always renders in the same
-            # lane.
+            # lane. Sibling pool covers EVERY looping edge (same-source,
+            # any direction) so up- and down-loops share the same fan
+            # and don't double up on top of each other.
             sibling_index = 0
             try:
                 canvas = self.source._canvas
+
+                def _is_looping(e: "_AgentEdge") -> bool:
+                    try:
+                        g = abs(e.source.layer - e.target.layer)
+                        if g == 0:
+                            return False
+                        if g == 1 and e.target.layer > e.source.layer:
+                            return False
+                        return True
+                    except Exception:
+                        return False
+
                 siblings = [
                     e for e in canvas._edges.values()
-                    if e.source is self.source
-                    and abs(e.source.layer - e.target.layer) > 1
+                    if e.source is self.source and _is_looping(e)
                 ]
 
                 def _sib_key(e: "_AgentEdge") -> tuple:
@@ -618,12 +644,19 @@ class _AgentEdge(QGraphicsPathItem):
             except Exception:
                 sibling_index = 0
 
-            base_pad = 32.0
-            lane_spacing = 18.0
+            # MUCH more breathing room around the source than before.
+            # base_pad is the minimum distance from the source body
+            # in every direction; lane_spacing is the extra gap each
+            # additional sibling claims so 3-4 loops still fit cleanly.
+            base_pad = 70.0
+            lane_spacing = 28.0
             loop_pad = base_pad + sibling_index * lane_spacing
 
-            # Drop past the bottom of the source, exit on its left.
-            detour_y = src_bottom + loop_pad + 14.0
+            # Drop well past the bottom of the source, exit on its
+            # LEFT side. The +30 px past loop_pad is the explicit
+            # "breathing room" the user asked for so the curve never
+            # hugs the source border.
+            detour_y = src_bottom + loop_pad + 30.0
 
             # Exit point on the source's LEFT side at mid-height. Sits
             # outside the input-port circle so it doesn't collide.

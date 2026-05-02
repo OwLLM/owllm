@@ -371,33 +371,36 @@ class ImmutableInstaller:
                 # cpXY tag doesn't match the venv's Python version. The
                 # validation pass earlier doesn't catch this (it reads
                 # metadata, not platform tags) so we check here on
-                # resume and rebuild the venv with the matching bundled
-                # Python before any pip install runs.
+                # resume.
+                #
+                # We CANNOT fix this by rebuilding the venv from inside
+                # the running OWLLM app — Windows holds the venv's
+                # python.exe and .pyd files locked because the app is
+                # literally running from them, so any destroy step
+                # leaves stragglers and breaks venv creation.
+                #
+                # The right move: leave the venv alone and re-download
+                # the wheelhouse for the venv's Python tag. PHASE 4
+                # then finds wheels that pip will accept, and we never
+                # touched the live interpreter.
                 tag_ok, venv_tag, required_tag = self._check_python_tag_compat(venv_python)
-                if not tag_ok and required_tag:
+                if not tag_ok and required_tag and venv_tag:
                     self.log(
                         f"  ⚠ Python-tag mismatch: venv is {venv_tag}, wheelhouse "
-                        f"requires {required_tag}. Rebuilding venv with the "
-                        f"correct bundled Python so wheels can install."
+                        f"contains {required_tag} wheels. Re-downloading the "
+                        f"wheelhouse for {venv_tag} (the venv stays put)."
                     )
-                    matching_python = self._find_bundled_python_for_tag(required_tag)
-                    if matching_python is None:
+                    if not self._redownload_wheelhouse_for_tag(cuda_config, venv_tag):
                         return False, (
-                            f"Wheelhouse needs Python {required_tag} but no bundled "
-                            f"runtime matches. Re-run the OWLLM installer to refresh "
-                            f"the python_runtime/ folder, then retry."
+                            f"Could not refresh wheelhouse for Python {venv_tag}. "
+                            f"Open a terminal (with OWLLM closed) and re-run the "
+                            f"OWLLM installer to rebuild the wheelhouse from "
+                            f"scratch, then reopen OWLLM."
                         )
-                    self.log(f"  Switching bootstrap Python to: {matching_python}")
-                    self.python_executable = matching_python
-                    # Tear down the wrong-version venv and rebuild.
-                    self._destroy_venv()
-                    venv_python = self._create_venv()
-                    # Force a full install of every required package since
-                    # the new venv is empty.
-                    skip_installed_arg = False
-                    self.log("  ✓ Venv rebuilt with matching Python — installing all packages from scratch")
-                else:
-                    skip_installed_arg = True
+                    self.log(f"  ✓ Wheelhouse refreshed for {venv_tag}")
+                # End python-tag self-heal — same skip_installed semantics
+                # as before (we did NOT touch the venv).
+                skip_installed_arg = should_resume
             
             # PHASE 4: Atomic installation
             # ALWAYS run installation phase to check and install binary packages if needed
@@ -686,6 +689,63 @@ class ImmutableInstaller:
         if required_tag is None:
             return True, venv_tag, None
         return venv_tag == required_tag, venv_tag, required_tag
+
+    def _redownload_wheelhouse_for_tag(self, cuda_config: str, venv_tag: str) -> bool:
+        """Refresh the wheelhouse so wheels match the venv's cpXY tag.
+
+        Returns True on success. The existing venv is NOT touched —
+        only ``self.wheelhouse`` is repopulated. Used by the python-
+        tag self-heal when the wheelhouse is full of wheels for the
+        wrong Python (e.g. cp312 wheels in a cp311 venv).
+        """
+        if not (venv_tag.startswith("cp") and len(venv_tag) >= 4 and venv_tag[2:].isdigit()):
+            self.log(f"  Cannot parse Python version from venv tag: {venv_tag!r}")
+            return False
+        digits = venv_tag[2:]
+        try:
+            python_version = (int(digits[0]), int(digits[1:]))
+        except ValueError:
+            self.log(f"  Invalid Python version digits in {venv_tag!r}")
+            return False
+
+        try:
+            from core.wheelhouse import WheelhouseManager
+        except Exception as exc:
+            self.log(f"  Could not import WheelhouseManager: {exc}")
+            return False
+
+        try:
+            mgr = WheelhouseManager(
+                wheelhouse_dir=self.wheelhouse,
+                logger=self.log,
+            )
+        except TypeError:
+            # Older constructor signature — no kwargs.
+            try:
+                mgr = WheelhouseManager(self.wheelhouse)
+            except Exception as exc:
+                self.log(f"  Could not construct WheelhouseManager: {exc}")
+                return False
+        except Exception as exc:
+            self.log(f"  Could not construct WheelhouseManager: {exc}")
+            return False
+
+        try:
+            success, error = mgr.prepare_wheelhouse(
+                cuda_config,
+                python_version,
+                package_versions=getattr(self, "profile_versions", None) or None,
+                binary_packages=self.binary_packages or None,
+                force_redownload=True,
+            )
+        except Exception as exc:
+            self.log(f"  Wheelhouse prepare failed: {exc}")
+            return False
+
+        if not success:
+            self.log(f"  Wheelhouse prepare returned failure: {error}")
+            return False
+        return True
 
     def _find_bundled_python_for_tag(self, required_tag: str) -> Optional[Path]:
         """Locate a python_runtime/pythonX.Y folder matching ``cpXY``.

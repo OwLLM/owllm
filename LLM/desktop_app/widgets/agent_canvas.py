@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsPathItem,
+    QGraphicsPolygonItem,
     QGraphicsScene,
     QGraphicsSceneContextMenuEvent,
     QGraphicsSceneMouseEvent,
@@ -460,6 +461,25 @@ _EDGE_COLOR_SELECTED = QColor("#ffd54a")
 _ARROW_HEAD = 13
 
 
+class _AgentEdgeHead(QGraphicsPolygonItem):
+    """Arrowhead for an edge — separate scene item so it can sit at a
+    z-value high enough to render on top of the input/output port dots
+    while the line itself passes UNDER the node body.
+    """
+
+    def __init__(self, edge: "_AgentEdge") -> None:
+        super().__init__()
+        self.edge = edge
+        # Above ports (children of nodes at z=2.0) so the head is visible
+        # on top of the input port circle it lands on.
+        self.setZValue(4.0)
+        self.setPen(QPen(Qt.NoPen))
+
+    def apply_color(self, col: QColor) -> None:
+        self.setBrush(QBrush(col))
+        self.setPen(QPen(col, 1.0))
+
+
 class _AgentEdge(QGraphicsPathItem):
     def __init__(self, source: _AgentNode, target: _AgentNode) -> None:
         super().__init__()
@@ -469,14 +489,17 @@ class _AgentEdge(QGraphicsPathItem):
         self._arrow_poly = QPolygonF()
         self._start_pt = QPointF()
         self._end_pt = QPointF()
-        # Arrow draws ABOVE node bodies (2.0) and ports (3.0) so the
-        # arrowhead is visible sitting on top of the input port dot.
-        self.setZValue(5.0)
+        # Curve sits BELOW the node body (z=2.0) so when the path
+        # crosses an unrelated node it visibly passes underneath.
+        self.setZValue(1.0)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         # Curve is stroked, not filled. Brush stays off — the arrowhead
-        # is drawn separately in paint() with its own fill colour.
+        # is a SEPARATE scene item (`_head`) painted at a higher z.
         self.setBrush(Qt.NoBrush)
+        # Arrowhead lives in its own item at z=4.0 so it draws above the
+        # port dots even though the curve passes under the body.
+        self._head: Optional[_AgentEdgeHead] = None
         self.update_path()
 
     def _palette(self) -> QColor:
@@ -558,6 +581,10 @@ class _AgentEdge(QGraphicsPathItem):
             QPointF(tip.x() - _ARROW_HEAD * math.cos(ang + math.pi / 7),
                     tip.y() - _ARROW_HEAD * math.sin(ang + math.pi / 7)),
         ])
+        # Sync the (separate) arrowhead item.
+        if self._head is not None:
+            self._head.setPolygon(self._arrow_poly)
+            self._head.apply_color(self._palette())
 
     def boundingRect(self) -> QRectF:  # noqa: N802
         # Expand the path's bounds to also cover the arrowhead polygon.
@@ -577,10 +604,12 @@ class _AgentEdge(QGraphicsPathItem):
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(self.path())
-        if not self._arrow_poly.isEmpty():
-            painter.setPen(QPen(col, 1.0))
-            painter.setBrush(QBrush(col))
-            painter.drawPolygon(self._arrow_poly)
+        # The arrowhead is a separate scene item (`self._head`) painted at
+        # z=4.0 so it renders on top of node body / port dots while the
+        # curve we just drew sits below the body. Keep its colour in sync
+        # with whatever palette the curve resolved to.
+        if self._head is not None:
+            self._head.apply_color(col)
 
 
 # ---------------------------------------------------------------------------
@@ -642,8 +671,7 @@ class AgentCanvas(QGraphicsView):
                 dst = self._nodes.get(e.target)
                 if src is None or dst is None:
                     continue
-                edge = _AgentEdge(src, dst)
-                self._scene.addItem(edge)
+                edge = self._make_edge(src, dst)
                 self._edges[(e.source, e.target)] = edge
             self._recompute_layers()
             self._scene.setSceneRect(self._compute_scene_rect())
@@ -682,11 +710,35 @@ class AgentCanvas(QGraphicsView):
         for nname, node in self._nodes.items():
             node.set_selected_visual(nname == name)
 
+    def _make_edge(self, src: _AgentNode, dst: _AgentNode) -> _AgentEdge:
+        """Create an edge AND its sibling arrowhead and add both to the scene."""
+        edge = _AgentEdge(src, dst)
+        self._scene.addItem(edge)
+        head = _AgentEdgeHead(edge)
+        edge._head = head
+        self._scene.addItem(head)
+        edge.update_path()
+        return edge
+
+    def _drop_edge(self, edge: _AgentEdge) -> None:
+        """Remove an edge AND its sibling arrowhead from the scene."""
+        head = edge._head
+        edge._head = None
+        try:
+            self._scene.removeItem(edge)
+        except Exception:
+            pass
+        if head is not None:
+            try:
+                self._scene.removeItem(head)
+            except Exception:
+                pass
+
     def remove_selected_edge(self) -> bool:
         for key, edge in list(self._edges.items()):
             if edge.isSelected():
                 self._edges.pop(key)
-                self._scene.removeItem(edge)
+                self._drop_edge(edge)
                 self._recompute_layers()
                 if not self._suspend_signals:
                     self.graph_changed.emit()
@@ -698,15 +750,14 @@ class AgentCanvas(QGraphicsView):
             if edge.isSelected():
                 src_name, dst_name = key
                 self._edges.pop(key)
-                self._scene.removeItem(edge)
+                self._drop_edge(edge)
                 src = self._nodes.get(dst_name)
                 dst = self._nodes.get(src_name)
                 if src is None or dst is None:
                     if not self._suspend_signals:
                         self.graph_changed.emit()
                     return True
-                new_edge = _AgentEdge(src, dst)
-                self._scene.addItem(new_edge)
+                new_edge = self._make_edge(src, dst)
                 self._edges[(dst_name, src_name)] = new_edge
                 new_edge.setSelected(True)
                 self._recompute_layers()
@@ -722,7 +773,7 @@ class AgentCanvas(QGraphicsView):
         for key in list(self._edges.keys()):
             if name in key:
                 edge = self._edges.pop(key)
-                self._scene.removeItem(edge)
+                self._drop_edge(edge)
         self._scene.removeItem(node)
         self._recompute_layers()
         if not self._suspend_signals:
@@ -811,8 +862,7 @@ class AgentCanvas(QGraphicsView):
         key = (src.name, dst.name)
         if key in self._edges:
             return
-        edge = _AgentEdge(src, dst)
-        self._scene.addItem(edge)
+        edge = self._make_edge(src, dst)
         self._edges[key] = edge
         self._recompute_layers()
         if not self._suspend_signals:

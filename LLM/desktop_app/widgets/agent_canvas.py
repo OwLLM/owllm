@@ -550,13 +550,18 @@ class _AgentEdge(QGraphicsPathItem):
         except Exception:
             return
 
-        same_layer = False
+        # Direct routing for same-row AND adjacent-row edges (the
+        # orchestrator → its immediate downstream specialists). Loop
+        # around only when the layer gap is bigger than one — those
+        # are the long-range arrows that previously cluttered the
+        # canvas centre.
+        direct_route = True
         try:
-            same_layer = (self.source.layer == self.target.layer)
+            direct_route = abs(self.source.layer - self.target.layer) <= 1
         except (RuntimeError, AttributeError):
-            same_layer = True
+            direct_route = True
 
-        if same_layer:
+        if direct_route:
             # Same row → direct horizontal-tangent bezier (the original
             # routing, fast and clean for orchestrator-and-friends).
             dx = end.x() - start.x()

@@ -575,11 +575,10 @@ class _AgentEdge(QGraphicsPathItem):
             path.cubicTo(c1, c2, end)
             tangent_from = c2
         else:
-            # Cross-layer → loop UNDER the source so cross-layer arrows
-            # don't pile up across the canvas centre. The arrow exits the
-            # right output port, dips down past the source's bottom,
-            # comes up on the source's LEFT side, then approaches the
-            # target's left input port from a clean off-canvas-side path.
+            # Cross-layer (gap > 1) → loop AROUND the source so the arrow
+            # doesn't cut across intermediate layers. Direction is chosen
+            # based on whether the target sits BELOW (loop down/under) or
+            # ABOVE (loop up/over) the source.
             try:
                 src_pos = self.source.scenePos()
             except (RuntimeError, AttributeError):
@@ -590,38 +589,70 @@ class _AgentEdge(QGraphicsPathItem):
             src_bottom = src_pos.y() + _NODE_H
             src_mid_y = src_pos.y() + _NODE_H / 2
 
-            loop_pad = 32.0
-            # Drop must clear the layer-stripe and any glow halo. The
-            # source's boundingRect is padded by 28 px each side
-            # (see _AgentNode.boundingRect), so we sit a touch beyond
-            # that to avoid clipping the curve against the node bounds.
-            drop_y = src_bottom + loop_pad + 14.0
-            # The "exit" point on the source's LEFT side. Sits just
-            # outside the input-port circle so the exit doesn't visually
-            # collide with the input dot.
+            try:
+                going_down = self.target.layer >= self.source.layer
+            except (RuntimeError, AttributeError):
+                going_down = True
+
+            # Stagger the detour distance so multiple cross-layer arrows
+            # from the same source don't overlap. Sibling order is
+            # deterministic (sort by target.layer then target.name) so a
+            # given edge always renders in the same lane.
+            sibling_index = 0
+            try:
+                canvas = self.source._canvas
+                siblings = [
+                    e for e in canvas._edges.values()
+                    if e.source is self.source
+                    and abs(e.source.layer - e.target.layer) > 1
+                    and ((e.target.layer >= e.source.layer) == going_down)
+                ]
+
+                def _sib_key(e: "_AgentEdge") -> tuple:
+                    try:
+                        return (abs(e.target.layer - e.source.layer), e.target.name)
+                    except Exception:
+                        return (0, "")
+
+                siblings.sort(key=_sib_key)
+                sibling_index = siblings.index(self) if self in siblings else 0
+            except Exception:
+                sibling_index = 0
+
+            base_pad = 32.0
+            lane_spacing = 18.0
+            loop_pad = base_pad + sibling_index * lane_spacing
+
+            if going_down:
+                # Drop past the bottom of the source, exit on its left.
+                detour_y = src_bottom + loop_pad + 14.0
+            else:
+                # Rise past the top of the source, exit on its left.
+                detour_y = src_top - loop_pad - 14.0
+
+            # Exit point on the source's LEFT side at mid-height. Sits
+            # outside the input-port circle so it doesn't collide.
             exit_x = src_left - loop_pad - _PORT_RADIUS - _PORT_OFFSET
             exit_pt = QPointF(exit_x, src_mid_y)
 
-            # Loop bezier: from (right output port) down-and-around to
-            # (exit point on source's left). One cubic with control
-            # points pulled DOWN past the source bottom is enough to
-            # produce a smooth U-shape that always passes underneath.
-            loop_c1 = QPointF(src_right + loop_pad, drop_y)
-            loop_c2 = QPointF(src_left - loop_pad, drop_y)
+            # Loop bezier: (right output port) → detour past top OR
+            # bottom of source → (exit point on source's left).
+            loop_c1 = QPointF(src_right + loop_pad, detour_y)
+            loop_c2 = QPointF(src_left - loop_pad, detour_y)
 
             path = QPainterPath(start)
             path.cubicTo(loop_c1, loop_c2, exit_pt)
 
             # Final bezier from exit point to the target input port.
-            # Exit tangent points UPWARD (the loop is climbing back up
-            # to source mid-Y); arrival tangent points RIGHTWARD into
-            # the target's left input port. Pick handle lengths from
-            # the geometric distance so short hops stay tight and long
-            # vertical hops still look smooth.
+            # Exit tangent direction follows the loop direction
+            # (downward loop ⇒ tangent points UP at exit; upward loop
+            # ⇒ tangent points DOWN at exit). Arrival tangent is
+            # always rightward into the target's left input port.
             f_dx = end.x() - exit_pt.x()
             f_dy = end.y() - exit_pt.y()
             f_handle = max(60.0, abs(f_dx) * 0.5, abs(f_dy) * 0.5)
-            f_c1 = QPointF(exit_pt.x(), exit_pt.y() + (-1 if f_dy < 0 else 1) * f_handle)
+            tangent_y = -f_handle if going_down else f_handle
+            f_c1 = QPointF(exit_pt.x(), exit_pt.y() + tangent_y)
             f_c2 = QPointF(end.x() - f_handle, end.y())
             path.cubicTo(f_c1, f_c2, end)
             tangent_from = f_c2

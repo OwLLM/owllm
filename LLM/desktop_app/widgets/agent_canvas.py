@@ -550,29 +550,85 @@ class _AgentEdge(QGraphicsPathItem):
         except Exception:
             return
 
-        # Cubic Bezier with horizontal-tangent control points so the curve
-        # leaves the output port pointing right and arrives at the input
-        # port pointing right. Handle length scales with the larger of
-        # dx / dy so vertically-separated nodes still get a smooth arc.
-        dx = end.x() - start.x()
-        dy = end.y() - start.y()
-        handle = max(60.0, abs(dx) * 0.5, abs(dy) * 0.6)
-        if dx < 0:
-            # Backward edge: push handles outward to loop cleanly.
-            handle = max(handle, abs(dx) * 0.6 + 80.0)
+        same_layer = False
+        try:
+            same_layer = (self.source.layer == self.target.layer)
+        except (RuntimeError, AttributeError):
+            same_layer = True
 
-        c1 = QPointF(start.x() + handle, start.y())
-        c2 = QPointF(end.x() - handle, end.y())
+        if same_layer:
+            # Same row → direct horizontal-tangent bezier (the original
+            # routing, fast and clean for orchestrator-and-friends).
+            dx = end.x() - start.x()
+            dy = end.y() - start.y()
+            handle = max(60.0, abs(dx) * 0.5, abs(dy) * 0.6)
+            if dx < 0:
+                handle = max(handle, abs(dx) * 0.6 + 80.0)
+            c1 = QPointF(start.x() + handle, start.y())
+            c2 = QPointF(end.x() - handle, end.y())
+            path = QPainterPath(start)
+            path.cubicTo(c1, c2, end)
+            tangent_from = c2
+        else:
+            # Cross-layer → loop UNDER the source so cross-layer arrows
+            # don't pile up across the canvas centre. The arrow exits the
+            # right output port, dips down past the source's bottom,
+            # comes up on the source's LEFT side, then approaches the
+            # target's left input port from a clean off-canvas-side path.
+            try:
+                src_pos = self.source.scenePos()
+            except (RuntimeError, AttributeError):
+                src_pos = QPointF(start.x() - _NODE_W, start.y() - _NODE_H / 2)
+            src_left = src_pos.x()
+            src_right = src_pos.x() + _NODE_W
+            src_top = src_pos.y()
+            src_bottom = src_pos.y() + _NODE_H
+            src_mid_y = src_pos.y() + _NODE_H / 2
 
-        path = QPainterPath(start)
-        path.cubicTo(c1, c2, end)
+            loop_pad = 32.0
+            # Drop must clear the layer-stripe and any glow halo. The
+            # source's boundingRect is padded by 28 px each side
+            # (see _AgentNode.boundingRect), so we sit a touch beyond
+            # that to avoid clipping the curve against the node bounds.
+            drop_y = src_bottom + loop_pad + 14.0
+            # The "exit" point on the source's LEFT side. Sits just
+            # outside the input-port circle so the exit doesn't visually
+            # collide with the input dot.
+            exit_x = src_left - loop_pad - _PORT_RADIUS - _PORT_OFFSET
+            exit_pt = QPointF(exit_x, src_mid_y)
+
+            # Loop bezier: from (right output port) down-and-around to
+            # (exit point on source's left). One cubic with control
+            # points pulled DOWN past the source bottom is enough to
+            # produce a smooth U-shape that always passes underneath.
+            loop_c1 = QPointF(src_right + loop_pad, drop_y)
+            loop_c2 = QPointF(src_left - loop_pad, drop_y)
+
+            path = QPainterPath(start)
+            path.cubicTo(loop_c1, loop_c2, exit_pt)
+
+            # Final bezier from exit point to the target input port.
+            # Exit tangent points UPWARD (the loop is climbing back up
+            # to source mid-Y); arrival tangent points RIGHTWARD into
+            # the target's left input port. Pick handle lengths from
+            # the geometric distance so short hops stay tight and long
+            # vertical hops still look smooth.
+            f_dx = end.x() - exit_pt.x()
+            f_dy = end.y() - exit_pt.y()
+            f_handle = max(60.0, abs(f_dx) * 0.5, abs(f_dy) * 0.5)
+            f_c1 = QPointF(exit_pt.x(), exit_pt.y() + (-1 if f_dy < 0 else 1) * f_handle)
+            f_c2 = QPointF(end.x() - f_handle, end.y())
+            path.cubicTo(f_c1, f_c2, end)
+            tangent_from = f_c2
+
         self.setPath(path)
         self._start_pt = QPointF(start)
         self._end_pt = QPointF(end)
 
-        # Arrowhead, tangent approximated from c2 → end.
-        ang = math.atan2(end.y() - c2.y(), end.x() - c2.x())
-        # Pull the head back from the port so it doesn't overlap the dot.
+        # Arrowhead — tangent approximated from the LAST control point
+        # to the path's end (works for both the same-layer and cross-
+        # layer routings since both end with a cubicTo into ``end``).
+        ang = math.atan2(end.y() - tangent_from.y(), end.x() - tangent_from.x())
         tip = QPointF(end.x() - 2 * math.cos(ang), end.y() - 2 * math.sin(ang))
         self._arrow_poly = QPolygonF([
             tip,
@@ -581,7 +637,6 @@ class _AgentEdge(QGraphicsPathItem):
             QPointF(tip.x() - _ARROW_HEAD * math.cos(ang + math.pi / 7),
                     tip.y() - _ARROW_HEAD * math.sin(ang + math.pi / 7)),
         ])
-        # Sync the (separate) arrowhead item.
         if self._head is not None:
             self._head.setPolygon(self._arrow_poly)
             self._head.apply_color(self._palette())
@@ -935,8 +990,11 @@ class AgentCanvas(QGraphicsView):
 
         for name, node in self._nodes.items():
             node.set_layer(layer.get(name, 0))
-        # Edges paint their colour from source.layer — force a repaint.
+        # Edges colour from source.layer AND route differently when
+        # source.layer != target.layer, so we must rebuild geometry, not
+        # just repaint.
         for edge in self._edges.values():
+            edge.update_path()
             edge.update()
 
     def _compute_scene_rect(self) -> QRectF:

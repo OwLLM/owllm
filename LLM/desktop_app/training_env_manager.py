@@ -118,12 +118,33 @@ def _can_import(python_exe: Path, module: str) -> bool:
             [str(python_exe), "-c", f"import {module}"],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=20,
             creationflags=(0x08000000 if sys.platform == "win32" else 0),
         )
     except Exception:  # noqa: BLE001
         return False
     return proc.returncode == 0
+
+
+def _import_error(python_exe: Path, module: str) -> str:
+    """Return stderr from ``python -c "import <module>"`` — empty string
+    if the import succeeds. Used by self-healing to figure out WHY a
+    pip-installed package fails to import (the typical Windows culprit
+    for unsloth is a missing transitive ``triton`` module that pip
+    silently couldn't supply)."""
+    try:
+        proc = subprocess.run(
+            [str(python_exe), "-c", f"import {module}"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            creationflags=(0x08000000 if sys.platform == "win32" else 0),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return str(exc)
+    if proc.returncode == 0:
+        return ""
+    return (proc.stderr or proc.stdout or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -140,10 +161,27 @@ def ensure_ready(
 ) -> TrainingEnvStatus:
     """Install whatever's missing in the training venv.
 
-    Idempotent. Reports each step via ``progress`` so the UI can show a
-    progress dialog. Raises :class:`TrainingEnvBootstrapError` if the
-    venv interpreter itself doesn't exist (the user must reinstall
-    OWLLM's training profile in that case — we don't manufacture a venv).
+    Idempotent + self-healing. Reports each step via ``progress`` so the
+    UI can show a progress dialog. Raises
+    :class:`TrainingEnvBootstrapError` only when every recovery attempt
+    has been exhausted — the app's "self-healing, self-contained,
+    self-installed" promise means we should resolve everything we can
+    automatically before bothering the user.
+
+    Recovery levels for each missing package:
+
+      L1 — plain ``pip install <pkg>`` (the cheap path that works for
+           well-behaved packages).
+      L2 — if the import still fails, parse the import error and
+           install the named missing dep first (e.g. unsloth's
+           transitive ``triton`` module needs ``triton-windows`` on
+           Windows because mainline ``triton`` only ships Linux/macOS
+           wheels).
+      L3 — ``pip install --upgrade --force-reinstall <pkg>`` to clear
+           any half-installed wheel state from a previous failed run.
+
+    Only after L1 → L2 → L3 all fail to make ``import <pkg>`` work do
+    we surface the actual import error to the user.
     """
     p = progress or (lambda _msg: None)
 
@@ -161,50 +199,138 @@ def ensure_ready(
 
     py = Path(cur.venv_python_path)
     spec_lookup = dict(REQUIRED_TRAINING_PACKAGES)
+    final_errors: List[Tuple[str, str]] = []
 
     for pkg in cur.missing_packages:
         spec = spec_lookup.get(pkg, pkg)
-        p(f"Installing {spec} into training venv (this can take a few minutes)…")
-        _pip_install(py, spec)
+
+        # ---- L1: plain pip install -----------------------------------
+        p(f"Installing {spec} (this can take a few minutes)…")
+        try:
+            _pip_install(py, spec)
+        except TrainingEnvBootstrapError as exc:
+            # Hard install failure — record and move on; the L3 retry
+            # below also wraps a different flag set so we may still
+            # succeed.
+            logger.warning("L1 install of %s failed: %s", pkg, exc)
+
+        if _can_import(py, pkg):
+            continue
+
+        # ---- L2: targeted prereq install based on the import error ---
+        err = _import_error(py, pkg)
+        prereqs = _infer_prereq_specs(pkg, err)
+        if prereqs:
+            for prereq in prereqs:
+                p(f"Installing prerequisite {prereq} for {pkg}…")
+                try:
+                    _pip_install(py, prereq)
+                except TrainingEnvBootstrapError as exc:
+                    logger.warning("L2 prereq %s for %s failed: %s", prereq, pkg, exc)
+            if _can_import(py, pkg):
+                continue
+
+        # ---- L3: aggressive reinstall --------------------------------
+        p(f"Re-installing {spec} with --upgrade --force-reinstall…")
+        try:
+            _pip_install(py, spec, force_reinstall=True)
+        except TrainingEnvBootstrapError as exc:
+            logger.warning("L3 force-reinstall of %s failed: %s", pkg, exc)
+
+        if _can_import(py, pkg):
+            continue
+
+        # All recovery levels failed — capture the real reason.
+        err = _import_error(py, pkg) or "(no stderr captured)"
+        final_errors.append((pkg, err))
 
     final = status(llm_root)
-    if not final.fully_ready:
+    if not final.fully_ready or final_errors:
+        details = "\n\n".join(
+            f"• {pkg} — actual import error:\n    {err}"
+            for pkg, err in final_errors
+        )
         raise TrainingEnvBootstrapError(
-            "Install reported success but the training env still reports "
-            f"missing packages: {final.missing_packages}.\n\n"
-            f"Try manually:\n  \"{py}\" -m pip install {' '.join(final.missing_packages)}"
+            "Self-healing exhausted L1/L2/L3 recovery and "
+            f"{len(final_errors)} package(s) still won't import.\n\n"
+            f"{details}\n\n"
+            "Open the Models tab → Repair All to rebuild the env from "
+            "scratch, or report this trace so we can ship a tighter "
+            "self-heal for your platform."
         )
     p("All training packages installed.")
     return final
 
 
-def _pip_install(python_exe: Path, package_spec: str) -> None:
+def _infer_prereq_specs(pkg: str, import_error: str) -> List[str]:
+    """Map an ``ImportError`` stderr blob to the pip specs that can fix it.
+
+    Self-healing only auto-installs a prereq when we have HIGH
+    confidence the mapping is right — every entry below is rooted in
+    a known-good fix for a recurring user report. Adding a new entry
+    means: someone hit it twice, manual fix worked, we know the spec.
+    """
+    err = (import_error or "").lower()
+    out: List[str] = []
+
+    if pkg == "unsloth":
+        # The most common Windows symptom: ``ModuleNotFoundError: triton``.
+        # Mainline ``triton`` only ships Linux/macOS wheels; the community
+        # ``triton-windows`` package fills the same import name for
+        # unsloth's purposes.
+        if "no module named 'triton'" in err or "no module named \"triton\"" in err:
+            if sys.platform == "win32":
+                out.append("triton-windows")
+            else:
+                out.append("triton")
+        # Some builds need ``unsloth_zoo`` separately.
+        if "no module named 'unsloth_zoo'" in err:
+            out.append("unsloth_zoo")
+        # ``xformers`` import failures are usually torch-version skew —
+        # forcing the wheel that matches the installed torch tends to
+        # resolve them. We *don't* pin a version because the right one
+        # depends on torch+cuda; pip's resolver picks something
+        # compatible most of the time.
+        if "no module named 'xformers'" in err:
+            out.append("xformers")
+
+    return out
+
+
+def _pip_install(python_exe: Path, package_spec: str, *, force_reinstall: bool = False) -> None:
     """Install one package into the training venv.
 
     Two anti-foot-gun flags vs. a naive ``pip install --upgrade <pkg>``:
 
-    * **Drop ``--upgrade``.** We only install packages that ``status()``
-      reported as missing. ``--upgrade`` would force pip to re-resolve
-      already-satisfied deps and try to write fresh wheels for them, which
-      on Windows trips ``WinError 32`` whenever the OWLLM Python process
-      has those deps loaded (zipp, importlib_metadata, packaging, etc.).
-    * **``--upgrade-strategy only-if-needed``** — belt-and-suspenders for
-      the same problem at the transitive layer. Even when a sub-dep has a
-      newer version available, pip leaves the existing one in place if
-      it satisfies the requirement spec.
+    * **Drop ``--upgrade``** for the default path. We only install
+      packages that ``status()`` reported as missing. ``--upgrade``
+      would force pip to re-resolve already-satisfied deps and try
+      to write fresh wheels for them, which on Windows trips
+      ``WinError 32`` whenever the OWLLM Python process has those
+      deps loaded (zipp, importlib_metadata, packaging, etc.).
+    * **``--upgrade-strategy only-if-needed``** — belt-and-suspenders
+      for the same problem at the transitive layer.
 
-    On a clean WinError 32 we raise a self-recoverable error with a clear
-    message — the caller turns that into a UI dialog with explicit next
-    steps. On other failures the stderr tail is included so the user
-    sees the actual reason.
+    Pass ``force_reinstall=True`` for the L3 self-heal path
+    (``ensure_ready`` falls back to it when L1+L2 leave the package
+    importable-broken). Force-reinstall costs more — it re-resolves
+    every transitive dep — but it cleans up half-installed wheel
+    state from a previous failed run that cheaper installs leave
+    alone.
+
+    On a clean WinError 32 we raise a self-recoverable error with a
+    clear message; on other failures the stderr tail is included so
+    the user sees the actual reason.
     """
     cmd = [
         str(python_exe), "-m", "pip", "install",
         "--upgrade-strategy", "only-if-needed",
         "--prefer-binary",
         "--no-warn-script-location",
-        package_spec,
     ]
+    if force_reinstall:
+        cmd += ["--upgrade", "--force-reinstall"]
+    cmd.append(package_spec)
     creationflags = 0x08000000 if sys.platform == "win32" else 0
     try:
         proc = subprocess.run(

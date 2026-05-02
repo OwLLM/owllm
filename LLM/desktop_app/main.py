@@ -10931,6 +10931,19 @@ class MainWindow(QMainWindow):
         
         self.train_base_model = QComboBox()
         self.train_base_model.setEditable(True)
+        # Without these explicit policies the combo defaults to
+        # AdjustToContentsOnFirstShow + a Preferred width: it sizes
+        # itself to the longest item once and never grows, so the
+        # "Select Base Model" container looked stuck at a narrow width
+        # while the other rows (Model Name, Epochs, …) stretched to
+        # fill. Make the combo behave like the other inputs.
+        self.train_base_model.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.train_base_model.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Fixed
+        )
+        self.train_base_model.setMinimumHeight(40)
         self.train_base_model.addItems(DEFAULT_BASE_MODELS)
         self.train_base_model.currentTextChanged.connect(self._on_model_selected_for_training)
         self.train_base_model.currentTextChanged.connect(self._auto_generate_model_name)

@@ -460,14 +460,17 @@ _EDGE_COLOR_HOVER_END = QColor("#ffc080")
 _EDGE_COLOR_SELECTED = QColor("#ffd54a")
 _ARROW_HEAD = 13
 
-# Magnet-repulsion tuning. The "field" decays linearly from full strength
-# at the obstacle's centre to 0 at REPEL_RANGE distance — outside the
-# range a control point feels nothing, inside it gets pushed AWAY along
-# the obstacle→point direction by an amount proportional to how deep
-# inside the field it is. Strength is the per-obstacle peak push;
-# multiple obstacles' forces sum.
-_REPEL_STRENGTH = 70.0
-_REPEL_RANGE = 180.0
+# Magnet-repulsion tuning. The repulsion is now applied to the BEZIER
+# CURVE itself, not just its control points: we sample the curve at
+# fixed t-values, compute a force on each sample from each obstacle's
+# nearest rectangle edge, then back-propagate those forces to the
+# control points via the cubic Bernstein basis. Iterating a handful of
+# times converges on a curve that hugs neither box.
+_REPEL_STRENGTH = 90.0   # peak push at the box edge
+_REPEL_RANGE = 180.0     # distance from the box edge at which force fades to 0
+_REPEL_ITERS = 5         # control-point relaxation steps
+_REPEL_SAMPLES = 16      # bezier samples per iteration
+_REPEL_DAMPING = 0.45    # per-iteration step size — keeps the relaxation stable
 
 
 class _AgentEdgeHead(QGraphicsPolygonItem):
@@ -550,14 +553,12 @@ class _AgentEdge(QGraphicsPathItem):
             self.update()
         return super().itemChange(change, value)
 
-    def _obstacle_centres(self) -> List[Tuple[float, float]]:
-        """Centres of every node OTHER than this edge's source/target.
-
-        Used by the magnet-repulsion pass — each control point is
-        nudged AWAY from every obstacle within range. Returns scene
-        coordinates so the caller can compute distances directly.
+    def _obstacle_rects(self) -> List[Tuple[float, float, float, float]]:
+        """Bounding rectangles of every node OTHER than this edge's
+        source / target. Returns ``(left, top, right, bottom)`` in scene
+        coordinates so distance-to-rect can be computed cheaply.
         """
-        out: List[Tuple[float, float]] = []
+        out: List[Tuple[float, float, float, float]] = []
         try:
             canvas = self.source._canvas
         except (RuntimeError, AttributeError):
@@ -571,35 +572,103 @@ class _AgentEdge(QGraphicsPathItem):
                 pos = node.scenePos()
             except (RuntimeError, AttributeError):
                 continue
-            out.append((pos.x() + _NODE_W / 2.0, pos.y() + _NODE_H / 2.0))
+            out.append((pos.x(), pos.y(), pos.x() + _NODE_W, pos.y() + _NODE_H))
         return out
 
     @staticmethod
-    def _apply_repulsion(point: QPointF, obstacles: List[Tuple[float, float]]) -> QPointF:
-        """Push ``point`` away from every obstacle whose centre is within
-        :data:`_REPEL_RANGE`. Forces from multiple obstacles sum so a
-        control point sandwiched between two boxes gets shoved into the
-        clearer side."""
-        if not obstacles:
-            return point
+    def _force_at_point(
+        px: float,
+        py: float,
+        obstacles: List[Tuple[float, float, float, float]],
+    ) -> Tuple[float, float]:
+        """Net repulsion vector at ``(px, py)`` from every obstacle rect.
+
+        Force decays linearly from peak strength at the box edge to
+        zero at :data:`_REPEL_RANGE` away. Inside a box, force points
+        from the box centre toward the sample so the curve gets shoved
+        out of any overlap.
+        """
         fx = 0.0
         fy = 0.0
-        for cx, cy in obstacles:
-            dx = point.x() - cx
-            dy = point.y() - cy
+        for left, top, right, bottom in obstacles:
+            # Closest point on the obstacle rect to the sample.
+            cpx = left if px < left else (right if px > right else px)
+            cpy = top if py < top else (bottom if py > bottom else py)
+            dx = px - cpx
+            dy = py - cpy
             dist = math.hypot(dx, dy)
-            if dist >= _REPEL_RANGE:
+            if dist > _REPEL_RANGE:
                 continue
             if dist < 1.0:
-                # Pathological overlap — push straight up by default
-                # so the resulting curve at least clears something.
-                fy -= _REPEL_STRENGTH
-                continue
-            falloff = 1.0 - dist / _REPEL_RANGE
-            scale = _REPEL_STRENGTH * falloff / dist
+                # Sample is inside (or right on the edge of) the rect —
+                # push from the rect's CENTRE so we always escape with
+                # a non-degenerate direction.
+                ccx = (left + right) * 0.5
+                ccy = (top + bottom) * 0.5
+                dx = px - ccx
+                dy = py - ccy
+                dist = math.hypot(dx, dy)
+                if dist < 1.0:
+                    dx, dy = 0.0, -1.0
+                    dist = 1.0
+                # Strong push — the sample is literally inside the box.
+                scale = _REPEL_STRENGTH * 3.0 / dist
+            else:
+                falloff = 1.0 - dist / _REPEL_RANGE
+                scale = _REPEL_STRENGTH * falloff / dist
             fx += dx * scale
             fy += dy * scale
-        return QPointF(point.x() + fx, point.y() + fy)
+        return fx, fy
+
+    @staticmethod
+    def _route_cubic(
+        start: QPointF,
+        c1: QPointF,
+        c2: QPointF,
+        end: QPointF,
+        obstacles: List[Tuple[float, float, float, float]],
+    ) -> Tuple[QPointF, QPointF]:
+        """Iteratively shift ``c1`` / ``c2`` so the cubic curve
+        ``start → c1 → c2 → end`` is pushed clear of every obstacle.
+
+        At each iteration we sample the curve at uniformly-spaced
+        t-values, compute the net repulsion at each sample, and
+        back-propagate to the control points via the cubic Bernstein
+        basis (the weight each control point has on the curve at that
+        t). Damping keeps multiple obstacles from causing oscillation.
+        """
+        if not obstacles:
+            return c1, c2
+
+        cur1 = QPointF(c1)
+        cur2 = QPointF(c2)
+        for _ in range(_REPEL_ITERS):
+            d1x = d1y = d2x = d2y = 0.0
+            any_force = False
+            for i in range(1, _REPEL_SAMPLES):
+                t = i / float(_REPEL_SAMPLES)
+                u = 1.0 - t
+                # B(t) = (1-t)^3 P0 + 3(1-t)^2 t P1 + 3(1-t) t^2 P2 + t^3 P3
+                b0 = u * u * u
+                b1 = 3.0 * u * u * t
+                b2 = 3.0 * u * t * t
+                b3 = t * t * t
+                px = b0 * start.x() + b1 * cur1.x() + b2 * cur2.x() + b3 * end.x()
+                py = b0 * start.y() + b1 * cur1.y() + b2 * cur2.y() + b3 * end.y()
+                fx, fy = _AgentEdge._force_at_point(px, py, obstacles)
+                if fx == 0.0 and fy == 0.0:
+                    continue
+                any_force = True
+                d1x += fx * b1
+                d1y += fy * b1
+                d2x += fx * b2
+                d2y += fy * b2
+            if not any_force:
+                break
+            damp = _REPEL_DAMPING / _REPEL_SAMPLES
+            cur1 = QPointF(cur1.x() + d1x * damp, cur1.y() + d1y * damp)
+            cur2 = QPointF(cur2.x() + d2x * damp, cur2.y() + d2y * damp)
+        return cur1, cur2
 
     def update_path(self) -> None:
         try:
@@ -610,7 +679,7 @@ class _AgentEdge(QGraphicsPathItem):
         except Exception:
             return
 
-        obstacles = self._obstacle_centres()
+        obstacles = self._obstacle_rects()
 
         # Routing rules:
         #   * same layer                              → direct curve
@@ -646,11 +715,11 @@ class _AgentEdge(QGraphicsPathItem):
                 handle = max(handle, abs(dx) * 0.6 + 80.0)
             c1 = QPointF(start.x() + handle, start.y())
             c2 = QPointF(end.x() - handle, end.y())
-            # Magnet repulsion: nudge control points AWAY from any node
-            # that's not the source or target. Lets the bezier bend
-            # around boxes that happen to sit on the straight-line path.
-            c1 = self._apply_repulsion(c1, obstacles)
-            c2 = self._apply_repulsion(c2, obstacles)
+            # Magnet repulsion: iteratively relax the control points so
+            # the actual curve (sampled at fixed t-values) stays clear
+            # of every obstacle box. This pushes the LINE away from
+            # boxes — not just the puppet strings.
+            c1, c2 = self._route_cubic(start, c1, c2, end, obstacles)
             path = QPainterPath(start)
             path.cubicTo(c1, c2, end)
             tangent_from = c2
@@ -731,14 +800,14 @@ class _AgentEdge(QGraphicsPathItem):
             exit_pt = QPointF(exit_x, src_mid_y)
 
             # Loop bezier: (right output port) → detour BELOW source →
-            # (exit point on source's left). The loop_c control points
-            # already sit far below the source so we DON'T repel them
-            # against the source itself (which would fight the loop
-            # geometry). They CAN feel other obstacles though.
+            # (exit point on source's left). The detour is intentionally
+            # far below the source, so this segment usually doesn't need
+            # much help from repulsion — but if there are OTHER boxes
+            # in the row below, the relaxation will steer the curve
+            # around them too.
             loop_c1 = QPointF(src_right + loop_pad, detour_y)
             loop_c2 = QPointF(src_left - loop_pad, detour_y)
-            loop_c1 = self._apply_repulsion(loop_c1, obstacles)
-            loop_c2 = self._apply_repulsion(loop_c2, obstacles)
+            loop_c1, loop_c2 = self._route_cubic(start, loop_c1, loop_c2, exit_pt, obstacles)
 
             path = QPainterPath(start)
             path.cubicTo(loop_c1, loop_c2, exit_pt)
@@ -752,8 +821,7 @@ class _AgentEdge(QGraphicsPathItem):
             f_handle = max(60.0, abs(f_dx) * 0.5, abs(f_dy) * 0.5)
             f_c1 = QPointF(exit_pt.x(), exit_pt.y() - f_handle)
             f_c2 = QPointF(end.x() - f_handle, end.y())
-            f_c1 = self._apply_repulsion(f_c1, obstacles)
-            f_c2 = self._apply_repulsion(f_c2, obstacles)
+            f_c1, f_c2 = self._route_cubic(exit_pt, f_c1, f_c2, end, obstacles)
             path.cubicTo(f_c1, f_c2, end)
             tangent_from = f_c2
 

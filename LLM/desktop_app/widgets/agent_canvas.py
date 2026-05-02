@@ -472,12 +472,19 @@ _ARROW_HEAD = 13
 # downward) edges as well as the cross-layer loops — the previous
 # values were so conservative that forward arrows barely moved even
 # with a box right in their path.
-_REPEL_STRENGTH = 160.0   # peak push at the box edge (px / iter / sample)
-_REPEL_RANGE = 320.0      # distance at which the field fades to zero
-_REPEL_PAD = 24.0         # virtual buffer added to each obstacle's rect
-_REPEL_ITERS = 14         # control-point relaxation steps
-_REPEL_SAMPLES = 18       # bezier samples per iteration
-_REPEL_STEP = 1.2         # per-iteration step size (post-normalisation)
+_REPEL_STRENGTH = 90.0    # peak push at the box edge (px / iter / sample)
+_REPEL_RANGE = 200.0      # distance at which the field fades to zero
+_REPEL_PAD = 14.0         # virtual buffer added to each obstacle's rect
+_REPEL_ITERS = 8          # control-point relaxation steps
+_REPEL_SAMPLES = 16       # bezier samples per iteration
+_REPEL_STEP = 0.65        # per-iteration step size (post-normalisation)
+
+# Sibling fan-out — when several edges share a source they all start
+# at the same output port. Without separation they overlap right at
+# the source and look like one fat arrow. Each sibling claims a
+# perpendicular offset on its first control point so the curves
+# spread out into a fan as they leave the source.
+_FANOUT_SPACING = 26.0
 
 
 class _AgentEdgeHead(QGraphicsPolygonItem):
@@ -559,6 +566,55 @@ class _AgentEdge(QGraphicsPathItem):
         if change == QGraphicsItem.ItemSelectedHasChanged:
             self.update()
         return super().itemChange(change, value)
+
+    def _direct_sibling_index(self) -> Tuple[int, int]:
+        """Return ``(index, total)`` of this edge among same-source
+        edges that take the DIRECT routing branch.
+
+        Only direct edges contribute to the fan, so a backward-loop
+        edge from the same source doesn't crowd the forward fan
+        (it's already on the under-loop side). Order is deterministic
+        — sorted by target's vertical position then name — so each
+        edge always renders in the same lane.
+        """
+        try:
+            canvas = self.source._canvas
+        except (RuntimeError, AttributeError):
+            return 0, 1
+        if canvas is None:
+            return 0, 1
+
+        def _is_direct(e: "_AgentEdge") -> bool:
+            try:
+                gap = abs(e.source.layer - e.target.layer)
+            except (RuntimeError, AttributeError):
+                return True
+            if gap == 0:
+                return True
+            if gap == 1 and e.target.layer > e.source.layer:
+                return True
+            return False
+
+        siblings = [
+            e for e in canvas._edges.values()
+            if e.source is self.source and _is_direct(e)
+        ]
+        if len(siblings) <= 1:
+            return 0, 1
+
+        def _key(e: "_AgentEdge") -> tuple:
+            try:
+                pos = e.target.scenePos()
+                return (pos.y(), pos.x(), e.target.name)
+            except Exception:
+                return (0.0, 0.0, "")
+
+        siblings.sort(key=_key)
+        try:
+            idx = siblings.index(self)
+        except ValueError:
+            idx = 0
+        return idx, len(siblings)
 
     def _obstacle_rects(self) -> List[Tuple[float, float, float, float]]:
         """Inflated bounding rectangles of every node OTHER than this
@@ -757,6 +813,17 @@ class _AgentEdge(QGraphicsPathItem):
                 handle = max(handle, abs(dx) * 0.6 + 80.0)
             c1 = QPointF(start.x() + handle, start.y())
             c2 = QPointF(end.x() - handle, end.y())
+
+            # Sibling fan-out: when multiple direct edges leave the
+            # same source they share the start point. Without a
+            # perpendicular offset on c1 they all lie on top of each
+            # other near the source. Centre the fan around 0 — the
+            # middle sibling stays straight, others bow up / down.
+            sib_idx, sib_total = self._direct_sibling_index()
+            if sib_total > 1:
+                offset = (sib_idx - (sib_total - 1) / 2.0) * _FANOUT_SPACING
+                c1 = QPointF(c1.x(), c1.y() + offset)
+
             # Magnet repulsion: iteratively relax the control points so
             # the actual curve (sampled at fixed t-values) stays clear
             # of every obstacle box. This pushes the LINE away from

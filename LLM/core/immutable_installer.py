@@ -715,17 +715,7 @@ class ImmutableInstaller:
             return False
 
         try:
-            mgr = WheelhouseManager(
-                wheelhouse_dir=self.wheelhouse,
-                logger=self.log,
-            )
-        except TypeError:
-            # Older constructor signature — no kwargs.
-            try:
-                mgr = WheelhouseManager(self.wheelhouse)
-            except Exception as exc:
-                self.log(f"  Could not construct WheelhouseManager: {exc}")
-                return False
+            mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
         except Exception as exc:
             self.log(f"  Could not construct WheelhouseManager: {exc}")
             return False

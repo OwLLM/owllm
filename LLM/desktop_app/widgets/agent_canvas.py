@@ -460,17 +460,24 @@ _EDGE_COLOR_HOVER_END = QColor("#ffc080")
 _EDGE_COLOR_SELECTED = QColor("#ffd54a")
 _ARROW_HEAD = 13
 
-# Magnet-repulsion tuning. The repulsion is now applied to the BEZIER
-# CURVE itself, not just its control points: we sample the curve at
-# fixed t-values, compute a force on each sample from each obstacle's
-# nearest rectangle edge, then back-propagate those forces to the
-# control points via the cubic Bernstein basis. Iterating a handful of
-# times converges on a curve that hugs neither box.
-_REPEL_STRENGTH = 90.0   # peak push at the box edge
-_REPEL_RANGE = 180.0     # distance from the box edge at which force fades to 0
-_REPEL_ITERS = 5         # control-point relaxation steps
-_REPEL_SAMPLES = 16      # bezier samples per iteration
-_REPEL_DAMPING = 0.45    # per-iteration step size — keeps the relaxation stable
+# Magnet-repulsion tuning. The repulsion is applied to the BEZIER
+# CURVE itself (not just control points): we sample the curve at fixed
+# t-values, compute a force on each sample from every obstacle's
+# nearest rectangle edge, then back-propagate the forces to the
+# control points via the cubic Bernstein basis. Iterating a handful
+# of times converges on a curve that stays clear of every box that
+# isn't its own endpoint.
+#
+# Tuning aims for *visible* deflection on direct (same-row / adjacent
+# downward) edges as well as the cross-layer loops — the previous
+# values were so conservative that forward arrows barely moved even
+# with a box right in their path.
+_REPEL_STRENGTH = 160.0   # peak push at the box edge (px / iter / sample)
+_REPEL_RANGE = 320.0      # distance at which the field fades to zero
+_REPEL_PAD = 24.0         # virtual buffer added to each obstacle's rect
+_REPEL_ITERS = 14         # control-point relaxation steps
+_REPEL_SAMPLES = 18       # bezier samples per iteration
+_REPEL_STEP = 1.2         # per-iteration step size (post-normalisation)
 
 
 class _AgentEdgeHead(QGraphicsPolygonItem):
@@ -554,8 +561,14 @@ class _AgentEdge(QGraphicsPathItem):
         return super().itemChange(change, value)
 
     def _obstacle_rects(self) -> List[Tuple[float, float, float, float]]:
-        """Bounding rectangles of every node OTHER than this edge's
-        source / target. Returns ``(left, top, right, bottom)`` in scene
+        """Inflated bounding rectangles of every node OTHER than this
+        edge's source / target.
+
+        Each box is padded by :data:`_REPEL_PAD` so the "stay clear"
+        buffer also keeps arrows from hugging a box edge — we want
+        the LINE to feel a push starting a bit BEFORE it would
+        actually overlap, not only when it's already grazing the
+        corner. Returns ``(left, top, right, bottom)`` in scene
         coordinates so distance-to-rect can be computed cheaply.
         """
         out: List[Tuple[float, float, float, float]] = []
@@ -572,7 +585,12 @@ class _AgentEdge(QGraphicsPathItem):
                 pos = node.scenePos()
             except (RuntimeError, AttributeError):
                 continue
-            out.append((pos.x(), pos.y(), pos.x() + _NODE_W, pos.y() + _NODE_H))
+            out.append((
+                pos.x() - _REPEL_PAD,
+                pos.y() - _REPEL_PAD,
+                pos.x() + _NODE_W + _REPEL_PAD,
+                pos.y() + _NODE_H + _REPEL_PAD,
+            ))
         return out
 
     @staticmethod
@@ -642,6 +660,21 @@ class _AgentEdge(QGraphicsPathItem):
 
         cur1 = QPointF(c1)
         cur2 = QPointF(c2)
+        # Sum of Bernstein weights B1(t) and B2(t) over our uniform t
+        # samples — used to normalise the per-iteration step so the
+        # tuning constants stay independent of the sample count.
+        weight_sum_b1 = 0.0
+        weight_sum_b2 = 0.0
+        for i in range(1, _REPEL_SAMPLES):
+            t = i / float(_REPEL_SAMPLES)
+            u = 1.0 - t
+            weight_sum_b1 += 3.0 * u * u * t
+            weight_sum_b2 += 3.0 * u * t * t
+        if weight_sum_b1 < 1e-6:
+            weight_sum_b1 = 1.0
+        if weight_sum_b2 < 1e-6:
+            weight_sum_b2 = 1.0
+
         for _ in range(_REPEL_ITERS):
             d1x = d1y = d2x = d2y = 0.0
             any_force = False
@@ -665,9 +698,18 @@ class _AgentEdge(QGraphicsPathItem):
                 d2y += fy * b2
             if not any_force:
                 break
-            damp = _REPEL_DAMPING / _REPEL_SAMPLES
-            cur1 = QPointF(cur1.x() + d1x * damp, cur1.y() + d1y * damp)
-            cur2 = QPointF(cur2.x() + d2x * damp, cur2.y() + d2y * damp)
+            # Normalise by the Bernstein-weight integral so the step
+            # size is meaningful regardless of how many samples we
+            # took, then scale by REPEL_STEP for the per-iteration
+            # damping factor.
+            cur1 = QPointF(
+                cur1.x() + d1x * _REPEL_STEP / weight_sum_b1,
+                cur1.y() + d1y * _REPEL_STEP / weight_sum_b1,
+            )
+            cur2 = QPointF(
+                cur2.x() + d2x * _REPEL_STEP / weight_sum_b2,
+                cur2.y() + d2y * _REPEL_STEP / weight_sum_b2,
+            )
         return cur1, cur2
 
     def update_path(self) -> None:

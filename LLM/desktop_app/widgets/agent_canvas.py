@@ -31,7 +31,7 @@ agent's title so the canvas isn't a wall of empty boxes.
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
@@ -460,6 +460,15 @@ _EDGE_COLOR_HOVER_END = QColor("#ffc080")
 _EDGE_COLOR_SELECTED = QColor("#ffd54a")
 _ARROW_HEAD = 13
 
+# Magnet-repulsion tuning. The "field" decays linearly from full strength
+# at the obstacle's centre to 0 at REPEL_RANGE distance — outside the
+# range a control point feels nothing, inside it gets pushed AWAY along
+# the obstacle→point direction by an amount proportional to how deep
+# inside the field it is. Strength is the per-obstacle peak push;
+# multiple obstacles' forces sum.
+_REPEL_STRENGTH = 70.0
+_REPEL_RANGE = 180.0
+
 
 class _AgentEdgeHead(QGraphicsPolygonItem):
     """Arrowhead for an edge — separate scene item so it can sit at a
@@ -541,6 +550,57 @@ class _AgentEdge(QGraphicsPathItem):
             self.update()
         return super().itemChange(change, value)
 
+    def _obstacle_centres(self) -> List[Tuple[float, float]]:
+        """Centres of every node OTHER than this edge's source/target.
+
+        Used by the magnet-repulsion pass — each control point is
+        nudged AWAY from every obstacle within range. Returns scene
+        coordinates so the caller can compute distances directly.
+        """
+        out: List[Tuple[float, float]] = []
+        try:
+            canvas = self.source._canvas
+        except (RuntimeError, AttributeError):
+            return out
+        if canvas is None:
+            return out
+        for node in canvas._nodes.values():
+            if node is self.source or node is self.target:
+                continue
+            try:
+                pos = node.scenePos()
+            except (RuntimeError, AttributeError):
+                continue
+            out.append((pos.x() + _NODE_W / 2.0, pos.y() + _NODE_H / 2.0))
+        return out
+
+    @staticmethod
+    def _apply_repulsion(point: QPointF, obstacles: List[Tuple[float, float]]) -> QPointF:
+        """Push ``point`` away from every obstacle whose centre is within
+        :data:`_REPEL_RANGE`. Forces from multiple obstacles sum so a
+        control point sandwiched between two boxes gets shoved into the
+        clearer side."""
+        if not obstacles:
+            return point
+        fx = 0.0
+        fy = 0.0
+        for cx, cy in obstacles:
+            dx = point.x() - cx
+            dy = point.y() - cy
+            dist = math.hypot(dx, dy)
+            if dist >= _REPEL_RANGE:
+                continue
+            if dist < 1.0:
+                # Pathological overlap — push straight up by default
+                # so the resulting curve at least clears something.
+                fy -= _REPEL_STRENGTH
+                continue
+            falloff = 1.0 - dist / _REPEL_RANGE
+            scale = _REPEL_STRENGTH * falloff / dist
+            fx += dx * scale
+            fy += dy * scale
+        return QPointF(point.x() + fx, point.y() + fy)
+
     def update_path(self) -> None:
         try:
             start = self.source.output_port_scene_pos()
@@ -549,6 +609,8 @@ class _AgentEdge(QGraphicsPathItem):
             return
         except Exception:
             return
+
+        obstacles = self._obstacle_centres()
 
         # Routing rules:
         #   * same layer                              → direct curve
@@ -584,6 +646,11 @@ class _AgentEdge(QGraphicsPathItem):
                 handle = max(handle, abs(dx) * 0.6 + 80.0)
             c1 = QPointF(start.x() + handle, start.y())
             c2 = QPointF(end.x() - handle, end.y())
+            # Magnet repulsion: nudge control points AWAY from any node
+            # that's not the source or target. Lets the bezier bend
+            # around boxes that happen to sit on the straight-line path.
+            c1 = self._apply_repulsion(c1, obstacles)
+            c2 = self._apply_repulsion(c2, obstacles)
             path = QPainterPath(start)
             path.cubicTo(c1, c2, end)
             tangent_from = c2
@@ -664,9 +731,14 @@ class _AgentEdge(QGraphicsPathItem):
             exit_pt = QPointF(exit_x, src_mid_y)
 
             # Loop bezier: (right output port) → detour BELOW source →
-            # (exit point on source's left).
+            # (exit point on source's left). The loop_c control points
+            # already sit far below the source so we DON'T repel them
+            # against the source itself (which would fight the loop
+            # geometry). They CAN feel other obstacles though.
             loop_c1 = QPointF(src_right + loop_pad, detour_y)
             loop_c2 = QPointF(src_left - loop_pad, detour_y)
+            loop_c1 = self._apply_repulsion(loop_c1, obstacles)
+            loop_c2 = self._apply_repulsion(loop_c2, obstacles)
 
             path = QPainterPath(start)
             path.cubicTo(loop_c1, loop_c2, exit_pt)
@@ -680,6 +752,8 @@ class _AgentEdge(QGraphicsPathItem):
             f_handle = max(60.0, abs(f_dx) * 0.5, abs(f_dy) * 0.5)
             f_c1 = QPointF(exit_pt.x(), exit_pt.y() - f_handle)
             f_c2 = QPointF(end.x() - f_handle, end.y())
+            f_c1 = self._apply_repulsion(f_c1, obstacles)
+            f_c2 = self._apply_repulsion(f_c2, obstacles)
             path.cubicTo(f_c1, f_c2, end)
             tangent_from = f_c2
 

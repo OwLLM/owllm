@@ -237,9 +237,18 @@ def attachments_to_prompt_block(attachments: Sequence[Attachment]) -> str:
 
     Used to splice a description of the media into the user's text request
     so every backend (including local llama-cpp without vision) sees
-    *something* about each attachment. For audio, the transcript itself
-    is inlined. For images, a labelled stub is used until the
-    vision-passthrough pass lands.
+    *something* about each attachment.
+
+    For audio, the transcript itself is inlined.
+
+    For images, the stub is deliberately STRICT about the no-fabrication
+    contract. Vision-capable backends (Claude API, OpenAI API) ALSO get
+    the actual image bytes via Anthropic / OpenAI image content blocks,
+    so for those models the stub is just metadata. Non-vision backends
+    (local llama-cpp, claude_cli, codex_cli) only see this text — and
+    without an explicit refuse-to-invent instruction they happily
+    hallucinate a table-of-results that was never in the picture. The
+    "if you cannot see image content, say so" line is what stops that.
     """
     if not attachments:
         return ""
@@ -257,8 +266,21 @@ def attachments_to_prompt_block(attachments: Sequence[Attachment]) -> str:
                 lines.append(f"{head}\n(no transcript available)")
         elif att.is_image():
             cap = (att.caption or "").strip()
-            head = f"[attachment {i} — image: {att.display_name()}, {att.mime}]"
-            lines.append(head + (f"\nUser caption: {cap}" if cap else ""))
+            head = f"[attachment {i} — image file: {att.display_name()} ({att.mime})]"
+            body_parts: List[str] = []
+            if cap:
+                body_parts.append(f"User caption: {cap}")
+            body_parts.append(
+                "IMPORTANT: An image is attached. Vision-capable models "
+                "(Claude API, GPT-4o, etc.) receive the actual image bytes "
+                "and can analyze them. If you CANNOT see image contents — "
+                "if all you see is this text description — you MUST tell "
+                "the user you cannot view images and stop. Do NOT invent, "
+                "describe, transcribe, OCR, or summarize image content "
+                "you cannot actually see. Fabricating image contents is a "
+                "serious failure."
+            )
+            lines.append(head + "\n" + "\n".join(body_parts))
     return "\n\n".join(lines)
 
 

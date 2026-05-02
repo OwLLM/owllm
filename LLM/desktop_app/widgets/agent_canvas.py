@@ -38,6 +38,7 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QLinearGradient,
     QPainterPath,
     QPen,
     QPolygonF,
@@ -364,8 +365,10 @@ class _AgentNode(QGraphicsItem):
 # ---------------------------------------------------------------------------
 
 
-_EDGE_COLOR = QColor("#3aa0ff")           # blue, matches output port
-_EDGE_COLOR_HOVER = QColor("#7cc2ff")
+_EDGE_COLOR_START = QColor("#3aa0ff")     # blue, matches output port
+_EDGE_COLOR_END = QColor("#ff9a3a")       # orange, matches input port
+_EDGE_COLOR_HOVER_START = QColor("#7cc2ff")
+_EDGE_COLOR_HOVER_END = QColor("#ffc080")
 _EDGE_COLOR_SELECTED = QColor("#ffd54a")
 _ARROW_HEAD = 13
 
@@ -377,22 +380,23 @@ class _AgentEdge(QGraphicsPathItem):
         self.target = target
         self._hover = False
         self._arrow_poly = QPolygonF()
+        self._start_pt = QPointF()
+        self._end_pt = QPointF()
         self.setZValue(1.0)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
-        # The visible curve must be a stroke, not a fill — so always
-        # keep the path-item's brush set to NoBrush. The arrowhead is
-        # drawn separately in paint() with the proper fill colour.
+        # Curve is stroked, not filled. Brush stays off — the arrowhead
+        # is drawn separately in paint() with its own fill colour.
         self.setBrush(Qt.NoBrush)
-        self._apply_pen()
         self.update_path()
 
-    def _current_color(self) -> QColor:
+    def _palette(self) -> Tuple[QColor, QColor]:
+        """(start_color, end_color) for the current visual state."""
         if self.isSelected():
-            return _EDGE_COLOR_SELECTED
+            return _EDGE_COLOR_SELECTED, _EDGE_COLOR_SELECTED
         if self._hover:
-            return _EDGE_COLOR_HOVER
-        return _EDGE_COLOR
+            return _EDGE_COLOR_HOVER_START, _EDGE_COLOR_HOVER_END
+        return _EDGE_COLOR_START, _EDGE_COLOR_END
 
     def _current_width(self) -> float:
         if self.isSelected():
@@ -401,30 +405,18 @@ class _AgentEdge(QGraphicsPathItem):
             return 2.5
         return 2.0
 
-    def _apply_pen(self) -> None:
-        pen = QPen(self._current_color())
-        pen.setWidthF(self._current_width())
-        pen.setCapStyle(Qt.RoundCap)
-        pen.setJoinStyle(Qt.RoundJoin)
-        self.setPen(pen)
-        # IMPORTANT: keep the brush off so the bezier region isn't filled.
-        self.setBrush(Qt.NoBrush)
-
     def hoverEnterEvent(self, event):  # noqa: N802
         self._hover = True
-        self._apply_pen()
         self.update()
         super().hoverEnterEvent(event)
 
     def hoverLeaveEvent(self, event):  # noqa: N802
         self._hover = False
-        self._apply_pen()
         self.update()
         super().hoverLeaveEvent(event)
 
     def itemChange(self, change, value):  # noqa: N802
         if change == QGraphicsItem.ItemSelectedHasChanged:
-            self._apply_pen()
             self.update()
         return super().itemChange(change, value)
 
@@ -454,6 +446,8 @@ class _AgentEdge(QGraphicsPathItem):
         path = QPainterPath(start)
         path.cubicTo(c1, c2, end)
         self.setPath(path)
+        self._start_pt = QPointF(start)
+        self._end_pt = QPointF(end)
 
         # Arrowhead, tangent approximated from c2 → end.
         ang = math.atan2(end.y() - c2.y(), end.x() - c2.x())
@@ -477,15 +471,24 @@ class _AgentEdge(QGraphicsPathItem):
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: N802
         painter.setRenderHint(painter.RenderHint.Antialiasing, True)
-        # 1) Stroke the curve.
-        painter.setPen(self.pen())
+        c_start, c_end = self._palette()
+        # 1) Stroke the curve with a blue→orange linear gradient so it's
+        #    obvious which end is the output (blue) and which is the
+        #    input (orange).
+        gradient = QLinearGradient(self._start_pt, self._end_pt)
+        gradient.setColorAt(0.0, c_start)
+        gradient.setColorAt(1.0, c_end)
+        pen = QPen(QBrush(gradient), self._current_width())
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(self.path())
-        # 2) Fill the arrowhead with the current edge colour.
+        # 2) Fill the arrowhead with the END (input-side) colour so it
+        #    visually merges with the orange input port it lands on.
         if not self._arrow_poly.isEmpty():
-            col = self._current_color()
-            painter.setPen(QPen(col, 1.0))
-            painter.setBrush(QBrush(col))
+            painter.setPen(QPen(c_end, 1.0))
+            painter.setBrush(QBrush(c_end))
             painter.drawPolygon(self._arrow_poly)
 
 

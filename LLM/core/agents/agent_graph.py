@@ -180,15 +180,15 @@ class AgentGraph:
                 n.pos_y = y0 + row * row_h
 
     def autolayout_layered(self, orchestrator: Optional[str], *,
-                           x0: float = 60.0, y0: float = 60.0,
-                           col_w: float = 260.0, row_h: float = 130.0) -> None:
-        """Arrange nodes in columns by graph distance from the orchestrator.
+                           x0: float = 360.0, y0: float = 60.0,
+                           col_w: float = 240.0, row_h: float = 150.0) -> None:
+        """Arrange nodes in horizontal rows by graph distance from the orchestrator.
 
-        Column 0 holds the orchestrator. Column k holds nodes whose
+        Row 0 (top) holds the orchestrator. Row k holds nodes whose
         shortest directed path from the orchestrator (following outbound
-        edges) has length k. Nodes that aren't reachable from the
-        orchestrator are appended to the right-most column. Within a
-        column, nodes are stacked vertically and centred around y0.
+        edges) has length k. Nodes unreachable from the orchestrator are
+        appended to the bottom row. Within a row, nodes are spread
+        horizontally and centred around ``x0``.
         """
         if not self.nodes:
             return
@@ -229,11 +229,11 @@ class AgentGraph:
             groups.setdefault(layer[n], []).append(n)
 
         by_name = {n.name: n for n in self.nodes}
-        for col, members in sorted(groups.items()):
+        for row, members in sorted(groups.items()):
             count = len(members)
-            # Centre vertically: row indices -(count-1)/2 .. +(count-1)/2.
+            # Centre horizontally around x0: offsets -(count-1)/2 .. +(count-1)/2.
             for i, name in enumerate(members):
                 offset = i - (count - 1) / 2.0
                 node = by_name[name]
-                node.pos_x = x0 + col * col_w
-                node.pos_y = y0 + offset * row_h
+                node.pos_x = x0 + offset * col_w
+                node.pos_y = y0 + row * row_h

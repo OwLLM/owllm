@@ -482,18 +482,17 @@ class _AgentEdge(QGraphicsPathItem):
     def _palette(self) -> QColor:
         """Edge colour for the current visual state.
 
-        Driven by the SOURCE node's layer — the arrow inherits the
-        colour of whatever layer it leaves from, so flow is readable
-        even from a glance.
+        Driven by the TARGET node's layer — the arrow inherits the
+        colour of the layer it points INTO, so a quick scan tells you
+        which downstream layer each arrow is feeding.
         """
         if self.isSelected():
             return _EDGE_COLOR_SELECTED
         try:
-            base = _layer_color(self.source.layer)
+            base = _layer_color(self.target.layer)
         except (RuntimeError, AttributeError):
             base = _layer_color(0)
         if self._hover:
-            # Brighten on hover.
             return base.lighter(135)
         return base
 

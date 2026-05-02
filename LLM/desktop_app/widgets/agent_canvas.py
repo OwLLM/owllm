@@ -108,6 +108,39 @@ PORT_KIND_INPUT = "input"
 
 
 # ---------------------------------------------------------------------------
+# Layer palette — row 0 = orchestrator, row 1 = direct downstream, etc.
+# Colours cycle if the graph has more than len(LAYER_COLORS) layers.
+# ---------------------------------------------------------------------------
+
+LAYER_COLORS = [
+    QColor("#f1c44a"),   # 0 — gold (orchestrator)
+    QColor("#48d486"),   # 1 — green
+    QColor("#3aa0ff"),   # 2 — blue
+    QColor("#ee5b5b"),   # 3 — red
+    QColor("#ff9a3a"),   # 4 — orange
+    QColor("#9aa3b2"),   # 5 — grey
+    QColor("#a578ff"),   # 6 — violet
+    QColor("#ff79c4"),   # 7 — pink
+]
+
+
+def _layer_color(layer: int) -> QColor:
+    if layer < 0:
+        layer = 0
+    return LAYER_COLORS[layer % len(LAYER_COLORS)]
+
+
+def _darker(col: QColor, factor: float = 0.35) -> QColor:
+    """Return a darker, semi-transparent version of ``col`` for fills."""
+    return QColor(
+        int(col.red() * factor),
+        int(col.green() * factor),
+        int(col.blue() * factor),
+        220,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Port — separate QGraphicsItem so its hit-area doesn't compete with the body
 # ---------------------------------------------------------------------------
 
@@ -196,6 +229,7 @@ class _AgentNode(QGraphicsItem):
         self._status = STATUS_IDLE
         self._model_label = ""
         self._selected_visual = False
+        self._layer = 0 if is_orchestrator else 1
 
         self.setFlags(
             QGraphicsItem.ItemIsMovable
@@ -248,15 +282,29 @@ class _AgentNode(QGraphicsItem):
             grad.setColorAt(1.0, QColor(glow.red(), glow.green(), glow.blue(), 0))
             painter.fillRect(self.boundingRect(), grad)
 
-        fill = QColor(_STATUS_FILL.get(self._status, _STATUS_FILL[STATUS_IDLE]))
-        border_col = QColor(_STATUS_BORDER.get(self._status, _STATUS_BORDER[STATUS_IDLE]))
+        layer_col = _layer_color(self._layer)
+        # Idle nodes get a layer-tinted dark fill + layer-coloured border;
+        # active / pending / error states keep their status colours so the
+        # status signal isn't drowned out.
+        if self._status == STATUS_IDLE:
+            fill = _darker(layer_col, 0.22)
+            border_col = layer_col
+        else:
+            fill = QColor(_STATUS_FILL.get(self._status, _STATUS_FILL[STATUS_IDLE]))
+            border_col = QColor(_STATUS_BORDER.get(self._status, _STATUS_BORDER[STATUS_IDLE]))
         if self._selected_visual:
-            border_col = QColor("#74a4ff")
+            border_col = QColor("#ffffff")
 
         painter.setRenderHint(painter.RenderHint.Antialiasing, True)
         path = QPainterPath()
         path.addRoundedRect(rect, _NODE_RADIUS, _NODE_RADIUS)
         painter.fillPath(path, QBrush(fill))
+
+        # Left-edge layer stripe — solid, full saturation, so the layer
+        # colour reads even when the node is in an active/error state.
+        stripe = QPainterPath()
+        stripe.addRoundedRect(QRectF(0, 0, 8, _NODE_H), 4, 4)
+        painter.fillPath(stripe, QBrush(layer_col))
 
         pen = QPen(border_col)
         pen.setWidth(2)
@@ -317,6 +365,17 @@ class _AgentNode(QGraphicsItem):
         if on != self._selected_visual:
             self._selected_visual = on
             self.update()
+
+    def set_layer(self, layer: int) -> None:
+        if layer < 0:
+            layer = 0
+        if layer != self._layer:
+            self._layer = layer
+            self.update()
+
+    @property
+    def layer(self) -> int:
+        return self._layer
 
     # --- Events ----------------------------------------------------------
 
@@ -382,7 +441,9 @@ class _AgentEdge(QGraphicsPathItem):
         self._arrow_poly = QPolygonF()
         self._start_pt = QPointF()
         self._end_pt = QPointF()
-        self.setZValue(1.0)
+        # Arrow draws ABOVE node bodies (2.0) and ports (3.0) so the
+        # arrowhead is visible sitting on top of the input port dot.
+        self.setZValue(5.0)
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.setAcceptHoverEvents(True)
         # Curve is stroked, not filled. Brush stays off — the arrowhead
@@ -390,13 +451,23 @@ class _AgentEdge(QGraphicsPathItem):
         self.setBrush(Qt.NoBrush)
         self.update_path()
 
-    def _palette(self) -> Tuple[QColor, QColor]:
-        """(start_color, end_color) for the current visual state."""
+    def _palette(self) -> QColor:
+        """Edge colour for the current visual state.
+
+        Driven by the SOURCE node's layer — the arrow inherits the
+        colour of whatever layer it leaves from, so flow is readable
+        even from a glance.
+        """
         if self.isSelected():
-            return _EDGE_COLOR_SELECTED, _EDGE_COLOR_SELECTED
+            return _EDGE_COLOR_SELECTED
+        try:
+            base = _layer_color(self.source.layer)
+        except (RuntimeError, AttributeError):
+            base = _layer_color(0)
         if self._hover:
-            return _EDGE_COLOR_HOVER_START, _EDGE_COLOR_HOVER_END
-        return _EDGE_COLOR_START, _EDGE_COLOR_END
+            # Brighten on hover.
+            return base.lighter(135)
+        return base
 
     def _current_width(self) -> float:
         if self.isSelected():
@@ -471,24 +542,17 @@ class _AgentEdge(QGraphicsPathItem):
 
     def paint(self, painter, option, widget=None) -> None:  # noqa: N802
         painter.setRenderHint(painter.RenderHint.Antialiasing, True)
-        c_start, c_end = self._palette()
-        # 1) Stroke the curve with a blue→orange linear gradient so it's
-        #    obvious which end is the output (blue) and which is the
-        #    input (orange).
-        gradient = QLinearGradient(self._start_pt, self._end_pt)
-        gradient.setColorAt(0.0, c_start)
-        gradient.setColorAt(1.0, c_end)
-        pen = QPen(QBrush(gradient), self._current_width())
+        col = self._palette()
+        pen = QPen(col)
+        pen.setWidthF(self._current_width())
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(self.path())
-        # 2) Fill the arrowhead with the END (input-side) colour so it
-        #    visually merges with the orange input port it lands on.
         if not self._arrow_poly.isEmpty():
-            painter.setPen(QPen(c_end, 1.0))
-            painter.setBrush(QBrush(c_end))
+            painter.setPen(QPen(col, 1.0))
+            painter.setBrush(QBrush(col))
             painter.drawPolygon(self._arrow_poly)
 
 
@@ -523,6 +587,7 @@ class AgentCanvas(QGraphicsView):
         self._drag_line: Optional[QGraphicsLineItem] = None
 
         self._selected_name: Optional[str] = None
+        self._orchestrator_name: Optional[str] = None
         self._suspend_signals = False
 
     # ------------------------------------------------------------------
@@ -539,6 +604,7 @@ class AgentCanvas(QGraphicsView):
             self._scene.clear()
             self._nodes.clear()
             self._edges.clear()
+            self._orchestrator_name = orchestrator
             for n in graph.nodes:
                 node = _AgentNode(n.name, is_orchestrator=(n.name == orchestrator), canvas=self)
                 node.setPos(QPointF(n.pos_x, n.pos_y))
@@ -552,6 +618,7 @@ class AgentCanvas(QGraphicsView):
                 edge = _AgentEdge(src, dst)
                 self._scene.addItem(edge)
                 self._edges[(e.source, e.target)] = edge
+            self._recompute_layers()
             self._scene.setSceneRect(self._compute_scene_rect())
         finally:
             self._suspend_signals = False
@@ -588,6 +655,7 @@ class AgentCanvas(QGraphicsView):
             if edge.isSelected():
                 self._edges.pop(key)
                 self._scene.removeItem(edge)
+                self._recompute_layers()
                 if not self._suspend_signals:
                     self.graph_changed.emit()
                 return True
@@ -609,6 +677,7 @@ class AgentCanvas(QGraphicsView):
                 self._scene.addItem(new_edge)
                 self._edges[(dst_name, src_name)] = new_edge
                 new_edge.setSelected(True)
+                self._recompute_layers()
                 if not self._suspend_signals:
                     self.graph_changed.emit()
                 return True
@@ -623,6 +692,7 @@ class AgentCanvas(QGraphicsView):
                 edge = self._edges.pop(key)
                 self._scene.removeItem(edge)
         self._scene.removeItem(node)
+        self._recompute_layers()
         if not self._suspend_signals:
             self.graph_changed.emit()
 
@@ -639,7 +709,7 @@ class AgentCanvas(QGraphicsView):
         pen.setWidthF(2.4)
         pen.setStyle(Qt.DashLine)
         line.setPen(pen)
-        line.setZValue(4.0)
+        line.setZValue(6.0)
         self._scene.addItem(line)
         self._drag_line = line
         try:
@@ -712,6 +782,7 @@ class AgentCanvas(QGraphicsView):
         edge = _AgentEdge(src, dst)
         self._scene.addItem(edge)
         self._edges[key] = edge
+        self._recompute_layers()
         if not self._suspend_signals:
             self.graph_changed.emit()
 
@@ -743,6 +814,48 @@ class AgentCanvas(QGraphicsView):
     def _emit_context_menu(self, node: _AgentNode, screen_pos) -> None:
         if not self._suspend_signals:
             self.node_context_menu_requested.emit(node.name, screen_pos)
+
+    def _recompute_layers(self) -> None:
+        """Assign each node a layer index by BFS from the orchestrator.
+
+        Layer 0 = orchestrator (or first node, fallback). Layer k = the
+        shortest directed-path distance from layer 0. Nodes unreachable
+        from the orchestrator land in the layer after the deepest one
+        so they still get a colour. After assignment, every edge is
+        re-rendered so its colour matches its new source-layer colour.
+        """
+        if not self._nodes:
+            return
+        names = list(self._nodes.keys())
+        root = self._orchestrator_name if self._orchestrator_name in self._nodes else names[0]
+
+        adj: Dict[str, list[str]] = {n: [] for n in names}
+        for src, dst in self._edges.keys():
+            if src in adj and dst in self._nodes:
+                adj[src].append(dst)
+
+        layer: Dict[str, int] = {root: 0}
+        frontier = [root]
+        while frontier:
+            nxt = []
+            for s in frontier:
+                for d in adj.get(s, []):
+                    if d == root:
+                        continue
+                    if d not in layer:
+                        layer[d] = layer[s] + 1
+                        nxt.append(d)
+            frontier = nxt
+        if any(n not in layer for n in names):
+            tail = (max(layer.values()) + 1) if layer else 0
+            for n in names:
+                layer.setdefault(n, tail)
+
+        for name, node in self._nodes.items():
+            node.set_layer(layer.get(name, 0))
+        # Edges paint their colour from source.layer — force a repaint.
+        for edge in self._edges.values():
+            edge.update()
 
     def _compute_scene_rect(self) -> QRectF:
         if not self._nodes:

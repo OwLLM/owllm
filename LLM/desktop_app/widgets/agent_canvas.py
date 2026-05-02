@@ -589,15 +589,15 @@ class _AgentEdge(QGraphicsPathItem):
             src_bottom = src_pos.y() + _NODE_H
             src_mid_y = src_pos.y() + _NODE_H / 2
 
-            try:
-                going_down = self.target.layer >= self.source.layer
-            except (RuntimeError, AttributeError):
-                going_down = True
+            # Routing rule: ALWAYS loop UNDER the source (never over),
+            # regardless of whether the target sits below or above.
+            # The user explicitly wants the detour below the box for
+            # both downward and upward arrows.
 
             # Stagger the detour distance so multiple cross-layer arrows
             # from the same source don't overlap. Sibling order is
-            # deterministic (sort by target.layer then target.name) so a
-            # given edge always renders in the same lane.
+            # deterministic so a given edge always renders in the same
+            # lane.
             sibling_index = 0
             try:
                 canvas = self.source._canvas
@@ -605,7 +605,6 @@ class _AgentEdge(QGraphicsPathItem):
                     e for e in canvas._edges.values()
                     if e.source is self.source
                     and abs(e.source.layer - e.target.layer) > 1
-                    and ((e.target.layer >= e.source.layer) == going_down)
                 ]
 
                 def _sib_key(e: "_AgentEdge") -> tuple:
@@ -623,20 +622,16 @@ class _AgentEdge(QGraphicsPathItem):
             lane_spacing = 18.0
             loop_pad = base_pad + sibling_index * lane_spacing
 
-            if going_down:
-                # Drop past the bottom of the source, exit on its left.
-                detour_y = src_bottom + loop_pad + 14.0
-            else:
-                # Rise past the top of the source, exit on its left.
-                detour_y = src_top - loop_pad - 14.0
+            # Drop past the bottom of the source, exit on its left.
+            detour_y = src_bottom + loop_pad + 14.0
 
             # Exit point on the source's LEFT side at mid-height. Sits
             # outside the input-port circle so it doesn't collide.
             exit_x = src_left - loop_pad - _PORT_RADIUS - _PORT_OFFSET
             exit_pt = QPointF(exit_x, src_mid_y)
 
-            # Loop bezier: (right output port) → detour past top OR
-            # bottom of source → (exit point on source's left).
+            # Loop bezier: (right output port) → detour BELOW source →
+            # (exit point on source's left).
             loop_c1 = QPointF(src_right + loop_pad, detour_y)
             loop_c2 = QPointF(src_left - loop_pad, detour_y)
 
@@ -644,15 +639,13 @@ class _AgentEdge(QGraphicsPathItem):
             path.cubicTo(loop_c1, loop_c2, exit_pt)
 
             # Final bezier from exit point to the target input port.
-            # Exit tangent direction follows the loop direction
-            # (downward loop ⇒ tangent points UP at exit; upward loop
-            # ⇒ tangent points DOWN at exit). Arrival tangent is
-            # always rightward into the target's left input port.
+            # Exit tangent points UP (the loop is climbing back from
+            # below to source mid-Y); arrival tangent points RIGHTWARD
+            # into the target's left input port.
             f_dx = end.x() - exit_pt.x()
             f_dy = end.y() - exit_pt.y()
             f_handle = max(60.0, abs(f_dx) * 0.5, abs(f_dy) * 0.5)
-            tangent_y = -f_handle if going_down else f_handle
-            f_c1 = QPointF(exit_pt.x(), exit_pt.y() + tangent_y)
+            f_c1 = QPointF(exit_pt.x(), exit_pt.y() - f_handle)
             f_c2 = QPointF(end.x() - f_handle, end.y())
             path.cubicTo(f_c1, f_c2, end)
             tangent_from = f_c2

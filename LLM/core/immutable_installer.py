@@ -70,16 +70,8 @@ class ImmutableInstaller:
         
         self.torch_lock = venv_path / ".torch_lock"
         
-        # Windows subprocess flags
+        # Do not hide child console windows.
         self.subprocess_flags = {}
-        if sys.platform == 'win32':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-            self.subprocess_flags = {
-                'startupinfo': startupinfo,
-                'creationflags': subprocess.CREATE_NO_WINDOW
-            }
 
         # Track auto-heal attempts per missing requirement to avoid infinite loops.
         # Key: normalized requirement string (lowercase, hyphenated).
@@ -371,18 +363,57 @@ class ImmutableInstaller:
                 else:
                     self.log("PHASE 2: All packages already installed correctly")
                     self.log("  No installation needed - skipping to verification")
+
+                # Python-tag compatibility self-heal.
+                # Symptom: pip install <pkg>==<x>+cuYYY fails with "No
+                # matching distribution found" even though the wheel is
+                # right there in the wheelhouse — because the wheel's
+                # cpXY tag doesn't match the venv's Python version. The
+                # validation pass earlier doesn't catch this (it reads
+                # metadata, not platform tags) so we check here on
+                # resume and rebuild the venv with the matching bundled
+                # Python before any pip install runs.
+                tag_ok, venv_tag, required_tag = self._check_python_tag_compat(venv_python)
+                if not tag_ok and required_tag:
+                    self.log(
+                        f"  ⚠ Python-tag mismatch: venv is {venv_tag}, wheelhouse "
+                        f"requires {required_tag}. Rebuilding venv with the "
+                        f"correct bundled Python so wheels can install."
+                    )
+                    matching_python = self._find_bundled_python_for_tag(required_tag)
+                    if matching_python is None:
+                        return False, (
+                            f"Wheelhouse needs Python {required_tag} but no bundled "
+                            f"runtime matches. Re-run the OWLLM installer to refresh "
+                            f"the python_runtime/ folder, then retry."
+                        )
+                    self.log(f"  Switching bootstrap Python to: {matching_python}")
+                    self.python_executable = matching_python
+                    # Tear down the wrong-version venv and rebuild.
+                    self._destroy_venv()
+                    venv_python = self._create_venv()
+                    # Force a full install of every required package since
+                    # the new venv is empty.
+                    skip_installed_arg = False
+                    self.log("  ✓ Venv rebuilt with matching Python — installing all packages from scratch")
+                else:
+                    skip_installed_arg = True
             
             # PHASE 4: Atomic installation
             # ALWAYS run installation phase to check and install binary packages if needed
             # This ensures binary packages are installed automatically even when regular packages are OK
             self.log("[STEP] PHASE 4: Installing packages atomically")
-            self.log(f"  should_resume={should_resume}, packages_to_install count={len(packages_to_install) if packages_to_install else 0}")
+            # If we just rebuilt the venv to fix a python-tag mismatch,
+            # `skip_installed_arg` was set to False above. In every other
+            # branch fall back to should_resume. Same for the packages
+            # list — after a rebuild, install everything from scratch.
+            effective_skip = locals().get("skip_installed_arg", should_resume)
+            packages_to_install_param = packages_to_install if (should_resume and effective_skip) else None
+            self.log(f"  should_resume={should_resume}, skip_installed={effective_skip}, packages_to_install count={len(packages_to_install_param) if packages_to_install_param else 0}")
             self.log(f"  binary_packages count={len(self.binary_packages) if self.binary_packages else 0}")
-            
+
             # Always run _install_packages - it will handle both regular and binary packages
-            # Pass packages_to_install as-is (empty list will be handled in _install_packages)
-            packages_to_install_param = packages_to_install if should_resume else None
-            self._install_packages(cuda_config, venv_python, skip_installed=should_resume, packages_to_install=packages_to_install_param, binary_packages=self.binary_packages)
+            self._install_packages(cuda_config, venv_python, skip_installed=effective_skip, packages_to_install=packages_to_install_param, binary_packages=self.binary_packages)
             
             # PHASE 4.5: Patch triton windows_utils.py (Windows only)
             if sys.platform == 'win32':
@@ -555,7 +586,8 @@ class ImmutableInstaller:
                         ['cmd', '/c', 'rmdir', '/S', '/Q', str(self.venv_path)],
                         capture_output=True,
                         text=True,
-                        timeout=60
+                        timeout=60,
+                        **self.subprocess_flags,
                     )
                     if result.returncode == 0 or not self.venv_path.exists():
                         self.log(f"  ✓ Venv destroyed (attempt {attempt}/3)")
@@ -601,6 +633,93 @@ class ImmutableInstaller:
         except Exception:
             pass  # Best effort
     
+    def _check_python_tag_compat(self, venv_python: Path) -> Tuple[bool, str, Optional[str]]:
+        """Check whether the venv's Python tag matches the wheelhouse wheels.
+
+        Returns ``(compatible, venv_tag, required_tag)``. ``required_tag``
+        is the cpXY string parsed from the first ``.whl`` file in the
+        wheelhouse — every well-formed wheel filename is
+        ``name-version-pythonTag-abiTag-platform.whl``, and the wheels
+        we ship target a single Python so reading any one tells us
+        what the venv must be.
+
+        Returns ``(True, venv_tag, None)`` when there are no
+        cp-tagged wheels (we can't know what's required).
+        """
+        # Probe venv Python version → cpXY tag.
+        try:
+            proc = subprocess.run(
+                [
+                    str(venv_python),
+                    "-c",
+                    "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                **self.subprocess_flags,
+            )
+            venv_tag = (proc.stdout or "").strip()
+        except Exception:
+            return True, "", None
+
+        if not venv_tag:
+            return True, "", None
+
+        required_tag: Optional[str] = None
+        try:
+            for whl in self.wheelhouse.glob("*.whl"):
+                # Filename: <name>-<version>-<pythonTag>-<abiTag>-<platform>.whl
+                # E.g. torch-2.5.1+cu121-cp312-cp312-win_amd64.whl
+                parts = whl.stem.split("-")
+                # Search from the right because version may itself
+                # contain dashes after a "+local" tag.
+                for token in reversed(parts):
+                    if token.startswith("cp") and token[2:].isdigit():
+                        required_tag = token
+                        break
+                if required_tag:
+                    break
+        except Exception:
+            return True, venv_tag, None
+
+        if required_tag is None:
+            return True, venv_tag, None
+        return venv_tag == required_tag, venv_tag, required_tag
+
+    def _find_bundled_python_for_tag(self, required_tag: str) -> Optional[Path]:
+        """Locate a python_runtime/pythonX.Y folder matching ``cpXY``.
+
+        We ship at least 3.11 and 3.12 in the runtime tree; the
+        installer's bootstrap may have picked the wrong one. Returns
+        the python.exe path or None if no folder matches.
+        """
+        if not required_tag.startswith("cp") or len(required_tag) < 4:
+            return None
+        digits = required_tag[2:]
+        # cp312 → "3.12"
+        if not digits.isdigit():
+            return None
+        ver = f"{digits[0]}.{digits[1:]}"
+        candidate_dir = (
+            self.venv_path.parent.parent.parent  # .envs/<key>/.venv → LLM/
+            / "python_runtime" / f"python{ver}"
+        )
+        # Cross-check against an absolute fallback in case wheelhouse
+        # / venv structure is non-standard.
+        py_exe = candidate_dir / "python.exe"
+        if py_exe.exists():
+            return py_exe
+        # Fallback: look relative to the existing self.python_executable
+        try:
+            runtime_root = self.python_executable.parent.parent
+            alt = runtime_root / f"python{ver}" / "python.exe"
+            if alt.exists():
+                return alt
+        except Exception:
+            pass
+        return None
+
     def _create_venv(self) -> Path:
         """
         Create fresh venv.

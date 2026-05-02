@@ -3,18 +3,30 @@
 Lists every model the onboarding service marks READY. If the OWLLM server
 manager has a model running right now, that row is annotated "(running)" and
 listed first so it's the obvious pick after the user just started Gemma 4.
+
+Vision: when a chat history carries image attachments on user messages,
+this backend talks to the running server's OpenAI-compatible
+``/v1/chat/completions`` endpoint with a multipart message (image_url
+parts + text part) instead of the flat-prompt ``/generate`` route.
+This lets multimodal local models (Gemma 4 / Llama 3.2 Vision /
+Qwen2-VL) actually see the image bytes — the bundled llama-server
+proxy auto-discovers an mmproj projector when one is on disk.
+
+For text-only conversations the legacy ``/generate`` path is kept so
+non-multimodal local models behave exactly as before.
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Mapping
+from typing import Any, Dict, List, Mapping
 
 from core.agents.backends.base import (
     ModelEntry,
     register_backend,
     render_messages_as_prompt,
 )
+from core.agents.vision import encode_image_paths, extract_image_paths
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +113,7 @@ class LocalBackend:
 
     # -- inference -------------------------------------------------------
 
-    def generate(self, messages: List[Mapping[str, str]], model_key: str) -> str:
+    def generate(self, messages: List[Mapping[str, Any]], model_key: str) -> str:
         # Step 1: look up the model's base_model_path (the actual weights file
         # on disk). The user-facing model_id (e.g. "unsloth/gemma-4-E4B-it-GGUF")
         # is what the picker shows, but the server manager keys running
@@ -110,6 +122,7 @@ class LocalBackend:
         # server is already running with the same weights file, we can use
         # it directly without any id matching.
         base_model_path = self._lookup_base_model_path(model_key)
+        has_images = self._has_image_attachments(messages)
 
         # Step 2: prefer a server that's already running with these weights.
         # Skips the entire ensure_server_running dance, which would otherwise
@@ -117,6 +130,8 @@ class LocalBackend:
         running_url = self._url_for_running_server(base_model_path)
         if running_url:
             logger.info("local backend: reusing running server at %s", running_url)
+            if has_images:
+                return self._call_server_chat_completions(running_url, messages, model_key)
             return self._call_server(running_url, messages)
 
         # Step 3: nothing running yet — auto-start. We pass runtime_base_model
@@ -136,6 +151,8 @@ class LocalBackend:
                     runtime_base_model=base_model_path or None,
                 )
                 if server_url:
+                    if has_images:
+                        return self._call_server_chat_completions(server_url, messages, model_key)
                     return self._call_server(server_url, messages)
         except Exception as exc:
             raise RuntimeError(
@@ -146,6 +163,9 @@ class LocalBackend:
 
         # Step 4: fall back to the legacy run_inference path (which has its
         # own ensure_server_running but uses cfg.model_id alone for lookup).
+        # Image attachments can't survive the flat-prompt route so we drop
+        # to text-only here; the textual stub from attachments_to_prompt_block
+        # at least tells the model something is there.
         from core.inference import InferenceConfig, run_inference
         cfg = InferenceConfig(
             prompt=render_messages_as_prompt(messages),
@@ -155,6 +175,80 @@ class LocalBackend:
             temperature=0.4,
         )
         return run_inference(cfg)
+
+    # -- vision: chat-completions path ----------------------------------
+
+    @staticmethod
+    def _has_image_attachments(messages: List[Mapping[str, Any]]) -> bool:
+        for m in messages:
+            if not hasattr(m, "get"):
+                continue
+            if extract_image_paths(m):
+                return True
+        return False
+
+    @staticmethod
+    def _call_server_chat_completions(
+        server_url: str,
+        messages: List[Mapping[str, Any]],
+        model_key: str,
+    ) -> str:
+        """POST OpenAI-shape multipart messages to the running server.
+
+        Used when ANY user message carries image attachments. The bundled
+        llama-server proxy exposes /v1/chat/completions and forwards to
+        the inner llama-server which natively understands the OpenAI
+        ``image_url`` content-part shape (with ``data:`` URIs) when an
+        mmproj projector was loaded at startup. For text-only messages
+        we still fall back to the cheaper /generate route.
+        """
+        import requests
+
+        clean: list[dict] = []
+        for m in messages:
+            role = (m.get("role") or "user").lower() if hasattr(m, "get") else "user"
+            if role not in ("system", "user", "assistant"):
+                continue
+            content = m.get("content") or ""
+            image_paths = extract_image_paths(m) if role == "user" else []
+            if image_paths:
+                parts: list[dict] = []
+                for enc in encode_image_paths(image_paths):
+                    parts.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": enc.to_data_uri()},
+                        }
+                    )
+                if content:
+                    parts.append({"type": "text", "text": content})
+                clean.append({"role": role, "content": parts})
+            else:
+                clean.append({"role": role, "content": content})
+        if not clean:
+            clean = [{"role": "user", "content": "(no input)"}]
+
+        url = server_url.rstrip("/") + "/v1/chat/completions"
+        payload = {
+            "model": model_key,
+            "messages": clean,
+            "temperature": 0.4,
+            "max_tokens": 1024,
+            "stream": False,
+        }
+        # Long timeout: vision processing on CPU/GPU adds seconds.
+        resp = requests.post(url, json=payload, timeout=900)
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"local vision call failed: HTTP {resp.status_code} {resp.text[:300]}"
+            )
+        data = resp.json() if resp.content else {}
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError(f"local vision call returned no choices: {data}")
+        msg = choices[0].get("message") or {}
+        out = msg.get("content") or ""
+        return (out or "").strip()
 
     # -- inference helpers ----------------------------------------------
 

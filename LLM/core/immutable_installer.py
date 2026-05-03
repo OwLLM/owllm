@@ -2640,6 +2640,58 @@ except Exception as e:
         except Exception as e:
             self.log(f"  ⚠ Triton Windows toolchain bootstrap error (non-fatal): {e}")
     
+    def _run_pip_streaming(self, cmd, *, label: str, timeout: int):
+        """Run a pip command and stream stdout/stderr line-by-line to self.log.
+
+        Used by the torch-trio reinstall (and any other long-running pip
+        step) so the user sees live progress instead of a frozen
+        console. Returns ``(returncode, tail_text)`` — ``tail_text`` is
+        the captured output (last 4 KB) so callers can include it in
+        an error message when the command fails.
+
+        Why this exists: subprocess.run(capture_output=True) buffers
+        all stdout/stderr until the process exits. For pip downloading
+        ~3 GB of torch wheels that means the user stares at a still
+        prompt for 10+ minutes wondering if the repair has hung.
+        """
+        import collections
+        self.log(f"  $ {' '.join(str(c) for c in cmd)}")
+        ring = collections.deque(maxlen=400)  # ~last 400 lines for tail
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                **self.subprocess_flags,
+            )
+        except Exception as e:
+            self.log(f"  [{label}] failed to spawn pip: {e}")
+            return 1, str(e)
+
+        import time as _time
+        start = _time.monotonic()
+        try:
+            assert proc.stdout is not None
+            for raw in proc.stdout:
+                line = raw.rstrip("\r\n")
+                if not line:
+                    continue
+                ring.append(line)
+                self.log(f"    [{label}] {line}")
+                if _time.monotonic() - start > timeout:
+                    self.log(f"  [{label}] timeout after {timeout}s — terminating")
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                    break
+        except Exception as e:
+            self.log(f"  [{label}] stream error: {e}")
+        rc = proc.wait()
+        return rc, "\n".join(ring)
+
     def _ensure_torch_trio_coherent(self, venv_python: Path) -> None:
         """Force the torch / torchvision / torchaudio triple to a matched build.
 
@@ -2739,25 +2791,31 @@ except Exception as e:
         # Re-install the matched trio. Wheelhouse first (offline,
         # already-cached cu121 wheels); fall back to PyTorch CUDA index
         # if a wheel isn't present.
+        #
+        # IMPORTANT: stream pip's stdout line-by-line so the user sees
+        # progress. The previous version used subprocess.run(
+        # capture_output=True), which buffers everything until pip
+        # exits — making a 3 GB torch download look completely frozen
+        # for ~10 minutes. _run_pip_streaming below uses Popen with
+        # bufsize=1 so each line reaches self.log() as pip prints it.
         cmd_wh = [
             str(venv_python), "-m", "pip", "install",
             "--no-deps", "--force-reinstall", "--no-cache-dir",
             "--no-index", "--find-links", str(self.wheelhouse),
             *triple,
         ]
-        r2 = subprocess.run(cmd_wh, capture_output=True, text=True, timeout=1800, **self.subprocess_flags)
-        if r2.returncode != 0:
-            self.log("  Wheelhouse-only torch trio reinstall didn't satisfy; falling back to PyTorch CUDA index…")
+        rc_wh, _ = self._run_pip_streaming(cmd_wh, label="trio (wheelhouse)", timeout=1800)
+        if rc_wh != 0:
+            self.log("  Wheelhouse-only torch trio reinstall didn't satisfy; falling back to PyTorch CUDA index (~3 GB download — progress streams below).")
             cmd_idx = [
                 str(venv_python), "-m", "pip", "install",
                 "--no-deps", "--force-reinstall", "--no-cache-dir",
                 "--index-url", "https://download.pytorch.org/whl/cu121",
                 *triple,
             ]
-            r2 = subprocess.run(cmd_idx, capture_output=True, text=True, timeout=1800, **self.subprocess_flags)
-            if r2.returncode != 0:
-                err = (r2.stderr or r2.stdout or "").strip()
-                self.log(f"  Torch trio reinstall failed: {err[:1200]}")
+            rc_idx, idx_tail = self._run_pip_streaming(cmd_idx, label="trio (cu121 index)", timeout=2400)
+            if rc_idx != 0:
+                self.log(f"  Torch trio reinstall failed (exit {rc_idx}). Last lines:\n{idx_tail[-1200:]}")
                 return
 
         # Re-probe so we know the rebuild actually fixed the ABI.

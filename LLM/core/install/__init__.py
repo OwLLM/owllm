@@ -37,6 +37,15 @@ from core.install.pin_resolver import (
     PinResolverError,
     default_resolver,
 )
+from core.install.env_repairer import (
+    EnvRepairer,
+    RepairResult,
+    RepairOutcome,
+    PackageDiff,
+    PackageStatus,
+    TorchProbe,
+    TORCH_ABI_FINGERPRINTS,
+)
 
 __all__ = [
     "PipExecutor",
@@ -46,4 +55,11 @@ __all__ = [
     "PinResolver",
     "PinResolverError",
     "default_resolver",
+    "EnvRepairer",
+    "RepairResult",
+    "RepairOutcome",
+    "PackageDiff",
+    "PackageStatus",
+    "TorchProbe",
+    "TORCH_ABI_FINGERPRINTS",
 ]

@@ -10,16 +10,12 @@ import subprocess
 from pathlib import Path
 import time
 
-# Windows subprocess flags to prevent CMD window flashing
+_llm_root = str(Path(__file__).resolve().parent)
+if _llm_root not in sys.path:
+    sys.path.insert(0, _llm_root)
+
+# Do not hide child console windows.
 SUBPROCESS_FLAGS = {}
-if sys.platform == 'win32':
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = subprocess.SW_HIDE
-    SUBPROCESS_FLAGS = {
-        'startupinfo': startupinfo,
-        'creationflags': subprocess.CREATE_NO_WINDOW
-    }
 
 def log(message):
     """Print log message"""
@@ -30,61 +26,46 @@ def log(message):
         safe = str(message).replace("✓", "[OK]").replace("✗", "[FAIL]").replace("⚠", "[WARN]")
         print(f"[LAUNCHER] {safe}")
 
-def find_venv_python():
-    """Find venv Python executable"""
-    llm_dir = Path(__file__).parent
-    # Prefer env_key-based environments under LLM/.envs/<env_key>/.venv
+
+def _wait_for_user(prompt: str = "Press Enter to exit...") -> None:
+    """Pause for the user only when running interactively.
+
+    When ``launcher.exe`` invokes us, stdin is not a tty and ``input()``
+    would hang forever waiting for keystrokes nobody can deliver. Skip the
+    wait in that case so a failed launch returns control immediately.
+    """
     try:
-        from system_detector import SystemDetector
-        from core.profile_selector import ProfileSelector
-        from setup_state import SetupStateManager
-        from core.envs.env_key_resolver import encode_torch_mm
-
-        setup_state = SetupStateManager()
-        selected_gpu_index = setup_state.get_selected_gpu_index()
-        override_profile = setup_state.get_selected_profile()
-
-        detector = SystemDetector()
-        hw_profile = detector.get_hardware_profile(selected_gpu_index=selected_gpu_index)
-        selector = ProfileSelector(llm_dir / "metadata" / "compatibility_matrix.json")
-        _profile_name, package_versions, _warnings, _binary = selector.select_profile(
-            hw_profile, override_profile_id=override_profile
-        )
-
-        torch_spec = str((package_versions or {}).get("torch", "")).strip()
-        accelerator = "cpu"
-        if "+cu" in torch_spec:
-            cuda_part = torch_spec.split("+cu", 1)[1]
-            digits = "".join([c for c in cuda_part if c.isdigit()])[:3]
-            if digits:
-                accelerator = f"cu{digits}"
-
-        torch_mm = ""
-        if torch_spec:
-            base = torch_spec.split("+", 1)[0]
-            parts = base.split(".")
-            if len(parts) >= 2:
-                torch_mm = f"{parts[0]}.{parts[1]}"
-        t_enc = encode_torch_mm(torch_mm) if torch_mm else ""
-        env_key = f"tf-{accelerator}-t{t_enc}-base-stable" if t_enc else f"tf-{accelerator}-base-stable"
-
-        venv_dir = llm_dir / ".envs" / env_key / ".venv"
-        if sys.platform == 'win32':
-            venv_python = venv_dir / "Scripts" / "python.exe"
-        else:
-            venv_python = venv_dir / "bin" / "python"
-        if venv_python.exists():
-            return venv_python
+        if sys.stdin and sys.stdin.isatty():
+            input(prompt)
     except Exception:
         pass
 
-    # Legacy fallback: LLM/.venv
-    venv_dir = llm_dir / ".venv"
-    if sys.platform == 'win32':
-        venv_python = venv_dir / "Scripts" / "python.exe"
-    else:
-        venv_python = venv_dir / "bin" / "python"
-    return venv_python if venv_python.exists() else None
+def find_venv_python():
+    """Return the canonical OWLLM Python (single source of truth).
+
+    Delegates to ``core.runtime.owllm_python.get_owllm_python``. There is
+    exactly ONE answer derived from the profile files
+    (``compatibility_matrix.json`` + ``setup_state``). No legacy ``.venv``
+    fallback, no bootstrap fallback — if the resolved env doesn't exist,
+    we return ``None`` and the caller launches the installer to create it.
+    """
+    llm_dir = Path(__file__).parent
+    try:
+        from core.runtime.owllm_python import get_owllm_python, get_owllm_env, OwllmEnvNotInstalled
+        try:
+            py = get_owllm_python(llm_dir)
+            try:
+                env = get_owllm_env(llm_dir)
+                log(f"Resolved OWLLM env: {env.env_key}")
+            except Exception:
+                pass
+            return py
+        except OwllmEnvNotInstalled as exc:
+            log(f"OWLLM env not installed: {exc.env_key} (expected at {exc.expected_path})")
+            return None
+    except Exception as e:
+        log(f"OWLLM env resolution failed: {e}")
+        return None
 
 def check_venv_health(venv_python):
     """Check if venv Python and PySide6 are working"""
@@ -100,7 +81,7 @@ def check_venv_health(venv_python):
         if result.returncode != 0:
             log("Venv Python check failed")
             return False
-        
+
         # Test if PySide6 can be imported
         result = subprocess.run(
             [str(venv_python), "-c", "import PySide6.QtCore; print('OK')"],
@@ -112,10 +93,139 @@ def check_venv_health(venv_python):
         if result.returncode != 0 or "OK" not in result.stdout:
             log("PySide6 check failed - dependencies broken")
             return False
-        
+
         return True
     except Exception as e:
         log(f"Health check failed: {e}")
+        return False
+
+
+def check_torch_stack_health(venv_python):
+    """Probe torch/torchvision/torchaudio in the venv via subprocess.
+
+    Returns ``(ok: bool, reason: str)``. ``ok=False`` means the workload
+    venv has a torch stack that will crash the app the moment a tab
+    touches it — we MUST NOT proceed to launch_app, because OWLLM runs
+    inside this venv and a torchvision._C.pyd ABI mismatch (or a missing
+    libtorch DLL, or CPU-only torch where CUDA is expected) will kill
+    the parent process at first touch with no Python traceback.
+
+    The probe is the same one the installer's _ensure_torch_trio_coherent
+    uses, just lifted earlier so we can REFUSE TO LAUNCH instead of
+    crashing post-launch. Cheap (~1 s) when healthy.
+    """
+    probe = (
+        "import sys\n"
+        "try:\n"
+        "    import torch\n"
+        "    import torchvision\n"
+        "    import torchaudio\n"
+        "    cuda_ok = bool(getattr(torch, 'cuda', None) and torch.cuda.is_available())\n"
+        "    print('TORCH_OK', torch.__version__, torchvision.__version__, torchaudio.__version__, 'cuda=', cuda_ok)\n"
+        "except Exception as e:\n"
+        "    print('TORCH_FAIL', type(e).__name__, str(e))\n"
+        "    sys.exit(2)\n"
+    )
+    try:
+        result = subprocess.run(
+            [str(venv_python), "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            **SUBPROCESS_FLAGS,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "torch import probe timed out (DLL hang likely)"
+    except Exception as e:
+        return False, f"could not run torch probe: {e}"
+
+    out = (result.stdout or "") + "\n" + (result.stderr or "")
+    if result.returncode == 0 and "TORCH_OK" in out:
+        # Even if the probe succeeded, "cuda=False" on a CUDA profile is
+        # a soft fail — we let the launcher proceed (the user might be
+        # on a CPU-only setup intentionally) but log it. The HARD fail
+        # here is import-time crash, which is what we redirect to safe
+        # mode for.
+        return True, out.strip()
+
+    # Hard fail — match the same ABI-mismatch / CPU-only / missing-DLL
+    # fingerprints the installer uses. Any of these in the probe output
+    # means the venv is in a state where launching the app would crash.
+    fingerprints = (
+        "intrusive_ptr_target",
+        "c10::",
+        "could not be located in the dynamic link library",
+        "_c.pyd",
+        "dll load failed while importing _c",
+        "undefined symbol",
+        "not a directory",  # sometimes accompanies a wrecked install
+        "modulenotfounderror: no module named 'torch'",
+        "modulenotfounderror: no module named 'torchvision'",
+        "modulenotfounderror: no module named 'torchaudio'",
+    )
+    low = out.lower()
+    if any(fp in low for fp in fingerprints):
+        return False, out.strip()
+    # Unknown error but probe exited non-zero — be conservative.
+    return False, out.strip() or f"torch probe exited {result.returncode}"
+
+
+def find_bootstrap_python():
+    """Locate the bundled python_runtime/pythonX.Y/python.exe.
+
+    Used as the safe-mode interpreter when the workload venv's torch
+    stack is broken. The bootstrap runtime is part of OWLLM's bundle —
+    no system Python required, true to the self-contained design intent.
+    Prefers 3.12 (matches the current installer target) and falls back
+    to 3.11.
+    """
+    llm_dir = Path(__file__).parent
+    candidates = [
+        llm_dir / "python_runtime" / "python3.12" / "python.exe",
+        llm_dir / "python_runtime" / "python3.11" / "python.exe",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
+def launch_safe_mode_installer(reason: str):
+    """Launch the installer GUI from the BUNDLED bootstrap Python.
+
+    Critical: never use the workload venv interpreter here — it's the
+    one that's broken. The installer GUI (installer_gui.py) only needs
+    tkinter (stdlib) and stdlib subprocess to drive InstallerV2, so the
+    bootstrap python_runtime can run it standalone. This breaks the
+    chicken-and-egg of "the repair tool lives inside the venv it's
+    repairing."
+    """
+    llm_dir = Path(__file__).parent
+    bootstrap_py = find_bootstrap_python()
+    if not bootstrap_py:
+        log("✗ Bundled bootstrap Python not found — cannot enter safe mode.")
+        log("  Looked under: LLM/python_runtime/python3.12/, python3.11/")
+        return False
+    installer_gui = llm_dir / "installer_gui.py"
+    if not installer_gui.exists():
+        log(f"✗ Installer GUI not found at {installer_gui}")
+        return False
+    log(f"⚠ Workload venv is broken at the C-extension layer:")
+    for line in (reason or "").splitlines()[-10:]:
+        log(f"    {line}")
+    log("")
+    log("Routing to SAFE MODE — repair will run from the bundled bootstrap")
+    log(f"interpreter, NOT the broken venv: {bootstrap_py}")
+    try:
+        print("[LAUNCHER] process_start: installer_gui.py (safe-mode bootstrap)", file=sys.stderr)
+        subprocess.Popen(
+            [str(bootstrap_py), str(installer_gui)],
+            cwd=str(llm_dir),
+            **SUBPROCESS_FLAGS,
+        )
+        return True
+    except Exception as e:
+        log(f"Failed to launch safe-mode installer: {e}")
         return False
 
 def run_dependency_check(venv_python):
@@ -247,7 +357,7 @@ def main():
             return 0
         else:
             log("ERROR: Could not launch installer!")
-            input("Press Enter to exit...")
+            _wait_for_user()
             return 1
     
     log(f"✓ Found venv: {venv_python}")
@@ -262,15 +372,33 @@ def main():
             return 0
         else:
             log("ERROR: Could not launch installer!")
-            input("Press Enter to exit...")
+            _wait_for_user()
             return 1
     
     log("✓ Venv health check passed")
-    
+
+    # Step 2.5: Probe the torch stack BEFORE launching the app.
+    # OWLLM runs INSIDE the workload venv, so any C-extension fault
+    # (torchvision/_C.pyd ABI mismatch, missing libtorch DLL, etc.)
+    # crashes the whole app the moment a tab loads it — with no Python
+    # traceback. Catch it here so we route to safe mode instead.
+    log("\nStep 2.5: Probing torch stack (subprocess; ~1s)...")
+    torch_ok, torch_reason = check_torch_stack_health(venv_python)
+    if not torch_ok:
+        log("✗ Torch stack probe failed — workload venv is unsafe to launch into.")
+        if launch_safe_mode_installer(torch_reason):
+            log("Safe-mode installer launched. Repair the venv and rerun.")
+            return 0
+        else:
+            log("ERROR: Could not launch safe-mode installer.")
+            _wait_for_user()
+            return 1
+    log(f"✓ Torch stack OK: {torch_reason.splitlines()[0] if torch_reason else ''}")
+
     # Step 3: Check dependencies
     log("\nStep 3: Checking dependencies...")
     deps_ok = run_dependency_check(venv_python)
-    
+
     if not deps_ok:
         log("✗ Dependencies check failed")
         log("Launching installer to repair...")
@@ -279,9 +407,9 @@ def main():
             return 0
         else:
             log("ERROR: Could not launch installer!")
-            input("Press Enter to exit...")
+            _wait_for_user()
             return 1
-    
+
     # Step 4: Launch application
     log("\nStep 4: Launching application...")
     if launch_app(venv_python):
@@ -304,5 +432,5 @@ if __name__ == "__main__":
         print(f"\nLauncher error: {e}")
         import traceback
         traceback.print_exc()
-        input("\nPress Enter to exit...")
+        _wait_for_user("\nPress Enter to exit...")
         sys.exit(1)

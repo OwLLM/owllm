@@ -690,6 +690,103 @@ class ImmutableInstaller:
             return True, venv_tag, None
         return venv_tag == required_tag, venv_tag, required_tag
 
+    def _ensure_pip_available(self, venv_python: Path) -> None:
+        """Bootstrap pip into the venv when it's missing.
+
+        Symptom we're recovering from: the venv was created with
+        ``virtualenv --no-pip`` (the bootstrap_rebuild_venv.py path
+        does this on purpose to avoid virtualenv's stale 3.11-era
+        seed pip on Python 3.12) but then no follow-up bootstrap
+        ran. PHASE 4 then crashes immediately with::
+
+            python.exe: No module named pip
+
+        Fix: probe ``import pip``; if it fails, find the
+        version-matched ``get-pip.py`` shipped alongside the
+        appropriate python_runtime/pythonX.Y/ folder and run it
+        against the venv's interpreter.
+        """
+        try:
+            probe = subprocess.run(
+                [str(venv_python), "-c", "import pip"],
+                capture_output=True, text=True, timeout=20,
+                **self.subprocess_flags,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"  Could not probe venv pip: {exc}")
+            return
+        if probe.returncode == 0:
+            return  # pip is fine; nothing to do.
+
+        self.log("  ⚠ venv has no pip — bootstrapping via get-pip.py")
+        # Resolve venv → cpXY tag → matching python_runtime/pythonX.Y
+        # so we use a get-pip.py that's version-matched to the venv.
+        try:
+            ver_probe = subprocess.run(
+                [
+                    str(venv_python),
+                    "-c",
+                    "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+                ],
+                capture_output=True, text=True, timeout=15,
+                **self.subprocess_flags,
+            )
+            ver_str = (ver_probe.stdout or "").strip() or "3.12"
+        except Exception:
+            ver_str = "3.12"
+
+        # python_runtime/ sits at LLM/python_runtime/. Walk up from
+        # self.venv_path (LLM/.envs/<key>/.venv) to find LLM/.
+        try:
+            llm_root = self.venv_path.parent.parent.parent
+        except Exception:
+            llm_root = self.venv_path.parents[2] if len(self.venv_path.parents) >= 3 else self.venv_path
+
+        candidates = [
+            llm_root / "python_runtime" / f"python{ver_str}" / "get-pip.py",
+            # Fallback: any get-pip.py in the python_runtime/ tree.
+            *list((llm_root / "python_runtime").rglob("get-pip.py")),
+        ]
+        get_pip = next((p for p in candidates if p and p.exists()), None)
+        if get_pip is None:
+            raise InstallationFailed(
+                f"venv has no pip and no get-pip.py was found under {llm_root / 'python_runtime'}. "
+                "Re-run the OWLLM installer to refresh python_runtime/."
+            )
+
+        self.log(f"  Running {get_pip} against {venv_python}…")
+        try:
+            boot = subprocess.run(
+                [
+                    str(venv_python),
+                    str(get_pip),
+                    "--no-cache-dir",
+                    "--no-warn-script-location",
+                ],
+                capture_output=True, text=True, timeout=300,
+                **self.subprocess_flags,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise InstallationFailed(f"get-pip.py invocation failed: {exc}")
+        if boot.returncode != 0:
+            raise InstallationFailed(
+                "get-pip.py failed to bootstrap pip into the venv.\n"
+                f"stderr: {(boot.stderr or '')[-800:]}"
+            )
+
+        # Re-probe.
+        verify = subprocess.run(
+            [str(venv_python), "-c", "import pip; print(pip.__version__)"],
+            capture_output=True, text=True, timeout=20,
+            **self.subprocess_flags,
+        )
+        if verify.returncode != 0:
+            raise InstallationFailed(
+                "Bootstrapped pip still doesn't import.\n"
+                f"stderr: {(verify.stderr or '')[-500:]}"
+            )
+        self.log(f"  ✓ pip {verify.stdout.strip()} bootstrapped")
+
     def _redownload_wheelhouse_for_tag(self, cuda_config: str, venv_tag: str) -> bool:
         """Refresh the wheelhouse so wheels match the venv's cpXY tag.
 
@@ -848,7 +945,7 @@ class ImmutableInstaller:
     def _install_packages(self, cuda_config: str, venv_python: Path, skip_installed: bool = False, packages_to_install: List[Tuple[str, str]] = None, binary_packages: dict = None):
         """
         Install all packages from wheelhouse in strict order.
-        
+
         Args:
             cuda_config: CUDA configuration key
             venv_python: Path to venv Python executable
@@ -857,6 +954,14 @@ class ImmutableInstaller:
                                If provided, only install these packages. If None, install all.
             binary_packages: Optional dict of binary packages to install from wheels.
         """
+        # Self-heal: a venv created with virtualenv --no-pip (or with a
+        # broken seeded pip — the python3.12-vs-virtualenv-21.2 ABI
+        # mismatch the bootstrap script works around) won't have pip
+        # importable. Detect that and bootstrap pip via the bundled
+        # version-matched get-pip.py BEFORE the install loop tries to
+        # call ``pip install`` and fails on every package.
+        self._ensure_pip_available(venv_python)
+
         # Get dependencies in order
         deps = sorted(self.manifest["core_dependencies"], key=lambda x: x["order"])
         cuda_packages = self.manifest["cuda_configs"][cuda_config]["packages"]

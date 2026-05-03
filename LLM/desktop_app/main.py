@@ -8989,7 +8989,15 @@ class MainWindow(QMainWindow):
         # IMMEDIATELY disable button to prevent double-clicks
         card.download_btn.setEnabled(False)
         card.download_btn.setText("⏳ Starting...")
-        
+
+        # Pink-blink + pin-to-top: mark this card as actively downloading
+        # and reorder the curated grid so it sits at (0, 0).
+        try:
+            card.set_downloading(True)
+            self._reorder_curated_grid()
+        except Exception:
+            pass
+
         self._log_models(f"📥 Downloading {model_id}...")
         if selected_patterns:
             self._log_models(f"  Selected weights: {[Path(p).name for p in selected_patterns]}")
@@ -9075,7 +9083,33 @@ class MainWindow(QMainWindow):
         
         # Start download
         thread.start()
-    
+
+    def _reorder_curated_grid(self) -> None:
+        """Re-pack ``self.curated_layout`` so downloading cards sit at the top.
+
+        Preserves the existing relative order within each bucket (the list
+        was already sorted green → red on initial build). Removing widgets
+        from a QGridLayout requires takeAt + setParent(None) — Qt won't
+        repaint properly otherwise — so we drain the grid first, then
+        re-add in the new order. 2 columns to match the initial pack.
+        """
+        if not hasattr(self, "curated_layout") or not hasattr(self, "model_cards"):
+            return
+        # Drain the grid without destroying widgets.
+        while self.curated_layout.count():
+            item = self.curated_layout.takeAt(0)
+            w = item.widget() if item else None
+            if w is not None:
+                w.setParent(None)
+
+        downloading = [c for c in self.model_cards if getattr(c, "is_downloading", False)]
+        idle = [c for c in self.model_cards if not getattr(c, "is_downloading", False)]
+        max_cols = 2
+        for i, c in enumerate(downloading + idle):
+            r, col = divmod(i, max_cols)
+            self.curated_layout.addWidget(c, r, col)
+            c.show()
+
     def _on_download_complete(self, model_id: str, dest: str, card, progress_bar):
         """Handle successful download"""
         self._log_models(f"✓ Downloaded to: {dest}")
@@ -9139,12 +9173,19 @@ class MainWindow(QMainWindow):
                 thread.quit()
                 thread.wait()
             del self.active_downloads[model_id]
-        
+
         # Remove progress bar
         if progress_bar:
             progress_bar.setVisible(False)
             progress_bar.deleteLater()
-        
+
+        # Stop the pink-blink ring on the card.
+        try:
+            if card is not None:
+                card.set_downloading(False)
+        except Exception:
+            pass
+
         # Don't hide the card - let _refresh_models handle showing it as downloaded
         
         # Refresh both downloaded models list AND train dropdown
@@ -10316,7 +10357,7 @@ class MainWindow(QMainWindow):
     def _on_download_error(self, model_id: str, error: str, card, progress_bar):
         """Handle download error"""
         self._log_models(f"✗ Error downloading {model_id}: {error}")
-        
+
         # Clean up thread first
         if model_id in self.active_downloads:
             thread, _ = self.active_downloads[model_id]
@@ -10324,12 +10365,21 @@ class MainWindow(QMainWindow):
                 thread.quit()
                 thread.wait()
             del self.active_downloads[model_id]
-        
+
         # Remove progress bar
         if progress_bar:
             progress_bar.setVisible(False)
             progress_bar.deleteLater()
-        
+
+        # Stop the pink-blink ring and re-pack the grid (the failed card
+        # will fall back to its compatibility-sorted slot).
+        try:
+            if card is not None:
+                card.set_downloading(False)
+            self._reorder_curated_grid()
+        except Exception:
+            pass
+
         # Restore button
         card.download_btn.setVisible(True)
         card.download_btn.setEnabled(True)

@@ -28,6 +28,15 @@ class ModelCard(QFrame):
         self.is_dark = True
         self.compatibility_badge = compatibility_badge
         self.requires_token = False
+        # Downloading state — when True, the card border switches to a
+        # blinking pink ring driven by self._blink_timer. The page that
+        # owns the grid is responsible for re-pinning the card to the top
+        # of the layout while in this state.
+        self.is_downloading = False
+        self._blink_state = False
+        self._blink_timer = QTimer(self)
+        self._blink_timer.setInterval(550)
+        self._blink_timer.timeout.connect(self._on_blink)
         
         self.setMinimumHeight(220)
         # Remove setMaximumHeight to allow automatic sizing based on content
@@ -306,6 +315,11 @@ class ModelCard(QFrame):
                 border_color = "#FF9800"
             elif color == "red":
                 border_color = "#f44336"
+
+        # Downloading override — pink blinking ring beats every other
+        # border colour so the user sees in-flight downloads at a glance.
+        if getattr(self, "is_downloading", False):
+            border_color = "#ff5fbf" if self._blink_state else "#3a1a2c"
         
         req = getattr(self, "requires_token", False)
         if self.is_dark:
@@ -337,12 +351,36 @@ class ModelCard(QFrame):
         """Mark card as requiring HF token (gated/private); re-applies style (yellow border)."""
         self.requires_token = bool(value)
         self._apply_style()
-    
+
+    def set_downloading(self, value: bool):
+        """Toggle the pink-blinking download indicator on this card.
+
+        Starts/stops a 550 ms QTimer that flips ``self._blink_state`` and
+        re-applies the card stylesheet, producing the pulse. The owning
+        page is expected to re-pin the card to position (0, 0) of its
+        grid while downloading is active.
+        """
+        value = bool(value)
+        if value == self.is_downloading:
+            return
+        self.is_downloading = value
+        if value:
+            self._blink_state = True
+            self._blink_timer.start()
+        else:
+            self._blink_timer.stop()
+            self._blink_state = False
+        self._apply_style()
+
+    def _on_blink(self):
+        self._blink_state = not self._blink_state
+        self._apply_style()
+
     def set_theme(self, dark_mode: bool):
         """Update theme"""
         self.is_dark = dark_mode
         self._apply_style()
-    
+
     def set_stats(self, downloads: Optional[int], likes: Optional[int]):
         """
         Update stats display (downloads/likes).

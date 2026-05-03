@@ -12418,43 +12418,77 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Training", "Select a dataset file.")
             return
 
-        # Get model name and convert to proper format for training
+        # Get model name from the dropdown.
         model_name = self.train_base_model.currentText().strip()
-        
-        # Convert hf_models folder format to HuggingFace ID:
-        # meta-llama__Llama-3.2-1B -> meta-llama/Llama-3.2-1B
-        # Double underscore __ is used in folder names, but HF needs single slash /
-        if "__" in model_name:
-            model_name_hf = model_name.replace("__", "/")
-        # Handle old single underscore format: nvidia_Llama -> nvidia/Llama
-        elif "/" not in model_name and "_" in model_name:
-            parts = model_name.split("_", 1)
-            if len(parts) == 2:
-                model_name_hf = f"{parts[0]}/{parts[1]}"
-            else:
-                model_name_hf = model_name
-        else:
-            model_name_hf = model_name
-        
+
+        # Resolve the dropdown selection to whatever transformers can
+        # actually load. Two-step:
+        #   1) Compute the HF hub id (used for self-heal preflight,
+        #      compat checks, and GGUF guard).
+        #   2) Compute the LOCAL DIRECTORY PATH if the model is already
+        #      downloaded into LLM/models/<slug>/. transformers'
+        #      AutoModelForCausalLM.from_pretrained() takes EITHER a
+        #      hub id (downloads) or a local dir (no network).
+        #      Without this, the user's already-downloaded model gets
+        #      re-fetched from huggingface.co every training run —
+        #      confusing, slow, and required network access for a
+        #      'local' workflow.
+        def _to_hub_id(s: str) -> str:
+            if "__" in s:
+                return s.replace("__", "/")
+            if "/" not in s and "_" in s:
+                parts = s.split("_", 1)
+                if len(parts) == 2:
+                    return f"{parts[0]}/{parts[1]}"
+            return s
+
+        model_name_hf = _to_hub_id(model_name)
+
         # Self-heal preflight — block on GGUF (we offer to switch) and
-        # auto-install missing training-env packages (we don't dump
-        # "go run pip" instructions on the user). Per OWLLM's rules:
-        # auto-repair first, then run.
+        # auto-install missing training-env packages.
         if not self._preflight_training_or_repair(model_name_hf):
             return
 
         # If the user accepted the GGUF auto-switch, the dropdown was
         # rewritten — re-read for the actual launch.
-        model_name_hf = self.train_base_model.currentText().strip()
-        if "__" in model_name_hf:
-            model_name_hf = model_name_hf.replace("__", "/")
-        elif "/" not in model_name_hf and "_" in model_name_hf:
-            parts = model_name_hf.split("_", 1)
-            if len(parts) == 2:
-                model_name_hf = f"{parts[0]}/{parts[1]}"
+        model_name_raw = self.train_base_model.currentText().strip()
+        model_name_hf = _to_hub_id(model_name_raw)
+
+        # Local-first model path resolution. The dropdown's raw text
+        # is already the directory slug (LLM/models stores entries as
+        # 'google__gemma-4-E4B-it' i.e. hub-id with '/' -> '__'). Look
+        # for that directory and prefer it over the hub id.
+        local_models_dir = self.root / "models"
+        candidate_paths = [
+            local_models_dir / model_name_raw,
+            local_models_dir / model_name_hf.replace("/", "__"),
+        ]
+        local_model_path = None
+        for p in candidate_paths:
+            if p.exists() and p.is_dir() and (p / "config.json").exists():
+                local_model_path = p
+                break
+
+        # finetune.py's --model-name argument is what transformers ends
+        # up passing to from_pretrained(). If the local copy exists,
+        # send the absolute path; transformers detects it as a local
+        # directory and skips the HF download entirely. Otherwise fall
+        # back to the hub id (legacy behaviour for users who haven't
+        # downloaded yet).
+        if local_model_path is not None:
+            base_model_for_finetune = str(local_model_path)
+            self.train_log.appendPlainText(
+                f"[INFO] Using local model directory: {local_model_path}"
+            )
+        else:
+            base_model_for_finetune = model_name_hf
+            self.train_log.appendPlainText(
+                f"[WARN] No local copy of {model_name_hf} found at {local_models_dir}; "
+                f"transformers will download from Hugging Face."
+            )
 
         cfg = TrainingConfig(
-            base_model=model_name_hf,
+            base_model=base_model_for_finetune,
             data_path=Path(data_path),
             output_dir=Path(self.train_out_dir.text().strip()),
             epochs=int(self.train_epochs.value()),

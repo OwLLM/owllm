@@ -224,12 +224,56 @@ class InstallerThread(QThread):
                     original_log(message)
                 
                 installer_v2.log = gui_log
-                
+
                 success = installer_v2.repair()
+                self.log_output.emit(f"Main repair completed with result: {success}")
+
+                # Proactively install training-env packages (unsloth, trl,
+                # triton-windows, bitsandbytes, …) into the SAME workload
+                # venv so the user doesn't discover a broken training
+                # stack on first 'Start Training' click. Treated as a
+                # soft dependency: a failure here doesn't fail the whole
+                # repair (training is opt-in), it just logs the trace.
+                if success:
+                    try:
+                        self.log_output.emit("")
+                        self.log_output.emit("=" * 60)
+                        self.log_output.emit("Installing training-env packages (unsloth/trl/triton-windows/...)")
+                        self.log_output.emit("=" * 60)
+                        from desktop_app import training_env_manager as tem
+                        cur = tem.status(llm_root)
+                        if cur.fully_ready:
+                            self.log_output.emit("✓ Training packages already installed and importable.")
+                        elif not cur.venv_python_exists:
+                            self.log_output.emit(
+                                f"⚠ Training-env Python not found at {cur.venv_python_path}; skipping."
+                            )
+                        else:
+                            self.log_output.emit(
+                                f"Missing training packages: {', '.join(cur.missing_packages) or '(none parsed)'}"
+                            )
+                            tem.ensure_ready(
+                                llm_root,
+                                progress=lambda m: self.log_output.emit(f"  {m}"),
+                            )
+                            self.log_output.emit("✓ Training packages installed.")
+                    except Exception as train_exc:
+                        import traceback as _tb
+                        self.log_output.emit(
+                            f"⚠ Training-env install raised "
+                            f"{type(train_exc).__name__}: {train_exc}"
+                        )
+                        self.log_output.emit(_tb.format_exc())
+                        self.log_output.emit(
+                            "Main repair still SUCCEEDED. Open the Train tab and "
+                            "click Start Training — that path will retry the install "
+                            "and surface the actual error."
+                        )
+
                 self.log_output.emit(f"Repair completed with result: {success}")
                 self.finished_signal.emit(success)
                 return
-            
+
             # For rebuild, use InstallerV2 for destructive rebuild
             if self.install_type == "rebuild":
                 self.log_output.emit("Starting rebuild process...")

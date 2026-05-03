@@ -12410,31 +12410,61 @@ class MainWindow(QMainWindow):
             self.train_out_dir.setText(d)
 
     def _start_training(self) -> None:
-        # Wrap the entire start-training flow in a top-level catch so
-        # any 'click -> instant error' exception (path resolution,
-        # preflight, cmd build, anything before QProcess.start) shows
-        # the user the actual traceback instead of evaporating with
-        # a generic 'Error code: 0' or no message at all.
+        # Always log click-time + arg snapshot to app.log on disk so we
+        # have a forensic trail even when the train_log pane isn't
+        # shared. Wrap the entire flow in a top-level catch — any
+        # exception raised before QProcess.start fires (path lookup,
+        # preflight, build_finetune_cmd, cfg construction) goes to
+        # disk + dialog + train_log instead of evaporating.
+        try:
+            self._log_to_app_log("[TRAIN-CLICK] Start Training pressed")
+            try:
+                snap = {
+                    "dropdown": self.train_base_model.currentText(),
+                    "data_path": self.train_data_path.text(),
+                    "out_dir": self.train_out_dir.text(),
+                    "epochs": self.train_epochs.value(),
+                    "batch_size": self.train_batch.value(),
+                    "lr": self.train_lr.value(),
+                }
+                self._log_to_app_log(f"[TRAIN-CLICK] form: {snap}")
+            except Exception as snap_exc:
+                self._log_to_app_log(f"[TRAIN-CLICK] form-snapshot failed: {snap_exc}")
+        except Exception:
+            pass
+
         try:
             self._start_training_impl()
         except Exception as exc:
             import traceback as _tb
             tb_text = _tb.format_exc()
+            # 1) On disk — survives ALL ui closures and gives a
+            #    paste-ready forensic trace.
+            try:
+                self._log_to_app_log(f"[TRAIN-FATAL] {type(exc).__name__}: {exc}")
+                for line in tb_text.splitlines():
+                    self._log_to_app_log(f"[TRAIN-FATAL]   {line}")
+            except Exception:
+                pass
+            # 2) In the Train log pane (UI).
             try:
                 self.train_log.appendPlainText("\n[FATAL] _start_training raised:")
                 self.train_log.appendPlainText(f"  {type(exc).__name__}: {exc}")
                 self.train_log.appendPlainText(tb_text)
             except Exception:
                 pass
+            # 3) In the source='train' terminal sink (UI).
             try:
                 self._append_terminal(f"[FATAL] _start_training raised: {exc}", source="train")
                 self._append_terminal(tb_text, source="train")
             except Exception:
                 pass
+            # 4) Modal dialog (so the user can't miss it).
             QMessageBox.critical(
                 self,
                 "Training failed to start",
-                f"{type(exc).__name__}: {exc}\n\nFull traceback in the train log.",
+                f"{type(exc).__name__}: {exc}\n\nFull traceback saved to logs/app.log "
+                f"and visible in the Train log pane.",
             )
             try:
                 self.train_start.setEnabled(True)

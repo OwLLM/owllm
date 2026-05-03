@@ -1,0 +1,16 @@
+{
+  "format_version": "1.0",
+  "extras_id": "training",
+  "description": "Training-only packages added on top of any base profile. Loaded by PinResolver via required_for(env_id, extras=['training']) and used by EnvRepairer when the user enters the Train tab or clicks Fix Issues. Versions intentionally permissive — the training stack moves fast and the resolver picks the latest compatible build.",
+  "packages": {
+    "unsloth": "",
+    "trl": "",
+    "peft": ">=0.13.0,<0.16.0",
+    "bitsandbytes": ">=0.45.0,<0.50.0",
+    "triton-windows": ""
+  },
+  "notes": [
+    "triton-windows is the Windows-only counterpart to mainline triton (which only ships Linux/macOS wheels). On Linux, omit it from the install list.",
+    "Empty spec means 'pip resolves the latest compatible version'. Pin tightly only when a specific version is required for compatibility."
+  ]
+}

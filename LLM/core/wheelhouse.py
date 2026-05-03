@@ -1215,9 +1215,14 @@ class WheelhouseManager:
             "--dest", str(self.wheelhouse),
             "--no-cache-dir"  # Critical: don't use cache
         ]
-        # Use an ASCII progress bar so we can parse progress reliably.
-        # (Still works even if caller doesn't parse it.)
-        cmd.extend(["--progress-bar", "ascii"])
+        # Disable pip's progress bar entirely. We parse percent + size
+        # from pip's own DEBUG/INFO lines on stderr, not from a TTY
+        # progress widget. Older pip understood "--progress-bar ascii";
+        # pip 24+ removed it (valid choices today are auto/on/off/raw),
+        # which silently killed every wheelhouse download with
+        # "option --progress-bar: invalid choice: 'ascii'". "off" works
+        # on every pip version we ship against.
+        cmd.extend(["--progress-bar", "off"])
 
         # Make network behavior more reliable on slow/proxied machines.
         # NOTE: pip's own network timeout is separate from our subprocess timeout below.

@@ -2640,25 +2640,166 @@ except Exception as e:
         except Exception as e:
             self.log(f"  ⚠ Triton Windows toolchain bootstrap error (non-fatal): {e}")
     
+    def _ensure_torch_trio_coherent(self, venv_python: Path) -> None:
+        """Force the torch / torchvision / torchaudio triple to a matched build.
+
+        Symptoms this prevents (all caused by torchvision._C.pyd or
+        torchaudio._C.pyd being compiled against a different libtorch
+        than the one currently installed):
+
+          * Windows pop-up: 'The procedure entry point
+            ?refcount@intrusive_ptr_target@c10@@... could not be located
+            in the dynamic link library .../torchvision/_C.pyd'
+          * ImportError: DLL load failed while importing _C
+          * 'undefined symbol: _ZN5torch...' on Linux
+
+        Strategy: run ``import torch, torchvision, torchaudio`` in the
+        venv. If any of them fail with an ABI-mismatch signature, force-
+        reinstall all three from the wheelhouse together (so they're the
+        SAME +cuXXX local-tag build). Cheap when everything's already
+        coherent (one subprocess that exits in ~1 s).
+        """
+        probe_code = (
+            "import sys\n"
+            "try:\n"
+            "    import torch\n"
+            "    import torchvision\n"
+            "    import torchaudio\n"
+            "    print('OK', torch.__version__, torchvision.__version__, torchaudio.__version__)\n"
+            "except Exception as e:\n"
+            "    print('FAIL', type(e).__name__, str(e))\n"
+            "    sys.exit(2)\n"
+        )
+        try:
+            r = subprocess.run(
+                [str(venv_python), "-c", probe_code],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                **self.subprocess_flags,
+            )
+        except Exception as e:
+            self.log(f"  torch trio coherence probe could not run: {e}")
+            return
+        out = ((r.stdout or "") + "\n" + (r.stderr or "")).lower()
+        # ABI / DLL mismatch fingerprints — Windows shows the c10 symbol
+        # name in the pop-up, Linux shows a similar mangled symbol. Either
+        # way the response is the same: rebuild the trio together.
+        abi_signatures = (
+            "intrusive_ptr_target",
+            "c10::",
+            "could not be located in the dynamic link library",
+            "_c.pyd",
+            "dll load failed while importing _c",
+            "undefined symbol",
+            "torchvision._c",
+            "torchaudio._c",
+        )
+        ok = r.returncode == 0 and "OK" in (r.stdout or "")
+        if ok:
+            return
+        if not any(sig in out for sig in abi_signatures):
+            # Different failure (e.g. torch.cuda not available, or a
+            # totally missing module). Leave it to the next phase / the
+            # auto-repair ladder; this method only handles ABI mismatch.
+            self.log(f"  torch trio probe failed but doesn't look like ABI mismatch; skipping rebuild.\n  details: {(out or '').strip()[:400]}")
+            return
+
+        self.log("  ⚠ Detected torch ↔ torchvision/torchaudio ABI mismatch — rebuilding the trio from the wheelhouse so they share a libtorch build.")
+        # Pull the canonical specs from the active profile; fall back to
+        # repo-wide pins if the profile didn't set them (shouldn't
+        # happen, but the fallback keeps this self-contained).
+        pkgs = (getattr(self, "profile_versions", None) or {}) or {}
+        torch_spec = pkgs.get("torch") or "==2.5.1+cu121"
+        tv_spec = pkgs.get("torchvision") or "==0.20.1+cu121"
+        ta_spec = pkgs.get("torchaudio") or "==2.5.1+cu121"
+
+        def _spec(name, ver):
+            ver = str(ver).strip()
+            if ver.startswith(("==", ">=", "<=", ">", "<")):
+                return f"{name}{ver}"
+            return f"{name}=={ver}"
+
+        triple = [_spec("torch", torch_spec), _spec("torchvision", tv_spec), _spec("torchaudio", ta_spec)]
+
+        # Uninstall first so pip doesn't decide a 'compatible' version is
+        # already present and skip the install.
+        for pkg in ("torchvision", "torchaudio", "torch"):
+            try:
+                subprocess.run(
+                    [str(venv_python), "-m", "pip", "uninstall", "-y", pkg],
+                    capture_output=True,
+                    text=True,
+                    timeout=180,
+                    **self.subprocess_flags,
+                )
+            except Exception:
+                pass
+
+        # Re-install the matched trio. Wheelhouse first (offline,
+        # already-cached cu121 wheels); fall back to PyTorch CUDA index
+        # if a wheel isn't present.
+        cmd_wh = [
+            str(venv_python), "-m", "pip", "install",
+            "--no-deps", "--force-reinstall", "--no-cache-dir",
+            "--no-index", "--find-links", str(self.wheelhouse),
+            *triple,
+        ]
+        r2 = subprocess.run(cmd_wh, capture_output=True, text=True, timeout=1800, **self.subprocess_flags)
+        if r2.returncode != 0:
+            self.log("  Wheelhouse-only torch trio reinstall didn't satisfy; falling back to PyTorch CUDA index…")
+            cmd_idx = [
+                str(venv_python), "-m", "pip", "install",
+                "--no-deps", "--force-reinstall", "--no-cache-dir",
+                "--index-url", "https://download.pytorch.org/whl/cu121",
+                *triple,
+            ]
+            r2 = subprocess.run(cmd_idx, capture_output=True, text=True, timeout=1800, **self.subprocess_flags)
+            if r2.returncode != 0:
+                err = (r2.stderr or r2.stdout or "").strip()
+                self.log(f"  Torch trio reinstall failed: {err[:1200]}")
+                return
+
+        # Re-probe so we know the rebuild actually fixed the ABI.
+        r3 = subprocess.run(
+            [str(venv_python), "-c", probe_code],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            **self.subprocess_flags,
+        )
+        if r3.returncode == 0:
+            self.log(f"  ✓ Torch trio re-imports cleanly: {(r3.stdout or '').strip()}")
+        else:
+            self.log(f"  ⚠ Torch trio still failing after rebuild: {(r3.stdout or '') + (r3.stderr or '')[:600]}")
+
     def _verify_installation(self, venv_python: Path):
         """
         Run verification checks.
-        
+
         Args:
             venv_python: Path to venv Python
         """
+        # ABI coherence first — torchvision/_C.pyd loaded against a
+        # different libtorch is a Windows pop-up not a Python exception,
+        # which can hang the verification. Cheap when already coherent.
+        try:
+            self._ensure_torch_trio_coherent(venv_python)
+        except Exception as e:
+            self.log(f"  Torch trio coherence check raised (continuing): {e}")
+
         from .verification import VerificationSystem
-        
+
         # Create verifier
         manifest_path = Path(__file__).parent.parent / "metadata" / "dependencies.json"
         verifier = VerificationSystem(manifest_path, venv_python)
-        
+
         # Run quick verification
         success, error = verifier.run_quick_verify()
-        
+
         if not success:
             raise InstallationFailed(f"Verification failed: {error}")
-        
+
         self.log("  ✓ Verification passed")
 
 

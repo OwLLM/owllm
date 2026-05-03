@@ -1,39 +1,48 @@
-"""One-shot venv rebuilder — recover from a partially-destroyed env without redownloading wheels.
+"""One-shot venv rebuilder — recreate the proven-working Python 3.11 setup.
 
 Why this exists
 ---------------
 A previous Repair attempt tried to swap the venv's Python version
-from inside the running OWLLM process. Windows held the venv's
-``python.exe`` and a few ``.pyd`` files locked, so the destroy step
-deleted *most* package directories under ``Lib/site-packages/`` but
-couldn't finish the job. The user is left with a venv that has only
-``python.exe`` + 3-4 packages and an OWLLM home page that correctly
-reports "everything missing".
+from 3.11 to 3.12 from inside the running OWLLM process. Windows
+held the venv's ``python.exe`` and a few ``.pyd`` files locked,
+so the destroy step deleted MOST package directories under
+``Lib/site-packages/`` but couldn't finish the job.
 
-The cp312 wheels are already cached in
-``LLM/wheelhouse/<env_key>/`` — the user shouldn't have to download
-anything again. This script:
+We then tried to recover by recreating the venv as Python 3.12 to
+match the cp312 wheels already cached on disk. That ALSO failed:
+``python_runtime/python3.12`` is the embeddable distribution and
+the bundled ``virtualenv 21.2`` produces a venv whose Python
+can't even load ``ctypes``::
 
-1. Confirms OWLLM is closed (no python.exe holds the venv tree).
-2. Resolves the canonical env_key via the same path the launcher
-   uses (``core.runtime.owllm_python.get_owllm_env``).
-3. Deletes the broken venv (no locks now → succeeds).
-4. Creates a fresh Python 3.12 venv at the same path, using the
-   bundled ``python_runtime/python3.11`` plus its vendored
-   ``virtualenv`` package (Python 3.12 is the embeddable distro
-   without a ``Lib/venv`` module so we can't ``-m venv`` it
-   directly; ``virtualenv -p`` works regardless).
-5. Installs every wheel in ``LLM/wheelhouse/<env_key>/`` into the
-   new venv with ``pip install --no-index --find-links``. Fully
-   offline.
+    AttributeError: class must define a '_type_' attribute
 
-Usage (Windows PowerShell):
+That's an ABI mismatch we can't paper over from a script — the
+embeddable's _ctypes.pyd doesn't line up with the stdlib
+ctypes/__init__.py that virtualenv copies in.
+
+The combo that DOES work — the same one your original install
+used — is **Python 3.11** as both bootstrapper and target. So
+this script abandons the cp312 wheelhouse on disk (it's
+unusable in a Python 3.11 venv) and rebuilds the environment
+as cp311:
+
+  1. Confirms OWLLM is closed.
+  2. Resolves the canonical env_key via the same path the
+     launcher uses (``core.runtime.owllm_python.get_owllm_env``).
+  3. Deletes the broken venv (no locks once OWLLM is closed).
+  4. Creates a fresh Python **3.11** venv via
+     ``virtualenv -p python_runtime/python3.11`` (with default
+     seed — virtualenv 21.2's bundled pip is fine on 3.11).
+  5. Installs requirements.txt from PyPI + the PyTorch CUDA
+     index. ~1.5 GB one-time download — yes, this DOES require
+     internet, because every cp311 wheel was overwritten in the
+     wheelhouse by an earlier wheelhouse-prep run that targeted
+     Python 3.12.
+
+Usage (Windows PowerShell, with OWLLM fully closed):
 
     cd C:\\1_Git\\LocaLLM
     .\\LLM\\python_runtime\\python3.11\\python.exe LLM\\bootstrap_rebuild_venv.py
-
-Or invoke through the launcher's Python — anything that's NOT the
-broken venv will do.
 """
 from __future__ import annotations
 
@@ -49,7 +58,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent  # LLM/
 REPO_ROOT = SCRIPT_DIR.parent
 PYTHON_RUNTIME = SCRIPT_DIR / "python_runtime"
 PY311 = PYTHON_RUNTIME / "python3.11" / "python.exe"
-PY312 = PYTHON_RUNTIME / "python3.12" / "python.exe"
 
 
 def banner(title: str) -> None:
@@ -65,8 +73,7 @@ def fail(msg: str, code: int = 1) -> None:
 def assert_running_from_safe_python() -> None:
     """Refuse to run from inside the very venv we're about to destroy."""
     me = Path(sys.executable).resolve()
-    target_hint = ".envs"
-    if target_hint in str(me).lower() and ".venv" in str(me).lower():
+    if ".envs" in str(me).lower() and ".venv" in str(me).lower():
         fail(
             "This script is running from the broken venv itself.\n"
             "Run it with the bundled python_runtime/python3.11 instead, e.g.:\n"
@@ -74,24 +81,14 @@ def assert_running_from_safe_python() -> None:
         )
 
 
-def resolve_env_key() -> tuple[str, Path, Path]:
-    """Use the canonical resolver so we hit the same env the launcher uses."""
+def resolve_env_key() -> tuple[str, Path]:
     sys.path.insert(0, str(SCRIPT_DIR))
     from core.runtime.owllm_python import get_owllm_env  # type: ignore
-
     env = get_owllm_env(SCRIPT_DIR, force_refresh=True)
-    venv_dir = env.venv_dir
-    wheelhouse_dir = SCRIPT_DIR / "wheelhouse" / env.env_key
-    if not wheelhouse_dir.exists():
-        # Fallback: top-level wheelhouse (older single-wheelhouse layouts).
-        alt = SCRIPT_DIR / "wheelhouse"
-        if alt.exists() and any(alt.glob("*.whl")):
-            wheelhouse_dir = alt
-    return env.env_key, venv_dir, wheelhouse_dir
+    return env.env_key, env.venv_dir
 
 
 def detect_owllm_processes() -> list[int]:
-    """Return PIDs of any python processes that look like OWLLM."""
     if sys.platform != "win32":
         return []
     try:
@@ -104,7 +101,6 @@ def detect_owllm_processes() -> list[int]:
         return []
     pids: list[int] = []
     for line in (out.stdout or "").splitlines():
-        # CSV: "python.exe","12345","Console","1","123,456 K"
         parts = [p.strip().strip('"') for p in line.split(",")]
         if len(parts) >= 2 and parts[0].lower() == "python.exe":
             try:
@@ -121,17 +117,14 @@ def delete_broken_venv(venv_dir: Path) -> None:
     print(f"  Deleting {venv_dir} …")
 
     def onerror(func, path, _exc):
-        # Try to clear read-only and retry once.
         try:
             os.chmod(path, 0o666)
             func(path)
         except Exception:
             print(f"    (could not delete {path}; continuing)")
 
-    # rmtree with onerror so a single locked file doesn't abort the whole tree.
     shutil.rmtree(venv_dir, onerror=onerror)
-    # If anything stragglers remain, retry up to 3 times with a short delay.
-    for attempt in range(3):
+    for _ in range(3):
         if not venv_dir.exists():
             break
         time.sleep(0.6)
@@ -142,150 +135,128 @@ def delete_broken_venv(venv_dir: Path) -> None:
     if venv_dir.exists():
         fail(
             f"Could not fully delete {venv_dir}. Make sure OWLLM is closed "
-            f"(check Task Manager for python.exe) and re-run this script."
+            "(check Task Manager for python.exe) and re-run this script."
         )
     print("  ✓ Broken venv removed")
 
 
-def ensure_python312_runtime() -> None:
-    if not PY312.exists():
-        fail(
-            f"Bundled Python 3.12 not found at {PY312}.\n"
-            "Re-run the OWLLM installer to refresh the python_runtime/ folder."
-        )
-
-
-def create_venv_with_virtualenv(venv_dir: Path) -> None:
-    """Use python3.11 + vendored virtualenv to create a Python 3.12 venv,
-    then bootstrap pip ourselves with the bundled ``get-pip.py``.
-
-    Why we don't let virtualenv seed pip:
-      The bundled ``virtualenv 21.2`` ships pre-built pip / setuptools /
-      wheel seed wheels that pre-date Python 3.12. When virtualenv
-      copies those into a 3.12 venv, the seeded pip can't even
-      ``import ctypes`` because its compiled bits don't match the
-      3.12 runtime ABI — that was the
-      ``AttributeError: class must define a '_type_' attribute`` you
-      saw on the previous attempt.
-
-    So:
-      1. ``virtualenv -p python3.12 --no-pip --no-setuptools --no-wheel``
-         to create an empty Python 3.12 venv.
-      2. Run ``get-pip.py`` (shipped with python_runtime/python3.12/
-         and therefore version-matched) against the new venv's
-         ``python.exe`` to install a 3.12-compatible pip / setuptools
-         / wheel from the bundled get-pip.
-      3. From that point on every pip call uses the freshly bootstrapped
-         3.12 pip — no more ABI mismatch.
-    """
+def ensure_python311_runtime() -> None:
     if not PY311.exists():
         fail(
             f"Bundled Python 3.11 not found at {PY311}.\n"
             "Re-run the OWLLM installer to refresh the python_runtime/ folder."
         )
-    print(f"  Creating empty Python 3.12 venv at {venv_dir} (no seeded packages)…")
+
+
+def create_venv_python311(venv_dir: Path) -> None:
+    """Create a Python 3.11 venv via the bundled virtualenv.
+
+    virtualenv 21.2's seed pip / setuptools / wheel match Python 3.11
+    cleanly, so we let virtualenv seed them — no manual get-pip
+    bootstrap needed. Python 3.11 + virtualenv 21.2 is the
+    proven-working combination (your original install used it).
+    """
+    print(f"  Creating Python 3.11 venv at {venv_dir} …")
     cmd = [
         str(PY311), "-m", "virtualenv",
-        "-p", str(PY312),
-        "--no-pip",
-        "--no-setuptools",
-        "--no-wheel",
+        "-p", str(PY311),
         "--no-periodic-update",
         str(venv_dir),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if proc.returncode != 0:
         fail(
             "virtualenv failed to create the new venv.\n"
-            f"stdout: {proc.stdout[-500:]}\nstderr: {proc.stderr[-500:]}"
+            f"stdout: {proc.stdout[-800:]}\nstderr: {proc.stderr[-800:]}"
         )
     new_python = venv_dir / "Scripts" / "python.exe"
     if not new_python.exists():
         fail(f"Venv created but python.exe missing at {new_python}")
 
-    # Verify the venv's Python is truly 3.12 AND its stdlib (ctypes etc.)
-    # imports cleanly. This is the gate that detects the abi-mismatch
-    # condition before we hit it via pip.
+    # Sanity: ctypes works, pip runs.
     sanity = subprocess.run(
-        [
-            str(new_python),
-            "-c",
-            "import sys, ctypes; print(sys.version_info[:2]); ctypes.c_int(0)",
-        ],
+        [str(new_python), "-c", "import sys, ctypes; ctypes.c_int(0); print(sys.version_info[:2])"],
         capture_output=True, text=True, timeout=30,
     )
     if sanity.returncode != 0:
         fail(
-            "New venv's stdlib import failed (ctypes / runtime mismatch).\n"
+            "New venv's Python failed the ctypes sanity check.\n"
             f"stderr: {sanity.stderr[-1000:]}"
         )
     print(f"  ✓ New venv reports: {sanity.stdout.strip()}")
 
-    # Bootstrap pip using the version-matched get-pip.py shipped with
-    # python_runtime/python3.12. This installs pip + setuptools + wheel
-    # using the new venv's own runtime, so the resulting pip can import
-    # ctypes correctly.
-    get_pip = SCRIPT_DIR / "python_runtime" / "python3.12" / "get-pip.py"
-    if not get_pip.exists():
-        fail(
-            f"get-pip.py not found at {get_pip}. Re-run the OWLLM installer "
-            "to refresh the python_runtime/ folder."
-        )
-    print(f"  Bootstrapping pip via {get_pip.name} …")
-    boot = subprocess.run(
-        [str(new_python), str(get_pip), "--no-cache-dir", "--no-warn-script-location"],
-        capture_output=True, text=True, timeout=300,
+    pip_check = subprocess.run(
+        [str(new_python), "-m", "pip", "--version"],
+        capture_output=True, text=True, timeout=30,
     )
-    if boot.returncode != 0:
+    if pip_check.returncode != 0:
         fail(
-            "get-pip.py failed.\n"
-            f"stdout: {boot.stdout[-500:]}\nstderr: {boot.stderr[-1000:]}"
+            "Seeded pip is broken in the new venv.\n"
+            f"stderr: {pip_check.stderr[-800:]}"
         )
-    print("  ✓ pip bootstrapped")
+    print(f"  ✓ pip OK: {pip_check.stdout.strip()}")
 
 
-def install_from_wheelhouse(venv_dir: Path, wheelhouse_dir: Path) -> None:
+def install_from_pypi(venv_dir: Path) -> None:
+    """Install requirements.txt from PyPI + the PyTorch CUDA index.
+
+    PyPI hosts cp311 wheels for everything in requirements.txt and
+    download.pytorch.org/whl/cu121 hosts cp311 torch wheels.
+    ~1.5 GB one-time. Live progress is streamed straight to the
+    terminal — pip download progress is the user's signal that
+    things are happening, so we don't capture stdout.
+    """
     new_python = venv_dir / "Scripts" / "python.exe"
-    wheel_count = len(list(wheelhouse_dir.glob("*.whl")))
-    print(f"  Installing from {wheelhouse_dir} ({wheel_count} wheels) …")
-    if wheel_count == 0:
-        fail(
-            f"No .whl files at {wheelhouse_dir}. Run the regular OWLLM "
-            f"installer/Repair to populate the wheelhouse first."
-        )
-    cmd = [
+    requirements = SCRIPT_DIR / "requirements.txt"
+    if not requirements.exists():
+        fail(f"requirements.txt not found at {requirements}")
+
+    print("  Upgrading pip / setuptools / wheel inside the venv …")
+    rc = subprocess.call([
         str(new_python), "-m", "pip", "install",
-        "--no-index",
-        "--find-links", str(wheelhouse_dir),
-        "--no-cache-dir",
-    ]
-    # Install every .whl in the wheelhouse — pip resolves the dep graph.
-    cmd.extend(str(p) for p in wheelhouse_dir.glob("*.whl"))
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
-    if proc.returncode != 0:
-        fail(
-            "Offline pip install failed.\n"
-            f"stdout tail: {proc.stdout[-1500:]}\nstderr tail: {proc.stderr[-1500:]}"
-        )
-    print("  ✓ Wheels installed from local cache")
+        "--upgrade", "--no-warn-script-location",
+        "pip", "setuptools", "wheel",
+    ])
+    if rc != 0:
+        fail(f"pip self-upgrade failed (exit {rc})")
+
+    print("  Installing torch+cu121 from the PyTorch CUDA index …")
+    rc = subprocess.call([
+        str(new_python), "-m", "pip", "install",
+        "--index-url", "https://download.pytorch.org/whl/cu121",
+        "--no-warn-script-location",
+        "torch==2.5.1+cu121",
+        "torchvision==0.20.1+cu121",
+        "torchaudio==2.5.1+cu121",
+    ])
+    if rc != 0:
+        fail(f"torch install failed (exit {rc})")
+
+    print(f"  Installing the rest from {requirements.name} …")
+    rc = subprocess.call([
+        str(new_python), "-m", "pip", "install",
+        "--no-warn-script-location",
+        "-r", str(requirements),
+    ])
+    if rc != 0:
+        fail(f"requirements.txt install failed (exit {rc})")
+    print("  ✓ All packages installed")
 
 
 def main() -> int:
-    banner("OWLLM venv rebuilder — offline recovery")
+    banner("OWLLM venv rebuilder — Python 3.11 (proven working)")
     print(f"  Repo root:   {REPO_ROOT}")
     print(f"  Script dir:  {SCRIPT_DIR}")
 
     assert_running_from_safe_python()
-    ensure_python312_runtime()
+    ensure_python311_runtime()
 
     pids = detect_owllm_processes()
     if pids:
-        # Don't refuse outright — it's safe enough to continue if OWLLM
-        # is using a different venv. But warn loudly.
         print(
             f"  ⚠ Found {len(pids)} python.exe process(es) running. If any of "
-            "them is OWLLM, close it now (Task Manager) before continuing — "
-            "Windows file locks will otherwise block the rebuild."
+            "them is OWLLM, close it now (Task Manager) — Windows file locks "
+            "will otherwise block the rebuild."
         )
         print("  (Sleeping 5s. Hit Ctrl+C if you need to close OWLLM first.)")
         try:
@@ -293,26 +264,22 @@ def main() -> int:
         except KeyboardInterrupt:
             return 1
 
-    env_key, venv_dir, wheelhouse_dir = resolve_env_key()
-    print(f"  env_key:        {env_key}")
-    print(f"  venv path:      {venv_dir}")
-    print(f"  wheelhouse:     {wheelhouse_dir}")
-
-    if not wheelhouse_dir.exists():
-        fail(f"Wheelhouse directory not found: {wheelhouse_dir}")
+    env_key, venv_dir = resolve_env_key()
+    print(f"  env_key:    {env_key}")
+    print(f"  venv path:  {venv_dir}")
 
     banner("Step 1/3 — Delete the broken venv")
     delete_broken_venv(venv_dir)
 
-    banner("Step 2/3 — Create a fresh Python 3.12 venv")
-    create_venv_with_virtualenv(venv_dir)
+    banner("Step 2/3 — Create a fresh Python 3.11 venv")
+    create_venv_python311(venv_dir)
 
-    banner("Step 3/3 — Install all wheels from the local cache")
-    install_from_wheelhouse(venv_dir, wheelhouse_dir)
+    banner("Step 3/3 — Install requirements.txt from PyPI (~1.5 GB one-time)")
+    install_from_pypi(venv_dir)
 
     banner("Done")
     print(
-        "  Reopen OWLLM. The home page System Status should turn green; "
+        "  Reopen OWLLM. The home page System Status should go green; "
         "if anything still looks off, click Refresh Hardware Detection."
     )
     return 0

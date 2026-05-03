@@ -2781,12 +2781,13 @@ class MainWindow(QMainWindow):
         # Previously these lived in the main navbar, taking up two slots
         # alongside their sub-tabs. Moving them next to Advanced
         # de-clutters the navbar and groups them with the OTHER toggle
-        # that reveals additional sub-buttons. Same fixed-size dark
-        # gradient pill + gold-bordered :checked state, so the three
-        # toggles read as a coherent header group.
+        # that reveals additional sub-buttons. Same fixed HEIGHT (50px)
+        # and same dark gradient + gold-bordered :checked state as
+        # Advanced; width is allowed to grow with the label so labels
+        # like "Fine Tuning" don't wrap or truncate.
         def _make_header_toggle(text: str) -> QPushButton:
             btn = QPushButton(text)
-            btn.setFixedSize(70, 50)
+            btn.setFixedHeight(50)
             btn.setCursor(QCursor(Qt.PointingHandCursor))
             btn.setCheckable(True)
             btn.setStyleSheet("""
@@ -2798,7 +2799,7 @@ class MainWindow(QMainWindow):
                     color: white;
                     font-size: 9pt;
                     font-weight: bold;
-                    padding: 0;
+                    padding: 0 14px;
                     text-align: center;
                 }
                 QPushButton:hover {
@@ -2813,18 +2814,12 @@ class MainWindow(QMainWindow):
             return btn
 
         # 'Fine Tuning' — wrench glyph + label, two-line layout matching
-        # the Advanced button.
+        # the Advanced button. Height fixed (50), width auto-fits.
         self.finetuning_group_btn = _make_header_toggle("🛠\nFine Tuning")
-        # 'Agentic Team' — keep the owl_agentic asset if present (matches
-        # the legacy navbar look), otherwise plain two-line text.
-        self.agentic_group_btn = _make_header_toggle("\nAgentic Team")
-        try:
-            _owl_agentic_path = self.root.parent / "icons" / "Page_icons" / "owl_agentic.png"
-            if _owl_agentic_path.exists():
-                self.agentic_group_btn.setIcon(QIcon(str(_owl_agentic_path)))
-                self.agentic_group_btn.setIconSize(QSize(18, 18))
-        except Exception:
-            pass
+        # 'Agentic Team' — masks emoji matches the legacy 🎭 used in the
+        # navbar; the owl_agentic.png asset is reserved for the canvas
+        # surface and intentionally NOT used here.
+        self.agentic_group_btn = _make_header_toggle("🎭\nAgentic Team")
 
         theme_layout.addSpacing(4)
         theme_layout.addWidget(self.finetuning_group_btn)

@@ -228,46 +228,58 @@ class InstallerThread(QThread):
                 success = installer_v2.repair()
                 self.log_output.emit(f"Main repair completed with result: {success}")
 
-                # Proactively install training-env packages (unsloth, trl,
-                # triton-windows, bitsandbytes, …) into the SAME workload
-                # venv so the user doesn't discover a broken training
-                # stack on first 'Start Training' click. Treated as a
-                # soft dependency: a failure here doesn't fail the whole
-                # repair (training is opt-in), it just logs the trace.
+                # Post-install: hand off to EnvRepairer for the unified
+                # diff/install/verify pass. This catches:
+                #   * any base-profile package installer_v2 thought it
+                #     installed but is actually still wrong (uses
+                #     PipExecutor.freeze + PinResolver.required_for to
+                #     compute the truth instead of trusting installer_v2's
+                #     internal accounting);
+                #   * training extras (unsloth/trl/triton-windows/...) so
+                #     the user doesn't discover a broken training stack
+                #     on first 'Start Training' click;
+                #   * torch ABI mismatches that survive installer_v2 —
+                #     EnvRepairer's torch trio coherence step rebuilds
+                #     the matched cu* trio when torchvision._C.pyd or
+                #     libtorchaudio fails to load.
+                # Soft dependency: a non-OK outcome here doesn't fail the
+                # whole repair (training/extras are opt-in), it logs the
+                # detail and lets installer_v2's success stand.
                 if success:
                     try:
                         self.log_output.emit("")
                         self.log_output.emit("=" * 60)
-                        self.log_output.emit("Installing training-env packages (unsloth/trl/triton-windows/...)")
+                        self.log_output.emit("Unified post-install verify (EnvRepairer)")
                         self.log_output.emit("=" * 60)
-                        from desktop_app import training_env_manager as tem
-                        cur = tem.status(llm_root)
-                        if cur.fully_ready:
-                            self.log_output.emit("✓ Training packages already installed and importable.")
-                        elif not cur.venv_python_exists:
-                            self.log_output.emit(
-                                f"⚠ Training-env Python not found at {cur.venv_python_path}; skipping."
-                            )
+                        from core.install import EnvRepairer, RepairOutcome
+                        from core.runtime.owllm_python import get_owllm_env
+                        env = get_owllm_env(llm_root)
+                        repairer = EnvRepairer(project_root=llm_root)
+                        result = repairer.repair(
+                            env_python=env.python_exe,
+                            env_id=env.profile_id,
+                            extras=["training"],
+                            log=lambda m: self.log_output.emit(f"  {m}"),
+                        )
+                        if result.outcome == RepairOutcome.SUCCESS:
+                            self.log_output.emit(f"✓ {result.summary}")
+                        elif result.outcome == RepairOutcome.SUCCESS_WITH_WARNINGS:
+                            self.log_output.emit(f"⚠ {result.summary}")
                         else:
-                            self.log_output.emit(
-                                f"Missing training packages: {', '.join(cur.missing_packages) or '(none parsed)'}"
-                            )
-                            tem.ensure_ready(
-                                llm_root,
-                                progress=lambda m: self.log_output.emit(f"  {m}"),
-                            )
-                            self.log_output.emit("✓ Training packages installed.")
-                    except Exception as train_exc:
+                            self.log_output.emit(f"✗ Post-install verify: {result.summary}")
+                            for r in result.pip_results:
+                                if not r.ok:
+                                    self.log_output.emit(f"  Failed pip log: {r.log_path}")
+                    except Exception as post_exc:
                         import traceback as _tb
                         self.log_output.emit(
-                            f"⚠ Training-env install raised "
-                            f"{type(train_exc).__name__}: {train_exc}"
+                            f"⚠ Post-install verify raised "
+                            f"{type(post_exc).__name__}: {post_exc}"
                         )
                         self.log_output.emit(_tb.format_exc())
                         self.log_output.emit(
-                            "Main repair still SUCCEEDED. Open the Train tab and "
-                            "click Start Training — that path will retry the install "
-                            "and surface the actual error."
+                            "Main repair still SUCCEEDED. The training tab will "
+                            "retry the install on demand and surface any actual error."
                         )
 
                 self.log_output.emit(f"Repair completed with result: {success}")

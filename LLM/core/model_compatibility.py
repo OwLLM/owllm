@@ -207,6 +207,77 @@ def pretty_model_name(folder_or_id: str, *, include_org: bool = True) -> str:
     return title
 
 
+# Quant tag we try to lift out of a GGUF filename for compact display.
+_GGUF_QUANT_RE = re.compile(
+    r"(IQ\d(?:_[A-Z]+)?|Q\d_K_[MSL]|Q\d_[01]|Q\d_K|Q\d|FP\d{1,2}|BF16|F16|F32)",
+    re.IGNORECASE,
+)
+
+
+def _extract_gguf_quant(gguf_name: str) -> str:
+    """Lift the quant tag out of a GGUF filename ("...-Q5_K_M.gguf" -> "Q5_K_M")."""
+    if not gguf_name:
+        return ""
+    base = gguf_name.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if base.lower().endswith(".gguf"):
+        base = base[:-5]
+    m = _GGUF_QUANT_RE.search(base)
+    if not m:
+        return base
+    tag = m.group(1).upper()
+    # Normalise rare lowercase forms: "fp16" -> "FP16", "bf16" -> "BF16".
+    return tag
+
+
+def pretty_server_label(
+    base_model: str = "",
+    *,
+    model_id: str = "",
+    variant_relpath: str = "",
+    port=None,
+    include_port: bool = True,
+) -> str:
+    """Single canonical pretty label for a model/server entry.
+
+    Matches the convention used by the model card
+    (``pretty_model_name(model_id, include_org=False)``) so the same model
+    reads the same everywhere. When the caller knows a specific weight
+    variant (a GGUF quant file), the quant tag is appended so multiple
+    weights of the same model can be told apart.
+
+    Examples::
+
+        pretty_server_label(model_id="unsloth/gemma-2-2b-it", port=10502)
+            -> "Gemma 2 2B Instruct — port 10502"
+        pretty_server_label(
+            base_model="C:/.../unsloth__gemma-4-E4B-it-GGUF",
+            variant_relpath="gemma-4-E4B-it-Q5_K_M.gguf",
+            port=10533,
+        )
+            -> "Gemma 4 E4B Instruct GGUF · Q5_K_M — port 10533"
+    """
+    # Prefer model_id (what the card uses). Fall back to the trailing
+    # segment of base_model, which may be a filesystem path.
+    raw = str(model_id or "").strip()
+    if not raw:
+        raw = str(base_model or "").replace("\\", "/").strip("/")
+        if "/" in raw:
+            raw = raw.rsplit("/", 1)[-1]
+    title = pretty_model_name(raw, include_org=False) if raw else ""
+    if not title:
+        title = str(model_id) or "model"
+    if variant_relpath:
+        quant = _extract_gguf_quant(str(variant_relpath))
+        if quant:
+            title = f"{title} · {quant}"
+    if include_port and port not in (None, "", "?"):
+        try:
+            title = f"{title} — port {int(port)}"
+        except Exception:
+            title = f"{title} — port {port}"
+    return title
+
+
 def _extract_base_model_name(model_name: str) -> str:
     """Extract base model name by removing unsloth/quantization suffixes."""
     base = model_name
@@ -282,41 +353,33 @@ def check_peft_capabilities() -> Dict[str, any]:
 
 def check_unsloth_capabilities() -> Dict[str, any]:
     """
-    Check if unsloth is available and functional.
-    
-    Returns:
-        Dict with:
-        - available: bool - Whether unsloth is installed
-        - functional: bool - Whether unsloth can be imported and used
-        - version: str - Unsloth version if available
+    Check if unsloth is available — WITHOUT importing it.
+
+    Importing unsloth has destructive side-effects: it monkey-patches
+    trl.SFTTrainer with UnslothSFTTrainer, prints '🦥 Unsloth: Will
+    patch your computer...', and (when imported AFTER transformers/peft)
+    leaves trl in a half-patched state that triggers a Windows
+    ACCESS_VIOLATION (0xC0000005) somewhere in the dataset/trainer
+    pipeline. We use importlib.metadata for the version probe — no
+    code execution, no patching.
     """
+    import importlib.util
+    import importlib.metadata as _md
+
+    spec = importlib.util.find_spec("unsloth")
+    if spec is None:
+        return {"available": False, "functional": False, "version": None}
+
     try:
-        from unsloth import FastLanguageModel
-        # Try to check version if available
-        try:
-            import unsloth
-            version = getattr(unsloth, "__version__", "unknown")
-        except:
-            version = "unknown"
-        
-        return {
-            "available": True,
-            "functional": True,
-            "version": version
-        }
-    except ImportError:
-        return {
-            "available": False,
-            "functional": False,
-            "version": None
-        }
-    except Exception as e:
-        return {
-            "available": True,
-            "functional": False,
-            "version": "unknown",
-            "error": str(e)
-        }
+        version = _md.version("unsloth")
+    except Exception:
+        version = "unknown"
+
+    return {
+        "available": True,
+        "functional": True,  # presence == usable; real probe happens at use time
+        "version": version,
+    }
 
 
 def check_bitsandbytes_capabilities() -> Dict[str, any]:

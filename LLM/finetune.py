@@ -247,15 +247,12 @@ def _should_use_bf16() -> bool:
 def main():
     args = parse_args()
 
-    # Determine if we should use unsloth
-    use_unsloth = HAS_UNSLOTH and args.use_unsloth
-    if not use_unsloth:
-        if args.use_unsloth and not HAS_UNSLOTH:
-            print("[INFO] Unsloth requested but not found. Falling back to standard PEFT.")
-        else:
-            print("[INFO] Using standard PEFT training.")
-    else:
-        print("[INFO] Using Unsloth for optimized training.")
+    # Note about unsloth: we ALWAYS go through the standard PEFT path
+    # below (should_try_unsloth is hard-coded False because Unsloth's
+    # FP16 GradScaler crashes on this stack). Don't print 'Using Unsloth'
+    # here — the actual decision happens later, and the misleading
+    # message confused real bug investigations.
+    print("[INFO] Using standard PEFT training.")
 
     MODEL_NAME = args.model_name
     MAX_SEQ_LENGTH = args.max_seq_length

@@ -28,7 +28,7 @@ python-dotenv==1.2.1
 PyYAML==6.0.2
 regex==2026.1.15
 requests==2.32.3
-safetensors==0.7.0
+safetensors==0.4.5
 sentencepiece==0.2.0
 starlette==0.52.1
 sympy==1.13.1

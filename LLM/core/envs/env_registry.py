@@ -49,16 +49,8 @@ class EnvRegistry:
         self.constraints_dir = self.env_manager.root_dir / "constraints"
         self.constraints_dir.mkdir(exist_ok=True)
         
-        # Windows subprocess flags to prevent CMD window flashing
+        # Do not hide child console windows.
         self.subprocess_flags = {}
-        if sys.platform == 'win32':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-            self.subprocess_flags = {
-                'startupinfo': startupinfo,
-                'creationflags': subprocess.CREATE_NO_WINDOW
-            }
         self.runtime_bundle_manager = RuntimeBundleManager(subprocess_flags=self.subprocess_flags)
 
     def _get_env_python_executable(self, env_key: str) -> Optional[Path]:
@@ -338,18 +330,6 @@ class EnvRegistry:
             
             if not python_exe.exists():
                 raise RuntimeError(f"Python executable not found after venv creation: {python_exe}")
-
-            # Install the Windows subprocess guard into the freshly-created venv.
-            # This makes python.exe inside this venv auto-install the no-window
-            # guard at startup, so any pip/setup.py/compiler grandchildren it
-            # spawns during the install below do not flash console windows.
-            # Root cause: without this, per-model venvs bypass the main venv's
-            # guard because site-packages is not shared across venvs.
-            try:
-                from core.win_subprocess_guard import install_guard_into_venv
-                install_guard_into_venv(str(venv_path))
-            except Exception as _guard_exc:
-                log(f"[warn] Could not install subprocess guard into {venv_path}: {_guard_exc!r}")
 
             log(f"Virtual environment created, installing dependencies...")
             pip_exe = self._get_env_pip_executable(python_exe)
@@ -1380,7 +1360,7 @@ except Exception as e:
                 "transformers==4.51.3",
                 "tokenizers==0.21.4",
                 "protobuf",
-                _pkg("safetensors", "safetensors>=0.7.0,<0.8.0"),
+                _pkg("safetensors", "safetensors>=0.4.5,<1.0"),
                 _pkg("accelerate", "accelerate>=1.2.0,<1.3.0"),
                 _pkg("peft", "peft>=0.13.0,<0.16.0"),
                 _pkg("sentencepiece", "sentencepiece==0.2.0"),
@@ -2709,7 +2689,7 @@ sys.exit(0)
                     "tokenizers": "tokenizers==0.21.4",
                     "accelerate": "accelerate>=1.2.0,<1.3.0",
                     "peft": "peft>=0.13.0,<0.16.0",
-                    "safetensors": "safetensors>=0.7.0,<0.8.0",
+                    "safetensors": "safetensors>=0.4.5,<1.0",
                 }
                 # Keep protobuf unpinned (many packages depend on it, and pinning can backfire)
                 if not is_edge and pkg_norm in pinned_map_stable:

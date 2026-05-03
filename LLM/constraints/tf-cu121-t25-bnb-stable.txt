@@ -29,7 +29,7 @@ python-dotenv==1.2.1
 PyYAML==6.0.2
 regex==2026.1.15
 requests==2.32.3
-safetensors==0.7.0
+safetensors==0.4.5
 sentencepiece==0.2.0
 setuptools==80.10.2
 starlette==0.50.0

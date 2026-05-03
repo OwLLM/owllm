@@ -28,7 +28,7 @@
         "torchvision": "0.20.1+cu124",
         "torchaudio": "2.5.1+cu124",
         "transformers": ">=4.51.0,<4.60.0",
-        "safetensors": ">=0.7.0,<0.8.0",
+        "safetensors": ">=0.4.5,<1.0",
         "huggingface-hub": ">=0.34.0,<1.0",
         "accelerate": ">=1.2.0,<1.3.0",
         "datasets": ">=3.2.0,<4.0.0",
@@ -70,7 +70,7 @@
         "torchvision": "0.20.1+cu121",
         "torchaudio": "2.5.1+cu121",
         "transformers": ">=4.51.0,<4.60.0",
-        "safetensors": ">=0.7.0,<0.8.0",
+        "safetensors": ">=0.4.5,<1.0",
         "huggingface-hub": ">=0.34.0,<1.0",
         "accelerate": ">=1.2.0,<1.3.0",
         "datasets": ">=3.2.0,<4.0.0",
@@ -110,7 +110,7 @@
         "torchvision": "0.20.1+cu124",
         "torchaudio": "2.5.1+cu124",
         "transformers": ">=4.51.0,<4.60.0",
-        "safetensors": ">=0.7.0,<0.8.0",
+        "safetensors": ">=0.4.5,<1.0",
         "huggingface-hub": ">=0.34.0,<1.0",
         "accelerate": ">=1.2.0,<1.3.0",
         "datasets": ">=3.2.0,<4.0.0",
@@ -146,7 +146,7 @@
         "torchvision": "0.20.1+cu124",
         "torchaudio": "2.5.1+cu124",
         "transformers": ">=4.51.0,<4.60.0",
-        "safetensors": ">=0.7.0,<0.8.0",
+        "safetensors": ">=0.4.5,<1.0",
         "huggingface-hub": ">=0.34.0,<1.0",
         "accelerate": ">=1.2.0,<1.3.0",
         "datasets": ">=3.2.0,<4.0.0",
@@ -203,12 +203,12 @@
   "fallback_rules": {
     "unknown_newer_gpu": {
       "action": "use_profile",
-      "profile": "cuda124_ampere_ada_blackwell",
+      "profile": "ada_cu124",
       "reason": "Newer GPU - try latest CUDA profile"
     },
     "unknown_older_gpu": {
       "action": "use_profile",
-      "profile": "cuda118_turing",
+      "profile": "turing_cu118",
       "reason": "Older GPU - use conservative CUDA 11.8"
     },
     "no_cuda": {

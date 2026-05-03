@@ -183,11 +183,18 @@ bool DeleteDirectoryWithRetries(const std::wstring& dirPath, int maxAttempts = 5
     return false;  // Failed after all attempts
 }
 
-// Helper to check for self-contained Python runtime
+// Helper to check for self-contained Python runtime.
+// OWLLM's design contract: ALWAYS use the bundled interpreter, NEVER
+// fall back to system Python. Prefers 3.12 (current installer target),
+// falls back to 3.11 — both ship in the bundle.
 std::wstring CheckSelfContainedPython(const std::wstring& exeDir) {
-    std::wstring selfContainedPython = exeDir + L"\\python_runtime\\python3.12\\python.exe";
-    if (FileExists(selfContainedPython)) {
-        return selfContainedPython;
+    std::wstring py312 = exeDir + L"\\python_runtime\\python3.12\\python.exe";
+    if (FileExists(py312)) {
+        return py312;
+    }
+    std::wstring py311 = exeDir + L"\\python_runtime\\python3.11\\python.exe";
+    if (FileExists(py311)) {
+        return py311;
     }
     return L"";
 }
@@ -519,278 +526,87 @@ static int RunLauncherWorker() {
     // Ensure logs directory exists
     EnsureLogsDirectory(exeDir);
     
-    // Step 0: Check for self-contained Python runtime first (NEW)
-    std::wstring selfContainedPython = CheckSelfContainedPython(exeDir);
-    std::wstring systemPython;
-    
-    if (!selfContainedPython.empty()) {
-        // Self-contained Python found - use it directly
-        systemPython = selfContainedPython;
-        goto use_python;  // Skip to venv check
-    }
-    
-    // Step 1: Check if system Python exists and is compatible
-    systemPython = FindSystemPython();
-    
-    if (!systemPython.empty()) {
-        // Check Python version - reject ALL incompatible versions (too old, too new, or any future versions)
-        std::wstring versionStr = GetPythonVersion(systemPython);
-        if (!versionStr.empty() && !IsPythonVersionSupported(versionStr)) {
-            // Python version incompatible (not 3.10-3.12) - use self-contained Python instead
-            systemPython = L"";
-        }
-    }
-    
+    // ─────────────────────────────────────────────────────────────────
+    // SELF-CONTAINED CONTRACT
+    //
+    // OWLLM ships a bundled Python under LLM/python_runtime/python3.12
+    // (and python3.11 as fallback). The launcher MUST use that and ONLY
+    // that — touching system Python or downloading 3.10 from python.org
+    // (the previous fallback path) violates the "self-contained, no
+    // system dependencies" promise. If the bundle is missing, the
+    // install is incomplete and the user needs to re-extract / re-run
+    // the installer; we don't try to paper over it by reaching into
+    // C:\Program Files\Python312.
+    //
+    // The legacy FindSystemPython / DownloadPythonInstaller / InstallPython
+    // helpers are still defined above for now (callers reference them
+    // through the existing function table) but are no longer reachable
+    // from the launcher's main path.
+    // ─────────────────────────────────────────────────────────────────
+    std::wstring systemPython = CheckSelfContainedPython(exeDir);
     if (systemPython.empty()) {
-        // No compatible system Python - try bootstrap launcher
-        std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
-        if (FileExists(bootstrapBat)) {
-            int result = MessageBoxW(NULL,
-                L"Python 3.10-3.12 is required, but your system Python version is incompatible.\n\n"
-                L"Would you like to download a self-contained Python runtime?\n"
-                L"(This will not affect your system Python installation.)",
-                L"Python Version Incompatible",
-                MB_YESNO | MB_ICONQUESTION);
-            
-            if (result == IDYES) {
-                MessageBoxW(NULL,
-                    L"Downloading self-contained Python runtime...\n\n"
-                    L"This may take a few minutes.\n"
-                    L"Please wait...",
-                    L"Downloading",
-                    MB_OK | MB_ICONINFORMATION);
-                
-                if (RunBootstrapLauncher(exeDir)) {
-                    // Check if self-contained Python is now available
-                    selfContainedPython = CheckSelfContainedPython(exeDir);
-                    if (!selfContainedPython.empty()) {
-                        systemPython = selfContainedPython;
-                        goto use_python;
-                    }
-                }
-                
-                MessageBoxW(NULL,
-                    L"Failed to download self-contained Python runtime.\n\n"
-                    L"Please try running bootstrap_launcher.bat manually.",
-                    L"Download Failed",
-                    MB_OK | MB_ICONERROR);
-            }
-        }
-        
-        // Fallback: Offer system Python installation (old behavior)
-        int result = MessageBoxW(NULL,
-            L"Python is not installed or has an incompatible version.\n\n"
-            L"This application requires Python 3.10-3.12.\n\n"
-            L"Would you like to download and install Python 3.12 system-wide?\n"
-            L"(Alternatively, you can run bootstrap_launcher.bat for a self-contained installation.)",
-            L"Python Required",
-            MB_YESNO | MB_ICONQUESTION);
-        
-        if (result != IDYES) {
-            MessageBoxW(NULL,
-                L"Python installation is required.\n\n"
-                L"Please install Python 3.10+ from https://www.python.org/downloads/\n"
-                L"Make sure to check 'Add Python to PATH' during installation.",
-                L"Python Required",
-                MB_OK | MB_ICONINFORMATION);
-            return 1;
-        }
-        
-        // Download Python installer
-        std::wstring tempDir = exeDir + L"\\temp";
-        CreateDirectoryW(tempDir.c_str(), NULL);
-        std::wstring installerPath = tempDir + L"\\python-installer.exe";
-        
-        MessageBoxW(NULL, L"Downloading Python installer...\n\nThis may take a few minutes.", L"Downloading", MB_OK | MB_ICONINFORMATION);
-        
-        if (!DownloadPythonInstaller(installerPath)) {
-            MessageBoxW(NULL,
-                L"Failed to download Python installer.\n\n"
-                L"Please download and install Python 3.10+ manually from:\n"
-                L"https://www.python.org/downloads/",
-                L"Download Failed",
-                MB_OK | MB_ICONERROR);
-            return 1;
-        }
-        
-        // Install Python
-        MessageBoxW(NULL, L"Installing Python...\n\nThis may take a few minutes.\n\nPlease wait...", L"Installing", MB_OK | MB_ICONINFORMATION);
-        
-        if (!InstallPython(installerPath)) {
-            MessageBoxW(NULL,
-                L"Python installation failed or was cancelled.\n\n"
-                L"Please install Python 3.10+ manually from:\n"
-                L"https://www.python.org/downloads/",
-                L"Installation Failed",
-                MB_OK | MB_ICONERROR);
-            return 1;
-        }
-        
-        // Clean up installer
-        DeleteFileW(installerPath.c_str());
-        
-        // Refresh PATH and try to find Python again
-        // Note: PATH refresh may require restart, but we'll try anyway
-        systemPython = FindSystemPython();
-        if (systemPython.empty()) {
-            MessageBoxW(NULL,
-                L"Python was installed, but the launcher cannot find it.\n\n"
-                L"Please restart your computer or manually add Python to PATH,\n"
-                L"then run this launcher again.",
-                L"Python Installed",
-                MB_OK | MB_ICONINFORMATION);
-            return 1;
-        }
-    }
-    
-    use_python:
-    // Step 2: Check if venv exists and is complete, if not, launch installer GUI
-    std::wstring pythonExe = exeDir + L"\\.venv\\Scripts\\python.exe";
-    std::wstring pyvenvCfg = exeDir + L"\\.venv\\pyvenv.cfg";
-    std::wstring venvPython = systemPython;  // Default to system Python
-
-    // Use python.exe (console-attached) so child processes are visible.
-    bool venvComplete = false;
-    if (FileExists(pythonExe) && FileExists(pyvenvCfg)) {
-        venvPython = pythonExe;
-        venvComplete = true;
-    }
-    
-    if (!venvComplete) {
-        // Venv doesn't exist - launch installer GUI via bootstrap (no console window)
-        std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
-        if (FileExists(runInstallerBat)) {
-            if (RunBatchNoWindow(runInstallerBat, exeDir))
-                return 0;
-        }
-        std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
-        if (FileExists(bootstrapBat)) {
-            if (RunBatchNoWindow(bootstrapBat, exeDir))
-                return 0;
-        }
-        {
-            // Fallback: installer_gui.py
-            
-            std::wstring installerGui = exeDir + L"\\installer_gui.py";
-            if (FileExists(installerGui)) {
-                // Use self-contained Python if available, otherwise system Python
-                std::wstring pythonToUse = systemPython;
-                if (pythonToUse.empty()) {
-                    pythonToUse = CheckSelfContainedPython(exeDir);
-                }
-                if (pythonToUse.empty()) {
-                    pythonToUse = FindSystemPython();
-                }
-                if (!pythonToUse.empty()) {
-                    std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
-                    ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
-                    return 0;
-                }
-            } else {
-                MessageBoxW(NULL,
-                    L"Virtual environment not found and installer GUI not available.\n\n"
-                    L"Please run the setup manually.",
-                    L"Setup Required",
-                    MB_OK | MB_ICONERROR);
-                return 1;
-            }
-        }
-    }
-    
-    // Ensure logs directory exists
-    EnsureLogsDirectory(exeDir);
-    
-    // Step 3: Health check - Test if PySide6 can import
-    // NOTE: All PySide6 packages MUST be at version 6.8.1 (PySide6, Essentials, Addons, shiboken6)
-    // Version mismatches cause "procedure could not be found" DLL errors
-    std::wstring healthCheckCmd = L"-c \"import PySide6.QtCore; print('OK')\"";
-    std::wstring healthCheckLog = exeDir + L"\\logs\\health_check.log";
-    
-    int healthCheckResult = LaunchPythonApp(exeDir, venvPython, healthCheckCmd, healthCheckLog, /*hideConsole=*/true);
-    
-    if (healthCheckResult != 0) {
-        // PySide6 is broken - launch installer GUI via bootstrap (no console window)
-        std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
-        if (FileExists(runInstallerBat) && RunBatchNoWindow(runInstallerBat, exeDir))
-            return 0;
-        std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
-        if (FileExists(bootstrapBat) && RunBatchNoWindow(bootstrapBat, exeDir))
-            return 0;
-        std::wstring installerGui = exeDir + L"\\installer_gui.py";
-        if (FileExists(installerGui)) {
-            std::wstring pythonToUse = systemPython;
-            if (pythonToUse.empty())
-                pythonToUse = CheckSelfContainedPython(exeDir);
-            if (pythonToUse.empty())
-                pythonToUse = FindSystemPython();
-            if (!pythonToUse.empty()) {
-                std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
-                ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
-                return 0;
-            }
-        }
         MessageBoxW(NULL,
-            L"Critical dependencies are broken and installer GUI is not available.\n\n"
-            L"Please run the setup manually or check the installation.",
-            L"Setup Required",
+            L"OWLLM's bundled Python runtime is missing.\n\n"
+            L"Looked for:\n"
+            L"  python_runtime\\python3.12\\python.exe\n"
+            L"  python_runtime\\python3.11\\python.exe\n\n"
+            L"OWLLM is designed to be self-contained and never use\n"
+            L"system Python. The bundle appears to be incomplete.\n\n"
+            L"Re-extract the OWLLM zip / re-run the installer so the\n"
+            L"python_runtime\\ folder is restored.",
+            L"OWLLM bundle incomplete",
             MB_OK | MB_ICONERROR);
         return 1;
     }
-    
-    // Step 4: Dependency health check - Verify critical packages are installed
-    std::wstring dependencyCheckScript = exeDir + L"\\check_dependencies.py";
-    std::wstring dependencyCheckLog = exeDir + L"\\logs\\dependency_check.log";
-    
-    if (FileExists(dependencyCheckScript)) {
-        // Run check_dependencies.py as a script
-        std::wstring dependencyCheckCmd = L"\"" + dependencyCheckScript + L"\"";
-        int dependencyCheckResult = LaunchPythonApp(exeDir, venvPython, dependencyCheckCmd, dependencyCheckLog, /*hideConsole=*/true);
-        
-        if (dependencyCheckResult != 0) {
-            // Dependencies are missing or wrong - launch installer GUI via bootstrap (no console window)
-            std::wstring runInstallerBat = exeDir + L"\\run_installer.bat";
-            if (FileExists(runInstallerBat) && RunBatchNoWindow(runInstallerBat, exeDir))
-                return 0;
-            std::wstring bootstrapBat = exeDir + L"\\bootstrap_launcher.bat";
-            if (FileExists(bootstrapBat) && RunBatchNoWindow(bootstrapBat, exeDir))
-                return 0;
-            std::wstring installerGui = exeDir + L"\\installer_gui.py";
-            if (FileExists(installerGui)) {
-                std::wstring pythonToUse = systemPython;
-                if (pythonToUse.empty())
-                    pythonToUse = CheckSelfContainedPython(exeDir);
-                if (pythonToUse.empty())
-                    pythonToUse = FindSystemPython();
-                if (!pythonToUse.empty()) {
-                    std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
-                    ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
-                    return 0;
-                }
-            }
-            MessageBoxW(NULL,
-                L"Critical dependencies are missing or have wrong versions.\n\n"
-                L"Installer GUI is not available.\n"
-                L"Please run the setup manually or check the installation.",
-                L"Setup Required",
-                MB_OK | MB_ICONERROR);
-            return 1;
+
+    use_python:
+    // ─────────────────────────────────────────────────────────────────
+    // SINGLE SOURCE OF TRUTH: delegate everything to LAUNCHER.py.
+    //
+    // launcher.exe used to hardcode `LLM/.venv/Scripts/python.exe`, run
+    // its own PySide6 health check via that interpreter, run
+    // `check_dependencies.py` via that interpreter, then launch
+    // `desktop_app.main` via that interpreter. None of those steps
+    // consulted the profile env (`LLM/.envs/<env_key>/.venv`), which is
+    // where the installer actually puts the CUDA-correct torch + the
+    // full runtime stack. End result: launching via `launcher.exe` ran
+    // the wrong Python and the home page reported "PyTorch not installed"
+    // / "CPU-only" even after a successful install.
+    //
+    // Now: launcher.exe is a thin shim. It finds a system Python and
+    // shells `python LAUNCHER.py`. LAUNCHER.py owns env resolution
+    // (via core.runtime.owllm_python.get_owllm_python — the SINGLE
+    // resolver), the health/dep checks, and the desktop_app.main
+    // invocation. There is one canonical answer to "which Python runs
+    // OWLLM?", derived deterministically from the profile files.
+    //
+    // venvPython is set to systemPython here so the cleanup-and-restart
+    // path below (exit code 42) can re-shell LAUNCHER.py with the same
+    // interpreter that worked the first time.
+    // ─────────────────────────────────────────────────────────────────
+    std::wstring venvPython = systemPython;
+    EnsureLogsDirectory(exeDir);
+
+    std::wstring launcherPy = exeDir + L"\\LAUNCHER.py";
+    if (!FileExists(launcherPy)) {
+        // Fallback: no LAUNCHER.py — fall through to installer GUI so
+        // user can repair their install.
+        std::wstring installerGui = exeDir + L"\\installer_gui.py";
+        if (FileExists(installerGui) && !systemPython.empty()) {
+            std::wstring guiPython = PreferConsolePythonForHiddenWorker(systemPython);
+            ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);
+            return 0;
         }
-    } else {
-        // Dependency check script missing - log warning but continue
-        // (This shouldn't happen in normal operation, but don't block launch)
-        std::wstring warnLog = exeDir + L"\\logs\\launcher_warning.log";
-        std::ofstream warnFile(warnLog.c_str(), std::ios::app);
-        if (warnFile.is_open()) {
-            warnFile << "WARNING: check_dependencies.py not found, skipping dependency check\n";
-            warnFile.close();
-        }
+        MessageBoxW(NULL,
+            L"LAUNCHER.py not found.\n\n"
+            L"Please reinstall OWLLM.",
+            L"Launcher Missing",
+            MB_OK | MB_ICONERROR);
+        return 1;
     }
-    
-    // Step 5: Launch main application (PySide6 and dependencies are working)
-    std::wstring scriptArgs = L"-m desktop_app.main";
-    std::wstring logFile = exeDir + L"\\logs\\app.log";
-    
-    // Ensure .setup_complete marker exists so setup wizard is skipped
+
+    // Ensure .setup_complete marker exists so the legacy setup wizard
+    // never appears (the installer GUI handles all setup now).
     std::wstring setupMarker = exeDir + L"\\.setup_complete";
     if (!FileExists(setupMarker)) {
         std::ofstream marker(setupMarker.c_str());
@@ -799,6 +615,13 @@ static int RunLauncherWorker() {
             marker.close();
         }
     }
+
+    // Delegate to LAUNCHER.py. It will resolve the canonical OWLLM
+    // Python, run its own health/dependency checks, and launch
+    // desktop_app.main from the right interpreter. If anything is
+    // broken, LAUNCHER.py launches the installer GUI itself.
+    std::wstring scriptArgs = L"\"" + launcherPy + L"\"";
+    std::wstring logFile = exeDir + L"\\logs\\app.log";
 
     int exitCode = LaunchPythonApp(exeDir, venvPython, scriptArgs, logFile);
     
@@ -923,9 +746,9 @@ static int RunLauncherWorker() {
             if (FileExists(bootstrapBat) && RunBatchNoWindow(bootstrapBat, exeDir))
                 return 0;
             if (FileExists(installerGui)) {
+                // ALWAYS the bundled interpreter — never system Python.
                 std::wstring pythonToUse = systemPython;
                 if (pythonToUse.empty()) pythonToUse = CheckSelfContainedPython(exeDir);
-                if (pythonToUse.empty()) pythonToUse = FindSystemPython();
                 if (!pythonToUse.empty()) {
                     std::wstring guiPython = PreferConsolePythonForHiddenWorker(pythonToUse);
                     ShellExecuteW(NULL, L"open", guiPython.c_str(), installerGui.c_str(), exeDir.c_str(), SW_SHOW);

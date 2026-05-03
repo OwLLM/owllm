@@ -12410,6 +12410,39 @@ class MainWindow(QMainWindow):
             self.train_out_dir.setText(d)
 
     def _start_training(self) -> None:
+        # Wrap the entire start-training flow in a top-level catch so
+        # any 'click -> instant error' exception (path resolution,
+        # preflight, cmd build, anything before QProcess.start) shows
+        # the user the actual traceback instead of evaporating with
+        # a generic 'Error code: 0' or no message at all.
+        try:
+            self._start_training_impl()
+        except Exception as exc:
+            import traceback as _tb
+            tb_text = _tb.format_exc()
+            try:
+                self.train_log.appendPlainText("\n[FATAL] _start_training raised:")
+                self.train_log.appendPlainText(f"  {type(exc).__name__}: {exc}")
+                self.train_log.appendPlainText(tb_text)
+            except Exception:
+                pass
+            try:
+                self._append_terminal(f"[FATAL] _start_training raised: {exc}", source="train")
+                self._append_terminal(tb_text, source="train")
+            except Exception:
+                pass
+            QMessageBox.critical(
+                self,
+                "Training failed to start",
+                f"{type(exc).__name__}: {exc}\n\nFull traceback in the train log.",
+            )
+            try:
+                self.train_start.setEnabled(True)
+                self.train_stop.setEnabled(False)
+            except Exception:
+                pass
+
+    def _start_training_impl(self) -> None:
         if self.train_proc is not None:
             QMessageBox.information(self, "Training", "Training is already running.")
             return
@@ -12474,15 +12507,15 @@ class MainWindow(QMainWindow):
         # send the absolute path; transformers detects it as a local
         # directory and skips the HF download entirely. Otherwise fall
         # back to the hub id (legacy behaviour for users who haven't
-        # downloaded yet).
+        # downloaded yet). Note: we append the resolution message to
+        # train_log AFTER train_log.clear() further down — so save it
+        # for that point.
         if local_model_path is not None:
             base_model_for_finetune = str(local_model_path)
-            self.train_log.appendPlainText(
-                f"[INFO] Using local model directory: {local_model_path}"
-            )
+            _model_path_log_line = f"[INFO] Using local model directory: {local_model_path}"
         else:
             base_model_for_finetune = model_name_hf
-            self.train_log.appendPlainText(
+            _model_path_log_line = (
                 f"[WARN] No local copy of {model_name_hf} found at {local_models_dir}; "
                 f"transformers will download from Hugging Face."
             )
@@ -12555,9 +12588,11 @@ class MainWindow(QMainWindow):
 
         self.train_log.clear()
         self.train_log.appendPlainText("=== Starting Training ===")
+        self.train_log.appendPlainText(_model_path_log_line)
         self.train_log.appendPlainText(f"Command: {' '.join(cmd)}")
         self.train_log.appendPlainText("=" * 50)
         self._append_terminal("=== Starting Training ===", source="train")
+        self._append_terminal(_model_path_log_line, source="train")
         self._append_terminal(f"Command: {' '.join(cmd)}", source="train")
 
         self.train_start.setEnabled(False)

@@ -293,6 +293,130 @@ def main():
         print(f"[ERROR] Dataset file not found: {DATASET_PATH}")
         sys.exit(1)
 
+    # ----------------------------------------------------------------
+    # Dataset prep BEFORE model load.
+    # ----------------------------------------------------------------
+    # On Windows we observed silent ACCESS_VIOLATION (exit -1073741819)
+    # the moment pyarrow tried to build its FIRST Arrow table after
+    # the Gemma-4 model + PEFT had been wrapped on the GPU. Both
+    # `datasets.load_dataset('json', ...)` and `Dataset.from_list`
+    # segfaulted at the same point — the model-load path corrupts
+    # heap state pyarrow's C++ allocator can't recover from. Building
+    # the dataset FIRST gives pyarrow a clean process to initialise,
+    # and subsequent `dataset.map(...)` calls (including the trainer's
+    # internal tokenisation map) reuse the already-built Arrow buffers
+    # without re-entering the broken init path.
+    print(f"[INFO] Preparing dataset...")
+    file_format = detect_file_format(DATASET_PATH)
+
+    if file_format == 'jsonl' or (file_format == 'auto' and DATASET_PATH.endswith('.jsonl')):
+        print(f"[INFO] ✓ Detected JSONL format")
+        raw_data = load_jsonl(DATASET_PATH, skip_errors=not args.strict_jsonl)
+    else:
+        print(f"[INFO] ✓ Detected JSON format")
+        with open(DATASET_PATH, 'r', encoding='utf-8') as f:
+            raw_data = json.load(f)
+
+    if isinstance(raw_data, dict):
+        for key in ['data', 'examples', 'train', 'dataset', 'items', 'conversations', 'entries']:
+            if key in raw_data and isinstance(raw_data[key], list):
+                raw_data = raw_data[key]
+                print(f"[INFO] ✓ Extracted data from '{key}' field")
+                break
+        else:
+            raw_data = [raw_data]
+            print("[INFO] ✓ Converted single dict to list")
+
+    if not isinstance(raw_data, list):
+        raise ValueError(f"Dataset must be a list or dict with data field. Got: {type(raw_data)}")
+
+    print(f"[INFO] ✓ Found {len(raw_data)} examples")
+
+    normalized_data = []
+    if len(raw_data) > 0:
+        first = raw_data[0]
+        instruction_key = None
+        output_key = None
+        instruction_fields = ['instruction', 'prompt', 'input', 'question', 'query', 'text', 'user', 'human',
+                              'customer_message', 'customer', 'message', 'query_text']
+        output_fields = ['output', 'response', 'completion', 'answer', 'reply', 'assistant', 'gpt', 'bot',
+                        'assistant_response', 'assistant', 'response_text', 'answer_text']
+        for key in instruction_fields:
+            if key in first:
+                instruction_key = key
+                break
+        for key in output_fields:
+            if key in first:
+                output_key = key
+                break
+
+        if 'messages' in first or 'conversations' in first:
+            print("[INFO] ✓ Detected chat/messages format")
+            msg_key = 'messages' if 'messages' in first else 'conversations'
+            for item in raw_data:
+                messages = item[msg_key]
+                instruction = ""
+                output = ""
+                # Roles cover the conventions actually seen in the wild:
+                #   user-side:      'user', 'human'
+                #   assistant-side: 'assistant', 'gpt', 'bot', 'model'
+                # 'model' is Gemma's convention — without it, every
+                # Gemma-format chat dataset normalises to zero rows.
+                for msg in messages:
+                    role = msg.get('role', msg.get('from', '')).lower()
+                    content = msg.get('content', msg.get('value', ''))
+                    if role in ('user', 'human'):
+                        if not instruction:
+                            instruction = content
+                    elif role in ('assistant', 'gpt', 'bot', 'model'):
+                        if not output:
+                            output = content
+                if instruction and output:
+                    normalized_data.append({'instruction': instruction, 'output': output})
+        elif instruction_key and output_key:
+            print(f"[INFO] ✓ Detected format: '{instruction_key}' -> '{output_key}'")
+            for item in raw_data:
+                normalized_data.append({
+                    'instruction': str(item.get(instruction_key, '')),
+                    'output': str(item.get(output_key, ''))
+                })
+        elif 'instruction' in first:
+            print("[INFO] ✓ Detected Alpaca format (instruction + optional input)")
+            for item in raw_data:
+                instruction = item.get('instruction', '')
+                inp = item.get('input', '')
+                output = item.get('output', item.get('response', ''))
+                if inp:
+                    full_instruction = f"{instruction}\n\nInput: {inp}"
+                else:
+                    full_instruction = instruction
+                normalized_data.append({'instruction': full_instruction, 'output': output})
+        else:
+            raise ValueError(f"Could not detect dataset format. First item keys: {list(first.keys())}\n"
+                           f"Expected one of: {instruction_fields} -> {output_fields}, or 'messages' format")
+
+    if not normalized_data:
+        raise ValueError("No valid examples found in dataset")
+
+    print(f"[INFO] ✓ Normalized {len(normalized_data)} examples")
+
+    # Build Arrow table NOW (before model load) — see explainer above.
+    dataset = Dataset.from_list(normalized_data)
+    print(f"[INFO] ✓ Loaded dataset with {len(dataset)} examples")
+
+    if args.max_examples:
+        dataset = dataset.select(range(min(args.max_examples, len(dataset))))
+
+    def formatting_func(example):
+        text = f"### Instruction:\n{example['instruction']}\n\n### Response:\n{example['output']}"
+        return {"text": text}
+
+    dataset = dataset.map(formatting_func, remove_columns=dataset.column_names)
+    print(f"[INFO] ✓ Dataset formatted ({len(dataset)} examples ready for tokenisation)")
+
+    # Free the now-redundant Python list before model load.
+    del raw_data, normalized_data
+
     print(f"[INFO] Loading model and tokenizer: {MODEL_NAME}")
 
     # Use compatibility module to detect model type and capabilities
@@ -535,151 +659,6 @@ def main():
                 )
             except TypeError:
                 model.gradient_checkpointing_enable()
-
-    print(f"[INFO] Preparing dataset...")
-
-    # Smart dataset loader - handles JSON and JSONL automatically.
-    file_format = detect_file_format(DATASET_PATH)
-    
-    if file_format == 'jsonl' or (file_format == 'auto' and DATASET_PATH.endswith('.jsonl')):
-        print(f"[INFO] ✓ Detected JSONL format")
-        raw_data = load_jsonl(DATASET_PATH, skip_errors=not args.strict_jsonl)
-    else:
-        # Standard JSON loading
-        print(f"[INFO] ✓ Detected JSON format")
-        with open(DATASET_PATH, 'r', encoding='utf-8') as f:
-            raw_data = json.load(f)
-    
-    # Step 1: Convert to list if needed
-    if isinstance(raw_data, dict):
-        # Try common keys that contain the actual data
-        for key in ['data', 'examples', 'train', 'dataset', 'items', 'conversations', 'entries']:
-            if key in raw_data and isinstance(raw_data[key], list):
-                raw_data = raw_data[key]
-                print(f"[INFO] ✓ Extracted data from '{key}' field")
-                break
-        else:
-            # If still a dict, treat as single example
-            raw_data = [raw_data]
-            print("[INFO] ✓ Converted single dict to list")
-    
-    if not isinstance(raw_data, list):
-        raise ValueError(f"Dataset must be a list or dict with data field. Got: {type(raw_data)}")
-    
-    print(f"[INFO] ✓ Found {len(raw_data)} examples")
-    
-    # Step 2: Normalize field names (handle various formats)
-    normalized_data = []
-    
-    # Detect format from first item
-    if len(raw_data) > 0:
-        first = raw_data[0]
-        
-        # Determine instruction/output field names
-        instruction_key = None
-        output_key = None
-        
-        # Common field name mappings (including customer_message/assistant_response)
-        instruction_fields = ['instruction', 'prompt', 'input', 'question', 'query', 'text', 'user', 'human', 
-                              'customer_message', 'customer', 'message', 'query_text']
-        output_fields = ['output', 'response', 'completion', 'answer', 'reply', 'assistant', 'gpt', 'bot',
-                        'assistant_response', 'assistant', 'response_text', 'answer_text']
-        
-        # Find matching fields
-        for key in instruction_fields:
-            if key in first:
-                instruction_key = key
-                break
-        
-        for key in output_fields:
-            if key in first:
-                output_key = key
-                break
-        
-        # Handle chat/messages format (like ShareGPT, OpenAI)
-        if 'messages' in first or 'conversations' in first:
-            print("[INFO] ✓ Detected chat/messages format")
-            msg_key = 'messages' if 'messages' in first else 'conversations'
-            for item in raw_data:
-                messages = item[msg_key]
-                # Extract user/assistant pairs
-                instruction = ""
-                output = ""
-                # Capture the FIRST user/assistant pair so multi-turn
-                # datasets train on the initial exchange (the rest is
-                # context for future fine-tunes if needed). Roles cover
-                # the conventions actually seen in the wild:
-                #   user-side:      'user', 'human'
-                #   assistant-side: 'assistant', 'gpt', 'bot', 'model'
-                # 'model' is Gemma's convention — without it, every
-                # Gemma-format chat dataset normalises to zero rows.
-                # 'system' role is intentionally skipped (it sets
-                # context but isn't part of the input/output pair).
-                for msg in messages:
-                    role = msg.get('role', msg.get('from', '')).lower()
-                    content = msg.get('content', msg.get('value', ''))
-                    if role in ('user', 'human'):
-                        if not instruction:
-                            instruction = content
-                    elif role in ('assistant', 'gpt', 'bot', 'model'):
-                        if not output:
-                            output = content
-                if instruction and output:
-                    normalized_data.append({'instruction': instruction, 'output': output})
-        
-        # Handle standard formats
-        elif instruction_key and output_key:
-            print(f"[INFO] ✓ Detected format: '{instruction_key}' -> '{output_key}'")
-            for item in raw_data:
-                normalized_data.append({
-                    'instruction': str(item.get(instruction_key, '')),
-                    'output': str(item.get(output_key, ''))
-                })
-        
-        # Handle Alpaca format with optional input field
-        elif 'instruction' in first:
-            print("[INFO] ✓ Detected Alpaca format (instruction + optional input)")
-            for item in raw_data:
-                instruction = item.get('instruction', '')
-                inp = item.get('input', '')
-                output = item.get('output', item.get('response', ''))
-                # Combine instruction and input if present
-                if inp:
-                    full_instruction = f"{instruction}\n\nInput: {inp}"
-                else:
-                    full_instruction = instruction
-                normalized_data.append({'instruction': full_instruction, 'output': output})
-        
-        else:
-            raise ValueError(f"Could not detect dataset format. First item keys: {list(first.keys())}\n"
-                           f"Expected one of: {instruction_fields} -> {output_fields}, or 'messages' format")
-    
-    if not normalized_data:
-        raise ValueError("No valid examples found in dataset")
-    
-    print(f"[INFO] ✓ Normalized {len(normalized_data)} examples")
-
-    # Build the Dataset directly from the in-memory Python list. The
-    # previous approach wrote a temp JSONL file and called
-    # ``datasets.load_dataset('json', data_files=...)`` — which hands
-    # the file to pyarrow's C++ JSON reader. On this Windows + pyarrow
-    # + datasets combination, that path segfaults with
-    # ACCESS_VIOLATION (0xC0000005, exit -1073741819) DURING
-    # 'Generating train split' before a single example is yielded.
-    # ``Dataset.from_list`` skips the pyarrow JSON reader entirely
-    # — it serialises straight into an Arrow table from Python objects,
-    # avoiding the broken native code path.
-    dataset = Dataset.from_list(normalized_data)
-    print(f"[INFO] ✓ Loaded dataset with {len(dataset)} examples")
-    
-    if args.max_examples:
-        dataset = dataset.select(range(min(args.max_examples, len(dataset))))
-
-    def formatting_func(example):
-        text = f"### Instruction:\n{example['instruction']}\n\n### Response:\n{example['output']}"
-        return {"text": text}
-
-    dataset = dataset.map(formatting_func, remove_columns=dataset.column_names)
 
     # Training bookkeeping for ETA/speed
     total_samples = len(dataset)

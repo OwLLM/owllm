@@ -11822,30 +11822,65 @@ class MainWindow(QMainWindow):
         # GPU status using REAL system detection (filtered by selection)
         cuda_info = self.system_info.get("cuda", {})
         all_gpus = self._sort_gpus_by_memory(cuda_info.get("gpus", []))
-        gpus = self._get_filtered_gpus()
-        # Re-sort filtered GPUs
-        gpus = self._sort_gpus_by_memory(gpus)
-        
-        if gpus:
-            gpu_count = len(gpus)
+        # Build the GPU dropdown DIRECTLY from torch.cuda — same source
+        # of truth that finetune.py uses. Whatever index torch reports
+        # here IS what gets passed as CUDA_VISIBLE_DEVICES to the
+        # training subprocess. No nvidia-smi cross-referencing, no PCI
+        # bus reordering, no _orig_index translation. The user picks
+        # 'cuda:N' and training runs on cuda:N. End of story.
+        torch_gpus = []  # list of (cuda_idx, name, total_mem_gb)
+        try:
+            from desktop_app.training_env_manager import _venv_python_path as _tem_py
+            import subprocess as _sp
+            _venv_py = _tem_py(self.root)
+            if _venv_py.exists():
+                # Query the workload venv's torch (the same one that
+                # will run finetune.py) — guarantees the indexing the
+                # user picks IS the indexing that subprocess sees.
+                probe = (
+                    "import json, torch\n"
+                    "info = []\n"
+                    "if torch.cuda.is_available():\n"
+                    "    for i in range(torch.cuda.device_count()):\n"
+                    "        p = torch.cuda.get_device_properties(i)\n"
+                    "        info.append({'idx': i, 'name': p.name, 'mem_gb': p.total_memory / (1024**3)})\n"
+                    "print(json.dumps(info))\n"
+                )
+                r = _sp.run(
+                    [str(_venv_py), "-c", probe],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=(0x08000000 if sys.platform == "win32" else 0),
+                )
+                if r.returncode == 0 and r.stdout.strip():
+                    try:
+                        torch_gpus = [
+                            (int(g["idx"]), str(g["name"]), float(g["mem_gb"]))
+                            for g in json.loads(r.stdout.strip().splitlines()[-1])
+                        ]
+                    except Exception:
+                        torch_gpus = []
+        except Exception:
+            torch_gpus = []
+
+        if torch_gpus:
+            gpu_count = len(torch_gpus)
             self.gpu_status_label = QLabel(f"✅ {gpu_count} GPU{'s' if gpu_count > 1 else ''} detected")
             self.gpu_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
         else:
             self.gpu_status_label = QLabel("⚠️ No GPUs detected")
             self.gpu_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
-        
+
         gpu_layout.addWidget(self.gpu_status_label)
-        
-        # GPU selection dropdown
+
+        # GPU selection dropdown — preserves CUDA index order exactly.
         self.gpu_select = QComboBox()
-        
+        # gpu_index_map[display_index] = real CUDA index passed via
+        # CUDA_VISIBLE_DEVICES. Same value torch.cuda.device(i) takes.
         self.gpu_index_map = []
-        if gpus:
-            for idx, gpu in enumerate(gpus):
-                gpu_name = gpu.get("name", f"GPU {idx}")
-                orig_idx = gpu.get("_orig_index", idx)
-                self.gpu_select.addItem(f"GPU {orig_idx}: {gpu_name}")
-                self.gpu_index_map.append(orig_idx)
+        if torch_gpus:
+            for cuda_idx, name, mem_gb in torch_gpus:
+                self.gpu_select.addItem(f"cuda:{cuda_idx} — {name} ({mem_gb:.1f} GB)")
+                self.gpu_index_map.append(cuda_idx)
             self.training_info_label = QLabel(f"⚡ Training will use: {self.gpu_select.currentText()}")
         else:
             self.gpu_select.addItem("No GPUs available - CPU mode")
@@ -12695,9 +12730,17 @@ class MainWindow(QMainWindow):
                 real_cuda_idx = self.gpu_index_map[selected_display_idx]
             else:
                 real_cuda_idx = selected_display_idx
+            # Pass the CUDA index VERBATIM. No CUDA_DEVICE_ORDER
+            # override — the dropdown was built from torch.cuda's own
+            # view in the workload venv, so the index here is exactly
+            # what torch.cuda will return there. Setting
+            # CUDA_DEVICE_ORDER=PCI_BUS_ID here would reorder the
+            # mapping and silently route to a different GPU.
             env.insert("CUDA_VISIBLE_DEVICES", str(real_cuda_idx))
-            env.insert("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-            self.train_log.appendPlainText(f"[INFO] Using GPU {real_cuda_idx}: {self.gpu_select.currentText()}")
+            self.train_log.appendPlainText(
+                f"[INFO] Using {self.gpu_select.currentText()} "
+                f"(CUDA_VISIBLE_DEVICES={real_cuda_idx})"
+            )
 
         proc = HiddenSubprocessRunner(self)
         proc.readyReadStandardOutput.connect(lambda: self._append_training_output(proc))

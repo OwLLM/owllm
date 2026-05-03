@@ -3,50 +3,17 @@ import os
 import sys
 import json
 import re
-# IMPORTANT: pick the target GPU BEFORE 'import torch' so the CUDA
-# runtime sees only the GPUs we want. Once torch has been imported and
-# torch.cuda has been touched, CUDA_VISIBLE_DEVICES is read once and
-# cached — setting it later is a silent no-op. This block honours an
-# already-set CUDA_VISIBLE_DEVICES (the GUI sets it from the Train
-# tab's dropdown) and only auto-picks when nothing was set externally.
-def _autoselect_single_gpu_pre_torch() -> None:
-    if os.environ.get("CUDA_VISIBLE_DEVICES"):
-        return  # respect external selection
-    try:
-        import subprocess as _sp
-        out = _sp.run(
-            ["nvidia-smi", "--query-gpu=index,memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-            creationflags=(0x08000000 if sys.platform == "win32" else 0),
-        )
-        if out.returncode != 0 or not out.stdout.strip():
-            return
-        rows = []
-        for line in out.stdout.strip().splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) >= 2 and parts[0].isdigit():
-                try:
-                    rows.append((int(parts[0]), int(parts[1])))
-                except ValueError:
-                    pass
-        if not rows:
-            return
-        if len(rows) == 1:
-            return  # single GPU; nothing to choose
-        biggest = max(rows, key=lambda r: r[1])
-        os.environ["CUDA_VISIBLE_DEVICES"] = str(biggest[0])
-        os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-        # Stash a friendly note for main() to log.
-        os.environ["_OWLLM_AUTO_GPU_NOTE"] = (
-            f"auto-pinned to GPU {biggest[0]} ({biggest[1]} MiB) — "
-            f"set CUDA_VISIBLE_DEVICES upstream to override"
-        )
-    except Exception:
-        pass
-
-
-_autoselect_single_gpu_pre_torch()
-
+# No GPU auto-selection here. The user picks the GPU in the Train
+# tab's dropdown; the GUI sets CUDA_VISIBLE_DEVICES BEFORE spawning
+# this process. If CUDA_VISIBLE_DEVICES isn't set we DO NOT touch it
+# — torch will see all GPUs and the user can run on cuda:0 by default
+# (or set CUDA_VISIBLE_DEVICES manually in their shell).
+#
+# We also do NOT override CUDA_DEVICE_ORDER. Keeping it on the system
+# default means the indexing torch reports == the indexing the user
+# saw in the dropdown. Any swap (e.g. forcing PCI_BUS_ID when the
+# system default is FASTEST_FIRST) will mismatch the dropdown's
+# implied indexing and silently route the user to a different GPU.
 import torch
 import io
 import shutil
@@ -294,21 +261,15 @@ def main():
     DATASET_PATH = args.data_path
     OUTPUT_DIR = args.output_dir
 
-    # GPU enumeration AFTER pre-torch auto-select has already had its
-    # say. CUDA_VISIBLE_DEVICES was set (by the GUI's gpu_select widget,
-    # OR by our nvidia-smi pre-torch fallback). torch.cuda's view of
-    # devices below already reflects that.
-    auto_note = os.environ.pop("_OWLLM_AUTO_GPU_NOTE", "")
-    if auto_note:
-        print(f"[INFO] {auto_note}")
+    # Log torch's CUDA view — single source of truth for what's
+    # available. Whatever cuda:0 maps to here IS where the model lands.
     try:
         cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "(not set)")
         cuda_order = os.environ.get("CUDA_DEVICE_ORDER", "(not set)")
         print(f"[INFO] CUDA_VISIBLE_DEVICES={cuda_vis} | CUDA_DEVICE_ORDER={cuda_order}")
         if torch.cuda.is_available():
             dev_count = torch.cuda.device_count()
-            print(f"[INFO] torch sees {dev_count} CUDA device(s) "
-                  f"(post CUDA_VISIBLE_DEVICES filter)")
+            print(f"[INFO] torch sees {dev_count} CUDA device(s)")
             for i in range(dev_count):
                 name = torch.cuda.get_device_name(i)
                 try:
@@ -317,7 +278,7 @@ def main():
                     print(f"[INFO]   cuda:{i} -> {name} ({mem_gb:.1f} GB)")
                 except Exception:
                     print(f"[INFO]   cuda:{i} -> {name}")
-            print(f"[INFO] Default torch device: cuda:0 => {torch.cuda.get_device_name(0)}")
+            print(f"[INFO] Training will use: cuda:0 => {torch.cuda.get_device_name(0)}")
         else:
             print("[INFO] torch.cuda.is_available() == False")
     except Exception as e:

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Dict, Optional
 
 from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, Signal, Slot
@@ -50,6 +51,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -1051,9 +1053,10 @@ class AgentsPage(QWidget):
         rv.addWidget(self.picker_host)
         self.picker_host.setVisible(False)
 
-        self.log_view = QTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setStyleSheet("""
+        # Two-tab log surface: Reply (filtered, default) + Thought (raw
+        # chain-of-thought stripped from model output). Selecting an agent
+        # reopens the Reply tab so users see the answer first.
+        log_view_css = """
             QTextEdit {
                 background:#0f1218;
                 color:#cbd2e0;
@@ -1062,8 +1065,24 @@ class AgentsPage(QWidget):
                 font-family: Consolas, 'JetBrains Mono', monospace;
                 font-size:12px;
             }
-        """)
-        rv.addWidget(self.log_view, 1)
+        """
+        self._chat_view = QTextEdit()
+        self._chat_view.setReadOnly(True)
+        self._chat_view.setStyleSheet(log_view_css)
+
+        self._thought_view = QTextEdit()
+        self._thought_view.setReadOnly(True)
+        self._thought_view.setStyleSheet(log_view_css)
+
+        self._log_tabs = QTabWidget()
+        self._log_tabs.addTab(self._chat_view, "💬 Reply")
+        self._log_tabs.addTab(self._thought_view, "🧠 Thought")
+        self._log_tabs.setCurrentIndex(0)
+        rv.addWidget(self._log_tabs, 1)
+        # Back-compat alias — older code paths (clear, render) still call
+        # self.log_view.clear(); the alias keeps them working but writes
+        # only to the Reply tab. Thought clearing is handled explicitly.
+        self.log_view = self._chat_view
 
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 2)
@@ -2333,19 +2352,52 @@ class AgentsPage(QWidget):
             picker.setVisible(name == agent_name)
         self.picker_host.setVisible(agent_name in self._model_picker_buttons)
         self._render_log_for_agent(agent_name)
+        # Default to the Reply tab whenever a new agent is selected.
+        if hasattr(self, "_log_tabs"):
+            self._log_tabs.setCurrentIndex(0)
 
     def _render_log_for_agent(self, agent_name: str) -> None:
-        self.log_view.clear()
+        self._chat_view.clear()
+        self._thought_view.clear()
         for msg in self._agent_logs.get(agent_name, []):
             self._append_log_line(msg)
+
+    # Strip reasoning-model chain-of-thought wrappers from a body.
+    # Returns ``(thought_text, clean_reply)``. Handles the common families:
+    #   * gpt-oss / harmony "channel" markers (both well-formed and the
+    #     mangled <|channel>thought…<channel|> seen in the wild)
+    #   * <think>…</think>           (DeepSeek-R1, Qwen reasoning)
+    #   * <thinking>…</thinking>     (Claude-style)
+    #   * <reasoning>…</reasoning>   (generic)
+    _THOUGHT_PATTERNS = [
+        re.compile(
+            r'<\|channel\|?>\s*(?:thought|analysis|reasoning)\b'
+            r'(?:\s*<\|message\|>)?(.*?)<\|?(?:end|return|channel)\|?>',
+            re.DOTALL | re.IGNORECASE,
+        ),
+        re.compile(r'<think>(.*?)</think>', re.DOTALL | re.IGNORECASE),
+        re.compile(r'<thinking>(.*?)</thinking>', re.DOTALL | re.IGNORECASE),
+        re.compile(r'<reasoning>(.*?)</reasoning>', re.DOTALL | re.IGNORECASE),
+    ]
+
+    @classmethod
+    def _split_thought(cls, body: str) -> tuple[str, str]:
+        thought_parts: list[str] = []
+        clean = body
+        for pat in cls._THOUGHT_PATTERNS:
+            def _capture(m):
+                grp = m.group(1) if m.lastindex else ""
+                if grp.strip():
+                    thought_parts.append(grp.strip())
+                return ""
+            clean = pat.sub(_capture, clean)
+        return ("\n\n".join(thought_parts).strip(), clean.strip())
 
     def _append_log_line(self, msg: Message) -> None:
         kind = msg.kind.value if hasattr(msg.kind, "value") else str(msg.kind)
         body = (msg.body or "").strip()
         if not body:
             return
-        if len(body) > 4000:
-            body = body[:4000] + "… (truncated)"
         prefix_color = {
             "user":        "#9ad9ff",
             "request":     "#ffd080",
@@ -2357,8 +2409,29 @@ class AgentsPage(QWidget):
         }.get(kind.lower(), "#cccccc")
         header = f"<span style='color:{prefix_color}; font-weight:bold;'>{kind.upper()}</span>"
         sub = f"<span style='color:#888;'> · {msg.from_agent} → {msg.to_agent}</span>"
-        body_html = _escape_html(body).replace("\n", "<br/>")
-        self.log_view.append(f"{header}{sub}<br/>{body_html}<br/>")
+
+        # THOUGHT-kind messages always go to the Thought tab unfiltered.
+        if kind.lower() == "thought":
+            text = body[:4000] + "… (truncated)" if len(body) > 4000 else body
+            html = _escape_html(text).replace("\n", "<br/>")
+            self._thought_view.append(f"{header}{sub}<br/>{html}<br/>")
+            return
+
+        # Other kinds: split out any inline reasoning wrappers and route
+        # the thought portion to the Thought tab. The cleaned reply goes
+        # to the chat tab — even if empty after stripping (rare but means
+        # the model returned ONLY a thought block, in which case we leave
+        # the chat tab silent rather than show empty header lines).
+        thought, clean = self._split_thought(body)
+        if thought:
+            t = thought[:4000] + "… (truncated)" if len(thought) > 4000 else thought
+            t_html = _escape_html(t).replace("\n", "<br/>")
+            t_header = f"<span style='color:#dcb0ff; font-weight:bold;'>THOUGHT (from {kind.upper()})</span>"
+            self._thought_view.append(f"{t_header}{sub}<br/>{t_html}<br/>")
+        if clean:
+            c = clean[:4000] + "… (truncated)" if len(clean) > 4000 else clean
+            c_html = _escape_html(c).replace("\n", "<br/>")
+            self._chat_view.append(f"{header}{sub}<br/>{c_html}<br/>")
 
     def _on_graph_changed(self) -> None:
         """Persist the canvas's current node positions + edges to the project."""

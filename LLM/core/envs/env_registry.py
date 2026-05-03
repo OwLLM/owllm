@@ -1361,8 +1361,8 @@ except Exception as e:
                 "tokenizers==0.21.4",
                 "protobuf",
                 _pkg("safetensors", "safetensors>=0.4.5,<0.6"),
-                _pkg("accelerate", "accelerate>=1.2.0,<1.3.0"),
-                _pkg("peft", "peft>=0.13.0,<0.16.0"),
+                _pkg("accelerate", "accelerate>=1.4.0,<2.0"),
+                _pkg("peft", "peft>=0.18.0,<1.0"),
                 _pkg("sentencepiece", "sentencepiece==0.2.0"),
                 _pkg("pyyaml", "pyyaml>=6.0.0,<7.0.0"),
                 _pkg("requests", "requests>=2.31.0,<3.0.0"),
@@ -2687,8 +2687,8 @@ sys.exit(0)
                 pinned_map_stable = {
                     "transformers": "transformers>=4.57.0,<5.6",
                     "tokenizers": "tokenizers==0.21.4",
-                    "accelerate": "accelerate>=1.2.0,<1.3.0",
-                    "peft": "peft>=0.13.0,<0.16.0",
+                    "accelerate": "accelerate>=1.4.0,<2.0",
+                    "peft": "peft>=0.18.0,<1.0",
                     "safetensors": "safetensors>=0.4.5,<0.6",
                 }
                 # Keep protobuf unpinned (many packages depend on it, and pinning can backfire)

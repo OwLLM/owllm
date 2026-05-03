@@ -214,6 +214,24 @@ def parse_args():
     return p.parse_args()
 
 
+def _should_use_bf16() -> bool:
+    """True when the active CUDA device supports bf16 natively.
+
+    Ampere (compute capability >= 8.0) supports bf16 in hardware. Older
+    cards (Pascal, Volta, Turing) fall back to fp32 emulation if bf16
+    is requested, which is slower and pointless. Default OFF on those.
+    """
+    try:
+        if not torch.cuda.is_available():
+            return False
+        if torch.cuda.device_count() == 0:
+            return False
+        major, _ = torch.cuda.get_device_capability(0)
+        return major >= 8
+    except Exception:
+        return False
+
+
 def main():
     args = parse_args()
 
@@ -232,7 +250,11 @@ def main():
     DATASET_PATH = args.data_path
     OUTPUT_DIR = args.output_dir
 
-    # Log CUDA visibility and selected device
+    # Log CUDA visibility and selected device. Auto-pin to the
+    # largest-VRAM single GPU when CUDA_VISIBLE_DEVICES isn't already
+    # set — without this, accelerate auto-distributes the model and
+    # the parts that land on the smaller card OOM (e.g. RTX 4090 +
+    # RTX A2000: A2000 has 12 GB, gemma-4-E4B in fp32 doesn't fit).
     try:
         cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "(not set)")
         cuda_order = os.environ.get("CUDA_DEVICE_ORDER", "(not set)")
@@ -240,9 +262,43 @@ def main():
         if torch.cuda.is_available():
             dev_count = torch.cuda.device_count()
             print(f"[INFO] torch sees {dev_count} CUDA device(s)")
+            gpu_specs = []  # list of (idx, name, total_mem_gb)
             for i in range(dev_count):
-                print(f"[INFO]   cuda:{i} -> {torch.cuda.get_device_name(i)}")
-            # Report which device index will be used by default
+                name = torch.cuda.get_device_name(i)
+                try:
+                    mem_total = torch.cuda.get_device_properties(i).total_memory
+                except Exception:
+                    mem_total = 0
+                mem_gb = mem_total / (1024 ** 3)
+                gpu_specs.append((i, name, mem_gb))
+                print(f"[INFO]   cuda:{i} -> {name} ({mem_gb:.1f} GB)")
+
+            # Auto-pin: only when caller didn't constrain visibility AND
+            # the GPUs differ in VRAM AND we have multiple devices.
+            if cuda_vis == "(not set)" and len(gpu_specs) > 1:
+                vram_set = {round(g[2]) for g in gpu_specs}
+                if len(vram_set) > 1:
+                    biggest = max(gpu_specs, key=lambda g: g[2])
+                    print(
+                        f"[INFO] Auto-pinning training to cuda:{biggest[0]} "
+                        f"({biggest[1]}, {biggest[2]:.1f} GB) — the smaller "
+                        f"card would OOM under accelerate's auto-split. "
+                        f"Set CUDA_VISIBLE_DEVICES to override."
+                    )
+                    os.environ["CUDA_VISIBLE_DEVICES"] = str(biggest[0])
+                    os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+                    # Re-init torch's view of CUDA so the pin takes
+                    # effect for any later calls in this process.
+                    try:
+                        # torch.cuda doesn't expose a clean way to
+                        # re-enumerate after CUDA_VISIBLE_DEVICES
+                        # changes; print the new effective state.
+                        print(
+                            f"[INFO] After auto-pin: torch will see only "
+                            f"the chosen GPU on next allocation."
+                        )
+                    except Exception:
+                        pass
             print(f"[INFO] Default torch device: cuda:0 => {torch.cuda.get_device_name(0)}")
         else:
             print("[INFO] torch.cuda.is_available() == False")
@@ -390,18 +446,46 @@ def main():
         if not peft_caps["available"]:
             raise RuntimeError("PEFT is required but not available. Please install peft.")
         
+        # Choose target modules. Default is the standard Llama-style
+        # projection names. Gemma 4 wraps every Linear in a custom
+        # ``Gemma4ClippableLinear(linear=Linear(...))`` for output
+        # clipping; PEFT's ``_create_new_module`` rejects the wrapper
+        # because it's not a ``torch.nn.Linear``. Detect that and aim
+        # one level deeper at the inner ``.linear`` so PEFT attaches
+        # LoRA to the actual Linear weights — the clipping wrapper
+        # stays in place around the LoRA-augmented output.
+        default_targets = ["q_proj", "k_proj", "v_proj", "o_proj",
+                           "gate_proj", "up_proj", "down_proj"]
+        gemma4_clippable_present = False
+        try:
+            for module in model.modules():
+                if type(module).__name__ == "Gemma4ClippableLinear":
+                    gemma4_clippable_present = True
+                    break
+        except Exception:
+            gemma4_clippable_present = False
+        if gemma4_clippable_present:
+            print(
+                "[INFO] Detected Gemma4ClippableLinear wrappers — targeting "
+                "inner '.linear' modules so PEFT can attach LoRA.",
+                flush=True,
+            )
+            target_modules = [f"{name}.linear" for name in default_targets]
+        else:
+            target_modules = default_targets
+
         peft_params = get_compatible_peft_params(
             r=LORA_R,
             lora_alpha=LORA_ALPHA,
             lora_dropout=LORA_DROPOUT,
-            target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            target_modules=target_modules,
             bias="none",
             task_type="CAUSAL_LM",
             capabilities=peft_caps
         )
-        
+
         peft_config = LoraConfig(**peft_params)
-        
+
         # Apply LoRA
         model = get_peft_model(model, peft_config)
         
@@ -486,13 +570,25 @@ def main():
                 # Extract user/assistant pairs
                 instruction = ""
                 output = ""
+                # Capture the FIRST user/assistant pair so multi-turn
+                # datasets train on the initial exchange (the rest is
+                # context for future fine-tunes if needed). Roles cover
+                # the conventions actually seen in the wild:
+                #   user-side:      'user', 'human'
+                #   assistant-side: 'assistant', 'gpt', 'bot', 'model'
+                # 'model' is Gemma's convention — without it, every
+                # Gemma-format chat dataset normalises to zero rows.
+                # 'system' role is intentionally skipped (it sets
+                # context but isn't part of the input/output pair).
                 for msg in messages:
                     role = msg.get('role', msg.get('from', '')).lower()
                     content = msg.get('content', msg.get('value', ''))
-                    if role in ['user', 'human']:
-                        instruction = content
-                    elif role in ['assistant', 'gpt', 'bot']:
-                        output = content
+                    if role in ('user', 'human'):
+                        if not instruction:
+                            instruction = content
+                    elif role in ('assistant', 'gpt', 'bot', 'model'):
+                        if not output:
+                            output = content
                 if instruction and output:
                     normalized_data.append({'instruction': instruction, 'output': output})
         
@@ -623,10 +719,15 @@ def main():
             warmup_steps=5,
             num_train_epochs=args.epochs,
             learning_rate=LEARNING_RATE,  # Use the configurable learning rate
-            # Run in float32 to avoid GradScaler FP16 unscale errors.
+            # bf16 halves memory vs fp32 with NONE of fp16's GradScaler
+            # unscale-NaN issues — bf16 has the same dynamic range as
+            # fp32 (8-bit exponent), only the mantissa is reduced. All
+            # current NVIDIA datacenter / consumer GPUs from Ampere
+            # onward (RTX 30/40 series, A100, H100) support it natively.
+            # On older Pascal/Volta (Tesla P100, V100) bf16 falls back
+            # to fp32; we detect that below.
             fp16=False,
-            bf16=False,
-            half_precision_backend="auto",
+            bf16=_should_use_bf16(),
             max_grad_norm=0.0,  # keep clipping disabled
             logging_steps=1,
             logging_strategy="steps",

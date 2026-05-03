@@ -767,25 +767,86 @@ class ImmutableInstaller:
                 **self.subprocess_flags,
             )
         except Exception as exc:  # noqa: BLE001
-            raise InstallationFailed(f"get-pip.py invocation failed: {exc}")
-        if boot.returncode != 0:
+            self.log(f"  get-pip.py invocation crashed: {exc}")
+            boot = None
+
+        # Verify pip both IMPORTS and RUNS as a module. The bundled
+        # get-pip.py can be old enough that it installs a pip release
+        # that doesn't support the venv's Python — symptom is
+        # ``python -m pip`` crashing inside its own import chain even
+        # though ``import pip`` succeeds. We catch that here and fall
+        # back to a fresh PyPA-hosted get-pip.py.
+        def _pip_runnable() -> tuple[bool, str]:
+            try:
+                run = subprocess.run(
+                    [str(venv_python), "-m", "pip", "--version"],
+                    capture_output=True, text=True, timeout=30,
+                    **self.subprocess_flags,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return False, str(exc)
+            return run.returncode == 0, (run.stderr or run.stdout or "").strip()
+
+        if boot is not None and boot.returncode == 0:
+            ok, detail = _pip_runnable()
+            if ok:
+                self.log(f"  ✓ pip bootstrapped: {detail}")
+                return
+            self.log(f"  ⚠ Bundled get-pip installed a pip that won't run: {detail[:200]}")
+        else:
+            self.log("  ⚠ Bundled get-pip.py exited non-zero; falling back to PyPA")
+
+        # Fallback: download a current get-pip.py from PyPA. ~100 KB,
+        # one-time, only on the rare path where the bundled one
+        # produced a too-old pip for the venv's Python.
+        try:
+            import urllib.request
+            tmp_get_pip = self.venv_path.parent / "get-pip-fresh.py"
+            self.log("  Downloading https://bootstrap.pypa.io/get-pip.py …")
+            urllib.request.urlretrieve(
+                "https://bootstrap.pypa.io/get-pip.py", str(tmp_get_pip)
+            )
+        except Exception as exc:  # noqa: BLE001
             raise InstallationFailed(
-                "get-pip.py failed to bootstrap pip into the venv.\n"
-                f"stderr: {(boot.stderr or '')[-800:]}"
+                f"Could not download fresh get-pip.py from PyPA: {exc}\n"
+                "Connect to the internet and retry, or run manually:\n"
+                f'  Invoke-WebRequest https://bootstrap.pypa.io/get-pip.py -OutFile "$env:TEMP\\get-pip.py"\n'
+                f'  & "{venv_python}" "$env:TEMP\\get-pip.py" --force-reinstall --no-warn-script-location'
             )
 
-        # Re-probe.
-        verify = subprocess.run(
-            [str(venv_python), "-c", "import pip; print(pip.__version__)"],
-            capture_output=True, text=True, timeout=20,
-            **self.subprocess_flags,
-        )
-        if verify.returncode != 0:
-            raise InstallationFailed(
-                "Bootstrapped pip still doesn't import.\n"
-                f"stderr: {(verify.stderr or '')[-500:]}"
+        try:
+            fresh = subprocess.run(
+                [
+                    str(venv_python),
+                    str(tmp_get_pip),
+                    "--force-reinstall",
+                    "--no-cache-dir",
+                    "--no-warn-script-location",
+                ],
+                capture_output=True, text=True, timeout=300,
+                **self.subprocess_flags,
             )
-        self.log(f"  ✓ pip {verify.stdout.strip()} bootstrapped")
+        except Exception as exc:  # noqa: BLE001
+            raise InstallationFailed(f"Fresh get-pip.py invocation failed: {exc}")
+        finally:
+            try:
+                tmp_get_pip.unlink()
+            except Exception:
+                pass
+
+        if fresh.returncode != 0:
+            raise InstallationFailed(
+                "Fresh get-pip.py from PyPA still failed.\n"
+                f"stderr: {(fresh.stderr or '')[-800:]}"
+            )
+
+        ok, detail = _pip_runnable()
+        if not ok:
+            raise InstallationFailed(
+                "Even after PyPA fallback, ``python -m pip`` still doesn't run.\n"
+                f"stderr: {detail[-500:]}"
+            )
+        self.log(f"  ✓ pip bootstrapped (PyPA fallback): {detail}")
 
     def _redownload_wheelhouse_for_tag(self, cuda_config: str, venv_tag: str) -> bool:
         """Refresh the wheelhouse so wheels match the venv's cpXY tag.

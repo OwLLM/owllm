@@ -3,6 +3,50 @@ import os
 import sys
 import json
 import re
+# IMPORTANT: pick the target GPU BEFORE 'import torch' so the CUDA
+# runtime sees only the GPUs we want. Once torch has been imported and
+# torch.cuda has been touched, CUDA_VISIBLE_DEVICES is read once and
+# cached — setting it later is a silent no-op. This block honours an
+# already-set CUDA_VISIBLE_DEVICES (the GUI sets it from the Train
+# tab's dropdown) and only auto-picks when nothing was set externally.
+def _autoselect_single_gpu_pre_torch() -> None:
+    if os.environ.get("CUDA_VISIBLE_DEVICES"):
+        return  # respect external selection
+    try:
+        import subprocess as _sp
+        out = _sp.run(
+            ["nvidia-smi", "--query-gpu=index,memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+            creationflags=(0x08000000 if sys.platform == "win32" else 0),
+        )
+        if out.returncode != 0 or not out.stdout.strip():
+            return
+        rows = []
+        for line in out.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 2 and parts[0].isdigit():
+                try:
+                    rows.append((int(parts[0]), int(parts[1])))
+                except ValueError:
+                    pass
+        if not rows:
+            return
+        if len(rows) == 1:
+            return  # single GPU; nothing to choose
+        biggest = max(rows, key=lambda r: r[1])
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(biggest[0])
+        os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+        # Stash a friendly note for main() to log.
+        os.environ["_OWLLM_AUTO_GPU_NOTE"] = (
+            f"auto-pinned to GPU {biggest[0]} ({biggest[1]} MiB) — "
+            f"set CUDA_VISIBLE_DEVICES upstream to override"
+        )
+    except Exception:
+        pass
+
+
+_autoselect_single_gpu_pre_torch()
+
 import torch
 import io
 import shutil
@@ -250,55 +294,29 @@ def main():
     DATASET_PATH = args.data_path
     OUTPUT_DIR = args.output_dir
 
-    # Log CUDA visibility and selected device. Auto-pin to the
-    # largest-VRAM single GPU when CUDA_VISIBLE_DEVICES isn't already
-    # set — without this, accelerate auto-distributes the model and
-    # the parts that land on the smaller card OOM (e.g. RTX 4090 +
-    # RTX A2000: A2000 has 12 GB, gemma-4-E4B in fp32 doesn't fit).
+    # GPU enumeration AFTER pre-torch auto-select has already had its
+    # say. CUDA_VISIBLE_DEVICES was set (by the GUI's gpu_select widget,
+    # OR by our nvidia-smi pre-torch fallback). torch.cuda's view of
+    # devices below already reflects that.
+    auto_note = os.environ.pop("_OWLLM_AUTO_GPU_NOTE", "")
+    if auto_note:
+        print(f"[INFO] {auto_note}")
     try:
         cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "(not set)")
         cuda_order = os.environ.get("CUDA_DEVICE_ORDER", "(not set)")
         print(f"[INFO] CUDA_VISIBLE_DEVICES={cuda_vis} | CUDA_DEVICE_ORDER={cuda_order}")
         if torch.cuda.is_available():
             dev_count = torch.cuda.device_count()
-            print(f"[INFO] torch sees {dev_count} CUDA device(s)")
-            gpu_specs = []  # list of (idx, name, total_mem_gb)
+            print(f"[INFO] torch sees {dev_count} CUDA device(s) "
+                  f"(post CUDA_VISIBLE_DEVICES filter)")
             for i in range(dev_count):
                 name = torch.cuda.get_device_name(i)
                 try:
                     mem_total = torch.cuda.get_device_properties(i).total_memory
+                    mem_gb = mem_total / (1024 ** 3)
+                    print(f"[INFO]   cuda:{i} -> {name} ({mem_gb:.1f} GB)")
                 except Exception:
-                    mem_total = 0
-                mem_gb = mem_total / (1024 ** 3)
-                gpu_specs.append((i, name, mem_gb))
-                print(f"[INFO]   cuda:{i} -> {name} ({mem_gb:.1f} GB)")
-
-            # Auto-pin: only when caller didn't constrain visibility AND
-            # the GPUs differ in VRAM AND we have multiple devices.
-            if cuda_vis == "(not set)" and len(gpu_specs) > 1:
-                vram_set = {round(g[2]) for g in gpu_specs}
-                if len(vram_set) > 1:
-                    biggest = max(gpu_specs, key=lambda g: g[2])
-                    print(
-                        f"[INFO] Auto-pinning training to cuda:{biggest[0]} "
-                        f"({biggest[1]}, {biggest[2]:.1f} GB) — the smaller "
-                        f"card would OOM under accelerate's auto-split. "
-                        f"Set CUDA_VISIBLE_DEVICES to override."
-                    )
-                    os.environ["CUDA_VISIBLE_DEVICES"] = str(biggest[0])
-                    os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
-                    # Re-init torch's view of CUDA so the pin takes
-                    # effect for any later calls in this process.
-                    try:
-                        # torch.cuda doesn't expose a clean way to
-                        # re-enumerate after CUDA_VISIBLE_DEVICES
-                        # changes; print the new effective state.
-                        print(
-                            f"[INFO] After auto-pin: torch will see only "
-                            f"the chosen GPU on next allocation."
-                        )
-                    except Exception:
-                        pass
+                    print(f"[INFO]   cuda:{i} -> {name}")
             print(f"[INFO] Default torch device: cuda:0 => {torch.cuda.get_device_name(0)}")
         else:
             print("[INFO] torch.cuda.is_available() == False")
@@ -423,8 +441,16 @@ def main():
         # low_cpu_mem_usage=True tells transformers to load weights
         # lazily into the device, avoiding a full state-dict copy in
         # CPU RAM during the safe_open mmap pass.
+        # device_map='auto' lets accelerate split the model across all
+        # visible GPUs. With CUDA_VISIBLE_DEVICES already constrained
+        # to a single GPU (either via GUI selector or our pre-torch
+        # auto-select), 'auto' would also work — but explicit is
+        # better than implicit, and it guarantees no model parts ever
+        # land on cuda:1+ even if a future code path adds another
+        # device. device_map=0 = 'put the entire model on cuda:0',
+        # which is what we want for LoRA fine-tuning.
         load_kwargs = {
-            "device_map": "auto",
+            "device_map": 0,
             "trust_remote_code": True,
             "low_cpu_mem_usage": True,
         }

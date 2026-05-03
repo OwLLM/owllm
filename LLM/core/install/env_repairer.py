@@ -553,6 +553,16 @@ class EnvRepairer:
 
     @staticmethod
     def _evaluate_spec(spec: str, current_version: Optional[str]) -> PackageStatus:
+        """Decide whether ``current_version`` satisfies ``spec``.
+
+        Match pip's own install behaviour: pre-releases (``rc``, ``a``,
+        ``b``, ``dev``) are EXCLUDED unless the spec explicitly opts in
+        (e.g. ``>=0.8.0rc0``). This catches the case where a stale
+        ``0.8.0rc0`` wheel was left behind by an earlier phantom-pin
+        attempt — pip won't install it under the current spec, our
+        check reports WRONG_VERSION, and the repair flow can drive it
+        out and replace with a real stable release.
+        """
         if current_version is None:
             return PackageStatus.MISSING
         spec = spec.strip()
@@ -565,7 +575,25 @@ class EnvRepairer:
             if not spec.startswith(("==", ">=", "<=", ">", "<", "!=", "~=")):
                 spec = f"=={spec}"
             try:
-                ok = Version(current_version) in SpecifierSet(spec)
+                version = Version(current_version)
+                spec_set = SpecifierSet(spec)
+                # If the installed version IS a pre-release, only count
+                # it as satisfying when the spec itself is opt-in. This
+                # mirrors pip's resolver default (which would not pick
+                # rc / dev / alpha / beta builds for a plain ``>=X,<Y``
+                # spec). Without this, a stale rc wheel reads as 'OK'
+                # in the diff but pip-install with the same spec will
+                # try to replace it with a stable release — eternal
+                # 'wrong version' loop.
+                if version.is_prerelease:
+                    spec_text = str(spec_set)
+                    explicit_pre = any(
+                        marker in spec_text.lower()
+                        for marker in ("rc", "a", "b", "dev", "pre", "post")
+                    )
+                    ok = (version in spec_set) and explicit_pre
+                else:
+                    ok = version in spec_set
             except InvalidVersion:
                 # Local versions like "2.5.1+cu121" sometimes fail the
                 # parser depending on packaging build; compare textually.

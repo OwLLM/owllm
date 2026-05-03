@@ -1360,7 +1360,7 @@ except Exception as e:
                 "transformers==4.51.3",
                 "tokenizers==0.21.4",
                 "protobuf",
-                _pkg("safetensors", "safetensors>=0.4.5,<1.0"),
+                _pkg("safetensors", "safetensors>=0.4.5,<0.6"),
                 _pkg("accelerate", "accelerate>=1.2.0,<1.3.0"),
                 _pkg("peft", "peft>=0.13.0,<0.16.0"),
                 _pkg("sentencepiece", "sentencepiece==0.2.0"),
@@ -2689,7 +2689,7 @@ sys.exit(0)
                     "tokenizers": "tokenizers==0.21.4",
                     "accelerate": "accelerate>=1.2.0,<1.3.0",
                     "peft": "peft>=0.13.0,<0.16.0",
-                    "safetensors": "safetensors>=0.4.5,<1.0",
+                    "safetensors": "safetensors>=0.4.5,<0.6",
                 }
                 # Keep protobuf unpinned (many packages depend on it, and pinning can backfire)
                 if not is_edge and pkg_norm in pinned_map_stable:

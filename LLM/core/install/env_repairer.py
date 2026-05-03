@@ -161,6 +161,80 @@ class EnvRepairer:
         self.pip = pip_executor or PipExecutor(project_root=self.project_root)
 
     # -----------------------------------------------------------------
+    # Probe-only — used by UIs that want to RENDER the plan before
+    # asking the user to confirm 'Start Repair'.
+    # -----------------------------------------------------------------
+    def probe(
+        self,
+        env_python: Path,
+        env_id: str,
+        *,
+        extras: Optional[List[str]] = None,
+        log: Optional[LogCallback] = None,
+    ) -> RepairResult:
+        """Compute the repair plan WITHOUT installing anything.
+
+        Returns a fully-populated RepairResult with:
+          * torch_before — what we found on probe
+          * diff         — per-package status (OK / MISSING / WRONG_VERSION)
+          * outcome      — UNREACHABLE / INTERPRETER_MISSING when those apply,
+                           SUCCESS when nothing needs doing,
+                           FAILED otherwise (callers display 'work to do')
+
+        ``torch_after`` and ``pip_results`` are left empty since we
+        haven't actually run pip.
+        """
+        env_python = Path(env_python)
+        log = log or (lambda _msg: None)
+
+        result = RepairResult(
+            outcome=RepairOutcome.UNREACHABLE,
+            env_python=env_python,
+            env_id=env_id,
+        )
+        if not env_python.exists():
+            result.outcome = RepairOutcome.INTERPRETER_MISSING
+            result.summary = f"venv interpreter does not exist: {env_python}"
+            return result
+
+        log("[probe] running torch import probe …")
+        result.torch_before = self._probe_torch(env_python)
+
+        try:
+            required = self.resolver.required_for(env_id, extras=extras)
+        except Exception as exc:
+            result.outcome = RepairOutcome.FAILED
+            result.summary = f"could not load profile {env_id!r}: {exc}"
+            return result
+
+        try:
+            installed = self.pip.freeze(env_python=env_python)
+        except PipExecutorError as exc:
+            result.outcome = RepairOutcome.UNREACHABLE
+            result.summary = f"pip freeze failed: {exc}"
+            return result
+
+        result.diff = self._compute_diff(required, installed)
+
+        # Outcome decision: if nothing's missing AND torch imports cleanly,
+        # the env is in fact already healthy — surface as SUCCESS so the
+        # UI can short-circuit to "nothing to do".
+        bad_pkgs = [d for d in result.diff if d.status in (PackageStatus.MISSING, PackageStatus.WRONG_VERSION)]
+        torch_unhealthy = bool(result.torch_before and (result.torch_before.abi_mismatch or not result.torch_before.ok))
+        if not bad_pkgs and not torch_unhealthy:
+            result.outcome = RepairOutcome.SUCCESS
+            result.summary = "environment already healthy; no repair work needed"
+        else:
+            result.outcome = RepairOutcome.FAILED  # 'work to do' marker
+            parts = []
+            if bad_pkgs:
+                parts.append(f"{len(bad_pkgs)} package(s) need install/update")
+            if torch_unhealthy:
+                parts.append("torch C-extensions need rebuild")
+            result.summary = "; ".join(parts) if parts else "repair plan ready"
+        return result
+
+    # -----------------------------------------------------------------
     # Public API
     # -----------------------------------------------------------------
     def repair(

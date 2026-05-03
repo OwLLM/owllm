@@ -293,11 +293,23 @@ class ModelOnboardingService:
                         log_callback=log_callback,
                     )
 
+            # GGUF compatibility requires deep probe (real backend init), not import-only checks.
+            is_gguf_model = False
+            try:
+                p = Path(base_model_path)
+                if p.is_file() and p.suffix.lower() == ".gguf":
+                    is_gguf_model = True
+                elif p.is_dir():
+                    is_gguf_model = any(p.rglob("*.gguf"))
+            except Exception:
+                is_gguf_model = False
+
             log(f"Running model load probe on stable env: {stable_env_key}")
             probe_success, probe_reason, probe_error = self.env_registry.run_model_load_probe(
                 stable_python_exe,
                 base_model_path,
                 adapter_dir,
+                deep_probe=is_gguf_model,
                 log_callback=log_callback
             )
 
@@ -323,6 +335,28 @@ class ModelOnboardingService:
             final_env_key = stable_env_key
             final_python_exe = stable_python_exe
             final_backend = backend
+
+            if not probe_success and is_gguf_model and probe_reason == "GGUF_BACKEND_INCOMPATIBLE":
+                try:
+                    model_path_obj = Path(base_model_path)
+                    bundled_ok, bundled_msg = self.env_registry.runtime_bundle_manager.probe_bundled_gguf_runtime(
+                        model_path_obj,
+                        log_callback=log_callback,
+                    )
+                    if bundled_ok:
+                        probe_success, probe_reason, probe_error = True, None, None
+                        final_backend = "llama_cpp_server"
+                        log(
+                            "Promoting GGUF onboarding to bundled llama.cpp backend because "
+                            f"the python runtime probe is incompatible. {bundled_msg}"
+                        )
+                    else:
+                        log(
+                            "Bundled llama.cpp backend probe did not recover GGUF onboarding failure. "
+                            f"{str(bundled_msg)[:240]}"
+                        )
+                except Exception as bundled_route_ex:
+                    log(f"Bundled llama.cpp onboarding recovery warning: {bundled_route_ex}")
             
             # Step 7a: MISSING_PACKAGE - attempt one-time auto-install of optional deps (Pillow/timm/einops), then re-probe
             if not probe_success and probe_reason == "MISSING_PACKAGE":
@@ -340,6 +374,7 @@ class ModelOnboardingService:
                             stable_python_exe,
                             base_model_path,
                             adapter_dir,
+                            deep_probe=is_gguf_model,
                             log_callback=log_callback
                         )
                         if probe_success:
@@ -367,6 +402,7 @@ class ModelOnboardingService:
                         "healthcheck_log_path": log_path
                     }
             # Step 7b: UNSUPPORTED_ARCH - try edge env fallback (newer transformers, etc.)
+            # GGUF backend incompatibility uses a separate reason code and should not trigger this path.
             if not probe_success and probe_reason == "UNSUPPORTED_ARCH":
                 log(f"Model load probe failed: {probe_reason} - {probe_error[:200]}")
                 log("Attempting edge environment fallback...")
@@ -399,6 +435,7 @@ class ModelOnboardingService:
                         edge_python_exe,
                         base_model_path,
                         adapter_dir,
+                        deep_probe=is_gguf_model,
                         log_callback=log_callback
                     )
                     
@@ -502,15 +539,31 @@ class ModelOnboardingService:
                         log_callback=log_callback,
                     )
                     if bundled_ok:
-                        py_ok, py_err = self.env_registry.runtime_bundle_manager.ensure_gguf_runtime(
-                            final_python_exe,
-                            log_callback=log_callback,
-                        )
-                        if not py_ok:
+                        py_route_ok = False
+                        py_route_err = ""
+                        try:
+                            selected_gguf = self.env_registry.runtime_bundle_manager._pick_gguf_variant(model_path_obj)
+                        except Exception:
+                            selected_gguf = None
+                        if selected_gguf is not None:
+                            py_route_ok, _py_reason, py_route_err = self.env_registry.run_model_load_probe(
+                                final_python_exe,
+                                str(selected_gguf),
+                                adapter_dir=adapter_dir,
+                                deep_probe=True,
+                                log_callback=log_callback,
+                            )
+                        else:
+                            py_route_ok, py_route_err = self.env_registry.runtime_bundle_manager.ensure_gguf_runtime(
+                                final_python_exe,
+                                model_path=model_path_obj,
+                                log_callback=log_callback,
+                            )
+                        if not py_route_ok:
                             final_backend = "llama_cpp_server"
                             log(
                                 "Selecting bundled llama.cpp runtime backend for this GGUF model "
-                                f"(python runtime not compatible: {str(py_err)[:220]})."
+                                f"(python runtime not compatible: {str(py_route_err)[:220]})."
                             )
                         else:
                             log(f"Keeping python GGUF backend (runtime compatible). Bundled probe: {bundled_msg}")
@@ -553,6 +606,14 @@ class ModelOnboardingService:
             log(f"Checking for model-specific extra dependencies")
             required_packages = runtime_required_packages
             extra_packages = [p for p in required_packages if p not in BASE_PACKAGES]
+            if final_backend == "llama_cpp_server":
+                filtered_extra_packages = [p for p in extra_packages if p != "llama-cpp-python"]
+                if len(filtered_extra_packages) != len(extra_packages):
+                    log(
+                        "Skipping llama-cpp-python dedicated isolation because this model "
+                        "is routed to bundled llama.cpp server backend."
+                    )
+                extra_packages = filtered_extra_packages
             
             if extra_packages:
                 log(f"Model requires extra packages: {extra_packages}")
@@ -602,25 +663,43 @@ class ModelOnboardingService:
                         "healthcheck_log_path": log_path
                     }
 
-                # Step 10: Run dependency probe (install model-specific packages into dedicated env)
-                log(f"Installing required packages into dedicated environment: {extra_packages}")
+                # Step 10: Run dependency probe.
+                # IMPORTANT: we check the FULL runtime_required_packages set
+                # (base + extras), not just `extra_packages`. The previous
+                # logic assumed the dedicated env inherited every BASE
+                # package from the source env via the copy in step
+                # _create_dedicated_env. When that copy partially failed
+                # (e.g. site-packages cleanup silently dropped transformers),
+                # onboarding still marked READY because it only re-verified
+                # the extras — and the user got a hard
+                # [RUNTIME_MISSING_COMPONENT] failure on first inference.
+                # Verifying the full set here means READY actually means
+                # "this dedicated env can run the model end-to-end".
+                full_required = list(required_packages)
+                if final_backend == "llama_cpp_server":
+                    full_required = [p for p in full_required if p != "llama-cpp-python"]
+                log(f"Verifying full runtime package set in dedicated env: {full_required}")
                 missing_packages = self.env_registry.check_missing_packages(
                     final_python_exe,
-                    extra_packages
+                    full_required,
                 )
-                
+
                 if missing_packages:
-                    log(f"Missing packages detected in dedicated env: {missing_packages}. Installing...")
+                    log(
+                        f"Missing packages detected in dedicated env: {missing_packages}. "
+                        f"Installing (this covers BASE packages that didn't make it through "
+                        f"the dedicated-env copy as well as model-specific extras)."
+                    )
                     install_success, install_error = self.env_registry.auto_install_missing_packages(
                         final_python_exe,
                         missing_packages,
-                        log_callback=log_callback
+                        log_callback=log_callback,
                     )
-                    
+
                     if not install_success:
                         error_msg = f"Failed to install required packages in dedicated environment: {', '.join(missing_packages)}\n\nDetailed error:\n{install_error}"
                         log(f"Model onboarding failed: {error_msg}")
-                        
+
                         self.state_store.upsert_onboarding(
                             model_id=onboarding_key,
                             base_model_path=base_model_path,
@@ -630,28 +709,29 @@ class ModelOnboardingService:
                             accelerator=accelerator,
                             status="BROKEN",
                             last_error=error_msg,
-                            healthcheck_log_path=log_path
+                            healthcheck_log_path=log_path,
                         )
-                        
+
                         return {
                             "status": "BROKEN",
                             "env_key": final_env_key,
                             "backend": final_backend,
                             "accelerator": accelerator,
                             "last_error": error_msg,
-                            "healthcheck_log_path": log_path
+                            "healthcheck_log_path": log_path,
                         }
-                    
-                    # Re-verify packages after installation
+
+                    # Re-verify against the FULL set (not just what we just
+                    # installed) so a stale copy of the env still shows up.
                     still_missing = self.env_registry.check_missing_packages(
                         final_python_exe,
-                        missing_packages
+                        full_required,
                     )
-                    
+
                     if still_missing:
                         error_msg = f"Packages still missing after installation in dedicated env: {', '.join(still_missing)}"
                         log(f"Model onboarding failed: {error_msg}")
-                        
+
                         self.state_store.upsert_onboarding(
                             model_id=onboarding_key,
                             base_model_path=base_model_path,
@@ -661,21 +741,21 @@ class ModelOnboardingService:
                             accelerator=accelerator,
                             status="BROKEN",
                             last_error=error_msg,
-                            healthcheck_log_path=log_path
+                            healthcheck_log_path=log_path,
                         )
-                        
+
                         return {
                             "status": "BROKEN",
                             "env_key": final_env_key,
                             "backend": final_backend,
                             "accelerator": accelerator,
                             "last_error": error_msg,
-                            "healthcheck_log_path": log_path
+                            "healthcheck_log_path": log_path,
                         }
-                    
+
                     log(f"Successfully installed and verified packages in dedicated env: {missing_packages}")
                 else:
-                    log(f"All required packages already present in dedicated env: {extra_packages}")
+                    log(f"All runtime packages already present in dedicated env: {full_required}")
                     # GPTQ: verify CUDA kernels when auto-gptq was pre-installed (no install = no verification in auto_install)
                     if "auto-gptq" in extra_packages:
                         log("Verifying auto-gptq CUDA kernels...")

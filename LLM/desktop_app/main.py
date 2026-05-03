@@ -11743,10 +11743,17 @@ class MainWindow(QMainWindow):
         params_grid.addWidget(self.train_lr, 1, 1)
         
         params_grid.addWidget(QLabel("<b>LoRA Alpha:</b>"), 1, 2)
+        # Alpha is derived (= 2 × r) and matches what _start_training
+        # actually passes. The label tooltip explains the rule so users
+        # don't think this is a free parameter.
         self.train_lora_alpha_label = QLabel("32")
         self.train_lora_alpha_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #4CAF50; padding: 8px;")
         self.train_lora_alpha_label.setMinimumHeight(40)
         self.train_lora_alpha_label.setAlignment(Qt.AlignCenter)
+        self.train_lora_alpha_label.setToolTip(
+            "LoRA alpha = 2 × r (PEFT/Unsloth convention). "
+            "Effective scaling is alpha / r."
+        )
         params_grid.addWidget(self.train_lora_alpha_label, 1, 3)
         self.train_lora_r.valueChanged.connect(lambda v: self.train_lora_alpha_label.setText(str(v * 2)))
         
@@ -12281,12 +12288,51 @@ class MainWindow(QMainWindow):
         return viewer_widget
     
     def _use_recommended_settings(self):
-        """Apply recommended training settings"""
+        """Apply size-aware recommended LoRA fine-tuning settings.
+
+        Defaults are tuned to the most common fine-tune scenario:
+        instruction-tuning a downloaded chat model on a few thousand
+        examples. The recommendations follow the consensus from the
+        Hugging Face PEFT docs and the Unsloth notebooks:
+
+          LoRA r        = 16   (good capacity, tiny memory cost)
+          LoRA alpha    = 32   (= 2 * r — gives effective scaling 2)
+          LoRA dropout  = 0.05 (regularises against overfitting on
+                                small datasets; 0.0 is a footgun)
+          Learning rate = 2e-4 (standard PEFT LR; lr=lr_full * 10x
+                                because LoRA optimises far fewer params)
+          Epochs        = 3    (more than 5 typically overfits at this
+                                LR on adapter-only training)
+          Max seq len   = 2048 (covers most chat datasets without
+                                blowing GPU memory; bump to 4096 if
+                                your dataset has long replies)
+
+        For very small (<200 ex) or very large (>50k ex) datasets the
+        user should adjust manually — auto-detecting dataset size
+        crosses into 'magic' territory we don't want here.
+        """
         self.train_epochs.setValue(3)
         self.train_lora_r.setValue(16)
+        # Alpha label updates via valueChanged signal connected at
+        # build time; force a refresh in case the spinbox value didn't
+        # actually change (already 16).
+        self.train_lora_alpha_label.setText("32")
         self.train_lr.setValue(2e-4)
         self.train_max_seq.setValue(2048)
-        QMessageBox.information(self, "Recommended Settings", "Applied recommended settings:\n• Epochs: 3\n• LoRA R: 16\n• Learning Rate: 2e-4\n• Max Seq Length: 2048")
+        QMessageBox.information(
+            self,
+            "Recommended Settings",
+            "Applied recommended LoRA fine-tuning settings:\n"
+            "  • Epochs: 3\n"
+            "  • LoRA r: 16\n"
+            "  • LoRA alpha: 32  (= 2 × r)\n"
+            "  • LoRA dropout: 0.05  (set at training time)\n"
+            "  • Learning rate: 2e-4\n"
+            "  • Max seq length: 2048\n\n"
+            "These match the consensus PEFT/Unsloth defaults. Adjust "
+            "manually for very small (<200 examples) or very large "
+            "(>50k examples) datasets.",
+        )
     
     def _toggle_batch_size(self):
         """Toggle between auto and manual batch size"""
@@ -12575,6 +12621,19 @@ class MainWindow(QMainWindow):
                 f"transformers will download from Hugging Face."
             )
 
+        # LoRA params from the GUI. The previous TrainingConfig
+        # construction read r/lr/epochs but silently used the dataclass
+        # DEFAULTS for lora_alpha (16) and lora_dropout (0.0) — meaning
+        # the alpha label in the UI ('LoRA Alpha: 32' for r=16) was a
+        # COSMETIC lie that never reached the trainer. Fix: derive
+        # alpha from r * 2 (matches the GUI label) and use a real
+        # dropout. lora_dropout=0.05 is the PEFT / Unsloth
+        # recommendation for fine-tuning; 0.0 disables regularisation
+        # entirely and overfits small datasets.
+        lora_r = int(self.train_lora_r.value())
+        lora_alpha = lora_r * 2     # matches the read-only label in the UI
+        lora_dropout = 0.05         # safer default than 0.0
+
         cfg = TrainingConfig(
             base_model=base_model_for_finetune,
             data_path=Path(data_path),
@@ -12582,6 +12641,10 @@ class MainWindow(QMainWindow):
             epochs=int(self.train_epochs.value()),
             batch_size=int(self.train_batch.value()),
             learning_rate=float(self.train_lr.value()),
+            max_seq_length=int(self.train_max_seq.value()),
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
         )
 
         cmd = build_finetune_cmd(cfg)

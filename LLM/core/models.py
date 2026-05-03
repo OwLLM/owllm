@@ -91,45 +91,93 @@ def fetch_recent_popular_models(
     limit: int = 20,
     pipeline_tag: str = "text-generation",
 ) -> List[HFModelHit]:
-    """Fetch the N most-recently-updated text-gen models with >= min_downloads.
+    """Fetch up to N text-gen models that combine "recent" with "popular".
 
-    Used by the Models tab "Recommended" view to replace the historical
-    hardcoded curated list (which had drifted to ancient Gemma 2 / Qwen 2.5
-    entries). Strategy: over-fetch the freshest 300 by ``lastModified`` from
-    the Hub, then post-filter on ``downloads >= min_downloads`` so brand-new
-    test/spam repos with zero traction don't crowd out real releases.
+    Used by the Models tab "Recommended" panel to replace the historical
+    hardcoded list (Gemma 2 / Qwen 2.5 etc.). The Hub's ``lastModified``
+    sort returns mostly zero-download spam at the top, so we use a
+    two-strategy approach and merge:
 
-    Returns at most ``limit`` results, ordered most-recent first. Raises
-    ``RuntimeError`` only if huggingface_hub isn't installed; network
-    failures bubble up to the caller so the UI can fall back gracefully.
+      1. Most-downloaded text-gen models (top ``2*limit`` by downloads).
+         These are guaranteed to exist and pass the >= ``min_downloads``
+         floor; gives us a strong baseline.
+      2. Most-recently-updated text-gen models (top 200 by lastModified)
+         post-filtered for >= ``min_downloads``. These bubble freshly
+         released versions of established families (Llama 3.3, Qwen 3,
+         Phi-5, …) to the top.
+
+    Strategy 2 entries take precedence when both return the same model_id;
+    we then top up with strategy 1 to reach ``limit``. Each strategy is
+    wrapped in try/except so a single API quirk doesn't kill the whole
+    fetch — partial results are still better than the offline fallback.
     """
     if list_models is None:
         raise RuntimeError("huggingface_hub is not available. Install requirements.txt")
-    over_fetch = max(limit * 12, 200)
-    kwargs: dict = {
-        "sort": "lastModified",
-        "direction": -1,
-        "limit": over_fetch,
-    }
-    if pipeline_tag:
-        kwargs["pipeline_tag"] = pipeline_tag
-    hits: List[HFModelHit] = []
-    for m in list_models(**kwargs):
-        dl = getattr(m, "downloads", None) or 0
-        if dl < min_downloads:
-            continue
-        hits.append(
-            HFModelHit(
-                model_id=getattr(m, "modelId", None) or getattr(m, "id", ""),
-                downloads=dl,
-                likes=getattr(m, "likes", None),
-                last_modified=str(getattr(m, "lastModified", None) or ""),
-                tags=list(getattr(m, "tags", None) or []),
-            )
+
+    def _to_hit(m) -> HFModelHit:
+        return HFModelHit(
+            model_id=getattr(m, "modelId", None) or getattr(m, "id", ""),
+            downloads=getattr(m, "downloads", None) or 0,
+            likes=getattr(m, "likes", None),
+            last_modified=str(getattr(m, "lastModified", None) or ""),
+            tags=list(getattr(m, "tags", None) or []),
         )
-        if len(hits) >= limit:
+
+    # --- strategy 1: top by downloads (always works, always >= floor) ---
+    by_downloads: List[HFModelHit] = []
+    try:
+        kwargs1: dict = {
+            "sort": "downloads",
+            "direction": -1,
+            "limit": max(limit * 4, 80),
+        }
+        if pipeline_tag:
+            kwargs1["pipeline_tag"] = pipeline_tag
+        for m in list_models(**kwargs1):
+            h = _to_hit(m)
+            if h.downloads >= min_downloads:
+                by_downloads.append(h)
+    except Exception:
+        # Silent — strategy 2 may still succeed; caller logs if both fail
+        # via the empty-result branch.
+        pass
+
+    # --- strategy 2: most-recently-updated, filtered to popular ones ---
+    by_recency: List[HFModelHit] = []
+    try:
+        kwargs2: dict = {
+            "sort": "lastModified",
+            "direction": -1,
+            "limit": 250,
+        }
+        if pipeline_tag:
+            kwargs2["pipeline_tag"] = pipeline_tag
+        for m in list_models(**kwargs2):
+            h = _to_hit(m)
+            if h.downloads >= min_downloads:
+                by_recency.append(h)
+            if len(by_recency) >= limit:
+                break
+    except Exception:
+        pass
+
+    # --- merge: recency first (these are the "fresh + popular" ones),
+    #     then top up from downloads for breadth.
+    merged: List[HFModelHit] = []
+    seen: set[str] = set()
+    for h in by_recency + by_downloads:
+        if not h.model_id or h.model_id in seen:
+            continue
+        seen.add(h.model_id)
+        merged.append(h)
+        if len(merged) >= limit:
             break
-    return hits
+
+    # If both strategies failed completely, raise so the caller's
+    # try/except hits the offline-fallback branch.
+    if not merged:
+        raise RuntimeError("HF list_models returned no results from either strategy")
+    return merged
 
 
 def download_hf_model(model_id: str, target_dir: Path) -> Path:

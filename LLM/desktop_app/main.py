@@ -6649,10 +6649,20 @@ class MainWindow(QMainWindow):
             }
         """)
         self.downloaded_tab_btn.clicked.connect(lambda: self.models_content_tabs.setCurrentIndex(1))
-        
+
+        # Tuned Models tab — lists locally fine-tuned outputs from
+        # LLM/fine_tuned/ (PEFT adapters produced by the Train tab).
+        self.tuned_tab_btn = QPushButton("🎯 Tuned Models")
+        self.tuned_tab_btn.setCheckable(True)
+        self.tuned_tab_btn.setChecked(False)
+        self.tuned_tab_btn.setMinimumHeight(50)
+        self.tuned_tab_btn.setStyleSheet(self.downloaded_tab_btn.styleSheet())
+        self.tuned_tab_btn.clicked.connect(lambda: self.models_content_tabs.setCurrentIndex(2))
+
         # Add custom tab buttons to header layout
         header_layout.addWidget(self.browse_tab_btn)
         header_layout.addWidget(self.downloaded_tab_btn)
+        header_layout.addWidget(self.tuned_tab_btn)
 
         # Filter container — inline next to the Downloaded button,
         # same height as the tab buttons (50px), 2×4 grid of checkboxes.
@@ -7105,7 +7115,30 @@ class MainWindow(QMainWindow):
         downloaded_layout.addLayout(downloaded_horizontal)
         
         self.models_content_tabs.addTab(downloaded_tab, "💾 Downloaded")
-        
+
+        # 2c. TUNED MODELS TAB — local fine-tuning outputs (LoRA adapters
+        # produced by the Train tab, stored under LLM/fine_tuned/).
+        tuned_tab = QWidget()
+        tuned_layout = QVBoxLayout(tuned_tab)
+        tuned_layout.setContentsMargins(10, 10, 10, 10)
+        tuned_header = QLabel("🎯 Locally fine-tuned models (LoRA adapters)")
+        tuned_header.setStyleSheet(
+            "font-size: 16pt; font-weight: bold; color: #c08aff; padding: 4px 0px;"
+        )
+        tuned_layout.addWidget(tuned_header)
+        tuned_scroll = QScrollArea()
+        tuned_scroll.setWidgetResizable(True)
+        tuned_scroll.setFrameShape(QFrame.NoFrame)
+        tuned_scroll.setStyleSheet("background: transparent;")
+        self.tuned_container = QWidget()
+        self.tuned_layout = QVBoxLayout(self.tuned_container)
+        self.tuned_layout.setSpacing(10)
+        self.tuned_layout.setContentsMargins(5, 5, 5, 5)
+        self.tuned_layout.addStretch(1)
+        tuned_scroll.setWidget(self.tuned_container)
+        tuned_layout.addWidget(tuned_scroll, 1)
+        self.models_content_tabs.addTab(tuned_tab, "🎯 Tuned Models")
+
         main_layout.addWidget(self.models_content_tabs)
         
         # 3. BOTTOM STATUS & CONFIG
@@ -7370,24 +7403,46 @@ class MainWindow(QMainWindow):
         try:
             from core.models import fetch_recent_popular_models
             curated_hits = fetch_recent_popular_models(min_downloads=10_000, limit=20)
+            self._log_models(f"✓ Fetched {len(curated_hits)} recommended models from Hugging Face.")
         except Exception as _curated_err:
+            import traceback as _tb
             self._log_models(
-                f"⚠ Could not fetch live recommended models ({_curated_err}); "
-                "showing offline fallback."
+                f"⚠ Could not fetch live recommended models: {type(_curated_err).__name__}: "
+                f"{_curated_err}; showing offline fallback. "
+                f"Check network / huggingface_hub install."
             )
+            self._log_models(_tb.format_exc())
             curated_hits = []
+        # Cache the raw fetch so the format/capability checkboxes can
+        # re-render the panel without re-hitting the Hub. (Re-uses the
+        # cache on subsequent _refresh_models calls triggered by a
+        # checkbox toggle — see _on_hf_filter_toggled.)
+        if curated_hits:
+            self._curated_hits_cache = curated_hits
+        elif hasattr(self, "_curated_hits_cache") and self._curated_hits_cache:
+            curated_hits = self._curated_hits_cache
 
         def _pretty_name(model_id: str) -> str:
             tail = model_id.split("/", 1)[-1]
             return tail.replace("-", " ").replace("_", " ")
 
+        # Apply the same format/capability filters to the curated list
+        # that the search panel uses. If no checkbox is on, every hit
+        # passes (legacy behaviour).
+        filtered_hits = self._apply_hf_filter(curated_hits)
+
         all_models: list[tuple[str, str, str, str, bool]] = []
-        if curated_hits:
-            for h in curated_hits:
+        if filtered_hits:
+            for h in filtered_hits:
                 desc = ""
                 if h.last_modified:
                     desc = f"Updated {h.last_modified[:10]} · {h.downloads:,} downloads"
                 all_models.append((_pretty_name(h.model_id), h.model_id, desc, "Unknown size", True))
+        elif curated_hits:
+            # We had hits but the active filters dropped them all. Show
+            # nothing rather than the offline fallback (which would be
+            # misleading — the network is fine, the filter just empty).
+            all_models = []
         else:
             # Offline fallback — small, modern, intentionally short. Used
             # only when the live HF query fails (no network, rate limit, …).
@@ -8331,12 +8386,98 @@ class MainWindow(QMainWindow):
     
     def _on_models_tab_changed(self, index: int):
         """Handle models tab changes - sync custom button states"""
-        if index == 0:  # Browse Models tab
-            self.browse_tab_btn.setChecked(True)
-            self.downloaded_tab_btn.setChecked(False)
-        elif index == 1:  # Downloaded tab
-            self.browse_tab_btn.setChecked(False)
-            self.downloaded_tab_btn.setChecked(True)
+        self.browse_tab_btn.setChecked(index == 0)
+        self.downloaded_tab_btn.setChecked(index == 1)
+        if hasattr(self, "tuned_tab_btn"):
+            self.tuned_tab_btn.setChecked(index == 2)
+        if index == 2:
+            try:
+                self._refresh_tuned_models()
+            except Exception:
+                pass
+
+    def _refresh_tuned_models(self) -> None:
+        """Re-list locally fine-tuned outputs (PEFT adapters) into the
+        Tuned Models tab.
+
+        Source of truth: ``LLM/fine_tuned/`` — every subdir with both
+        ``adapter_config.json`` and an ``adapter_model.{safetensors,bin}``
+        is treated as a finished training run. Anything else (in-progress
+        checkpoint dirs, broken outputs) is skipped.
+        """
+        if not hasattr(self, "tuned_layout") or not hasattr(self, "tuned_container"):
+            return
+        # Drain everything except the trailing stretch.
+        while self.tuned_layout.count() > 1:
+            item = self.tuned_layout.takeAt(0)
+            w = item.widget() if item else None
+            if w is not None:
+                w.setParent(None)
+
+        from core.models import list_local_adapters
+        adapters = list_local_adapters()
+        adapter_root = self.root / "fine_tuned"
+
+        if not adapters:
+            empty = QLabel(
+                "No fine-tuned models yet.\n\n"
+                "Run a training job in the Train tab — finished LoRA adapters\n"
+                f"will show up here automatically (saved under {adapter_root})."
+            )
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setStyleSheet(
+                "color:#888; font-size: 12pt; padding: 40px;"
+            )
+            self.tuned_layout.insertWidget(0, empty)
+            return
+
+        for name in adapters:
+            path = adapter_root / name
+            row = QFrame()
+            row.setStyleSheet("""
+                QFrame {
+                    background: rgba(192, 138, 255, 0.08);
+                    border: 1px solid rgba(192, 138, 255, 0.3);
+                    border-radius: 8px;
+                }
+            """)
+            row_lay = QHBoxLayout(row)
+            row_lay.setContentsMargins(14, 10, 14, 10)
+            row_lay.setSpacing(12)
+
+            icon = QLabel("🎯")
+            icon.setStyleSheet("font-size: 22pt; background: transparent;")
+            row_lay.addWidget(icon)
+
+            text_box = QVBoxLayout()
+            text_box.setSpacing(2)
+            title = QLabel(name)
+            title.setStyleSheet(
+                "color:#ffffff; font-size: 13pt; font-weight: bold; background: transparent;"
+            )
+            text_box.addWidget(title)
+            sub = QLabel(str(path))
+            sub.setStyleSheet("color:#888; font-size: 10pt; background: transparent;")
+            text_box.addWidget(sub)
+            row_lay.addLayout(text_box, 1)
+
+            open_btn = QPushButton("📂 Open folder")
+            open_btn.setMinimumHeight(32)
+            open_btn.clicked.connect(
+                lambda _checked=False, p=path: self._open_path_in_explorer(str(p))
+            )
+            row_lay.addWidget(open_btn, 0, Qt.AlignVCenter)
+
+            self.tuned_layout.insertWidget(self.tuned_layout.count() - 1, row)
+
+    def _open_path_in_explorer(self, path: str) -> None:
+        """Reveal a folder in the OS file manager (Windows / macOS / Linux)."""
+        try:
+            from PySide6.QtGui import QDesktopServices
+            from PySide6.QtCore import QUrl
+            QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+        except Exception:
+            pass
 
     def _update_progress_bar_text(self, progress_bar, prefix: str, status_msg: str) -> None:
         """Show GB/GB details in progress bars when status includes them."""
@@ -10483,13 +10624,118 @@ class MainWindow(QMainWindow):
             self.hf_target_dir.setText(d)
 
     def _on_hf_filter_toggled(self, _checked: bool = False) -> None:
-        """Re-run the current HF search when a format filter is toggled.
+        """Apply the format/capability filters.
 
-        No-op when the search box is empty — we don't want to spam list_models
-        with unfiltered queries while the user is clicking around.
+        Two surfaces are affected:
+          * Search Results — re-run the current query through the filter.
+          * Recommended panel — re-render from the cached HF fetch using
+            the same _matches() logic, so checking 'Vision' on the
+            curated view actually narrows the cards instead of being
+            silently ignored.
         """
+        # Search results: only re-run if there's an active query (don't
+        # spam list_models on every checkbox click with an empty query).
         if hasattr(self, "hf_query") and self.hf_query.text().strip():
             self._hf_search()
+        # Recommended panel: rebuild the curated grid from cached hits
+        # using the current checkbox state.
+        if hasattr(self, "_curated_hits_cache"):
+            try:
+                self._refresh_models()
+            except Exception:
+                pass
+
+    def _active_hf_filter_categories(self) -> list[str]:
+        """Snapshot the checkboxes into the canonical category strings."""
+        wanted: list[str] = []
+        if getattr(self, "hf_filter_trainable", None) and self.hf_filter_trainable.isChecked():
+            wanted.append("trainable")
+        if getattr(self, "hf_filter_gguf", None) and self.hf_filter_gguf.isChecked():
+            wanted.append("gguf")
+        if getattr(self, "hf_filter_adapter", None) and self.hf_filter_adapter.isChecked():
+            wanted.append("adapter")
+        if getattr(self, "hf_filter_quant", None) and self.hf_filter_quant.isChecked():
+            wanted.append("quant")
+        if getattr(self, "hf_filter_instruct", None) and self.hf_filter_instruct.isChecked():
+            wanted.append("instruct")
+        if getattr(self, "hf_filter_chat", None) and self.hf_filter_chat.isChecked():
+            wanted.append("chat")
+        if getattr(self, "hf_filter_reasoning", None) and self.hf_filter_reasoning.isChecked():
+            wanted.append("reasoning")
+        if getattr(self, "hf_filter_vision", None) and self.hf_filter_vision.isChecked():
+            wanted.append("vision")
+        return wanted
+
+    def _hit_matches_filters(self, hit, wanted: list[str]) -> bool:
+        """OR-style match between an HFModelHit and the active categories."""
+        if not wanted:
+            return True
+        tagset = {t.lower() for t in (hit.tags or [])}
+        mid = (hit.model_id or "").lower()
+        for category in wanted:
+            if category == "trainable":
+                if (
+                    "transformers" in tagset
+                    and "gguf" not in tagset
+                    and "peft" not in tagset
+                    and "adapter" not in tagset
+                    and not any(q in tagset for q in ("awq", "gptq", "exl2", "mlx"))
+                ):
+                    return True
+            elif category == "gguf":
+                if "gguf" in tagset:
+                    return True
+            elif category == "adapter":
+                if "peft" in tagset or "adapter" in tagset or "lora" in tagset:
+                    return True
+            elif category == "quant":
+                if any(q in tagset for q in ("awq", "gptq", "exl2", "bitsandbytes")):
+                    return True
+            elif category == "instruct":
+                if any(t in tagset for t in ("instruct", "instruction-tuned", "sft")):
+                    return True
+                if (
+                    "instruct" in mid
+                    or "-it-" in mid
+                    or mid.endswith("-it")
+                    or mid.endswith("-it-bnb-4bit")
+                ):
+                    return True
+            elif category == "chat":
+                if any(t in tagset for t in ("chat", "conversational", "dialog", "chatml")):
+                    return True
+                if "chat" in mid or "dialog" in mid:
+                    return True
+            elif category == "reasoning":
+                if any(t in tagset for t in ("reasoning", "thinking", "chain-of-thought")):
+                    return True
+                if any(
+                    kw in mid
+                    for kw in ("reasoning", "thinking", "deepseek-r1", "-r1-", "-r1", "qwq", "o1-")
+                ):
+                    return True
+            elif category == "vision":
+                if any(
+                    t in tagset
+                    for t in (
+                        "image-text-to-text",
+                        "vqa",
+                        "visual-question-answering",
+                        "image-to-text",
+                        "multimodal",
+                    )
+                ):
+                    return True
+                if any(kw in mid for kw in ("vision", "-vl-", "-vl", "llava", "multimodal", "moondream")):
+                    return True
+        return False
+
+    def _apply_hf_filter(self, hits: list) -> list:
+        """Filter a list of HFModelHit by the currently-checked categories."""
+        wanted = self._active_hf_filter_categories()
+        if not wanted:
+            return list(hits or [])
+        return [h for h in (hits or []) if self._hit_matches_filters(h, wanted)]
 
     def _hf_search(self) -> None:
         q = self.hf_query.text().strip()
@@ -10510,99 +10756,7 @@ class MainWindow(QMainWindow):
                 item.widget().deleteLater()
         self.search_model_cards.clear()
         
-        # Collect active filters. Two families:
-        #   FORMAT — Trainable / GGUF / Adapter / Quantized (based on
-        #            HF library tags + quant tags).
-        #   CAPABILITY — Instruct / Chat / Reasoning / Vision (based on
-        #            tags AND model_id name patterns; tags alone are
-        #            sparse for instruct/chat).
-        # Each checkbox is an INCLUSIVE category; a model passes if it
-        # matches ANY checked category. Server-side library filters are
-        # intentionally avoided — the Hub returns cross-tagged repos
-        # (a transformers card with a GGUF mirror sibling), so client-
-        # side post-filtering is the only reliable approach.
-        wanted: list[str] = []
-        if getattr(self, "hf_filter_trainable", None) and self.hf_filter_trainable.isChecked():
-            wanted.append("trainable")
-        if getattr(self, "hf_filter_gguf", None) and self.hf_filter_gguf.isChecked():
-            wanted.append("gguf")
-        if getattr(self, "hf_filter_adapter", None) and self.hf_filter_adapter.isChecked():
-            wanted.append("adapter")
-        if getattr(self, "hf_filter_quant", None) and self.hf_filter_quant.isChecked():
-            wanted.append("quant")
-        if getattr(self, "hf_filter_instruct", None) and self.hf_filter_instruct.isChecked():
-            wanted.append("instruct")
-        if getattr(self, "hf_filter_chat", None) and self.hf_filter_chat.isChecked():
-            wanted.append("chat")
-        if getattr(self, "hf_filter_reasoning", None) and self.hf_filter_reasoning.isChecked():
-            wanted.append("reasoning")
-        if getattr(self, "hf_filter_vision", None) and self.hf_filter_vision.isChecked():
-            wanted.append("vision")
-
-        def _matches(hit) -> bool:
-            tagset = {t.lower() for t in (hit.tags or [])}
-            mid = (hit.model_id or "").lower()
-            for category in wanted:
-                if category == "trainable":
-                    if (
-                        "transformers" in tagset
-                        and "gguf" not in tagset
-                        and "peft" not in tagset
-                        and "adapter" not in tagset
-                        and not any(q in tagset for q in ("awq", "gptq", "exl2", "mlx"))
-                    ):
-                        return True
-                elif category == "gguf":
-                    if "gguf" in tagset:
-                        return True
-                elif category == "adapter":
-                    if "peft" in tagset or "adapter" in tagset or "lora" in tagset:
-                        return True
-                elif category == "quant":
-                    if any(q in tagset for q in ("awq", "gptq", "exl2", "bitsandbytes")):
-                        return True
-                elif category == "instruct":
-                    # Tag forms vary: "instruct", "instruction-tuned",
-                    # "sft". Naming also reliable: "-instruct", "-it-",
-                    # "-it" suffix (Gemma style).
-                    if any(t in tagset for t in ("instruct", "instruction-tuned", "sft")):
-                        return True
-                    if (
-                        "instruct" in mid
-                        or "-it-" in mid
-                        or mid.endswith("-it")
-                        or mid.endswith("-it-bnb-4bit")
-                    ):
-                        return True
-                elif category == "chat":
-                    if any(t in tagset for t in ("chat", "conversational", "dialog", "chatml")):
-                        return True
-                    if "chat" in mid or "dialog" in mid:
-                        return True
-                elif category == "reasoning":
-                    if any(t in tagset for t in ("reasoning", "thinking", "chain-of-thought")):
-                        return True
-                    if any(
-                        kw in mid
-                        for kw in ("reasoning", "thinking", "deepseek-r1", "-r1-", "-r1", "qwq", "o1-")
-                    ):
-                        return True
-                elif category == "vision":
-                    if any(
-                        t in tagset
-                        for t in (
-                            "image-text-to-text",
-                            "vqa",
-                            "visual-question-answering",
-                            "image-to-text",
-                            "multimodal",
-                        )
-                    ):
-                        return True
-                    if any(kw in mid for kw in ("vision", "-vl-", "-vl", "llava", "multimodal", "moondream")):
-                        return True
-            return False
-
+        wanted = self._active_hf_filter_categories()
         filter_summary = f" [filter: {', '.join(wanted)}]" if wanted else ""
         self._log_models(f"🔍 Searching Hugging Face for: {q}{filter_summary}...")
 
@@ -10611,7 +10765,7 @@ class MainWindow(QMainWindow):
             # after client-side filtering drops false positives.
             fetch_limit = 100 if wanted else 24
             raw = search_hf_models(q, limit=fetch_limit)
-            hits = [h for h in raw if _matches(h)] if wanted else raw
+            hits = self._apply_hf_filter(raw)
             hits = hits[:24]
             
             if not hits:

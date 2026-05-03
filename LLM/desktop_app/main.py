@@ -2966,9 +2966,10 @@ class MainWindow(QMainWindow):
                     color: #cbd2e0;
                     border: none;
                     border-bottom: 3px solid transparent;
-                    padding: 8px 14px;
-                    font-size: 11pt;
-                    font-weight: 500;
+                    padding: 12px 20px;
+                    font-size: 13pt;
+                    font-weight: 600;
+                    min-height: 32px;
                 }
                 QPushButton:hover {
                     background: rgba(255, 255, 255, 0.10);
@@ -7255,38 +7256,52 @@ class MainWindow(QMainWindow):
                             col = 0
                             row += 1
         
-        # Curated models: 4 LATEST + 20 MOST POPULAR (2 columns)
-        latest_models = [
-            ("Llama 3.3 70B Instruct (4-bit)", "unsloth/Llama-3.3-70B-Instruct-bnb-4bit", "Latest Llama 3.3 70B model with enhanced capabilities", "~35 GB", True),
-            ("Qwen2.5 72B Instruct (4-bit)", "unsloth/Qwen2.5-72B-Instruct-bnb-4bit", "State-of-the-art Qwen 2.5 72B model", "~36 GB", True),
-            ("Gemma 2 27B Instruct (4-bit)", "unsloth/gemma-2-27b-it-bnb-4bit", "Google's Gemma 2 27B instruction-tuned model", "~14 GB", True),
-            ("Phi-4 14B (4-bit)", "unsloth/Phi-4-bnb-4bit", "Microsoft's latest Phi-4 14B model", "~7 GB", True),
-        ]
-        
-        popular_models = [
-            ("Qwen2.5 32B Instruct (4-bit)", "unsloth/Qwen2.5-32B-Instruct-bnb-4bit", "Powerful 32B parameter Qwen model", "~16 GB", False),
-            ("Qwen2.5 14B Instruct (4-bit)", "unsloth/Qwen2.5-14B-Instruct-bnb-4bit", "Balanced 14B Qwen model", "~7 GB", False),
-            ("Qwen2.5 7B Instruct (4-bit)", "unsloth/Qwen2.5-7B-Instruct-bnb-4bit", "Efficient 7B Qwen model", "~4 GB", False),
-            ("Llama 3.2 11B Vision (4-bit)", "unsloth/Llama-3.2-11B-Vision-Instruct-bnb-4bit", "Vision-capable Llama 3.2 11B", "~6 GB", False),
-            ("Llama 3.2 3B Instruct (4-bit)", "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit", "Fast 3B parameter model", "~2.5 GB", False),
-            ("Llama 3.2 1B Instruct (4-bit)", "unsloth/llama-3.2-1b-instruct-unsloth-bnb-4bit", "Ultra-lightweight 1B model", "~800 MB", False),
-            ("Llama 3.1 8B Instruct (4-bit)", "unsloth/llama-3.1-8b-instruct-unsloth-bnb-4bit", "Popular 8B Llama 3.1", "~5 GB", False),
-            ("Mistral Nemo 12B (4-bit)", "unsloth/Mistral-Nemo-Instruct-2407-bnb-4bit", "Mistral's 12B instruction model", "~6 GB", False),
-            ("Gemma 2 9B Instruct (4-bit)", "unsloth/gemma-2-9b-it-bnb-4bit", "Google's 9B Gemma model", "~5 GB", False),
-            ("Phi-3.5 Mini (4-bit)", "unsloth/Phi-3.5-mini-instruct-bnb-4bit", "Microsoft's efficient Phi-3.5", "~2 GB", False),
-            ("OpenHermes 2.5 Mistral 7B", "unsloth/OpenHermes-2.5-Mistral-7B-bnb-4bit", "Fine-tuned Mistral 7B", "~4 GB", False),
-            ("Llama 3.1 70B Instruct (4-bit)", "unsloth/Meta-Llama-3.1-70B-Instruct-bnb-4bit", "Powerful 70B Llama 3.1", "~35 GB", False),
-            ("Llama 3.1 405B Instruct (4-bit)", "unsloth/Meta-Llama-3.1-405B-Instruct-bnb-4bit", "Massive 405B flagship model", "~200 GB", False),
-            ("Qwen2.5-Coder 7B (4-bit)", "unsloth/Qwen2.5-Coder-7B-Instruct-bnb-4bit", "Code-specialized Qwen 7B", "~4 GB", False),
-            ("Qwen2.5-Coder 14B (4-bit)", "unsloth/Qwen2.5-Coder-14B-Instruct-bnb-4bit", "Advanced code model 14B", "~7 GB", False),
-            ("DeepSeek-R1 7B (4-bit)", "unsloth/DeepSeek-R1-Distill-Qwen-7B-bnb-4bit", "Reasoning-focused 7B model", "~4 GB", False),
-            ("DeepSeek-R1 14B (4-bit)", "unsloth/DeepSeek-R1-Distill-Qwen-14B-bnb-4bit", "Advanced reasoning 14B", "~7 GB", False),
-            ("DeepSeek-R1 32B (4-bit)", "unsloth/DeepSeek-R1-Distill-Qwen-32B-bnb-4bit", "High-end reasoning 32B", "~16 GB", False),
-            ("Llama 3.3 70B Instruct", "unsloth/Llama-3.3-70B-Instruct", "Full precision Llama 3.3 70B", "~140 GB", False),
-            ("Gemma 2 2B Instruct (4-bit)", "unsloth/gemma-2-2b-it-bnb-4bit", "Lightweight 2B Gemma", "~1.5 GB", False),
-        ]
-        
-        all_models = latest_models + popular_models
+        # Recommended models — fetched live from Hugging Face.
+        # Strategy: pull the freshest text-generation repos that already
+        # have ≥10k downloads (so brand-new spam/test repos stay out),
+        # cap at 20, then sort green → orange → red by compatibility so
+        # the user sees what they can actually run first.
+        # The historical hardcoded list (Gemma 2, Qwen 2.5, …) had drifted
+        # ~1 year stale; the dynamic fetch keeps this surface fresh.
+        try:
+            from core.models import fetch_recent_popular_models
+            curated_hits = fetch_recent_popular_models(min_downloads=10_000, limit=20)
+        except Exception as _curated_err:
+            self._log_models(
+                f"⚠ Could not fetch live recommended models ({_curated_err}); "
+                "showing offline fallback."
+            )
+            curated_hits = []
+
+        def _pretty_name(model_id: str) -> str:
+            tail = model_id.split("/", 1)[-1]
+            return tail.replace("-", " ").replace("_", " ")
+
+        all_models: list[tuple[str, str, str, str, bool]] = []
+        if curated_hits:
+            for h in curated_hits:
+                desc = ""
+                if h.last_modified:
+                    desc = f"Updated {h.last_modified[:10]} · {h.downloads:,} downloads"
+                all_models.append((_pretty_name(h.model_id), h.model_id, desc, "Unknown size", True))
+        else:
+            # Offline fallback — small, modern, intentionally short. Used
+            # only when the live HF query fails (no network, rate limit, …).
+            all_models = [
+                ("Llama 3.3 70B Instruct (4-bit)", "unsloth/Llama-3.3-70B-Instruct-bnb-4bit", "Llama 3.3 70B (offline fallback)", "~35 GB", True),
+                ("Phi-4 14B (4-bit)", "unsloth/Phi-4-bnb-4bit", "Microsoft Phi-4 14B (offline fallback)", "~7 GB", True),
+                ("Qwen2.5 7B Instruct (4-bit)", "unsloth/Qwen2.5-7B-Instruct-bnb-4bit", "Qwen 2.5 7B (offline fallback)", "~4 GB", True),
+                ("Llama 3.2 3B Instruct (4-bit)", "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit", "Llama 3.2 3B (offline fallback)", "~2.5 GB", True),
+            ]
+
+        # Sort by compatibility: green → orange → red → unknown. Within a
+        # bucket we keep HF's recency order (fetch_recent_popular_models
+        # already returned newest-first).
+        _color_rank = {"green": 0, "orange": 1, "yellow": 1, "red": 2}
+        def _rank(entry):
+            badge = get_model_compatibility_badge(entry[1], entry[0], self.user_vram_gb)
+            return _color_rank.get((badge or {}).get("color"), 3)
+        all_models.sort(key=_rank)
         
         row, col = 0, 0
         for name, model_id, desc, size, is_new in all_models:

@@ -86,6 +86,52 @@ def search_hf_models(
     return hits
 
 
+def fetch_recent_popular_models(
+    min_downloads: int = 10000,
+    limit: int = 20,
+    pipeline_tag: str = "text-generation",
+) -> List[HFModelHit]:
+    """Fetch the N most-recently-updated text-gen models with >= min_downloads.
+
+    Used by the Models tab "Recommended" view to replace the historical
+    hardcoded curated list (which had drifted to ancient Gemma 2 / Qwen 2.5
+    entries). Strategy: over-fetch the freshest 300 by ``lastModified`` from
+    the Hub, then post-filter on ``downloads >= min_downloads`` so brand-new
+    test/spam repos with zero traction don't crowd out real releases.
+
+    Returns at most ``limit`` results, ordered most-recent first. Raises
+    ``RuntimeError`` only if huggingface_hub isn't installed; network
+    failures bubble up to the caller so the UI can fall back gracefully.
+    """
+    if list_models is None:
+        raise RuntimeError("huggingface_hub is not available. Install requirements.txt")
+    over_fetch = max(limit * 12, 200)
+    kwargs: dict = {
+        "sort": "lastModified",
+        "direction": -1,
+        "limit": over_fetch,
+    }
+    if pipeline_tag:
+        kwargs["pipeline_tag"] = pipeline_tag
+    hits: List[HFModelHit] = []
+    for m in list_models(**kwargs):
+        dl = getattr(m, "downloads", None) or 0
+        if dl < min_downloads:
+            continue
+        hits.append(
+            HFModelHit(
+                model_id=getattr(m, "modelId", None) or getattr(m, "id", ""),
+                downloads=dl,
+                likes=getattr(m, "likes", None),
+                last_modified=str(getattr(m, "lastModified", None) or ""),
+                tags=list(getattr(m, "tags", None) or []),
+            )
+        )
+        if len(hits) >= limit:
+            break
+    return hits
+
+
 def download_hf_model(model_id: str, target_dir: Path) -> Path:
     """Download a HF model snapshot into target_dir/<model_id_slug>."""
     if snapshot_download is None:

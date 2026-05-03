@@ -47,6 +47,49 @@ from core.install.env_repairer import (
     TORCH_ABI_FINGERPRINTS,
 )
 
+
+def resolve_profile_id(env_key: str, project_root=None) -> str:
+    """Map an env_key (e.g. ``tf-cu121-t25-base-stable``) to a PinResolver profile id.
+
+    The launcher / EnvSpec returns ``env_key`` (the layout id), while
+    PinResolver and EnvRepairer want a ``profile_id`` (the hardware id,
+    e.g. ``ampere_cu121``). They're related but not the same string.
+
+    Strategy:
+      1. If env_key is itself a known profile id, use it directly.
+      2. Otherwise extract the cuXXX/cpu tag from env_key and pick the
+         first profile whose torch_index targets that variant.
+      3. Last resort: return env_key unchanged so the caller sees
+         exactly what was tried in the resulting error.
+
+    Single helper because at least four files need this same translation
+    (safe_mode console + Qt window, home-page Fix Issues post-verify,
+    onboarding, server preflight). Putting it here means the rule lives
+    in ONE place.
+    """
+    from pathlib import Path as _Path
+    if project_root is None:
+        project_root = _Path(__file__).resolve().parents[2]
+    try:
+        resolver = PinResolver(project_root=_Path(project_root))
+    except Exception:
+        return env_key
+    if env_key in resolver.profile_ids:
+        return env_key
+    # Pull the cu* tag out of the env_key.
+    import re as _re
+    m = _re.search(r"\b(cu\d+|cpu)\b", env_key)
+    target = m.group(1) if m else None
+    if target:
+        for pid in resolver.profile_ids:
+            try:
+                idx = (resolver.torch_index_for(pid) or "").lower()
+            except Exception:
+                idx = ""
+            if target in idx:
+                return pid
+    return env_key
+
 __all__ = [
     "PipExecutor",
     "PipMode",
@@ -62,4 +105,5 @@ __all__ = [
     "PackageStatus",
     "TorchProbe",
     "TORCH_ABI_FINGERPRINTS",
+    "resolve_profile_id",
 ]

@@ -85,11 +85,18 @@ def _venv_python_path(llm_root: Path) -> Path:
 
 
 def _resolve_env_id(llm_root: Path) -> Optional[str]:
-    """Return the active profile id (e.g. ``ampere_cu121``) or None."""
+    """Return the active profile id (e.g. ``ampere_cu121``) or None.
+
+    Translates ``env_key`` (the layout id e.g. ``tf-cu121-t25-base-stable``)
+    into a PinResolver profile id. Uses the shared
+    ``core.install.resolve_profile_id`` helper so the rule lives in one
+    place.
+    """
     try:
         from core.runtime.owllm_python import get_owllm_env
+        from core.install import resolve_profile_id
         env = get_owllm_env(llm_root)
-        return getattr(env, "profile_id", None)
+        return resolve_profile_id(env.env_key, project_root=llm_root)
     except Exception:
         return None
 

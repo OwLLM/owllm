@@ -127,14 +127,16 @@ def run_qt_window(project_root: Path) -> int:
                 summary = "unknown"
                 try:
                     from core.runtime.owllm_python import get_owllm_env
-                    from core.install import EnvRepairer
+                    from core.install import EnvRepairer, resolve_profile_id
                     env = get_owllm_env(here)
+                    pid = resolve_profile_id(env.env_key, project_root=here)
                     _emit(f"[safe-mode] workload venv: {env.python_exe}")
-                    _emit(f"[safe-mode] profile id:    {env.profile_id}")
+                    _emit(f"[safe-mode] env_key:       {env.env_key}")
+                    _emit(f"[safe-mode] profile id:    {pid}")
                     repairer = EnvRepairer(project_root=here)
                     result = repairer.repair(
                         env_python=env.python_exe,
-                        env_id=env.profile_id,
+                        env_id=pid,
                         extras=["training"],
                         log=_emit,
                     )

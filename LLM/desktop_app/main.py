@@ -251,13 +251,14 @@ class InstallerThread(QThread):
                         self.log_output.emit("=" * 60)
                         self.log_output.emit("Unified post-install verify (EnvRepairer)")
                         self.log_output.emit("=" * 60)
-                        from core.install import EnvRepairer, RepairOutcome
+                        from core.install import EnvRepairer, RepairOutcome, resolve_profile_id
                         from core.runtime.owllm_python import get_owllm_env
                         env = get_owllm_env(llm_root)
+                        pid = resolve_profile_id(env.env_key, project_root=llm_root)
                         repairer = EnvRepairer(project_root=llm_root)
                         result = repairer.repair(
                             env_python=env.python_exe,
-                            env_id=env.profile_id,
+                            env_id=pid,
                             extras=["training"],
                             log=lambda m: self.log_output.emit(f"  {m}"),
                         )

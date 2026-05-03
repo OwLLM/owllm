@@ -58,9 +58,10 @@ def run_console(project_root: Path) -> int:
     # Resolve which env to repair — the same way LAUNCHER.py does.
     try:
         from core.runtime.owllm_python import get_owllm_env
+        from core.install import resolve_profile_id
         env = get_owllm_env(here)
         env_python = env.python_exe
-        env_id = env.profile_id
+        env_id = resolve_profile_id(env.env_key, project_root=here)
     except Exception as exc:
         print(f"[FATAL] could not resolve OWLLM env: {exc}")
         traceback.print_exc()

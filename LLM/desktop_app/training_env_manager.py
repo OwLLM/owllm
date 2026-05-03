@@ -126,6 +126,51 @@ def _can_import(python_exe: Path, module: str) -> bool:
     return proc.returncode == 0
 
 
+def _verify_torch_cuda(python_exe: Path) -> Tuple[bool, str]:
+    """Probe the venv: does torch import AND see CUDA?
+
+    Returns ``(ok, reason)``. ``ok=True`` only when:
+      * ``import torch`` succeeds without error
+      * ``torch.cuda`` exists
+      * ``torch.cuda.is_available()`` returns True
+
+    Used by ``ensure_ready`` as a pre-flight gate so we fix CPU-only
+    torch BEFORE any training package install. Spawns the venv's own
+    interpreter — `import torch` in the parent process would either
+    miss the venv's site-packages or worse, load mismatched DLLs into
+    OWLLM itself.
+    """
+    probe = (
+        "import sys\n"
+        "try:\n"
+        "    import torch\n"
+        "except Exception as e:\n"
+        "    print('IMPORT_FAIL', type(e).__name__, str(e))\n"
+        "    sys.exit(2)\n"
+        "if not getattr(torch, 'cuda', None):\n"
+        "    print('NO_CUDA_MODULE', torch.__version__)\n"
+        "    sys.exit(3)\n"
+        "if not torch.cuda.is_available():\n"
+        "    print('CUDA_NOT_AVAILABLE', torch.__version__)\n"
+        "    sys.exit(4)\n"
+        "print('OK', torch.__version__, torch.cuda.device_count())\n"
+    )
+    try:
+        proc = subprocess.run(
+            [str(python_exe), "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=(0x08000000 if sys.platform == "win32" else 0),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return False, f"probe-failed: {exc}"
+    out = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode == 0 and out.startswith("OK"):
+        return True, out
+    return False, out or f"probe exited {proc.returncode}"
+
+
 def _import_error(python_exe: Path, module: str) -> str:
     """Return stderr from ``python -c "import <module>"`` — empty string
     if the import succeeds. Used by self-healing to figure out WHY a
@@ -168,20 +213,26 @@ def ensure_ready(
     self-installed" promise means we should resolve everything we can
     automatically before bothering the user.
 
-    Recovery levels for each missing package:
+    Recovery levels:
 
-      L1 — plain ``pip install <pkg>`` (the cheap path that works for
-           well-behaved packages).
-      L2 — if the import still fails, parse the import error and
-           install the named missing dep first (e.g. unsloth's
-           transitive ``triton`` module needs ``triton-windows`` on
-           Windows because mainline ``triton`` only ships Linux/macOS
-           wheels).
-      L3 — ``pip install --upgrade --force-reinstall <pkg>`` to clear
-           any half-installed wheel state from a previous failed run.
+      Step 0 (PROACTIVE) — verify torch+CUDA in the venv. If torch
+           import works but ``torch.cuda.is_available()`` is False
+           (i.e. a CPU-only torch sneaked in), force-reinstall the
+           torch / torchvision / torchaudio cu121 trio from the
+           PyTorch CUDA index BEFORE installing any training package.
+           This fixes the most common recurring failure mode (unsloth
+           raising 'cannot find any torch accelerator') at its source.
 
-    Only after L1 → L2 → L3 all fail to make ``import <pkg>`` work do
-    we surface the actual import error to the user.
+      Per-missing-package ladder:
+        L1 — plain ``pip install <pkg>`` (the cheap path).
+        L2 — parse the import error and install the named missing dep
+             first (e.g. unsloth needs ``triton-windows`` on Windows).
+        L2.5 — if the error matches torch-CUDA fingerprints, reinstall
+             the cu121 trio (fallback in case Step 0 didn't catch it).
+        L3 — ``pip install --upgrade --force-reinstall <pkg>``.
+
+    Only after every level fails to make ``import <pkg>`` work do we
+    surface the actual import error to the user.
     """
     p = progress or (lambda _msg: None)
 
@@ -193,11 +244,49 @@ def ensure_ready(
             "or run:\n  python -m venv LLM/.venv"
         )
 
-    if not cur.missing_packages:
+    py = Path(cur.venv_python_path)
+
+    # Step 0 — proactive torch+CUDA gate.
+    # The biggest recurring failure mode here was 'unsloth installed,
+    # imports, but raises NotImplementedError("Unsloth cannot find any
+    # torch accelerator? You need a GPU.")' because torch in the venv
+    # was the CPU-only PyPI build instead of the cu121 build. Catching
+    # that symptom in L2.5 worked, but only after pip had already done
+    # an unsloth install + the per-package import probe failed and we
+    # parsed the error string. By running this check FIRST we fix the
+    # cause once, before any training-package install touches a torch
+    # that's broken at the C-extension layer.
+    p("Verifying torch+CUDA in the training venv…")
+    torch_ok, torch_reason = _verify_torch_cuda(py)
+    if not torch_ok:
+        p(f"Torch CUDA unavailable ({torch_reason}); reinstalling torch+cu121…")
+        try:
+            _pip_install_with_index(
+                py,
+                ["torch", "torchvision", "torchaudio"],
+                index_url="https://download.pytorch.org/whl/cu121",
+                force_reinstall=True,
+            )
+        except TrainingEnvBootstrapError as exc:
+            logger.warning("Step-0 torch+cu121 reinstall failed: %s", exc)
+            p(f"Torch reinstall failed: {exc}")
+        # Re-probe regardless — if it now works, great; if not, we still
+        # try the package ladder so the user gets the most-specific error
+        # surfaced for whatever's still broken.
+        torch_ok, torch_reason = _verify_torch_cuda(py)
+        if torch_ok:
+            p("✓ Torch CUDA now available; proceeding with package install.")
+        else:
+            p(f"⚠ Torch CUDA still unavailable after reinstall: {torch_reason}")
+
+    # Re-probe missing packages AFTER the torch reinstall — a force-
+    # reinstalled torch can break unsloth's C deps that were importable
+    # before, which means our 'missing' list at this point may be stale.
+    cur = status(llm_root)
+    if not cur.missing_packages and torch_ok:
         p("Training environment ready.")
         return cur
 
-    py = Path(cur.venv_python_path)
     spec_lookup = dict(REQUIRED_TRAINING_PACKAGES)
     final_errors: List[Tuple[str, str]] = []
 
@@ -277,13 +366,19 @@ def ensure_ready(
             f"• {pkg} — actual import error:\n    {err}"
             for pkg, err in final_errors
         )
+        torch_ok_now, torch_state = _verify_torch_cuda(py)
+        torch_line = (
+            f"Torch state: {torch_state}\n\n"
+            if not torch_ok_now
+            else ""
+        )
         raise TrainingEnvBootstrapError(
-            "Self-healing exhausted L1/L2/L3 recovery and "
-            f"{len(final_errors)} package(s) still won't import.\n\n"
-            f"{details}\n\n"
-            "Open the Models tab → Repair All to rebuild the env from "
-            "scratch, or report this trace so we can ship a tighter "
-            "self-heal for your platform."
+            "Self-healing exhausted Step-0 / L1 / L2 / L2.5 / L3 recovery "
+            f"and {len(final_errors)} package(s) still won't import.\n\n"
+            f"{torch_line}{details}\n\n"
+            "Open the Environments page and click 'Repair Environment' "
+            "to rebuild the venv from scratch, or report this trace so "
+            "we can ship a tighter self-heal for your platform."
         )
     p("All training packages installed.")
     return final

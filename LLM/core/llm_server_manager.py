@@ -1726,6 +1726,42 @@ class LLMServerManager:
                             f"Startup log: {preflight_log_path}"
                         )
             log("Environment dependencies validated - all critical packages present")
+
+            # Migration 6/6: unified torch ABI coherence check.
+            # The 'critical packages present' gate above only checks that
+            # each package has a compatible-version wheel installed — it
+            # does NOT verify that torch's C extensions actually load.
+            # That distinction matters: a venv with torch+cu121 installed
+            # but a stale torchvision/_C.pyd compiled against a different
+            # libtorch reports 'all packages present' here AND then dies
+            # at first inference with the Windows 'Entry Point Not Found'
+            # pop-up (we hit this empirically with Gemma-4 / unsloth).
+            # EnvRepairer's torch trio coherence step force-rebuilds the
+            # matched cu* triple in that exact case. Soft-dependency: a
+            # verify failure logs the trace; the existing 'critical
+            # packages OK' result stands so we don't regress models that
+            # were working before the unified check existed.
+            try:
+                from core.install import EnvRepairer, RepairOutcome
+                from pathlib import Path as _Path
+                repairer = EnvRepairer(project_root=_Path(__file__).resolve().parents[1])
+                pin_env_id = self.env_registry.env_key_resolver.parse_env_key(env_spec.key).get("profile_id") or env_spec.key
+                if pin_env_id in repairer.resolver.profile_ids:
+                    log(f"[server-preflight] EnvRepairer torch coherence check (profile={pin_env_id})")
+                    coh = repairer.repair(
+                        env_python=_Path(env_spec.python_executable),
+                        env_id=pin_env_id,
+                        log=log,
+                    )
+                    if coh.outcome == RepairOutcome.SUCCESS_WITH_WARNINGS:
+                        log(f"[server-preflight] coherence warning: {coh.summary}")
+                    elif coh.outcome != RepairOutcome.SUCCESS:
+                        log(f"[server-preflight] coherence check non-fatal failure: {coh.summary}")
+                else:
+                    log(f"[server-preflight] env_key {env_spec.key!r} has no matching profile — skipping coherence check")
+            except Exception as coh_exc:
+                log(f"[server-preflight] EnvRepairer coherence check raised (continuing): {type(coh_exc).__name__}: {coh_exc}")
+
             if not use_bundled_backend:
                 self._ensure_min_llama_cpp_version_for_gguf(env_spec, model_path, log)
 

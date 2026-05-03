@@ -785,7 +785,68 @@ class ModelOnboardingService:
                         log("auto-gptq CUDA extension verified OK")
             else:
                 log(f"No model-specific packages required (shared environment is sufficient)")
-            
+
+            # Migration 5/6: post-install verify via the unified EnvRepairer.
+            # The model-specific install logic above (auto_install_missing_
+            # packages with GPTQ-from-HF wheels, stable-vs-edge pin rules,
+            # CUDA-kernel verification) stays put — it's intricate and
+            # well-tested. What EnvRepairer adds here is the torch trio
+            # ABI coherence check that the env_registry path doesn't have.
+            # If the dedicated env's torch+torchvision+torchaudio aren't
+            # a matched cu* triple, EnvRepairer rebuilds them — so models
+            # never reach 'READY' with a torch state that will crash the
+            # first inference call. Soft-dependency: a verify failure
+            # downgrades to BROKEN with a precise reason instead of
+            # letting the model land READY-but-broken.
+            try:
+                from core.install import EnvRepairer, RepairOutcome
+                repairer = EnvRepairer(project_root=Path(__file__).resolve().parents[1])
+                # We deliberately pass the dedicated env_key (or shared
+                # final_env_key if no dedicated env was created) so the
+                # PinResolver pulls the right base profile.
+                # If the env_key isn't a known profile id, EnvRepairer
+                # raises and we skip the verify (model setup still
+                # succeeded; we just don't get the bonus check).
+                pin_env_id = self.env_registry.env_key_resolver.parse_env_key(final_env_key).get("profile_id") or final_env_key
+                if pin_env_id in repairer.resolver.profile_ids:
+                    log(f"[onboarding] EnvRepairer post-verify against profile={pin_env_id}")
+                    verify = repairer.repair(
+                        env_python=Path(final_python_exe),
+                        env_id=pin_env_id,
+                        log=log,
+                    )
+                    if verify.outcome not in (RepairOutcome.SUCCESS, RepairOutcome.SUCCESS_WITH_WARNINGS):
+                        error_msg = (
+                            f"EnvRepairer post-verify rejected env after install: "
+                            f"{verify.summary}"
+                        )
+                        log(f"Model onboarding failed: {error_msg}")
+                        self.state_store.upsert_onboarding(
+                            model_id=onboarding_key,
+                            base_model_path=base_model_path,
+                            adapter_dir=adapter_dir,
+                            env_key=final_env_key,
+                            backend=final_backend,
+                            accelerator=accelerator,
+                            status="BROKEN",
+                            last_error=error_msg,
+                            healthcheck_log_path=log_path,
+                        )
+                        return {
+                            "status": "BROKEN",
+                            "env_key": final_env_key,
+                            "backend": final_backend,
+                            "accelerator": accelerator,
+                            "last_error": error_msg,
+                            "healthcheck_log_path": log_path,
+                        }
+                    if verify.outcome == RepairOutcome.SUCCESS_WITH_WARNINGS:
+                        log(f"[onboarding] post-verify warning: {verify.summary}")
+                else:
+                    log(f"[onboarding] env_key {final_env_key!r} has no matching profile — skipping unified post-verify")
+            except Exception as verify_exc:
+                log(f"[onboarding] EnvRepairer post-verify raised (continuing): {type(verify_exc).__name__}: {verify_exc}")
+
             # Success: mark as READY (all checks passed)
             log(f"Model {model_id} successfully onboarded (env: {final_env_key})")
             self.state_store.upsert_onboarding(

@@ -53,16 +53,8 @@ class WheelhouseManager:
         # Expected signature: callback(dict_event)
         self.progress_callback = None
         
-        # Windows subprocess flags to prevent CMD window flashing
+        # Do not hide child console windows.
         self.subprocess_flags = {}
-        if sys.platform == 'win32':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-            self.subprocess_flags = {
-                'startupinfo': startupinfo,
-                'creationflags': subprocess.CREATE_NO_WINDOW
-            }
     
     def log(self, message: str):
         """Log message to console with encoding safety"""
@@ -1297,7 +1289,15 @@ class WheelhouseManager:
                     pass
 
             # Read stderr in chunks; pip often uses carriage returns for progress updates.
+            # IMPORTANT: keep BOTH a progress-parser buffer (carriage-return tail
+            # only, used for live percent updates) AND a complete-stderr accumulator
+            # (every line pip emits, including error text). The previous version
+            # discarded all stderr after progress parsing — so when pip failed we
+            # surfaced an empty error string and the user-facing dialog said
+            # "Failed to download X:" with nothing after the colon. That's been
+            # masking every real download failure.
             stderr_buf = ""
+            stderr_all_lines: list[str] = []
             stdout_lines = []
             try:
                 while True:
@@ -1312,11 +1312,18 @@ class WheelhouseManager:
                             stderr_buf += chunk
                             # Split by carriage return or newline
                             parts = re.split(r"[\r\n]+", stderr_buf)
-                            stderr_buf = parts[-1]  # keep tail
+                            stderr_buf = parts[-1]  # keep tail for progress parser
                             for p in parts[:-1]:
                                 p = p.strip()
                                 if not p:
                                     continue
+                                # Persist every non-progress line for the
+                                # final error report. Progress lines look
+                                # like "45%|####| 1.20G/3.00G"; keep those
+                                # OUT of the accumulator so they don't drown
+                                # the real error text.
+                                if not (percent_re.search(p) and ("|" in p or "/" in p)):
+                                    stderr_all_lines.append(p)
                                 m_pct = percent_re.search(p)
                                 pct = int(m_pct.group(1)) if m_pct else None
                                 m_sz = size_re.search(p)
@@ -1343,10 +1350,19 @@ class WheelhouseManager:
                     pass
 
             if proc.returncode != 0:
-                # Best-effort collect remaining stderr tail
-                err_tail = (stderr_buf or "")
-                error_msg = err_tail or "".join(stdout_lines)
-                return False, str(error_msg)[:500]
+                # Best-effort collect: full stderr (sans progress noise) +
+                # any leftover partial line + stdout for context.
+                err_lines = list(stderr_all_lines)
+                if stderr_buf and stderr_buf.strip():
+                    err_lines.append(stderr_buf.strip())
+                error_msg = "\n".join(err_lines).strip()
+                if not error_msg:
+                    error_msg = "".join(stdout_lines).strip()
+                if not error_msg:
+                    error_msg = f"pip exited {proc.returncode} with no captured output"
+                # Cap a bit higher so multi-line pip error blocks survive
+                # (e.g. 'No matching distribution found' + version list).
+                return False, str(error_msg)[:2000]
 
             # Mark completion
             _emit_download_progress(percent=100)

@@ -4550,6 +4550,64 @@ class MainWindow(QMainWindow):
             print(f"Error refreshing GPU detection: {e}")
             # Button will be recreated when tab is rebuilt, so no need to restore state
     
+    def nativeEvent(self, event_type, message):
+        """Hand WM_NCHITTEST off to Windows so every edge resizes.
+
+        The Qt-level mousePressEvent / mouseMoveEvent path only fires
+        when no child widget claims the mouse — which means resizing
+        was effectively dead on every edge that overlapped a button,
+        scroll area, tab bar, etc. Hooking nativeEvent to return
+        HT* codes for the 8 edge zones lets Windows itself drive the
+        resize loop, which works no matter what Qt widget is under
+        the cursor.
+
+        The Qt-level resize fallback below stays in place so non-
+        Windows builds (and the Qt-only HybridFrameWindow path) still
+        work.
+        """
+        if sys.platform == "win32" and event_type in (
+            b"windows_generic_MSG", "windows_generic_MSG"
+        ):
+            try:
+                import ctypes
+                from ctypes.wintypes import POINT
+
+                class _MSG(ctypes.Structure):
+                    _fields_ = [
+                        ("hWnd", ctypes.c_void_p),
+                        ("message", ctypes.c_uint),
+                        ("wParam", ctypes.c_size_t),
+                        ("lParam", ctypes.c_ssize_t),
+                        ("time", ctypes.c_ulong),
+                        ("pt", POINT),
+                    ]
+
+                msg = _MSG.from_address(int(message))
+                # WM_NCHITTEST = 0x0084. Maximised windows shouldn't
+                # resize from inside the screen edge.
+                if msg.message == 0x0084 and not self.isMaximized() and not self.isFullScreen():
+                    # lParam packs (x, y) as signed 16-bit screen coords.
+                    x = ctypes.c_short(msg.lParam & 0xFFFF).value
+                    y = ctypes.c_short((msg.lParam >> 16) & 0xFFFF).value
+                    from PySide6.QtCore import QPoint as _QPoint
+                    local = self.mapFromGlobal(_QPoint(x, y))
+                    edge = self._get_resize_edge(local)
+                    if edge:
+                        ht_codes = {
+                            "left":         10,  # HTLEFT
+                            "right":        11,  # HTRIGHT
+                            "top":          12,  # HTTOP
+                            "top-left":     13,  # HTTOPLEFT
+                            "top-right":    14,  # HTTOPRIGHT
+                            "bottom":       15,  # HTBOTTOM
+                            "bottom-left":  16,  # HTBOTTOMLEFT
+                            "bottom-right": 17,  # HTBOTTOMRIGHT
+                        }
+                        return True, ht_codes.get(edge, 1)
+            except Exception:
+                pass
+        return super().nativeEvent(event_type, message)
+
     def _get_resize_edge(self, pos) -> str:
         """Determine which edge the mouse is near for resizing"""
         rect = self.rect()

@@ -146,9 +146,40 @@ class HiddenSubprocessRunner(QObject):
         cmd0 = _resolve_program_for_subprocess(cmd0)
         program_and_args = [cmd0] + list(program_and_args[1:])
 
+        # Sanitise the environment dict before handing it to Popen.
+        # On Windows, os.environ inherits cmd.exe's per-drive 'drive
+        # variables' — '=C:', '=D:', '=ExitCode', '=ExitCodeAscii' —
+        # which start with '=' and are SUPPOSED to be there but Python's
+        # subprocess.Popen rejects them with the famously unhelpful
+        # OSError(22, 'The parameter is incorrect', winerror=87). The
+        # whole training spawn dies one millisecond into the process.
+        # Filter:
+        #   * keys starting with '='
+        #   * non-str keys or values
+        #   * keys/values containing NUL bytes
+        #   * empty keys
+        sanitised_env: dict[str, str] = {}
+        bad_keys: list[str] = []
+        for k, v in (process_environment or {}).items():
+            if not isinstance(k, str) or not isinstance(v, str):
+                bad_keys.append(f"{k!r} (non-str)")
+                continue
+            if not k or k.startswith("="):
+                bad_keys.append(k)
+                continue
+            if "\x00" in k or "\x00" in v:
+                bad_keys.append(f"{k} (null byte)")
+                continue
+            sanitised_env[k] = v
+        if bad_keys:
+            _spawn_log_write(
+                f"env sanitisation: dropped {len(bad_keys)} bad key(s): "
+                f"{bad_keys[:10]}"
+            )
+
         kw: dict = {
             "cwd": working_directory,
-            "env": process_environment,
+            "env": sanitised_env,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.STDOUT,
             "stdin": subprocess.DEVNULL,

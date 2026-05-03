@@ -390,14 +390,23 @@ class ImmutableInstaller:
                         f"contains {required_tag} wheels. Re-downloading the "
                         f"wheelhouse for {venv_tag} (the venv stays put)."
                     )
-                    if not self._redownload_wheelhouse_for_tag(cuda_config, venv_tag):
-                        return False, (
-                            f"Could not refresh wheelhouse for Python {venv_tag}. "
-                            f"Open a terminal (with OWLLM closed) and re-run the "
-                            f"OWLLM installer to rebuild the wheelhouse from "
-                            f"scratch, then reopen OWLLM."
+                    refreshed, refresh_err = self._redownload_wheelhouse_for_tag(
+                        cuda_config, venv_tag
+                    )
+                    if not refreshed:
+                        # Wheelhouse refresh failed (network, phantom pin,
+                        # etc). Surface the real error AND switch to
+                        # direct-PyPI install mode so the repair isn't
+                        # stuck behind the wheelhouse.
+                        self.log(
+                            f"  ⚠ Wheelhouse refresh failed: {refresh_err}\n"
+                            f"  Falling back to direct PyPI install for the "
+                            f"missing packages (no wheelhouse cache)."
                         )
-                    self.log(f"  ✓ Wheelhouse refreshed for {venv_tag}")
+                        self._direct_pypi_fallback = True
+                        self._direct_pypi_reason = refresh_err
+                    else:
+                        self.log(f"  ✓ Wheelhouse refreshed for {venv_tag}")
                 # End python-tag self-heal — same skip_installed semantics
                 # as before (we did NOT touch the venv).
                 skip_installed_arg = should_resume
@@ -861,35 +870,40 @@ class ImmutableInstaller:
             )
         self.log(f"  ✓ pip bootstrapped (PyPA fallback): {detail}")
 
-    def _redownload_wheelhouse_for_tag(self, cuda_config: str, venv_tag: str) -> bool:
+    def _redownload_wheelhouse_for_tag(self, cuda_config: str, venv_tag: str) -> tuple[bool, str]:
         """Refresh the wheelhouse so wheels match the venv's cpXY tag.
 
-        Returns True on success. The existing venv is NOT touched —
-        only ``self.wheelhouse`` is repopulated. Used by the python-
-        tag self-heal when the wheelhouse is full of wheels for the
-        wrong Python (e.g. cp312 wheels in a cp311 venv).
+        Returns ``(success, detail)``. ``detail`` is the underlying
+        wheelhouse error when ``success`` is False — surfaced to the
+        caller so the user dialog can show the real reason instead of
+        a generic 'Could not refresh wheelhouse' message. The existing
+        venv is NOT touched.
         """
         if not (venv_tag.startswith("cp") and len(venv_tag) >= 4 and venv_tag[2:].isdigit()):
-            self.log(f"  Cannot parse Python version from venv tag: {venv_tag!r}")
-            return False
+            msg = f"Cannot parse Python version from venv tag: {venv_tag!r}"
+            self.log(f"  {msg}")
+            return False, msg
         digits = venv_tag[2:]
         try:
             python_version = (int(digits[0]), int(digits[1:]))
         except ValueError:
-            self.log(f"  Invalid Python version digits in {venv_tag!r}")
-            return False
+            msg = f"Invalid Python version digits in {venv_tag!r}"
+            self.log(f"  {msg}")
+            return False, msg
 
         try:
             from core.wheelhouse import WheelhouseManager
         except Exception as exc:
-            self.log(f"  Could not import WheelhouseManager: {exc}")
-            return False
+            msg = f"Could not import WheelhouseManager: {exc}"
+            self.log(f"  {msg}")
+            return False, msg
 
         try:
             mgr = WheelhouseManager(self.manifest_path, self.wheelhouse)
         except Exception as exc:
-            self.log(f"  Could not construct WheelhouseManager: {exc}")
-            return False
+            msg = f"Could not construct WheelhouseManager: {exc}"
+            self.log(f"  {msg}")
+            return False, msg
 
         try:
             success, error = mgr.prepare_wheelhouse(
@@ -900,13 +914,14 @@ class ImmutableInstaller:
                 force_redownload=True,
             )
         except Exception as exc:
-            self.log(f"  Wheelhouse prepare failed: {exc}")
-            return False
+            msg = f"Wheelhouse prepare raised: {exc}"
+            self.log(f"  {msg}")
+            return False, msg
 
         if not success:
             self.log(f"  Wheelhouse prepare returned failure: {error}")
-            return False
-        return True
+            return False, str(error or "(no error string)")
+        return True, ""
 
     def _find_bundled_python_for_tag(self, required_tag: str) -> Optional[Path]:
         """Locate a python_runtime/pythonX.Y folder matching ``cpXY``.
@@ -1438,17 +1453,29 @@ class ImmutableInstaller:
         Returns:
             Tuple of (success: bool, error_message: str)
         """
-        cmd = [
-            str(venv_python), "-m", "pip", "install",
-            "--no-index",  # Critical: offline only
-            "--find-links", str(self.wheelhouse),
-            "--no-cache-dir"
-            # NO --no-deps: All packages are explicitly listed in profiles
-        ]
-        
+        cmd = [str(venv_python), "-m", "pip", "install"]
+        if getattr(self, "_direct_pypi_fallback", False):
+            # Wheelhouse refresh failed earlier — install from PyPI
+            # directly. We still install the explicit wheel file path,
+            # so torch+cu121 etc that ARE in the wheelhouse keep
+            # working; the find-links flag is dropped so missing wheels
+            # fall through to PyPI.
+            cmd.extend([
+                "--no-cache-dir",
+                "--prefer-binary",
+                "--extra-index-url", "https://download.pytorch.org/whl/cu121",
+            ])
+        else:
+            cmd.extend([
+                "--no-index",  # Offline-only: wheelhouse must satisfy.
+                "--find-links", str(self.wheelhouse),
+                "--no-cache-dir",
+            ])
+        # NO --no-deps: All packages are explicitly listed in profiles
+
         if force_reinstall:
             cmd.append("--force-reinstall")
-        
+
         cmd.append(str(wheel_path))
         
         try:
@@ -1494,14 +1521,23 @@ class ImmutableInstaller:
             install_args = []
         
         # Build pip install command
-        cmd = [
-            str(venv_python), "-m", "pip", "install",
-            "--no-index",  # Critical: offline only
-            "--find-links", str(self.wheelhouse),
-            "--no-cache-dir"
-            # NO --no-deps: All packages are explicitly listed in profiles
-        ]
-        
+        cmd = [str(venv_python), "-m", "pip", "install"]
+        if getattr(self, "_direct_pypi_fallback", False):
+            # Direct PyPI fallback (wheelhouse refresh failed). PyPI +
+            # PyTorch CUDA index cover everything in our requirements.
+            cmd.extend([
+                "--no-cache-dir",
+                "--prefer-binary",
+                "--extra-index-url", "https://download.pytorch.org/whl/cu121",
+            ])
+        else:
+            cmd.extend([
+                "--no-index",
+                "--find-links", str(self.wheelhouse),
+                "--no-cache-dir",
+            ])
+        # NO --no-deps: All packages are explicitly listed in profiles
+
         # Add additional args from install_args (like --force-reinstall)
         if install_args:
             for arg in install_args:

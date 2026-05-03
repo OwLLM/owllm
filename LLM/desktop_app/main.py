@@ -6626,9 +6626,68 @@ class MainWindow(QMainWindow):
         search_layout.addWidget(self.hf_search_btn)
         
         header_layout.addWidget(search_container)
-        
+
         main_layout.addWidget(header_container)
-        
+
+        # Format filter row — narrows HF search by model format. Trainable
+        # = transformers/full-weights (what the Train page can fine-tune);
+        # GGUF = llama.cpp inference; Adapter = PEFT/LoRA artefacts;
+        # Quantized = AWQ/GPTQ inference-only checkpoints. Filters compose
+        # OR-style server-side; checking none = unfiltered (legacy behaviour).
+        filter_row = QWidget()
+        filter_row_layout = QHBoxLayout(filter_row)
+        filter_row_layout.setContentsMargins(2, 0, 2, 6)
+        filter_row_layout.setSpacing(14)
+        filter_label = QLabel("Format:")
+        filter_label.setStyleSheet("color:#aaa; font-size:10pt; background:transparent;")
+        filter_row_layout.addWidget(filter_label)
+
+        chk_style = (
+            "QCheckBox { color:#dadcdf; font-size:10pt; background:transparent; spacing:4px; }"
+            "QCheckBox::indicator { width:14px; height:14px; }"
+        )
+
+        self.hf_filter_trainable = QCheckBox("✅ Trainable")
+        self.hf_filter_trainable.setToolTip(
+            "transformers-format models with full weights — what the Train tab can fine-tune."
+        )
+        self.hf_filter_trainable.setStyleSheet(chk_style)
+        filter_row_layout.addWidget(self.hf_filter_trainable)
+
+        self.hf_filter_gguf = QCheckBox("📦 GGUF")
+        self.hf_filter_gguf.setToolTip(
+            "llama.cpp / bundled-proxy inference format. Cannot be fine-tuned."
+        )
+        self.hf_filter_gguf.setStyleSheet(chk_style)
+        filter_row_layout.addWidget(self.hf_filter_gguf)
+
+        self.hf_filter_adapter = QCheckBox("🧩 Adapter (LoRA)")
+        self.hf_filter_adapter.setToolTip(
+            "PEFT / LoRA adapters — small overlays that need a base model to load."
+        )
+        self.hf_filter_adapter.setStyleSheet(chk_style)
+        filter_row_layout.addWidget(self.hf_filter_adapter)
+
+        self.hf_filter_quant = QCheckBox("⚡ Quantized (AWQ / GPTQ)")
+        self.hf_filter_quant.setToolTip(
+            "Inference-only weight-quantized checkpoints (AWQ or GPTQ)."
+        )
+        self.hf_filter_quant.setStyleSheet(chk_style)
+        filter_row_layout.addWidget(self.hf_filter_quant)
+
+        filter_row_layout.addStretch(1)
+
+        # Re-run search whenever a filter toggles (only if there's a query).
+        for _chk in (
+            self.hf_filter_trainable,
+            self.hf_filter_gguf,
+            self.hf_filter_adapter,
+            self.hf_filter_quant,
+        ):
+            _chk.toggled.connect(self._on_hf_filter_toggled)
+
+        main_layout.addWidget(filter_row)
+
         # Connect tab widget changes to update button states
         self.models_content_tabs.currentChanged.connect(self._on_models_tab_changed)
         
@@ -10229,6 +10288,15 @@ class MainWindow(QMainWindow):
         if d:
             self.hf_target_dir.setText(d)
 
+    def _on_hf_filter_toggled(self, _checked: bool = False) -> None:
+        """Re-run the current HF search when a format filter is toggled.
+
+        No-op when the search box is empty — we don't want to spam list_models
+        with unfiltered queries while the user is clicking around.
+        """
+        if hasattr(self, "hf_query") and self.hf_query.text().strip():
+            self._hf_search()
+
     def _hf_search(self) -> None:
         q = self.hf_query.text().strip()
         
@@ -10248,10 +10316,32 @@ class MainWindow(QMainWindow):
                 item.widget().deleteLater()
         self.search_model_cards.clear()
         
-        self._log_models(f"🔍 Searching Hugging Face for: {q}...")
-        
+        # Collect format filters. Trainable/GGUF/Adapter resolve to HF
+        # `library` filters; AWQ/GPTQ map to tag filters. Mixed selection
+        # composes OR-style on the Hub.
+        libraries: list[str] = []
+        tags: list[str] = []
+        if getattr(self, "hf_filter_trainable", None) and self.hf_filter_trainable.isChecked():
+            libraries.append("transformers")
+        if getattr(self, "hf_filter_gguf", None) and self.hf_filter_gguf.isChecked():
+            libraries.append("gguf")
+        if getattr(self, "hf_filter_adapter", None) and self.hf_filter_adapter.isChecked():
+            libraries.append("peft")
+        if getattr(self, "hf_filter_quant", None) and self.hf_filter_quant.isChecked():
+            tags.extend(["awq", "gptq"])
+
+        filter_summary = ""
+        if libraries or tags:
+            filter_summary = f" [filter: {', '.join(libraries + tags)}]"
+        self._log_models(f"🔍 Searching Hugging Face for: {q}{filter_summary}...")
+
         try:
-            hits = search_hf_models(q, limit=24) # Show up to 24 results
+            hits = search_hf_models(
+                q,
+                limit=24,
+                libraries=libraries or None,
+                tags=tags or None,
+            )
             
             if not hits:
                 no_results = QLabel(f"No models found matching '{q}'")
@@ -22182,27 +22272,59 @@ respective package directories or official repositories.
         
         models_dir = self.root / "models"
         downloaded_models = []
-        
+        trainable_models = []
+
         if models_dir.exists():
             for model_dir in sorted(models_dir.iterdir()):
-                if model_dir.is_dir():
-                    has_config = (model_dir / "config.json").exists()
-                    has_weights = any(
-                        (model_dir / f).exists() 
-                        for f in ["model.safetensors", "pytorch_model.bin", "model.safetensors.index.json", "adapter_model.safetensors", "adapter_model.bin"]
+                if not model_dir.is_dir():
+                    continue
+                has_config = (model_dir / "config.json").exists()
+                has_full_weights = any(
+                    (model_dir / f).exists()
+                    for f in (
+                        "model.safetensors",
+                        "pytorch_model.bin",
+                        "model.safetensors.index.json",
+                        "pytorch_model.bin.index.json",
                     )
-                    has_gguf = len(list(model_dir.glob("*.gguf"))) > 0
-                    if has_gguf or (has_config and (has_weights or len(list(model_dir.glob("*.safetensors"))) > 0 or len(list(model_dir.glob("*.bin"))) > 0)):
-                        downloaded_models.append(model_dir.name)
-        
+                )
+                # Loose .safetensors / .bin that AREN'T adapter shards count as
+                # full weights too. Adapter-only dirs (`adapter_model.*`) are
+                # PEFT artefacts — usable as resumed-from checkpoints, not as
+                # standalone fine-tune base models.
+                if not has_full_weights:
+                    for ext in ("safetensors", "bin"):
+                        for p in model_dir.glob(f"*.{ext}"):
+                            if not p.name.startswith("adapter_"):
+                                has_full_weights = True
+                                break
+                        if has_full_weights:
+                            break
+                has_adapter = any(
+                    (model_dir / f).exists()
+                    for f in ("adapter_model.safetensors", "adapter_model.bin")
+                )
+                has_gguf = bool(list(model_dir.glob("*.gguf")))
+
+                # Listed in the Downloaded panel — this is the broad list and
+                # still includes GGUF / adapter dirs.
+                if has_gguf or (has_config and (has_full_weights or has_adapter)):
+                    downloaded_models.append(model_dir.name)
+
+                # Trainable = transformers-format base model with full weights.
+                # Pure-GGUF and adapter-only dirs are excluded from the train
+                # page dropdown.
+                if has_config and has_full_weights and not has_gguf:
+                    trainable_models.append(model_dir.name)
+
         if hasattr(self, 'train_base_model'):
             current_train = self.train_base_model.currentText()
             self.train_base_model.clear()
-            if downloaded_models:
-                for model_name in downloaded_models:
+            if trainable_models:
+                for model_name in trainable_models:
                     self.train_base_model.addItem(model_name)
             else:
-                self.train_base_model.addItem("(No models downloaded yet)")
+                self.train_base_model.addItem("(No trainable models — download a transformers model)")
             if current_train:
                 idx = self.train_base_model.findText(current_train)
                 if idx >= 0:

@@ -45,12 +45,29 @@ def ensure_dir(p: Path) -> Path:
     return p
 
 
-def search_hf_models(query: str, limit: int = 20) -> List[HFModelHit]:
-    """Search Hugging Face models by free-text query."""
+def search_hf_models(
+    query: str,
+    limit: int = 20,
+    libraries: Optional[List[str]] = None,
+    tags: Optional[List[str]] = None,
+) -> List[HFModelHit]:
+    """Search Hugging Face models by free-text query.
+
+    Optional filters narrow the result set on the server side:
+      * ``libraries`` — HF library tags (e.g. ``["transformers"]``,
+        ``["gguf"]``, ``["peft"]``). Multiple values are OR-combined by
+        the Hub.
+      * ``tags`` — arbitrary tag filters (e.g. ``["awq"]``, ``["gptq"]``).
+    """
     if list_models is None:
         raise RuntimeError("huggingface_hub is not available. Install requirements.txt")
+    kwargs: dict = {"search": query, "limit": limit}
+    if libraries:
+        kwargs["library"] = libraries if len(libraries) > 1 else libraries[0]
+    if tags:
+        kwargs["filter"] = tags if len(tags) > 1 else tags[0]
     hits: List[HFModelHit] = []
-    for m in list_models(search=query, limit=limit):
+    for m in list_models(**kwargs):
         hits.append(
             HFModelHit(
                 model_id=getattr(m, "modelId", None) or getattr(m, "id", ""),

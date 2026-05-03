@@ -216,17 +216,22 @@ def launch_safe_mode_installer(reason: str):
     # The legacy safe_mode_repair.py at LLM root is left in place as a
     # last-resort fallback so existing installs that haven't pulled the
     # safe_mode/ package still have something to run.
-    safe_pkg_init = llm_dir / "safe_mode" / "__init__.py"
+    safe_pkg_main = llm_dir / "safe_mode" / "__main__.py"
     legacy_safe_repair = llm_dir / "safe_mode_repair.py"
 
-    if safe_pkg_init.exists():
-        target = ["-m", "safe_mode"]
+    if safe_pkg_main.exists():
+        # Direct script invocation rather than ``-m safe_mode``: the
+        # bundled embeddable Python doesn't put cwd on sys.path by
+        # default, so ``-m`` lookup fails with 'No module named
+        # safe_mode'. Running __main__.py as a path always works
+        # because the file path is what python loads.
+        target = [str(safe_pkg_main)]
         target_label = "safe_mode (Qt-if-available, console-fallback)"
     elif legacy_safe_repair.exists():
         target = [str(legacy_safe_repair)]
         target_label = "safe_mode_repair.py (legacy console)"
     else:
-        log(f"✗ Neither {safe_pkg_init} nor {legacy_safe_repair} exists.")
+        log(f"✗ Neither {safe_pkg_main} nor {legacy_safe_repair} exists.")
         return False
 
     log("⚠ Workload venv is broken at the C-extension layer:")
@@ -239,6 +244,14 @@ def launch_safe_mode_installer(reason: str):
 
     try:
         print(f"[LAUNCHER] process_start: {target_label}", file=sys.stderr)
+        # Belt-and-braces: PYTHONPATH guarantees the LLM dir is
+        # importable regardless of which Python is invoked / how
+        # the embeddable distribution's _pth file is configured.
+        env = os.environ.copy()
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            str(llm_dir) + (os.pathsep + existing if existing else "")
+        )
         # CREATE_NEW_CONSOLE = 0x00000010 on Windows so the console
         # safe-mode is visible (launcher.exe is GUI-subsystem). Qt
         # safe-mode opens its own window so it doesn't need the
@@ -247,12 +260,14 @@ def launch_safe_mode_installer(reason: str):
             subprocess.Popen(
                 [str(bootstrap_py), *target],
                 cwd=str(llm_dir),
+                env=env,
                 creationflags=0x00000010,
             )
         else:
             subprocess.Popen(
                 [str(bootstrap_py), *target],
                 cwd=str(llm_dir),
+                env=env,
             )
         return True
     except Exception as e:

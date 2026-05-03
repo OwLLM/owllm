@@ -2777,6 +2777,60 @@ class MainWindow(QMainWindow):
         theme_layout.addSpacing(6)
         theme_layout.addWidget(advanced_btn)
 
+        # ---- Group toggles in the header (matches Advanced style) -----
+        # Previously these lived in the main navbar, taking up two slots
+        # alongside their sub-tabs. Moving them next to Advanced
+        # de-clutters the navbar and groups them with the OTHER toggle
+        # that reveals additional sub-buttons. Same fixed-size dark
+        # gradient pill + gold-bordered :checked state, so the three
+        # toggles read as a coherent header group.
+        def _make_header_toggle(text: str) -> QPushButton:
+            btn = QPushButton(text)
+            btn.setFixedSize(70, 50)
+            btn.setCursor(QCursor(Qt.PointingHandCursor))
+            btn.setCheckable(True)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 rgba(60, 60, 80, 0.85), stop:1 rgba(40, 40, 60, 0.85));
+                    border: 1px solid rgba(255, 255, 255, 0.2);
+                    border-radius: 6px;
+                    color: white;
+                    font-size: 9pt;
+                    font-weight: bold;
+                    padding: 0;
+                    text-align: center;
+                }
+                QPushButton:hover {
+                    border: 1px solid rgba(255, 255, 255, 0.4);
+                }
+                QPushButton:checked {
+                    border: 1px solid #ffd080;
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 rgba(80, 70, 50, 0.85), stop:1 rgba(60, 50, 30, 0.85));
+                }
+            """)
+            return btn
+
+        # 'Fine Tuning' — wrench glyph + label, two-line layout matching
+        # the Advanced button.
+        self.finetuning_group_btn = _make_header_toggle("🛠\nFine Tuning")
+        # 'Agentic Team' — keep the owl_agentic asset if present (matches
+        # the legacy navbar look), otherwise plain two-line text.
+        self.agentic_group_btn = _make_header_toggle("\nAgentic Team")
+        try:
+            _owl_agentic_path = self.root.parent / "icons" / "Page_icons" / "owl_agentic.png"
+            if _owl_agentic_path.exists():
+                self.agentic_group_btn.setIcon(QIcon(str(_owl_agentic_path)))
+                self.agentic_group_btn.setIconSize(QSize(18, 18))
+        except Exception:
+            pass
+
+        theme_layout.addSpacing(4)
+        theme_layout.addWidget(self.finetuning_group_btn)
+        theme_layout.addSpacing(4)
+        theme_layout.addWidget(self.agentic_group_btn)
+
         # Left column (theme controls)
         header_left = QWidget()
         header_left.setStyleSheet("background: transparent;")
@@ -2985,21 +3039,11 @@ class MainWindow(QMainWindow):
         
         # Tab buttons
         self.home_btn = QPushButton("🏠 Home")
-        # Group buttons — replace the flat-list navbar. They toggle the
-        # visibility of their sub-buttons so the bar isn't a 14-button
-        # river. Default state is "home only" — sub-buttons stay hidden
-        # until the user clicks a group or one of the launcher cards.
-        self.finetuning_group_btn = QPushButton("🛠  Fine Tuning")
-        self.agentic_group_btn = QPushButton("Agentic Team")
-        # Use the owl_agentic icon shipped under icons/Page_icons/ instead
-        # of the 🎭 emoji. Fall back silently if the file is missing.
-        try:
-            _owl_agentic_path = self.root.parent / "icons" / "Page_icons" / "owl_agentic.png"
-            if _owl_agentic_path.exists():
-                self.agentic_group_btn.setIcon(QIcon(str(_owl_agentic_path)))
-                self.agentic_group_btn.setIconSize(QSize(22, 22))
-        except Exception:
-            pass
+        # Note: 'Fine Tuning' and 'Agentic Team' group toggles live in
+        # the HEADER (next to the Advanced button) — see the
+        # _make_header_toggle calls above. They were moved out of the
+        # navbar to declutter and to group them visually with the only
+        # other reveal-toggle (Advanced).
         self.download_btn = QPushButton("📦 Models")
         self.train_btn = QPushButton("🎯 Train")
         self.test_btn = QPushButton("🧪 Test")
@@ -3019,7 +3063,6 @@ class MainWindow(QMainWindow):
 
         for btn in [
             self.home_btn,
-            self.finetuning_group_btn, self.agentic_group_btn,
             self.train_btn, self.download_btn, self.test_btn,
             self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn,
             self.characters_btn, self.code_btn, self.agents_btn,
@@ -3058,15 +3101,17 @@ class MainWindow(QMainWindow):
             """)
 
         # Layout — order matters because we toggle visibility on the
-        # individual buttons below.
+        # individual buttons below. The Fine Tuning and Agentic Team
+        # GROUP TOGGLES that previously lived between these sub-buttons
+        # have been moved to the HEADER (see _make_header_toggle calls
+        # next to the Advanced button); only the sub-buttons remain in
+        # the navbar.
         navbar_layout.addWidget(self.home_btn)
-        navbar_layout.addWidget(self.finetuning_group_btn)
-        # Fine Tuning sub-tabs — hidden until the user activates the group.
+        # Fine Tuning sub-tabs — hidden until the header group toggle is on.
         navbar_layout.addWidget(self.download_btn)
         navbar_layout.addWidget(self.train_btn)
         navbar_layout.addWidget(self.test_btn)
-        navbar_layout.addWidget(self.agentic_group_btn)
-        # Agentic Team sub-tabs — hidden until the user activates the group.
+        # Agentic Team sub-tabs — hidden until the header group toggle is on.
         navbar_layout.addWidget(self.characters_btn)
         navbar_layout.addWidget(self.code_btn)
         navbar_layout.addWidget(self.agents_btn)

@@ -405,19 +405,45 @@ def main():
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
-        # Try loading with quantization first, fallback to FP32 if bitsandbytes fails
+        # Three load tiers, in preference order:
+        #   1. bitsandbytes 4-bit if available  (~4 GB for a 7B model)
+        #   2. bf16 on Ampere+ GPUs             (~14 GB for a 7B model;
+        #      same dynamic range as fp32, NO GradScaler needed —
+        #      different from fp16's quirks)
+        #   3. fp32 fallback                    (~28 GB for a 7B model)
+        #
+        # Tier 2 is what should run on a 4090 / A100 / H100 when
+        # bitsandbytes' CUDA backend isn't loadable. Previously we fell
+        # straight from tier 1 to tier 3, which caused the disk safe_open
+        # to mmap a 16 GB file into 32 GB of fp32 tensors — Windows
+        # rejected the resulting page-file commit with
+        # 'OSError 1455 paging file too small' even on a machine with
+        # 24 GB VRAM and 64 GB RAM.
+        #
+        # low_cpu_mem_usage=True tells transformers to load weights
+        # lazily into the device, avoiding a full state-dict copy in
+        # CPU RAM during the safe_open mmap pass.
         load_kwargs = {
             "device_map": "auto",
             "trust_remote_code": True,
+            "low_cpu_mem_usage": True,
         }
-        
-        # Only add quantization_config if it's not None
+
         if bnb_config is not None:
             load_kwargs["quantization_config"] = bnb_config
+            print("[INFO] Loading with 4-bit quantization (bitsandbytes).")
+        elif _should_use_bf16():
+            load_kwargs["torch_dtype"] = torch.bfloat16
+            print(
+                "[INFO] Loading in bf16 (Ampere+ GPU). Half the memory "
+                "of fp32, full fp32 dynamic range, no GradScaler needed."
+            )
         else:
-            # Use FP32 when quantization is not available to avoid AMP/GradScaler issues
             load_kwargs["torch_dtype"] = torch.float32
-            print("[WARNING] bitsandbytes not available - using FP32 (more VRAM, but stable)")
+            print(
+                "[WARNING] No quantization and GPU does not support bf16 "
+                "— falling back to fp32 (high memory)."
+            )
         
         try:
             model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, **load_kwargs)

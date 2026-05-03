@@ -1357,7 +1357,7 @@ except Exception as e:
                 "typing_extensions>=4.12.2,<5.0.0",
                 _pkg("numpy", "numpy==1.26.4"),
                 _pkg("huggingface-hub", None),
-                "transformers==4.51.3",
+                "transformers>=4.57.0,<5.0",
                 "tokenizers==0.21.4",
                 "protobuf",
                 _pkg("safetensors", "safetensors>=0.4.5,<0.6"),
@@ -2685,7 +2685,7 @@ sys.exit(0)
                 is_edge = (parsed_env.get("tier") == "edge")
 
                 pinned_map_stable = {
-                    "transformers": "transformers==4.51.3",
+                    "transformers": "transformers>=4.57.0,<5.0",
                     "tokenizers": "tokenizers==0.21.4",
                     "accelerate": "accelerate>=1.2.0,<1.3.0",
                     "peft": "peft>=0.13.0,<0.16.0",

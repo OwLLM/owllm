@@ -2928,7 +2928,16 @@ class MainWindow(QMainWindow):
         # river. Default state is "home only" — sub-buttons stay hidden
         # until the user clicks a group or one of the launcher cards.
         self.finetuning_group_btn = QPushButton("🛠  Fine Tuning")
-        self.agentic_group_btn = QPushButton("🎭  Agentic Team")
+        self.agentic_group_btn = QPushButton("Agentic Team")
+        # Use the owl_agentic icon shipped under icons/Page_icons/ instead
+        # of the 🎭 emoji. Fall back silently if the file is missing.
+        try:
+            _owl_agentic_path = self.root.parent / "icons" / "Page_icons" / "owl_agentic.png"
+            if _owl_agentic_path.exists():
+                self.agentic_group_btn.setIcon(QIcon(str(_owl_agentic_path)))
+                self.agentic_group_btn.setIconSize(QSize(22, 22))
+        except Exception:
+            pass
         self.download_btn = QPushButton("📦 Models")
         self.train_btn = QPushButton("🎯 Train")
         self.test_btn = QPushButton("🧪 Test")

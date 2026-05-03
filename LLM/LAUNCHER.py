@@ -211,35 +211,47 @@ def launch_safe_mode_installer(reason: str):
         log("✗ Bundled bootstrap Python not found — cannot enter safe mode.")
         log("  Looked under: LLM/python_runtime/python3.12/, python3.11/")
         return False
-    safe_repair = llm_dir / "safe_mode_repair.py"
-    if not safe_repair.exists():
-        log(f"✗ Safe-mode repair script not found at {safe_repair}")
+    # New: route to the safe_mode package, which auto-picks Qt vs console
+    # based on whether PySide6 is reachable in the bundled interpreter.
+    # The legacy safe_mode_repair.py at LLM root is left in place as a
+    # last-resort fallback so existing installs that haven't pulled the
+    # safe_mode/ package still have something to run.
+    safe_pkg_init = llm_dir / "safe_mode" / "__init__.py"
+    legacy_safe_repair = llm_dir / "safe_mode_repair.py"
+
+    if safe_pkg_init.exists():
+        target = ["-m", "safe_mode"]
+        target_label = "safe_mode (Qt-if-available, console-fallback)"
+    elif legacy_safe_repair.exists():
+        target = [str(legacy_safe_repair)]
+        target_label = "safe_mode_repair.py (legacy console)"
+    else:
+        log(f"✗ Neither {safe_pkg_init} nor {legacy_safe_repair} exists.")
         return False
 
     log("⚠ Workload venv is broken at the C-extension layer:")
     for line in (reason or "").splitlines()[-10:]:
         log(f"    {line}")
     log("")
-    log("Routing to SAFE MODE — repair runs from the bundled Python in a")
-    log(f"new console window, NOT inside the broken venv.")
+    log("Routing to SAFE MODE — repair runs from the bundled Python.")
     log(f"Interpreter: {bootstrap_py}")
-    log(f"Script:      {safe_repair}")
+    log(f"Target:      {target_label}")
 
     try:
-        print("[LAUNCHER] process_start: safe_mode_repair.py (bundled Python, console)", file=sys.stderr)
+        print(f"[LAUNCHER] process_start: {target_label}", file=sys.stderr)
+        # CREATE_NEW_CONSOLE = 0x00000010 on Windows so the console
+        # safe-mode is visible (launcher.exe is GUI-subsystem). Qt
+        # safe-mode opens its own window so it doesn't need the
+        # console; the flag is a no-op for it.
         if sys.platform == "win32":
-            # Open in a fresh visible console window so the user actually
-            # sees the repair progress (the launcher.exe parent is GUI-
-            # subsystem, so a plain Popen would silently hide all output).
-            # CREATE_NEW_CONSOLE = 0x00000010
             subprocess.Popen(
-                [str(bootstrap_py), str(safe_repair)],
+                [str(bootstrap_py), *target],
                 cwd=str(llm_dir),
                 creationflags=0x00000010,
             )
         else:
             subprocess.Popen(
-                [str(bootstrap_py), str(safe_repair)],
+                [str(bootstrap_py), *target],
                 cwd=str(llm_dir),
             )
         return True

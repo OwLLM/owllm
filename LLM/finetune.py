@@ -414,10 +414,41 @@ def main():
     dataset = dataset.map(formatting_func, remove_columns=dataset.column_names)
     print(f"[INFO] ✓ Dataset formatted ({len(dataset)} examples ready for tokenisation)")
 
+    # Pre-tokenise the entire dataset BEFORE model load.
+    # Why: trl 0.24's SFTTrainer runs an internal `dataset.map(add_eos)`
+    # during __init__, AFTER the model is on the GPU. On Windows that
+    # second pyarrow allocation segfaults the same way the first one
+    # did (ACCESS_VIOLATION 0xC0000005). By giving SFTTrainer a dataset
+    # that already has `input_ids`, AND setting
+    # `dataset_kwargs={"skip_prepare_dataset": True}`, trl skips every
+    # preprocessing pass — no post-model-load pyarrow calls, no segfault.
+    #
+    # The tokenizer is tiny (pure Python + a Rust backend, no CUDA),
+    # so loading it here doesn't disturb pyarrow's heap.
+    print("[INFO] Loading tokenizer for pre-tokenisation...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    eos = tokenizer.eos_token or ""
+
+    def _tokenize(example):
+        # Append EOS here so trl never needs to do it post-load.
+        return tokenizer(
+            example["text"] + eos,
+            truncation=True,
+            max_length=MAX_SEQ_LENGTH,
+            padding=False,
+        )
+
+    print(f"[INFO] Pre-tokenising {len(dataset)} examples (max_length={MAX_SEQ_LENGTH})...")
+    dataset = dataset.map(_tokenize, remove_columns=["text"])
+    print(f"[INFO] ✓ Pre-tokenised — columns: {dataset.column_names}")
+
     # Free the now-redundant Python list before model load.
     del raw_data, normalized_data
 
-    print(f"[INFO] Loading model and tokenizer: {MODEL_NAME}")
+    print(f"[INFO] Loading model: {MODEL_NAME}")
 
     # Use compatibility module to detect model type and capabilities
     model_info = detect_model_type(MODEL_NAME)
@@ -510,11 +541,9 @@ def main():
             should_try_unsloth = False
     
     if not should_try_unsloth:
-        # Standard PEFT Loading
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        
+        # Standard PEFT Loading. Tokenizer was already loaded before
+        # model load (see pre-tokenisation block above) — re-using.
+
         # Three load tiers, in preference order:
         #   1. bitsandbytes 4-bit if available  (~4 GB for a 7B model)
         #   2. bf16 on Ampere+ GPUs             (~14 GB for a 7B model;
@@ -741,13 +770,19 @@ def main():
     #   - max_seq_length     → max_length (in SFTConfig)
     # SFTConfig is a TrainingArguments subclass, so it accepts every
     # arg TrainingArguments did plus the SFT-specific ones.
+    #
+    # We pre-tokenised the dataset before model load (see explainer
+    # at the top of main()). dataset_kwargs={'skip_prepare_dataset':
+    # True} tells trl to NOT run any post-model-load `dataset.map`
+    # (the pyarrow allocator is corrupted by then on Windows). We
+    # also omit dataset_text_field and max_length — both are
+    # preprocessing-only and irrelevant for an already-tokenised set.
     trainer = SFTTrainer(
         model=model,
         processing_class=tokenizer,
         train_dataset=dataset,
         args=SFTConfig(
-            dataset_text_field="text",
-            max_length=MAX_SEQ_LENGTH,
+            dataset_kwargs={"skip_prepare_dataset": True},
             per_device_train_batch_size=BATCH_SIZE,
             gradient_accumulation_steps=GRADIENT_ACCUMULATION,
             warmup_steps=5,

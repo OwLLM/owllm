@@ -2756,36 +2756,68 @@ class MainWindow(QMainWindow):
         # state: which servers are up, the API key clients use, and the VRAM
         # each server is consuming). Populated by _update_header_runtime_info()
         # — fires on a 2-second QTimer, with VRAM queried on a worker thread.
-        servers_label = QLabel("🟢 Servers: …", self)
+        # Servers row: text label + tiny restart button (mini, inline-height).
+        servers_row = QWidget(self)
+        servers_row.setStyleSheet("background: transparent;")
+        servers_row_layout = QHBoxLayout(servers_row)
+        servers_row_layout.setContentsMargins(0, 0, 0, 0)
+        servers_row_layout.setSpacing(6)
+        servers_label = QLabel("🟢 Servers: …", servers_row)
         servers_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
         servers_label.setToolTip("Models with an inference server currently running.")
-        # MinimumExpanding — let the label grow with the model name; full
-        # text is also available in the tooltip.
         servers_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-        servers_label.setMinimumWidth(520)
-        sys_info_layout.addWidget(servers_label)
-        self.header_servers_label = servers_label
-
-        apikey_label = QLabel("🔑 API key: owllm-local", self)
-        apikey_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
-        apikey_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
-        apikey_label.setMinimumWidth(520)
-        apikey_label.setCursor(Qt.PointingHandCursor)
-        apikey_label.setToolTip(
-            "API key clients use to talk to OWLLM's OpenAI-compatible proxy at "
-            "http://127.0.0.1:9999/v1.\nClick to copy."
+        servers_row_layout.addWidget(servers_label, 1)
+        # Mini restart button — sized to the text line (≈16px) so the row
+        # height doesn't grow. Hidden when no server is running.
+        restart_btn = QPushButton("↻", servers_row)
+        restart_btn.setFixedSize(18, 18)
+        restart_btn.setCursor(Qt.PointingHandCursor)
+        restart_btn.setToolTip("Restart running inference server(s).")
+        restart_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #ffd080; border: 1px solid rgba(255,208,128,0.55); "
+            "border-radius: 4px; font-size: 11pt; font-weight: bold; padding: 0px; }"
+            "QPushButton:hover { background: rgba(255,208,128,0.18); border-color: #ffd080; }"
+            "QPushButton:pressed { background: rgba(255,208,128,0.30); }"
         )
-        # Click to copy api key to clipboard.
+        restart_btn.setVisible(False)
+        restart_btn.clicked.connect(self._on_header_restart_clicked)
+        servers_row_layout.addWidget(restart_btn, 0, Qt.AlignVCenter)
+        servers_row.setMinimumWidth(520)
+        sys_info_layout.addWidget(servers_row)
+        self.header_servers_label = servers_label
+        self.header_servers_restart_btn = restart_btn
+
+        # API key row: clickable 🔑 icon + non-clickable text.
+        # Splitting these prevents the "click anywhere" behaviour from
+        # accidentally firing as the cursor passes over the wide label.
+        apikey_row = QWidget(self)
+        apikey_row.setStyleSheet("background: transparent;")
+        apikey_row_layout = QHBoxLayout(apikey_row)
+        apikey_row_layout.setContentsMargins(0, 0, 0, 0)
+        apikey_row_layout.setSpacing(4)
+        apikey_icon = QLabel("🔑", apikey_row)
+        apikey_icon.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
+        apikey_icon.setCursor(Qt.PointingHandCursor)
+        apikey_icon.setToolTip("Click to copy API key to clipboard.")
+        apikey_text = QLabel("API key: owllm-local", apikey_row)
+        apikey_text.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
+        apikey_text.setToolTip(
+            "API key clients use to talk to OWLLM's OpenAI-compatible proxy at "
+            "http://127.0.0.1:9999/v1."
+        )
+        apikey_row_layout.addWidget(apikey_icon, 0, Qt.AlignVCenter)
+        apikey_row_layout.addWidget(apikey_text, 1, Qt.AlignVCenter)
+        apikey_row.setMinimumWidth(520)
         def _copy_apikey(_event=None):
             try:
                 QApplication.clipboard().setText("owllm-local")
-                apikey_label.setText("🔑 API key: copied!")
-                QTimer.singleShot(1200, lambda: apikey_label.setText("🔑 API key: owllm-local"))
+                apikey_text.setText("API key: copied!")
+                QTimer.singleShot(1200, lambda: apikey_text.setText("API key: owllm-local"))
             except Exception:
                 pass
-        apikey_label.mousePressEvent = _copy_apikey
-        sys_info_layout.addWidget(apikey_label)
-        self.header_apikey_label = apikey_label
+        apikey_icon.mousePressEvent = _copy_apikey
+        sys_info_layout.addWidget(apikey_row)
+        self.header_apikey_label = apikey_text
 
         vram_label = QLabel("💾 VRAM: …", self)
         vram_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
@@ -21606,6 +21638,44 @@ respective package directories or official repositories.
         t.finished.connect(lambda: self._log_to_app_log("[BACKGROUND] Detection thread finished."))
         t.start()
     
+    def _on_header_restart_clicked(self):
+        """Restart every server currently shown in the header.
+
+        Snapshot the cfg_ids the timer last saw, then shutdown + re-ensure
+        each one off the UI thread. Multiple servers are restarted serially
+        so we don't pile spawn cost on a single GPU at once.
+        """
+        cfg_ids = list(getattr(self, "_header_running_cfg_ids", []) or [])
+        if not cfg_ids:
+            return
+        btn = getattr(self, "header_servers_restart_btn", None)
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText("…")
+
+        def _worker():
+            try:
+                from core.llm_server_manager import get_global_server_manager
+                mgr = get_global_server_manager()
+                for cfg_id in cfg_ids:
+                    try:
+                        mgr.shutdown_server(cfg_id)
+                    except Exception:
+                        pass
+                    try:
+                        mgr.ensure_server_running(cfg_id)
+                    except Exception:
+                        pass
+            finally:
+                def _restore():
+                    if btn is not None:
+                        btn.setEnabled(True)
+                        btn.setText("↻")
+                QTimer.singleShot(0, _restore)
+
+        import threading
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _update_header_system_info(self):
         """Refresh the header runtime info labels (servers, API key, VRAM).
 
@@ -21670,6 +21740,9 @@ respective package directories or official repositories.
             if not running_pairs:
                 self.header_servers_label.setText("🟢 Servers: 0")
                 self.header_servers_label.setToolTip("No inference servers running. Start one in the Server or Code tab.")
+                if hasattr(self, "header_servers_restart_btn"):
+                    self.header_servers_restart_btn.setVisible(False)
+                self._header_running_cfg_ids = []
             else:
                 summary = ", ".join(d for d, _, _ in running_pairs[:2])
                 if len(running_pairs) > 2:
@@ -21677,6 +21750,16 @@ respective package directories or official repositories.
                 self.header_servers_label.setText(f"🟢 Servers: {len(running_pairs)} ({summary})")
                 tooltip_lines = [f"{d}  :  port {p}  ({cfg_id})" for d, p, cfg_id in running_pairs]
                 self.header_servers_label.setToolTip("\n".join(tooltip_lines))
+                if hasattr(self, "header_servers_restart_btn"):
+                    self.header_servers_restart_btn.setVisible(True)
+                    self.header_servers_restart_btn.setToolTip(
+                        "Restart " + (
+                            f"{len(running_pairs)} running servers."
+                            if len(running_pairs) > 1
+                            else f"running server: {running_pairs[0][0]}"
+                        )
+                    )
+                self._header_running_cfg_ids = [cfg_id for _, _, cfg_id in running_pairs]
 
         # --- API key (static; click to copy is wired in __init__) ----------
         # Nothing to recompute here per-tick; left in place for completeness.

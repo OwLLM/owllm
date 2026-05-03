@@ -2407,21 +2407,20 @@ class AgentsPage(QWidget):
             "tool_result": "#a0c8e0",
             "event":       "#e8e8e8",
         }.get(kind.lower(), "#cccccc")
-        header = f"<span style='color:{prefix_color}; font-weight:bold;'>{kind.upper()}</span>"
         sub = f"<span style='color:#888;'> · {msg.from_agent} → {msg.to_agent}</span>"
 
-        # THOUGHT-kind messages always go to the Thought tab unfiltered.
-        if kind.lower() == "thought":
+        # Mechanical / internal traffic — THOUGHT, TOOL_CALL, TOOL_RESULT,
+        # plus EVENT — always go to the Thought tab. The clean Reply tab
+        # is reserved for human-readable chat between agents and the user.
+        if kind.lower() in ("thought", "tool_call", "tool_result", "event"):
             text = body[:4000] + "… (truncated)" if len(body) > 4000 else body
             html = _escape_html(text).replace("\n", "<br/>")
-            self._thought_view.append(f"{header}{sub}<br/>{html}<br/>")
+            t_header = f"<span style='color:{prefix_color}; font-weight:bold;'>{kind.upper()}</span>"
+            self._thought_view.append(f"{t_header}{sub}<br/>{html}<br/>")
             return
 
-        # Other kinds: split out any inline reasoning wrappers and route
-        # the thought portion to the Thought tab. The cleaned reply goes
-        # to the chat tab — even if empty after stripping (rare but means
-        # the model returned ONLY a thought block, in which case we leave
-        # the chat tab silent rather than show empty header lines).
+        # USER / REQUEST / REPLY: split inline reasoning wrappers off to
+        # the Thought tab, render the cleaned text in the Reply tab.
         thought, clean = self._split_thought(body)
         if thought:
             t = thought[:4000] + "… (truncated)" if len(thought) > 4000 else thought
@@ -2431,7 +2430,22 @@ class AgentsPage(QWidget):
         if clean:
             c = clean[:4000] + "… (truncated)" if len(clean) > 4000 else clean
             c_html = _escape_html(c).replace("\n", "<br/>")
-            self._chat_view.append(f"{header}{sub}<br/>{c_html}<br/>")
+            # Speaker label: for REPLY/REQUEST use the FROM agent's name
+            # ("Orchi: …"); for USER use a fixed "You: …". This replaces
+            # the old uppercase REPLY / USER / REQUEST tags so the chat
+            # actually reads like a conversation.
+            kl = kind.lower()
+            if kl == "user":
+                speaker = "You"
+            else:
+                speaker = msg.from_agent or kind.upper()
+            speaker_html = (
+                f"<span style='color:{prefix_color}; font-weight:bold;'>{_escape_html(speaker)}:</span>"
+            )
+            target_note = ""
+            if kl == "request" and msg.to_agent and msg.to_agent != msg.from_agent:
+                target_note = f" <span style='color:#888;'>→ {_escape_html(msg.to_agent)}</span>"
+            self._chat_view.append(f"{speaker_html}{target_note} {c_html}<br/>")
 
     def _on_graph_changed(self) -> None:
         """Persist the canvas's current node positions + edges to the project."""

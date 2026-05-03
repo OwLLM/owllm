@@ -92,7 +92,7 @@ FastLanguageModel = None  # populated lazily inside main() if needed
 # Always import transformers classes - we may need them even if unsloth is available (fallback)
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from trl import SFTTrainer
+from trl import SFTTrainer, SFTConfig
 from datasets import load_dataset, Dataset
 from transformers import TrainerCallback, TrainerState, TrainerControl
 
@@ -735,13 +735,19 @@ def main():
         optim_name = "adamw_torch"
         print("[INFO] Optimizer: adamw_torch (bitsandbytes not functional)")
 
+    # trl 0.24 changed SFTTrainer's signature:
+    #   - tokenizer=         → processing_class=
+    #   - dataset_text_field, max_seq_length moved into SFTConfig
+    #   - max_seq_length     → max_length (in SFTConfig)
+    # SFTConfig is a TrainingArguments subclass, so it accepts every
+    # arg TrainingArguments did plus the SFT-specific ones.
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=dataset,
-        dataset_text_field="text",
-        max_seq_length=MAX_SEQ_LENGTH,
-        args=TrainingArguments(
+        args=SFTConfig(
+            dataset_text_field="text",
+            max_length=MAX_SEQ_LENGTH,
             per_device_train_batch_size=BATCH_SIZE,
             gradient_accumulation_steps=GRADIENT_ACCUMULATION,
             warmup_steps=5,

@@ -12410,12 +12410,37 @@ class MainWindow(QMainWindow):
             self.train_out_dir.setText(d)
 
     def _start_training(self) -> None:
-        # Always log click-time + arg snapshot to app.log on disk so we
-        # have a forensic trail even when the train_log pane isn't
-        # shared. Wrap the entire flow in a top-level catch — any
-        # exception raised before QProcess.start fires (path lookup,
-        # preflight, build_finetune_cmd, cfg construction) goes to
-        # disk + dialog + train_log instead of evaporating.
+        # GROUND-TRUTH SIGNAL: write directly to logs/train_click.log
+        # using only stdlib open(). No QTextEdit, no _append_terminal,
+        # no nested handlers. If the click reaches this method AT ALL,
+        # this line is on disk before anything else happens. Used to
+        # determine — when the user reports 'instant error on click' —
+        # whether the click handler is even being invoked.
+        try:
+            from datetime import datetime as _dt
+            _gt_log = self.root / "logs" / "train_click.log"
+            _gt_log.parent.mkdir(parents=True, exist_ok=True)
+            with _gt_log.open("a", encoding="utf-8", errors="replace") as _f:
+                _f.write(f"[{_dt.utcnow().isoformat()}Z] CLICK reached _start_training\n")
+                try:
+                    _f.write(
+                        f"  dropdown={self.train_base_model.currentText()!r}\n"
+                        f"  data_path={self.train_data_path.text()!r}\n"
+                        f"  out_dir={self.train_out_dir.text()!r}\n"
+                        f"  epochs={self.train_epochs.value()}\n"
+                        f"  batch_size={self.train_batch.value()}\n"
+                        f"  lr={self.train_lr.value()}\n"
+                    )
+                except Exception as _snap_exc:
+                    _f.write(f"  form-snapshot exc: {_snap_exc!r}\n")
+        except Exception:
+            # Even this should never raise — but if it does, swallow
+            # it (don't take down the click handler over a log write).
+            pass
+
+        # Forward to the original logger AND the in-UI panes via the
+        # existing helper (kept so the train log pane gets the line
+        # too — train_click.log is the disk-only fallback).
         try:
             self._log_to_app_log("[TRAIN-CLICK] Start Training pressed")
             try:
@@ -22354,12 +22379,17 @@ respective package directories or official repositories.
         self._start_background_detection()
 
     def _log_to_app_log(self, message: str) -> None:
-        """Best-effort logger for pythonw launches (no console)."""
-        self._append_terminal(message, source="app")
+        """Best-effort logger for pythonw launches (no console).
+
+        Order matters: write to DISK first, then mirror to the in-UI
+        terminal sink. If the UI sink raises (widget destroyed,
+        re-entrancy, anything), the disk record still survives — which
+        is the whole point of a forensic logger.
+        """
         try:
             logs_dir = self.root / "logs"
             logs_dir.mkdir(parents=True, exist_ok=True)
-            
+
             # Use timestamped session log name if available
             if hasattr(self, 'session_log_name'):
                 log_path = logs_dir / self.session_log_name
@@ -22369,9 +22399,14 @@ respective package directories or official repositories.
                 time_str = datetime.now().strftime("%H%M")
                 log_path = logs_dir / f"[{timestamp}][app][{time_str}].log"
                 self.session_log_name = log_path.name
-                
+
             with log_path.open("a", encoding="utf-8", errors="replace") as f:
                 f.write(message.rstrip() + "\n")
+        except Exception:
+            pass
+
+        try:
+            self._append_terminal(message, source="app")
         except Exception:
             pass
 

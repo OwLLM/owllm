@@ -6587,9 +6587,11 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(self.browse_tab_btn)
         header_layout.addWidget(self.downloaded_tab_btn)
 
-        # Format-filter container — inline next to the Downloaded button,
-        # same height as the tab buttons (50px), 2×2 grid of checkboxes.
-        # Trainable / GGUF / Adapter / Quantized. No checkbox = unfiltered.
+        # Filter container — inline next to the Downloaded button,
+        # same height as the tab buttons (50px), 2×4 grid of checkboxes.
+        # Left half = Format (Trainable/GGUF/Adapter/Quantized).
+        # Right half = Capability (Instruct/Chat/Reasoning/Vision).
+        # No checkbox = unfiltered. Multiple checks compose OR-style.
         filter_container = QFrame()
         filter_container.setObjectName("formatFilterContainer")
         filter_container.setMinimumHeight(50)
@@ -6611,6 +6613,7 @@ class MainWindow(QMainWindow):
             "QCheckBox::indicator { width:14px; height:14px; }"
         )
 
+        # --- Format filters (left half) ---
         self.hf_filter_trainable = QCheckBox("✅ Trainable")
         self.hf_filter_trainable.setToolTip(
             "transformers-format models with full weights — what the Train tab can fine-tune."
@@ -6635,16 +6638,50 @@ class MainWindow(QMainWindow):
         )
         self.hf_filter_quant.setStyleSheet(chk_style)
 
+        # --- Capability filters (right half) ---
+        self.hf_filter_instruct = QCheckBox("💡 Instruct")
+        self.hf_filter_instruct.setToolTip(
+            "Instruction-tuned base models (-instruct, -it). Follow direct task prompts."
+        )
+        self.hf_filter_instruct.setStyleSheet(chk_style)
+
+        self.hf_filter_chat = QCheckBox("💬 Chat")
+        self.hf_filter_chat.setToolTip(
+            "Multi-turn chat / conversation tuned (-chat, -dialog, ChatML)."
+        )
+        self.hf_filter_chat.setStyleSheet(chk_style)
+
+        self.hf_filter_reasoning = QCheckBox("🧠 Reasoning")
+        self.hf_filter_reasoning.setToolTip(
+            "Chain-of-thought reasoning models (R1, o1-style, deepseek-r1, thinking)."
+        )
+        self.hf_filter_reasoning.setStyleSheet(chk_style)
+
+        self.hf_filter_vision = QCheckBox("👁️ Vision")
+        self.hf_filter_vision.setToolTip(
+            "Multimodal vision-language models (image input — VL, llava, vision)."
+        )
+        self.hf_filter_vision.setStyleSheet(chk_style)
+
+        # Layout: 2 rows × 4 columns.
         filter_grid.addWidget(self.hf_filter_trainable, 0, 0)
         filter_grid.addWidget(self.hf_filter_gguf,      0, 1)
+        filter_grid.addWidget(self.hf_filter_instruct,  0, 2)
+        filter_grid.addWidget(self.hf_filter_chat,      0, 3)
         filter_grid.addWidget(self.hf_filter_adapter,   1, 0)
         filter_grid.addWidget(self.hf_filter_quant,     1, 1)
+        filter_grid.addWidget(self.hf_filter_reasoning, 1, 2)
+        filter_grid.addWidget(self.hf_filter_vision,    1, 3)
 
         for _chk in (
             self.hf_filter_trainable,
             self.hf_filter_gguf,
             self.hf_filter_adapter,
             self.hf_filter_quant,
+            self.hf_filter_instruct,
+            self.hf_filter_chat,
+            self.hf_filter_reasoning,
+            self.hf_filter_vision,
         ):
             _chk.toggled.connect(self._on_hf_filter_toggled)
 
@@ -10356,12 +10393,17 @@ class MainWindow(QMainWindow):
                 item.widget().deleteLater()
         self.search_model_cards.clear()
         
-        # Collect active format filters. Each checkbox is an INCLUSIVE
-        # category; a model passes if it matches ANY checked category.
-        # We intentionally do NOT pass these as server-side filters —
-        # the Hub's `library=transformers` still returns repos that are
-        # ALSO tagged `gguf` (TheBloke et al.), so client-side post-
-        # filtering is the only reliable way to honour the user's intent.
+        # Collect active filters. Two families:
+        #   FORMAT — Trainable / GGUF / Adapter / Quantized (based on
+        #            HF library tags + quant tags).
+        #   CAPABILITY — Instruct / Chat / Reasoning / Vision (based on
+        #            tags AND model_id name patterns; tags alone are
+        #            sparse for instruct/chat).
+        # Each checkbox is an INCLUSIVE category; a model passes if it
+        # matches ANY checked category. Server-side library filters are
+        # intentionally avoided — the Hub returns cross-tagged repos
+        # (a transformers card with a GGUF mirror sibling), so client-
+        # side post-filtering is the only reliable approach.
         wanted: list[str] = []
         if getattr(self, "hf_filter_trainable", None) and self.hf_filter_trainable.isChecked():
             wanted.append("trainable")
@@ -10371,13 +10413,20 @@ class MainWindow(QMainWindow):
             wanted.append("adapter")
         if getattr(self, "hf_filter_quant", None) and self.hf_filter_quant.isChecked():
             wanted.append("quant")
+        if getattr(self, "hf_filter_instruct", None) and self.hf_filter_instruct.isChecked():
+            wanted.append("instruct")
+        if getattr(self, "hf_filter_chat", None) and self.hf_filter_chat.isChecked():
+            wanted.append("chat")
+        if getattr(self, "hf_filter_reasoning", None) and self.hf_filter_reasoning.isChecked():
+            wanted.append("reasoning")
+        if getattr(self, "hf_filter_vision", None) and self.hf_filter_vision.isChecked():
+            wanted.append("vision")
 
-        def _matches(hit_tags: list[str]) -> bool:
-            tagset = {t.lower() for t in (hit_tags or [])}
+        def _matches(hit) -> bool:
+            tagset = {t.lower() for t in (hit.tags or [])}
+            mid = (hit.model_id or "").lower()
             for category in wanted:
                 if category == "trainable":
-                    # Full transformers checkpoint AND not also GGUF / PEFT —
-                    # those are filed under their own categories.
                     if (
                         "transformers" in tagset
                         and "gguf" not in tagset
@@ -10395,6 +10444,46 @@ class MainWindow(QMainWindow):
                 elif category == "quant":
                     if any(q in tagset for q in ("awq", "gptq", "exl2", "bitsandbytes")):
                         return True
+                elif category == "instruct":
+                    # Tag forms vary: "instruct", "instruction-tuned",
+                    # "sft". Naming also reliable: "-instruct", "-it-",
+                    # "-it" suffix (Gemma style).
+                    if any(t in tagset for t in ("instruct", "instruction-tuned", "sft")):
+                        return True
+                    if (
+                        "instruct" in mid
+                        or "-it-" in mid
+                        or mid.endswith("-it")
+                        or mid.endswith("-it-bnb-4bit")
+                    ):
+                        return True
+                elif category == "chat":
+                    if any(t in tagset for t in ("chat", "conversational", "dialog", "chatml")):
+                        return True
+                    if "chat" in mid or "dialog" in mid:
+                        return True
+                elif category == "reasoning":
+                    if any(t in tagset for t in ("reasoning", "thinking", "chain-of-thought")):
+                        return True
+                    if any(
+                        kw in mid
+                        for kw in ("reasoning", "thinking", "deepseek-r1", "-r1-", "-r1", "qwq", "o1-")
+                    ):
+                        return True
+                elif category == "vision":
+                    if any(
+                        t in tagset
+                        for t in (
+                            "image-text-to-text",
+                            "vqa",
+                            "visual-question-answering",
+                            "image-to-text",
+                            "multimodal",
+                        )
+                    ):
+                        return True
+                    if any(kw in mid for kw in ("vision", "-vl-", "-vl", "llava", "multimodal", "moondream")):
+                        return True
             return False
 
         filter_summary = f" [filter: {', '.join(wanted)}]" if wanted else ""
@@ -10403,9 +10492,9 @@ class MainWindow(QMainWindow):
         try:
             # Over-fetch when filters are active so we still have ~24 results
             # after client-side filtering drops false positives.
-            fetch_limit = 80 if wanted else 24
+            fetch_limit = 100 if wanted else 24
             raw = search_hf_models(q, limit=fetch_limit)
-            hits = [h for h in raw if _matches(h.tags or [])] if wanted else raw
+            hits = [h for h in raw if _matches(h)] if wanted else raw
             hits = hits[:24]
             
             if not hits:

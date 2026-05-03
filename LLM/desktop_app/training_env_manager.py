@@ -230,6 +230,33 @@ def ensure_ready(
             if _can_import(py, pkg):
                 continue
 
+        # ---- L2.5: torch-cuda repair ---------------------------------
+        # unsloth and friends raise NotImplementedError("Unsloth cannot
+        # find any torch accelerator? You need a GPU.") when torch was
+        # installed as the CPU-only build. The L2 ladder above is
+        # import-name based and doesn't catch this symptom — but the
+        # fix is mechanical: reinstall torch from the cu121 PyTorch
+        # index. Targeted to unsloth-style errors so we don't shotgun
+        # torch reinstalls into every transient import failure.
+        err_recheck = (err or _import_error(py, pkg) or "").lower()
+        if (
+            "cannot find any torch accelerator" in err_recheck
+            or "you need a gpu" in err_recheck
+            or "torch.cuda is not available" in err_recheck
+        ):
+            p(f"{pkg} can't see torch's CUDA build — reinstalling torch+cu121…")
+            try:
+                _pip_install_with_index(
+                    py,
+                    ["torch", "torchvision", "torchaudio"],
+                    index_url="https://download.pytorch.org/whl/cu121",
+                    force_reinstall=True,
+                )
+            except TrainingEnvBootstrapError as exc:
+                logger.warning("L2.5 torch+cu121 reinstall failed: %s", exc)
+            if _can_import(py, pkg):
+                continue
+
         # ---- L3: aggressive reinstall --------------------------------
         p(f"Re-installing {spec} with --upgrade --force-reinstall…")
         try:
@@ -378,6 +405,60 @@ def _pip_install(python_exe: Path, package_spec: str, *, force_reinstall: bool =
     raise TrainingEnvBootstrapError(
         f"pip install {package_spec} failed (exit {proc.returncode}).\n"
         f"stderr: {stderr[:600]}"
+    )
+
+
+def _pip_install_with_index(
+    python_exe: Path,
+    packages: List[str],
+    *,
+    index_url: str,
+    force_reinstall: bool = False,
+) -> None:
+    """Install a batch of packages from a non-PyPI index (e.g. PyTorch CUDA).
+
+    Used by the L2.5 torch-cuda repair path — torch's CUDA wheels live
+    only on download.pytorch.org/whl/<variant>, not PyPI, so the regular
+    ``_pip_install`` (which doesn't accept an index override) can't
+    fetch them. Force-reinstall is the default for this path because
+    the symptom is "torch is installed but it's the CPU build" — a
+    plain install would see torch already present and skip.
+    """
+    if not packages:
+        return
+    cmd = [
+        str(python_exe), "-m", "pip", "install",
+        "--index-url", index_url,
+        "--upgrade-strategy", "only-if-needed",
+        "--prefer-binary",
+        "--no-warn-script-location",
+    ]
+    if force_reinstall:
+        cmd += ["--upgrade", "--force-reinstall"]
+    cmd.extend(packages)
+    creationflags = 0x08000000 if sys.platform == "win32" else 0
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=1500,  # ~25 min — torch wheel + cu121 runtime is ~3 GB
+            creationflags=creationflags,
+        )
+    except subprocess.TimeoutExpired:
+        raise TrainingEnvBootstrapError(
+            f"pip install from {index_url} timed out after 25 minutes"
+        )
+    except FileNotFoundError as exc:
+        raise TrainingEnvBootstrapError(f"pip not callable in training venv: {exc}")
+
+    if proc.returncode == 0:
+        return
+    stderr = (proc.stderr or "").strip()
+    raise TrainingEnvBootstrapError(
+        f"pip install --index-url {index_url} {' '.join(packages)} failed "
+        f"(exit {proc.returncode}).\nstderr: {stderr[:600]}"
     )
 
 

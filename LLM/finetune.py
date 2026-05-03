@@ -93,7 +93,7 @@ FastLanguageModel = None  # populated lazily inside main() if needed
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer
-from datasets import load_dataset
+from datasets import load_dataset, Dataset
 from transformers import TrainerCallback, TrainerState, TrainerControl
 
 # Import compatibility module for runtime capability detection
@@ -537,10 +537,8 @@ def main():
                 model.gradient_checkpointing_enable()
 
     print(f"[INFO] Preparing dataset...")
-    
-    # Smart dataset loader - handles JSON and JSONL automatically
-    import tempfile
-    
+
+    # Smart dataset loader - handles JSON and JSONL automatically.
     file_format = detect_file_format(DATASET_PATH)
     
     if file_format == 'jsonl' or (file_format == 'auto' and DATASET_PATH.endswith('.jsonl')):
@@ -660,15 +658,18 @@ def main():
         raise ValueError("No valid examples found in dataset")
     
     print(f"[INFO] ✓ Normalized {len(normalized_data)} examples")
-    
-    # Step 3: Write to JSONL format for reliable loading
-    temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.jsonl', delete=False, encoding='utf-8')
-    for item in normalized_data:
-        temp_file.write(json.dumps(item, ensure_ascii=False) + '\n')
-    temp_file.close()
-    
-    # Step 4: Load with HuggingFace datasets
-    dataset = load_dataset("json", data_files=temp_file.name, split="train")
+
+    # Build the Dataset directly from the in-memory Python list. The
+    # previous approach wrote a temp JSONL file and called
+    # ``datasets.load_dataset('json', data_files=...)`` — which hands
+    # the file to pyarrow's C++ JSON reader. On this Windows + pyarrow
+    # + datasets combination, that path segfaults with
+    # ACCESS_VIOLATION (0xC0000005, exit -1073741819) DURING
+    # 'Generating train split' before a single example is yielded.
+    # ``Dataset.from_list`` skips the pyarrow JSON reader entirely
+    # — it serialises straight into an Arrow table from Python objects,
+    # avoiding the broken native code path.
+    dataset = Dataset.from_list(normalized_data)
     print(f"[INFO] ✓ Loaded dataset with {len(dataset)} examples")
     
     if args.max_examples:

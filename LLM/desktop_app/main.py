@@ -363,7 +363,17 @@ class InstallerThread(QThread):
 
 
 class PipPackageThread(QThread):
-    """Thread for running a single pip install/uninstall without freezing UI."""
+    """Thread for running a single pip install/uninstall without freezing UI.
+
+    Migration 4/6: replaced the bespoke pip-runner (regex-based +cuXXX
+    index detection, hand-rolled subprocess.Popen, no log persistence)
+    with the unified ``core.install.PipExecutor``. PipMode is selected
+    automatically based on the package spec — torch+cuXXX specs get
+    PYPI_PLUS_CU121/124, everything else uses PYPI.
+
+    Same Qt signal contract (``log_output`` / ``finished_signal``) so
+    the UI doesn't change.
+    """
     log_output = Signal(str)
     finished_signal = Signal(bool)
 
@@ -372,49 +382,44 @@ class PipPackageThread(QThread):
         self.action = action  # "install" | "uninstall"
         self.package_spec = package_spec
         self.python_exe = python_exe or sys.executable
-        self.pip_index_args: list[str] = []
 
-        # Detect torch CUDA wheels and add correct index automatically
-        try:
-            import re
-            # Look for +cuXXX in the spec (e.g., torch==2.5.1+cu121)
-            m = re.search(r"\+cu(\d+)", package_spec or "")
-            if m:
-                cu_tag = m.group(1)
-                torch_index = f"https://download.pytorch.org/whl/cu{cu_tag}"
-                # Prefer explicit index to find CUDA wheels; keep PyPI as extra for deps
-                self.pip_index_args = ["--index-url", torch_index, "--extra-index-url", "https://pypi.org/simple"]
-        except Exception:
-            # Fallback silently; will just use default index
-            self.pip_index_args = []
+    def _pick_mode(self):
+        """Mode selection: cu121/cu124 for torch wheels, PyPI otherwise."""
+        from core.install import PipMode
+        spec = self.package_spec or ""
+        if "+cu121" in spec:
+            return PipMode.PYPI_PLUS_CU121
+        if "+cu124" in spec:
+            return PipMode.PYPI_PLUS_CU124
+        return PipMode.PYPI
 
     def run(self):
-        import subprocess
         try:
+            from core.install import PipExecutor
+            from pathlib import Path
+            project_root = Path(__file__).parent.parent
+            executor = PipExecutor(project_root=project_root)
+            stream = lambda line: self.log_output.emit(line)
+
             if self.action == "uninstall":
-                cmd = [self.python_exe, "-m", "pip", "uninstall", "-y", self.package_spec]
+                result = executor.uninstall(
+                    env_python=Path(self.python_exe),
+                    packages=[self.package_spec],
+                    log=stream,
+                )
             else:
-                # Install/update a single package only; do NOT resolve deps (to avoid cascading reinstalls).
-                cmd = [self.python_exe, "-m", "pip", "install", "--no-deps", "--no-cache-dir"] + self.pip_index_args + [self.package_spec]
-
-            self.log_output.emit(f"Running: {' '.join(cmd)}")
-
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                universal_newlines=True,
-                **SUBPROCESS_FLAGS
-            )
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                line = line.rstrip()
-                if line:
-                    self.log_output.emit(line)
-            rc = proc.wait()
-            self.finished_signal.emit(rc == 0)
+                result = executor.install(
+                    env_python=Path(self.python_exe),
+                    specs=[self.package_spec],
+                    mode=self._pick_mode(),
+                    no_deps=True,  # single-package repair: don't cascade
+                    log=stream,
+                    label=f"pkg-{self.action}",
+                )
+            if not result.ok:
+                self.log_output.emit(f"\n[FAIL] {result.summary}")
+                self.log_output.emit(f"Detailed log: {result.log_path}")
+            self.finished_signal.emit(result.ok)
         except Exception as e:
             import traceback
             self.log_output.emit(f"[ERROR] pip task failed: {e}")

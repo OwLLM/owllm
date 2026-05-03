@@ -6573,7 +6573,70 @@ class MainWindow(QMainWindow):
         # Add custom tab buttons to header layout
         header_layout.addWidget(self.browse_tab_btn)
         header_layout.addWidget(self.downloaded_tab_btn)
-        
+
+        # Format-filter container — inline next to the Downloaded button,
+        # same height as the tab buttons (50px), 2×2 grid of checkboxes.
+        # Trainable / GGUF / Adapter / Quantized. No checkbox = unfiltered.
+        filter_container = QFrame()
+        filter_container.setObjectName("formatFilterContainer")
+        filter_container.setMinimumHeight(50)
+        filter_container.setMaximumHeight(50)
+        filter_container.setStyleSheet("""
+            QFrame#formatFilterContainer {
+                background: rgba(102, 126, 234, 0.08);
+                border: 1px solid rgba(102, 126, 234, 0.25);
+                border-radius: 8px;
+            }
+        """)
+        filter_grid = QGridLayout(filter_container)
+        filter_grid.setContentsMargins(10, 4, 10, 4)
+        filter_grid.setHorizontalSpacing(14)
+        filter_grid.setVerticalSpacing(0)
+
+        chk_style = (
+            "QCheckBox { color:#dadcdf; font-size:10pt; background:transparent; spacing:4px; }"
+            "QCheckBox::indicator { width:14px; height:14px; }"
+        )
+
+        self.hf_filter_trainable = QCheckBox("✅ Trainable")
+        self.hf_filter_trainable.setToolTip(
+            "transformers-format models with full weights — what the Train tab can fine-tune."
+        )
+        self.hf_filter_trainable.setStyleSheet(chk_style)
+
+        self.hf_filter_gguf = QCheckBox("📦 GGUF")
+        self.hf_filter_gguf.setToolTip(
+            "llama.cpp / bundled-proxy inference format. Cannot be fine-tuned."
+        )
+        self.hf_filter_gguf.setStyleSheet(chk_style)
+
+        self.hf_filter_adapter = QCheckBox("🧩 Adapter (LoRA)")
+        self.hf_filter_adapter.setToolTip(
+            "PEFT / LoRA adapters — small overlays that need a base model to load."
+        )
+        self.hf_filter_adapter.setStyleSheet(chk_style)
+
+        self.hf_filter_quant = QCheckBox("⚡ Quantized (AWQ / GPTQ)")
+        self.hf_filter_quant.setToolTip(
+            "Inference-only weight-quantized checkpoints (AWQ or GPTQ)."
+        )
+        self.hf_filter_quant.setStyleSheet(chk_style)
+
+        filter_grid.addWidget(self.hf_filter_trainable, 0, 0)
+        filter_grid.addWidget(self.hf_filter_gguf,      0, 1)
+        filter_grid.addWidget(self.hf_filter_adapter,   1, 0)
+        filter_grid.addWidget(self.hf_filter_quant,     1, 1)
+
+        for _chk in (
+            self.hf_filter_trainable,
+            self.hf_filter_gguf,
+            self.hf_filter_adapter,
+            self.hf_filter_quant,
+        ):
+            _chk.toggled.connect(self._on_hf_filter_toggled)
+
+        header_layout.addWidget(filter_container)
+
         # Add stretch to push search bar to the right
         header_layout.addStretch(1)
         
@@ -6628,65 +6691,6 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(search_container)
 
         main_layout.addWidget(header_container)
-
-        # Format filter row — narrows HF search by model format. Trainable
-        # = transformers/full-weights (what the Train page can fine-tune);
-        # GGUF = llama.cpp inference; Adapter = PEFT/LoRA artefacts;
-        # Quantized = AWQ/GPTQ inference-only checkpoints. Filters compose
-        # OR-style server-side; checking none = unfiltered (legacy behaviour).
-        filter_row = QWidget()
-        filter_row_layout = QHBoxLayout(filter_row)
-        filter_row_layout.setContentsMargins(2, 0, 2, 6)
-        filter_row_layout.setSpacing(14)
-        filter_label = QLabel("Format:")
-        filter_label.setStyleSheet("color:#aaa; font-size:10pt; background:transparent;")
-        filter_row_layout.addWidget(filter_label)
-
-        chk_style = (
-            "QCheckBox { color:#dadcdf; font-size:10pt; background:transparent; spacing:4px; }"
-            "QCheckBox::indicator { width:14px; height:14px; }"
-        )
-
-        self.hf_filter_trainable = QCheckBox("✅ Trainable")
-        self.hf_filter_trainable.setToolTip(
-            "transformers-format models with full weights — what the Train tab can fine-tune."
-        )
-        self.hf_filter_trainable.setStyleSheet(chk_style)
-        filter_row_layout.addWidget(self.hf_filter_trainable)
-
-        self.hf_filter_gguf = QCheckBox("📦 GGUF")
-        self.hf_filter_gguf.setToolTip(
-            "llama.cpp / bundled-proxy inference format. Cannot be fine-tuned."
-        )
-        self.hf_filter_gguf.setStyleSheet(chk_style)
-        filter_row_layout.addWidget(self.hf_filter_gguf)
-
-        self.hf_filter_adapter = QCheckBox("🧩 Adapter (LoRA)")
-        self.hf_filter_adapter.setToolTip(
-            "PEFT / LoRA adapters — small overlays that need a base model to load."
-        )
-        self.hf_filter_adapter.setStyleSheet(chk_style)
-        filter_row_layout.addWidget(self.hf_filter_adapter)
-
-        self.hf_filter_quant = QCheckBox("⚡ Quantized (AWQ / GPTQ)")
-        self.hf_filter_quant.setToolTip(
-            "Inference-only weight-quantized checkpoints (AWQ or GPTQ)."
-        )
-        self.hf_filter_quant.setStyleSheet(chk_style)
-        filter_row_layout.addWidget(self.hf_filter_quant)
-
-        filter_row_layout.addStretch(1)
-
-        # Re-run search whenever a filter toggles (only if there's a query).
-        for _chk in (
-            self.hf_filter_trainable,
-            self.hf_filter_gguf,
-            self.hf_filter_adapter,
-            self.hf_filter_quant,
-        ):
-            _chk.toggled.connect(self._on_hf_filter_toggled)
-
-        main_layout.addWidget(filter_row)
 
         # Connect tab widget changes to update button states
         self.models_content_tabs.currentChanged.connect(self._on_models_tab_changed)
@@ -10316,32 +10320,57 @@ class MainWindow(QMainWindow):
                 item.widget().deleteLater()
         self.search_model_cards.clear()
         
-        # Collect format filters. Trainable/GGUF/Adapter resolve to HF
-        # `library` filters; AWQ/GPTQ map to tag filters. Mixed selection
-        # composes OR-style on the Hub.
-        libraries: list[str] = []
-        tags: list[str] = []
+        # Collect active format filters. Each checkbox is an INCLUSIVE
+        # category; a model passes if it matches ANY checked category.
+        # We intentionally do NOT pass these as server-side filters —
+        # the Hub's `library=transformers` still returns repos that are
+        # ALSO tagged `gguf` (TheBloke et al.), so client-side post-
+        # filtering is the only reliable way to honour the user's intent.
+        wanted: list[str] = []
         if getattr(self, "hf_filter_trainable", None) and self.hf_filter_trainable.isChecked():
-            libraries.append("transformers")
+            wanted.append("trainable")
         if getattr(self, "hf_filter_gguf", None) and self.hf_filter_gguf.isChecked():
-            libraries.append("gguf")
+            wanted.append("gguf")
         if getattr(self, "hf_filter_adapter", None) and self.hf_filter_adapter.isChecked():
-            libraries.append("peft")
+            wanted.append("adapter")
         if getattr(self, "hf_filter_quant", None) and self.hf_filter_quant.isChecked():
-            tags.extend(["awq", "gptq"])
+            wanted.append("quant")
 
-        filter_summary = ""
-        if libraries or tags:
-            filter_summary = f" [filter: {', '.join(libraries + tags)}]"
+        def _matches(hit_tags: list[str]) -> bool:
+            tagset = {t.lower() for t in (hit_tags or [])}
+            for category in wanted:
+                if category == "trainable":
+                    # Full transformers checkpoint AND not also GGUF / PEFT —
+                    # those are filed under their own categories.
+                    if (
+                        "transformers" in tagset
+                        and "gguf" not in tagset
+                        and "peft" not in tagset
+                        and "adapter" not in tagset
+                        and not any(q in tagset for q in ("awq", "gptq", "exl2", "mlx"))
+                    ):
+                        return True
+                elif category == "gguf":
+                    if "gguf" in tagset:
+                        return True
+                elif category == "adapter":
+                    if "peft" in tagset or "adapter" in tagset or "lora" in tagset:
+                        return True
+                elif category == "quant":
+                    if any(q in tagset for q in ("awq", "gptq", "exl2", "bitsandbytes")):
+                        return True
+            return False
+
+        filter_summary = f" [filter: {', '.join(wanted)}]" if wanted else ""
         self._log_models(f"🔍 Searching Hugging Face for: {q}{filter_summary}...")
 
         try:
-            hits = search_hf_models(
-                q,
-                limit=24,
-                libraries=libraries or None,
-                tags=tags or None,
-            )
+            # Over-fetch when filters are active so we still have ~24 results
+            # after client-side filtering drops false positives.
+            fetch_limit = 80 if wanted else 24
+            raw = search_hf_models(q, limit=fetch_limit)
+            hits = [h for h in raw if _matches(h.tags or [])] if wanted else raw
+            hits = hits[:24]
             
             if not hits:
                 no_results = QLabel(f"No models found matching '{q}'")

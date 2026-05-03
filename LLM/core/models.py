@@ -33,6 +33,12 @@ class HFModelHit:
     downloads: int | None = None
     likes: int | None = None
     last_modified: str | None = None
+    # All Hub tags for this model (library tags like "transformers"/"gguf",
+    # quant tags like "awq"/"gptq", task tags, etc.). Populated from the
+    # ``ModelInfo.tags`` attribute returned by ``list_models``. The UI uses
+    # this to do client-side format filtering, since ``library=transformers``
+    # alone still returns repos cross-tagged with GGUF.
+    tags: List[str] = None  # type: ignore[assignment]
 
 
 def get_app_root() -> Path:
@@ -74,6 +80,7 @@ def search_hf_models(
                 downloads=getattr(m, "downloads", None),
                 likes=getattr(m, "likes", None),
                 last_modified=str(getattr(m, "lastModified", None) or ""),
+                tags=list(getattr(m, "tags", None) or []),
             )
         )
     return hits

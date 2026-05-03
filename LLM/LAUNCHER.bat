@@ -1,47 +1,40 @@
 @echo off
+REM =============================================================
+REM   OWLLM / LLM Fine-Tuning Studio — launcher (LLM-dir entry)
+REM
+REM   Equivalent to ..\START.bat but kept here so users running
+REM   from inside LLM\ get the same self-contained behaviour.
+REM   ALWAYS uses the bundled python_runtime — never system Python.
+REM =============================================================
+
+setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 
-REM Change to script directory
 cd /d "%~dp0"
 
-REM Find Python executable
-set PYTHON_EXE=python
+set "BUNDLED_PY="
+if exist "python_runtime\python3.12\python.exe" (
+    set "BUNDLED_PY=%~dp0python_runtime\python3.12\python.exe"
+) else if exist "python_runtime\python3.11\python.exe" (
+    set "BUNDLED_PY=%~dp0python_runtime\python3.11\python.exe"
+)
 
-REM Check if python is in PATH
-python --version >nul 2>&1
-if errorlevel 1 (
-    REM Check common Python install locations
-    for %%P in (
-        "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
-        "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-        "%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
-        "%LOCALAPPDATA%\Programs\Python\Python39\python.exe"
-        "%LOCALAPPDATA%\Programs\Python\Python38\python.exe"
-        "C:\Python312\python.exe"
-        "C:\Python311\python.exe"
-        "C:\Python310\python.exe"
-        "C:\Python39\python.exe"
-        "C:\Python38\python.exe"
-        "%ProgramFiles%\Python312\python.exe"
-        "%ProgramFiles%\Python311\python.exe"
-        "%ProgramFiles%\Python310\python.exe"
-        "%ProgramFiles%\Python39\python.exe"
-        "%ProgramFiles%\Python38\python.exe"
-    ) do (
-        if exist %%P (
-            set PYTHON_EXE=%%P
-            goto :python_found
-        )
-    )
-    
-    REM Python not found anywhere
-    msg * "Python not found! Please install Python 3.8+ from: https://www.python.org/downloads/ and check 'Add Python to PATH' during installation."
+if "!BUNDLED_PY!"=="" (
+    echo Bundled Python runtime not found under python_runtime\python3.{11,12}\.
+    echo OWLLM is designed to be self-contained and never use system Python.
+    echo Re-extract OWLLM or re-run the installer to restore python_runtime\.
+    pause
     exit /b 1
 )
 
-:python_found
+"!BUNDLED_PY!" "%~dp0LAUNCHER.py"
+set "LAUNCHER_RC=%ERRORLEVEL%"
 
-REM Call LAUNCHER.py which has all the new state management and resume logic
-"%PYTHON_EXE%" LAUNCHER.py
+if not "%LAUNCHER_RC%"=="0" (
+    echo.
+    echo Launcher exited with code %LAUNCHER_RC%.
+    echo See logs\app.log and logs\auto_repair.log for details.
+    pause
+)
 
-exit /b %ERRORLEVEL%
+exit /b %LAUNCHER_RC%

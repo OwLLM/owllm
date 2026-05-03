@@ -1,97 +1,77 @@
 @echo off
-REM ================================================================
-REM   LLM FINE-TUNING STUDIO - ONE-CLICK LAUNCHER
-REM   Double-click this file to launch the app
-REM ================================================================
+REM =============================================================
+REM   OWLLM / LLM Fine-Tuning Studio — production entry point
+REM
+REM   Single source of truth for "double-click to launch":
+REM     1. Use the BUNDLED Python runtime under
+REM        LLM\python_runtime\ — never touch system Python.
+REM     2. Hand off to LLM\LAUNCHER.py so it can run the
+REM        health gate (PySide6 OK? torch+CUDA OK?) and route
+REM        to safe-mode (installer GUI from bundled Python)
+REM        when the workload venv is broken at the C-extension
+REM        layer. Without this hand-off, the safe-mode path
+REM        is dead code in production.
+REM =============================================================
 
-REM Try to find Python - check multiple locations
-set PYTHON_EXE=
+setlocal EnableExtensions EnableDelayedExpansion
 
-REM Check if python is in PATH
-python --version >nul 2>&1
-if %ERRORLEVEL% EQU 0 (
-    set PYTHON_EXE=python
-    goto :found_python
+REM --- Resolve the bundled Python interpreter ------------------
+set "REPO_DIR=%~dp0"
+set "PY_RUNTIME=%REPO_DIR%LLM\python_runtime"
+set "BUNDLED_PY="
+
+if exist "%PY_RUNTIME%\python3.12\python.exe" (
+    set "BUNDLED_PY=%PY_RUNTIME%\python3.12\python.exe"
+) else if exist "%PY_RUNTIME%\python3.11\python.exe" (
+    set "BUNDLED_PY=%PY_RUNTIME%\python3.11\python.exe"
 )
 
-REM Check common Python install locations
-for %%P in (
-    "C:\Program Files\Python312\python.exe"
-    "C:\Program Files\Python311\python.exe"
-    "C:\Program Files\Python310\python.exe"
-    "%LOCALAPPDATA%\Programs\Python\Python312\python.exe"
-    "%LOCALAPPDATA%\Programs\Python\Python311\python.exe"
-    "%LOCALAPPDATA%\Programs\Python\Python310\python.exe"
-    "C:\Python312\python.exe"
-    "C:\Python311\python.exe"
-    "C:\Python310\python.exe"
-) do (
-    if exist %%P (
-        set PYTHON_EXE=%%P
-        goto :found_python
-    )
+if "!BUNDLED_PY!"=="" (
+    echo =============================================================
+    echo  BUNDLED PYTHON RUNTIME NOT FOUND
+    echo =============================================================
+    echo.
+    echo  Looked under:
+    echo    %PY_RUNTIME%\python3.12\python.exe
+    echo    %PY_RUNTIME%\python3.11\python.exe
+    echo.
+    echo  OWLLM is designed to be self-contained and never use
+    echo  system Python. The bundled runtime appears to be missing
+    echo  from this install.
+    echo.
+    echo  Re-extract the OWLLM zip / re-run the installer so the
+    echo  python_runtime\ folder is present.
+    echo.
+    pause
+    exit /b 1
 )
 
-REM Python not found
-echo ================================================================
-echo ERROR: Python Not Found
-echo ================================================================
+echo =============================================================
+echo  OWLLM launcher
+echo =============================================================
+echo  Bundled Python: !BUNDLED_PY!
 echo.
-echo Python 3.8 or higher is required but was not found.
-echo.
-echo Please install Python from:
-echo https://www.python.org/downloads/
-echo.
-echo Make sure to check 'Add Python to PATH' during installation!
-echo.
-pause
-exit /b 1
 
-:found_python
+REM Always run from the LLM dir so relative imports in LAUNCHER.py
+REM resolve the way they expect.
+pushd "%REPO_DIR%LLM"
 
-REM Change to LLM directory
-cd /d "%~dp0\LLM"
+REM Hand off to LAUNCHER.py — it owns:
+REM   * venv discovery
+REM   * PySide6 health probe
+REM   * torch+CUDA probe + safe-mode route
+REM   * dependency check
+REM   * the actual app launch (or installer GUI fallback)
+"!BUNDLED_PY!" "%REPO_DIR%LLM\LAUNCHER.py"
+set "LAUNCHER_RC=%ERRORLEVEL%"
 
-REM Check if venv exists
-if not exist ".venv\Scripts\pythonw.exe" (
-    echo ================================================================
-    echo FIRST TIME SETUP
-    echo ================================================================
+popd
+
+if not "%LAUNCHER_RC%"=="0" (
     echo.
-    echo Creating virtual environment and installing GUI library...
-    echo This will take 2-3 minutes...
-    echo.
-    
-    REM Create venv
-    "%PYTHON_EXE%" -m venv .venv
-    if errorlevel 1 (
-        echo ERROR: Failed to create virtual environment!
-        pause
-        exit /b 1
-    )
-    
-    REM Install PySide6
-    echo Installing GUI library...
-    .venv\Scripts\python.exe -m pip install --quiet --upgrade pip
-    .venv\Scripts\python.exe -m pip install PySide6==6.8.1
-    if errorlevel 1 (
-        echo ERROR: Failed to install GUI library!
-        pause
-        exit /b 1
-    )
-    
-    echo.
-    echo Setup complete!
-    echo.
+    echo Launcher exited with code %LAUNCHER_RC%.
+    echo Check LLM\logs\app.log and LLM\logs\auto_repair.log for details.
+    pause
 )
 
-REM Ensure setup marker exists (skip the broken wizard)
-if not exist ".setup_complete" (
-    echo. > .setup_complete
-)
-
-REM Launch the app
-start "" .venv\Scripts\pythonw.exe -m desktop_app.main
-
-exit /b 0
-
+exit /b %LAUNCHER_RC%

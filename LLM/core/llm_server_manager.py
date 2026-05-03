@@ -757,7 +757,12 @@ class LLMServerManager:
                 except Exception:
                     continue
             
-            # Check if already running and healthy
+            # Check if already running. If the process is alive, REUSE it — never
+            # kill a same-model server that another caller may currently be using.
+            # A failing /health check (status "loading", "unknown", False) usually
+            # just means the server is busy answering an in-flight generation;
+            # a 2s probe timing out is not evidence that it's broken. Wait it out;
+            # only restart if it genuinely never recovers within warmup_timeout.
             if server_id in self.running_servers:
                 process, _, _ = self.running_servers[server_id]
                 if process.poll() is None:  # Process is alive
@@ -765,19 +770,20 @@ class LLMServerManager:
                     if health_status == "ok":
                         log(f"Server '{server_id}' already running and healthy")
                         return self._get_server_url(server_id)
-                    if health_status == "loading":
-                        # Prefer waiting for loading to finish rather than killing/restarting
-                        log(f"Server '{server_id}' is loading, waiting for it to become ready...")
-                        try:
-                            self._wait_for_health_ok(server_id, self.warmup_timeout, log_callback=log)
-                            return self._get_server_url(server_id)
-                        except TimeoutError:
-                            log(f"Server '{server_id}' did not become ready in time, will restart")
-                            process.kill()
-                            del self.running_servers[server_id]
-                    else:
-                        log(f"Server '{server_id}' process alive but not healthy (status={health_status}), restarting")
-                        process.kill()
+                    log(
+                        f"Server '{server_id}' alive but health probe returned "
+                        f"status={health_status!r} (likely busy or still loading). "
+                        f"Waiting for it to become ready instead of restarting."
+                    )
+                    try:
+                        self._wait_for_health_ok(server_id, self.warmup_timeout, log_callback=log)
+                        return self._get_server_url(server_id)
+                    except TimeoutError:
+                        log(
+                            f"Server '{server_id}' never returned to 'ok' within "
+                            f"{self.warmup_timeout}s; assuming stuck and restarting."
+                        )
+                        self._force_kill_process_tree(process, server_id)
                         del self.running_servers[server_id]
                 else:
                     log(f"Server '{server_id}' process died, restarting")
@@ -1633,10 +1639,27 @@ class LLMServerManager:
                             log(f"Vision migration install failed: {mig_err[:300]}")
                     except Exception as mig_ex:
                         log(f"Vision migration install error: {mig_ex}")
-                # Optional one-shot runtime auto-repair (opt-in via LLM_RUNTIME_AUTO_REPAIR=1)
-                auto_repair = os.environ.get("LLM_RUNTIME_AUTO_REPAIR", "").strip().lower() in ("1", "true", "yes")
+                # One-shot runtime auto-repair. For DEDICATED envs we always
+                # try, because a dedicated env is contractually a complete
+                # self-contained runtime for its model — if it's missing
+                # core packages (transformers, accelerate, …) onboarding
+                # left it incomplete and the user-facing fix is the same
+                # install we'd run on opt-in. For SHARED envs we keep the
+                # opt-in gate so a quick boot doesn't accidentally fix up
+                # the global venv. LLM_RUNTIME_AUTO_REPAIR=0 forces the
+                # old strict behaviour for both.
+                auto_repair_env = os.environ.get("LLM_RUNTIME_AUTO_REPAIR", "").strip().lower()
+                auto_repair_disabled = auto_repair_env in ("0", "false", "no")
+                auto_repair_forced = auto_repair_env in ("1", "true", "yes")
+                auto_repair = (
+                    not auto_repair_disabled
+                    and (auto_repair_forced or is_dedicated)
+                )
                 if auto_repair and missing_packages:
-                    log("LLM_RUNTIME_AUTO_REPAIR enabled: attempting one-shot install of missing packages...")
+                    log(
+                        "Attempting one-shot install of missing packages "
+                        f"({'dedicated env auto-heal' if is_dedicated and not auto_repair_forced else 'LLM_RUNTIME_AUTO_REPAIR'})..."
+                    )
                     try:
                         install_ok, install_err = self.env_registry.auto_install_missing_packages(
                             env_spec.python_executable,
@@ -3093,60 +3116,97 @@ class LLMServerManager:
 
             return True
 
+    def _force_kill_process_tree(self, process: subprocess.Popen, server_id: str) -> None:
+        """
+        Force-kill a server process and ALL of its descendants, then wait for
+        the parent to exit. process.kill() only terminates the parent; native
+        workers it spawned (e.g. llama-server.exe under a python proxy, or any
+        in-process CUDA context that hasn't yet been reaped) keep holding GPU
+        VRAM and break the next launch on the same GPU. taskkill /F /T walks
+        the tree on Windows; killpg covers the POSIX case.
+        """
+        try:
+            pid = process.pid
+        except Exception:
+            pid = None
+
+        try:
+            if pid is not None and os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    capture_output=True,
+                    timeout=10,
+                    **self.subprocess_flags,
+                )
+            elif pid is not None:
+                try:
+                    os.killpg(os.getpgid(pid), 15)
+                except Exception:
+                    pass
+                try:
+                    os.killpg(os.getpgid(pid), 9)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(
+                f"Tree-kill of PID {pid} for '{server_id}' failed: {e}; falling back to process.kill()"
+            )
+            try:
+                process.kill()
+            except Exception:
+                pass
+
+        # Block briefly so the OS finishes reaping the process and its CUDA
+        # context before the caller tries to relaunch on the same GPU.
+        try:
+            process.wait(timeout=5)
+        except Exception:
+            pass
+
     def _kill_orphan_bundled_llama_servers(self) -> int:
         """
-        Kill orphan bundled llama-server.exe child processes that are no longer represented
-        by a live proxy/state row.
+        Kill orphan llama-server.exe processes left behind by a previous run.
+
+        Previously this used ``powershell.exe`` + ``Get-CimInstance`` to filter
+        only processes whose ExecutablePath/CommandLine pointed at the bundled
+        runtime under ``LLM/runtime/llama.cpp``. That powershell spawn was
+        triggering ``0xc0000142`` (DLL init failed) error popups during app
+        shutdown on some Windows boxes — undismissable modal dialogs.
+
+        OWLLM has no legitimate reason to leave non-bundled llama-server.exe
+        processes alive on its own machine, so the safer-and-simpler approach
+        is ``taskkill /F /IM llama-server.exe /T``. It does not spawn
+        powershell, has no DLL-init dependencies, and is idempotent.
         """
         if os.name != "nt":
             return 0
-
-        llm_root = Path(__file__).resolve().parents[1]
-        bundled_root = str((llm_root / "runtime" / "llama.cpp").resolve()).lower()
-        killed = 0
         try:
             result = subprocess.run(
-                [
-                    "powershell",
-                    "-NoProfile",
-                    "-Command",
-                    "(Get-CimInstance Win32_Process -Filter \"Name='llama-server.exe'\") | "
-                    "Select-Object ProcessId,ExecutablePath,CommandLine | ConvertTo-Json -Compress",
-                ],
+                ["taskkill", "/F", "/IM", "llama-server.exe", "/T"],
                 capture_output=True,
                 text=True,
                 timeout=10,
                 **self.subprocess_flags,
             )
-            raw = (result.stdout or "").strip()
-            if not raw:
-                return 0
-            data = json.loads(raw)
-            rows = data if isinstance(data, list) else [data]
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                pid = row.get("ProcessId")
-                exe = str(row.get("ExecutablePath") or "").lower()
-                cmd = str(row.get("CommandLine") or "").lower()
-                if bundled_root not in exe and bundled_root not in cmd:
-                    continue
-                if not pid:
-                    continue
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/PID", str(int(pid))],
-                        capture_output=True,
-                        timeout=10,
-                        **self.subprocess_flags,
-                    )
-                    killed += 1
-                    logger.info("Killed orphan bundled llama-server.exe PID %s", pid)
-                except Exception as e:
-                    logger.warning("Failed to kill orphan bundled llama-server.exe PID %s: %s", pid, e)
+            # taskkill exits 128 if no matching process — treat as 0 killed.
+            if result.returncode == 0:
+                # stdout typically lists each killed PID; count "PID" tokens
+                # for the log line.
+                out = result.stdout or ""
+                count = out.count("PID ") if "PID " in out else (1 if out.strip() else 0)
+                return count
+            return 0
         except Exception as e:
-            logger.warning("Failed orphan bundled llama-server cleanup: %s", e)
-        return killed
+            logger.warning("Failed orphan llama-server cleanup: %s", e)
+            return 0
     
     def shutdown_all(self):
         """Shutdown all running servers"""

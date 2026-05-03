@@ -7,7 +7,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, QPoint, QRect, QSize, QEvent, QTimer
 from PySide6.QtGui import QPainter, QPixmap, QPen, QColor
-from PySide6.QtWidgets import QWidget, QVBoxLayout
+from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout
 
 
 @dataclass
@@ -81,6 +81,16 @@ class HybridFrameWindow(QWidget):
         self._resize_dir = 0  # bitmask: L=1 R=2 T=4 B=8
         self._press_global = QPoint(0, 0)
         self._press_geom = QRect()
+
+        # --- corner-image click-to-snap rects (populated by paintEvent) ---
+        # The decorative images at the top-left, top-center and top-right
+        # double as window-snap shortcuts:
+        #   TL → left half of screen (full height)
+        #   TC → half-size, centered
+        #   TR → right half of screen (full height)
+        self._tl_click_rect = QRect()
+        self._tc_click_rect = QRect()
+        self._tr_click_rect = QRect()
 
         self._cursor_by_dir = {
             1 | 4: Qt.SizeFDiagCursor,  # L+T
@@ -301,13 +311,19 @@ class HybridFrameWindow(QWidget):
         # Other corner images (TL, TR, BL) - draw LAST so they appear on top
         # Corner TL - at top-left corner of outer frame, contained within frame
         corner_tl_height = get_corner_height(self.corner_tl)
-        self._draw_corner_pix(p, self.corner_tl, QRect(
+        corner_tl_rect = QRect(
             outer.left(),  # Frame left edge
             outer.top(),   # Frame top edge
             corner_width,
             corner_tl_height
-        ))
-        
+        )
+        self._draw_corner_pix(p, self.corner_tl, corner_tl_rect)
+        # Cache click target — shrink by resize_margin on the OUTER edges
+        # (left/top here) so the diagonal-resize handle at the very corner
+        # pixel stays draggable; the body of the owl stays clickable.
+        rm = self.resize_margin
+        self._tl_click_rect = corner_tl_rect.adjusted(rm, rm, 0, 0)
+
         # Corner TR - at top-right corner of outer frame, contained within frame
         corner_tr_height = get_corner_height(self.corner_tr)
         corner_tr_rect = QRect(
@@ -317,6 +333,8 @@ class HybridFrameWindow(QWidget):
             corner_tr_height
         )
         self._draw_corner_pix(p, self.corner_tr, corner_tr_rect)
+        # Outer edges are top/right for TR — preserve resize there.
+        self._tr_click_rect = corner_tr_rect.adjusted(0, rm, -rm, 0)
         
         # Corner BL - at bottom-left corner of outer frame, contained within frame
         corner_bl_height = get_corner_height(self.corner_bl)
@@ -338,6 +356,12 @@ class HybridFrameWindow(QWidget):
             target = QRect(x, y, badge_w, badge_h)
             # Draw directly without background - the image itself is transparent
             self._draw_scaled(p, self.top_center, target)
+            # Cache click target. The badge sits horizontally far from the
+            # left/right resize edges, so no inset needed; the small badge
+            # rect is the click target as-is.
+            self._tc_click_rect = QRect(target)
+        else:
+            self._tc_click_rect = QRect()
 
     def _draw_corner_brackets(self, p: QPainter, r: QRect, *, length: int, inset: int) -> None:
         x1, y1, x2, y2 = r.left(), r.top(), r.right(), r.bottom()
@@ -383,10 +407,10 @@ class HybridFrameWindow(QWidget):
     # Drag + Resize
     # ----------------------------
     def mousePressEvent(self, event) -> None:
-        """Only handle resize from edges - everything else passes through."""
+        """Handle resize from edges and snap-clicks on corner images."""
         if event is None:
             return
-        
+
         try:
             if event.button() != Qt.LeftButton:
                 event.ignore()
@@ -395,18 +419,27 @@ class HybridFrameWindow(QWidget):
             pos = event.pos()
             global_pos = event.globalPosition().toPoint()
 
-            # Check if clicking on resize edge
+            # Resize edge takes priority — the very corner pixel stays
+            # a diagonal-resize handle even though the corner image rect
+            # overlaps it. The image's click rect is shrunk by
+            # resize_margin in paintEvent specifically for this.
             d = self._hit_test_resize(pos)
             if d != 0 and self.parent_window:
-                # Resize edge - handle it to resize parent window
                 self._resizing = True
                 self._resize_dir = d
                 self._press_global = global_pos
                 self._press_geom = self.parent_window.geometry()
                 event.accept()
                 return
-            
-            # Not on edge - ignore event (pass through to parent)
+
+            # Not on an edge — check the snap-shortcut click rects.
+            which = self._hit_test_corner_click(pos)
+            if which is not None and self.parent_window is not None:
+                self._apply_corner_snap(which)
+                event.accept()
+                return
+
+            # Not on edge or snap target - ignore event (pass through to parent)
             event.ignore()
         except Exception as e:
             print(f"Error in HybridFrameWindow.mousePressEvent: {e}")
@@ -416,7 +449,7 @@ class HybridFrameWindow(QWidget):
         """Handle resize cursor and resize operation."""
         if event is None:
             return
-        
+
         try:
             # If resizing, apply resize to parent window
             if self._resizing and self.parent_window:
@@ -425,11 +458,19 @@ class HybridFrameWindow(QWidget):
                 event.accept()
                 return
 
-            # Not resizing - update cursor based on position
+            # Not resizing — pick the cursor by precedence:
+            #   resize edge   → directional resize cursor
+            #   snap target   → pointing-hand cursor
+            #   neither       → arrow
             pos = event.pos()
             d = self._hit_test_resize(pos)
-            self.setCursor(self._cursor_by_dir.get(d, Qt.ArrowCursor))
-            
+            if d != 0:
+                self.setCursor(self._cursor_by_dir.get(d, Qt.ArrowCursor))
+            elif self._hit_test_corner_click(pos) is not None:
+                self.setCursor(Qt.PointingHandCursor)
+            else:
+                self.setCursor(Qt.ArrowCursor)
+
             event.ignore()  # Pass through
         except Exception as e:
             print(f"Error in HybridFrameWindow.mouseMoveEvent: {e}")
@@ -476,6 +517,64 @@ class HybridFrameWindow(QWidget):
         if bottom:
             d |= 8
         return d
+
+    def _hit_test_corner_click(self, pos) -> str | None:
+        """Return 'tl' / 'tc' / 'tr' if pos is over a snap target, else None.
+
+        The rects are populated by paintEvent. Test in priority order:
+        the top-center badge is small and sits between the corners, so
+        it's checked first; otherwise tie-breaking by position is fine.
+        """
+        if self._tc_click_rect.isValid() and self._tc_click_rect.contains(pos):
+            return "tc"
+        if self._tl_click_rect.isValid() and self._tl_click_rect.contains(pos):
+            return "tl"
+        if self._tr_click_rect.isValid() and self._tr_click_rect.contains(pos):
+            return "tr"
+        return None
+
+    def _apply_corner_snap(self, which: str) -> None:
+        """Resize+move the parent window to a screen-half snap rect.
+
+        The frame syncs to the parent automatically via the parent's
+        Move/Resize events (see eventFilter), so we only set the parent's
+        geometry — the overlay follows.
+        """
+        if self.parent_window is None:
+            return
+
+        # availableGeometry excludes the taskbar / docked panels, so the
+        # snapped window doesn't slide under them.
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+
+        if which == "tl":
+            target = QRect(avail.x(), avail.y(),
+                           avail.width() // 2, avail.height())
+        elif which == "tr":
+            target = QRect(avail.x() + avail.width() // 2, avail.y(),
+                           avail.width() - avail.width() // 2, avail.height())
+        elif which == "tc":
+            half_w = avail.width() // 2
+            half_h = avail.height() // 2
+            target = QRect(avail.x() + (avail.width() - half_w) // 2,
+                           avail.y() + (avail.height() - half_h) // 2,
+                           half_w, half_h)
+        else:
+            return
+
+        # Honour the parent's minimum size so we don't crush smaller
+        # windows below their content's hard floor.
+        min_w = max(self.parent_window.minimumWidth(), 100)
+        min_h = max(self.parent_window.minimumHeight(), 100)
+        if target.width() < min_w:
+            target.setWidth(min_w)
+        if target.height() < min_h:
+            target.setHeight(min_h)
+
+        self.parent_window.setGeometry(target)
 
     def _apply_resize(self, global_pos: QPoint) -> None:
         """Apply resize to parent window and sync overlay."""

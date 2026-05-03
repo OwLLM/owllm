@@ -12650,18 +12650,81 @@ class MainWindow(QMainWindow):
         return True
 
     def _on_training_error(self, proc, error):
-        """Handle training process errors"""
-        error_msgs = {
-            QProcess.FailedToStart: "Failed to start (check if Python is installed)",
-            QProcess.Crashed: "Process crashed",
-            QProcess.Timedout: "Process timed out",
-            QProcess.WriteError: "Write error",
-            QProcess.ReadError: "Read error",
-            QProcess.UnknownError: "Unknown error"
+        """Handle training process errors with real diagnostics.
+
+        Two bugs lived here:
+          1. Dict-keyed by QProcess.FailedToStart enum, but PySide6's
+             signal can pass an int that doesn't compare-hash cleanly
+             with the enum member depending on the runtime — so users
+             saw 'Error code: 0' instead of the readable label.
+             Fix: cast both sides to int.
+          2. 'FailedToStart' is reported by Qt for ANY very-quick
+             non-zero exit on Windows, even when the process DID
+             start and produced stderr. So 'Failed to start' was a
+             lie 90% of the time; the actual error was buried in
+             stderr that nobody read.
+             Fix: drain stdout/stderr from the proc and surface them.
+        """
+        # 1) Translate the enum/int to a label safely.
+        try:
+            error_int = int(error)
+        except Exception:
+            error_int = error
+        labels = {
+            int(QProcess.FailedToStart): "QProcess: FailedToStart",
+            int(QProcess.Crashed):       "QProcess: Crashed",
+            int(QProcess.Timedout):      "QProcess: Timedout",
+            int(QProcess.WriteError):    "QProcess: WriteError",
+            int(QProcess.ReadError):     "QProcess: ReadError",
+            int(QProcess.UnknownError):  "QProcess: UnknownError",
         }
-        error_msg = error_msgs.get(error, f"Error code: {error}")
-        self.train_log.appendPlainText(f"\n[ERROR] {error_msg}")
-        self._append_terminal(f"[ERROR] {error_msg}", source="train")
+        label = labels.get(error_int, f"QProcess error #{error_int}")
+
+        # 2) Drain whatever stdout/stderr the child produced before exit.
+        #    This is where the actual Python traceback lives — not in
+        #    the enum value Qt hands us. Empty bytes -> 'no output'.
+        captured: list[str] = []
+        try:
+            blob = bytes(proc.readAllStandardOutput()).decode(
+                "utf-8", errors="replace"
+            ).strip()
+            if blob:
+                captured.append(blob)
+        except Exception:
+            pass
+        try:
+            blob = bytes(proc.readAllStandardError()).decode(
+                "utf-8", errors="replace"
+            ).strip()
+            if blob:
+                captured.append(blob)
+        except Exception:
+            pass
+
+        self.train_log.appendPlainText(f"\n[ERROR] {label}")
+        self._append_terminal(f"[ERROR] {label}", source="train")
+        if captured:
+            output = "\n".join(captured)
+            # Show a HEAD + TAIL of the output if it's huge — but never
+            # silently drop. The middle is in the persisted log already.
+            shown = output if len(output) <= 4000 else f"{output[:1500]}\n...\n{output[-2000:]}"
+            self.train_log.appendPlainText("[ERROR] Captured output from finetune.py:")
+            self.train_log.appendPlainText(shown)
+            self._append_terminal("[ERROR] Captured output from finetune.py:", source="train")
+            for line in shown.splitlines():
+                self._append_terminal(line, source="train")
+        else:
+            # No output from the child — this really IS likely a
+            # process-launch problem (bad PATH, antivirus blocking,
+            # exec bit issue). Point the user at the verifiable thing.
+            self.train_log.appendPlainText(
+                "[ERROR] No output captured from finetune.py. The interpreter "
+                "may have failed to launch. Verify standalone:"
+            )
+            self.train_log.appendPlainText(
+                f"  > {self._get_target_venv_python() or 'python'} -u finetune.py --help"
+            )
+
         self.train_start.setEnabled(True)
         self.train_stop.setEnabled(False)
 

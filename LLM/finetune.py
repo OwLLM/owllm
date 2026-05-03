@@ -432,17 +432,33 @@ def main():
 
     eos = tokenizer.eos_token or ""
 
-    def _tokenize(example):
-        # Append EOS here so trl never needs to do it post-load.
-        return tokenizer(
-            example["text"] + eos,
+    # Tokenise in PURE PYTHON, not via dataset.map. dataset.map writes
+    # the tokenised columns through pyarrow's IPC writer; on Windows
+    # that writer segfaults the moment it tries to commit a variable-
+    # length list<int32> column (the input_ids), even though the
+    # tokenizer itself handles every row cleanly when tested in
+    # isolation. Building a list of dicts in Python and passing it to
+    # Dataset.from_list avoids the broken IPC code path — Arrow
+    # builds the table directly from Python objects.
+    print(f"[INFO] Pre-tokenising {len(dataset)} examples (max_length={MAX_SEQ_LENGTH})...")
+    tokenised_rows = []
+    texts = dataset["text"]
+    for i, text in enumerate(texts):
+        enc = tokenizer(
+            text + eos,
             truncation=True,
             max_length=MAX_SEQ_LENGTH,
             padding=False,
         )
+        tokenised_rows.append({
+            "input_ids": enc["input_ids"],
+            "attention_mask": enc["attention_mask"],
+        })
+        if (i + 1) % 200 == 0 or i + 1 == len(texts):
+            print(f"  ...{i + 1}/{len(texts)}")
 
-    print(f"[INFO] Pre-tokenising {len(dataset)} examples (max_length={MAX_SEQ_LENGTH})...")
-    dataset = dataset.map(_tokenize, remove_columns=["text"])
+    dataset = Dataset.from_list(tokenised_rows)
+    del texts, tokenised_rows
     print(f"[INFO] ✓ Pre-tokenised — columns: {dataset.column_names}")
 
     # Free the now-redundant Python list before model load.

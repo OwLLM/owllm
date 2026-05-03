@@ -691,34 +691,47 @@ class ImmutableInstaller:
         return venv_tag == required_tag, venv_tag, required_tag
 
     def _ensure_pip_available(self, venv_python: Path) -> None:
-        """Bootstrap pip into the venv when it's missing.
+        """Bootstrap pip into the venv when it's missing OR broken.
 
-        Symptom we're recovering from: the venv was created with
-        ``virtualenv --no-pip`` (the bootstrap_rebuild_venv.py path
-        does this on purpose to avoid virtualenv's stale 3.11-era
-        seed pip on Python 3.12) but then no follow-up bootstrap
-        ran. PHASE 4 then crashes immediately with::
+        Recovers from two distinct failure modes:
 
-            python.exe: No module named pip
+        1. **No pip at all.** ``virtualenv --no-pip`` (used by
+           ``bootstrap_rebuild_venv.py``) deliberately skips seeding
+           pip; without a follow-up bootstrap PHASE 4 dies with
+           ``No module named pip``.
+        2. **Pip imports but won't run.** The bundled
+           ``python_runtime/python3.12/get-pip.py`` is old enough
+           to install a pip release that pre-dates Python 3.12
+           support — symptom is ``import pip`` succeeding while
+           ``python -m pip --version`` raises inside pip's own
+           import chain (``from pip._internal.cli.autocompletion
+           import autocomplete`` failing on 3.12 stdlib changes).
 
-        Fix: probe ``import pip``; if it fails, find the
-        version-matched ``get-pip.py`` shipped alongside the
-        appropriate python_runtime/pythonX.Y/ folder and run it
-        against the venv's interpreter.
+        The probe must therefore RUN pip, not just import it. If
+        ``python -m pip --version`` exits non-zero the bootstrap
+        path runs: bundled get-pip.py first, then a PyPA-hosted
+        ``https://bootstrap.pypa.io/get-pip.py`` fallback if the
+        bundled one produces another too-old pip.
         """
         try:
             probe = subprocess.run(
-                [str(venv_python), "-c", "import pip"],
-                capture_output=True, text=True, timeout=20,
+                [str(venv_python), "-m", "pip", "--version"],
+                capture_output=True, text=True, timeout=30,
                 **self.subprocess_flags,
             )
         except Exception as exc:  # noqa: BLE001
             self.log(f"  Could not probe venv pip: {exc}")
             return
         if probe.returncode == 0:
-            return  # pip is fine; nothing to do.
+            self.log(f"  ✓ pip OK: {(probe.stdout or '').strip()}")
+            return
 
-        self.log("  ⚠ venv has no pip — bootstrapping via get-pip.py")
+        # Probe failed → either pip is missing entirely, or installed
+        # but broken. Either way the bootstrap path below handles it.
+        self.log(
+            f"  ⚠ pip is missing or broken — bootstrapping. "
+            f"Probe stderr: {(probe.stderr or '')[-200:].strip()}"
+        )
         # Resolve venv → cpXY tag → matching python_runtime/pythonX.Y
         # so we use a get-pip.py that's version-matched to the venv.
         try:

@@ -41,10 +41,13 @@ class MCPPage(QWidget):
             QTabBar::tab {
                 background: rgba(30, 30, 40, 0.8);
                 color: white;
-                padding: 8px 16px;
+                padding: 10px 20px;
                 border: none;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
+                font-size: 12pt;
+                font-weight: 600;
+                min-height: 22px;
             }
             QTabBar::tab:selected {
                 background: rgba(102, 126, 234, 0.8);

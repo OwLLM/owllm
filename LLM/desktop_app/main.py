@@ -1618,10 +1618,13 @@ QTabWidget::pane {
 QTabBar::tab {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
     color: white;
-    padding: 8px 16px;
+    padding: 10px 20px;
     margin-right: 2px;
     border-top-left-radius: 4px;
     border-top-right-radius: 4px;
+    font-size: 12pt;
+    font-weight: 600;
+    min-height: 22px;
 }
 QTabBar::tab:selected {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #764ba2, stop:1 #667eea);
@@ -1692,10 +1695,13 @@ QTabWidget::pane {
 QTabBar::tab {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #667eea, stop:1 #764ba2);
     color: white;
-    padding: 8px 16px;
+    padding: 10px 20px;
     margin-right: 2px;
     border-top-left-radius: 4px;
     border-top-right-radius: 4px;
+    font-size: 12pt;
+    font-weight: 600;
+    min-height: 22px;
 }
 QTabBar::tab:selected {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #764ba2, stop:1 #667eea);
@@ -1944,10 +1950,13 @@ QTabWidget::pane {{
 QTabBar::tab {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary}, stop:1 {secondary});
     color: white;
-    padding: 8px 16px;
+    padding: 10px 20px;
     margin-right: 2px;
     border-top-left-radius: 4px;
     border-top-right-radius: 4px;
+    font-size: 12pt;
+    font-weight: 600;
+    min-height: 22px;
 }}
 QTabBar::tab:selected {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary}, stop:1 {primary});
@@ -2123,10 +2132,13 @@ QTabWidget::pane {{
 QTabBar::tab {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {primary}, stop:1 {secondary});
     color: white;
-    padding: 8px 16px;
+    padding: 10px 20px;
     margin-right: 2px;
     border-top-left-radius: 4px;
     border-top-right-radius: 4px;
+    font-size: 12pt;
+    font-weight: 600;
+    min-height: 22px;
 }}
 QTabBar::tab:selected {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary}, stop:1 {primary});
@@ -6530,7 +6542,7 @@ class MainWindow(QMainWindow):
                 border-top-left-radius: 8px;
                 border-top-right-radius: 8px;
                 font-weight: bold;
-                font-size: 12pt;
+                font-size: 14pt;
                 border: none;
             }
             QPushButton:checked {
@@ -6543,7 +6555,7 @@ class MainWindow(QMainWindow):
             }
         """)
         self.browse_tab_btn.clicked.connect(lambda: self.models_content_tabs.setCurrentIndex(0))
-        
+
         self.downloaded_tab_btn = QPushButton("💾 Downloaded")
         self.downloaded_tab_btn.setCheckable(True)
         self.downloaded_tab_btn.setChecked(False)
@@ -6556,7 +6568,7 @@ class MainWindow(QMainWindow):
                 border-top-left-radius: 8px;
                 border-top-right-radius: 8px;
                 font-weight: bold;
-                font-size: 12pt;
+                font-size: 14pt;
                 border: none;
             }
             QPushButton:checked {
@@ -6747,10 +6759,13 @@ class MainWindow(QMainWindow):
             QTabBar::tab {
                 background: rgba(102, 126, 234, 0.1);
                 color: #d7dde7;
-                padding: 8px 16px;
+                padding: 10px 20px;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
                 margin-right: 2px;
+                font-size: 12pt;
+                font-weight: 600;
+                min-height: 22px;
             }
             QTabBar::tab:selected {
                 background: rgba(102, 126, 234, 0.3);
@@ -6834,10 +6849,13 @@ class MainWindow(QMainWindow):
             QTabBar::tab {
                 background: rgba(102, 126, 234, 0.1);
                 color: #d7dde7;
-                padding: 8px 16px;
+                padding: 10px 20px;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
                 margin-right: 2px;
+                font-size: 12pt;
+                font-weight: 600;
+                min-height: 22px;
             }
             QTabBar::tab:selected {
                 background: rgba(102, 126, 234, 0.3);
@@ -6925,10 +6943,13 @@ class MainWindow(QMainWindow):
             QTabBar::tab {
                 background: rgba(102, 126, 234, 0.1);
                 color: #d7dde7;
-                padding: 8px 16px;
+                padding: 10px 20px;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
                 margin-right: 2px;
+                font-size: 12pt;
+                font-weight: 600;
+                min-height: 22px;
             }
             QTabBar::tab:selected {
                 background: rgba(102, 126, 234, 0.3);
@@ -12285,10 +12306,13 @@ class MainWindow(QMainWindow):
             QTabBar::tab {
                 background: rgba(30, 30, 40, 0.8);
                 color: white;
-                padding: 8px 16px;
+                padding: 10px 20px;
                 border: none;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
+                font-size: 12pt;
+                font-weight: 600;
+                min-height: 22px;
             }
             QTabBar::tab:selected {
                 background: rgba(102, 126, 234, 0.8);
@@ -12814,10 +12838,13 @@ class MainWindow(QMainWindow):
             QTabBar::tab {
                 background: rgba(30, 35, 50, 0.9);
                 color: #cccccc;
-                padding: 6px 10px;
+                padding: 10px 20px;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
                 margin-right: 2px;
+                font-size: 12pt;
+                font-weight: 600;
+                min-height: 22px;
             }
             QTabBar::tab:selected {
                 color: white;
@@ -13043,10 +13070,13 @@ class MainWindow(QMainWindow):
             QTabBar::tab {
                 background: rgba(30, 35, 50, 0.9);
                 color: #cccccc;
-                padding: 6px 10px;
+                padding: 10px 20px;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
                 margin-right: 2px;
+                font-size: 12pt;
+                font-weight: 600;
+                min-height: 22px;
             }
             QTabBar::tab:selected {
                 color: white;
@@ -13347,10 +13377,13 @@ class MainWindow(QMainWindow):
             QTabBar::tab {
                 background: rgba(30, 35, 50, 0.9);
                 color: #cccccc;
-                padding: 6px 10px;
+                padding: 10px 20px;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
                 margin-right: 2px;
+                font-size: 12pt;
+                font-weight: 600;
+                min-height: 22px;
             }
             QTabBar::tab:selected {
                 color: white;
@@ -19263,8 +19296,9 @@ except Exception as e:
                 margin-right: 2px;
                 border-top-left-radius: 6px;
                 border-top-right-radius: 6px;
-                font-size: 10pt;
-                font-weight: bold;
+                font-size: 12pt;
+                font-weight: 600;
+                min-height: 22px;
             }
             QTabBar::tab:selected {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,

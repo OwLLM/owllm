@@ -34,6 +34,7 @@ Local usage:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -190,9 +191,58 @@ def _spec_matches(spec: str, versions: Iterable[str]) -> bool:
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
+def _safe_print(message: str) -> None:
+    """Print without crashing the cp1252 Windows console on unicode glyphs."""
+    try:
+        print(message)
+    except UnicodeEncodeError:
+        print(message.encode("ascii", "replace").decode("ascii"))
+
+
+def _flag_prerelease_risk(name: str, spec: str) -> Optional[str]:
+    """Return a one-line warning if spec ALLOWS unintended pre-releases.
+
+    A pre-release version (X.Y.ZrcN, X.Y.ZbN, X.Y.Z.devN, ...) is ALLOWED
+    by pip's resolver when the spec contains ANY pre-release marker
+    (e.g. '>=1.0rc1') — but NOT when the spec is a plain stable range.
+    Where this becomes a footgun: a user opens an issue saying
+    'safetensors 0.8.0rc0 keeps installing under spec >=0.4.5,<1.0'
+    because PyPI bumps the latest tagged release to an rc and pip's
+    --find-links wheelhouse caches it.
+
+    Pre-release exposure rule: ``<1.0``-style upper bounds let the next
+    rc creep in. Tighter bounds like ``<0.6`` keep the resolver in a
+    known stable corridor. Flag any spec whose UPPER bound is a major
+    version (1.0, 2.0, 3.0, ...) without an explicit '!=*rc*' or
+    pre-release marker.
+    """
+    if not spec:
+        return None
+    spec_low = spec.lower()
+    # An explicit pre-release marker means the author DID intend to
+    # allow it — don't flag.
+    if any(marker in spec_low for marker in ("rc", "dev", "alpha", "beta", "pre", "post", "a", "b")):
+        # crude but works: 'rc' / 'dev' / 'alpha' / 'beta' as substrings
+        # rules out genuine intent. Include 'a' / 'b' for X.Y.Za1 etc.
+        # (false positive: 'beat' or 'apple' as version words. Vanishingly
+        # rare in pip specs in practice.)
+        return None
+    import re as _re
+    upper = _re.search(r"<\s*(\d+)\.0(?:\.0)?\b", spec)
+    if not upper:
+        return None
+    return (
+        f"  {name}{spec}\n"
+        f"      pre-release risk: '<{upper.group(1)}.0' is a wide upper "
+        f"bound. If a future {upper.group(1)}.0rcN lands in any cached "
+        f"wheelhouse, pip can pick it. Tighten to e.g. '<{upper.group(1)}.6' "
+        f"or 'rc'-aware spec to lock to stable releases only."
+    )
+
+
 def main() -> int:
     pins = gather_pins()
-    print(f"verify_pins: found {len(pins)} pins across the repo.\n")
+    _safe_print(f"verify_pins: found {len(pins)} pins across the repo.\n")
 
     # Group by (package, spec) so we don't re-query PyPI for duplicates,
     # but keep every site so the failure report is precise.
@@ -226,27 +276,58 @@ def main() -> int:
         if not _spec_matches(spec, versions):
             phantom.append((norm_name, spec, paths))
 
+    # Second-pass scan: surface specs that ALLOW pre-releases (rc, dev,
+    # beta) even when their PyPI lookup succeeded. These aren't phantoms
+    # but they're the next-most-common footgun.
+    prerelease_warnings: list[tuple[str, str, list[Path]]] = []
+    for (norm_name, spec), paths in sorted(grouped.items()):
+        if norm_name in PYTORCH_INDEX_NAMES:
+            continue
+        flag = _flag_prerelease_risk(norm_name, spec)
+        if flag:
+            prerelease_warnings.append((norm_name, spec, paths))
+
     if network_dead and not phantom:
-        print("\nverify_pins: PyPI was unreachable for some packages; rerun on a "
-              "machine with network access before shipping.")
+        _safe_print("\nverify_pins: PyPI was unreachable for some packages; rerun on a "
+                    "machine with network access before shipping.")
         return 2
 
-    if not phantom:
-        print("verify_pins: ✓ every pin resolves to a real PyPI release.")
-        return 0
+    if phantom:
+        _safe_print("verify_pins: [FAIL] phantom or unsatisfiable pins detected:\n")
+        for name, spec, paths in phantom:
+            _safe_print(f"  {name}{spec}")
+            for p in sorted(set(paths)):
+                _safe_print(f"      in: {p.relative_to(LLM_ROOT.parent)}")
+            _safe_print("")
+        _safe_print(
+            "Fix the spec to a range that has at least one published release "
+            "(check `pip index versions <name>` or pypi.org/project/<name>/) "
+            "and re-run this script before shipping."
+        )
+        return 1
 
-    print("verify_pins: ✗ phantom or unsatisfiable pins detected:\n")
-    for name, spec, paths in phantom:
-        print(f"  {name}{spec}")
-        for p in sorted(set(paths)):
-            print(f"      in: {p.relative_to(LLM_ROOT.parent)}")
-        print()
-    print(
-        "Fix the spec to a range that has at least one published release "
-        "(check `pip index versions <name>` or pypi.org/project/<name>/) "
-        "and re-run this script before shipping."
-    )
-    return 1
+    if prerelease_warnings:
+        _safe_print(
+            "verify_pins: [WARN] specs that may admit pre-release versions:\n"
+        )
+        for name, spec, paths in prerelease_warnings:
+            _safe_print(_flag_prerelease_risk(name, spec) or f"  {name}{spec}")
+            for p in sorted(set(paths))[:3]:
+                _safe_print(f"      in: {p.relative_to(LLM_ROOT.parent)}")
+            _safe_print("")
+        _safe_print(
+            "These are NOT failures — every spec has at least one valid PyPI "
+            "release. But the wide upper bound means a future rc/beta could "
+            "land in your wheelhouse and start an install loop "
+            "(see safetensors 0.8.0rc0 incident, fix 48abb05).\n"
+            "Set OWLLM_VERIFY_PINS_STRICT=1 to treat warnings as errors in CI."
+        )
+        if os.environ.get("OWLLM_VERIFY_PINS_STRICT", "").strip().lower() in ("1", "true", "yes"):
+            _safe_print("Strict mode: treating warnings as failures.")
+            return 1
+
+    _safe_print(f"verify_pins: [OK] every pin resolves to a real PyPI release ({len(grouped)} unique pins).")
+    return 0
 
 
 if __name__ == "__main__":

@@ -12937,6 +12937,42 @@ class MainWindow(QMainWindow):
         status_str = "NormalExit" if exit_status == QProcess.NormalExit else "CrashExit"
         self.train_log.appendPlainText(f"\n[INFO] Training process finished. exit_code={exit_code}, status={status_str}")
         self._append_terminal(f"[INFO] Training process finished. exit_code={exit_code}, status={status_str}", source="train")
+
+        # On crash / non-zero exit, dump the rolling raw tail into the
+        # train_log so the user actually sees the traceback even if
+        # the filter ate every line during the run. Persist it to disk
+        # too so post-mortems work after the window closes.
+        if exit_code != 0 or exit_status != QProcess.NormalExit:
+            tail = getattr(self, "_train_raw_tail", "") or ""
+            if tail.strip():
+                self.train_log.appendPlainText(
+                    "\n--- RAW OUTPUT TAIL (last 8 KB, unfiltered) ---"
+                )
+                for line in tail.splitlines():
+                    self.train_log.appendPlainText(line)
+                self.train_log.appendPlainText("--- end raw tail ---\n")
+                # Persist to disk too.
+                try:
+                    crash_log = self.root / "logs" / "train_crash.log"
+                    crash_log.parent.mkdir(parents=True, exist_ok=True)
+                    from datetime import datetime as _dt
+                    with crash_log.open("a", encoding="utf-8", errors="replace") as _f:
+                        _f.write(
+                            f"\n=== {_dt.utcnow().isoformat()}Z exit={exit_code} status={status_str} ===\n"
+                        )
+                        _f.write(tail)
+                        _f.write("\n")
+                except Exception:
+                    pass
+            else:
+                self.train_log.appendPlainText(
+                    "[WARN] Process crashed but no raw output captured. "
+                    "If this keeps happening, check logs/spawn.log."
+                )
+
+        # Reset the rolling tail for the next run.
+        self._train_raw_tail = ""
+
         self.train_proc = None
         self.train_start.setEnabled(True)
         self.train_stop.setEnabled(False)
@@ -21889,17 +21925,25 @@ respective package directories or official repositories.
 
     # ---------------- Helpers ----------------
     def _append_training_output(self, proc: QProcess | HiddenSubprocessRunner) -> None:
-        """Parse training output and update dashboard metrics + filtered logs"""
-        # Read available data
+        """Parse training output and update dashboard metrics + filtered logs.
+
+        Also keeps a rolling RAW unfiltered copy in
+        ``self._train_raw_tail`` (last 8 KB) so the crash handler can
+        show the user what actually happened when the filter would
+        otherwise have hidden a stack trace.
+        """
         data = bytes(proc.readAllStandardOutput())
         if not data:
             return
 
-        # Decode text
         new_text = data.decode("utf-8", errors="replace")
         self._append_terminal(new_text, source="train")
-        
-        # Add to buffer
+
+        # Rolling unfiltered tail — used by _train_finished on crash.
+        if not hasattr(self, '_train_raw_tail'):
+            self._train_raw_tail = ""
+        self._train_raw_tail = (self._train_raw_tail + new_text)[-8192:]
+
         if not hasattr(self, '_train_output_buffer'):
             self._train_output_buffer = ""
         self._train_output_buffer += new_text
@@ -21925,22 +21969,61 @@ respective package directories or official repositories.
                 self._filter_and_append_to_train_log(line)
 
     def _filter_and_append_to_train_log(self, line: str) -> None:
-        """Filter out noise and append important training logs"""
-        # Skip lines that are just noise
+        """Filter noise out of training output, keep everything else.
+
+        Critical bug fix: the previous version built ``skip_patterns``
+        as a list of MIXED strings and Python boolean expressions, e.g.
+
+            skip_patterns = [
+                '🦥 Unsloth Zoo will now patch',  # ← string (always truthy)
+                "'%|' in line",                    # ← bool
+                ...
+            ]
+            if any(skip_patterns): return        # ← ALWAYS True
+
+        Because the first element is a non-empty string (truthy),
+        ``any(skip_patterns)`` returned True for EVERY line — the
+        function dropped every single line of training output silently.
+        That's why users saw 'training started' then nothing then
+        'crashed' with no traceback in between. Re-written as proper
+        per-pattern checks.
+
+        Errors/tracebacks now ALWAYS pass the filter regardless of
+        other matches, so a crash never goes invisible again.
+        """
         line_clean = line.strip()
         if not line_clean:
             return
-            
-        skip_patterns = [
-            '🦥 Unsloth Zoo will now patch',  # Repeated unsloth messages
-            'Unsloth: Tokenizing',  # Tokenization progress bars
-            '%|' in line,  # Any tqdm progress bar
-            'examples/s' in line or 'it/s' in line,  # Progress bar speed indicators
-            line_clean and line_clean[0].isdigit() and '%|' in line,  # Progress bar lines starting with numbers
-            '[' in line and ']' in line and ('examples/s' in line or 'it/s' in line),  # tqdm format
-        ]
-        
-        if any(skip_patterns):
+
+        line_lower = line_clean.lower()
+
+        # Always-show overrides (errors / tracebacks / fatal markers)
+        # — emitted EVEN IF the line also matches noise patterns. We
+        # never silence a crash to clean up the log.
+        if (
+            "traceback" in line_lower
+            or "error:" in line_lower
+            or "exception" in line_lower
+            or "importerror" in line_lower
+            or "modulenotfounderror" in line_lower
+            or "[error]" in line_lower
+            or line_lower.startswith("e ")  # pytest-style 'E ...'
+            or line_lower.startswith("file \"")  # traceback frame
+        ):
+            self.train_log.appendPlainText(line.rstrip("\r"))
+            return
+
+        # Noise patterns — drop only when a clear noise marker is in
+        # the line AND it isn't an error/traceback line (handled above).
+        is_noise = (
+            "🦥 unsloth zoo will now patch" in line_lower
+            or "unsloth: tokenizing" in line_lower
+            or "%|" in line  # tqdm bars use the pipe-with-progress glyph
+            or " examples/s" in line
+            or " it/s" in line
+            or " ba/s" in line  # batches/sec
+        )
+        if is_noise:
             return
         
         # Always allow JSON metric lines through (dashboard parsing)

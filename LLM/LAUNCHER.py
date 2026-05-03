@@ -191,14 +191,19 @@ def find_bootstrap_python():
 
 
 def launch_safe_mode_installer(reason: str):
-    """Launch the installer GUI from the BUNDLED bootstrap Python.
+    """Launch the safe-mode repair runner from the BUNDLED Python.
 
     Critical: never use the workload venv interpreter here — it's the
-    one that's broken. The installer GUI (installer_gui.py) only needs
-    tkinter (stdlib) and stdlib subprocess to drive InstallerV2, so the
-    bootstrap python_runtime can run it standalone. This breaks the
-    chicken-and-egg of "the repair tool lives inside the venv it's
-    repairing."
+    one that's broken. We also can't route to the legacy tkinter-based
+    ``installer_gui.py`` because the bundled embeddable Python doesn't
+    ship tkinter (confirmed empirically — that crash is what motivated
+    this rewrite). Instead we spawn ``safe_mode_repair.py``, a stdlib-
+    only console script that wraps ``InstallerV2.repair()``. The user
+    sees the repair as text in a console window. No GUI deps required.
+
+    The ``cmd /K`` wrapper is intentional: when the bundled Python
+    finishes the repair, the console stays open so the user can read
+    pip's actual output before deciding to re-launch OWLLM.
     """
     llm_dir = Path(__file__).parent
     bootstrap_py = find_bootstrap_python()
@@ -206,23 +211,37 @@ def launch_safe_mode_installer(reason: str):
         log("✗ Bundled bootstrap Python not found — cannot enter safe mode.")
         log("  Looked under: LLM/python_runtime/python3.12/, python3.11/")
         return False
-    installer_gui = llm_dir / "installer_gui.py"
-    if not installer_gui.exists():
-        log(f"✗ Installer GUI not found at {installer_gui}")
+    safe_repair = llm_dir / "safe_mode_repair.py"
+    if not safe_repair.exists():
+        log(f"✗ Safe-mode repair script not found at {safe_repair}")
         return False
-    log(f"⚠ Workload venv is broken at the C-extension layer:")
+
+    log("⚠ Workload venv is broken at the C-extension layer:")
     for line in (reason or "").splitlines()[-10:]:
         log(f"    {line}")
     log("")
-    log("Routing to SAFE MODE — repair will run from the bundled bootstrap")
-    log(f"interpreter, NOT the broken venv: {bootstrap_py}")
+    log("Routing to SAFE MODE — repair runs from the bundled Python in a")
+    log(f"new console window, NOT inside the broken venv.")
+    log(f"Interpreter: {bootstrap_py}")
+    log(f"Script:      {safe_repair}")
+
     try:
-        print("[LAUNCHER] process_start: installer_gui.py (safe-mode bootstrap)", file=sys.stderr)
-        subprocess.Popen(
-            [str(bootstrap_py), str(installer_gui)],
-            cwd=str(llm_dir),
-            **SUBPROCESS_FLAGS,
-        )
+        print("[LAUNCHER] process_start: safe_mode_repair.py (bundled Python, console)", file=sys.stderr)
+        if sys.platform == "win32":
+            # Open in a fresh visible console window so the user actually
+            # sees the repair progress (the launcher.exe parent is GUI-
+            # subsystem, so a plain Popen would silently hide all output).
+            # CREATE_NEW_CONSOLE = 0x00000010
+            subprocess.Popen(
+                [str(bootstrap_py), str(safe_repair)],
+                cwd=str(llm_dir),
+                creationflags=0x00000010,
+            )
+        else:
+            subprocess.Popen(
+                [str(bootstrap_py), str(safe_repair)],
+                cwd=str(llm_dir),
+            )
         return True
     except Exception as e:
         log(f"Failed to launch safe-mode installer: {e}")

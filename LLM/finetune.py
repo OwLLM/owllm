@@ -78,15 +78,16 @@ except Exception:
     # weave is optional; continue without it
     pass
 
-# Import unsloth at the top (as requested)
-try:
-    import unsloth
-    from unsloth import FastLanguageModel
-    HAS_UNSLOTH = True
-except (ImportError, NotImplementedError, Exception) as e:
-    HAS_UNSLOTH = False
-    FastLanguageModel = None
-    # Don't print error here, we'll handle it in main() if unsloth is requested
+# Probe whether unsloth COULD be imported, but do NOT import it yet.
+# Importing unsloth has a side-effect: it monkey-patches trl.SFTTrainer
+# with UnslothSFTTrainer, which assumes Unsloth-wrapped models. If we
+# go through the standard PEFT path with that patched trainer, training
+# crashes mid-step with 'CUDA error: an illegal memory access was
+# encountered'. We therefore only import unsloth when we are actually
+# going to USE it (see main()).
+import importlib.util as _ilu
+HAS_UNSLOTH = _ilu.find_spec("unsloth") is not None
+FastLanguageModel = None  # populated lazily inside main() if needed
 
 # Always import transformers classes - we may need them even if unsloth is available (fallback)
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments, BitsAndBytesConfig
@@ -324,15 +325,22 @@ def main():
             if MODEL_NAME != model_info["original_name"]:
                 print(f"[INFO] Using base model: {MODEL_NAME}")
 
-    # Disable Unsloth path to avoid FP16 grad-scaler crashes on this setup
+    # Disable Unsloth path to avoid FP16 grad-scaler crashes on this setup.
+    # CRITICAL: do not import unsloth unless we plan to use it — its
+    # import side-effect monkey-patches trl.SFTTrainer with a wrapper
+    # that crashes on vanilla PEFT models (CUDA illegal memory access).
     should_try_unsloth = False
     if args.use_unsloth and unsloth_caps["functional"]:
         print("[INFO] Skipping Unsloth path; using standard PEFT (more stable on this system).")
-    
+
     if should_try_unsloth:
         try:
+            global FastLanguageModel
+            import unsloth  # noqa: F401  (side-effect: patches trl)
+            from unsloth import FastLanguageModel as _FLM
+            FastLanguageModel = _FLM
             print(f"[INFO] Using Unsloth for optimized training (peft {peft_caps['version']})")
-            
+
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=MODEL_NAME,
                 max_seq_length=MAX_SEQ_LENGTH,
@@ -352,13 +360,15 @@ def main():
             )
             
             model = FastLanguageModel.get_peft_model(model, **unsloth_params)
-            
-            # Ensure model is in training mode and parameters require gradients
+
+            # PEFT/Unsloth set requires_grad correctly: True on LoRA adapters,
+            # False on the frozen base. DO NOT override — forcing every base
+            # weight to trainable blows VRAM (AdamW state ~2x model size) and
+            # corrupts memory on bf16 paths.
             model.train()
-            for param in model.parameters():
-                if param.requires_grad is False:
-                    param.requires_grad = True
-            
+            if hasattr(model, "config"):
+                model.config.use_cache = False
+
         except (TypeError, AttributeError, ImportError) as e:
             # Unsloth failed due to version incompatibility
             error_msg = str(e).lower()
@@ -501,16 +511,33 @@ def main():
 
         # Apply LoRA
         model = get_peft_model(model, peft_config)
-        
-        # Ensure model is in training mode and parameters require gradients
+
+        # PEFT correctly sets requires_grad=True on LoRA adapters and
+        # False on the frozen base model. NEVER iterate parameters and
+        # force them all to True — that defeats LoRA, makes the entire
+        # base model trainable, and the AdamW state alone (≈2x model
+        # size) overflows VRAM, corrupting CUDA memory. The next CUDA
+        # op (typically clip_grad_norm) then crashes with the famously
+        # vague 'CUDA error: an illegal memory access was encountered'.
         model.train()
-        for param in model.parameters():
-            if param.requires_grad is False:
-                param.requires_grad = True
-        
-        # Enable gradient checkpointing if supported
+
+        # Cache is incompatible with gradient checkpointing in many
+        # decoder layers (incl. Gemma4TextDecoderLayer). Turn it off
+        # explicitly to silence the warning AND to keep KV-cache state
+        # from interfering with checkpoint recompute.
+        if hasattr(model, "config"):
+            model.config.use_cache = False
+
+        # Enable gradient checkpointing with the non-reentrant variant
+        # (the modern path; reentrant is deprecated and triggers extra
+        # autograd quirks on PEFT-wrapped models).
         if hasattr(model, "gradient_checkpointing_enable"):
-            model.gradient_checkpointing_enable()
+            try:
+                model.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            except TypeError:
+                model.gradient_checkpointing_enable()
 
     print(f"[INFO] Preparing dataset...")
     
@@ -720,6 +747,17 @@ def main():
     os.environ["TQDM_DISABLE"] = "0"
     os.environ["TQDM_MININTERVAL"] = "0.1"  # Update at least every 0.1 seconds
     
+    # Pick the optimizer based on what's actually working in this venv.
+    # adamw_8bit needs bitsandbytes' CUDA backend; if bnb is broken or
+    # missing, it silently corrupts memory and crashes on the next CUDA
+    # op. Default to vanilla adamw_torch unless bnb is fully functional.
+    if BITSANDBYTES_AVAILABLE and bnb_caps.get("functional", False):
+        optim_name = "adamw_8bit"
+        print("[INFO] Optimizer: adamw_8bit (bitsandbytes available)")
+    else:
+        optim_name = "adamw_torch"
+        print("[INFO] Optimizer: adamw_torch (bitsandbytes not functional)")
+
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -741,16 +779,18 @@ def main():
             # to fp32; we detect that below.
             fp16=False,
             bf16=_should_use_bf16(),
-            max_grad_norm=0.0,  # keep clipping disabled
+            max_grad_norm=1.0,  # standard gradient clipping
+            gradient_checkpointing=False,  # already enabled on the model itself above
             logging_steps=1,
             logging_strategy="steps",
             output_dir=OUTPUT_DIR,
-            optim="adamw_8bit",
+            optim=optim_name,
             seed=3407,
             # Disable Hugging Face Trainer intermediate checkpoints (creates `checkpoint-<step>` dirs)
             save_strategy="no",
             # Keep a small number if you enable saving later
             save_total_limit=2,
+            report_to="none",
         ),
     )
     trainer.add_callback(DashboardCallback(total_steps=total_steps, effective_bs=effective_bs, start_time=time.time()))

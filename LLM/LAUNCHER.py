@@ -311,43 +311,23 @@ def run_dependency_check(venv_python):
         log(f"Dependency check error: {e}")
         return False
 
-def launch_installer():
-    """Launch installer GUI"""
-    llm_dir = Path(__file__).parent
-    
-    # Try run_installer.bat first (uses bootstrap)
-    run_installer_bat = llm_dir / "run_installer.bat"
-    if run_installer_bat.exists():
-        log("Launching installer via run_installer.bat...")
-        try:
-            print("[LAUNCHER] process_start: run_installer.bat", file=sys.stderr)
-            subprocess.Popen(
-                [str(run_installer_bat)],
-                cwd=str(llm_dir),
-                **SUBPROCESS_FLAGS
-            )
-            return True
-        except Exception as e:
-            log(f"Failed to launch via batch file: {e}")
-    
-    # Fallback to installer_gui.py directly
-    installer_gui = llm_dir / "installer_gui.py"
-    if installer_gui.exists():
-        log("Launching installer_gui.py...")
-        try:
-            print("[LAUNCHER] process_start: installer_gui.py", file=sys.stderr)
-            # Use system Python to launch installer
-            subprocess.Popen(
-                [sys.executable, str(installer_gui)],
-                cwd=str(llm_dir),
-                **SUBPROCESS_FLAGS
-            )
-            return True
-        except Exception as e:
-            log(f"Failed to launch installer: {e}")
-    
-    log("ERROR: Could not find installer!")
-    return False
+def launch_installer(reason: str = "Dependencies need install/update.") -> bool:
+    """Open the unified safe-mode repair UI.
+
+    All 'environment needs work' paths now route through this single
+    entry point. We delegate to ``launch_safe_mode_installer`` so the
+    user sees the SAME Qt window (with checklist + reason + plan +
+    progress) regardless of whether the trigger was a missing venv,
+    failed PySide6 import, broken torch, or version-drift in the
+    dependency check.
+
+    The legacy ``installer_gui.py`` (tkinter) and ``run_installer.bat``
+    (bootstrap-Python launcher) are no longer reachable from here —
+    they were a parallel UX with worse diagnostics. ``installer_gui.py``
+    still exists on disk for users who want to invoke it manually,
+    but the launcher will never auto-spawn it.
+    """
+    return launch_safe_mode_installer(reason)
 
 def launch_app(venv_python):
     """Launch the main application"""

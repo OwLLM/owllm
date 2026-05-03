@@ -9,6 +9,8 @@ import subprocess
 from importlib.metadata import version, PackageNotFoundError
 from pathlib import Path
 
+LLM_DIR = Path(__file__).resolve().parent
+
 try:
     from packaging.specifiers import SpecifierSet
     from packaging import version as pkg_version
@@ -77,7 +79,6 @@ def check_pytorch_cuda():
                     ["nvidia-smi"],
                     capture_output=True,
                     timeout=5,
-                    creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
                 )
                 if result.returncode == 0:
                     return False, "GPU detected but PyTorch is CPU-only"
@@ -167,32 +168,17 @@ def verify_all():
 
     def _resolve_active_state_file() -> Path:
         """
-        Resolve per-env install state file if env_key environments are enabled.
-        Falls back to legacy LLM/.install_state.json.
+        Resolve install state without hardware probing.
+
+        This script runs before the GUI is visible. Calling SystemDetector here
+        repeatedly spawns nvidia-smi/wmic during startup, which can flash on
+        some Windows/NVIDIA setups even when CREATE_NO_WINDOW is requested.
         """
+        envs_dir = llm_dir / ".envs"
         try:
-            # Single source of truth: use the same profile selection logic as installer.
-            from system_detector import SystemDetector
-            from core.profile_selector import ProfileSelector
-            from setup_state import SetupStateManager
-
-            matrix_path = llm_dir / "metadata" / "compatibility_matrix.json"
-            setup_state = SetupStateManager()
-            selected_gpu_index = setup_state.get_selected_gpu_index()
-            override_profile = setup_state.get_selected_profile()
-
-            detector = SystemDetector()
-            hardware_profile = detector.get_hardware_profile(selected_gpu_index=selected_gpu_index)
-            selector = ProfileSelector(matrix_path)
-            _profile_name, package_versions, _warnings, _binary = selector.select_profile(
-                hardware_profile, override_profile_id=override_profile
-            )
-
-            env_key = _derive_env_key_from_package_versions(package_versions)
-            env_dir = llm_dir / ".envs" / env_key
-            state_path = env_dir / ".install_state.json"
-            if state_path.exists():
-                return state_path
+            candidates = sorted(envs_dir.glob("*/.install_state.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if candidates:
+                return candidates[0]
         except Exception:
             pass
         return llm_dir / ".install_state.json"
@@ -252,58 +238,54 @@ def verify_all():
             # If state file check fails, continue to full verification
             print(f"[WARN] Could not read install state: {e}", file=sys.stderr)
     
-    # Single source of truth: derive checks from the selected hardware profile.
-    # This avoids "repair loops" caused by hardcoded version ranges drifting from profiles.
-    llm_dir = Path(__file__).parent
-    matrix_path = llm_dir / "metadata" / "compatibility_matrix.json"
-
+    # Keep launcher startup checks metadata-only. Full profile/hardware
+    # validation belongs inside the app where output is visible in the terminal.
+    #
+    # Pin sourcing: this used to hard-code specs (transformers>=4.51.0,<4.60.0
+    # etc.) which then drifted independently of the profile JSONs and caused
+    # 'check_dependencies says it's wrong but every other place says it's fine'
+    # repair loops. We now read the active profile through PinResolver so this
+    # file participates in the same single-source-of-truth as EnvRepairer.
+    # Any package the resolver doesn't have a pin for falls back to a
+    # conservative built-in default — matches the historical behaviour for
+    # third-party packages we deliberately don't pin tightly.
+    _DEFAULT_CHECKS = [
+        ("numpy", "<2.0.0"),
+        ("transformers", ">=4.57.0,<5.6"),
+        ("tokenizers", ">=0.21.0,<0.24.0"),
+        ("huggingface-hub", ">=0.34.0"),
+        ("datasets", ">=2.11.0,<4.4.0"),
+    ]
+    checks = list(_DEFAULT_CHECKS)
     try:
-        from system_detector import SystemDetector
-        from core.profile_selector import ProfileSelector
-        from setup_state import SetupStateManager
-
-        # Use persisted profile selection (same as InstallerV2)
-        setup_state = SetupStateManager()
-        selected_gpu_index = setup_state.get_selected_gpu_index()
-        override_profile = setup_state.get_selected_profile()
-
-        detector = SystemDetector()
-        hardware_profile = detector.get_hardware_profile(selected_gpu_index=selected_gpu_index)
-        selector = ProfileSelector(matrix_path)
-        profile_name, package_versions, warnings, _binary = selector.select_profile(
-            hardware_profile, override_profile_id=override_profile
-        )
-
-        # Report selected profile (useful in dependency_check.log)
-        print(f"[PROFILE] Selected '{profile_name}' for dependency check")
-        if override_profile:
-            print(f"[PROFILE] Using user-selected profile override")
-        if selected_gpu_index is not None:
-            print(f"[PROFILE] Using user-selected GPU index {selected_gpu_index}")
-        for w in warnings or []:
-            print(f"[PROFILE] Warning: {w}")
-
-        # Only check a small stable set; exact pins come from profiles.
-        # (Don't hardcode newer ranges here — that's what caused the loop.)
-        check_pkgs = ["numpy", "transformers", "tokenizers", "huggingface-hub", "datasets"]
-        checks = []
-        for pkg in check_pkgs:
-            if pkg in package_versions:
-                checks.append((pkg, _normalize_spec(package_versions[pkg])))
-            else:
-                # If profile doesn't specify it, skip quietly.
-                pass
-    except Exception as e:
-        # Fallback: keep checks broad and avoid forcing repair loops
-        print(f"[WARN] Could not load profile-based checks: {e}", file=sys.stderr)
-        checks = [
-            ("numpy", "<2.0.0"),
-            ("transformers", ">=4.51.0,<4.60.0"),
-            ("tokenizers", ">=0.21.0,<0.24.0"),
-            # Keep hub compatible with current profiles (do NOT require >=0.30.0).
-            ("huggingface-hub", ">=0.34.0,<1.0"),
-            ("datasets", ">=2.11.0,<4.4.0"),
-        ]
+        sys.path.insert(0, str(LLM_DIR))
+        from core.install import default_resolver, resolve_profile_id
+        from core.runtime.owllm_python import get_owllm_env
+        env = get_owllm_env(LLM_DIR)
+        env_id = resolve_profile_id(env.env_key, project_root=LLM_DIR)
+        resolver = default_resolver(LLM_DIR)
+        # For each default check, prefer the resolver's spec if it has one.
+        # That keeps the SAME list of "metadata-only" packages we always
+        # checked but resolves their versions from the canonical source.
+        resolved = []
+        for pkg, fallback_spec in _DEFAULT_CHECKS:
+            try:
+                spec = resolver.get(pkg, env_id) or fallback_spec
+            except Exception:
+                spec = fallback_spec
+            # Normalise bare versions like '1.26.4' to '==1.26.4' so
+            # SpecifierSet accepts them. PinResolver stores specs as
+            # the raw JSON value, which can be a bare version.
+            spec = (spec or "").strip()
+            if spec and not spec.startswith(("==", ">=", "<=", ">", "<", "!=", "~=")):
+                spec = f"=={spec}"
+            resolved.append((pkg, spec))
+        checks = resolved
+    except Exception as exc:
+        # Resolver missing / env unresolvable — fall back to the defaults
+        # above. The launcher then still checks SOMETHING; it just won't
+        # auto-pick up profile JSON changes for this run.
+        print(f"[WARN] PinResolver unavailable, using built-in defaults: {exc}", file=sys.stderr)
     
     all_ok = True
     for pkg, spec in checks:

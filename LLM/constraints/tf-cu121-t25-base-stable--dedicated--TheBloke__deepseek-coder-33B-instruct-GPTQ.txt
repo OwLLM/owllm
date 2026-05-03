@@ -37,7 +37,7 @@ torch==2.5.1+cu121
 torchaudio==2.5.1+cu121
 torchvision==0.20.1+cu121
 tqdm==4.67.3
-transformers>=4.57.0,<5.0
+transformers>=4.57.0,<5.6
 typing-inspection==0.4.2
 typing_extensions==4.15.0
 urllib3==2.6.3

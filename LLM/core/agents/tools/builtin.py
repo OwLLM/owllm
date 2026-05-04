@@ -1004,6 +1004,8 @@ def builtin_registry() -> ToolRegistry:
     callers that want a shared gate (e.g. one UI per process) should wire
     that explicitly via the ``Agent`` plumbing later.
     """
+    from core.agents.tools.git_tools import GIT_TOOLS
+
     reg = ToolRegistry()
     reg.register(read_file)
     reg.register(write_file_with_diff)
@@ -1017,4 +1019,6 @@ def builtin_registry() -> ToolRegistry:
     reg.register(ssh_exec)
     reg.register(ssh_upload)
     reg.register(ssh_download)
+    for t in GIT_TOOLS:
+        reg.register(t)
     return reg

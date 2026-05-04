@@ -66,6 +66,7 @@ class TestParser:
         for name in (
             "read_file", "write_file_with_diff", "edit_file", "list_dir",
             "glob_files", "grep", "todo_write", "shell", "http_get",
+            "git_status", "git_diff", "git_log", "git_blame", "git_show",
         ):
             assert name in prompt
         assert "(requires approval)" in prompt  # write_file + edit_file + shell

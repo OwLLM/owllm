@@ -454,8 +454,8 @@ class AgentTeamCanvas(QWidget):
         # The cap also scales with zoom but is absolutely bounded by
         # the visible canvas area minus a small margin so deep rings
         # don't disappear off the edges at max zoom.
-        canvas_cap = min(rect.width() - card_reserve, rect.height()) * 0.45
-        max_radius = min(canvas_cap, min(rect.width(), rect.height()) * 0.45 * zoom)
+        canvas_cap = min(rect.width() - card_reserve, rect.height()) * 0.48
+        max_radius = min(canvas_cap, min(rect.width(), rect.height()) * 0.48 * zoom)
 
         # True concentric rings: group agents by BFS depth and give
         # each depth its OWN angle distribution within its ring.
@@ -479,15 +479,17 @@ class AgentTeamCanvas(QWidget):
         # ``step``. Increasing the offset enlarges the centre WITHOUT
         # changing layer distances.
         max_depth = max(by_depth.keys()) if by_depth else 1
-        # Centre clearance — a touch more than the orchestrator's hit
-        # radius (90·zoom in _layout below) so ring 1 sits comfortably
-        # outside the owl crest.
-        inner_offset = 130.0 * zoom
-        # Inter-ring gap. Falls back to a reasonable floor when there
-        # are only one or two layers so we don't crowd the centre.
+        # Centre clearance — pushed outward enough that the new big
+        # square agent containers (≈170×210 base, scaling with zoom)
+        # don't crash into the orchestrator crest. The crest itself has
+        # a 90·zoom hit radius; we add the container's half-height plus
+        # a little breathing room.
+        inner_offset = 230.0 * zoom
+        # Inter-ring gap — must exceed container height so ring N+1
+        # doesn't overlap ring N.
         step_budget = max_radius - inner_offset
         step = step_budget / max(1, max_depth)
-        min_step = 90.0 * zoom
+        min_step = 240.0 * zoom
         if step < min_step:
             step = min_step
         # Cache for the visible-ring painter.
@@ -499,13 +501,12 @@ class AgentTeamCanvas(QWidget):
         self._ensure_ring_motion(list(by_depth.keys()))
 
         # Distribute agents on each ring across an arc of 340° (not
-        # the full 360°). The 20° "missing slice" guarantees two
-        # agents on the same ring are never exactly diametrically
-        # opposite — for n=2 they'd land at 180° apart on a full
-        # circle, which made the arrows between them lie on top of
-        # the orchestrator and on top of each other. With a 340°
-        # spread, n=2 sits 340° apart (20° gap on one side), n=3 at
-        # 170° apart, etc.
+        # the full 360°). The user's spec: agent ``i`` (1-indexed) sits
+        # at ``i/n * 340°`` along the arc. So for n=2 → 170° / 340°,
+        # for n=3 → 113.33° / 226.66° / 340°, etc. The 20° "missing
+        # slice" still guarantees two agents on the same ring are
+        # never exactly diametrically opposite, which kept connection
+        # arrows from collapsing onto each other.
         arc_span = math.tau * 340.0 / 360.0
 
         for depth in sorted(by_depth.keys()):
@@ -526,7 +527,7 @@ class AgentTeamCanvas(QWidget):
                 if count == 1:
                     theta = ring_rot - math.pi / 2
                 else:
-                    theta = (arc_span * i) / (count - 1) + ring_rot - math.pi / 2
+                    theta = (arc_span * (i + 1)) / count + ring_rot - math.pi / 2
                 x = cx + ring_radius * math.cos(theta)
                 y = cy + ring_radius * math.sin(theta)
                 pos = QPointF(x, y)
@@ -746,37 +747,45 @@ class AgentTeamCanvas(QWidget):
     def _paint_centre(self, p: QPainter, centre: QPointF, r: float) -> None:
         cx, cy = centre.x(), centre.y()
 
-        # Outer rotating ring.
-        outer = QRectF(cx - r, cy - r, r * 2, r * 2)
-        pen = QPen(_alpha(_NEON_CYAN, 220), 2.4)
-        p.setPen(pen)
-        p.setBrush(Qt.NoBrush)
-        start_deg = -int(math.degrees(self._phase * 0.9)) % 360
-        for arc_offset in (0, 130, 240):
-            p.drawArc(outer, (start_deg + arc_offset) * 16, 60 * 16)
-
-        # Inner counter-rotating ring.
-        inner = QRectF(cx - r * 0.7, cy - r * 0.7, r * 1.4, r * 1.4)
-        pen2 = QPen(_alpha(_NEON_VIOLET, 200), 1.8)
-        p.setPen(pen2)
-        start_deg2 = int(math.degrees(self._phase * 1.6)) % 360
-        for arc_offset in (0, 110, 230):
-            p.drawArc(inner, (start_deg2 + arc_offset) * 16, 70 * 16)
-
-        # Soft glowing core.
-        # If the orchestrator agent is "active", the core glows green.
+        # Orchestrator is layer 0 → ALWAYS gold, matching the graph
+        # editor's LAYER_COLORS palette and the gold ring + halo used
+        # for the orchestrator there. When the orchestrator is mid-run
+        # we still flash green so the "active" status reads, but idle /
+        # pending / error all stay in the gold family.
+        gold_core = QColor("#f1c44a")
+        gold_glow = QColor("#ffd76a")
         orch = (
             self._agents.get(self._orchestrator_name)
             if self._orchestrator_name
             else None
         )
         active = orch is not None and orch.status == STATUS_ACTIVE
-        core_a = _NEON_GREEN if active else _NEON_CYAN
-        core_b = _NEON_GREEN if active else _NEON_BLUE
+
+        # Outer rotating ring — gold instead of cyan.
+        outer = QRectF(cx - r, cy - r, r * 2, r * 2)
+        pen = QPen(_alpha(gold_core, 230), 2.6)
+        p.setPen(pen)
+        p.setBrush(Qt.NoBrush)
+        start_deg = -int(math.degrees(self._phase * 0.9)) % 360
+        for arc_offset in (0, 130, 240):
+            p.drawArc(outer, (start_deg + arc_offset) * 16, 60 * 16)
+
+        # Inner counter-rotating ring — also gold (slightly warmer).
+        inner = QRectF(cx - r * 0.7, cy - r * 0.7, r * 1.4, r * 1.4)
+        pen2 = QPen(_alpha(gold_glow, 210), 2.0)
+        p.setPen(pen2)
+        start_deg2 = int(math.degrees(self._phase * 1.6)) % 360
+        for arc_offset in (0, 110, 230):
+            p.drawArc(inner, (start_deg2 + arc_offset) * 16, 70 * 16)
+
+        # Soft glowing core — gold when idle/pending/error, green when
+        # actively running so live state still reads.
+        core_a = _NEON_GREEN if active else gold_glow
+        core_b = _NEON_GREEN if active else gold_core
         pulse = 0.5 + 0.5 * math.sin(self._phase * 2.6)
         core = QRadialGradient(QPointF(cx, cy), r * 0.8)
-        core.setColorAt(0.0, _alpha(core_a, int(80 + 60 * pulse)))
-        core.setColorAt(0.6, _alpha(core_b, int(30 + 30 * pulse)))
+        core.setColorAt(0.0, _alpha(core_a, int(110 + 70 * pulse)))
+        core.setColorAt(0.6, _alpha(core_b, int(50 + 40 * pulse)))
         core.setColorAt(1.0, _alpha(_BG_DARK, 0))
         p.setBrush(QBrush(core))
         p.setPen(Qt.NoPen)
@@ -818,79 +827,135 @@ class AgentTeamCanvas(QWidget):
     def _paint_nodes(
         self, p: QPainter, positions: List[Tuple[str, QPointF]]
     ) -> None:
+        from desktop_app.widgets.agent_icons import paint_icon as _paint_icon
         for i, (name, pos) in enumerate(positions):
             agent = self._agents.get(name)
             if agent is None:
                 continue
             phase_offset = i * 0.7
             pulse = 0.5 + 0.5 * math.sin(self._phase * 2.2 + phase_offset)
-            # Scale the agent disc radius with the user's zoom so
-            # nodes stay proportional to the rings they sit on.
             zoom = max(self._zoom_min, min(self._zoom_max, self._zoom))
-            r = (22 + 4 * pulse) * zoom
-            agent.radius = r
+
+            # Square container — three stacked rows: icon (big), name,
+            # model. Base is 170×210; at max zoom (2.5×) the container
+            # is 425×525 with ~330×330 icons, comfortably exceeding the
+            # 300×300 floor the user asked for.
+            box_w = 170.0 * zoom
+            box_h = 210.0 * zoom
+            box = QRectF(
+                pos.x() - box_w / 2.0,
+                pos.y() - box_h / 2.0,
+                box_w,
+                box_h,
+            )
+            # Hit radius — circumscribed circle of the container plus a
+            # touch of slack so the click target matches what the user
+            # sees.
+            agent.radius = math.hypot(box_w, box_h) / 2.0
 
             is_selected = self._selected == name
             is_hover = self._hover == name
             is_active = agent.status == STATUS_ACTIVE
 
             # Halo. When the agent is doing work the status colour
-            # wins (green/amber/red) so the visual cue is unambiguous.
-            # Otherwise the halo borrows this agent's LAYER colour
-            # (same palette as the rings + edges) so each layer's
-            # agents share a chromatic family.
+            # wins (green/amber/red); otherwise the halo borrows this
+            # agent's LAYER colour so each layer's agents share a
+            # chromatic family with the rings and edges.
             agent_depth = self._depth.get(name, 1)
             layer_col = _layer_color(agent_depth)
             if agent.status == STATUS_IDLE:
                 halo_col = layer_col
             else:
                 halo_col = _STATUS_HALO[agent.status]
-            grad = QRadialGradient(pos, r * 2.4)
             halo_alpha = (
-                int(120 + 90 * pulse) if is_active else int(70 + 50 * pulse)
+                int(110 + 80 * pulse) if is_active else int(50 + 40 * pulse)
             )
+            halo_r = max(box_w, box_h) * 0.85
+            grad = QRadialGradient(pos, halo_r)
             grad.setColorAt(0.0, _alpha(halo_col, halo_alpha))
             grad.setColorAt(1.0, _alpha(halo_col, 0))
             p.setBrush(QBrush(grad))
             p.setPen(Qt.NoPen)
-            p.drawEllipse(pos, r * 2.0, r * 2.0)
+            p.drawEllipse(pos, halo_r, halo_r)
 
-            # Core disc.
-            fill = _STATUS_FILL[agent.status]
+            # Container background — slight gradient so it doesn't read
+            # as a flat decal on top of the dark canvas. Active /
+            # pending / error states tint it with the status colour.
+            bg = QLinearGradient(box.topLeft(), box.bottomRight())
             if agent.status == STATUS_IDLE:
-                # gradient by index so idle agents aren't all identical
-                fill = _mix(
-                    _NEON_BLUE,
-                    _NEON_VIOLET,
-                    i / max(1, len(positions)),
-                )
-            p.setBrush(QBrush(fill))
+                bg.setColorAt(0.0, QColor(26, 32, 46, 235))
+                bg.setColorAt(1.0, QColor(14, 18, 26, 235))
+            else:
+                tint = _STATUS_FILL[agent.status]
+                bg.setColorAt(0.0, _alpha(tint, 200))
+                bg.setColorAt(1.0, _alpha(tint, 120))
+            p.setBrush(QBrush(bg))
 
-            border_col = _TEXT_BRIGHT if is_selected else _alpha(
-                _TEXT_BRIGHT, 220
+            border_col = (
+                QColor("#ffffff") if is_selected
+                else (_alpha(layer_col, 240) if agent.status == STATUS_IDLE
+                      else _alpha(_STATUS_BORDER[agent.status], 240))
             )
-            border_w = 2.6 if is_selected else (2.0 if is_hover else 1.6)
+            border_w = 3.0 if is_selected else (2.4 if is_hover else 1.8)
             p.setPen(QPen(border_col, border_w))
-            p.drawEllipse(pos, r, r)
+            corner = 18.0 * zoom
+            p.drawRoundedRect(box, corner, corner)
 
-            # Icon (emoji or owl PNG) inside the disc.
-            from desktop_app.widgets.agent_icons import paint_icon as _paint_icon
-            font = QFont()
-            font.setPointSizeF(r * 0.85)
-            p.setFont(font)
+            # Inner padding that scales with zoom.
+            pad = 12.0 * zoom
+
+            # Row heights — name + model rows sized to fit the labels;
+            # everything else goes to the icon.
+            name_h = 28.0 * zoom
+            model_h = 24.0 * zoom
+            icon_h = box_h - 2 * pad - name_h - model_h - 8.0 * zoom
+
+            # Row 1: icon (big).
+            icon_rect = QRectF(
+                box.x() + pad,
+                box.y() + pad,
+                box_w - 2 * pad,
+                icon_h,
+            )
             p.setPen(_TEXT_BRIGHT)
-            icon_rect = QRectF(pos.x() - r, pos.y() - r, r * 2, r * 2)
             _paint_icon(p, icon_rect, agent.icon)
 
-            # Label below the node — agent name + a tiny status word when
-            # not idle (Working / Pending / Error).
-            label_font = QFont()
-            label_font.setPointSize(9)
-            label_font.setBold(True)
-            p.setFont(label_font)
-            p.setPen(_TEXT_BRIGHT)
-            label_rect = QRectF(pos.x() - 90, pos.y() + r + 4, 180, 16)
-            p.drawText(label_rect, Qt.AlignCenter, name)
+            # Row 2: name.
+            name_rect = QRectF(
+                box.x() + pad,
+                icon_rect.bottom() + 4.0 * zoom,
+                box_w - 2 * pad,
+                name_h,
+            )
+            name_font = QFont()
+            name_font.setPointSizeF(max(11.0, 13.0 * zoom))
+            name_font.setBold(True)
+            p.setFont(name_font)
+            p.setPen(_TEXT_BRIGHT if agent.status == STATUS_IDLE
+                     else QColor("#0c1a10"))
+            p.drawText(name_rect, Qt.AlignCenter, name)
+
+            # Row 3: model used.
+            model_rect = QRectF(
+                box.x() + pad,
+                name_rect.bottom() + 2.0 * zoom,
+                box_w - 2 * pad,
+                model_h,
+            )
+            model_font = QFont()
+            model_font.setPointSizeF(max(9.0, 10.5 * zoom))
+            p.setFont(model_font)
+            p.setPen(_TEXT_DIM if agent.status == STATUS_IDLE
+                     else QColor("#0c1a10"))
+            model_label = agent.model_label or "no model"
+            # Truncate so a long model id doesn't blow past the box.
+            fm_w = model_rect.width()
+            if p.fontMetrics().horizontalAdvance(model_label) > fm_w:
+                while (model_label and
+                       p.fontMetrics().horizontalAdvance(model_label + "…") > fm_w):
+                    model_label = model_label[:-1]
+                model_label += "…"
+            p.drawText(model_rect, Qt.AlignCenter, model_label)
 
             if agent.status != STATUS_IDLE:
                 status_word = {
@@ -898,17 +963,27 @@ class AgentTeamCanvas(QWidget):
                     STATUS_PENDING: "● Pending",
                     STATUS_ERROR: "● Error",
                 }[agent.status]
-                status_col = {
-                    STATUS_ACTIVE: _NEON_GREEN,
-                    STATUS_PENDING: _NEON_AMBER,
-                    STATUS_ERROR: _NEON_RED,
-                }[agent.status]
+                # Top-right status pill so it doesn't push the container
+                # taller. Pill text is dark for contrast on the bright
+                # status fill the box already has.
                 sf = QFont()
-                sf.setPointSize(8)
+                sf.setPointSizeF(max(8.0, 9.5 * zoom))
+                sf.setBold(True)
                 p.setFont(sf)
-                p.setPen(status_col)
-                status_rect = QRectF(pos.x() - 90, pos.y() + r + 20, 180, 14)
-                p.drawText(status_rect, Qt.AlignCenter, status_word)
+                p.setPen(QColor("#0c1a10"))
+                pill_w = max(78.0, 92.0 * zoom)
+                pill_h = max(18.0, 22.0 * zoom)
+                pill_rect = QRectF(
+                    box.right() - pill_w - 8.0 * zoom,
+                    box.top() + 8.0 * zoom,
+                    pill_w,
+                    pill_h,
+                )
+                p.setBrush(QBrush(QColor(255, 255, 255, 200)))
+                p.setPen(Qt.NoPen)
+                p.drawRoundedRect(pill_rect, pill_h / 2.0, pill_h / 2.0)
+                p.setPen(QColor("#0c1a10"))
+                p.drawText(pill_rect, Qt.AlignCenter, status_word)
 
     def _paint_hint(self, p: QPainter, rect) -> None:
         font = QFont()

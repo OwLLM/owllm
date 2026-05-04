@@ -474,23 +474,51 @@ class AgentTeamCanvas(QWidget):
 
         _safe("info card", _draw_info_card)
 
-        # Visible-state diagnostic in the bottom-right so the user (and
-        # we) can confirm the widget is alive and what data it has,
-        # even when individual paint stages fail. Tiny dim text — not
-        # in the way.
+        # Always-visible identity banner. Until the user confirms the
+        # orbital widget is actually the one being painted (the
+        # previous symptom looked suspiciously like the AgentCanvas
+        # graph editor showing through the QStackedWidget), this is
+        # the cheapest signal: if the user sees "TEAM DIAGRAM" then
+        # team_canvas is alive; if they don't, the wrong widget is on
+        # top. The banner sits in the top-right corner with neon
+        # styling so it's hard to miss.
+        try:
+            badge_w = 170.0
+            badge_h = 26.0
+            badge = QRectF(rect.width() - badge_w - 12, 10, badge_w, badge_h)
+            bg = QLinearGradient(badge.topLeft(), badge.topRight())
+            bg.setColorAt(0.0, _alpha(_NEON_CYAN, 60))
+            bg.setColorAt(1.0, _alpha(_NEON_VIOLET, 60))
+            p.setBrush(QBrush(bg))
+            p.setPen(QPen(_alpha(_NEON_CYAN, 220), 1.2))
+            p.drawRoundedRect(badge, 8, 8)
+            font = QFont()
+            font.setPointSize(9)
+            font.setBold(True)
+            p.setFont(font)
+            p.setPen(_TEXT_BRIGHT)
+            p.drawText(badge, Qt.AlignCenter, "● TEAM DIAGRAM")
+        except Exception:
+            pass
+
+        # Visible-state diagnostic line beneath the banner — counts so
+        # we can tell at a glance whether the canvas has data. If
+        # 'agents:0' shows here, the page hasn't pushed the team in
+        # yet; if it shows non-zero but no nodes render, the bug is
+        # in the per-node draw code.
         try:
             diag = (
-                f"agents:{len(self._agents)} "
-                f"orbit:{len(self._orbit_order)} "
-                f"edges:{len(self._edges)} "
+                f"agents:{len(self._agents)}  "
+                f"orbit:{len(self._orbit_order)}  "
+                f"edges:{len(self._edges)}  "
                 f"orch:{self._orchestrator_name or '—'}"
             )
             font = QFont()
             font.setPointSize(8)
             p.setFont(font)
-            p.setPen(_alpha(_TEXT_DIM, 140))
+            p.setPen(_alpha(_TEXT_DIM, 200))
             p.drawText(
-                QRectF(0, rect.height() - 16, rect.width() - 6, 14),
+                QRectF(rect.width() - 320, 40, 308, 14),
                 Qt.AlignRight | Qt.AlignVCenter,
                 diag,
             )

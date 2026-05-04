@@ -1026,10 +1026,16 @@ class AgentsPage(QWidget):
 
         # Stack the two visuals so we can flip between them with the
         # toggle button. Orbital lives at index 0 (default).
+        # IMPORTANT: explicitly hide the non-current widget — relying on
+        # setCurrentIndex alone has caused the AgentCanvas to bleed
+        # through on some Qt versions, leaving the user staring at an
+        # almost-empty graph editor instead of the orbital diagram.
         self._canvas_stack = QStackedWidget()
         self._canvas_stack.addWidget(self.team_canvas)  # 0
         self._canvas_stack.addWidget(self.canvas)        # 1
         self._canvas_stack.setCurrentIndex(0)
+        self.team_canvas.setVisible(True)
+        self.canvas.setVisible(False)
         lv.addWidget(self._canvas_stack, 1)
 
         self.status_label = QLabel("Idle.")
@@ -2455,6 +2461,11 @@ class AgentsPage(QWidget):
             return
         idx = 1 if self._view_toggle_btn.isChecked() else 0
         self._canvas_stack.setCurrentIndex(idx)
+        # Force visibility on both children — QStackedWidget alone has
+        # been flaky here (the editable graph kept rendering when it
+        # should be hidden).
+        self.team_canvas.setVisible(idx == 0)
+        self.canvas.setVisible(idx == 1)
         # Update the label so the user knows what tapping does next.
         if idx == 0:
             self._view_toggle_btn.setText("◐ Graph view")

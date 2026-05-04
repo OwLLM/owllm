@@ -506,6 +506,17 @@ class ToolRegistry:
                     meta={"decision": decision.value},
                 )
 
+        # Pin (agent, goal_id) on a thread-local so tools that need the
+        # caller's identity (notably spawn_agent, which has no other way
+        # to discover who's calling) can read it. Cleaned up below in
+        # the finally block of the run loop.
+        try:
+            from core.agents.spawn import set_invocation_context, clear_invocation_context
+            set_invocation_context(agent=agent, goal_id=goal_id)
+            _ctx_cleanup = clear_invocation_context
+        except Exception:  # noqa: BLE001
+            _ctx_cleanup = lambda: None
+
         # Run with: telemetry timing, transient retry (read-only tools only),
         # crash isolation. Side-effecting tools never auto-retry — the agent
         # has to be the one to decide whether a retry is safe.
@@ -570,6 +581,14 @@ class ToolRegistry:
                         crashed=False,
                         error=last_err,
                     )
+
+        # Tear down the invocation context now that the tool has finished
+        # (or failed). Done here, not in a finally on the run loop, because
+        # we still need the auto-verify block below to run with no leak.
+        try:
+            _ctx_cleanup()
+        except Exception:  # noqa: BLE001
+            pass
 
         # On a successful read_file, record the path so edit_file can verify
         # the precondition above. Done here (not inside the tool) so the

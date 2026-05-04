@@ -402,6 +402,20 @@ def build_team(
     registry = base_registry if base_registry is not None else builtin_registry()
     gate = registry.gate
 
+    # Wire spawn_agent into the registry so every agent (orchestrator +
+    # specialists) can fan out to ad-hoc sub-agents from the gallery.
+    # Idempotent: skip if a previous build_team already registered it
+    # (the same registry instance can be reused across teams in tests
+    # and message bridges).
+    from core.agents.spawn import make_spawn_agent_tool
+    if "spawn_agent" not in registry.names():
+        spawn_tool = make_spawn_agent_tool(
+            model_fn=model_fn,
+            base_registry=registry,
+            bus=bus,
+        )
+        registry.register(spawn_tool)
+
     # Build specialists first (orchestrator needs the dict to wire dispatch).
     specialists: Dict[str, _SpecialistRunner] = {}
     orchestrator_role: Optional[Role] = None
@@ -409,12 +423,18 @@ def build_team(
         if role.can_dispatch:
             orchestrator_role = role
             continue
+        # Add spawn_agent to every specialist's allowlist (if they have
+        # one — None means "all tools" already). This is the whole point
+        # of the slice: any agent can fan out, not just the orchestrator.
+        allowlist = role.tool_allowlist
+        if allowlist is not None and "spawn_agent" not in allowlist:
+            allowlist = list(allowlist) + ["spawn_agent"]
         agent = Agent(
             name=role.name,
             role_prompt=role.system_prompt,
             model_id=model_id_for(role.name),
             bus=bus,
-            tools=registry.for_allowlist(role.tool_allowlist),
+            tools=registry.for_allowlist(allowlist),
             model_fn=model_fn,
         )
         specialists[role.name] = _SpecialistRunner(agent, team=None)  # team back-ref set below
@@ -422,10 +442,14 @@ def build_team(
     if orchestrator_role is None:
         raise ValueError("no orchestrator role found (need can_dispatch: true)")
 
-    # Build the orchestrator's tools: its allowlist + the dispatch tool.
+    # Build the orchestrator's tools: its allowlist + the dispatch tool
+    # + spawn_agent (so it too can fan out beyond the standing roster).
     # We build a fresh registry that shares the gate so approvals route
     # to the same UI.
-    orch_registry = registry.for_allowlist(orchestrator_role.tool_allowlist)
+    orch_allowlist = orchestrator_role.tool_allowlist
+    if orch_allowlist is not None and "spawn_agent" not in orch_allowlist:
+        orch_allowlist = list(orch_allowlist) + ["spawn_agent"]
+    orch_registry = registry.for_allowlist(orch_allowlist)
 
     # Stub Team for the dispatch closure to reference by attribute.
     team = Team(

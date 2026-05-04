@@ -23,7 +23,7 @@ if os.environ.get("LOCALLLM_TRACE_WIDGETS") == "1":
 from functools import partial
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Dict, List
+from typing import Optional, Tuple, Dict, List, Any
 
 from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnvironment, QRect, QSize, QEvent, QObject, QPoint, QPointF, QSettings, QLockFile, QUrl
 from PySide6.QtWidgets import (
@@ -41,7 +41,10 @@ USE_HYBRID_FRAME = os.getenv("USE_HYBRID_FRAME", "1") == "1"
 _APP_INSTANCE_LOCK = None
 
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
-from desktop_app.training_widgets import MetricCard
+from desktop_app.training_widgets import (
+    MetricCard, RunModeSelector, CheckpointToggle, StatusPill,
+    RUN_MODE_NEW, RUN_MODE_RESUME, RUN_MODE_CONTINUE,
+)
 from desktop_app.splash_screen import SplashScreen
 from desktop_app.process_utils import (
     HiddenSubprocessRunner,
@@ -7233,10 +7236,11 @@ class MainWindow(QMainWindow):
         tuned_scroll.setFrameShape(QFrame.NoFrame)
         tuned_scroll.setStyleSheet("background: transparent;")
         self.tuned_container = QWidget()
-        self.tuned_layout = QVBoxLayout(self.tuned_container)
-        self.tuned_layout.setSpacing(10)
+        # 2-column grid — same pattern the Downloaded Models page uses
+        # (see _build_models_page) so the visual style matches.
+        self.tuned_layout = QGridLayout(self.tuned_container)
+        self.tuned_layout.setSpacing(20)
         self.tuned_layout.setContentsMargins(5, 5, 5, 5)
-        self.tuned_layout.addStretch(1)
         tuned_scroll.setWidget(self.tuned_container)
         tuned_layout.addWidget(tuned_scroll, 1)
         self.models_content_tabs.addTab(tuned_tab, "🎯 Tuned Models")
@@ -8506,11 +8510,13 @@ class MainWindow(QMainWindow):
         ``adapter_config.json`` and an ``adapter_model.{safetensors,bin}``
         is treated as a finished training run. Anything else (in-progress
         checkpoint dirs, broken outputs) is skipped.
+
+        Layout: 2-column QGridLayout matching the Downloaded Models page.
         """
         if not hasattr(self, "tuned_layout") or not hasattr(self, "tuned_container"):
             return
-        # Drain everything except the trailing stretch.
-        while self.tuned_layout.count() > 1:
+        # Clear the entire grid before repopulating.
+        while self.tuned_layout.count():
             item = self.tuned_layout.takeAt(0)
             w = item.widget() if item else None
             if w is not None:
@@ -8530,15 +8536,20 @@ class MainWindow(QMainWindow):
             empty.setStyleSheet(
                 "color:#888; font-size: 12pt; padding: 40px;"
             )
-            self.tuned_layout.insertWidget(0, empty)
+            # Span the empty-state label across both columns.
+            self.tuned_layout.addWidget(empty, 0, 0, 1, 2)
             return
 
+        max_cols = 2
+        row = col = 0
         for name in adapters:
             path = adapter_root / name
-            self.tuned_layout.insertWidget(
-                self.tuned_layout.count() - 1,
-                self._build_tuned_model_card(name, path),
-            )
+            card = self._build_tuned_model_card(name, path)
+            self.tuned_layout.addWidget(card, row, col)
+            col += 1
+            if col >= max_cols:
+                col = 0
+                row += 1
 
     def _build_tuned_model_card(self, name: str, path: "Path") -> QFrame:
         """Render one fine-tuned adapter as a rich card.
@@ -8767,48 +8778,195 @@ class MainWindow(QMainWindow):
 
         return card
 
-    def _use_tuned_model(self, name: str, path: "Path") -> None:
-        """Best-effort 'Use in Chat': flips the user to the chat tab with
-        a hint message. Full adapter+base-model loading flow lives in the
-        chat infra; this just gets the user there. Failures show a polite
-        warning instead of crashing.
+    # ------------------------------------------------------------------
+    # Helpers shared by Onboard / Use in Chat for tuned adapters
+    # ------------------------------------------------------------------
+
+    def _resolve_adapter_base_path(self, adapter_dir: "Path") -> Optional[str]:
+        """Read adapter_config.json from a LoRA adapter dir and return
+        the base model's local path (or HF id) on disk.
+
+        Returns ``None`` if adapter_config.json is missing or doesn't
+        name a base.
+        """
+        import json as _json
+        cfg_path = adapter_dir / "adapter_config.json"
+        if not cfg_path.exists():
+            return None
+        try:
+            with cfg_path.open("r", encoding="utf-8") as f:
+                cfg = _json.load(f)
+        except Exception:
+            return None
+        return (
+            cfg.get("base_model_name_or_path")
+            or cfg.get("base_model")
+            or None
+        )
+
+    def _find_base_onboarding(self, base_path: str) -> Optional[Dict[str, Any]]:
+        """Look up an existing READY onboarding row for a given base
+        model path. Used to clone its env_key/backend/accelerator into
+        the adapter's row so the adapter inherits a working environment.
         """
         try:
-            QMessageBox.information(
-                self,
-                "Use Tuned Model",
-                f"To chat with '{name}':\n\n"
-                f"1. Onboard the base model first (Models page).\n"
-                f"2. In Chat, pick the base model.\n"
-                f"3. The LoRA adapter at:\n   {path}\n"
-                f"   will be applied automatically when present in fine_tuned/.\n\n"
-                f"Full one-click 'Use' is on the roadmap.",
+            from core.state_store import StateStore
+            ss = StateStore()
+            base_norm = str(Path(base_path)).lower()
+            for row in ss.list_onboarding_by_status("READY"):
+                if str(row.get("base_model_path", "")).lower() == base_norm:
+                    return row
+        except Exception as e:
+            self.train_log.appendPlainText(
+                f"[WARN] _find_base_onboarding failed: {e}"
+            )
+        return None
+
+    def _register_tuned_adapter(self, name: str, adapter_dir: "Path") -> Tuple[bool, str]:
+        """Register a tuned LoRA adapter as a usable model.
+
+        Strategy: read the adapter's base_model from adapter_config.json,
+        find an existing READY onboarding row for that base, then upsert
+        a new row pairing the same base + this adapter dir with status
+        READY. The chat picker reads from list_ready_models() so the
+        adapter shows up automatically after this.
+
+        If the base model isn't onboarded yet, return (False, hint) so
+        the caller can trigger base onboarding instead of silently
+        leaving a half-broken row in the DB.
+        """
+        base_path = self._resolve_adapter_base_path(adapter_dir)
+        if not base_path:
+            return False, (
+                "adapter_config.json is missing or does not name a base "
+                "model. The adapter directory looks corrupted."
+            )
+
+        # The base might be a HuggingFace id ('google/gemma-4-E4B-it')
+        # or a local path. If it's a relative HF id, try resolving it
+        # against LLM/models/<sanitized> first.
+        from pathlib import Path as _P
+        base_p = _P(base_path)
+        if not base_p.exists():
+            sanitised = base_path.replace("/", "__")
+            candidate = self.root / "models" / sanitised
+            if candidate.exists():
+                base_path = str(candidate)
+            else:
+                return False, (
+                    f"Base model '{base_path}' is not present locally "
+                    f"under {self.root / 'models'}. Onboard the base "
+                    "model first (Models page → Browse → Download → "
+                    "Onboard), then re-click Use here."
+                )
+
+        # Locate an existing READY row for this base — we need its env
+        # so the adapter inherits a working runtime.
+        base_row = self._find_base_onboarding(base_path)
+        if base_row is None:
+            return False, (
+                "The base model is not yet onboarded. Click Onboard on "
+                "the base in the Models page first, then return here."
+            )
+
+        # Upsert the adapter row.
+        try:
+            from core.state_store import StateStore
+            ss = StateStore()
+            ss.upsert_onboarding(
+                model_id=f"tuned__{name}",
+                base_model_path=str(base_path),
+                adapter_dir=str(adapter_dir),
+                env_key=base_row.get("env_key"),
+                backend=base_row.get("backend"),
+                accelerator=base_row.get("accelerator"),
+                status="READY",
             )
         except Exception as e:
-            self.train_log.appendPlainText(f"[WARN] Use action failed: {e}")
+            return False, f"State-store write failed: {e}"
+
+        # Drop the sentinel so the card flips to the green badge.
+        try:
+            (adapter_dir / ".onboarded").touch(exist_ok=True)
+        except Exception:
+            pass
+        return True, "Adapter is now ready for chat."
+
+    def _refresh_chat_pickers(self) -> None:
+        """Re-populate every chat-tab model dropdown so a freshly
+        registered adapter shows up immediately. Best-effort — silently
+        ignores pickers that don't exist yet (lazy-loaded sub-tabs).
+        """
+        for fn_name in (
+            "_load_tool_chat_models",
+            "_load_chat_models",
+            "_load_test_models",
+            "_load_m2m_models",
+            "_refresh_chat_model_picker",
+        ):
+            fn = getattr(self, fn_name, None)
+            if callable(fn):
+                try:
+                    fn()
+                except Exception:
+                    pass
+
+    def _navigate_to_chat_tab(self) -> None:
+        """Switch the main tab bar to the Test tab (which hosts Chat /
+        Tool Chat sub-pages). Walks the tab labels because the tab index
+        isn't stored as a named attribute.
+        """
+        try:
+            for i in range(self.tabs.count()):
+                if self.tabs.tabText(i).strip().lower() in ("test", "🧪 test"):
+                    self.tabs.setCurrentIndex(i)
+                    return
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Tuned-model card actions (Use / Onboard / Delete)
+    # ------------------------------------------------------------------
+
+    def _use_tuned_model(self, name: str, path: "Path") -> None:
+        """Make this adapter usable in chat and route the user there.
+
+        Flow:
+          1. Register the adapter via _register_tuned_adapter (looks
+             up the base's env_key/backend/accelerator and writes a
+             READY row pointing at the adapter dir).
+          2. Refresh every chat-tab dropdown so the new entry appears.
+          3. Switch the main tab bar to the Test/Chat tab.
+        Failure path: show ONE actionable dialog explaining what's
+        missing (no more "the adapter at PATH will be applied
+        automatically" runaround).
+        """
+        ok, msg = self._register_tuned_adapter(name, path)
+        if not ok:
+            QMessageBox.warning(self, "Use Tuned Model", msg)
+            return
+
+        self._refresh_chat_pickers()
+        self._refresh_tuned_models()  # flip ONBOARDED badge
+        self._navigate_to_chat_tab()
 
     def _onboard_tuned_model(self, name: str, path: "Path") -> None:
-        """Run the existing model-onboarding flow on the adapter path.
-
-        The onboarding pipeline already understands LoRA adapters via
-        adapter_config.json. We mark the adapter dir with a sentinel
-        ``.onboarded`` file on success so the card flips to the green
-        ONBOARDED badge on the next refresh.
+        """Same registration logic as Use, minus the tab navigation —
+        this is the explicit 'prepare it for use, but don't take me
+        to chat yet' button.
         """
-        try:
-            model_id = f"tuned__{name}"
-            self._start_model_onboarding(str(path), model_id)
-            try:
-                (path / ".onboarded").touch(exist_ok=True)
-            except Exception:
-                pass
-            QTimer.singleShot(500, self._refresh_tuned_models)
-        except Exception as e:
-            QMessageBox.warning(
-                self,
-                "Onboarding Failed",
-                f"Could not onboard '{name}':\n\n{e}",
-            )
+        ok, msg = self._register_tuned_adapter(name, path)
+        if not ok:
+            QMessageBox.warning(self, "Onboarding Failed", msg)
+            return
+        self._refresh_chat_pickers()
+        self._refresh_tuned_models()
+        QMessageBox.information(
+            self,
+            "Tuned Model Ready",
+            f"'{name}' is now onboarded and will appear in the chat "
+            f"model picker on the Test tab.",
+        )
 
     def _delete_tuned_model(self, name: str, path: "Path") -> None:
         """Confirm and delete a fine-tuned adapter directory."""

@@ -383,19 +383,19 @@ class _EditorPanel(QFrame):
         outer.setContentsMargins(20, 20, 20, 20)
         outer.setSpacing(14)
 
-        # Header.
+        # Header — large 240×240 avatar + name field stacked beside it.
         header_row = QHBoxLayout()
-        header_row.setSpacing(14)
+        header_row.setSpacing(18)
         self.avatar_button = QPushButton("🤖")
-        self.avatar_button.setFixedSize(64, 64)
-        self.avatar_button.setIconSize(QSize(54, 54))
+        self.avatar_button.setFixedSize(240, 240)
+        self.avatar_button.setIconSize(QSize(220, 220))
         self.avatar_button.setStyleSheet("""
             QPushButton {
                 background: rgba(255,255,255,0.10);
                 border: 1px solid rgba(255,255,255,0.12);
-                border-radius: 12px;
+                border-radius: 18px;
                 color: #ffffff;
-                font-size: 32px;
+                font-size: 120px;
             }
             QPushButton:hover {
                 background: rgba(74,108,255,0.30);
@@ -408,18 +408,19 @@ class _EditorPanel(QFrame):
         name_box = QVBoxLayout()
         name_box.setSpacing(6)
         nf = QFont()
-        nf.setPointSize(11)
+        nf.setPointSize(13)
         nf.setBold(True)
         nf2 = QFont()
-        nf2.setPointSize(11)
+        nf2.setPointSize(13)
         lbl_n = QLabel("Name")
         lbl_n.setFont(nf2)
-        lbl_n.setStyleSheet("color:#9aa0a6; background:transparent;")
+        lbl_n.setStyleSheet("color:#9aa0a6; background:transparent; font-size:13px;")
         name_box.addWidget(lbl_n)
         self.name_input = QLineEdit()
-        self.name_input.setMinimumHeight(32)
+        self.name_input.setMinimumHeight(40)
         self.name_input.setStyleSheet(_INPUT_STYLE)
         name_box.addWidget(self.name_input)
+        name_box.addStretch(1)
         header_row.addLayout(name_box, 1)
         outer.addLayout(header_row)
 
@@ -432,14 +433,14 @@ class _EditorPanel(QFrame):
         # Description.
         outer.addWidget(_section_label("Job description (one line)"))
         self.desc_input = QLineEdit()
-        self.desc_input.setMinimumHeight(32)
+        self.desc_input.setMinimumHeight(40)
         self.desc_input.setStyleSheet(_INPUT_STYLE)
         outer.addWidget(self.desc_input)
 
         # System prompt.
         outer.addWidget(_section_label("System prompt"))
         self.prompt_input = QTextEdit()
-        self.prompt_input.setMinimumHeight(160)
+        self.prompt_input.setMinimumHeight(180)
         self.prompt_input.setStyleSheet(_INPUT_STYLE_TEXTAREA)
         outer.addWidget(self.prompt_input)
 
@@ -449,18 +450,23 @@ class _EditorPanel(QFrame):
         self.model_picker.refresh_entries()
         outer.addWidget(self.model_picker)
 
-        # Tools.
+        # Built-in tools — 3-column grid so the list stays compact even
+        # as the registry grows.
         outer.addWidget(_section_label("Built-in tools"))
         self._builtin_tools_box = QFrame()
         self._builtin_tools_box.setStyleSheet(_TOOLBOX_STYLE)
-        bt_layout = QVBoxLayout(self._builtin_tools_box)
+        bt_layout = QGridLayout(self._builtin_tools_box)
         bt_layout.setContentsMargins(12, 10, 12, 10)
-        bt_layout.setSpacing(4)
-        for tool_name in _list_builtin_tool_names():
+        bt_layout.setHorizontalSpacing(14)
+        bt_layout.setVerticalSpacing(6)
+        bt_cols = 3
+        for col in range(bt_cols):
+            bt_layout.setColumnStretch(col, 1)
+        for i, tool_name in enumerate(_list_builtin_tool_names()):
             cb = QCheckBox(tool_name)
-            cb.setStyleSheet("color:#dadcdf; font-size:12px;")
+            cb.setStyleSheet("color:#dadcdf; font-size:14px;")
             self._builtin_tool_checks[tool_name] = cb
-            bt_layout.addWidget(cb)
+            bt_layout.addWidget(cb, i // bt_cols, i % bt_cols)
         outer.addWidget(self._builtin_tools_box)
 
         # MCP tools.
@@ -469,19 +475,19 @@ class _EditorPanel(QFrame):
         self._mcp_tools_box.setStyleSheet(_TOOLBOX_STYLE)
         mt_layout = QVBoxLayout(self._mcp_tools_box)
         mt_layout.setContentsMargins(12, 10, 12, 10)
-        mt_layout.setSpacing(4)
+        mt_layout.setSpacing(6)
         mcp_names = _list_mcp_tool_names()
         if mcp_names:
             for tool_name in mcp_names:
                 cb = QCheckBox(tool_name)
-                cb.setStyleSheet("color:#dadcdf; font-size:12px;")
+                cb.setStyleSheet("color:#dadcdf; font-size:14px;")
                 self._mcp_tool_checks[tool_name] = cb
                 mt_layout.addWidget(cb)
         else:
             empty = QLabel(
                 "No MCP servers connected. Configure them in the 🧩 MCP tab."
             )
-            empty.setStyleSheet("color:#9aa0a6; font-size:11px; font-style:italic;")
+            empty.setStyleSheet("color:#9aa0a6; font-size:13px; font-style:italic;")
             mt_layout.addWidget(empty)
         outer.addWidget(self._mcp_tools_box)
 
@@ -489,7 +495,7 @@ class _EditorPanel(QFrame):
         self.leader_cb = QCheckBox(
             "Team leader — can dispatch work to other agents"
         )
-        self.leader_cb.setStyleSheet("color:#dadcdf; font-size:12px;")
+        self.leader_cb.setStyleSheet("color:#dadcdf; font-size:14px;")
         outer.addWidget(self.leader_cb)
 
         outer.addStretch(1)
@@ -498,15 +504,15 @@ class _EditorPanel(QFrame):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
         self.save_btn = QPushButton("Save")
-        self.save_btn.setMinimumHeight(36)
+        self.save_btn.setMinimumHeight(42)
         self.save_btn.setStyleSheet(_PRIMARY_BTN_STYLE)
         self.save_btn.clicked.connect(self._on_save)
         self.duplicate_btn = QPushButton("Duplicate")
-        self.duplicate_btn.setMinimumHeight(36)
+        self.duplicate_btn.setMinimumHeight(42)
         self.duplicate_btn.setStyleSheet(_GHOST_BTN_STYLE)
         self.duplicate_btn.clicked.connect(self._on_duplicate)
         self.delete_btn = QPushButton("Delete")
-        self.delete_btn.setMinimumHeight(36)
+        self.delete_btn.setMinimumHeight(42)
         self.delete_btn.setStyleSheet(_DESTRUCTIVE_BTN_STYLE)
         self.delete_btn.clicked.connect(self._on_delete)
 
@@ -521,7 +527,7 @@ class _EditorPanel(QFrame):
         )
         self.builtin_banner.setStyleSheet(
             "color:#c5cdff; background:rgba(74,108,255,0.10); "
-            "border-radius:8px; padding:8px 12px; font-size:11px;"
+            "border-radius:8px; padding:8px 12px; font-size:13px;"
         )
         self.builtin_banner.setVisible(False)
         outer.addWidget(self.builtin_banner)
@@ -761,20 +767,24 @@ class AgentStudioPage(QWidget):
         actions.addWidget(self.refresh_btn)
         outer.addLayout(actions)
 
-        # Splitter: gallery left, editor right.
+        # Splitter: gallery left (60%), editor right (40%).
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(8)
 
         # Gallery (scroll area is fine here — list of cards can grow).
+        # Two-column grid: column 0 = built-ins, column 1 = customs.
+        # Orchestrators within each column always sit on the first row.
         gallery_host = QScrollArea()
         gallery_host.setWidgetResizable(True)
         gallery_host.setFrameShape(QFrame.NoFrame)
         gallery_host.setStyleSheet("QScrollArea { background:transparent; border:none; }")
         self.gallery_widget = QWidget()
-        self.gallery_layout = QVBoxLayout(self.gallery_widget)
+        self.gallery_layout = QGridLayout(self.gallery_widget)
         self.gallery_layout.setContentsMargins(0, 0, 0, 0)
-        self.gallery_layout.setSpacing(10)
-        self.gallery_layout.addStretch(1)  # keep cards top-aligned
+        self.gallery_layout.setHorizontalSpacing(12)
+        self.gallery_layout.setVerticalSpacing(10)
+        self.gallery_layout.setColumnStretch(0, 1)
+        self.gallery_layout.setColumnStretch(1, 1)
         gallery_host.setWidget(self.gallery_widget)
         splitter.addWidget(gallery_host)
 
@@ -784,9 +794,10 @@ class AgentStudioPage(QWidget):
         self.editor.deleted.connect(self._on_deleted)
         splitter.addWidget(self.editor)
 
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([400, 600])
+        # 60/40 split — gallery wider so two columns of cards breathe.
+        splitter.setStretchFactor(0, 6)
+        splitter.setStretchFactor(1, 4)
+        splitter.setSizes([600, 400])
         outer.addWidget(splitter, 1)
 
     # ------------------------------------------------------------------
@@ -794,26 +805,51 @@ class AgentStudioPage(QWidget):
     # ------------------------------------------------------------------
 
     def _reload_gallery(self, select: Optional[str] = None) -> None:
-        # Clear existing cards (keep the trailing stretch).
-        while self.gallery_layout.count() > 1:
+        # Clear existing cards.
+        while self.gallery_layout.count():
             item = self.gallery_layout.takeAt(0)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
 
         defs = list_all_definitions()
-        # Order: built-ins first (alphabetical), then customs.
-        ordered = sorted(
-            defs.values(),
-            key=lambda d: (0 if d.built_in else 1, d.name.lower()),
+        # Two-column layout: built-ins on the left, customs on the right.
+        # Orchestrators (can_dispatch=True) always sit on the FIRST row
+        # of their respective column so the team leaders are immediately
+        # visible at the top.
+        def _sort_key(d: AgentDefinition) -> tuple:
+            return (0 if d.can_dispatch else 1, d.name.lower())
+
+        builtins = sorted(
+            (d for d in defs.values() if d.built_in),
+            key=_sort_key,
         )
-        first_name = None
-        for d in ordered:
-            card = _GalleryCard(d)
-            card.clicked.connect(self._on_card_clicked)
-            self.gallery_layout.insertWidget(self.gallery_layout.count() - 1, card)
-            if first_name is None:
-                first_name = d.name
+        customs = sorted(
+            (d for d in defs.values() if not d.built_in),
+            key=_sort_key,
+        )
+
+        first_name: Optional[str] = None
+
+        def _add_column(items, col: int) -> Optional[str]:
+            first: Optional[str] = None
+            for row, d in enumerate(items):
+                card = _GalleryCard(d)
+                card.clicked.connect(self._on_card_clicked)
+                self.gallery_layout.addWidget(card, row, col)
+                if first is None:
+                    first = d.name
+            return first
+
+        first_builtin = _add_column(builtins, 0)
+        first_custom = _add_column(customs, 1)
+
+        first_name = first_builtin or first_custom
+
+        # Push a row stretcher at the bottom so cards stay top-aligned
+        # when one column has fewer rows than the other.
+        max_rows = max(len(builtins), len(customs), 1)
+        self.gallery_layout.setRowStretch(max_rows, 1)
 
         target = select or first_name
         if target and target in defs:
@@ -920,7 +956,7 @@ class AgentStudioPage(QWidget):
 def _section_label(text: str) -> QLabel:
     lbl = QLabel(text)
     lbl.setStyleSheet(
-        "color:#9aa0a6; font-size:11px; font-weight:600; "
+        "color:#9aa0a6; font-size:13px; font-weight:600; "
         "letter-spacing:0.6px; text-transform:uppercase; "
         "background:transparent; margin-top:4px;"
     )
@@ -930,7 +966,7 @@ def _section_label(text: str) -> QLabel:
 _INPUT_STYLE = """
     QLineEdit {
         background:#14171d; color:#fff; border:none;
-        border-radius:8px; padding:0 12px; font-size:13px;
+        border-radius:8px; padding:0 12px; font-size:15px;
     }
     QLineEdit:focus { background:#1a1d24; }
     QLineEdit:disabled { color:#888; background:#101218; }
@@ -939,7 +975,7 @@ _INPUT_STYLE = """
 _INPUT_STYLE_TEXTAREA = """
     QTextEdit {
         background:#14171d; color:#fff; border:none;
-        border-radius:8px; padding:8px 12px; font-size:13px;
+        border-radius:8px; padding:8px 12px; font-size:15px;
     }
     QTextEdit:focus { background:#1a1d24; }
 """

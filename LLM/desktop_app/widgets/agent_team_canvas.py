@@ -143,6 +143,22 @@ class AgentTeamCanvas(QWidget):
         self._selected: Optional[str] = None
         self._hover: Optional[str] = None
 
+        # Edges: (from_name, to_name) — passed in via set_edges() from
+        # the saved AgentGraph. Used both for arrow rendering and for
+        # the BFS-depth ring layout (onion-ring style).
+        self._edges: List[Tuple[str, str]] = []
+        # Per-agent BFS depth from orchestrator (1 = directly connected,
+        # 2 = two hops away, etc). Recomputed on set_agents / set_edges.
+        # Orphan agents (no path to orchestrator) get a sentinel max
+        # depth so they sit on the outermost ring.
+        self._depth: Dict[str, int] = {}
+
+        # Team-level metadata (shown in the default info card when no
+        # agent is selected). Populated via set_team_info.
+        self._team_name: str = ""
+        self._team_description: str = ""
+        self._team_icon: str = "🧠"
+
         # Pulse particles travelling along beams (orchestrator → agent).
         # Each is (agent_index_in_orbit, t_offset).
         self._pulses: List[Tuple[int, float]] = [
@@ -213,7 +229,64 @@ class AgentTeamCanvas(QWidget):
         # Selection survives re-set if the agent still exists.
         if self._selected not in self._agents:
             self._selected = None
+        self._recompute_depths()
         self.update()
+
+    def set_edges(self, edges: List[Tuple[str, str]]) -> None:
+        """Set the (from, to) connections used for arrow rendering and
+        for the onion-ring depth layout."""
+        self._edges = [
+            (str(a), str(b)) for a, b in (edges or []) if a and b
+        ]
+        self._recompute_depths()
+        self.update()
+
+    def set_team_info(
+        self,
+        name: str,
+        description: str = "",
+        icon: str = "",
+    ) -> None:
+        """Provide metadata for the team-level card shown when no agent
+        is selected. Empty name disables the team card and falls back to
+        the simple 'Click an agent…' hint."""
+        self._team_name = name or ""
+        self._team_description = description or ""
+        if icon:
+            self._team_icon = icon
+        self.update()
+
+    def _recompute_depths(self) -> None:
+        """BFS from the orchestrator over self._edges. Depth 0 is the
+        orchestrator; 1 = directly connected; etc. Disconnected agents
+        get a sentinel large depth so they sit on the outermost ring.
+        """
+        self._depth.clear()
+        if not self._orchestrator_name or self._orchestrator_name not in self._agents:
+            return
+        # Build undirected adjacency — connections in either direction
+        # count for layout (the arrows themselves still respect
+        # direction).
+        adj: Dict[str, set] = {n: set() for n in self._agents}
+        for a, b in self._edges:
+            if a in adj and b in adj:
+                adj[a].add(b)
+                adj[b].add(a)
+
+        from collections import deque
+        seen = {self._orchestrator_name: 0}
+        q = deque([self._orchestrator_name])
+        while q:
+            cur = q.popleft()
+            d = seen[cur]
+            for nb in adj.get(cur, ()):
+                if nb not in seen:
+                    seen[nb] = d + 1
+                    q.append(nb)
+        # Orphans get a depth larger than any real depth.
+        max_real = max(seen.values()) if seen else 0
+        for name in self._agents:
+            self._depth[name] = seen.get(name, max_real + 1)
 
     def set_node_status(self, name: str, status: str) -> None:
         if status not in _STATUS_FILL:
@@ -262,7 +335,13 @@ class AgentTeamCanvas(QWidget):
     # ------------------------------------------------------------------
 
     def _tick(self) -> None:
-        self._phase = (self._phase + 0.012) % math.tau
+        # Free-running phase — DON'T wrap at math.tau. The previous
+        # ``% math.tau`` made every sin/cos that multiplied phase by a
+        # non-integer (the agent pulse uses ``phase * 2.2``) snap
+        # visibly when the phase wrapped, because 2.2 * tau isn't a
+        # multiple of tau. A monotonically increasing float is fine
+        # for double-precision over multi-day uptimes.
+        self._phase += 0.012
         for i, (beam_i, t) in enumerate(self._pulses):
             t = (t + 0.011 + (beam_i % 3) * 0.001) % 1.0
             self._pulses[i] = (beam_i, t)
@@ -273,38 +352,67 @@ class AgentTeamCanvas(QWidget):
     # ------------------------------------------------------------------
 
     def _layout(self) -> Tuple[QPointF, float, List[Tuple[str, QPointF]]]:
+        """Onion-ring layout: agents grouped by BFS-depth from the
+        orchestrator, each depth on its own concentric ring. Falls
+        back to a single ring when no edges are known.
+        """
         rect = self.rect()
         cx = rect.width() / 2.0
-        # Leave a little headroom at the bottom for the "click an agent"
-        # hint, but keep the orchestrator close to vertical centre so the
-        # layout reads as a halo, not as a sun-with-distant-planets.
         cy = rect.height() / 2.0
-        radius = min(rect.width(), rect.height() * 1.5) * 0.30
-        radius = max(120.0, radius)
+        # Base ring radius — smaller than before so we have room for
+        # multiple onion rings on bigger teams.
+        base_radius = min(rect.width(), rect.height() * 1.5) * 0.22
+        base_radius = max(110.0, base_radius)
 
         positions: List[Tuple[str, QPointF]] = []
         n = len(self._orbit_order)
         if n == 0:
-            return QPointF(cx, cy), radius, positions
+            # Orchestrator may still need its position cached.
+            if self._orchestrator_name and self._orchestrator_name in self._agents:
+                self._agents[self._orchestrator_name].pos = QPointF(cx, cy)
+                self._agents[self._orchestrator_name].radius = 56.0
+            return QPointF(cx, cy), base_radius, positions
 
+        # Group orbit agents by their BFS depth.
+        by_depth: Dict[int, List[str]] = {}
+        for name in self._orbit_order:
+            d = max(1, self._depth.get(name, 1))
+            by_depth.setdefault(d, []).append(name)
+
+        # Each successive ring lives at a slightly larger radius. We
+        # use a sub-linear growth so depth 5 doesn't fall off the edge
+        # of the canvas.
         rot = self._phase * 0.25  # slow orbital drift
-        for i, name in enumerate(self._orbit_order):
-            theta = (math.tau * i) / n + rot - math.pi / 2  # start at top
-            x = cx + radius * math.cos(theta)
-            y = cy + radius * math.sin(theta)
-            pos = QPointF(x, y)
-            positions.append((name, pos))
-            # Cache for hit-testing on click.
-            agent = self._agents.get(name)
-            if agent is not None:
-                agent.pos = pos
+        max_depth = max(by_depth.keys()) if by_depth else 1
+        for depth in sorted(by_depth.keys()):
+            ring_radius = base_radius * (1.0 + 0.55 * (depth - 1))
+            # Cap radius to fit inside the widget.
+            ring_radius = min(
+                ring_radius,
+                min(rect.width(), rect.height()) * 0.45,
+            )
 
-        # Cache orchestrator centre for hit-testing too.
+            ring_agents = by_depth[depth]
+            count = len(ring_agents)
+            # Counter-rotate alternating rings so the layout doesn't
+            # feel like every layer spins the same direction.
+            ring_rot = rot * (1 if depth % 2 == 1 else -0.6)
+            for i, name in enumerate(ring_agents):
+                theta = (math.tau * i) / max(1, count) + ring_rot - math.pi / 2
+                x = cx + ring_radius * math.cos(theta)
+                y = cy + ring_radius * math.sin(theta)
+                pos = QPointF(x, y)
+                positions.append((name, pos))
+                agent = self._agents.get(name)
+                if agent is not None:
+                    agent.pos = pos
+
+        # Cache orchestrator centre for hit-testing.
         if self._orchestrator_name and self._orchestrator_name in self._agents:
             self._agents[self._orchestrator_name].pos = QPointF(cx, cy)
             self._agents[self._orchestrator_name].radius = 56.0
 
-        return QPointF(cx, cy), radius, positions
+        return QPointF(cx, cy), base_radius, positions
 
     # ------------------------------------------------------------------
     # Painting
@@ -332,15 +440,18 @@ class AgentTeamCanvas(QWidget):
         # Agent nodes on top of beams.
         self._paint_nodes(p, positions)
 
-        # Helper hint when nothing is selected and we have agents.
-        if self._selected is None and self._agents:
-            self._paint_hint(p, rect)
-
-        # Top-left info card overlay (if an agent is selected).
+        # Top-left info card.
+        # When an agent is selected, the agent's card. Otherwise the
+        # team-level card (if team metadata was provided), else a
+        # plain hint — never empty.
         if self._selected is not None:
             agent = self._agents.get(self._selected)
             if agent is not None:
                 self._paint_info_card(p, rect, agent)
+        elif self._team_name:
+            self._paint_team_card(p, rect)
+        elif self._agents:
+            self._paint_hint(p, rect)
 
     def _paint_background(self, p: QPainter, rect) -> None:
         grad = QLinearGradient(0, 0, 0, rect.height())
@@ -381,18 +492,13 @@ class AgentTeamCanvas(QWidget):
             p.setPen(pen)
             p.drawLine(centre, pos)
 
-        # Adjacent ring connections — softer dashed feel.
-        n = len(positions)
-        for i in range(n):
-            a_name, a_pos = positions[i]
-            b_name, b_pos = positions[(i + 1) % n]
-            grad = QLinearGradient(a_pos, b_pos)
-            grad.setColorAt(0.0, _alpha(_NEON_VIOLET, 70))
-            grad.setColorAt(1.0, _alpha(_NEON_PINK, 70))
-            pen = QPen(QBrush(grad), 1.0)
-            pen.setStyle(Qt.DashLine)
-            p.setPen(pen)
-            p.drawLine(a_pos, b_pos)
+        # Explicit edges from set_edges() — render as directed arrows.
+        # We draw these AFTER spokes so they sit on top, and the
+        # arrowhead at the destination shows direction. Edges that
+        # involve the orchestrator are skipped (the spokes already
+        # cover that visually).
+        if self._edges:
+            self._paint_edge_arrows(p, positions)
 
         # Travelling light pulses on the spokes.
         for beam_i, t in self._pulses:
@@ -405,7 +511,11 @@ class AgentTeamCanvas(QWidget):
             )
             x = centre.x() + (target_pos.x() - centre.x()) * t
             y = centre.y() + (target_pos.y() - centre.y()) * t
-            head_alpha = max(40, int(255 * (1.0 - abs(0.5 - t) * 1.2)))
+            # Alpha = 0 at t=0 AND t=1 so the pulse fades in at the
+            # orchestrator and out at the agent — the wrap from
+            # t=1→0 becomes invisible because the pulse is fully
+            # transparent at both endpoints.
+            head_alpha = max(0, int(255 * math.sin(t * math.pi)))
             head_col = _alpha(colour, head_alpha)
 
             grad = QRadialGradient(QPointF(x, y), 16)
@@ -416,6 +526,64 @@ class AgentTeamCanvas(QWidget):
             p.drawEllipse(QPointF(x, y), 14, 14)
             p.setBrush(QBrush(head_col))
             p.drawEllipse(QPointF(x, y), 3.0, 3.0)
+
+    def _paint_edge_arrows(
+        self,
+        p: QPainter,
+        positions: List[Tuple[str, QPointF]],
+    ) -> None:
+        """Render every set_edges() entry as a directed arrow."""
+        # Build a quick name→pos lookup including the orchestrator
+        # at the centre (so edges to/from the orchestrator render too,
+        # not only inter-orbit edges).
+        pos_by_name: Dict[str, QPointF] = {n: pos for n, pos in positions}
+        if self._orchestrator_name and self._orchestrator_name in self._agents:
+            pos_by_name[self._orchestrator_name] = self._agents[self._orchestrator_name].pos
+
+        for src, dst in self._edges:
+            a = pos_by_name.get(src)
+            b = pos_by_name.get(dst)
+            if a is None or b is None:
+                continue
+            # Pull the arrow's start and end IN by each node's radius
+            # so the line stops at the disc edge instead of the
+            # centre. Hit-test radius lives on the agent.
+            ar = self._agents[src].radius if src in self._agents else 22.0
+            br = self._agents[dst].radius if dst in self._agents else 22.0
+            dx = b.x() - a.x()
+            dy = b.y() - a.y()
+            dist = max(1.0, math.hypot(dx, dy))
+            ux, uy = dx / dist, dy / dist
+            start = QPointF(a.x() + ux * ar, a.y() + uy * ar)
+            end = QPointF(b.x() - ux * br, b.y() - uy * br)
+
+            # Both ends active → green; otherwise violet/pink.
+            sa = self._agents[src].status if src in self._agents else STATUS_IDLE
+            da = self._agents[dst].status if dst in self._agents else STATUS_IDLE
+            both_active = sa == STATUS_ACTIVE and da == STATUS_ACTIVE
+            grad = QLinearGradient(start, end)
+            if both_active:
+                grad.setColorAt(0.0, _alpha(_NEON_GREEN, 220))
+                grad.setColorAt(1.0, _alpha(_NEON_GREEN, 120))
+                pen_w = 2.0
+            else:
+                grad.setColorAt(0.0, _alpha(_NEON_VIOLET, 170))
+                grad.setColorAt(1.0, _alpha(_NEON_PINK, 170))
+                pen_w = 1.4
+            pen = QPen(QBrush(grad), pen_w)
+            pen.setCapStyle(Qt.RoundCap)
+            p.setPen(pen)
+            p.drawLine(start, end)
+
+            # Arrowhead at end. Two short lines flaring back from the tip.
+            head_len = 9.0
+            head_angle = math.radians(28)
+            angle = math.atan2(uy, ux)
+            for sign in (-1, 1):
+                ah_a = angle + math.pi - sign * head_angle
+                hx = end.x() + math.cos(ah_a) * head_len
+                hy = end.y() + math.sin(ah_a) * head_len
+                p.drawLine(end, QPointF(hx, hy))
 
     def _paint_centre(self, p: QPainter, centre: QPointF, r: float) -> None:
         cx, cy = centre.x(), centre.y()
@@ -568,6 +736,158 @@ class AgentTeamCanvas(QWidget):
                 p.setPen(status_col)
                 status_rect = QRectF(pos.x() - 90, pos.y() + r + 20, 180, 14)
                 p.drawText(status_rect, Qt.AlignCenter, status_word)
+
+    def _paint_team_card(self, p: QPainter, rect) -> None:
+        """Top-left card describing the team itself, shown when no agent
+        is selected. Same gamey character-sheet treatment as the per-
+        agent card so the visual language stays consistent.
+        """
+        margin = 14
+        card_w = min(380, rect.width() - 2 * margin)
+        card_h = 200
+        card = QRectF(margin, margin, card_w, card_h)
+
+        # Background.
+        bg = QLinearGradient(card.topLeft(), card.bottomRight())
+        bg.setColorAt(0.0, QColor(18, 22, 34, 230))
+        bg.setColorAt(1.0, QColor(8, 11, 18, 230))
+        p.setBrush(QBrush(bg))
+        border_grad = QLinearGradient(card.topLeft(), card.bottomRight())
+        border_grad.setColorAt(0.0, _alpha(_NEON_CYAN, 220))
+        border_grad.setColorAt(1.0, _alpha(_NEON_VIOLET, 220))
+        p.setPen(QPen(QBrush(border_grad), 1.6))
+        p.drawRoundedRect(card, 12, 12)
+
+        # Top ribbon — "TEAM".
+        ribbon = QRectF(card.x() + 8, card.y() + 8, card.width() - 16, 22)
+        rg = QLinearGradient(ribbon.topLeft(), ribbon.topRight())
+        rg.setColorAt(0.0, _alpha(_NEON_CYAN, 60))
+        rg.setColorAt(1.0, _alpha(_NEON_VIOLET, 10))
+        p.setBrush(QBrush(rg))
+        p.setPen(QPen(_alpha(_NEON_CYAN, 120), 1))
+        p.drawRoundedRect(ribbon, 6, 6)
+        rib_font = QFont()
+        rib_font.setPointSize(9)
+        rib_font.setBold(True)
+        p.setFont(rib_font)
+        p.setPen(_TEXT_BRIGHT)
+        p.drawText(
+            ribbon.adjusted(10, 0, -10, 0),
+            Qt.AlignVCenter | Qt.AlignLeft,
+            "● TEAM",
+        )
+
+        # Picture (left): the team icon at large size.
+        pic_x = card.x() + 14
+        pic_y = card.y() + 38
+        pic_size = 100.0
+        pic_rect = QRectF(pic_x, pic_y, pic_size, pic_size)
+        ring = QRadialGradient(pic_rect.center(), pic_size * 0.7)
+        ring.setColorAt(0.0, _alpha(_NEON_CYAN, 110))
+        ring.setColorAt(1.0, _alpha(_NEON_CYAN, 0))
+        p.setBrush(QBrush(ring))
+        p.setPen(Qt.NoPen)
+        p.drawEllipse(pic_rect.adjusted(-6, -6, 6, 6))
+        p.setBrush(QBrush(QColor(30, 36, 52)))
+        p.setPen(QPen(_alpha(_TEXT_BRIGHT, 200), 1.4))
+        p.drawEllipse(pic_rect)
+
+        # Use the orchestrator's owl crest if available, otherwise the
+        # team icon emoji.
+        if self._owl_pixmap is not None and not self._owl_pixmap.isNull():
+            target = pic_size * 0.85
+            scaled = self._owl_pixmap.scaled(
+                int(target), int(target),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation,
+            )
+            p.drawPixmap(
+                QPointF(
+                    pic_rect.center().x() - scaled.width() / 2,
+                    pic_rect.center().y() - scaled.height() / 2,
+                ),
+                scaled,
+            )
+        else:
+            icon_font = QFont()
+            icon_font.setPointSizeF(pic_size * 0.65)
+            p.setFont(icon_font)
+            p.setPen(_TEXT_BRIGHT)
+            p.drawText(pic_rect, Qt.AlignCenter, self._team_icon or "🧠")
+
+        # Team name under the picture.
+        name_font = QFont()
+        name_font.setPointSize(11)
+        name_font.setBold(True)
+        p.setFont(name_font)
+        p.setPen(_TEXT_BRIGHT)
+        name_rect = QRectF(pic_x - 6, pic_y + pic_size + 6, pic_size + 12, 20)
+        p.drawText(name_rect, Qt.AlignCenter, self._team_name)
+
+        # Right side: description + agent count.
+        info_x = pic_x + pic_size + 18
+        info_y = pic_y - 4
+        info_w = card.x() + card.width() - 14 - info_x
+
+        desc_font = QFont()
+        desc_font.setPointSize(9)
+        p.setFont(desc_font)
+        p.setPen(_TEXT_BRIGHT)
+        desc_rect = QRectF(info_x, info_y, info_w, 96)
+        desc = self._team_description or "No team description provided."
+        if len(desc) > 260:
+            desc = desc[:257] + "…"
+        p.drawText(
+            desc_rect,
+            Qt.AlignTop | Qt.AlignLeft | Qt.TextWordWrap,
+            desc,
+        )
+
+        # Stats row at the bottom: number of agents, edges.
+        stat_y = card.y() + card.height() - 36
+        h_font = QFont()
+        h_font.setPointSize(8)
+        h_font.setBold(True)
+        p.setFont(h_font)
+        p.setPen(_TEXT_DIM)
+        p.drawText(
+            QRectF(info_x, stat_y, info_w, 14),
+            Qt.AlignLeft,
+            "AGENTS",
+        )
+        p.drawText(
+            QRectF(info_x + 80, stat_y, info_w, 14),
+            Qt.AlignLeft,
+            "CONNECTIONS",
+        )
+
+        v_font = QFont()
+        v_font.setPointSize(11)
+        v_font.setBold(True)
+        p.setFont(v_font)
+        p.setPen(_TEXT_BRIGHT)
+        p.drawText(
+            QRectF(info_x, stat_y + 14, info_w, 18),
+            Qt.AlignLeft,
+            str(len(self._agents)),
+        )
+        p.drawText(
+            QRectF(info_x + 80, stat_y + 14, info_w, 18),
+            Qt.AlignLeft,
+            str(len(self._edges)),
+        )
+
+        # Bottom hint.
+        hint_font = QFont()
+        hint_font.setPointSize(8)
+        hint_font.setItalic(True)
+        p.setFont(hint_font)
+        p.setPen(_TEXT_DIM)
+        hint_rect = QRectF(0, rect.height() - 24, rect.width(), 20)
+        p.drawText(
+            hint_rect,
+            Qt.AlignCenter,
+            "Click any node — the orchestrator too — to see its skills",
+        )
 
     def _paint_hint(self, p: QPainter, rect) -> None:
         font = QFont()
@@ -775,17 +1095,29 @@ class AgentTeamCanvas(QWidget):
     # ------------------------------------------------------------------
 
     def _hit_test(self, pos: QPoint) -> Optional[str]:
-        """Return the agent name under ``pos`` (orbital nodes only — we
-        don't return the orchestrator from a click on the centre crest,
-        though we do hit-test it because clicking the crest deselects)."""
+        """Return the agent name under ``pos``. The orchestrator is now
+        a first-class clickable target (its info card opens on click,
+        same as orbit agents). Orbit agents still take priority on
+        overlap so they aren't masked when the rings sit close to the
+        centre on a small canvas.
+        """
+        # Orbit agents first (so they win on overlap).
         for name, agent in self._agents.items():
             if agent.is_orchestrator:
                 continue
-            r = agent.radius + 6  # forgiving hit area
+            r = agent.radius + 6
             dx = pos.x() - agent.pos.x()
             dy = pos.y() - agent.pos.y()
             if dx * dx + dy * dy <= r * r:
                 return name
+        # Then the orchestrator.
+        if self._orchestrator_name and self._orchestrator_name in self._agents:
+            agent = self._agents[self._orchestrator_name]
+            r = agent.radius + 8
+            dx = pos.x() - agent.pos.x()
+            dy = pos.y() - agent.pos.y()
+            if dx * dx + dy * dy <= r * r:
+                return self._orchestrator_name
         return None
 
     def mouseMoveEvent(self, event):  # noqa: N802

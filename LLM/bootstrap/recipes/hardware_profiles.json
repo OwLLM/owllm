@@ -1,0 +1,50 @@
+{
+  "$schema_note": "Cold-start happy paths consulted before asking the model. Fields documented in LLM/docs/supervisor/BOOTSTRAP.md 'Cold-start recipe table'.",
+  "version": 1,
+  "profiles": [
+    {
+      "id": "cuda121-torch25",
+      "description": "NVIDIA GPU with CUDA 12.1+ runtime, compute capability >= 8.0 (Ampere/Ada/Hopper).",
+      "match": {
+        "gpu.0.vendor": "nvidia",
+        "gpu.0.cuda_runtime": ">=12.1,<13.0",
+        "gpu.0.compute_capability": ">=8.0"
+      },
+      "steps": [
+        { "action": "create_venv",  "args": { "python_version": "3.11" } },
+        { "action": "install_pkg",  "args": { "name": "torch==2.5.1+cu121",
+                                              "index": "https://download.pytorch.org/whl/cu121" } },
+        { "action": "install_pkg",  "args": { "name": "bitsandbytes==0.44.1" } }
+      ]
+    },
+    {
+      "id": "cuda118-torch24",
+      "description": "Older NVIDIA stack — CUDA 11.8, compute capability >= 7.5 (Turing).",
+      "match": {
+        "gpu.0.vendor": "nvidia",
+        "gpu.0.cuda_runtime": ">=11.8,<12.0",
+        "gpu.0.compute_capability": ">=7.5"
+      },
+      "steps": [
+        { "action": "create_venv",  "args": { "python_version": "3.11" } },
+        { "action": "install_pkg",  "args": { "name": "torch==2.4.1+cu118",
+                                              "index": "https://download.pytorch.org/whl/cu118" } },
+        { "action": "install_pkg",  "args": { "name": "bitsandbytes==0.43.3" } }
+      ]
+    },
+    {
+      "id": "cpu-only",
+      "description": "No discrete GPU — install CPU-only torch and warn the user that training will be slow.",
+      "match": {
+        "gpu.0.vendor": "none"
+      },
+      "steps": [
+        { "action": "create_venv",  "args": { "python_version": "3.11" } },
+        { "action": "install_pkg",  "args": { "name": "torch==2.5.1",
+                                              "index": "https://download.pytorch.org/whl/cpu" } },
+        { "action": "ask_user",     "args": { "question": "No GPU detected — training will run on CPU and be very slow. Continue?",
+                                              "options": ["continue", "abort"] } }
+      ]
+    }
+  ]
+}

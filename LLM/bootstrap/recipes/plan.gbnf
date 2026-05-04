@@ -1,0 +1,22 @@
+# GBNF grammar for supervisor plan output.
+# Constrains llama-server output so the model literally cannot return malformed actions.
+# See LLM/docs/supervisor/BOOTSTRAP.md "Plan grammar (GBNF)" and TOOLS.md for the action catalog.
+
+root        ::= "{" ws "\"action\":" ws action "," ws "\"args\":" ws object "," ws "\"reason\":" ws string ("," ws "\"fallback\":" ws (root | "null"))? ws "}"
+
+action      ::= "\"install_pkg\"" | "\"swap_wheel\"" | "\"download_file\"" | "\"install_local_wheel\""
+              | "\"uninstall_pkg\"" | "\"create_venv\"" | "\"set_env\"" | "\"pick_profile\""
+              | "\"repair_runtime_bundle\"" | "\"rerun_model_probe\"" | "\"clear_pip_cache\""
+              | "\"validate_dataset\"" | "\"normalize_dataset\"" | "\"inspect_sample\""
+              | "\"read_log\"" | "\"probe_hardware\"" | "\"pip_show\"" | "\"python_version\""
+              | "\"run_shell\"" | "\"abort\"" | "\"ask_user\""
+
+# Minimal JSON value grammar. llama.cpp ships a richer json.gbnf — replace this with that
+# at integration time and import only `value` / `object`.
+value       ::= object | array | string | number | "true" | "false" | "null"
+object      ::= "{" ws (member ("," ws member)*)? ws "}"
+member      ::= string ws ":" ws value
+array       ::= "[" ws (value ("," ws value)*)? ws "]"
+string      ::= "\"" ([^"\\] | "\\" ["\\/bfnrt])* "\""
+number      ::= "-"? ("0" | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [-+]? [0-9]+)?
+ws          ::= [ \t\n\r]*

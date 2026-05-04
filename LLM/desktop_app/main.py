@@ -12669,6 +12669,17 @@ class MainWindow(QMainWindow):
         lora_alpha = lora_r * 2     # matches the read-only label in the UI
         lora_dropout = 0.05         # safer default than 0.0
 
+        # The Model Name field on the Training Parameters card is the
+        # user's chosen adapter directory name (e.g. "260504_gemma-4-
+        # E4B-it_kbeauty_finetune_gemma4_1_0956"). Pipe it through so
+        # the saved LoRA adapter is named what the user typed instead
+        # of getting a meaningless "adapter_<timestamp>" suffix.
+        adapter_name = ""
+        try:
+            adapter_name = self.train_model_name.text().strip()
+        except Exception:
+            adapter_name = ""
+
         cfg = TrainingConfig(
             base_model=base_model_for_finetune,
             data_path=Path(data_path),
@@ -12680,6 +12691,7 @@ class MainWindow(QMainWindow):
             lora_r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
+            adapter_name=(adapter_name or None),
         )
 
         cmd = build_finetune_cmd(cfg)

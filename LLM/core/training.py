@@ -26,6 +26,11 @@ class TrainingConfig:
     lora_alpha: int = 16
     lora_dropout: float = 0.0
     use_4bit: bool = True
+    adapter_name: Optional[str] = None
+    """User-supplied adapter directory name (typed in the Model Name field
+    of the training panel). When set, finetune.py saves the adapter to
+    ``<output_dir>/<adapter_name>`` instead of the default
+    ``adapter_<timestamp>``. ``None`` falls back to the timestamped name."""
 
 
 def build_finetune_cmd(cfg: TrainingConfig) -> List[str]:
@@ -34,7 +39,7 @@ def build_finetune_cmd(cfg: TrainingConfig) -> List[str]:
     python_exe = sys.executable
     if python_exe.endswith("pythonw.exe"):
         python_exe = python_exe.replace("pythonw.exe", "python.exe")
-    
+
     cmd = [
         python_exe, "-u", "finetune.py",
         "--model-name", cfg.base_model,  # finetune.py uses --model-name, not --base-model
@@ -49,6 +54,8 @@ def build_finetune_cmd(cfg: TrainingConfig) -> List[str]:
         "--lora-dropout", str(cfg.lora_dropout),
         # Note: finetune.py always uses 4-bit (hardcoded), no --use-4bit flag needed
     ]
+    if cfg.adapter_name:
+        cmd.extend(["--adapter-name", cfg.adapter_name])
     return cmd
 
 
@@ -58,6 +65,11 @@ def default_output_dir() -> Path:
     out = root / "fine_tuned"
     out.mkdir(parents=True, exist_ok=True)
     return out
+
+
+def _training_no_window_flags() -> Dict[str, object]:
+    """Return subprocess kwargs. Console windows are intentionally not hidden."""
+    return {}
 
 
 def start_training_process(cfg: TrainingConfig, env: Optional[Dict[str, str]] = None) -> subprocess.Popen:
@@ -77,4 +89,5 @@ def start_training_process(cfg: TrainingConfig, env: Optional[Dict[str, str]] = 
         universal_newlines=True,
         encoding="utf-8",
         errors="replace",
+        **_training_no_window_flags(),
     )

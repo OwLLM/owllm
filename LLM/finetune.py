@@ -223,6 +223,11 @@ def parse_args():
     p.add_argument("--no-unsloth", dest="use_unsloth", action="store_false", help="Disable unsloth even if available")
     p.add_argument("--strict-jsonl", action="store_true", default=False,
                    help="Fail on malformed JSONL lines instead of skipping")
+    p.add_argument("--adapter-name", default=None,
+                   help="Directory name for the saved LoRA adapter (under "
+                        "--output-dir). Falls back to 'adapter_<timestamp>' "
+                        "when omitted. The training-panel Model Name field "
+                        "is piped here so the user-typed name is preserved.")
     return p.parse_args()
 
 
@@ -845,10 +850,25 @@ def main():
         print("[WARNING] Training completed but no metrics were recorded!")
         print("[WARNING] This might indicate training did not actually run.")
 
-    # Define unique adapter path with timestamp for this run
+    # Honour the user-typed adapter name when supplied (the Model Name
+    # field on the training panel). If a directory with that name
+    # already exists we suffix it with the timestamp so we never
+    # overwrite a previous run silently. Fall back to the legacy
+    # ``adapter_<timestamp>`` name when no --adapter-name was given.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    adapter_path = Path(OUTPUT_DIR) / f"adapter_{timestamp}"
-    
+    raw_name = (args.adapter_name or "").strip()
+    if raw_name:
+        # Sanitise — keep alnum + . _ - and collapse the rest to '_' so
+        # the path stays valid on Windows.
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", raw_name)[:120] or f"adapter_{timestamp}"
+        candidate = Path(OUTPUT_DIR) / safe
+        if candidate.exists():
+            candidate = Path(OUTPUT_DIR) / f"{safe}_{timestamp}"
+            print(f"[INFO] Adapter name already exists; using {candidate.name} instead.")
+        adapter_path = candidate
+    else:
+        adapter_path = Path(OUTPUT_DIR) / f"adapter_{timestamp}"
+
     print(f"[INFO] Saving LoRA adapter to: {adapter_path.absolute()}")
 
     # Ensure adapter_path exists

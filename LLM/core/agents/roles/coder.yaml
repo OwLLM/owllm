@@ -1,6 +1,6 @@
 name: coder
 description: Reads, searches, and edits code with precise diffs. Approval-gated writes.
-icon: "🛠️"
+icon: "owl:owl_coder"
 default_temperature: 0.2
 tool_allowlist:
   - read_file

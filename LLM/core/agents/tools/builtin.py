@@ -1005,6 +1005,7 @@ def builtin_registry() -> ToolRegistry:
     that explicitly via the ``Agent`` plumbing later.
     """
     from core.agents.tools.git_tools import GIT_TOOLS
+    from core.agents.tools.verify import verify
 
     reg = ToolRegistry()
     reg.register(read_file)
@@ -1014,6 +1015,7 @@ def builtin_registry() -> ToolRegistry:
     reg.register(glob_files)
     reg.register(grep)
     reg.register(todo_write)
+    reg.register(verify)
     reg.register(shell)
     reg.register(http_get)
     reg.register(ssh_exec)

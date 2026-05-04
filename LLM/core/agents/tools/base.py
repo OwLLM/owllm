@@ -478,7 +478,19 @@ class ToolRegistry:
                         ),
                     )
 
-        if tool.requires_approval:
+        # ``verify`` is special: gated only when the agent passes an
+        # explicit ``command`` override (effectively an arbitrary shell
+        # call). The configured command from .owllm/verify.json is pre-
+        # blessed by the user — gating it would defeat the auto-verify
+        # loop's whole point. The same logic kicks in for the auto-
+        # invocation below, where ``call.meta`` carries an "auto" flag.
+        gate_required = tool.requires_approval
+        if tool.name == "verify":
+            override = str(call.args.get("command", "")).strip()
+            if not override:
+                gate_required = False
+
+        if gate_required:
             decision = self.gate.request(
                 agent=agent,
                 tool_name=tool.name,
@@ -572,6 +584,17 @@ class ToolRegistry:
                 except Exception:  # noqa: BLE001
                     pass
 
+        # Auto-verify hook. After a successful edit_file or
+        # write_file_with_diff, walk up from the edited file looking for
+        # .owllm/verify.json. If found AND the verify tool is registered
+        # in this view, run the configured command and append its output
+        # to the edit's tool result. The agent sees breakage in the same
+        # turn and can self-correct without an extra round-trip.
+        if ok and tool.name in ("edit_file", "write_file_with_diff"):
+            verify_text = self._maybe_auto_verify(call.args.get("path"))
+            if verify_text:
+                output = (output or "") + "\n\n--- AUTO-VERIFY ---\n" + verify_text
+
         if not ok:
             return ToolResult(
                 call_id=call.id,
@@ -580,3 +603,33 @@ class ToolRegistry:
                 output=last_err,
             )
         return ToolResult(call_id=call.id, name=tool.name, ok=True, output=output or "")
+
+    # ------------------------------------------------------------------
+    # Auto-verify
+    # ------------------------------------------------------------------
+
+    def _maybe_auto_verify(self, edited_path_arg: Any) -> Optional[str]:
+        """Run the project's verify command if configured and not disabled.
+
+        Triggers iff:
+          - a ``.owllm/verify.json`` exists at or above the edited file,
+          - its ``trigger`` is ``after_edit``,
+          - ``verify`` is a registered tool in this registry view (so the
+            agent's allowlist can opt out by omitting it).
+        Failures (no config, parse error, command crash) return None
+        instead of raising — auto-verify must never bury the edit's own
+        success.
+        """
+        if "verify" not in self._tools:
+            return None
+        try:
+            from pathlib import Path as _P
+            from core.agents.tools.verify import find_verify_config, run_verify
+            start = _P(str(edited_path_arg)).expanduser() if edited_path_arg else _P.cwd()
+            config = find_verify_config(start)
+            if config is None or not config.auto:
+                return None
+            return run_verify(config)
+        except Exception:  # noqa: BLE001
+            logger.exception("auto-verify failed; ignoring")
+            return None

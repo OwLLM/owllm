@@ -905,7 +905,11 @@ class _AgentEdge(QGraphicsPathItem):
         # points to clear any third-party obstacles in the way.
         dx = end.x() - start.x()
         dy = end.y() - start.y()
-        handle = max(60.0, abs(dx) * 0.5, abs(dy) * 0.6)
+        # Handle baseline scales with the node geometry — a 360×440 box
+        # needs much beefier control-point handles than a 200×84 one
+        # to produce a smooth curve.
+        handle_base = max(60.0, _NODE_W * 0.35, _NODE_H * 0.25)
+        handle = max(handle_base, abs(dx) * 0.5, abs(dy) * 0.6)
 
         if direct_route:
             c1 = QPointF(start.x() + handle, start.y())
@@ -957,8 +961,11 @@ class _AgentEdge(QGraphicsPathItem):
             except Exception:
                 sibling_index = 0
 
-            base_pad = 28.0
-            lane_spacing = 18.0
+            # Loop clearance scales with node size. With 360×440 boxes
+            # the previous flat 28 px wasn't enough to clear the source
+            # body — the curves sliced through neighbouring nodes.
+            base_pad = max(28.0, _NODE_W * 0.12)
+            lane_spacing = max(18.0, _NODE_W * 0.06)
             loop_pad = base_pad + sibling_index * lane_spacing
 
             # c1 just past the source's right edge, lifted above /

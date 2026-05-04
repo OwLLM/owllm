@@ -69,7 +69,7 @@ from core.agents.bus import get_bus
 from core.agents.message import Message, MessageKind
 from core.agents.orchestrator import Team, build_team
 from core.agents.projects import Project, get_project_store
-from core.agents.roles.loader import Role
+from core.agents.roles.loader import Role, builtin_roles
 from core.agents.tools import (
     ApprovalDecision,
     ApprovalRequest,
@@ -1504,17 +1504,39 @@ class AgentsPage(QWidget):
             saved.autolayout_grid()
 
         self.canvas.load_graph(saved, orchestrator=leader_name)
+
+        # Best-effort icon resolution: if the agent definition has no
+        # icon (or only the generic robot fallback), look up its role
+        # in the built-in registry by name and use the role's emoji.
+        # That way every box on the canvas shows the agent's actual
+        # role icon (📡 operator, 🛠️ coder, 🔬 critic, 🧠 orchestrator,
+        # …) instead of all collapsing to the same Windows 🤖 glyph.
+        try:
+            _role_icons = {r.name: r.icon for r in builtin_roles().values()}
+        except Exception:
+            _role_icons = {}
+
+        def _resolve_icon(d: AgentDefinition) -> str:
+            raw = (d.icon or "").strip()
+            if raw and raw != "🤖":
+                return raw
+            role_icon = _role_icons.get(d.name, "")
+            if role_icon:
+                return role_icon
+            return raw or "🤖"
+
         # Push each agent's icon + meta (description, skills) onto its
         # canvas node so the graph view's info-card overlay can show
         # the same fields the orbital diagram does.
         for d in team_defs:
+            resolved_icon = _resolve_icon(d)
             try:
-                self.canvas.set_node_icon(d.name, d.icon or "🤖")
+                self.canvas.set_node_icon(d.name, resolved_icon)
             except Exception:
                 pass
             try:
                 if hasattr(self, "team_canvas") and self.team_canvas is not None:
-                    self.team_canvas.set_node_icon(d.name, d.icon or "🤖")
+                    self.team_canvas.set_node_icon(d.name, resolved_icon)
             except Exception:
                 pass
             try:
@@ -1542,7 +1564,7 @@ class AgentsPage(QWidget):
                     skills = ["dispatch"] + skills
                 team_payload.append({
                     "name": d.name,
-                    "icon": d.icon or "🤖",
+                    "icon": _resolve_icon(d),
                     "description": d.description or "",
                     "skills": skills,
                 })

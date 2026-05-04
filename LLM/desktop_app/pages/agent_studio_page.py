@@ -427,6 +427,19 @@ class _EditorPanel(QFrame):
         self.name_input.setMinimumHeight(40)
         self.name_input.setStyleSheet(_INPUT_STYLE)
         name_box.addWidget(self.name_input)
+
+        # Default model — sits straight under the agent name in the
+        # right header column, so the two key identity fields (who the
+        # agent is + what model runs it) are visible together at the
+        # top of the editor.
+        lbl_m = QLabel("Default model")
+        lbl_m.setFont(nf2)
+        lbl_m.setStyleSheet("color:#9aa0a6; background:transparent; font-size:13px;")
+        name_box.addWidget(lbl_m)
+        self.model_picker = ModelPickerButton()
+        self.model_picker.refresh_entries()
+        name_box.addWidget(self.model_picker)
+
         name_box.addStretch(1)
         header_row.addLayout(name_box, 1)
         outer.addLayout(header_row)
@@ -450,12 +463,6 @@ class _EditorPanel(QFrame):
         self.prompt_input.setMinimumHeight(180)
         self.prompt_input.setStyleSheet(_INPUT_STYLE_TEXTAREA)
         outer.addWidget(self.prompt_input)
-
-        # Default model.
-        outer.addWidget(_section_label("Default model"))
-        self.model_picker = ModelPickerButton()
-        self.model_picker.refresh_entries()
-        outer.addWidget(self.model_picker)
 
         # Built-in tools — 3-column grid so the list stays compact even
         # as the registry grows.

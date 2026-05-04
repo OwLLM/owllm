@@ -8,6 +8,7 @@ It replaces brittle rule-based recovery (`profile_selector.py`, `capability_matr
 
 | Doc | Purpose |
 | --- | --- |
+| [ROLLOUT.md](ROLLOUT.md) | **Read first.** How we ship to production fast without breaking what works today. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | High-level design, components, boot sequence, data flow |
 | [BOOTSTRAP.md](BOOTSTRAP.md) | Native bootstrap launcher — solves the chicken-and-egg of "no Python yet" |
 | [TOOLS.md](TOOLS.md) | The action surface the model can invoke (install_pkg, swap_wheel, …) |

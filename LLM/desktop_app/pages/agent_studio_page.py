@@ -134,7 +134,12 @@ class _GalleryCard(QFrame):
 
         self.setObjectName("GalleryCard")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumHeight(110)
+        # FIXED height so cards in the same row are guaranteed equal —
+        # without this, a card whose description wraps to 4 lines drags
+        # its left/right neighbour up and produces uneven gaps between
+        # rows (the gripe in the screenshot). Long descriptions are
+        # elided below.
+        self.setFixedHeight(118)
         self.setCursor(Qt.PointingHandCursor)
 
         # Built-ins get a subtle accent border-left; customs are neutral.
@@ -206,6 +211,8 @@ class _GalleryCard(QFrame):
 
         desc = QLabel(definition.description or "(no description)")
         desc.setWordWrap(True)
+        # Cap to ~2 lines so the card never grows past its fixed height.
+        desc.setMaximumHeight(40)
         desc.setStyleSheet("color:#9aa0a6; font-size:12px; background:transparent;")
         text.addWidget(desc)
         layout.addLayout(text, 1)
@@ -542,7 +549,7 @@ class _EditorPanel(QFrame):
     def load(self, definition: AgentDefinition) -> None:
         self._current = definition
         self._current_icon = definition.icon or "🤖"
-        apply_to_button(self.avatar_button, self._current_icon, size=54)
+        apply_to_button(self.avatar_button, self._current_icon, size=220)
         self.avatar_picker.setVisible(False)
         self.name_input.setText(definition.name)
         self.desc_input.setText(definition.description)
@@ -566,7 +573,10 @@ class _EditorPanel(QFrame):
         self.desc_input.setEnabled(editable)
         self.prompt_input.setReadOnly(not editable)
         self.leader_cb.setEnabled(editable)
-        self.avatar_button.setEnabled(editable)
+        # Keep the avatar button ENABLED even for built-ins so Qt
+        # doesn't render the icon at 50% opacity. _toggle_avatar_picker
+        # already no-ops when the current def is a built-in.
+        self.avatar_button.setEnabled(True)
         for cb in self._builtin_tool_checks.values():
             cb.setEnabled(editable)
         for cb in self._mcp_tool_checks.values():
@@ -580,11 +590,16 @@ class _EditorPanel(QFrame):
     # ------------------------------------------------------------------
 
     def _toggle_avatar_picker(self) -> None:
+        # Built-in agents are immutable — clicking the avatar shouldn't
+        # open the picker (would let the user pick a new icon and then
+        # silently drop it on Save since save_custom is disabled).
+        if self._current is not None and self._current.built_in:
+            return
         self.avatar_picker.setVisible(not self.avatar_picker.isVisible())
 
     def _on_avatar_picked(self, icon: str) -> None:
         self._current_icon = icon
-        apply_to_button(self.avatar_button, icon, size=54)
+        apply_to_button(self.avatar_button, icon, size=220)
         self.avatar_picker.setVisible(False)
 
     # ------------------------------------------------------------------

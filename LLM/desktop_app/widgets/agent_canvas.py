@@ -95,17 +95,17 @@ _STATUS_GLOW = {
 # ---------------------------------------------------------------------------
 
 _NODE_W = 220
-_NODE_H = 320
+_NODE_H = 340
 _NODE_RADIUS = 18
 _PORT_RADIUS = 11  # generous so it's easy to grab
 _PORT_OFFSET = 4   # gap between node body and port circle
 
 # Inner layout — the node is a vertical stack:
 #   row 1: icon (~180×180)
-#   row 2: agent name
+#   row 2: agent name (up to two lines at 16 pt bold)
 #   row 3: model used
 _NODE_PAD = 14
-_NODE_NAME_H = 30
+_NODE_NAME_H = 50
 _NODE_MODEL_H = 24
 _NODE_STATUS_H = 20
 
@@ -385,11 +385,15 @@ class _AgentNode(QGraphicsItem):
             _NODE_NAME_H,
         )
         name_font = QFont()
-        name_font.setPointSize(13)
+        name_font.setPointSize(16)
         name_font.setBold(True)
         painter.setFont(name_font)
         painter.setPen(name_col)
-        painter.drawText(name_rect, Qt.AlignCenter, self.name)
+        painter.drawText(
+            name_rect,
+            Qt.AlignCenter | Qt.TextWordWrap,
+            self.name,
+        )
 
         # Model row.
         model_rect = QRectF(

@@ -1481,7 +1481,7 @@ class AgentsPage(QWidget):
         max_x = max((n.pos_x for n in existing_positioned), default=60.0)
         min_y = min((n.pos_y for n in existing_positioned), default=60.0)
         max_y = max((n.pos_y for n in existing_positioned), default=60.0)
-        col_w, row_h = 240.0, 150.0
+        col_w, row_h = 440.0, 500.0
         next_x = max_x + col_w
         next_y = min_y
         for d in team_defs:

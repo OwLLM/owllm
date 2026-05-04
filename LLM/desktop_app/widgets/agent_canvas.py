@@ -94,11 +94,20 @@ _STATUS_GLOW = {
 # Geometry constants
 # ---------------------------------------------------------------------------
 
-_NODE_W = 200
-_NODE_H = 84
-_NODE_RADIUS = 14
-_PORT_RADIUS = 10  # generous so it's easy to grab
+_NODE_W = 360
+_NODE_H = 440
+_NODE_RADIUS = 22
+_PORT_RADIUS = 12  # generous so it's easy to grab
 _PORT_OFFSET = 4   # gap between node body and port circle
+
+# Inner layout — the node is a vertical stack:
+#   row 1: big icon (≥300×300)
+#   row 2: agent name
+#   row 3: model used
+_NODE_PAD = 18
+_NODE_NAME_H = 36
+_NODE_MODEL_H = 30
+_NODE_STATUS_H = 22
 
 _PORT_COLOR_OUT = QColor("#3aa0ff")   # blue (output)
 _PORT_COLOR_IN = QColor("#ff9a3a")    # orange (input)
@@ -311,10 +320,11 @@ class _AgentNode(QGraphicsItem):
         path.addRoundedRect(rect, _NODE_RADIUS, _NODE_RADIUS)
         painter.fillPath(path, QBrush(fill))
 
-        # Left-edge layer stripe — solid, full saturation, so the layer
-        # colour reads even when the node is in an active/error state.
+        # Top-edge layer stripe — running across the top of the node so
+        # the layer colour reads at a glance even when active/error
+        # states recolour the body.
         stripe = QPainterPath()
-        stripe.addRoundedRect(QRectF(0, 0, 8, _NODE_H), 4, 4)
+        stripe.addRoundedRect(QRectF(0, 0, _NODE_W, 10), 5, 5)
         painter.fillPath(stripe, QBrush(layer_col))
 
         pen = QPen(border_col)
@@ -322,69 +332,100 @@ class _AgentNode(QGraphicsItem):
         painter.setPen(pen)
         painter.drawPath(path)
 
-        # Title — icon (always) on the same line as the name, with the
-        # crown badge overlaid for the orchestrator so the role still
-        # reads even when the def's icon isn't a crown.
-        from desktop_app.widgets.agent_icons import is_owl_icon, resolve_pixmap
-        icon_value = self._icon or ("👑" if self.is_orchestrator else "🤖")
         # Pick text colours that contrast with the current fill — the
         # bright lime active fill needs near-black text to stay legible.
         if self._status == STATUS_ACTIVE:
-            title_col = QColor("#0c1a10")
-            body_col = QColor("#0c1a10")
+            name_col = QColor("#0c1a10")
+            model_col = QColor("#0c1a10")
             status_col = QColor("#0c1a10")
         else:
-            title_col = QColor("#ffffff")
-            body_col = QColor("#b8c3d8")
+            name_col = QColor("#ffffff")
+            model_col = QColor("#b8c3d8")
             status_col = QColor("#cbd2e0")
-        painter.setPen(title_col)
-        font = QFont()
-        font.setPointSize(11)
-        font.setBold(True)
-        painter.setFont(font)
 
-        title_x = 14
-        if is_owl_icon(icon_value):
-            pm = resolve_pixmap(icon_value)
-            if pm is not None:
-                ico_size = 22
-                scaled = pm.scaled(
-                    ico_size, ico_size,
-                    Qt.KeepAspectRatio, Qt.SmoothTransformation,
-                )
-                painter.drawPixmap(14, 7, scaled)
-                title_x = 14 + ico_size + 6
-            crown = "👑 " if self.is_orchestrator else ""
-            title_text = crown + self.name
-        else:
-            prefix = f"{icon_value} "
-            if self.is_orchestrator and "👑" not in icon_value:
-                prefix = f"👑 {icon_value} "
-            title_text = prefix + self.name
-        painter.drawText(
-            QRectF(title_x, 8, _NODE_W - title_x - 14, 22),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            title_text,
+        # Layout: icon (top, big) + name + model + status, stacked.
+        from desktop_app.widgets.agent_icons import paint_icon as _paint_icon
+        icon_value = self._icon or ("👑" if self.is_orchestrator else "🤖")
+
+        top = 10  # below the layer stripe
+        usable_h = _NODE_H - top - _NODE_PAD
+        text_block_h = (
+            _NODE_NAME_H + _NODE_MODEL_H + _NODE_STATUS_H + 16
         )
-
-        # Model label.
-        font2 = QFont()
-        font2.setPointSize(9)
-        painter.setFont(font2)
-        painter.setPen(body_col)
-        painter.drawText(
-            QRectF(14, 32, _NODE_W - 28, 20),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            self._model_label or "no model",
+        icon_h = max(_NODE_W - 2 * _NODE_PAD, usable_h - text_block_h)
+        # Cap so the icon never crowds the text block.
+        icon_h = min(icon_h, usable_h - text_block_h)
+        icon_rect = QRectF(
+            _NODE_PAD,
+            top + _NODE_PAD,
+            _NODE_W - 2 * _NODE_PAD,
+            icon_h,
         )
+        painter.setPen(name_col)
+        _paint_icon(painter, icon_rect, icon_value)
 
-        # Status.
+        # Crown badge for the orchestrator so the role still reads
+        # even when its icon isn't a crown.
+        if self.is_orchestrator:
+            badge = QFont()
+            badge.setPointSize(20)
+            painter.setFont(badge)
+            painter.setPen(QColor("#f1c44a"))
+            painter.drawText(
+                QRectF(_NODE_W - 44, top + 6, 36, 36),
+                Qt.AlignCenter,
+                "👑",
+            )
+
+        # Name row.
+        name_rect = QRectF(
+            _NODE_PAD,
+            icon_rect.bottom() + 4,
+            _NODE_W - 2 * _NODE_PAD,
+            _NODE_NAME_H,
+        )
+        name_font = QFont()
+        name_font.setPointSize(16)
+        name_font.setBold(True)
+        painter.setFont(name_font)
+        painter.setPen(name_col)
+        painter.drawText(name_rect, Qt.AlignCenter, self.name)
+
+        # Model row.
+        model_rect = QRectF(
+            _NODE_PAD,
+            name_rect.bottom() + 2,
+            _NODE_W - 2 * _NODE_PAD,
+            _NODE_MODEL_H,
+        )
+        model_font = QFont()
+        model_font.setPointSize(11)
+        painter.setFont(model_font)
+        painter.setPen(model_col)
+        model_label = self._model_label or "no model"
+        # Elide so a long id doesn't blow past the box.
+        fm = painter.fontMetrics()
+        if fm.horizontalAdvance(model_label) > model_rect.width():
+            while (
+                model_label
+                and fm.horizontalAdvance(model_label + "…") > model_rect.width()
+            ):
+                model_label = model_label[:-1]
+            model_label += "…"
+        painter.drawText(model_rect, Qt.AlignCenter, model_label)
+
+        # Status row.
+        status_rect = QRectF(
+            _NODE_PAD,
+            model_rect.bottom() + 2,
+            _NODE_W - 2 * _NODE_PAD,
+            _NODE_STATUS_H,
+        )
+        sf = QFont()
+        sf.setPointSize(10)
+        painter.setFont(sf)
         painter.setPen(status_col)
-        painter.drawText(
-            QRectF(14, 54, _NODE_W - 28, 22),
-            Qt.AlignLeft | Qt.AlignVCenter,
-            self._status_label(),
-        )
+        painter.drawText(status_rect, Qt.AlignCenter, self._status_label())
 
     def _status_label(self) -> str:
         return {

@@ -169,7 +169,7 @@ class AgentGraph:
     # ------------------------------------------------------------------
 
     def autolayout_grid(self, *, x0: float = 60.0, y0: float = 60.0,
-                        col_w: float = 220.0, row_h: float = 140.0,
+                        col_w: float = 420.0, row_h: float = 500.0,
                         cols: int = 3) -> None:
         """Place nodes in a grid for first-time projects with no positions."""
         for i, n in enumerate(self.nodes):
@@ -181,7 +181,7 @@ class AgentGraph:
 
     def autolayout_layered(self, orchestrator: Optional[str], *,
                            x0: float = 360.0, y0: float = 60.0,
-                           col_w: float = 240.0, row_h: float = 150.0) -> None:
+                           col_w: float = 440.0, row_h: float = 500.0) -> None:
         """Arrange nodes in horizontal rows by graph distance from the orchestrator.
 
         Row 0 (top) holds the orchestrator. Row k holds nodes whose

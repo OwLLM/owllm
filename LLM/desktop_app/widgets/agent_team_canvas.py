@@ -161,6 +161,10 @@ class AgentTeamCanvas(QWidget):
         self._team_name: str = ""
         self._team_description: str = ""
 
+        # Cached radii for the visible concentric rings — populated by
+        # _layout each frame, consumed by _paint_rings.
+        self._ring_radii: List[float] = []
+
         # Pulse particles travelling along beams (orchestrator → agent).
         # Each is (agent_index_in_orbit, t_offset).
         self._pulses: List[Tuple[int, float]] = [
@@ -358,31 +362,44 @@ class AgentTeamCanvas(QWidget):
             return QPointF(cx, cy), radius, positions
 
         rot = self._phase * 0.25  # slow orbital drift
-        # Cap a single agent's radius so a hop-deep agent doesn't fly
-        # off the edge on small canvases.
+        # Cap the outermost ring so it doesn't fly off the canvas edge.
         max_radius = min(rect.width(), rect.height()) * 0.45
 
-        # True concentric rings now: group agents by BFS depth and
-        # give each depth its OWN angle distribution within its ring.
+        # True concentric rings: group agents by BFS depth and give
+        # each depth its OWN angle distribution within its ring.
         # When no edges exist (depth dict empty), every agent defaults
-        # to depth 1, so all the agents land on a single ring with
-        # uniform spacing — identical to the original single-ring
-        # behaviour. So the fallback is safe.
+        # to depth 1 → single ring → identical to the original
+        # single-ring behaviour. Fallback is safe.
         by_depth: Dict[int, List[str]] = {}
         for name in self._orbit_order:
             d = max(1, self._depth.get(name, 1))
             by_depth.setdefault(d, []).append(name)
+
+        # EQUAL ring spacing. orchestrator(centre) → ring1 → ring2 →
+        # ring3 should all be the same step apart. Solve:
+        #   ring_radius(d) = step * d
+        # so that step = max_radius / max_depth, picking the step
+        # that lands the OUTERMOST ring exactly at max_radius.
+        max_depth = max(by_depth.keys()) if by_depth else 1
+        step = max_radius / max(1, max_depth)
+        # Don't let the inner ring crowd the orchestrator crest (its
+        # outer ring sits at ~r=72 on a typical canvas). 110 is a
+        # comfortable minimum for the depth-1 ring.
+        if step < 110.0 and max_depth > 0:
+            step = 110.0
+        # Cache for the visible-ring painter.
+        self._ring_radii: List[float] = [
+            min(max_radius, step * d) for d in sorted(by_depth.keys())
+        ]
 
         for depth in sorted(by_depth.keys()):
             ring_agents = by_depth[depth]
             count = len(ring_agents)
             if count == 0:
                 continue
-            ring_radius = min(max_radius, radius * (1.0 + 0.35 * (depth - 1)))
+            ring_radius = min(max_radius, step * depth)
             # Counter-rotate alternate rings so the layers feel like
-            # distinct layers, not one big swarm. Inner ring drifts
-            # one way, next ring drifts the other way (slower, so
-            # agents don't fly past each other).
+            # distinct layers, not one big swarm.
             ring_rot = rot if (depth % 2 == 1) else -rot * 0.6
             for i, name in enumerate(ring_agents):
                 theta = (math.tau * i) / count + ring_rot - math.pi / 2
@@ -417,6 +434,9 @@ class AgentTeamCanvas(QWidget):
         self._paint_background(p, rect)
 
         centre, radius, positions = self._layout()
+
+        # Concentric rings (visible orbit paths) under everything else.
+        self._paint_rings(p, centre)
 
         # Beams under nodes.
         self._paint_beams(p, centre, positions)
@@ -454,6 +474,28 @@ class AgentTeamCanvas(QWidget):
         glow.setColorAt(0.5, _alpha(_NEON_BLUE, 12))
         glow.setColorAt(1.0, _alpha(_BG_DARK, 0))
         p.fillRect(rect, QBrush(glow))
+
+    def _paint_rings(self, p: QPainter, centre: QPointF) -> None:
+        """Draw the concentric onion-ring orbital paths.
+
+        Uses the same neon palette as the rest of the diagram —
+        cyan, violet, pink — cycling per ring so successive rings
+        read as distinct. Thin lines, semi-transparent so the rings
+        sit in the background without competing with the agent
+        nodes.
+        """
+        if not self._ring_radii:
+            return
+        # Same palette as the central crest's rings + the dashed
+        # adjacency connections — keeps the diagram cohesive.
+        ring_palette = [_NEON_CYAN, _NEON_VIOLET, _NEON_PINK, _NEON_BLUE]
+        p.setBrush(Qt.NoBrush)
+        for idx, r in enumerate(self._ring_radii):
+            col = ring_palette[idx % len(ring_palette)]
+            pen = QPen(_alpha(col, 110), 1.2)
+            pen.setStyle(Qt.DashLine)
+            p.setPen(pen)
+            p.drawEllipse(centre, r, r)
 
     def _paint_beams(
         self,

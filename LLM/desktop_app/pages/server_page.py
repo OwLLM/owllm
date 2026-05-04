@@ -1193,23 +1193,31 @@ class ServerPage(QWidget):
             # Registration into llm_backends.yaml is deferred to Start click to keep app startup fast.
             #
             # Disk-existence guard: state-store rows for onboarded
-            # models persist even after the user deletes the weights,
-            # which is what produces the "ghost READY adapter"
-            # entries in this dropdown. Skip any ready row whose
-            # declared base_model_path doesn't actually exist anymore.
+            # models persist even after the user deletes the weights.
+            # Per-row-type rules (mirrors LocalBackend._list_ready_models):
+            #   - Adapter rows (adapter_dir set): alive iff the adapter
+            #     directory exists. The base may be referenced by HF id
+            #     or have been moved — that's a loader concern, not a
+            #     reason to hide the adapter from this dropdown.
+            #   - Base-model rows (adapter_dir empty): alive iff
+            #     base_model_path exists.
             added_ids = {c["model_id"] for c in candidates}
             for entry in ready_list:
                 mid = entry.get("model_id") or ""
                 if not mid or mid in added_ids:
                     continue
                 base = entry.get("base_model_path") or ""
-                if base and not _path_alive(base):
+                adapter = entry.get("adapter_dir") or ""
+                if adapter:
+                    if not _path_alive(adapter):
+                        continue
+                elif base and not _path_alive(base):
                     continue
                 port = "?"
                 model_cfg = models.get(mid, {}) if isinstance(models, dict) else {}
                 if isinstance(model_cfg, dict) and model_cfg.get("port") is not None:
                     port = model_cfg.get("port", "?")
-                name = Path(base).name if base else mid
+                name = Path(adapter).name if adapter else (Path(base).name if base else mid)
                 candidates.append(
                     {
                         "model_id": mid,

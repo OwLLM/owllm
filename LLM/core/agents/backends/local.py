@@ -320,16 +320,20 @@ class LocalBackend:
 
         The state store keeps a model's onboarding row at status=READY
         even after the user deletes the underlying weights — onboarding
-        only writes the row, it never reaps it. The agent / server
-        dropdowns were therefore showing rows for adapters and base
-        models that no longer existed on disk (the "ghost models" the
-        user complained about).
+        only writes the row, it never reaps it. We strip rows whose
+        files are obviously gone, but the rule is per-row-type:
 
-        We strip every row whose declared ``base_model_path`` is set
-        but doesn't actually exist. Rows without any path stay (API
-        backends and synthetic auto-router targets), and disk-check
-        failures are treated as "exists" so a transient I/O hiccup
-        doesn't blank the dropdown.
+        - Adapter rows (``adapter_dir`` set): keep iff the adapter
+          directory itself exists. The base_model_path may point at a
+          base model that's been deleted, moved, or is referenced by a
+          HuggingFace hub id — that's the loader's problem at run
+          time, not a reason to hide the adapter from the dropdown.
+        - Base-model rows (``adapter_dir`` empty): keep iff
+          ``base_model_path`` exists.
+        - Rows with neither a base path nor an adapter dir stay
+          (defensive: API/synthetic targets and rows on flaky FSes).
+        - Disk-check failures (OSError) keep the row so a transient
+          I/O hiccup doesn't blank the dropdown.
         """
         try:
             from core.model_onboarding import get_onboarding_service
@@ -338,21 +342,31 @@ class LocalBackend:
             logger.exception("local backend: list_ready_models failed")
             return []
 
+        def _exists(p: str) -> bool:
+            try:
+                return bool(p) and Path(p).exists()
+            except OSError:
+                # Treat unreachable paths as "alive" — better a stale
+                # entry than hiding a real one because the FS hiccuped.
+                return True
+
         alive: List[dict] = []
         for row in ready:
+            adapter = row.get("adapter_dir") or ""
             base = row.get("base_model_path") or row.get("base_model") or ""
+            if adapter:
+                # Adapter row — life depends on the adapter dir, not
+                # on whether the base is still around. Keep it if the
+                # adapter folder exists OR if both paths are blank
+                # (defensive).
+                if _exists(adapter) or (not adapter and not base):
+                    alive.append(row)
+                continue
+            # Base-model row.
             if not base:
-                # Nothing to verify — keep it; better a stale id than a
-                # missing local model.
                 alive.append(row)
                 continue
-            try:
-                if Path(base).exists():
-                    alive.append(row)
-                # else: weights are gone -> drop the ghost row
-            except OSError:
-                # Path looked weird / unreachable; keep it rather than
-                # mistakenly hide a genuine model on a flaky filesystem.
+            if _exists(base):
                 alive.append(row)
         return alive
 

@@ -1481,7 +1481,7 @@ class AgentsPage(QWidget):
         max_x = max((n.pos_x for n in existing_positioned), default=60.0)
         min_y = min((n.pos_y for n in existing_positioned), default=60.0)
         max_y = max((n.pos_y for n in existing_positioned), default=60.0)
-        col_w, row_h = 440.0, 500.0
+        col_w, row_h = 300.0, 380.0
         next_x = max_x + col_w
         next_y = min_y
         for d in team_defs:
@@ -2752,6 +2752,31 @@ class AgentsPage(QWidget):
         # Layered: orchestrator at column 0, others by BFS distance from it.
         graph.autolayout_layered(leader_name)
         self.canvas.load_graph(graph, orchestrator=leader_name)
+        # ``load_graph`` rebuilds every node from scratch and resets
+        # them to the default robot icon — push each agent's real
+        # icon, model label, and meta back onto the new nodes so
+        # Reset-layout doesn't wipe what the Studio configured.
+        for n in graph.nodes:
+            d = defs.get(n.name)
+            if d is None:
+                continue
+            try:
+                self.canvas.set_node_icon(n.name, d.icon or "🤖")
+            except Exception:
+                pass
+            try:
+                graph_skills = list(d.tool_allowlist or [])
+                if d.can_dispatch and "dispatch" not in graph_skills:
+                    graph_skills = ["dispatch"] + graph_skills
+                self.canvas.set_node_meta(
+                    n.name, d.description or "", graph_skills,
+                )
+            except Exception:
+                pass
+            try:
+                self._update_canvas_model_label(n.name)
+            except Exception:
+                pass
         # Persist new positions.
         self._on_graph_changed()
 

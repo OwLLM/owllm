@@ -94,20 +94,20 @@ _STATUS_GLOW = {
 # Geometry constants
 # ---------------------------------------------------------------------------
 
-_NODE_W = 360
-_NODE_H = 440
-_NODE_RADIUS = 22
-_PORT_RADIUS = 12  # generous so it's easy to grab
+_NODE_W = 220
+_NODE_H = 320
+_NODE_RADIUS = 18
+_PORT_RADIUS = 11  # generous so it's easy to grab
 _PORT_OFFSET = 4   # gap between node body and port circle
 
 # Inner layout — the node is a vertical stack:
-#   row 1: big icon (≥300×300)
+#   row 1: icon (~180×180)
 #   row 2: agent name
 #   row 3: model used
-_NODE_PAD = 18
-_NODE_NAME_H = 36
-_NODE_MODEL_H = 30
-_NODE_STATUS_H = 22
+_NODE_PAD = 14
+_NODE_NAME_H = 30
+_NODE_MODEL_H = 24
+_NODE_STATUS_H = 20
 
 _PORT_COLOR_OUT = QColor("#3aa0ff")   # blue (output)
 _PORT_COLOR_IN = QColor("#ff9a3a")    # orange (input)
@@ -368,11 +368,11 @@ class _AgentNode(QGraphicsItem):
         # even when its icon isn't a crown.
         if self.is_orchestrator:
             badge = QFont()
-            badge.setPointSize(20)
+            badge.setPointSize(14)
             painter.setFont(badge)
             painter.setPen(QColor("#f1c44a"))
             painter.drawText(
-                QRectF(_NODE_W - 44, top + 6, 36, 36),
+                QRectF(_NODE_W - 32, top + 4, 26, 26),
                 Qt.AlignCenter,
                 "👑",
             )
@@ -385,7 +385,7 @@ class _AgentNode(QGraphicsItem):
             _NODE_NAME_H,
         )
         name_font = QFont()
-        name_font.setPointSize(16)
+        name_font.setPointSize(13)
         name_font.setBold(True)
         painter.setFont(name_font)
         painter.setPen(name_col)
@@ -399,7 +399,7 @@ class _AgentNode(QGraphicsItem):
             _NODE_MODEL_H,
         )
         model_font = QFont()
-        model_font.setPointSize(11)
+        model_font.setPointSize(10)
         painter.setFont(model_font)
         painter.setPen(model_col)
         model_label = self._model_label or "no model"
@@ -422,7 +422,7 @@ class _AgentNode(QGraphicsItem):
             _NODE_STATUS_H,
         )
         sf = QFont()
-        sf.setPointSize(10)
+        sf.setPointSize(9)
         painter.setFont(sf)
         painter.setPen(status_col)
         painter.drawText(status_rect, Qt.AlignCenter, self._status_label())

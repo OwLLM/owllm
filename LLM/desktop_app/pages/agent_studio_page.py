@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Callable, Dict, List, Optional
 
-from PySide6.QtCore import QObject, QSize, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -660,10 +660,14 @@ class AgentStudioPage(QWidget):
     # without us reaching into them directly.
     definitions_changed = Signal()
 
+    # QSettings key for the "I dismissed the first-run banner" flag.
+    _ONBOARDING_DISMISSED_KEY = "studio/skill_library_onboarding_dismissed"
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._build_ui()
         self._reload_gallery()
+        self._maybe_show_onboarding()
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
@@ -687,6 +691,48 @@ class AgentStudioPage(QWidget):
         sub.setWordWrap(True)
         sub.setStyleSheet("color:#9aa0a6; font-size:12px;")
         outer.addWidget(sub)
+
+        # First-run onboarding banner — hidden until _maybe_show_onboarding
+        # decides to surface it. Sits above the action row so it's the first
+        # call-to-action a new user sees, but it never blocks the workflow:
+        # one click on the X dismisses it permanently.
+        self.onboarding_banner = QFrame()
+        self.onboarding_banner.setVisible(False)
+        self.onboarding_banner.setStyleSheet(
+            "QFrame { background:qlineargradient("
+            "x1:0,y1:0,x2:1,y2:0, stop:0 #2a3a6a, stop:1 #1f2a4a);"
+            " border:none; border-radius:10px; }"
+        )
+        ob = QHBoxLayout(self.onboarding_banner)
+        ob.setContentsMargins(14, 10, 8, 10)
+        ob.setSpacing(10)
+        msg = QLabel(
+            "👋  <b>New here?</b> Install Anthropic's official skill pack "
+            "(PDF, Excel, Word helpers — drop-in compatible) to give your "
+            "agents pro-grade capabilities out of the box."
+        )
+        msg.setWordWrap(True)
+        msg.setStyleSheet("color:#dde3ff; background:transparent; font-size:12px;")
+        ob.addWidget(msg, 1)
+        open_btn = QPushButton("Open Skill Library")
+        open_btn.setStyleSheet(
+            "QPushButton { background:#4a6cff; color:white; border:none;"
+            " border-radius:8px; padding:6px 14px; font-weight:600; }"
+            "QPushButton:hover { background:#5a7bff; }"
+        )
+        open_btn.clicked.connect(self._on_onboarding_open_clicked)
+        ob.addWidget(open_btn)
+        dismiss_btn = QPushButton("✕")
+        dismiss_btn.setFixedSize(28, 28)
+        dismiss_btn.setToolTip("Don't show again")
+        dismiss_btn.setStyleSheet(
+            "QPushButton { background:transparent; color:#dde3ff;"
+            " border:none; font-size:14px; }"
+            "QPushButton:hover { color:#fff; }"
+        )
+        dismiss_btn.clicked.connect(self._dismiss_onboarding)
+        ob.addWidget(dismiss_btn)
+        outer.addWidget(self.onboarding_banner)
 
         # Action row.
         actions = QHBoxLayout()
@@ -797,6 +843,41 @@ class AgentStudioPage(QWidget):
         dlg.exec()
         if dlg.changed_anything():
             self._reload_gallery()
+            # If they actually installed something, hide the banner —
+            # they've graduated past the onboarding state.
+            self.onboarding_banner.setVisible(False)
+
+    # ------------------------------------------------------------------
+    # First-run onboarding
+    # ------------------------------------------------------------------
+
+    def _maybe_show_onboarding(self) -> None:
+        """Show the 'install Anthropic skills' banner on first run.
+
+        Triggers when (a) no remote skills are installed yet AND (b) the
+        user hasn't dismissed it before. Once dismissed, never shown again
+        for this user (QSettings persists the flag in the OS-native store).
+        """
+        try:
+            from core.agents.skill_sources import list_installed_remote_folders
+        except Exception:  # noqa: BLE001
+            return
+        settings = QSettings()
+        if settings.value(self._ONBOARDING_DISMISSED_KEY, False, type=bool):
+            return
+        if list_installed_remote_folders():
+            # Already has remote skills — don't badger them.
+            return
+        self.onboarding_banner.setVisible(True)
+
+    def _on_onboarding_open_clicked(self) -> None:
+        # The Open button leaves the banner up — if they install nothing,
+        # the banner reappears next session, which is the desired nudge.
+        self._on_library_clicked()
+
+    def _dismiss_onboarding(self) -> None:
+        QSettings().setValue(self._ONBOARDING_DISMISSED_KEY, True)
+        self.onboarding_banner.setVisible(False)
 
     def _on_new_clicked(self) -> None:
         # New customs are always seeded from a sensible default (the

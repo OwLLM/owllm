@@ -380,6 +380,42 @@ def list_installed_remote_folders() -> List[str]:
     return sorted(out)
 
 
+def is_skill_installed(source_key: str, source_relative_dir: str) -> bool:
+    """Check whether a discovered skill has already been installed.
+
+    The Studio dialog uses this to render an "INSTALLED" badge next to
+    skills the user has already pulled, so the picker shows what's new
+    without forcing a manual diff against the installed-skills folder.
+    """
+    if not source_relative_dir:
+        return False
+    folder_basename = Path(source_relative_dir).name
+    target = _installed_root() / f"{source_key}__{folder_basename}"
+    return target.exists() and target.is_dir()
+
+
+def read_skill_body(skill_md_path: Path, *, max_chars: int = 6000) -> str:
+    """Return the markdown body of a SKILL.md (frontmatter stripped) for preview.
+
+    Capped at ``max_chars`` to keep the preview pane snappy on huge
+    skills. Preserves the original formatting; the UI renders it as
+    monospace plain text rather than markdown so users see exactly what
+    will land in the agent's system prompt.
+    """
+    try:
+        text = skill_md_path.read_text(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return "(could not read SKILL.md)"
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[end + 4 :]
+    text = text.strip()
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n\n... [truncated; {len(text) - max_chars} more chars]"
+    return text
+
+
 def custom_source_from_url(url: str) -> SkillSource:
     """Build an ad-hoc :class:`SkillSource` from a user-pasted git URL.
 

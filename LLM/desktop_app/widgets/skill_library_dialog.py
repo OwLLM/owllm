@@ -105,21 +105,21 @@ class _SkillRow(QFrame):
             "QFrame#SkillRow:hover { background:#222632; }"
         )
         rlay = QVBoxLayout(self)
-        rlay.setContentsMargins(12, 8, 12, 8)
-        rlay.setSpacing(2)
+        rlay.setContentsMargins(14, 10, 14, 10)
+        rlay.setSpacing(4)
 
         head = QHBoxLayout()
         head.setSpacing(8)
         self.checkbox = QCheckBox(self.skill.name)
-        self.checkbox.setStyleSheet("color:#fff; font-weight:600; font-size:13px;")
+        self.checkbox.setStyleSheet("color:#fff; font-weight:600; font-size:17px;")
         head.addWidget(self.checkbox)
         head.addStretch(1)
         if self.installed:
             badge = QLabel("INSTALLED")
             badge.setStyleSheet(
                 "color:#7eebac; background:rgba(126,235,172,0.12);"
-                " border-radius:6px; padding:2px 8px;"
-                " font-size:10px; font-weight:600; letter-spacing:0.6px;"
+                " border-radius:6px; padding:3px 10px;"
+                " font-size:14px; font-weight:600; letter-spacing:0.6px;"
             )
             head.addWidget(badge)
         rlay.addLayout(head)
@@ -127,10 +127,10 @@ class _SkillRow(QFrame):
         if self.skill.description:
             desc = QLabel(self.skill.description)
             desc.setWordWrap(True)
-            desc.setStyleSheet("color:#9aa0a6; font-size:11px;")
+            desc.setStyleSheet("color:#9aa0a6; font-size:15px;")
             rlay.addWidget(desc)
         path = QLabel(self.skill.relative_dir)
-        path.setStyleSheet("color:#5a6270; font-size:10px; font-style:italic;")
+        path.setStyleSheet("color:#5a6270; font-size:14px; font-style:italic;")
         rlay.addWidget(path)
 
     def mousePressEvent(self, ev) -> None:  # noqa: N802
@@ -181,7 +181,7 @@ class SkillLibraryDialog(QDialog):
 
         title = QLabel("Skill Library")
         tf = QFont()
-        tf.setPointSize(18)
+        tf.setPointSize(22)
         tf.setBold(True)
         title.setFont(tf)
         outer.addWidget(title)
@@ -192,7 +192,7 @@ class SkillLibraryDialog(QDialog):
             "automatically (e.g. <b>Read</b> → <b>read_file</b>)."
         )
         sub.setWordWrap(True)
-        sub.setStyleSheet("color:#9aa0a6; font-size:12px;")
+        sub.setStyleSheet("color:#9aa0a6; font-size:16px;")
         outer.addWidget(sub)
 
         # Source picker row.
@@ -220,7 +220,7 @@ class SkillLibraryDialog(QDialog):
         # Description / status / progress.
         self.desc_label = QLabel("")
         self.desc_label.setWordWrap(True)
-        self.desc_label.setStyleSheet("color:#9aa0a6; font-size:11px;")
+        self.desc_label.setStyleSheet("color:#9aa0a6; font-size:15px;")
         outer.addWidget(self.desc_label)
 
         self.progress = QProgressBar()
@@ -230,7 +230,7 @@ class SkillLibraryDialog(QDialog):
 
         self.status_label = QLabel("")
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("color:#ffb86b; font-size:11px;")
+        self.status_label.setStyleSheet("color:#ffb86b; font-size:15px;")
         outer.addWidget(self.status_label)
 
         # Filter row: search box + radio filters.
@@ -245,7 +245,7 @@ class SkillLibraryDialog(QDialog):
         self._filter_group = QButtonGroup(self)
         for label, key in (("All", _FILTER_ALL), ("Available", _FILTER_NEW), ("Installed", _FILTER_INSTALLED)):
             rb = QRadioButton(label)
-            rb.setStyleSheet("color:#dadcdf; font-size:11px;")
+            rb.setStyleSheet("color:#dadcdf; font-size:15px;")
             if key == _FILTER_ALL:
                 rb.setChecked(True)
             rb.toggled.connect(lambda checked, k=key: checked and self._set_filter(k))
@@ -278,7 +278,7 @@ class SkillLibraryDialog(QDialog):
         pv.setContentsMargins(12, 10, 12, 10)
         pv.setSpacing(6)
         self.preview_title = QLabel("Click a skill to preview its SKILL.md")
-        self.preview_title.setStyleSheet("color:#fff; font-weight:600; font-size:13px;")
+        self.preview_title.setStyleSheet("color:#fff; font-weight:600; font-size:17px;")
         pv.addWidget(self.preview_title)
         self.preview_text = QTextEdit()
         self.preview_text.setReadOnly(True)
@@ -286,12 +286,15 @@ class SkillLibraryDialog(QDialog):
         self.preview_text.setStyleSheet(
             "QTextEdit { background:#0f1117; color:#cfd2d8; border:none;"
             " border-radius:6px; padding:8px; font-family:Consolas,monospace;"
-            " font-size:11px; }"
+            " font-size:15px; }"
         )
         pv.addWidget(self.preview_text, 1)
         splitter.addWidget(preview_host)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        # 45 / 55 split — left list compact, right preview wider so the
+        # SKILL.md content has room to breathe with the new larger fonts.
+        splitter.setStretchFactor(0, 45)
+        splitter.setStretchFactor(1, 55)
+        splitter.setSizes([450, 550])
         outer.addWidget(splitter, 1)
 
         # Action row.
@@ -312,7 +315,7 @@ class SkillLibraryDialog(QDialog):
         self.install_btn = QPushButton("Install selected")
         self.install_btn.setStyleSheet(
             "QPushButton { background:#4a6cff; color:white; border:none;"
-            " border-radius:8px; padding:6px 18px; font-weight:600; }"
+            " border-radius:8px; padding:8px 22px; font-weight:600; font-size:15px; }"
             "QPushButton:hover { background:#5a7bff; }"
             "QPushButton:disabled { background:#2c313c; color:#777; }"
         )
@@ -548,7 +551,19 @@ class SkillLibraryDialog(QDialog):
     def _populate_skills(self, skills: List[DiscoveredSkill]) -> None:
         self._clear_skills()
         self._all_skills = list(skills)
-        for sk in skills:
+        # Sort installed/downloaded skills FIRST — the user treats those
+        # as "built-in" and wants them at the top of the left column.
+        # Within each group keep the original (alphabetical) order.
+        decorated = [
+            (
+                0 if is_skill_installed(sk.source_key, sk.relative_dir) else 1,
+                idx,
+                sk,
+            )
+            for idx, sk in enumerate(skills)
+        ]
+        decorated.sort(key=lambda t: (t[0], t[1]))
+        for _, _, sk in decorated:
             row = _SkillRow(sk, installed=is_skill_installed(sk.source_key, sk.relative_dir))
             row.clicked.connect(self._set_preview)
             self.list_layout.insertWidget(self.list_layout.count() - 1, row)

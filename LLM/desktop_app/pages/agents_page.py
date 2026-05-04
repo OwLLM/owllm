@@ -88,6 +88,7 @@ from desktop_app.widgets.agent_canvas import (
     STATUS_PENDING as CANVAS_STATUS_PENDING,
 )
 from desktop_app.widgets.agent_canvas_loader import AgentCanvasLoader
+from desktop_app.widgets.agent_team_canvas import AgentTeamCanvas
 from desktop_app.widgets.model_picker import ModelPickerButton
 
 logger = logging.getLogger(__name__)
@@ -999,13 +1000,37 @@ class AgentsPage(QWidget):
         refresh.setStyleSheet(_GHOST_BTN_STYLE_SMALL)
         refresh.clicked.connect(self._refresh_pickers)
         canvas_header.addWidget(refresh)
+
+        # Diagram-vs-Graph toggle. Orbital diagram is the default — it
+        # carries the live activity animation (agents glow green when
+        # working, click an agent to see its skill card). The graph
+        # editor stays one click away for users who want to rewire
+        # edges manually.
+        self._view_toggle_btn = QPushButton("◐ Graph view")
+        self._view_toggle_btn.setToolTip("Switch between the live diagram and the editable graph")
+        self._view_toggle_btn.setStyleSheet(_GHOST_BTN_STYLE_SMALL)
+        self._view_toggle_btn.setCheckable(True)
+        self._view_toggle_btn.clicked.connect(self._on_view_toggle_clicked)
+        canvas_header.addWidget(self._view_toggle_btn)
         lv.addLayout(canvas_header)
 
+        # Live orbital diagram — the new default visual.
+        self.team_canvas = AgentTeamCanvas()
+        self.team_canvas.node_selected.connect(self._on_canvas_node_selected)
+
+        # Editable graph canvas — kept for power-user workflows.
         self.canvas = AgentCanvas()
         self.canvas.node_selected.connect(self._on_canvas_node_selected)
         self.canvas.graph_changed.connect(self._on_graph_changed)
         self.canvas.node_context_menu_requested.connect(self._on_canvas_node_context_menu)
-        lv.addWidget(self.canvas, 1)
+
+        # Stack the two visuals so we can flip between them with the
+        # toggle button. Orbital lives at index 0 (default).
+        self._canvas_stack = QStackedWidget()
+        self._canvas_stack.addWidget(self.team_canvas)  # 0
+        self._canvas_stack.addWidget(self.canvas)        # 1
+        self._canvas_stack.setCurrentIndex(0)
+        lv.addWidget(self._canvas_stack, 1)
 
         self.status_label = QLabel("Idle.")
         self.status_label.setStyleSheet(
@@ -1440,6 +1465,35 @@ class AgentsPage(QWidget):
                 self.canvas.set_node_icon(d.name, d.icon or "🤖")
             except Exception:
                 pass
+            try:
+                if hasattr(self, "team_canvas") and self.team_canvas is not None:
+                    self.team_canvas.set_node_icon(d.name, d.icon or "🤖")
+            except Exception:
+                pass
+
+        # Mirror the team into the live orbital diagram. The diagram
+        # gets the rich AgentDefinition fields (description, skills,
+        # icon) so its top-left info card is populated when an agent
+        # is clicked.
+        try:
+            team_payload = []
+            for d in team_defs:
+                # Skills come from the tool allowlist (built-in tools the
+                # agent is permitted to use) — falls back to a sensible
+                # default summary if the role doesn't list any.
+                skills = list(d.tool_allowlist or [])
+                if d.can_dispatch and "dispatch" not in skills:
+                    skills = ["dispatch"] + skills
+                team_payload.append({
+                    "name": d.name,
+                    "icon": d.icon or "🤖",
+                    "description": d.description or "",
+                    "skills": skills,
+                })
+            self.team_canvas.set_agents(team_payload, orchestrator=leader_name)
+        except Exception:
+            pass
+
         # Sync the loading-screen constellation to the real team so the
         # placeholder ("orchestrator/researcher/...") doesn't show during
         # the wait.
@@ -2065,6 +2119,11 @@ class AgentsPage(QWidget):
             if saved:
                 label = saved.split("/", 1)[-1] if "/" in saved else saved
         self.canvas.set_node_model_label(role_name, label)
+        try:
+            if hasattr(self, "team_canvas") and self.team_canvas is not None:
+                self.team_canvas.set_node_model_label(role_name, label)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Tab navigation hook
@@ -2292,6 +2351,11 @@ class AgentsPage(QWidget):
             self.canvas.reset_all_status()
         except Exception:
             pass
+        try:
+            if hasattr(self, "team_canvas") and self.team_canvas is not None:
+                self.team_canvas.reset_all_status()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Stream / approvals
@@ -2328,20 +2392,53 @@ class AgentsPage(QWidget):
                 self._append_log_line(msg)
 
         # ---- canvas status ----
+        # Fan out to BOTH the editable graph canvas and the live orbital
+        # diagram so they stay in sync regardless of which view the user
+        # is currently looking at. AgentTeamCanvas accepts the same
+        # CANVAS_STATUS_* string keys as AgentCanvas.
+        def _set_status_both(agent: str, status: str) -> None:
+            try:
+                self.canvas.set_node_status(agent, status)
+            except Exception:
+                pass
+            try:
+                if hasattr(self, "team_canvas") and self.team_canvas is not None:
+                    self.team_canvas.set_node_status(agent, status)
+            except Exception:
+                pass
+
         if msg.kind == MessageKind.REQUEST:
-            self.canvas.set_node_status(msg.to_agent, CANVAS_STATUS_ACTIVE)
+            _set_status_both(msg.to_agent, CANVAS_STATUS_ACTIVE)
         elif msg.kind in (MessageKind.THOUGHT, MessageKind.TOOL_CALL):
-            self.canvas.set_node_status(msg.from_agent, CANVAS_STATUS_ACTIVE)
+            _set_status_both(msg.from_agent, CANVAS_STATUS_ACTIVE)
         elif msg.kind == MessageKind.REPLY:
-            self.canvas.set_node_status(msg.from_agent, CANVAS_STATUS_IDLE)
+            _set_status_both(msg.from_agent, CANVAS_STATUS_IDLE)
         elif msg.kind == MessageKind.EVENT and "error" in (msg.body or "").lower():
             target = msg.from_agent if msg.from_agent in self._agent_logs else msg.to_agent
             if target:
-                self.canvas.set_node_status(target, CANVAS_STATUS_ERROR)
+                _set_status_both(target, CANVAS_STATUS_ERROR)
 
     # ------------------------------------------------------------------
     # Canvas / log helpers
     # ------------------------------------------------------------------
+
+    def _on_view_toggle_clicked(self) -> None:
+        """Flip between the live orbital diagram and the editable graph."""
+        if not hasattr(self, "_canvas_stack"):
+            return
+        idx = 1 if self._view_toggle_btn.isChecked() else 0
+        self._canvas_stack.setCurrentIndex(idx)
+        # Update the label so the user knows what tapping does next.
+        if idx == 0:
+            self._view_toggle_btn.setText("◐ Graph view")
+            self._view_toggle_btn.setToolTip(
+                "Switch to the editable graph (drag nodes, wire edges)"
+            )
+        else:
+            self._view_toggle_btn.setText("◑ Diagram view")
+            self._view_toggle_btn.setToolTip(
+                "Switch back to the live orbital diagram"
+            )
 
     def _on_canvas_node_selected(self, agent_name: str) -> None:
         """User clicked a node — re-point the right pane at that agent's log."""

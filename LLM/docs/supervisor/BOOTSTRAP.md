@@ -69,8 +69,10 @@ Recommend **Go**: lower friction for the install-time use case where ergonomics 
       - venv created
       - core deps installed
       - app launchable
-      bootstrap.exe leaves llama-server.exe running for runtime supervisor handoff,
-      OR shuts it down and lets the app respawn it (decision pending).
+   bootstrap.exe gracefully shuts down llama-server.exe (POST /shutdown,
+   then SIGTERM, then SIGKILL after 5s) before exiting. The desktop app
+   respawns llama-server on demand the first time a runtime failure event
+   arrives -- see "Model lifecycle" below.
 ```
 
 ## Hardware probe
@@ -140,6 +142,32 @@ Skeleton schema:
 }
 ```
 
+## Model lifecycle
+
+**Decided:** llama-server is shut down by bootstrap when install completes;
+the desktop app respawns it on demand.
+
+Why:
+- Clean ownership. The process that started llama-server owns it. Bootstrap
+  doesn't hand off a live process to a child it didn't fork.
+- Crash recovery is trivial: if llama-server dies, the desktop app
+  respawns it the next time it's needed. No "is the inherited process
+  still alive?" plumbing.
+- Memory cost. The bundled E2B holds ~1.5 GB resident even when idle.
+  Releasing it after install lets the user reach the desktop tray with
+  ~1.5 GB more free RAM until the supervisor is actually needed.
+- The cost is one ~8 sec cold start the first time a runtime failure
+  event triggers the supervisor in a session. The supervisor is event-
+  driven (not on the hot path), so this is acceptable.
+
+How the desktop app respawns it:
+- `core/supervisor/brain.py` checks `/health` before each request.
+- If unhealthy, it spawns `bootstrap/runtime/llama-server.exe` with the
+  same args bootstrap used (model path, port 8765, ctx 16384, grammar
+  file). Spawn is hidden via the existing Windows subprocess guard.
+- After 5 minutes idle, the desktop app sends `/shutdown` to free RAM.
+  The next failure event respawns it -- same 8 sec cold start, fine.
+
 ## Distribution sizing
 
 | Component | Size | Notes |
@@ -154,7 +182,6 @@ To keep the installer small: ship a 50 MB stub installer that downloads the GGUF
 
 ## Open questions
 
-- llama-server lifecycle: does it keep running after install completes (handed to runtime supervisor) or shut down + respawn?
-- If user has no GPU, do we install CPU-only torch profile or refuse? (Refuse is mean — install CPU profile and warn.)
+- If user has no GPU, do we install CPU-only torch profile or refuse? (Refuse is mean -- install CPU profile and warn.)
 - What happens if `bootstrap.exe` itself crashes? Need a tiny watchdog or just rely on user re-launching the installer.
 - Wheel cache strategy: pre-stage common wheels in `wheels/` (adds ~500 MB) vs. always download from PyPI/pytorch.org (faster installer, breaks offline install).

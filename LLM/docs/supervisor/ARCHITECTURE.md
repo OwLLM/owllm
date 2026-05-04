@@ -28,7 +28,7 @@ See [BOOTSTRAP.md](BOOTSTRAP.md) for details.
 
 ### 2. Runtime mode (post-install)
 
-Once the main app is up, `core/supervisor/brain.py` connects to the same `llama-server` (kept resident) and subscribes to the agent bus (`core/agents/bus.py`). Failure events from training, inference, dataset validation, and runtime probes are routed to the supervisor, which proposes a fix. The fix is gated by a UI toast ("Apply fix?") by default — the user can toggle "auto-approve safe fixes" later.
+Once the main app is up, `core/supervisor/brain.py` subscribes to the agent bus (`core/agents/bus.py`). Failure events from training, inference, dataset validation, and runtime probes are routed to the supervisor, which respawns `llama-server.exe` on demand (bootstrap shuts it down on install completion -- see [BOOTSTRAP.md](BOOTSTRAP.md#model-lifecycle)) and proposes a fix. The fix is gated by a UI toast ("Apply fix?") by default -- the user can toggle "auto-approve safe fixes" later. Server idles out after 5 minutes to free ~1.5 GB RAM; next failure respawns it.
 
 See [EVENTS.md](EVENTS.md) for the event contract.
 
@@ -132,9 +132,10 @@ Existing recovery primitives (runtime bundle repair, missing-package install, mo
 
 ## Open design questions
 
-- Where does the resident llama-server live in the process tree? Spawned by bootstrap and inherited, or restarted by the app?
-- Model update channel — auto-update the GGUF separately from app releases?
-- Telemetry: opt-in upload of failure→fix outcomes to feed the next fine-tune?
+- Model update channel -- auto-update the GGUF separately from app releases?
+- Telemetry: opt-in upload of failure->fix outcomes to feed the next fine-tune?
 - Trust boundary: what tools require user confirmation vs. fully auto?
 
 These are tracked in their respective docs.
+
+(Resolved: llama-server lifecycle -- bootstrap shuts down, app respawns on demand. See [BOOTSTRAP.md](BOOTSTRAP.md#model-lifecycle).)

@@ -789,12 +789,21 @@ class AgentTeamCanvas(QWidget):
         p.setPen(Qt.NoPen)
         p.drawEllipse(QPointF(cx, cy), r * 0.78, r * 0.78)
 
-        # Owl crest pixmap (with emoji fallback). 20% smaller than the
-        # surrounding centre disc so the orchestrator boundary stays
-        # large (arrows visible) while the icon itself is more modest.
-        if self._owl_pixmap is not None and not self._owl_pixmap.isNull():
-            target = r * 1.4 * 0.8
-            scaled = self._owl_pixmap.scaled(
+        # Centre icon — render the ORCHESTRATOR agent's own icon
+        # (whatever the user picked in the Studio) instead of a static
+        # crest. Falls back to the bundled owl_agentic crest, then to
+        # the 🦉 emoji, so the diagram always renders something.
+        target = r * 1.4 * 0.8
+        from desktop_app.widgets.agent_icons import resolve_pixmap as _resolve_pm
+        orch_pm = None
+        orch_icon = None
+        if self._orchestrator_name and self._orchestrator_name in self._agents:
+            orch_icon = self._agents[self._orchestrator_name].icon or ""
+            orch_pm = _resolve_pm(orch_icon)
+        crest_pm = orch_pm if orch_pm is not None else self._owl_pixmap
+
+        if crest_pm is not None and not crest_pm.isNull():
+            scaled = crest_pm.scaled(
                 int(target),
                 int(target),
                 Qt.KeepAspectRatio,
@@ -805,12 +814,13 @@ class AgentTeamCanvas(QWidget):
                 scaled,
             )
         else:
+            from desktop_app.widgets.agent_icons import paint_icon as _paint_icon
             font = QFont()
             font.setPointSizeF(max(20.0, r * 0.85))
             p.setFont(font)
             p.setPen(_TEXT_BRIGHT)
             glyph_rect = QRectF(cx - r, cy - r, r * 2, r * 2)
-            p.drawText(glyph_rect, Qt.AlignCenter, "🦉")
+            _paint_icon(p, glyph_rect, orch_icon or "🦉")
 
         # Orchestrator label below the crest.
         if self._orchestrator_name:

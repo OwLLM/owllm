@@ -1,6 +1,6 @@
 name: researcher
 description: Gathers facts from files, the web, and APIs. Read-only by design.
-icon: "owl:owl_documentation"
+icon: "owl:owl_researcher"
 default_temperature: 0.3
 tool_allowlist:
   - read_file

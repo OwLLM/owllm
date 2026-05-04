@@ -101,6 +101,33 @@ _STATUS_HALO = {
     STATUS_ERROR: _alpha(_NEON_RED, 200),
 }
 
+# Layer palette — IDENTICAL to the graph editor's LAYER_COLORS in
+# desktop_app.widgets.agent_canvas, so the orbital diagram and the
+# graph view speak the same colour language. Index = BFS layer
+# from the orchestrator (0 = orchestrator itself).
+LAYER_COLORS: List[QColor] = [
+    QColor("#f1c44a"),   # 0 — gold (orchestrator)
+    QColor("#48d486"),   # 1 — green
+    QColor("#3aa0ff"),   # 2 — blue
+    QColor("#ee5b5b"),   # 3 — red
+    QColor("#ff9a3a"),   # 4 — orange
+    QColor("#9aa3b2"),   # 5 — grey
+    QColor("#a578ff"),   # 6 — violet
+    QColor("#ff79c4"),   # 7 — pink
+]
+
+
+def _layer_color(layer: int) -> QColor:
+    if layer < 0:
+        layer = 0
+    return LAYER_COLORS[layer % len(LAYER_COLORS)]
+
+
+# Edge port colours — matches the graph editor's convention so an
+# 'output → input' edge reads the same on both views.
+_EDGE_COLOR_OUT = QColor("#3aa0ff")  # blue (output port)
+_EDGE_COLOR_IN = QColor("#ff9a3a")   # orange (input port)
+
 
 @dataclass
 class _Agent:
@@ -451,11 +478,16 @@ class AgentTeamCanvas(QWidget):
                 if agent is not None:
                     agent.pos = pos
 
-        # Cache orchestrator centre for hit-testing too. Crest size
-        # scales with zoom.
+        # Cache orchestrator centre for hit-testing too. The hit /
+        # arrow-termination radius is intentionally LARGER than the
+        # owl crest icon — arrows that point at the orchestrator
+        # stop here, well outside the owl, so the arrowhead stays
+        # visible instead of getting masked by the icon. The icon
+        # itself is drawn separately in _paint_centre and isn't
+        # affected by this radius.
         if self._orchestrator_name and self._orchestrator_name in self._agents:
             self._agents[self._orchestrator_name].pos = QPointF(cx, cy)
-            self._agents[self._orchestrator_name].radius = 56.0 * zoom
+            self._agents[self._orchestrator_name].radius = 90.0 * zoom
 
         return QPointF(cx, cy), radius, positions
 
@@ -517,20 +549,19 @@ class AgentTeamCanvas(QWidget):
         p.fillRect(rect, QBrush(glow))
 
     def _paint_rings(self, p: QPainter, centre: QPointF) -> None:
-        """Draw the concentric onion-ring orbital paths.
-
-        Uses the SAME look as the orchestrator's central rotating
-        rings — solid neon strokes alternating cyan / violet /
-        pink / blue, around 200 alpha and 1.6px thick — so the
-        onion rings feel like extensions of the central crest
-        rather than a different visual language.
+        """Draw the concentric onion-ring orbital paths using the
+        graph editor's LAYER_COLORS palette. Ring 1 (depth 1) =
+        green, ring 2 = blue, ring 3 = red, ring 4 = orange, etc.
+        — IDENTICAL ordering to AgentCanvas, so the orbital
+        diagram and the graph view share one colour language.
         """
         if not self._ring_radii:
             return
-        ring_palette = [_NEON_CYAN, _NEON_VIOLET, _NEON_PINK, _NEON_BLUE]
         p.setBrush(Qt.NoBrush)
         for idx, r in enumerate(self._ring_radii):
-            col = ring_palette[idx % len(ring_palette)]
+            # idx 0 → ring 1 → layer 1, idx 1 → ring 2 → layer 2, …
+            layer = idx + 1
+            col = _layer_color(layer)
             pen = QPen(_alpha(col, 200), 1.6)
             pen.setCapStyle(Qt.RoundCap)
             p.setPen(pen)
@@ -633,13 +664,19 @@ class AgentTeamCanvas(QWidget):
             both_active = sa == STATUS_ACTIVE and da == STATUS_ACTIVE
             grad = QLinearGradient(start, end)
             if both_active:
-                grad.setColorAt(0.0, _alpha(_NEON_GREEN, 220))
-                grad.setColorAt(1.0, _alpha(_NEON_GREEN, 120))
+                # Brighter / thicker version of the same convention
+                # so an in-flight pair stands out without violating
+                # the colour language.
+                grad.setColorAt(0.0, _alpha(_EDGE_COLOR_OUT, 240))
+                grad.setColorAt(1.0, _alpha(_EDGE_COLOR_IN, 240))
                 pen_w = 2.0
             else:
-                grad.setColorAt(0.0, _alpha(_NEON_VIOLET, 170))
-                grad.setColorAt(1.0, _alpha(_NEON_PINK, 170))
-                pen_w = 1.4
+                # Graph editor edge convention: gradient from blue
+                # (output port) at the source to orange (input port)
+                # at the destination.
+                grad.setColorAt(0.0, _alpha(_EDGE_COLOR_OUT, 200))
+                grad.setColorAt(1.0, _alpha(_EDGE_COLOR_IN, 200))
+                pen_w = 1.5
             pen = QPen(QBrush(grad), pen_w)
             pen.setCapStyle(Qt.RoundCap)
             p.setPen(pen)

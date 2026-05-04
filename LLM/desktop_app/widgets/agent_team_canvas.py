@@ -165,6 +165,15 @@ class AgentTeamCanvas(QWidget):
         # _layout each frame, consumed by _paint_rings.
         self._ring_radii: List[float] = []
 
+        # Zoom factor controlled by the mouse wheel — multiplies every
+        # geometric distance in the diagram (ring radii, agent disc
+        # size, orchestrator crest, arrowhead length). Info card and
+        # bottom hint stay absolute so they don't scale with the
+        # diagram. Clamped to a sensible range.
+        self._zoom: float = 1.0
+        self._zoom_min: float = 0.5
+        self._zoom_max: float = 2.5
+
         # Pulse particles travelling along beams (orchestrator → agent).
         # Each is (agent_index_in_orbit, t_offset).
         self._pulses: List[Tuple[int, float]] = [
@@ -348,13 +357,21 @@ class AgentTeamCanvas(QWidget):
 
     def _layout(self) -> Tuple[QPointF, float, List[Tuple[str, QPointF]]]:
         rect = self.rect()
-        cx = rect.width() / 2.0
-        # Leave a little headroom at the bottom for the "click an agent"
-        # hint, but keep the orchestrator close to vertical centre so the
-        # layout reads as a halo, not as a sun-with-distant-planets.
+        # Shift the centre rightward past the info-card band so the
+        # diagram doesn't end up half-covered by the top-left card.
+        # The card occupies a ~410px-wide top-left strip; reserve up
+        # to 35% of the canvas width for it and centre the diagram in
+        # the remaining right portion.
+        card_reserve = min(410.0, rect.width() * 0.35)
+        cx = card_reserve + (rect.width() - card_reserve) / 2.0
         cy = rect.height() / 2.0
-        radius = min(rect.width(), rect.height() * 1.5) * 0.30
-        radius = max(120.0, radius)
+
+        # Apply the user's zoom multiplier to every geometry term so
+        # the whole diagram scales as one. Info card / hint stay
+        # absolute so the gamey UI doesn't grow grotesque at max zoom.
+        zoom = max(self._zoom_min, min(self._zoom_max, self._zoom))
+        radius = min(rect.width(), rect.height() * 1.5) * 0.30 * zoom
+        radius = max(120.0 * zoom, radius)
 
         positions: List[Tuple[str, QPointF]] = []
         n = len(self._orbit_order)
@@ -363,7 +380,11 @@ class AgentTeamCanvas(QWidget):
 
         rot = self._phase * 0.25  # slow orbital drift
         # Cap the outermost ring so it doesn't fly off the canvas edge.
-        max_radius = min(rect.width(), rect.height()) * 0.45
+        # The cap also scales with zoom but is absolutely bounded by
+        # the visible canvas area minus a small margin so deep rings
+        # don't disappear off the edges at max zoom.
+        canvas_cap = min(rect.width() - card_reserve, rect.height()) * 0.45
+        max_radius = min(canvas_cap, min(rect.width(), rect.height()) * 0.45 * zoom)
 
         # True concentric rings: group agents by BFS depth and give
         # each depth its OWN angle distribution within its ring.
@@ -382,11 +403,11 @@ class AgentTeamCanvas(QWidget):
         # that lands the OUTERMOST ring exactly at max_radius.
         max_depth = max(by_depth.keys()) if by_depth else 1
         step = max_radius / max(1, max_depth)
-        # Don't let the inner ring crowd the orchestrator crest (its
-        # outer ring sits at ~r=72 on a typical canvas). 110 is a
-        # comfortable minimum for the depth-1 ring.
-        if step < 110.0 and max_depth > 0:
-            step = 110.0
+        # Don't let the inner ring crowd the orchestrator crest. The
+        # floor scales with zoom so it stays proportional.
+        min_step = 110.0 * zoom
+        if step < min_step and max_depth > 0:
+            step = min_step
         # Cache for the visible-ring painter.
         self._ring_radii: List[float] = [
             min(max_radius, step * d) for d in sorted(by_depth.keys())
@@ -411,10 +432,11 @@ class AgentTeamCanvas(QWidget):
                 if agent is not None:
                     agent.pos = pos
 
-        # Cache orchestrator centre for hit-testing too.
+        # Cache orchestrator centre for hit-testing too. Crest size
+        # scales with zoom.
         if self._orchestrator_name and self._orchestrator_name in self._agents:
             self._agents[self._orchestrator_name].pos = QPointF(cx, cy)
-            self._agents[self._orchestrator_name].radius = 56.0
+            self._agents[self._orchestrator_name].radius = 56.0 * zoom
 
         return QPointF(cx, cy), radius, positions
 
@@ -606,7 +628,8 @@ class AgentTeamCanvas(QWidget):
             p.setPen(pen)
             p.drawLine(start, end)
 
-            head_len = 9.0
+            zoom = max(self._zoom_min, min(self._zoom_max, self._zoom))
+            head_len = 9.0 * zoom
             head_angle = math.radians(28)
             angle = math.atan2(uy, ux)
             for sign in (-1, 1):
@@ -694,7 +717,10 @@ class AgentTeamCanvas(QWidget):
                 continue
             phase_offset = i * 0.7
             pulse = 0.5 + 0.5 * math.sin(self._phase * 2.2 + phase_offset)
-            r = 22 + 4 * pulse  # bigger than loader nodes — easier to click
+            # Scale the agent disc radius with the user's zoom so
+            # nodes stay proportional to the rings they sit on.
+            zoom = max(self._zoom_min, min(self._zoom_max, self._zoom))
+            r = (22 + 4 * pulse) * zoom
             agent.radius = r
 
             is_selected = self._selected == name
@@ -1151,3 +1177,23 @@ class AgentTeamCanvas(QWidget):
             self._hover = None
             self.update()
         super().leaveEvent(event)
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        """Mouse wheel = zoom. ~10% per notch, clamped to
+        [self._zoom_min, self._zoom_max]. Same gesture the
+        AgentCanvas graph editor uses, so the two views feel
+        consistent.
+        """
+        delta = event.angleDelta().y()
+        if delta == 0:
+            event.ignore()
+            return
+        factor = 1.10 if delta > 0 else (1.0 / 1.10)
+        new_zoom = self._zoom * factor
+        new_zoom = max(self._zoom_min, min(self._zoom_max, new_zoom))
+        if abs(new_zoom - self._zoom) < 1e-3:
+            event.accept()
+            return
+        self._zoom = new_zoom
+        self.update()
+        event.accept()

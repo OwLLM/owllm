@@ -1511,6 +1511,19 @@ class AgentsPage(QWidget):
             except Exception:
                 edge_pairs = []
             self.team_canvas.set_edges(edge_pairs)
+
+            # Team metadata for the default info card shown when no
+            # agent is selected.
+            proj = self._active_project
+            self.team_canvas.set_team_info(
+                name=getattr(proj, "name", "") or "Untitled team",
+                description=(
+                    getattr(proj, "description", "")
+                    or f"{len(team_defs)} agents · "
+                       f"{len(edge_pairs)} connections · "
+                       f"orchestrator: {leader_name or '—'}"
+                ),
+            )
         except Exception:
             pass
 

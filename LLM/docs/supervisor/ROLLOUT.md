@@ -58,7 +58,10 @@ Already landed:
 - `core/supervisor/flags.py` -- flag reader with safe defaults.
 - `core/supervisor/shadow.py` -- `observe(channel, trigger, rules_decision)` that writes to `~/.owllm/shadow_log.jsonl` only when both flags are on. Never raises.
 - `tests/test_supervisor_flags.py`, `tests/test_supervisor_shadow.py` -- 19 tests pinning the production-safety contract.
-- `core/runtime/self_heal_orchestrator.py` -- one call to `shadow.observe()` added to `try_repair_probe_failure`. Existing self-heal tests still pass.
+
+Pending (not yet wired):
+- `core/runtime/self_heal_orchestrator.py` will get a `shadow.observe()` call in its repair entrypoint as the first wire-in. Validated locally; staged for a follow-up PR once the file's pending WIP changes land.
+- training, dataset, install, mcp wire-ins follow same pattern.
 
 Net effect on production users today: **zero behavioral change.** Master switch is false; the new code is dead code in every prod install.
 

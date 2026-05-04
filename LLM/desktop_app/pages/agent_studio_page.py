@@ -438,6 +438,10 @@ class _EditorPanel(QFrame):
         name_box.addWidget(lbl_m)
         self.model_picker = ModelPickerButton()
         self.model_picker.refresh_entries()
+        # Real-time persist: when the user picks a new model the
+        # selection is written to the definition and saved immediately,
+        # without needing to hit the Save button.
+        self.model_picker.selection_changed.connect(self._on_model_changed)
         name_box.addWidget(self.model_picker)
 
         name_box.addStretch(1)
@@ -608,6 +612,35 @@ class _EditorPanel(QFrame):
         self._current_icon = icon
         apply_to_button(self.avatar_button, icon, size=220)
         self.avatar_picker.setVisible(False)
+
+    # ------------------------------------------------------------------
+    # Real-time model save
+    # ------------------------------------------------------------------
+
+    def _on_model_changed(self, composite_id: str) -> None:
+        """Persist the new model the moment the user picks one.
+
+        Built-ins are read-only by design — the picker selection just
+        sits in the widget until the user duplicates the agent. For
+        custom (and skill-backed) defs we re-gather the form, swap in
+        the new ``default_model_id``, and call ``save_custom`` so the
+        change survives a reload without needing the Save button.
+        """
+        if self._current is None or self._current.built_in:
+            return
+        if not composite_id:
+            return
+        try:
+            d = self._gather()
+            d.default_model_id = composite_id
+            save_custom(d)
+            self._current = d
+            self.saved.emit(d.name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "could not auto-save model selection for %s: %s",
+                getattr(self._current, "name", "?"), exc,
+            )
 
     # ------------------------------------------------------------------
     # Save / delete / duplicate

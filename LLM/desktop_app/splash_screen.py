@@ -19,9 +19,9 @@ class SplashScreen(QSplashScreen):
     # frame overlays in the main app.
     _SPLASH_W = 550
     _SPLASH_H = 350
-    # Owl startup icon — 450 px, top-centered over the splash, shifted
+    # Owl startup icon — 200 px, top-centered over the splash, shifted
     # 150 px upward so it visibly extends above the splash window.
-    _ICON_SIZE = 450
+    _ICON_SIZE = 200
     _ICON_Y_SHIFT = -150  # negative = up; positions the icon's TOP
                           # this many px above the splash's top edge.
 
@@ -59,14 +59,16 @@ class SplashScreen(QSplashScreen):
         layout.addWidget(self.title)
 
         # ---- floating owl crest -----------------------------------
-        # Independent top-level frameless window with a transparent
-        # background so the PNG can render OUTSIDE the splash bounds —
-        # exactly like the corner frame overlays in the main app. A
-        # child QLabel of the splash would be clipped to the splash
-        # rectangle, which is what was cropping the icon before.
+        # Top-level frameless tool window parented to the splash so it
+        # stacks ABOVE it on Windows (Qt.Tool with a parent inherits
+        # the parent's stacking context). Without the parent, two
+        # independent WindowStaysOnTopHint windows could end up in
+        # arbitrary z-order — which is what made the owl appear
+        # *behind* the splash in the previous attempt.
         self._owl_overlay = QWidget(
-            None,
-            Qt.FramelessWindowHint
+            self,
+            Qt.Window
+            | Qt.FramelessWindowHint
             | Qt.WindowStaysOnTopHint
             | Qt.Tool
             | Qt.WindowTransparentForInput,
@@ -197,6 +199,12 @@ class SplashScreen(QSplashScreen):
         if getattr(self, "_owl_overlay", None):
             self._owl_overlay.show()
             self._owl_overlay.raise_()
+            # QSplashScreen aggressively re-asserts top-of-stack the
+            # first time it paints, so a single raise_() can lose to
+            # it. Re-raise on the next tick once both windows are
+            # known to the WM.
+            QTimer.singleShot(0, self._owl_overlay.raise_)
+            QTimer.singleShot(50, self._owl_overlay.raise_)
 
     def moveEvent(self, event):
         super().moveEvent(event)

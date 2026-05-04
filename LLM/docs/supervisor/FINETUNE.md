@@ -45,22 +45,54 @@ Sources to mine:
 | Existing user logs (with consent) | stderr + the eventual successful command |
 | `core/envs/capability_matrix.py` | rule entries → synthetic seed examples |
 
-Build script: [LLM/tools/build_failure_corpus.py](../../tools/build_failure_corpus.py).
+Three-stage pipeline:
+
+```
+   git log + CHANGELOG.md
+            |
+            v
+   [Stage 1] build_failure_corpus.py
+            |  scrapes prose, tags by category (cuda, deps, ui, ...)
+            v
+   bootstrap/recipes/failure_corpus_raw.jsonl
+            |
+            v
+   [Stage 2] structure_failure_corpus.py
+            |  LLM call (Claude API or local Gemma) per row
+            |  emits {input, output} JSON; flags vague rows for review
+            v
+   failure_corpus_structured.jsonl  +  failure_corpus_needs_review.jsonl
+            |
+            v
+   [Stage 3] review_failure_corpus.py
+            |  terminal UI: accept / reject / edit
+            |  accepted rows get meta.verified_human = true
+            v
+   bootstrap/recipes/failure_corpus.jsonl   <- the file the fine-tune trains on
+```
 
 Run:
+
 ```
-python LLM/tools/build_failure_corpus.py            # write
-python LLM/tools/build_failure_corpus.py --dry-run  # stats only
+# Stage 1 -- mine project history (~215 candidates from current repo)
+python LLM/tools/build_failure_corpus.py
+python LLM/tools/build_failure_corpus.py --dry-run        # stats only
+
+# Stage 2 -- LLM-assisted structuring
+$env:ANTHROPIC_API_KEY = "..."                            # PowerShell
+python LLM/tools/structure_failure_corpus.py              # full corpus
+python LLM/tools/structure_failure_corpus.py --limit 5    # smoke test
+python LLM/tools/structure_failure_corpus.py --backend stub --limit 5
+python LLM/tools/structure_failure_corpus.py --backend gemma --endpoint http://127.0.0.1:8765
+
+# Stage 3 -- human review
+python LLM/tools/review_failure_corpus.py
+python LLM/tools/review_failure_corpus.py --include-review-queue
+python LLM/tools/review_failure_corpus.py --resume        # continue last session
 ```
 
-Output: `bootstrap/recipes/failure_corpus_raw.jsonl` — natural-language
-symptom→fix pairs scraped from CHANGELOG + git log, tagged by category. The
-v0 extractor finds ~215 candidates from the project's own history.
-
-Stage 2 (TODO): an LLM-assisted pass converts each raw row into the
-structured `{input: {hardware, trigger, current_env, error_log_tail},
-output: {action, args, reason, fallback}}` schema below, gated by human
-review. This is the next task after the extractor lands.
+Stage-2 expansion (variations on hardware specs / error tails) plus telemetry
+ingestion grows the corpus toward the 3k-5k target.
 
 Final structured schema (`bootstrap/recipes/failure_corpus.jsonl`):
 

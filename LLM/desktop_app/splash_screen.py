@@ -13,35 +13,41 @@ from PySide6.QtGui import QPixmap, QPainter, QColor, QLinearGradient, QFont, QTe
 
 
 class SplashScreen(QSplashScreen):
+    # Splash dimensions. Enlarged from the historical 550×350 so a 450
+    # px owl crest can sit above the progress + log area without
+    # cropping the bottom controls.
+    _SPLASH_W = 700
+    _SPLASH_H = 600
+    # Owl startup icon — 450 px, top-centered, shifted 150 px upward
+    # so it bleeds off the top edge and visually dominates the splash.
+    _ICON_SIZE = 450
+    _ICON_Y_SHIFT = -150  # negative = up
+
     def __init__(self):
         # Create a custom pixmap with gradient background
-        pixmap = QPixmap(550, 350)
+        pixmap = QPixmap(self._SPLASH_W, self._SPLASH_H)
         pixmap.fill(Qt.transparent)
-        
+
         super().__init__(pixmap, Qt.WindowStaysOnTopHint | Qt.WindowStaysOnTopHint)
-        
+
         # Enable mouse events for scrolling
         self.setMouseTracking(True)
-        
+
         # Create overlay widget for content
         self.content_widget = QWidget(self)
-        self.content_widget.setGeometry(0, 0, 550, 350)
-        
-        layout = QVBoxLayout(self.content_widget)
-        layout.setContentsMargins(20, 15, 20, 15)
-        layout.setSpacing(8)
-        
-        # Title row: owl_startup PNG + "OWLLM" text. Replaces the bare
-        # 🎯 emoji that historically rendered as a random/missing glyph
-        # depending on the user's system fonts.
-        title_row = QHBoxLayout()
-        title_row.setSpacing(10)
-        title_row.setContentsMargins(0, 0, 0, 0)
-        title_row.addStretch(1)
+        self.content_widget.setGeometry(0, 0, self._SPLASH_W, self._SPLASH_H)
 
-        self.title_icon = QLabel()
+        # Owl crest — absolute positioned so it can be top-centered AND
+        # shifted upward independently of the QVBoxLayout below. A
+        # layout-managed icon with a negative top margin would just be
+        # clipped to (0, 0).
+        self.title_icon = QLabel(self.content_widget)
         self.title_icon.setAlignment(Qt.AlignCenter)
         self.title_icon.setStyleSheet("background: transparent;")
+        icon_x = (self._SPLASH_W - self._ICON_SIZE) // 2
+        self.title_icon.setGeometry(
+            icon_x, self._ICON_Y_SHIFT, self._ICON_SIZE, self._ICON_SIZE
+        )
         try:
             # splash_screen.py is in LLM/desktop_app/ — repo root is parents[2].
             icon_path = (
@@ -53,17 +59,26 @@ class SplashScreen(QSplashScreen):
                 if not pm.isNull():
                     self.title_icon.setPixmap(
                         pm.scaled(
-                            48, 48,
+                            self._ICON_SIZE, self._ICON_SIZE,
                             Qt.KeepAspectRatio,
                             Qt.SmoothTransformation,
                         )
                     )
         except Exception:
             pass
-        title_row.addWidget(self.title_icon)
+        self.title_icon.raise_()
+
+        # Reserve room for the visible portion of the icon so the rest
+        # of the splash content (title text + progress + log) starts
+        # below it. Visible pixels = ICON_SIZE + ICON_Y_SHIFT.
+        visible_icon_h = self._ICON_SIZE + self._ICON_Y_SHIFT  # 300
+
+        layout = QVBoxLayout(self.content_widget)
+        layout.setContentsMargins(20, visible_icon_h + 12, 20, 15)
+        layout.setSpacing(8)
 
         self.title = QLabel("OWLLM")
-        self.title.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        self.title.setAlignment(Qt.AlignCenter)
         self.title.setStyleSheet("""
             QLabel {
                 color: white;
@@ -73,9 +88,7 @@ class SplashScreen(QSplashScreen):
                 padding: 5px;
             }
         """)
-        title_row.addWidget(self.title)
-        title_row.addStretch(1)
-        layout.addLayout(title_row)
+        layout.addWidget(self.title)
         
         # Progress bar (compact)
         self.progress = QProgressBar()

@@ -1498,8 +1498,9 @@ class AgentsPage(QWidget):
                 })
             self.team_canvas.set_agents(team_payload, orchestrator=leader_name)
 
-            # Push edges so the orbital diagram does the onion-ring
-            # layout (depth from the orchestrator) and renders arrows.
+            # Push edges so the orbital diagram renders directed
+            # arrows for the saved AgentGraph connections. Layout is
+            # NOT affected by edges — agents stay on the single ring.
             edge_pairs: List[Tuple[str, str]] = []
             try:
                 for e in (saved.edges or []):
@@ -1510,20 +1511,6 @@ class AgentsPage(QWidget):
             except Exception:
                 edge_pairs = []
             self.team_canvas.set_edges(edge_pairs)
-
-            # Provide team-level metadata for the default info card
-            # shown when no agent is selected.
-            proj = self._active_project
-            self.team_canvas.set_team_info(
-                name=getattr(proj, "name", "") or "Untitled team",
-                description=(
-                    getattr(proj, "description", "")
-                    or f"{len(team_defs)} agents · "
-                       f"{len(edge_pairs)} connections · "
-                       f"orchestrator: {leader_name or '—'}"
-                ),
-                icon="🧠",
-            )
         except Exception:
             pass
 

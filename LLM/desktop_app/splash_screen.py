@@ -19,11 +19,16 @@ class SplashScreen(QSplashScreen):
     # frame overlays in the main app.
     _SPLASH_W = 550
     _SPLASH_H = 350
-    # Owl startup icon — 200 px, top-centered over the splash, shifted
-    # 150 px upward so it visibly extends above the splash window.
+    # Owl startup icon — 200 px, top-centered over the splash. Sits
+    # 50 px below the splash top, so it's mostly inside the splash and
+    # close to the title / progress bar (the user moved the previous
+    # -150 placement down by 200 px to close the gap).
     _ICON_SIZE = 200
-    _ICON_Y_SHIFT = -150  # negative = up; positions the icon's TOP
-                          # this many px above the splash's top edge.
+    _ICON_Y_SHIFT = 50    # positive = below splash top; negative = up
+    # Vertical shift applied to the progress bar relative to its
+    # natural QVBoxLayout position. Negative = move up. Used to bring
+    # the bar nearer to the title without re-doing the whole layout.
+    _PROGRESS_Y_SHIFT = -100
 
     def __init__(self):
         # Fully transparent backdrop — no gradient, no panel, no shadow.
@@ -115,8 +120,13 @@ class SplashScreen(QSplashScreen):
         # Stash for the move/show plumbing.
         self.title_icon = owl_label
         
-        # Progress bar (compact)
-        self.progress = QProgressBar()
+        # Progress bar — parented directly to content_widget and given
+        # an absolute geometry so we can shift it independently of the
+        # QVBoxLayout. The natural layout y was ~63 px (top margin 15 +
+        # title ~40 + spacing 8); applying _PROGRESS_Y_SHIFT lets the
+        # user dial the bar up/down a fixed amount without rewriting
+        # the rest of the layout.
+        self.progress = QProgressBar(self.content_widget)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setTextVisible(True)
@@ -139,7 +149,17 @@ class SplashScreen(QSplashScreen):
                 border-radius: 4px;
             }
         """)
-        layout.addWidget(self.progress)
+        # Approximate baseline matches what the QVBoxLayout would have
+        # produced (top margin + title height + spacing).
+        _baseline_y = 63
+        _progress_y = _baseline_y + self._PROGRESS_Y_SHIFT
+        self.progress.setGeometry(
+            20,
+            _progress_y,
+            self._SPLASH_W - 40,
+            22,
+        )
+        self.progress.raise_()
         
         # Scrollable details — kept as a hidden in-memory log so the
         # update_progress / set_checking / set_result API still works

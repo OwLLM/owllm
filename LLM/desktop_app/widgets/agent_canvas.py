@@ -854,6 +854,19 @@ class _AgentEdge(QGraphicsPathItem):
             # of every obstacle box. This pushes the LINE away from
             # boxes — not just the puppet strings.
             c1, c2 = self._route_cubic(start, c1, c2, end, obstacles)
+
+            # Tangent-direction guard: relaxation is free to push the
+            # control points anywhere — including PAST the endpoint.
+            # When that happens the cubic flips its end tangent and
+            # draws a tiny hook just before the arrowhead (the
+            # "fish-tail flick" the user kept seeing). Clamp so the
+            # natural exit/entry tangent stays rightward.
+            min_clearance = 12.0
+            if c1.x() < start.x() + min_clearance:
+                c1 = QPointF(start.x() + min_clearance, c1.y())
+            if c2.x() > end.x() - min_clearance:
+                c2 = QPointF(end.x() - min_clearance, c2.y())
+
             path = QPainterPath(start)
             path.cubicTo(c1, c2, end)
             tangent_from = c2
@@ -930,16 +943,35 @@ class _AgentEdge(QGraphicsPathItem):
             path.cubicTo(loop_c1, loop_c2, exit_pt)
 
             # Final bezier from exit point to the target input port.
-            # Tangent at the exit point points in the SAME direction
-            # the loop was travelling (up if we looped over, down if
-            # we looped under) so the two segments meet smoothly.
+            # C1 continuity at the junction: segment 2 must start
+            # heading in the SAME direction segment 1 ended, otherwise
+            # the path kinks visibly at exit_pt (the bug the user
+            # reported — a tiny S-bend just before the arrowhead).
+            # Segment 1 ended heading from loop_c2 → exit_pt; carry
+            # that unit tangent forward for f_c1.
+            t_dx = exit_pt.x() - loop_c2.x()
+            t_dy = exit_pt.y() - loop_c2.y()
+            t_len = math.hypot(t_dx, t_dy) or 1.0
+            ux = t_dx / t_len
+            uy = t_dy / t_len
+
             f_dx = end.x() - exit_pt.x()
             f_dy = end.y() - exit_pt.y()
             f_handle = max(60.0, abs(f_dx) * 0.5, abs(f_dy) * 0.5)
-            tangent_dy = -f_handle if loop_above else f_handle
-            f_c1 = QPointF(exit_pt.x(), exit_pt.y() + tangent_dy)
+            f_c1 = QPointF(
+                exit_pt.x() + ux * f_handle,
+                exit_pt.y() + uy * f_handle,
+            )
             f_c2 = QPointF(end.x() - f_handle, end.y())
             f_c1, f_c2 = self._route_cubic(exit_pt, f_c1, f_c2, end, obstacles)
+
+            # Tangent-direction guard at the target end (same fix as
+            # the direct route): keep f_c2 to the LEFT of end so the
+            # arrival tangent stays rightward into the input port.
+            min_clearance = 12.0
+            if f_c2.x() > end.x() - min_clearance:
+                f_c2 = QPointF(end.x() - min_clearance, f_c2.y())
+
             path.cubicTo(f_c1, f_c2, end)
             tangent_from = f_c2
 

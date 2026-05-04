@@ -361,25 +361,38 @@ class AgentTeamCanvas(QWidget):
         # Cap a single agent's radius so a hop-deep agent doesn't fly
         # off the edge on small canvases.
         max_radius = min(rect.width(), rect.height()) * 0.45
-        for i, name in enumerate(self._orbit_order):
-            theta = (math.tau * i) / n + rot - math.pi / 2  # start at top
-            # Per-agent radius keyed by BFS depth from the orchestrator.
-            # depth 1 (or missing) = base radius (i.e. the original
-            # single-ring placement). Each extra hop pushes the agent
-            # ~35% further out — the "onion-ring" effect, but at the
-            # per-agent level instead of restructuring the loop, so a
-            # missing/empty depth dict naturally falls back to the
-            # working single-ring layout.
-            depth = max(1, self._depth.get(name, 1))
-            agent_radius = min(max_radius, radius * (1.0 + 0.35 * (depth - 1)))
-            x = cx + agent_radius * math.cos(theta)
-            y = cy + agent_radius * math.sin(theta)
-            pos = QPointF(x, y)
-            positions.append((name, pos))
-            # Cache for hit-testing on click.
-            agent = self._agents.get(name)
-            if agent is not None:
-                agent.pos = pos
+
+        # True concentric rings now: group agents by BFS depth and
+        # give each depth its OWN angle distribution within its ring.
+        # When no edges exist (depth dict empty), every agent defaults
+        # to depth 1, so all the agents land on a single ring with
+        # uniform spacing — identical to the original single-ring
+        # behaviour. So the fallback is safe.
+        by_depth: Dict[int, List[str]] = {}
+        for name in self._orbit_order:
+            d = max(1, self._depth.get(name, 1))
+            by_depth.setdefault(d, []).append(name)
+
+        for depth in sorted(by_depth.keys()):
+            ring_agents = by_depth[depth]
+            count = len(ring_agents)
+            if count == 0:
+                continue
+            ring_radius = min(max_radius, radius * (1.0 + 0.35 * (depth - 1)))
+            # Counter-rotate alternate rings so the layers feel like
+            # distinct layers, not one big swarm. Inner ring drifts
+            # one way, next ring drifts the other way (slower, so
+            # agents don't fly past each other).
+            ring_rot = rot if (depth % 2 == 1) else -rot * 0.6
+            for i, name in enumerate(ring_agents):
+                theta = (math.tau * i) / count + ring_rot - math.pi / 2
+                x = cx + ring_radius * math.cos(theta)
+                y = cy + ring_radius * math.sin(theta)
+                pos = QPointF(x, y)
+                positions.append((name, pos))
+                agent = self._agents.get(name)
+                if agent is not None:
+                    agent.pos = pos
 
         # Cache orchestrator centre for hit-testing too.
         if self._orchestrator_name and self._orchestrator_name in self._agents:

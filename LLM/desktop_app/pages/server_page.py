@@ -400,9 +400,14 @@ class ServerPage(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
+        # Title — pin to a fixed compact height. Without an upper bound the
+        # title's vertical size policy could let it claim space when the
+        # window grows.
         title = QLabel("🖧 Servers")
         title.setProperty("class", "page_title")
-        layout.addWidget(title)
+        title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        title.setMaximumHeight(36)
+        layout.addWidget(title, 0)
 
         # THREE COLUMN LAYOUT (fixed ratio 40/40/20)
         cols_splitter = QSplitter(Qt.Horizontal)
@@ -602,8 +607,7 @@ class ServerPage(QWidget):
         self.config_path_label.setStyleSheet("font-size: 9pt; color: gray;")
         tool_server_layout.addWidget(self.config_path_label)
 
-        left_layout.addWidget(tool_server_group)
-        left_layout.addStretch()
+        left_layout.addWidget(tool_server_group, 1)
 
         # ===================================================================
         # MIDDLE COLUMN: LLM INFERENCE SERVER + ACTIVE SERVERS
@@ -826,7 +830,7 @@ class ServerPage(QWidget):
         self.active_stop_selected_btn.clicked.connect(self._stop_selected_active_server)
         active_btns_layout.addWidget(self.active_stop_selected_btn)
         active_servers_layout.addLayout(active_btns_layout)
-        middle_layout.addWidget(active_servers_group)
+        middle_layout.addWidget(active_servers_group, 1)
         
         # ===================================================================
         # RIGHT COLUMN: SERVER LOG
@@ -876,8 +880,7 @@ class ServerPage(QWidget):
         clear_btn_layout.addStretch()  # Push button to the left
         log_layout.addLayout(clear_btn_layout)
         
-        right_layout.addWidget(log_group)
-        right_layout.addStretch()
+        right_layout.addWidget(log_group, 1)
 
         # Add columns to splitter
         cols_splitter.addWidget(left_col)
@@ -905,7 +908,11 @@ class ServerPage(QWidget):
         self._server_cols_ratio_filter = _ServerColsFixedRatioFilter()
         cols_splitter.installEventFilter(self._server_cols_ratio_filter)
         QTimer.singleShot(0, _maintain_server_cols_ratio)
-        layout.addWidget(cols_splitter)
+        # stretch=1 so the splitter (and its three columns) absorb every
+        # pixel of vertical space the window grows into. Without this the
+        # splitter sits at its size hint and the user sees a giant empty
+        # band between the title and the cards.
+        layout.addWidget(cols_splitter, 1)
         
         # Sync Copy Model Name button state with initial selection
         QTimer.singleShot(0, self._on_llm_model_selection_changed)
@@ -979,6 +986,54 @@ class ServerPage(QWidget):
     def _selected_model_id(self) -> Optional[str]:
         payload = self._selected_model_payload()
         return payload.get("model_id") if payload else None
+
+    def _selected_runtime_base_model(self) -> Optional[str]:
+        """Resolve the exact runtime model target from the selected payload."""
+        payload = self._selected_model_payload()
+        if not payload:
+            return None
+        base_model = str(payload.get("base_model") or "").strip()
+        variant_rel = str(payload.get("variant_relpath") or "").strip().replace("\\", "/")
+        if not base_model:
+            return None
+        try:
+            base_path = Path(base_model)
+            model_dir = base_path.parent if base_path.is_file() else base_path
+            if variant_rel:
+                return str((model_dir / variant_rel).resolve())
+            return str(base_path.resolve())
+        except Exception:
+            return base_model
+
+    def _selected_runtime_server_id(self):
+        """Resolve selected model into runtime slot identity and known URL."""
+        payload = self._selected_model_payload()
+        model_id = payload.get("model_id") if payload else None
+        if not model_id:
+            return None, None, None
+        runtime_base_model = self._selected_runtime_base_model()
+        try:
+            from core.llm_server_manager import get_global_server_manager
+
+            manager = get_global_server_manager()
+            manager._load_config()
+            model_cfg = ((manager.config or {}).get("models") or {}).get(model_id) or {}
+            canonical_id = manager._canonical_server_id(model_id)
+            server_id = manager._resolve_runtime_server_id(
+                model_id=model_id,
+                canonical_id=canonical_id,
+                model_cfg=model_cfg,
+                runtime_base_model=runtime_base_model,
+            )
+            server_state = manager.state_store.get_server(server_id) or {}
+            port = server_state.get("port")
+            if port:
+                url = f"http://127.0.0.1:{port}"
+            else:
+                url = manager._get_server_url(model_id)
+            return model_id, runtime_base_model, server_id if server_id else model_id, url
+        except Exception:
+            return model_id, runtime_base_model, model_id, None
 
     def _apply_selected_variant_marker(self, payload: Optional[dict]) -> None:
         """Persist selected GGUF variant for runtime by updating active_variant marker."""
@@ -1097,12 +1152,31 @@ class ServerPage(QWidget):
                 return candidate if candidate_score > existing_score else existing
 
             # Build candidate entries then de-duplicate by logical model identity.
+            # Disk-existence filter: skip YAML entries whose ``base_model``
+            # AND ``adapter_dir`` are both gone. The YAML accumulates
+            # stale entries (deleted adapters, moved models, broken
+            # training runs) that the rest of the pipeline can't load,
+            # and surfacing them in the dropdown is what produces the
+            # "trash" the user complained about.
+            def _path_alive(p: str) -> bool:
+                if not p:
+                    return False
+                try:
+                    return Path(str(p)).exists()
+                except Exception:
+                    return False
+
             candidates = []
             for model_id, model_cfg in models.items():
                 if model_id == "default" and len(models) > 1:
                     continue
                 base_model = model_cfg.get("base_model", "")
+                adapter_dir = model_cfg.get("adapter_dir") or ""
                 if not is_ready(model_id, base_model):
+                    continue
+                # An entry is alive only if at least one of its paths
+                # still exists on disk. Both gone -> stale -> skip.
+                if not (_path_alive(base_model) or _path_alive(adapter_dir)):
                     continue
                 port = model_cfg.get("port", "?")
                 model_name = Path(base_model).name if base_model else model_id
@@ -1117,12 +1191,20 @@ class ServerPage(QWidget):
 
             # Add READY models not in config so they still appear.
             # Registration into llm_backends.yaml is deferred to Start click to keep app startup fast.
+            #
+            # Disk-existence guard: state-store rows for onboarded
+            # models persist even after the user deletes the weights,
+            # which is what produces the "ghost READY adapter"
+            # entries in this dropdown. Skip any ready row whose
+            # declared base_model_path doesn't actually exist anymore.
             added_ids = {c["model_id"] for c in candidates}
             for entry in ready_list:
                 mid = entry.get("model_id") or ""
                 if not mid or mid in added_ids:
                     continue
                 base = entry.get("base_model_path") or ""
+                if base and not _path_alive(base):
+                    continue
                 port = "?"
                 model_cfg = models.get(mid, {}) if isinstance(models, dict) else {}
                 if isinstance(model_cfg, dict) and model_cfg.get("port") is not None:
@@ -1153,30 +1235,69 @@ class ServerPage(QWidget):
                     return payload
                 return ""
 
+            try:
+                from core.model_compatibility import pretty_server_label
+            except Exception:
+                pretty_server_label = None
+
+            def _label(base_model: str, model_id: str, variant_rel: str, port) -> str:
+                if pretty_server_label is not None:
+                    try:
+                        return f"✓ {pretty_server_label(base_model=base_model, model_id=model_id, variant_relpath=variant_rel, port=port)}"
+                    except Exception:
+                        pass
+                # Fallback if helper import fails — keep behaviour usable.
+                name = Path(base_model).name if base_model else model_id
+                tail = f" · {Path(variant_rel).name}" if variant_rel else ""
+                port_str = f" (Port: {port})" if port not in (None, "", "?") else ""
+                return f"✓ {name}{tail}{port_str}"
+
+            def _active_variant_for(model_dir: Path, ggufs: list) -> str:
+                """Return the active weight (relpath) for the model.
+
+                Mirrors the model card: read .selected_weights.json's
+                active_variant. If absent or invalid, fall back to the
+                lone GGUF when there's only one. Returns "" otherwise so
+                no variant suffix is shown.
+                """
+                marker = model_dir / ".selected_weights.json"
+                if marker.exists():
+                    try:
+                        data = json.loads(marker.read_text(encoding="utf-8")) or {}
+                        active = str(data.get("active_variant") or "").strip().replace("\\", "/")
+                        if active:
+                            for g in ggufs:
+                                rel = str(g.relative_to(model_dir)).replace("\\", "/")
+                                if rel == active:
+                                    return rel
+                    except Exception:
+                        pass
+                if len(ggufs) == 1:
+                    return str(ggufs[0].relative_to(model_dir)).replace("\\", "/")
+                return ""
+
             model_items = []
             for c in deduped.values():
                 model_id = c["model_id"]
                 base_model = c.get("base_model") or ""
                 port = c.get("port")
-                model_name = c.get("model_name") or model_id
-                variant_rows = []
+                variant_rel = ""
                 try:
                     base_path = Path(base_model)
                     model_dir = base_path.parent if base_path.is_file() else base_path
                     if model_dir.exists() and model_dir.is_dir():
                         ggufs = sorted(model_dir.rglob("*.gguf"))
-                        if len(ggufs) > 1:
-                            for g in ggufs:
-                                rel = str(g.relative_to(model_dir)).replace("\\", "/")
-                                payload = {"model_id": model_id, "base_model": str(model_dir), "variant_relpath": rel}
-                                variant_rows.append((f"✓ {model_name} · GGUF:{g.name} (Port: {port})", payload))
+                        if ggufs:
+                            base_model = str(model_dir)
+                            variant_rel = _active_variant_for(model_dir, ggufs)
                 except Exception:
                     pass
-                if variant_rows:
-                    model_items.extend(variant_rows)
-                else:
-                    payload = {"model_id": model_id, "base_model": base_model, "variant_relpath": ""}
-                    model_items.append((f"✓ {model_name} (Port: {port})", payload))
+                payload = {
+                    "model_id": model_id,
+                    "base_model": base_model,
+                    "variant_relpath": variant_rel,
+                }
+                model_items.append((_label(base_model, model_id, variant_rel, port), payload))
             model_items.sort(key=lambda x: x[0].lower())
 
             prev_key = _payload_key(self.llm_model_selector.currentData())
@@ -1715,6 +1836,7 @@ class ServerPage(QWidget):
                 QMessageBox.warning(self, "No Model Selected", "Please select a model from the dropdown.")
                 return
             self._apply_selected_variant_marker(payload)
+            _, runtime_base_model, runtime_server_id, resolved_url = self._selected_runtime_server_id()
 
             self._last_llm_model_id = selected_model_id
             manager = get_global_server_manager()
@@ -1737,7 +1859,7 @@ class ServerPage(QWidget):
                         self._append_log(f"[LLM] Registered READY model '{selected_model_id}' into config.")
                 except Exception as e:
                     self._append_log(f"[LLM] Could not auto-register model '{selected_model_id}': {e}")
-            url = manager._get_server_url(selected_model_id)
+            url = resolved_url or manager._get_server_url(selected_model_id)
 
             # Idempotent: if server already up on this port, just refresh UI
             try:
@@ -1746,7 +1868,7 @@ class ServerPage(QWidget):
                     data = r.json()
                     status = str(data.get("status", "")).lower().strip()
                     reported_model = str(data.get("model", "")).strip()
-                    if status in ("ok", "loading") and (reported_model == selected_model_id or reported_model in ("", "local-llm")):
+                    if status in ("ok", "loading") and (reported_model in {selected_model_id, runtime_server_id, "", "local-llm"}):
                         self._append_log(f"[LLM] Server already running at {url}, reusing.")
                         QTimer.singleShot(0, lambda: self._on_llm_server_started(url, selected_model_id))
                         self._refresh_active_servers()
@@ -1766,7 +1888,11 @@ class ServerPage(QWidget):
                     def log_cb(msg):
                         QTimer.singleShot(0, lambda: self._append_log(f"[LLM] {msg}"))
                     manager = get_global_server_manager()
-                    url = manager.ensure_server_running(selected_model_id, log_callback=log_cb)
+                    url = manager.ensure_server_running(
+                        selected_model_id,
+                        log_callback=log_cb,
+                        runtime_base_model=runtime_base_model,
+                    )
                     QTimer.singleShot(0, lambda: self._on_llm_server_started(url, selected_model_id))
                 except Exception as e:
                     import traceback
@@ -1785,15 +1911,19 @@ class ServerPage(QWidget):
             from core.llm_server_manager import get_global_server_manager
             
             # Get selected model ID
-            selected_model_id = self._selected_model_id()
+            selected_model_id, runtime_base_model, runtime_server_id, _ = self._selected_runtime_server_id()
             if selected_model_id is None:
                 return
             
             self.llm_stop_btn.setEnabled(False)
-            self._append_log(f"[LLM] Stopping server for model '{selected_model_id}'...")
+            self._append_log(
+                f"[LLM] Stopping server for model '{selected_model_id}'"
+                + (f" (slot '{runtime_server_id}')" if runtime_server_id and runtime_server_id != selected_model_id else "")
+                + "..."
+            )
             
             manager = get_global_server_manager()
-            manager.shutdown_server(selected_model_id)
+            manager.shutdown_server(selected_model_id, runtime_base_model=runtime_base_model)
             
             self.llm_server_status_label.setText("● Stopped")
             self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #888;")
@@ -1821,15 +1951,19 @@ class ServerPage(QWidget):
         try:
             import yaml
             from pathlib import Path
+            from core.model_compatibility import pretty_server_label
             config_path = Path(__file__).parent.parent.parent / "configs" / "llm_backends.yaml"
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
                 if model_id in config.get('models', {}):
                     model_path = config['models'][model_id]['base_model']
-                    model_name = Path(model_path).name
-                    self.llm_model_label.setText(model_name)
+                    self.llm_model_label.setText(
+                        pretty_server_label(base_model=model_path, model_id=model_id, include_port=False)
+                    )
                 else:
-                    self.llm_model_label.setText(model_id)
+                    self.llm_model_label.setText(
+                        pretty_server_label(base_model=model_id, model_id=model_id, include_port=False)
+                    )
         except Exception:
             self.llm_model_label.setText(model_id if model_id else "unknown")
         
@@ -1907,13 +2041,30 @@ class ServerPage(QWidget):
             import requests
             from pathlib import Path
 
-            selected_model_id = self._selected_model_id()
+            selected_model_id, runtime_base_model, runtime_server_id, resolved_url = self._selected_runtime_server_id()
             if selected_model_id is None:
                 return
 
             manager = get_global_server_manager()
-            url = manager._get_server_url(selected_model_id)
+            url = resolved_url or manager._get_server_url(selected_model_id)
             port = url.split(":")[-1] if ":" in url else ""
+
+            try:
+                from core.model_compatibility import pretty_server_label
+            except Exception:
+                pretty_server_label = None
+
+            def _pretty(identity: str) -> str:
+                if pretty_server_label is None or not identity:
+                    return identity or "-"
+                try:
+                    return pretty_server_label(
+                        base_model=identity,
+                        model_id=selected_model_id or "",
+                        include_port=False,
+                    ) or identity
+                except Exception:
+                    return identity
 
             try:
                 response = requests.get(f"{url}/health", timeout=1)
@@ -1923,12 +2074,12 @@ class ServerPage(QWidget):
                     reported_model = str(data.get("model", "")).strip()
 
                     # Port occupied by a different model: show state, do not attempt restart
-                    if reported_model and reported_model not in (selected_model_id, "local-llm", ""):
-                        self.llm_server_status_label.setText(f"● Port in use by {reported_model}")
+                    if reported_model and reported_model not in (selected_model_id, runtime_server_id, "local-llm", ""):
+                        self.llm_server_status_label.setText(f"● Port in use by {_pretty(reported_model)}")
                         self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
                         self.llm_port_label.setText(port)
                         self.llm_api_label.setText(f"{url}/v1")
-                        self.llm_model_label.setText(reported_model)
+                        self.llm_model_label.setText(_pretty(reported_model))
                         self.llm_start_btn.setEnabled(False)
                         self.llm_stop_btn.setEnabled(True)
                         self.copy_api_btn.setEnabled(True)
@@ -1941,10 +2092,10 @@ class ServerPage(QWidget):
                         self.llm_api_label.setText(f"{url}/v1")
                         try:
                             model_cfg = manager.config["models"][selected_model_id]
-                            base_model = model_cfg["base_model"]
-                            self.llm_model_label.setText(Path(base_model).name)
+                            base_model = runtime_base_model or model_cfg["base_model"]
+                            self.llm_model_label.setText(_pretty(base_model))
                         except Exception:
-                            self.llm_model_label.setText(reported_model or selected_model_id)
+                            self.llm_model_label.setText(_pretty(reported_model or selected_model_id))
                         self.llm_start_btn.setEnabled(False)
                         self.llm_start_btn.setText("● Running")
                         self.llm_stop_btn.setEnabled(True)
@@ -1955,8 +2106,21 @@ class ServerPage(QWidget):
                         self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
                         self.llm_port_label.setText(port)
                         self.llm_api_label.setText(f"{url}/v1")
-                        self.llm_model_label.setText(reported_model or selected_model_id)
+                        self.llm_model_label.setText(_pretty(reported_model or selected_model_id))
                         self.llm_start_btn.setEnabled(False)
+                        self.llm_stop_btn.setEnabled(True)
+                        self.copy_api_btn.setEnabled(True)
+                        return
+                    if status == "not_started":
+                        # Proxy is up but the model hasn't been loaded yet.
+                        # Show this honestly so users don't think a model is running.
+                        self.llm_server_status_label.setText("● Standby (no model loaded)")
+                        self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+                        self.llm_port_label.setText(port)
+                        self.llm_api_label.setText(f"{url}/v1")
+                        self.llm_model_label.setText(_pretty(selected_model_id))
+                        self.llm_start_btn.setEnabled(True)
+                        self.llm_start_btn.setText("▶ Start")
                         self.llm_stop_btn.setEnabled(True)
                         self.copy_api_btn.setEnabled(True)
                         return
@@ -1967,7 +2131,7 @@ class ServerPage(QWidget):
                     self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
                     self.llm_port_label.setText(port)
                     self.llm_api_label.setText(f"{url}/v1")
-                    self.llm_model_label.setText(selected_model_id or "-")
+                    self.llm_model_label.setText(_pretty(selected_model_id))
                     self.llm_start_btn.setEnabled(False)
                     self.llm_start_btn.setText("● Busy")
                     self.llm_stop_btn.setEnabled(True)
@@ -2027,19 +2191,38 @@ class ServerPage(QWidget):
                 except Exception:
                     selected_port = None
 
+            try:
+                from core.model_compatibility import pretty_server_label
+            except Exception:
+                pretty_server_label = None
+
             self.active_servers_list.blockSignals(True)
             self.active_servers_list.clear()
             for r in (results or []):
-                status_str = str(r.get("status") or "").strip().lower()
-                if status_str == "ok":
+                raw_status = str(r.get("status") or "").strip().lower()
+                if raw_status == "ok":
                     status_str = "Running"
-                elif status_str == "loading":
+                elif raw_status == "loading":
                     status_str = "Loading"
-                elif status_str == "unresponsive":
+                elif raw_status == "unresponsive":
                     status_str = "Busy/Unresponsive"
+                elif raw_status == "not_started":
+                    status_str = "Standby (no model loaded)"
                 else:
-                    status_str = status_str or "Unknown"
-                label = f"{r.get('model_from_health') or r.get('model_id') or 'Unknown'} — port {r.get('port')} ({status_str})"
+                    status_str = raw_status or "Unknown"
+                identity = r.get("model_from_health") or r.get("model_id") or ""
+                if pretty_server_label is not None and identity:
+                    try:
+                        pretty = pretty_server_label(
+                            base_model=identity,
+                            model_id=r.get("model_id") or "",
+                            include_port=False,
+                        )
+                    except Exception:
+                        pretty = identity
+                else:
+                    pretty = identity or "Unknown"
+                label = f"{pretty} — port {r.get('port')} ({status_str})"
                 item = QListWidgetItem(label)
                 item.setData(Qt.UserRole, r)
                 self.active_servers_list.addItem(item)
@@ -2090,16 +2273,29 @@ class ServerPage(QWidget):
         try:
             if not r or not isinstance(r, dict):
                 return
-            model_id = r.get("model_id")
+            model_id = r.get("model_id") or ""
             port = r.get("port")
             status = (r.get("status") or "").lower()
             if not model_id and port:
                 model_id = r.get("model_from_health") or ""
 
+            # Match by payload's model_id (combo entries store dicts now).
             for i in range(self.llm_model_selector.count()):
-                if self.llm_model_selector.itemData(i) == model_id:
+                data = self.llm_model_selector.itemData(i)
+                cand = data.get("model_id") if isinstance(data, dict) else (data or "")
+                if cand and cand == model_id:
                     self.llm_model_selector.setCurrentIndex(i)
                     break
+
+            try:
+                from core.model_compatibility import pretty_server_label
+                pretty = pretty_server_label(
+                    base_model=r.get("model_from_health") or model_id or "",
+                    model_id=model_id,
+                    include_port=False,
+                ) or "-"
+            except Exception:
+                pretty = r.get("model_from_health") or model_id or "-"
 
             if port:
                 url = f"http://127.0.0.1:{port}"
@@ -2108,7 +2304,7 @@ class ServerPage(QWidget):
                 if status == "ok":
                     self.llm_server_status_label.setText("● Running")
                     self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
-                    self.llm_model_label.setText(r.get("model_from_health") or model_id or "-")
+                    self.llm_model_label.setText(pretty)
                     self.llm_start_btn.setEnabled(False)
                     self.llm_start_btn.setText("● Running")
                     self.llm_stop_btn.setEnabled(True)
@@ -2116,23 +2312,37 @@ class ServerPage(QWidget):
                 elif status == "loading":
                     self.llm_server_status_label.setText("● Loading...")
                     self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
-                    self.llm_model_label.setText(r.get("model_from_health") or model_id or "-")
+                    self.llm_model_label.setText(pretty)
                     self.llm_start_btn.setEnabled(False)
                     self.llm_stop_btn.setEnabled(True)
                     self.copy_api_btn.setEnabled(True)
                 elif status == "unresponsive":
                     self.llm_server_status_label.setText("● Busy/Unresponsive")
                     self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
-                    self.llm_model_label.setText(r.get("model_from_health") or model_id or "-")
+                    self.llm_model_label.setText(pretty)
                     self.llm_start_btn.setEnabled(False)
                     self.llm_start_btn.setText("● Busy")
+                    self.llm_stop_btn.setEnabled(True)
+                    self.copy_api_btn.setEnabled(True)
+                elif status == "not_started":
+                    self.llm_server_status_label.setText("● Standby (no model loaded)")
+                    self.llm_server_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+                    self.llm_model_label.setText(pretty)
+                    self.llm_start_btn.setEnabled(True)
                     self.llm_stop_btn.setEnabled(True)
                     self.copy_api_btn.setEnabled(True)
         except Exception:
             pass
 
     def _stop_selected_active_server(self):
-        """Stop the server selected in the Active inference servers list (by model_id or by port)."""
+        """Stop the server selected in the Active inference servers list.
+
+        Strategy: when a port is known (which is always the case for entries
+        produced by the active-servers probe), kill by port. The probe may
+        canonicalize model IDs in ways that don't match running_servers, so
+        the model_id path silently no-ops; port-based kill walks the OS
+        process table and is reliable for both tracked and adopted servers.
+        """
         items = self.active_servers_list.selectedItems()
         if not items:
             self._append_log("[LLM] No server selected. Select a row in Active inference servers, then click Stop selected.")
@@ -2146,28 +2356,31 @@ class ServerPage(QWidget):
                 return
             model_id = (r.get("model_id") or "").strip() or (r.get("model_from_health") or "").strip()
             port = r.get("port") or 0
-            pid = r.get("pid")
+            try:
+                port = int(port)
+            except Exception:
+                port = 0
 
             manager = get_global_server_manager()
+            stopped = False
 
-            # Prefer shutdown by model_id when we have one that matches a known config
-            if model_id:
-                try:
-                    manager.shutdown_server(model_id)
-                    self._append_log(f"[LLM] Stopped server for model '{model_id}'.")
-                except Exception as e:
-                    self._append_log(f"[LLM] Stop by model failed ({e}), trying by port {port}...")
-                    if port and manager.shutdown_server_by_port(port):
-                        self._append_log(f"[LLM] Stopped server on port {port}.")
-                    else:
-                        self._append_log(f"[LLM] Could not stop server (port {port}).")
-            elif port:
+            if port:
                 if manager.shutdown_server_by_port(port):
                     self._append_log(f"[LLM] Stopped server on port {port}.")
+                    stopped = True
                 else:
-                    self._append_log(f"[LLM] Could not stop server on port {port}.")
-            else:
-                self._append_log("[LLM] No model or port for selected server.")
+                    self._append_log(f"[LLM] Stop-by-port failed for {port}; trying model id...")
+
+            if not stopped and model_id:
+                try:
+                    manager.shutdown_server(model_id)
+                    self._append_log(f"[LLM] Stopped server for slot '{model_id}'.")
+                    stopped = True
+                except Exception as e:
+                    self._append_log(f"[LLM] Stop by model failed ({e}).")
+
+            if not stopped:
+                self._append_log("[LLM] Could not stop selected server.")
 
             self._refresh_active_servers()
             # Refresh status line in case the stopped server was the one shown
@@ -2181,13 +2394,13 @@ class ServerPage(QWidget):
             from core.llm_server_manager import get_global_server_manager
             
             # Get selected model ID
-            selected_model_id = self._selected_model_id()
+            selected_model_id, _, _, resolved_url = self._selected_runtime_server_id()
             if selected_model_id is None:
                 QMessageBox.warning(self, "Error", "No model selected.")
                 return
             
             manager = get_global_server_manager()
-            url = manager._get_server_url(selected_model_id)
+            url = resolved_url or manager._get_server_url(selected_model_id)
             api_url = f"{url}/v1"
             
             clipboard = QApplication.clipboard()

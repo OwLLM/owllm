@@ -316,12 +316,45 @@ class LocalBackend:
 
     @staticmethod
     def _list_ready_models() -> List[dict]:
+        """Onboarded local models filtered for disk existence.
+
+        The state store keeps a model's onboarding row at status=READY
+        even after the user deletes the underlying weights — onboarding
+        only writes the row, it never reaps it. The agent / server
+        dropdowns were therefore showing rows for adapters and base
+        models that no longer existed on disk (the "ghost models" the
+        user complained about).
+
+        We strip every row whose declared ``base_model_path`` is set
+        but doesn't actually exist. Rows without any path stay (API
+        backends and synthetic auto-router targets), and disk-check
+        failures are treated as "exists" so a transient I/O hiccup
+        doesn't blank the dropdown.
+        """
         try:
             from core.model_onboarding import get_onboarding_service
-            return get_onboarding_service().list_ready_models() or []
+            ready = get_onboarding_service().list_ready_models() or []
         except Exception:
             logger.exception("local backend: list_ready_models failed")
             return []
+
+        alive: List[dict] = []
+        for row in ready:
+            base = row.get("base_model_path") or row.get("base_model") or ""
+            if not base:
+                # Nothing to verify — keep it; better a stale id than a
+                # missing local model.
+                alive.append(row)
+                continue
+            try:
+                if Path(base).exists():
+                    alive.append(row)
+                # else: weights are gone -> drop the ghost row
+            except OSError:
+                # Path looked weird / unreachable; keep it rather than
+                # mistakenly hide a genuine model on a flaky filesystem.
+                alive.append(row)
+        return alive
 
     @staticmethod
     def _running_base_paths() -> set[str]:

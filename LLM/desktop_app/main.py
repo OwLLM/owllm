@@ -565,6 +565,7 @@ class ToolInferenceWorker(QThread):
         max_new_tokens: int = 1024,
         temperature: float = 0.7,
         images: Optional[List[str]] = None,
+        enable_tools: bool = True,
     ):
         super().__init__()
         self.prompt = prompt
@@ -575,14 +576,58 @@ class ToolInferenceWorker(QThread):
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.images = list(images) if images else []
+        # Whether to run the multi-pass tool-calling loop. When False,
+        # we go through the lean ``run_inference`` path — same as agent
+        # backends use — instead of ``run_inference_with_tools`` which
+        # iterates up to 5 times, sniffing tool-call patterns in every
+        # output. Regular Test Chat (where the user just wants
+        # back-and-forth replies, no tools) used to be forced through
+        # the iterative loop, which made it 3-5x slower than agents
+        # for the same model. The Tool Chat sub-tab still passes True.
+        self.enable_tools = bool(enable_tools)
     
     def run(self):
         """Run tool-enabled inference in background"""
         try:
-            from core.inference import ToolEnabledInferenceConfig, run_inference_with_tools
+            from core.inference import (
+                ToolEnabledInferenceConfig,
+                InferenceConfig,
+                run_inference_with_tools,
+                run_inference,
+            )
             from desktop_app.config.config_manager import ConfigManager
             import urllib.request
-            
+
+            # FAST PATH: tools disabled -> run a single forward pass
+            # via run_inference and emit the result. Skips the
+            # tool-server health probe, the up-to-5-iteration tool
+            # loop, and the ToolCallDetector overhead. Regular Test
+            # Chat hits this path; Tool Chat sub-tab keeps the full
+            # iterative path below.
+            #
+            # Note: ``InferenceConfig`` (the base) does NOT accept a
+            # ``system_prompt`` field — only the tool subclass does.
+            # The Test Chat path bakes the system prompt into the
+            # already-rendered ``self.prompt`` (see
+            # ``_build_test_prompt_for_model``), so we just pass it
+            # through without a separate system_prompt argument.
+            if not self.enable_tools:
+                self.progress_update.emit("[INFO] Initializing inference (tools disabled)...")
+                ic = InferenceConfig(
+                    prompt=self.prompt,
+                    model_id=self.model_id,
+                    base_model=self.base_model or None,
+                    max_new_tokens=self.max_new_tokens,
+                    temperature=self.temperature,
+                    images=self.images,
+                )
+                final_output = run_inference(
+                    ic,
+                    log_callback=lambda m: self.progress_update.emit(str(m)),
+                )
+                self.inference_finished.emit(final_output, [], self.model_column)
+                return
+
             self.progress_update.emit("[INFO] Initializing tool-enabled inference...")
 
             # Load tool server config (single source of truth)
@@ -590,11 +635,11 @@ class ToolInferenceWorker(QThread):
             tool_cfg = cfg_mgr.load()
             execution_mode = tool_cfg.get("execution_mode", "http")  # Default to HTTP for backward compatibility
             workspace_root = Path(tool_cfg.get("workspace_root", "."))
-            
+
             native_executor = None
             tool_server_url = None
             tool_server_token = None
-            
+
             if execution_mode == "native":
                 # Native mode - execute tools directly
                 self.progress_update.emit("[INFO] Using native tool execution (no HTTP server needed)")
@@ -4331,56 +4376,69 @@ class MainWindow(QMainWindow):
                 m.lower(),
             )
 
-        # First pass: exact path match (highest priority)
+        # First pass: exact path match (highest priority).
+        # Match against EITHER ``base_model`` OR ``adapter_dir`` because
+        # the caller may legitimately pass either path:
+        #   - Picking a downloaded model in the Test page → base path
+        #   - Picking a tuned adapter in the Test page → adapter path
+        # The resolver was previously only checking base_model and so
+        # any caller passing an adapter dir got a "not in config"
+        # error even though the YAML had a perfectly valid
+        # ``tuned__<name>`` entry whose ``adapter_dir`` matched.
         exact_matches = []
         for model_id, model_cfg in config["models"].items():
-            existing_base = model_cfg.get("base_model", "")
-            if not existing_base:
-                continue
-            try:
-                existing_path_normalized = Path(existing_base).resolve()
-                if str(model_path_normalized) == str(existing_path_normalized):
-                    exact_matches.append(model_id)
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.debug(f"Path resolution error for {existing_base}: {e}")
-                continue
+            for field in ("base_model", "adapter_dir"):
+                existing = model_cfg.get(field, "")
+                if not existing:
+                    continue
+                try:
+                    existing_path_normalized = Path(existing).resolve()
+                    if str(model_path_normalized) == str(existing_path_normalized):
+                        exact_matches.append(model_id)
+                        break
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.debug(f"Path resolution error for {existing}: {e}")
+                    continue
         if exact_matches:
             exact_matches.sort(key=_model_id_rank)
             return exact_matches[0]
         
-        # Second pass: directory name match (if no exact match found)
-        # Collect all matches, then pick the best one
+        # Second pass: directory name match (if no exact match found).
+        # Same dual-field check as the exact pass above — match either
+        # base_model or adapter_dir.
         directory_matches = []
         for model_id, model_cfg in config["models"].items():
-            existing_base = model_cfg.get("base_model", "")
-            if not existing_base:
-                continue
-            try:
-                existing_path_normalized = Path(existing_base).resolve()
-                existing_dir_name = existing_path_normalized.name
-                
-                if model_dir_name == existing_dir_name:
-                    # Additional validation: check if parent directory name matches
-                    if model_path_normalized.parent.name == existing_path_normalized.parent.name:
-                        existing_path_str = str(existing_path_normalized).lower()
-                        # Calculate similarity: count matching path components from the end
-                        # More matching components = better match
-                        model_parts = model_path_str_normalized.split(os.sep)
-                        existing_parts = existing_path_str.split(os.sep)
-                        matching_components = 0
-                        for i in range(1, min(len(model_parts), len(existing_parts)) + 1):
-                            if model_parts[-i] == existing_parts[-i]:
-                                matching_components += 1
-                            else:
-                                break
-                        directory_matches.append((model_id, matching_components, existing_path_str))
-            except Exception as e:
-                import logging
-                logger = logging.getLogger(__name__)
-                logger.debug(f"Path resolution error for {existing_base}: {e}")
-                continue
+            for field in ("base_model", "adapter_dir"):
+                existing = model_cfg.get(field, "")
+                if not existing:
+                    continue
+                try:
+                    existing_path_normalized = Path(existing).resolve()
+                    existing_dir_name = existing_path_normalized.name
+
+                    if model_dir_name == existing_dir_name:
+                        # Additional validation: check if parent directory name matches
+                        if model_path_normalized.parent.name == existing_path_normalized.parent.name:
+                            existing_path_str = str(existing_path_normalized).lower()
+                            # Calculate similarity: count matching path components from the end
+                            # More matching components = better match
+                            model_parts = model_path_str_normalized.split(os.sep)
+                            existing_parts = existing_path_str.split(os.sep)
+                            matching_components = 0
+                            for i in range(1, min(len(model_parts), len(existing_parts)) + 1):
+                                if model_parts[-i] == existing_parts[-i]:
+                                    matching_components += 1
+                                else:
+                                    break
+                            directory_matches.append((model_id, matching_components, existing_path_str))
+                            break
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.debug(f"Path resolution error for {existing}: {e}")
+                    continue
         
         # Return the match with the most matching path components
         if directory_matches:
@@ -4490,28 +4548,41 @@ class MainWindow(QMainWindow):
             # launch proceeds normally — no popup, no re-onboard loop.
             try:
                 _ap = Path(model_path)
-                if _ap.is_dir() and (_ap / "adapter_config.json").exists():
+                _is_adapter_dir = _ap.is_dir() and (_ap / "adapter_config.json").exists()
+                self._log_to_app_log(
+                    f"[chat-resolve] not in config; path={_ap} "
+                    f"is_adapter_dir={_is_adapter_dir}"
+                )
+                if _is_adapter_dir:
                     _ok, _msg = self._register_tuned_adapter(_ap.name, _ap)
+                    self._log_to_app_log(
+                        f"[chat-resolve] _register_tuned_adapter -> ok={_ok} msg={_msg!r}"
+                    )
                     if _ok:
-                        try:
-                            self._log_to_app_log(
-                                f"[chat-resolve] auto-registered adapter {_ap.name} "
-                                "on first chat use."
-                            )
-                        except Exception:
-                            pass
                         # Re-run the resolution; the adapter row exists now.
                         try:
-                            return self._resolve_model_id_from_path(
+                            _resolved = self._resolve_model_id_from_path(
                                 model_path, allow_create=True
                             )
-                        except Exception:
-                            # Fall through to legacy path on weird race.
-                            pass
-            except Exception:
+                            self._log_to_app_log(
+                                f"[chat-resolve] resolved to model_id={_resolved!r} after registration"
+                            )
+                            return _resolved
+                        except Exception as _resolve_exc:
+                            self._log_to_app_log(
+                                f"[chat-resolve] post-register resolve raised: {_resolve_exc!r}"
+                            )
+            except Exception as _autoreg_exc:
                 # Adapter auto-register is best-effort; if it fails for
                 # any reason, fall through to the legacy READY-row scan.
-                pass
+                # Log the reason so the next failure is debuggable.
+                try:
+                    self._log_to_app_log(
+                        f"[chat-resolve] auto-register raised: "
+                        f"{type(_autoreg_exc).__name__}: {_autoreg_exc}"
+                    )
+                except Exception:
+                    pass
 
             # Only auto-register if this exact model path is already READY in onboarding.
             try:
@@ -9111,8 +9182,12 @@ class MainWindow(QMainWindow):
                 pass
 
         try:
-            from core.state_store import StateStore
-            ss = StateStore()
+            # Use the global StateStore singleton — calling
+            # ``StateStore()`` directly fails because the constructor
+            # requires a ``db_path`` argument. The factory wires the
+            # canonical LLM/data/owllm_state.db path automatically.
+            from core.state_store import get_state_store
+            ss = get_state_store()
             wanted = self._base_model_match_keys(base_path)
             _diag(f"input={base_path!r} wanted_keys={sorted(wanted)}")
             if not wanted:
@@ -9395,8 +9470,12 @@ class MainWindow(QMainWindow):
 
         # Upsert the adapter row.
         try:
-            from core.state_store import StateStore
-            ss = StateStore()
+            # Use the global StateStore singleton — see
+            # _find_base_onboarding for the same fix; ``StateStore()``
+            # with no args fails because the constructor requires
+            # ``db_path``.
+            from core.state_store import get_state_store
+            ss = get_state_store()
             ss.upsert_onboarding(
                 model_id=f"tuned__{name}",
                 base_model_path=str(base_path),
@@ -9409,12 +9488,187 @@ class MainWindow(QMainWindow):
         except Exception as e:
             return False, f"State-store write failed: {e}"
 
+        # Wire the adapter into llm_backends.yaml so it SHARES the
+        # base's port + server process. See _wire_adapter_into_yaml
+        # for the full design rationale (one server hosts base+adapter,
+        # per-request ``adapter`` flag toggles the LoRA layer).
+        try:
+            self._wire_adapter_into_yaml(name, str(base_path), str(adapter_dir), base_row)
+        except Exception as exc:
+            try:
+                self._log_to_app_log(
+                    f"[adapter-wire] could not wire {name} into "
+                    f"llm_backends.yaml: {exc!r}"
+                )
+            except Exception:
+                pass
+
         # Drop the sentinel so the card flips to the green badge.
         try:
             (adapter_dir / ".onboarded").touch(exist_ok=True)
         except Exception:
             pass
         return True, "Adapter is now ready for chat." + synth_note
+
+    def _wire_adapter_into_yaml(
+        self,
+        adapter_name: str,
+        base_path: str,
+        adapter_dir: str,
+        base_row: Dict[str, Any],
+    ) -> None:
+        """Make the freshly-registered adapter share the base's server.
+
+        Edits ``configs/llm_backends.yaml`` so:
+          1. The BASE entry (created if it doesn't exist) carries
+             ``adapter_dir = <this adapter>`` — the server will load
+             base + adapter at startup.
+          2. The ADAPTER entry (``tuned__<name>``) reuses the SAME
+             ``port`` as the base. Both entries resolve to the same
+             backend process, so the Test page can pick Model A
+             (base) and Model B (adapter) without spawning a second
+             16 GB server. Per-request ``adapter`` field on chat
+             calls flips the LoRA layer on/off via PEFT's
+             ``enable_adapter_layers()`` / ``disable_adapter_layers()``.
+
+        Caveats / current limits:
+          - One adapter per base at a time. Switching to a different
+            adapter requires re-registering and bouncing the server.
+            Multi-adapter-per-base would need a list of paths and
+            per-request ``adapter_name`` selection — future work.
+          - If the base server is already running when the adapter is
+            registered, the running process won't gain the adapter
+            until the user stops + starts it. The next ``Use in Chat``
+            click will write the YAML correctly; user just needs one
+            server bounce.
+        """
+        from pathlib import Path as _P
+        config_path = self.root / "configs" / "llm_backends.yaml"
+        try:
+            import yaml as _yaml
+        except ImportError:
+            self._log_to_app_log(
+                "[adapter-wire] PyYAML not available; cannot edit llm_backends.yaml"
+            )
+            return
+
+        cfg: Dict[str, Any] = {}
+        try:
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = _yaml.safe_load(f) or {}
+        except Exception as exc:
+            self._log_to_app_log(f"[adapter-wire] failed to read YAML: {exc!r}")
+            return
+        if not isinstance(cfg, dict):
+            cfg = {}
+        models = cfg.setdefault("models", {})
+
+        # 1. Find or create the BASE entry. We match by base_path
+        # (case-insensitive, slash-normalized) since the YAML stores
+        # ``base_model`` as a path string and the comparison must be
+        # tolerant of Windows / POSIX separator differences.
+        def _norm(p: str) -> str:
+            return str(p).replace("\\", "/").lower().rstrip("/")
+
+        base_norm = _norm(base_path)
+        base_entry = None
+        base_id = None
+        for mid, ent in list(models.items()):
+            if not isinstance(ent, dict):
+                continue
+            if _norm(str(ent.get("base_model", ""))) == base_norm and not ent.get("adapter_dir"):
+                base_entry = ent
+                base_id = mid
+                break
+        # If no base-only entry exists, just take the first one that
+        # references this base_model (we'll patch it to carry the adapter).
+        if base_entry is None:
+            for mid, ent in list(models.items()):
+                if not isinstance(ent, dict):
+                    continue
+                if _norm(str(ent.get("base_model", ""))) == base_norm:
+                    base_entry = ent
+                    base_id = mid
+                    break
+
+        # If still none, synthesize a base entry.
+        if base_entry is None:
+            from core.model_id_resolver import derive_from_model_path
+            try:
+                canonical = derive_from_model_path(base_path)
+                base_id = canonical or _P(base_path).name.replace("__", "/")
+            except Exception:
+                base_id = _P(base_path).name.replace("__", "/")
+            # Allocate a port — first free in the 10500+ range.
+            used_ports = {
+                int(v.get("port", 0))
+                for v in models.values()
+                if isinstance(v, dict) and v.get("port") is not None
+            }
+            preferred_port = 10500
+            while preferred_port in used_ports:
+                preferred_port += 1
+            base_entry = {
+                "base_model": base_path,
+                "adapter_dir": None,
+                "model_type": "instruct",
+                "port": preferred_port,
+                "use_4bit": True,
+                "system_prompt": "",
+            }
+            models[base_id] = base_entry
+
+        # 2. Patch base entry: load with the adapter on startup. Only
+        # overwrite if blank/None so a user who manually set a
+        # different adapter (rare but possible) isn't silently
+        # overridden.
+        if not base_entry.get("adapter_dir"):
+            base_entry["adapter_dir"] = adapter_dir
+            self._log_to_app_log(
+                f"[adapter-wire] patched base entry '{base_id}' to load "
+                f"adapter_dir={adapter_dir}"
+            )
+
+        # 3. Add/refresh the adapter entry — same port as base.
+        adapter_id = f"tuned__{adapter_name}"
+        adapter_entry = models.get(adapter_id, {}) or {}
+        adapter_entry.update({
+            "base_model": base_path,
+            "adapter_dir": adapter_dir,
+            "model_type": base_entry.get("model_type", "instruct"),
+            # Same port — chat requests for this model_id route to
+            # the base's server process. The per-request ``adapter``
+            # field on the chat call enables/disables the LoRA layer.
+            "port": int(base_entry.get("port", 10500)),
+            "use_4bit": base_entry.get("use_4bit", True),
+            "system_prompt": adapter_entry.get("system_prompt", ""),
+            # Mark this entry as adapter-only so the launcher knows
+            # NOT to start a second server for it. The base entry is
+            # what spawns the process.
+            "shares_server_with": base_id,
+        })
+        models[adapter_id] = adapter_entry
+
+        # Write back.
+        try:
+            with open(config_path, "w", encoding="utf-8") as f:
+                _yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
+        except Exception as exc:
+            self._log_to_app_log(f"[adapter-wire] write failed: {exc!r}")
+            return
+
+        # Sync the runtime manager so subsequent launches see the new entries.
+        try:
+            from core.llm_server_manager import get_global_server_manager
+            get_global_server_manager()._load_config()
+        except Exception:
+            pass
+
+        self._log_to_app_log(
+            f"[adapter-wire] {adapter_id} now shares port "
+            f"{adapter_entry['port']} with base '{base_id}'."
+        )
 
     def _refresh_chat_pickers(self) -> None:
         """Re-populate every chat-tab model dropdown so a freshly
@@ -12875,7 +13129,7 @@ class MainWindow(QMainWindow):
         save_layout = QVBoxLayout(save_frame)
         save_layout.setContentsMargins(14, 14, 14, 14)
         save_layout.setSpacing(10)
-        self.train_save_toggle = CheckpointToggle(default_steps=50, parent=self)
+        self.train_save_toggle = CheckpointToggle(default_steps=25, parent=self)
         save_layout.addWidget(self.train_save_toggle)
         left_layout.addWidget(save_frame)
 
@@ -18233,7 +18487,12 @@ class MainWindow(QMainWindow):
             base_model=model_path,
             system_prompt=system_prompt,
             max_new_tokens=max_tokens_a,
-            temperature=temperature_a
+            temperature=temperature_a,
+            # ``auto_inject_tool_prompt`` is the existing per-call
+            # signal that distinguishes Tool Chat (True) from regular
+            # Test Chat (False). Map directly to enable_tools so
+            # regular Test Chat takes the fast single-pass path.
+            enable_tools=bool(auto_inject_tool_prompt),
         )
         
         # Connect signals
@@ -18468,14 +18727,38 @@ class MainWindow(QMainWindow):
         category = norm.get("category", "ENVIRONMENT_CORRUPT")
         action = norm.get("action", "")
 
+        # Show the FIRST 500 chars of the actual error inline so users
+        # don't have to click "Show Details" to learn why their chat
+        # failed. The detailed-text panel keeps the full error for
+        # forensic copy-paste, but the headline tells the truth right
+        # away: not just "the model is broken, go re-onboard", but the
+        # actual exception that the worker received.
+        _err_str = str(error_text or "").strip()
+        _err_preview = _err_str if len(_err_str) <= 500 else _err_str[:480] + "…"
+
         msg = QMessageBox(self)
         msg.setWindowTitle("Model not ready")
         msg.setIcon(QMessageBox.Warning)
-        msg.setText(f"Model '{model_id}' is not ready to use.")
+        msg.setText(f"<b>Model '{model_id}' couldn't be reached for inference.</b>")
         if category == "BACKEND_INCOMPATIBLE_MODEL":
-            msg.setInformativeText(action or "Try another GGUF variant or backend format.")
+            _hint = action or "Try another GGUF variant or backend format."
         else:
-            msg.setInformativeText(action or "Please repair or re-onboard the model environment, then retry.")
+            _hint = action or (
+                "Either the server failed to start, ran out of VRAM, or the "
+                "model environment needs repair. The actual error from the "
+                "subprocess is below — read it before clicking Re-onboard."
+            )
+        # InformativeText supports basic rich text; format the error
+        # block in <pre> so newlines / tracebacks survive readably.
+        from html import escape as _h
+        msg.setTextFormat(Qt.RichText)
+        msg.setInformativeText(
+            f"<p>{_h(_hint)}</p>"
+            f"<p><b>Error from subprocess:</b></p>"
+            f"<pre style='font-family: Consolas, monospace; font-size: 9pt; "
+            f"background: #1a1a1a; color: #f5f5f5; padding: 8px; "
+            f"border-radius: 4px;'>{_h(_err_preview)}</pre>"
+        )
         msg.setDetailedText(error_text)
 
         btn_reonboard = msg.addButton("Re-onboard now", QMessageBox.AcceptRole)
@@ -18872,7 +19155,8 @@ class MainWindow(QMainWindow):
             base_model=model_path,
             system_prompt=system_prompt,
             max_new_tokens=max_tokens_b,
-            temperature=temperature_b
+            temperature=temperature_b,
+            enable_tools=bool(auto_inject_tool_prompt),
         )
         
         self.tool_worker_b.progress_update.connect(
@@ -19144,7 +19428,8 @@ class MainWindow(QMainWindow):
             base_model=model_path,
             system_prompt=system_prompt,
             max_new_tokens=max_tokens_c,
-            temperature=temperature_c
+            temperature=temperature_c,
+            enable_tools=bool(auto_inject_tool_prompt),
         )
         
         self.tool_worker_c.progress_update.connect(
@@ -20129,6 +20414,21 @@ class MainWindow(QMainWindow):
                             if org in mid and model in mid:
                                 return cfg.get("port", "-")
                     return "-"
+                # ``_resolve_chat_model_id_from_path`` may have just
+                # WRITTEN a new entry for an adapter on first use (the
+                # auto-register fallback). The ``models_cfg`` snapshot
+                # we took at the top of this function predates that
+                # write. Re-load from disk if the model_id we got back
+                # isn't in the stale snapshot.
+                if model_id not in models_cfg:
+                    try:
+                        with open(config_path, 'r', encoding='utf-8') as f:
+                            fresh_cfg = yaml.safe_load(f) or {}
+                        fresh_models = fresh_cfg.get("models", {}) or {}
+                        if model_id in fresh_models:
+                            return fresh_models[model_id].get("port", "-")
+                    except Exception:
+                        pass
                 if model_id in models_cfg:
                     return models_cfg[model_id].get("port", "-")
                 return "-"
@@ -25011,8 +25311,8 @@ respective package directories or official repositories.
                 # ready". See _fill_model_combo for the full rationale.
                 broken_names: set[str] = set()
                 try:
-                    from core.state_store import StateStore
-                    _ss = StateStore()
+                    from core.state_store import get_state_store
+                    _ss = get_state_store()
                     for _row in _ss.list_all_onboarding():
                         status = (_row.get("status") or "").upper()
                         if status not in ("BROKEN", "FAILED"):
@@ -25107,8 +25407,8 @@ respective package directories or official repositories.
                 # there on disk and looks like a normal adapter.
                 broken_names: set[str] = set()
                 try:
-                    from core.state_store import StateStore
-                    _ss = StateStore()
+                    from core.state_store import get_state_store
+                    _ss = get_state_store()
                     for _row in _ss.list_all_onboarding():
                         status = (_row.get("status") or "").upper()
                         if status not in ("BROKEN", "FAILED"):
@@ -25161,9 +25461,83 @@ respective package directories or official repositories.
             combo.setUpdatesEnabled(True)
             combo.blockSignals(False)
 
+    def _autodiscover_adapters(self) -> int:
+        """Scan ``fine_tuned/`` and register any adapter directories
+        not yet in ``llm_backends.yaml``. Returns the count registered.
+
+        Without this, freshly-trained adapters only appear in pickers
+        AFTER the user clicks Use-in-Chat or attempts to chat with
+        them — which produces the "Server dropdown is missing my new
+        adapter" surprise. Running this on every locals-refresh tick
+        keeps the YAML in sync with what's on disk.
+        """
+        registered = 0
+        try:
+            ft = self.root / "fine_tuned"
+            if not ft.exists():
+                return 0
+            # Read the current YAML so we know what's already registered.
+            import yaml as _yaml
+            cfg_path = self.root / "configs" / "llm_backends.yaml"
+            already_registered: set[str] = set()
+            if cfg_path.exists():
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        cfg = _yaml.safe_load(f) or {}
+                    for ent in (cfg.get("models") or {}).values():
+                        if not isinstance(ent, dict):
+                            continue
+                        ad = ent.get("adapter_dir") or ""
+                        if ad:
+                            try:
+                                already_registered.add(str(Path(ad).resolve()).lower())
+                            except Exception:
+                                already_registered.add(str(ad).lower())
+                except Exception:
+                    pass
+
+            for d in ft.iterdir():
+                if not d.is_dir():
+                    continue
+                if d.name.startswith("checkpoint-"):
+                    continue
+                cfg_file = d / "adapter_config.json"
+                weights_safe = d / "adapter_model.safetensors"
+                weights_bin = d / "adapter_model.bin"
+                if not cfg_file.exists() or not (weights_safe.exists() or weights_bin.exists()):
+                    continue
+                try:
+                    key = str(d.resolve()).lower()
+                except Exception:
+                    key = str(d).lower()
+                if key in already_registered:
+                    continue
+                # Run the same registration the Use-in-Chat button uses.
+                try:
+                    ok, _msg = self._register_tuned_adapter(d.name, d)
+                    if ok:
+                        registered += 1
+                except Exception:
+                    # Best-effort discovery — never let one bad adapter
+                    # block the rest.
+                    continue
+        except Exception:
+            pass
+        return registered
+
     def _refresh_locals(self) -> None:
         # Refresh downloaded models display
         self._refresh_models()
+        # Autodiscover adapters in fine_tuned/ so dropdowns are in
+        # sync with the on-disk reality without waiting for Use-in-Chat.
+        try:
+            n = self._autodiscover_adapters()
+            if n:
+                self._log_to_app_log(
+                    f"[autodiscover] registered {n} adapter(s) from fine_tuned/"
+                )
+        except Exception:
+            pass
         
         models_dir = self.root / "models"
         downloaded_models = []

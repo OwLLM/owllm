@@ -32,6 +32,34 @@ class TrainingConfig:
     ``<output_dir>/<adapter_name>`` instead of the default
     ``adapter_<timestamp>``. ``None`` falls back to the timestamped name."""
 
+    # --- Resume / continue ------------------------------------------------
+    resume: Optional[str] = None
+    """Trainer-checkpoint resume. ``"auto"`` picks the newest checkpoint-N
+    under ``output_dir``; an explicit path resumes from that checkpoint.
+    Mutually exclusive with ``resume_adapter``. ``None`` = fresh run."""
+
+    resume_adapter: Optional[Path] = None
+    """Continue training from a saved LoRA adapter directory (fresh
+    optimizer state). Use when extending a finished adapter for more
+    epochs / new data / lower LR. Mutually exclusive with ``resume``."""
+
+    # --- Periodic Trainer checkpoints ------------------------------------
+    save_steps: int = 0
+    """Write a Trainer checkpoint every N optimizer steps. ``0`` disables
+    intermediate saving (only the final adapter is kept). Set this >0 if
+    you want ``resume="auto"`` to have something to resume from."""
+
+    save_total_limit: int = 2
+    """When ``save_steps > 0``, retain at most this many rolling
+    checkpoints in ``output_dir``."""
+
+    # --- Graceful stop ----------------------------------------------------
+    stop_file: Optional[Path] = None
+    """Sentinel-file path watched by finetune.py. The GUI's Stop button
+    writes this file; the trainer halts at the next step boundary, saves
+    a checkpoint, and exits cleanly. The trainer also unlinks the file
+    on detection so the next run isn't pre-stopped."""
+
 
 def build_finetune_cmd(cfg: TrainingConfig) -> List[str]:
     # Use python.exe instead of pythonw.exe for training to get real-time output
@@ -56,6 +84,27 @@ def build_finetune_cmd(cfg: TrainingConfig) -> List[str]:
     ]
     if cfg.adapter_name:
         cmd.extend(["--adapter-name", cfg.adapter_name])
+
+    # Resume flags (mutually exclusive — caller is responsible for not
+    # setting both; finetune.py also rejects the combo at startup).
+    if cfg.resume:
+        cmd.extend(["--resume", cfg.resume])
+    if cfg.resume_adapter:
+        cmd.extend(["--resume-adapter", str(cfg.resume_adapter)])
+
+    # Periodic checkpointing. Always emit --save-steps explicitly so the
+    # GUI is the single source of truth. cfg.save_steps == 0 means the
+    # user explicitly disabled checkpointing; finetune.py defaults to 25
+    # only when the flag is absent (e.g. someone running the script by
+    # hand without thinking about recovery).
+    cmd.extend(["--save-steps", str(int(cfg.save_steps or 0))])
+    if cfg.save_steps and cfg.save_steps > 0:
+        cmd.extend(["--save-total-limit", str(cfg.save_total_limit)])
+
+    # Graceful stop sentinel.
+    if cfg.stop_file:
+        cmd.extend(["--stop-file", str(cfg.stop_file)])
+
     return cmd
 
 

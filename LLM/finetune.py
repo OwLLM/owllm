@@ -17,9 +17,41 @@ import re
 import torch
 import io
 import shutil
+import signal
+import gc
 import time
 from pathlib import Path
 from datetime import datetime
+
+# Module-level flag flipped by signal handlers (SIGINT/SIGTERM). The
+# GracefulStopCallback polls this each step and asks the Trainer to
+# save + halt at the next safe boundary. Cross-platform: on Windows
+# only SIGINT (Ctrl+C) and SIGBREAK fire reliably from a console; on
+# POSIX SIGTERM works too. Either way the file-based --stop-file path
+# is the GUI's primary contract — signals are a console fallback.
+_STOP_REQUESTED: bool = False
+
+
+def _request_stop(signum, frame):  # noqa: ARG001
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+    try:
+        sys.stdout.write(f"[INFO] Received signal {signum} — will stop training at the next step boundary.\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+for _sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+    _sig = getattr(signal, _sig_name, None)
+    if _sig is not None:
+        try:
+            signal.signal(_sig, _request_stop)
+        except (ValueError, OSError):
+            # ValueError: signal only works in main thread (e.g. when
+            #   the trainer is launched from a worker thread). OSError
+            #   can hit on Windows for SIGTERM in some environments.
+            pass
 
 # Fix Windows console encoding for emojis and ensure unbuffered output for real-time GUI updates
 if sys.platform == "win32":
@@ -168,18 +200,24 @@ def cleanup_old_adapters(adapters_dir: Path, keep_latest: int = 10):
     if not adapters_dir.exists():
         return
     
-    # Get all valid adapters sorted by modification time
+    # Get all valid adapters sorted by modification time. SKIP Trainer
+    # `checkpoint-<step>` dirs — those are managed by the Trainer's
+    # save_total_limit and contain optimizer/scheduler state we must
+    # preserve for --resume. Sweeping them here would silently break
+    # resume capability the moment the user accumulated 11+ runs.
     adapters = []
     for adapter_dir in adapters_dir.iterdir():
         if not adapter_dir.is_dir():
             continue
-        
+        if adapter_dir.name.startswith("checkpoint-"):
+            continue
+
         # Check if it's a valid adapter (has required files)
         adapter_config = adapter_dir / "adapter_config.json"
         adapter_model = adapter_dir / "adapter_model.safetensors"
         if not adapter_model.exists():
             adapter_model = adapter_dir / "adapter_model.bin"
-        
+
         if adapter_config.exists() and adapter_model.exists():
             # Get modification time from the adapter model file
             mtime = adapter_model.stat().st_mtime
@@ -228,6 +266,57 @@ def parse_args():
                         "--output-dir). Falls back to 'adapter_<timestamp>' "
                         "when omitted. The training-panel Model Name field "
                         "is piped here so the user-typed name is preserved.")
+    # ------------------------------------------------------------------
+    # Resume / continue training
+    # ------------------------------------------------------------------
+    # Two independent ways to keep training:
+    #
+    # 1. --resume <path|auto>
+    #    Trainer-checkpoint resume. Restores model, optimizer, scheduler,
+    #    RNG, global_step — picks up exactly where a crashed/stopped run
+    #    left off. Requires the previous run wrote checkpoints
+    #    (--save-steps > 0). 'auto' = pick the newest checkpoint-* in
+    #    --output-dir.
+    #
+    # 2. --resume-adapter <path>
+    #    Adapter continuation. Load any saved LoRA adapter directory and
+    #    keep training it. Fresh optimizer state — appropriate when
+    #    extending a finished adapter, possibly with new data or a lower
+    #    LR. Skips get_peft_model and uses
+    #    PeftModel.from_pretrained(..., is_trainable=True).
+    #
+    # Mutually exclusive — pass one OR the other, not both.
+    p.add_argument("--resume", default=None, metavar="PATH",
+                   help="Resume from a Trainer checkpoint. Pass an explicit "
+                        "checkpoint dir, or 'auto' to use the newest "
+                        "checkpoint-* under --output-dir.")
+    p.add_argument("--resume-adapter", default=None, metavar="PATH",
+                   help="Continue training from an existing LoRA adapter "
+                        "directory (fresh optimizer state). Useful for "
+                        "extra epochs on a previously trained adapter.")
+    p.add_argument("--save-steps", type=int, default=25,
+                   help="Save a Trainer checkpoint every N optimizer steps "
+                        "(default 25; pass 0 to disable). Default-on so any "
+                        "crash/OOM/driver fault is recoverable via --resume "
+                        "without losing significant progress.")
+    p.add_argument("--save-total-limit", type=int, default=2,
+                   help="When --save-steps > 0, keep at most this many "
+                        "rolling checkpoints in --output-dir.")
+    # ------------------------------------------------------------------
+    # Stop training
+    # ------------------------------------------------------------------
+    # File-based stop signal. When this file appears on disk, the next
+    # step end will (a) save a checkpoint so the next --resume picks up
+    # cleanly, (b) exit the train loop, (c) write the final adapter,
+    # (d) free the GPU and exit the process.
+    #
+    # GUI contract: write the file to request stop, delete it BEFORE
+    # launching the next run so a stale file doesn't pre-stop it.
+    # We also delete it ourselves on detection (belt-and-suspenders).
+    p.add_argument("--stop-file", default=None, metavar="PATH",
+                   help="Sentinel file. If/when this file exists, training "
+                        "stops gracefully at the next step boundary, saves "
+                        "a checkpoint, and exits.")
     return p.parse_args()
 
 
@@ -249,8 +338,258 @@ def _should_use_bf16() -> bool:
         return False
 
 
+def _resolve_resume_checkpoint(resume_arg: str | None, output_dir: str) -> str | None:
+    """Translate --resume into a concrete checkpoint dir or None.
+
+    'auto' -> newest checkpoint-<N> under output_dir (sorted by N, not
+    by mtime — mtime can lie when files are copied around). An explicit
+    path is returned as-is after a sanity check.
+    """
+    if not resume_arg:
+        return None
+    if resume_arg.strip().lower() == "auto":
+        out = Path(output_dir)
+        if not out.exists():
+            print(f"[WARNING] --resume=auto: output dir {out} does not exist — starting fresh.")
+            return None
+        candidates = []
+        for p in out.iterdir():
+            if not p.is_dir() or not p.name.startswith("checkpoint-"):
+                continue
+            try:
+                step = int(p.name.split("-", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            candidates.append((step, p))
+        if not candidates:
+            print(f"[WARNING] --resume=auto: no checkpoint-* dirs in {out} — starting fresh.")
+            return None
+        candidates.sort()
+        chosen = str(candidates[-1][1])
+        print(f"[INFO] --resume=auto: latest checkpoint is {chosen} (step {candidates[-1][0]}).")
+        return chosen
+    # Explicit path
+    p = Path(resume_arg)
+    if not p.exists():
+        raise FileNotFoundError(f"--resume path does not exist: {p}")
+    return str(p)
+
+
+def _release_gpu(*objs) -> None:
+    """Drop refs to large CUDA-resident objects and reclaim VRAM.
+
+    Called after training (success or stop) so a parent process that
+    keeps this Python interpreter alive briefly during teardown can
+    still see the GPU freed. When the subprocess simply exits, the OS
+    reclaims everything regardless — but explicit cleanup is cheap and
+    makes 'stop, then start a new run in the same shell' work too.
+    """
+    for o in objs:
+        try:
+            del o
+        except Exception:
+            pass
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+
+
+def _preflight_checks(args) -> tuple[bool, list[str]]:
+    """Validate everything the training run depends on, BEFORE we touch
+    the GPU or load the model. Returns (ok, errors).
+
+    Goal: catch the cheap-to-detect failure modes (missing dataset,
+    corrupt model dir, base/adapter mismatch, no disk space, wrong
+    Python env) at the second the run starts — not 30 minutes in
+    after the user has watched a progress bar tick.
+
+    Each check is independent and contributes one error string on
+    failure. We return the FULL list of errors so the user sees every
+    problem at once instead of fixing them one at a time.
+    """
+    import json as _json
+    import shutil as _shutil
+    errs: list[str] = []
+
+    # 1. Dataset file present and parseable.
+    data_path = Path(args.data_path)
+    if not data_path.exists():
+        errs.append(f"Dataset file not found: {data_path}")
+    elif data_path.is_dir():
+        errs.append(f"Dataset path is a directory, not a file: {data_path}")
+    else:
+        try:
+            sz = data_path.stat().st_size
+            if sz == 0:
+                errs.append(f"Dataset file is empty (0 bytes): {data_path}")
+            elif sz > 10 * 1024 * 1024 * 1024:  # 10 GB
+                errs.append(
+                    f"Dataset file is enormous ({sz / 1024**3:.1f} GB) — "
+                    "training will be extremely slow. Are you sure?"
+                )
+        except Exception:
+            pass
+        # Quick parse check — read first non-empty line.
+        try:
+            with data_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if data_path.suffix.lower() == ".jsonl":
+                        _json.loads(line)
+                    elif data_path.suffix.lower() == ".json":
+                        # Don't slurp giant files — just verify the prefix.
+                        pass
+                    break
+        except _json.JSONDecodeError as exc:
+            errs.append(f"Dataset's first JSONL line doesn't parse: {exc}")
+        except Exception as exc:
+            errs.append(f"Couldn't read dataset: {exc}")
+
+    # 2. Base model directory.
+    model_arg = args.model_name
+    model_path = Path(model_arg)
+    if model_path.exists() and model_path.is_dir():
+        cfg = model_path / "config.json"
+        if not cfg.exists():
+            errs.append(
+                f"Base model dir missing config.json: {model_path}"
+            )
+        # Need at least one weight file.
+        has_weights = any(
+            (model_path / f).exists()
+            for f in ("model.safetensors", "pytorch_model.bin",
+                      "model.safetensors.index.json",
+                      "pytorch_model.bin.index.json")
+        ) or any(model_path.glob("*.safetensors")) or any(model_path.glob("*.bin"))
+        if not has_weights:
+            errs.append(
+                f"Base model dir has no weight files: {model_path}"
+            )
+    elif "/" in model_arg or "\\" in model_arg:
+        # Looked like a local path but doesn't exist.
+        errs.append(f"Base model path does not exist: {model_arg}")
+    # If it's a hub id like 'org/name' with no slashes interpreted as
+    # path, transformers will try to download — we accept that.
+
+    # 3. Output dir writable.
+    out_dir = Path(args.output_dir)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        probe = out_dir / ".__write_probe__"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except Exception as exc:
+        errs.append(f"Output dir not writable ({out_dir}): {exc}")
+    # Disk space — warn if < 5 GB free where the adapter will land.
+    try:
+        free = _shutil.disk_usage(str(out_dir)).free
+        if free < 2 * 1024 ** 3:
+            errs.append(
+                f"Less than 2 GB free at {out_dir} — adapter save may fail."
+            )
+    except Exception:
+        pass
+
+    # 4. Resume / continue invariants.
+    if args.resume and args.resume_adapter:
+        errs.append(
+            "--resume and --resume-adapter are mutually exclusive — "
+            "pick one."
+        )
+    if args.resume_adapter:
+        ad = Path(args.resume_adapter)
+        if not ad.exists():
+            errs.append(f"--resume-adapter path does not exist: {ad}")
+        else:
+            cfg = ad / "adapter_config.json"
+            if not cfg.exists():
+                errs.append(
+                    f"--resume-adapter dir is missing adapter_config.json: {ad}"
+                )
+            else:
+                # Cross-check: base referenced by adapter MUST match
+                # --model-name. The GUI's launch path enforces this,
+                # but a CLI invocation can bypass that — catch it here.
+                try:
+                    ac = _json.loads(cfg.read_text(encoding="utf-8"))
+                    adapter_base = ac.get("base_model_name_or_path") or ac.get("base_model") or ""
+                    # Loose match — basename or hub-id match is fine,
+                    # since path forms vary across machines.
+                    def _slug(s: str) -> str:
+                        s = (s or "").replace("\\", "/").lower().rstrip("/")
+                        return s.rsplit("/", 1)[-1].replace("__", "/")
+                    if adapter_base and _slug(adapter_base) != _slug(model_arg):
+                        errs.append(
+                            "Continue-mode base mismatch: adapter was trained "
+                            f"on '{adapter_base}', but --model-name is "
+                            f"'{model_arg}'. Continuing an adapter against a "
+                            "different base produces garbage outputs."
+                        )
+                except Exception:
+                    pass
+
+    # 5. CUDA availability when the user expects a GPU.
+    cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if cuda_vis is not None and cuda_vis.strip() != "":
+        try:
+            import torch as _torch
+            if not _torch.cuda.is_available():
+                errs.append(
+                    f"CUDA_VISIBLE_DEVICES={cuda_vis!r} is set but torch.cuda.is_available() "
+                    "returned False. Training will fall back to CPU (extremely slow)."
+                )
+        except Exception:
+            pass
+
+    return (len(errs) == 0), errs
+
+
 def main():
     args = parse_args()
+
+    # Preflight — fail loud and early on the cheap-to-detect things.
+    # The GUI sees these errors immediately in the train log and the
+    # exit code so it can surface them in the dashboard without a 30
+    # minute wait.
+    print("[INFO] [PREFLIGHT] running input checks...")
+    ok, errs = _preflight_checks(args)
+    if not ok:
+        print("[ERROR] [PREFLIGHT] training inputs failed validation:")
+        for e in errs:
+            print(f"[ERROR] [PREFLIGHT]   • {e}")
+        print("[ERROR] [PREFLIGHT] aborting before model load. Fix the above and re-run.")
+        sys.exit(2)
+    print("[INFO] [PREFLIGHT] all checks passed.")
+
+    # Resume flags are mutually exclusive — they touch different parts
+    # of the pipeline (Trainer state vs model weights) and combining
+    # them silently picks the worse of both.
+    if args.resume and args.resume_adapter:
+        print("[ERROR] --resume and --resume-adapter are mutually exclusive.")
+        print("[ERROR] Pick one: --resume restores Trainer state from a "
+              "checkpoint-<step> dir; --resume-adapter loads a saved LoRA "
+              "adapter and trains it further with a fresh optimizer.")
+        sys.exit(2)
+
+    # Pre-clean stale stop file if user/GUI didn't. A stop file from a
+    # previous run would otherwise pre-stop this run on the first step.
+    if args.stop_file:
+        sf = Path(args.stop_file)
+        if sf.exists():
+            try:
+                sf.unlink()
+                print(f"[INFO] Removed stale stop file: {sf}")
+            except Exception as e:
+                print(f"[WARNING] Could not remove stale stop file {sf}: {e}")
 
     # Note about unsloth: we ALWAYS go through the standard PEFT path
     # below (should_try_unsloth is hard-coded False because Unsloth's
@@ -412,9 +751,35 @@ def main():
     if args.max_examples:
         dataset = dataset.select(range(min(args.max_examples, len(dataset))))
 
-    def formatting_func(example):
-        text = f"### Instruction:\n{example['instruction']}\n\n### Response:\n{example['output']}"
-        return {"text": text}
+    # Pick a formatter. If the tokenizer ships a chat template (Gemma,
+    # Llama 3, Qwen, ...), USE IT — feeding chat-tuned models text in
+    # Alpaca's "### Instruction / ### Response" template trains them
+    # against the wrong turn structure and pushes initial loss into
+    # the 50–100 range, which then converges very slowly even when
+    # gradients flow correctly. The tokenizer's own template matches
+    # what the base model already knows, so loss starts near 1–3 and
+    # actually moves. Fall back to Alpaca only when no template exists.
+    _tokenizer_for_template = AutoTokenizer.from_pretrained(MODEL_NAME)
+    _has_chat_template = bool(getattr(_tokenizer_for_template, "chat_template", None))
+
+    if _has_chat_template:
+        print("[INFO] ✓ Using tokenizer's built-in chat template for formatting.")
+        def formatting_func(example):
+            messages = [
+                {"role": "user", "content": example["instruction"]},
+                {"role": "assistant", "content": example["output"]},
+            ]
+            text = _tokenizer_for_template.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            return {"text": text}
+    else:
+        print("[INFO] No chat template on tokenizer — falling back to Alpaca format.")
+        def formatting_func(example):
+            text = f"### Instruction:\n{example['instruction']}\n\n### Response:\n{example['output']}"
+            return {"text": text}
 
     dataset = dataset.map(formatting_func, remove_columns=dataset.column_names)
     print(f"[INFO] ✓ Dataset formatted ({len(dataset)} examples ready for tokenisation)")
@@ -659,12 +1024,42 @@ def main():
         except Exception:
             gemma4_clippable_present = False
         if gemma4_clippable_present:
+            # Gemma 4 is MULTIMODAL. Three distinct module families:
+            #   - model.vision_tower.* — uses Gemma4ClippableLinear
+            #     (q_proj, k_proj, ... are nn.Module wrappers; the
+            #     INNER nn.Linear is at ``q_proj.linear``).
+            #   - model.audio_tower.* — same wrapper.
+            #   - model.language_model.layers.N.* — uses plain
+            #     nn.Linear directly. ``q_proj`` IS the nn.Linear
+            #     (no ``.linear`` child).
+            #
+            # The previous targeting ``q_proj.linear`` ONLY matched
+            # vision/audio. For text-only fine-tuning those LoRA
+            # params get zero activations during forward, p.grad stays
+            # None, and ``grad_norm: 0`` for the entire run. Verified
+            # empirically: a real forward+backward showed 148 lora_A +
+            # 148 lora_B all had ``p.grad=None``, sampled names lived
+            # under ``vision_tower.encoder.layers.0...``, and the
+            # text decoder had ZERO LoRA modules attached.
+            #
+            # Fix: target_modules as a REGEX restricted to the
+            # language_model subtree. PEFT treats a string as a regex
+            # (``re.fullmatch`` against each module's full name).
+            # Text-decoder q_proj is a direct nn.Linear, no .linear
+            # suffix needed. Verified path:
+            #   model.language_model.layers.<N>.self_attn.q_proj
+            #   model.language_model.layers.<N>.mlp.gate_proj
+            proj_alt = "|".join(default_targets)
+            target_modules = (
+                rf".*\.language_model\..*\.(?:{proj_alt})$"
+            )
             print(
-                "[INFO] Detected Gemma4ClippableLinear wrappers — targeting "
-                "inner '.linear' modules so PEFT can attach LoRA.",
+                "[INFO] Detected Gemma4ClippableLinear wrappers (multimodal "
+                "Gemma 4) — using regex to target language_model only "
+                "(vision/audio towers excluded).",
                 flush=True,
             )
-            target_modules = [f"{name}.linear" for name in default_targets]
+            print(f"[INFO]   target_modules regex: {target_modules}", flush=True)
         else:
             target_modules = default_targets
 
@@ -680,8 +1075,134 @@ def main():
 
         peft_config = LoraConfig(**peft_params)
 
-        # Apply LoRA
-        model = get_peft_model(model, peft_config)
+        # Apply LoRA — either fresh (get_peft_model) or by loading an
+        # existing adapter we want to keep training (--resume-adapter).
+        # The adapter-resume path uses PeftModel.from_pretrained with
+        # is_trainable=True so the loaded LoRA weights are trainable
+        # rather than frozen-eval. This works for any adapter saved by
+        # PEFT regardless of base model — we just need the same base
+        # weights underneath, which the caller is responsible for
+        # passing via --model-name.
+        if args.resume_adapter:
+            from peft import PeftModel
+            adapter_dir = Path(args.resume_adapter)
+            if not adapter_dir.exists():
+                raise FileNotFoundError(
+                    f"--resume-adapter path does not exist: {adapter_dir}"
+                )
+            print(f"[INFO] Continuing from existing adapter: {adapter_dir}")
+            print("[INFO] Optimizer state will start fresh — consider lowering "
+                  "--learning-rate (e.g. 0.5x–0.25x of the original) when "
+                  "extending a finished adapter.")
+            model = PeftModel.from_pretrained(
+                model, str(adapter_dir), is_trainable=True
+            )
+        else:
+            model = get_peft_model(model, peft_config)
+
+        # CRITICAL: with a fully frozen embedding + non-reentrant
+        # gradient checkpointing, the activations entering each
+        # transformer block have requires_grad=False. The checkpointed
+        # backward then cannot rebuild the autograd graph, gradients
+        # silently zero out before reaching the LoRA adapters, and the
+        # Trainer reports grad_norm=0 every step while loss stays flat.
+        # `enable_input_require_grads()` adds a forward hook that flips
+        # requires_grad=True on the embedding's output WITHOUT making
+        # the embedding's parameters trainable — exactly what LoRA +
+        # gradient checkpointing needs. The bnb path gets this for
+        # free via `prepare_model_for_kbit_training`; the bf16/fp32
+        # path does not, so we replicate it here.
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+
+        # ----------------------------------------------------------------
+        # Gemma 4-specific gradient-flow fix.
+        # ----------------------------------------------------------------
+        # Gemma 4 wraps every Q/K/V/O and MLP linear in a custom
+        # ``Gemma4ClippableLinear`` module that applies ``torch.clamp``
+        # to the input AND output of the linear. The clip ranges are
+        # buffers loaded from the checkpoint (tight finite values like
+        # ``[-21.4, 21.3]``, NOT ``±inf``). During training, activations
+        # routinely sit at the clamp boundary — and ``torch.clamp`` has
+        # a hard-zero gradient outside the clip range. The output
+        # clamp sits between the linear (where LoRA is attached) and
+        # downstream layers, so gradients flowing back from the loss
+        # are zeroed before they ever reach the linear → LoRA params
+        # receive zero gradient → ``grad_norm: 0`` for every step →
+        # the adapter doesn't learn.
+        #
+        # The clamp is a numerical-stabilization artifact for
+        # inference; disabling it during training restores gradient
+        # flow. The model recovers numerical stability through
+        # training; the saved adapter still works at inference time
+        # whether the base has clipping enabled or not (PEFT attaches
+        # to the inner ``.linear``, leaving the wrapper around it).
+        try:
+            disabled = 0
+            for module in model.modules():
+                if type(module).__name__ != "Gemma4ClippableLinear":
+                    continue
+                if not getattr(module, "use_clipped_linears", False):
+                    continue
+                module.use_clipped_linears = False
+                # Also widen the buffers in case any cached path peeks
+                # at them directly. This makes the clamp a no-op even
+                # if the flag check is bypassed somewhere.
+                for buf, sign in (
+                    ("input_min", -1.0), ("input_max", 1.0),
+                    ("output_min", -1.0), ("output_max", 1.0),
+                ):
+                    if hasattr(module, buf):
+                        try:
+                            getattr(module, buf).fill_(sign * float("inf"))
+                        except Exception:
+                            pass
+                disabled += 1
+            if disabled:
+                print(
+                    f"[INFO] [GEMMA4-FIX] Disabled torch.clamp on {disabled} "
+                    "Gemma4ClippableLinear modules — restores gradient flow "
+                    "to LoRA adapters during training."
+                )
+        except Exception as exc:
+            print(f"[WARN] [GEMMA4-FIX] couldn't disable clipping: {exc}")
+
+        # ----------------------------------------------------------------
+        # Kernelize-during-training crash workaround.
+        # ----------------------------------------------------------------
+        # transformers' ``PreTrainedModel.train()`` (modeling_utils.py
+        # ~line 4676) calls ``self.kernelize()`` whenever
+        # ``self.use_kernels`` is truthy. The kernelize step swaps
+        # optimized C++ kernel modules into the model tree. On the
+        # Gemma 4 + PEFT + bf16 combo this corrupts a sub-module's
+        # ``_modules`` dict (it ends up as a bool instead of a dict),
+        # which then trips ``TypeError: argument of type 'bool' is not
+        # iterable`` the next time __setattr__ runs — observed crashing
+        # training mid-run (around step 24/225) with a deep recursion
+        # of ``module.train(mode)`` calls in the traceback.
+        #
+        # Kernel optimization is an INFERENCE feature; training works
+        # fine without it. Force-disable on the wrapper AND walk every
+        # sub-module so PreTrainedModel descendants in the multimodal
+        # tree (vision_tower, audio_tower, language_model) all skip
+        # kernelize() on every train() call.
+        try:
+            disabled_kernels = 0
+            for sub in model.modules():
+                if hasattr(sub, "use_kernels"):
+                    try:
+                        sub.use_kernels = False
+                        disabled_kernels += 1
+                    except Exception:
+                        pass
+            if disabled_kernels:
+                print(
+                    f"[INFO] [KERNELIZE-FIX] Disabled use_kernels on "
+                    f"{disabled_kernels} module(s) to prevent the "
+                    "kernelize() crash mid-training."
+                )
+        except Exception as exc:
+            print(f"[WARN] [KERNELIZE-FIX] couldn't disable use_kernels: {exc}")
 
         # PEFT correctly sets requires_grad=True on LoRA adapters and
         # False on the frozen base model. NEVER iterate parameters and
@@ -691,6 +1212,22 @@ def main():
         # op (typically clip_grad_norm) then crashes with the famously
         # vague 'CUDA error: an illegal memory access was encountered'.
         model.train()
+
+        # Diagnostic: confirm LoRA actually attached. If this prints
+        # "trainable params: 0" then target_modules didn't match any
+        # module in the model and training will silently no-op.
+        if hasattr(model, "print_trainable_parameters"):
+            try:
+                trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                total = sum(p.numel() for p in model.parameters())
+                pct = (100.0 * trainable / total) if total else 0.0
+                print(f"[INFO] [LORA-CHECK] trainable={trainable:,}  total={total:,}  trainable_pct={pct:.4f}%")
+                if trainable == 0:
+                    print("[ERROR] [LORA-CHECK] No trainable parameters! LoRA did not attach to any module.")
+                    print("[ERROR] [LORA-CHECK] target_modules tried: {}".format(target_modules))
+            except Exception as e:
+                print(f"[WARN] [LORA-CHECK] couldn't count params: {e}")
+            model.print_trainable_parameters()
 
         # Cache is incompatible with gradient checkpointing in many
         # decoder layers (incl. Gemma4TextDecoderLayer). Turn it off
@@ -767,6 +1304,66 @@ def main():
             # Ensure at least one emit per step even if Trainer log is skipped
             self._emit(state, logs={})
 
+    class GracefulStopCallback(TrainerCallback):
+        """Stop training cleanly on a stop-file or SIGINT/SIGTERM.
+
+        Two trigger sources, both polled at every step boundary:
+          1. The sentinel file at ``self.stop_file`` exists (the GUI's
+             stop button drops this file in the run's output dir).
+          2. The module-level ``_STOP_REQUESTED`` flag is True (set by
+             our SIGINT/SIGTERM/SIGBREAK handlers — covers Ctrl+C in
+             a terminal).
+
+        On trigger we set ``control.should_save = True`` AND
+        ``control.should_training_stop = True``. The Trainer then writes
+        a `checkpoint-<step>` dir on the way out, so the next
+        ``--resume auto`` picks up exactly where we stopped. We also
+        delete the sentinel file so a second run doesn't see stale state.
+        """
+
+        def __init__(self, stop_file: str | None) -> None:
+            self.stop_file = Path(stop_file) if stop_file else None
+            self._already_triggered = False
+
+        def _should_stop(self) -> bool:
+            if _STOP_REQUESTED:
+                return True
+            if self.stop_file is not None and self.stop_file.exists():
+                return True
+            return False
+
+        def _trigger(self, control: TrainerControl) -> TrainerControl:
+            if self._already_triggered:
+                return control
+            self._already_triggered = True
+            print(
+                "[INFO] Graceful stop requested — saving checkpoint and "
+                "exiting at the next opportunity.",
+                flush=True,
+            )
+            # Best-effort: remove the sentinel so a re-launch with the
+            # same path doesn't immediately re-trigger.
+            if self.stop_file is not None:
+                try:
+                    self.stop_file.unlink(missing_ok=True)
+                except Exception as e:
+                    print(f"[WARN] Could not remove stop file {self.stop_file}: {e}")
+            control.should_save = True
+            control.should_training_stop = True
+            return control
+
+        def on_step_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+            if self._should_stop():
+                return self._trigger(control)
+            return control
+
+        def on_substep_end(self, args, state: TrainerState, control: TrainerControl, **kwargs):
+            # Inside grad-accum micro-steps. Cheap to check and lets us
+            # bail out a fraction of a step earlier on slow batches.
+            if self._should_stop():
+                return self._trigger(control)
+            return control
+
     print("[INFO] Starting training...")
     
     # Configure tqdm for real-time progress updates in GUI
@@ -825,19 +1422,99 @@ def main():
             output_dir=OUTPUT_DIR,
             optim=optim_name,
             seed=3407,
-            # Disable Hugging Face Trainer intermediate checkpoints (creates `checkpoint-<step>` dirs)
-            save_strategy="no",
-            # Keep a small number if you enable saving later
-            save_total_limit=2,
+            # Periodic Trainer checkpoints. Default ON (every 25 steps) so
+            # any crash/OOM/driver fault is recoverable via --resume.
+            # Pass --save-steps 0 to disable. checkpoint-<step> dirs land
+            # in OUTPUT_DIR; save_total_limit rotates the oldest out.
+            save_strategy="steps" if args.save_steps and args.save_steps > 0 else "no",
+            save_steps=args.save_steps if args.save_steps and args.save_steps > 0 else 500,
+            save_total_limit=max(1, args.save_total_limit),
             report_to="none",
         ),
     )
     trainer.add_callback(DashboardCallback(total_steps=total_steps, effective_bs=effective_bs, start_time=time.time()))
+    trainer.add_callback(GracefulStopCallback(stop_file=args.stop_file))
+    if args.stop_file:
+        print(f"[INFO] Graceful stop watching: {args.stop_file}")
+    print("[INFO] Send SIGINT (Ctrl+C) or SIGTERM to request a graceful stop.")
 
-    # Train and capture training state
+    # Resolve --resume into a concrete checkpoint dir (or None). We
+    # do this AFTER trainer construction so OUTPUT_DIR is the trainer's
+    # actual save root and not some not-yet-created path.
+    resume_ckpt = _resolve_resume_checkpoint(args.resume, OUTPUT_DIR)
+    if resume_ckpt is not None:
+        print(f"[INFO] Resuming Trainer state from: {resume_ckpt}")
+    elif args.resume_adapter:
+        print(f"[INFO] Continuing adapter (fresh optimizer) from: {args.resume_adapter}")
+    else:
+        print("[INFO] Fresh training run (no resume).")
+
+    # ---------------------------------------------------------------------
+    # Pre-training parameter audit (cheap — pure param inspection).
+    # ---------------------------------------------------------------------
+    # An earlier version of this block ran a forward+backward on the
+    # whole model to verify gradient flow. That works for small models
+    # but on an 8B bf16 multimodal model it consumed enough VRAM that
+    # the subsequent trainer.train() stalled during its first forward.
+    # We now do a pure parameter-name + requires_grad inspection — no
+    # forward, no backward, no extra VRAM. The actual gradient values
+    # become visible at step 1 in the trainer's normal grad_norm log.
+    try:
+        groups = {"lora_A": 0, "lora_B": 0, "other_trainable": 0, "frozen": 0}
+        sample_lora_A_name: Optional[str] = None
+        sample_lora_B_name: Optional[str] = None
+        for n, p in model.named_parameters():
+            if not p.requires_grad:
+                groups["frozen"] += p.numel()
+                continue
+            lname = n.lower()
+            if "lora_a" in lname:
+                groups["lora_A"] += p.numel()
+                if sample_lora_A_name is None:
+                    sample_lora_A_name = n
+            elif "lora_b" in lname:
+                groups["lora_B"] += p.numel()
+                if sample_lora_B_name is None:
+                    sample_lora_B_name = n
+            else:
+                groups["other_trainable"] += p.numel()
+        print(
+            "[INFO] [PARAM-AUDIT] trainable breakdown: "
+            f"lora_A={groups['lora_A']:,} | lora_B={groups['lora_B']:,} | "
+            f"other_trainable={groups['other_trainable']:,} | frozen={groups['frozen']:,}"
+        )
+        if sample_lora_A_name:
+            print(f"[INFO] [PARAM-AUDIT] sample lora_A param: {sample_lora_A_name}")
+        if sample_lora_B_name:
+            print(f"[INFO] [PARAM-AUDIT] sample lora_B param: {sample_lora_B_name}")
+        if groups["lora_A"] == 0 and groups["lora_B"] == 0:
+            # Trainable params exist but no lora_A/lora_B — name
+            # convention differs in this PEFT version. Fall back to
+            # printing the first few trainable param names so we can
+            # see what they're called and adjust the matcher.
+            print("[WARN] [PARAM-AUDIT] no lora_A/lora_B by name — listing first 8 trainable params:")
+            seen = 0
+            for n, p in model.named_parameters():
+                if p.requires_grad:
+                    print(f"[WARN] [PARAM-AUDIT]   {n}  shape={tuple(p.shape)}")
+                    seen += 1
+                    if seen >= 8:
+                        break
+        if groups["lora_A"] + groups["lora_B"] + groups["other_trainable"] == 0:
+            print("[ERROR] [PARAM-AUDIT] ZERO trainable parameters — LoRA didn't attach.")
+    except Exception as exc:
+        print(f"[WARN] [PARAM-AUDIT] inspection raised {type(exc).__name__}: {exc}")
+
+    # Train and capture training state. ``resume_from_checkpoint`` is
+    # honoured even when None — Trainer treats None as 'fresh run',
+    # so we don't branch the call.
     print("[INFO] Starting training loop...")
-    train_result = trainer.train()
-    
+    train_result = trainer.train(resume_from_checkpoint=resume_ckpt)
+    if _STOP_REQUESTED:
+        print("[INFO] Training was stopped early by user request — the "
+              "Trainer wrote a checkpoint on the way out, so a future "
+              "--resume auto run will pick up where this one left off.")
+
     # Verify training actually happened
     if train_result.metrics:
         print(f"[INFO] Training completed successfully!")
@@ -980,6 +1657,14 @@ def main():
         cleanup_old_adapters(Path(OUTPUT_DIR), keep_latest=10)
     except Exception as e:
         print(f"[WARNING] Cleanup failed: {e}")
+
+    # Free GPU memory before returning. When the training subprocess
+    # exits, the OS reclaims VRAM regardless — but doing it explicitly
+    # here makes 'stop one run, immediately start another in the same
+    # interpreter' work, and keeps VRAM usage honest in any embedded
+    # use of this script (e.g. notebooks, batch runners).
+    print("[INFO] Releasing GPU memory…")
+    _release_gpu(trainer, model)
 
 
 if __name__ == "__main__":

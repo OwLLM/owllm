@@ -20,6 +20,8 @@ page transitions from the loading state to the live state.
 from __future__ import annotations
 
 import math
+import sys
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -419,39 +421,81 @@ class AgentTeamCanvas(QWidget):
     # ------------------------------------------------------------------
 
     def paintEvent(self, event) -> None:  # noqa: N802
+        # Each stage is wrapped in try/except so a failure in one stage
+        # (e.g. a Qt arg-type quirk in the rotating-rings draw code)
+        # doesn't cascade and hide the agent nodes / orchestrator crest
+        # that follow it. Stack traces dump to stderr so the next run
+        # reports the actual culprit instead of silently rendering
+        # only edge arrows.
         p = QPainter(self)
         p.setRenderHints(
             QPainter.Antialiasing
             | QPainter.TextAntialiasing
             | QPainter.SmoothPixmapTransform
         )
-
         rect = self.rect()
-        self._paint_background(p, rect)
 
-        centre, radius, positions = self._layout()
+        def _safe(stage_name: str, fn) -> None:
+            try:
+                fn()
+            except Exception:
+                sys.stderr.write(
+                    f"[AgentTeamCanvas] {stage_name} failed:\n"
+                )
+                traceback.print_exc(file=sys.stderr)
 
-        # Beams under nodes.
-        self._paint_beams(p, centre, positions)
+        _safe("background", lambda: self._paint_background(p, rect))
 
-        # Orchestrator crest at the centre.
-        self._paint_centre(p, centre, radius * 0.36)
+        # Layout is critical — if it fails we still want a fallback so
+        # the user sees something instead of an empty void.
+        try:
+            centre, radius, positions = self._layout()
+        except Exception:
+            sys.stderr.write("[AgentTeamCanvas] _layout failed:\n")
+            traceback.print_exc(file=sys.stderr)
+            centre = QPointF(rect.width() / 2.0, rect.height() / 2.0)
+            radius = 110.0
+            positions = []
 
-        # Agent nodes on top of beams.
-        self._paint_nodes(p, positions)
+        _safe("beams", lambda: self._paint_beams(p, centre, positions))
+        _safe("centre", lambda: self._paint_centre(p, centre, radius * 0.36))
+        _safe("nodes", lambda: self._paint_nodes(p, positions))
 
         # Top-left info card.
-        # When an agent is selected, the agent's card. Otherwise the
-        # team-level card (if team metadata was provided), else a
-        # plain hint — never empty.
-        if self._selected is not None:
-            agent = self._agents.get(self._selected)
-            if agent is not None:
-                self._paint_info_card(p, rect, agent)
-        elif self._team_name:
-            self._paint_team_card(p, rect)
-        elif self._agents:
-            self._paint_hint(p, rect)
+        def _draw_info_card() -> None:
+            if self._selected is not None:
+                agent = self._agents.get(self._selected)
+                if agent is not None:
+                    self._paint_info_card(p, rect, agent)
+            elif self._team_name:
+                self._paint_team_card(p, rect)
+            elif self._agents:
+                self._paint_hint(p, rect)
+
+        _safe("info card", _draw_info_card)
+
+        # Visible-state diagnostic in the bottom-right so the user (and
+        # we) can confirm the widget is alive and what data it has,
+        # even when individual paint stages fail. Tiny dim text — not
+        # in the way.
+        try:
+            diag = (
+                f"agents:{len(self._agents)} "
+                f"orbit:{len(self._orbit_order)} "
+                f"edges:{len(self._edges)} "
+                f"orch:{self._orchestrator_name or '—'}"
+            )
+            font = QFont()
+            font.setPointSize(8)
+            p.setFont(font)
+            p.setPen(_alpha(_TEXT_DIM, 140))
+            p.drawText(
+                QRectF(0, rect.height() - 16, rect.width() - 6, 14),
+                Qt.AlignRight | Qt.AlignVCenter,
+                diag,
+            )
+        except Exception:
+            pass
 
     def _paint_background(self, p: QPainter, rect) -> None:
         grad = QLinearGradient(0, 0, 0, rect.height())

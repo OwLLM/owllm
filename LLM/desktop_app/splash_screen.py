@@ -2,7 +2,12 @@
 Professional splash screen for LLM Fine-tuning Studio
 Shows system detection progress with app's signature gradient style
 """
-from PySide6.QtWidgets import QSplashScreen, QVBoxLayout, QLabel, QWidget, QProgressBar, QTextEdit, QScrollArea
+from pathlib import Path
+
+from PySide6.QtWidgets import (
+    QSplashScreen, QVBoxLayout, QHBoxLayout, QLabel, QWidget, QProgressBar,
+    QTextEdit, QScrollArea,
+)
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QPixmap, QPainter, QColor, QLinearGradient, QFont, QTextCursor
 
@@ -26,9 +31,39 @@ class SplashScreen(QSplashScreen):
         layout.setContentsMargins(20, 15, 20, 15)
         layout.setSpacing(8)
         
-        # Title (compact)
-        self.title = QLabel("🎯 OWLLM")
-        self.title.setAlignment(Qt.AlignCenter)
+        # Title row: owl_startup PNG + "OWLLM" text. Replaces the bare
+        # 🎯 emoji that historically rendered as a random/missing glyph
+        # depending on the user's system fonts.
+        title_row = QHBoxLayout()
+        title_row.setSpacing(10)
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title_row.addStretch(1)
+
+        self.title_icon = QLabel()
+        self.title_icon.setAlignment(Qt.AlignCenter)
+        self.title_icon.setStyleSheet("background: transparent;")
+        try:
+            # splash_screen.py is in LLM/desktop_app/ — repo root is parents[2].
+            icon_path = (
+                Path(__file__).resolve().parents[2]
+                / "icons" / "Page_icons" / "owl_startup.png"
+            )
+            if icon_path.exists():
+                pm = QPixmap(str(icon_path))
+                if not pm.isNull():
+                    self.title_icon.setPixmap(
+                        pm.scaled(
+                            48, 48,
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation,
+                        )
+                    )
+        except Exception:
+            pass
+        title_row.addWidget(self.title_icon)
+
+        self.title = QLabel("OWLLM")
+        self.title.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         self.title.setStyleSheet("""
             QLabel {
                 color: white;
@@ -38,7 +73,9 @@ class SplashScreen(QSplashScreen):
                 padding: 5px;
             }
         """)
-        layout.addWidget(self.title)
+        title_row.addWidget(self.title)
+        title_row.addStretch(1)
+        layout.addLayout(title_row)
         
         # Progress bar (compact)
         self.progress = QProgressBar()
@@ -117,52 +154,48 @@ class SplashScreen(QSplashScreen):
         """)
     
     def update_progress(self, value: int, status: str, details: str = ""):
-        """Update splash screen with detection progress"""
+        """Update splash screen with detection progress.
+
+        ``self.repaint()`` is synchronous: it repaints the splash immediately
+        without yielding to Qt's event loop, so other widgets do NOT get a
+        chance to render. ``QApplication.processEvents()`` was previously
+        called here as well, but during ``MainWindow.__init__`` that flushed
+        every queued show/HWND/paint event for transient widgets being built
+        in the same call stack — appearing as dozens of brief flashes
+        precisely at progress-bar phase changes (50%, 90%, 100%).
+        """
         self.progress.setValue(value)
         self.progress.setFormat(f"{value}% - {status}")
-        
+
         if details:
-            # Append to existing details
             self.details.append(details)
-            # Auto-scroll to bottom
             cursor = self.details.textCursor()
             cursor.movePosition(QTextCursor.End)
             self.details.setTextCursor(cursor)
-        
-        # Force repaint and process events for mouse interactivity
+
         self.repaint()
-        from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()
-        
+
     def set_checking(self, component: str):
-        """Mark a component as being checked"""
+        """Mark a component as being checked."""
         self.details.append(f"⏳ Checking {component}...")
         cursor = self.details.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.details.setTextCursor(cursor)
         self.repaint()
-        from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()
-    
+
     def set_result(self, component: str, result: str, is_ok: bool = True):
-        """Update the last line with result"""
-        # Move to last line and replace it
+        """Update the last line with result."""
         cursor = self.details.textCursor()
         cursor.movePosition(QTextCursor.End)
         cursor.select(QTextCursor.LineUnderCursor)
         cursor.removeSelectedText()
-        cursor.deletePreviousChar()  # Remove the newline
-        
-        # Insert updated line
+        cursor.deletePreviousChar()
+
         icon = '✅' if is_ok else '⚠️'
         self.details.append(f"{icon} {component}: {result}")
-        
-        # Auto-scroll to bottom
+
         cursor = self.details.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.details.setTextCursor(cursor)
-        
         self.repaint()
-        from PySide6.QtWidgets import QApplication
-        QApplication.processEvents()
 

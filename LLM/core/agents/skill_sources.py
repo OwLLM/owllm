@@ -96,16 +96,17 @@ KNOWN_SOURCES: List[SkillSource] = [
 ALIAS_MAP: Dict[str, str] = {
     "Read": "read_file",
     "Write": "write_file_with_diff",
-    "Edit": "write_file_with_diff",
-    "MultiEdit": "write_file_with_diff",
+    "Edit": "edit_file",
+    "MultiEdit": "edit_file",
     "Bash": "shell",
     "PowerShell": "shell",
     "LS": "list_dir",
-    "Glob": "list_dir",
-    "Grep": "list_dir",
+    "Glob": "glob_files",
+    "Grep": "grep",
     "WebFetch": "http_get",
     "WebSearch": "http_get",
-    # NotebookEdit, Task, TodoWrite, etc. — no OWLLM equivalent yet;
+    "TodoWrite": "todo_write",
+    # NotebookEdit, Task, etc. — no OWLLM equivalent yet;
     # they'll fall through and be silently dropped at runtime.
 }
 

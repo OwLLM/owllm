@@ -170,6 +170,14 @@ class AgentTeamCanvas(QWidget):
         self._selected: Optional[str] = None
         self._hover: Optional[str] = None
 
+        # Per-layer rotation speed + phase offset. Each ring spins at
+        # its own random rate (some clockwise, some counter-clockwise)
+        # so agents on different layers don't stay aligned along the
+        # same radial line — that previously made connections hide
+        # behind each other.
+        self._ring_speed: Dict[int, float] = {}
+        self._ring_phase: Dict[int, float] = {}
+
         # Explicit (from, to) edges from the saved AgentGraph — drawn
         # as directed arrows on top of the spokes. Empty means no
         # arrows are rendered, layout is unaffected.
@@ -292,6 +300,23 @@ class AgentTeamCanvas(QWidget):
         self._team_name = name or ""
         self._team_description = description or ""
         self.update()
+
+    def _ensure_ring_motion(self, depths: List[int]) -> None:
+        """Lazily assign a stable random rotation speed + phase offset
+        to each ring depth. Called from _layout once the BFS depths
+        are known, so a ring's spin rate doesn't change between
+        frames — only new layers get a new rate."""
+        import random as _random
+        for d in depths:
+            if d not in self._ring_speed:
+                # Random magnitude in ~[0.10, 0.40] rad/tick, signed
+                # randomly so some rings go clockwise and others
+                # counter-clockwise. The orchestrator (depth 0) never
+                # moves so it isn't seeded here.
+                mag = 0.10 + _random.random() * 0.30
+                sign = 1.0 if _random.random() < 0.5 else -1.0
+                self._ring_speed[d] = mag * sign
+                self._ring_phase[d] = _random.random() * math.tau
 
     def _recompute_depths(self) -> None:
         """Directed BFS over set_edges() starting at the orchestrator,
@@ -470,15 +495,23 @@ class AgentTeamCanvas(QWidget):
             inner_offset + step * d for d in sorted(by_depth.keys())
         ]
 
+        # Make sure every visible layer has its own rotation rate.
+        self._ensure_ring_motion(list(by_depth.keys()))
+
         for depth in sorted(by_depth.keys()):
             ring_agents = by_depth[depth]
             count = len(ring_agents)
             if count == 0:
                 continue
             ring_radius = inner_offset + step * depth
-            # Counter-rotate alternate rings so the layers feel like
-            # distinct layers, not one big swarm.
-            ring_rot = rot if (depth % 2 == 1) else -rot * 0.6
+            # Each layer spins at its own random rate so agents on
+            # different rings don't stay aligned along the same
+            # radial line (which previously made their connection
+            # arrows hide behind each other). Speed and direction
+            # are seeded once per layer in _ensure_ring_motion.
+            speed = self._ring_speed.get(depth, 0.25)
+            phase_off = self._ring_phase.get(depth, 0.0)
+            ring_rot = self._phase * speed + phase_off
             for i, name in enumerate(ring_agents):
                 theta = (math.tau * i) / count + ring_rot - math.pi / 2
                 x = cx + ring_radius * math.cos(theta)
@@ -777,17 +810,29 @@ class AgentTeamCanvas(QWidget):
             phase_offset = i * 0.7
             pulse = 0.5 + 0.5 * math.sin(self._phase * 2.2 + phase_offset)
             # Scale the agent disc radius with the user's zoom so
-            # nodes stay proportional to the rings they sit on.
+            # nodes stay proportional to the rings they sit on. Icons
+            # are 20% smaller than before so neighbouring agents on
+            # different rings don't overlap each other's connection
+            # arrows when they line up radially.
             zoom = max(self._zoom_min, min(self._zoom_max, self._zoom))
-            r = (22 + 4 * pulse) * zoom
+            r = (17.6 + 3.2 * pulse) * zoom
             agent.radius = r
 
             is_selected = self._selected == name
             is_hover = self._hover == name
             is_active = agent.status == STATUS_ACTIVE
 
-            # Halo. Bright green when working; subtle cyan otherwise.
-            halo_col = _STATUS_HALO[agent.status]
+            # Halo. When the agent is doing work the status colour
+            # wins (green/amber/red) so the visual cue is unambiguous.
+            # Otherwise the halo borrows this agent's LAYER colour
+            # (same palette as the rings + edges) so each layer's
+            # agents share a chromatic family.
+            agent_depth = self._depth.get(name, 1)
+            layer_col = _layer_color(agent_depth)
+            if agent.status == STATUS_IDLE:
+                halo_col = layer_col
+            else:
+                halo_col = _STATUS_HALO[agent.status]
             grad = QRadialGradient(pos, r * 2.4)
             halo_alpha = (
                 int(120 + 90 * pulse) if is_active else int(70 + 50 * pulse)

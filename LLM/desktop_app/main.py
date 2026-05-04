@@ -29,7 +29,7 @@ from PySide6.QtCore import Qt, QProcess, QTimer, QThread, Signal, QProcessEnviro
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QFileDialog, QComboBox, QTextEdit, QPlainTextEdit,
-    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox, QStyleOptionButton, QDialog, QDialogButtonBox, QAbstractItemView, QDockWidget
+    QSpinBox, QDoubleSpinBox, QMessageBox, QListWidget, QListWidgetItem, QSplitter, QToolBar, QScrollArea, QGridLayout, QFrame, QProgressBar, QSizePolicy, QTabBar, QStyleOptionTab, QStyle, QStackedWidget, QGroupBox, QInputDialog, QCheckBox, QStyleOptionButton, QDialog, QDialogButtonBox, QAbstractItemView, QDockWidget, QGraphicsDropShadowEffect
 )
 from PySide6.QtGui import QAction, QIcon, QFont, QMouseEvent, QCursor, QPixmap, QPainter, QPen, QColor, QBrush
 
@@ -43,6 +43,7 @@ _APP_INSTANCE_LOCK = None
 from desktop_app.model_card_widget import ModelCard, DownloadedModelCard
 from desktop_app.training_widgets import (
     MetricCard, RunModeSelector, CheckpointToggle, StatusPill,
+    StartTrainingPanel,
     RUN_MODE_NEW, RUN_MODE_RESUME, RUN_MODE_CONTINUE,
 )
 from desktop_app.splash_screen import SplashScreen
@@ -3841,6 +3842,10 @@ class MainWindow(QMainWindow):
             self._studio_tab_initializing = True
             page = AgentStudioPage(parent=self)
             self._studio_page = page
+            # Studio saves should refresh the live agents page (cards,
+            # graph node icons, orbital diagram) so a re-picked avatar
+            # shows up without a project switch.
+            page.definitions_changed.connect(self._on_agent_definitions_changed)
             tabs.removeTab(self._studio_tab_index)
             self._studio_tab_index = tabs.insertTab(idx, page, "Studio")
             tabs.setCurrentIndex(self._studio_tab_index)
@@ -3854,6 +3859,23 @@ class MainWindow(QMainWindow):
             self._studio_page = None
         finally:
             self._studio_tab_initializing = False
+
+    def _on_agent_definitions_changed(self) -> None:
+        """Studio reported a save/delete — push the new defs to the
+        agents page if it's been built."""
+        page = getattr(self, "_agents_page", None)
+        if page is None:
+            return
+        try:
+            page.refresh_after_definitions_changed()
+        except Exception:
+            import traceback
+            try:
+                self._log_to_app_log(
+                    f"[STUDIO] agents-page refresh failed:\n{traceback.format_exc()}"
+                )
+            except Exception:
+                pass
 
     def _setup_process_console(self) -> None:
         """Add the built-in process terminal to the main window."""
@@ -8804,23 +8826,302 @@ class MainWindow(QMainWindow):
             or None
         )
 
-    def _find_base_onboarding(self, base_path: str) -> Optional[Dict[str, Any]]:
-        """Look up an existing READY onboarding row for a given base
-        model path. Used to clone its env_key/backend/accelerator into
-        the adapter's row so the adapter inherits a working environment.
+    def _base_model_match_keys(self, raw: str) -> set[str]:
+        """Generate every reasonable lowercased identifier for a base model.
+
+        A "base model" can show up in three different forms across the app:
+          • A Windows path like ``C:\\1_Git\\LocaLLM\\LLM\\models\\google__gemma-4-E4B-it``
+          • A POSIX-style path like ``C:/1_Git/.../google__gemma-4-E4B-it``
+            (this is what PEFT writes into ``adapter_config.json``)
+          • A HuggingFace hub id like ``google/gemma-4-E4B-it``
+          • A sanitised model-dir basename like ``google__gemma-4-E4B-it``
+
+        ``_find_base_onboarding`` used to compare ``str(Path(x)).lower()``
+        on both sides — that fails the moment one side has backslashes and
+        the other has forward slashes (which is exactly what happens with
+        Windows + PEFT-written adapter_config.json). It also fails when a
+        base was onboarded under its hub id but the adapter records the
+        absolute local path (or vice versa). Returning a *set* of every
+        likely form and intersecting with the row's keys fixes both gaps
+        without inventing a brittle "canonical form" rule.
         """
+        keys: set[str] = set()
+        if not raw:
+            return keys
+        s = str(raw).strip()
+        if not s:
+            return keys
+        keys.add(s.lower())
+        # Slash variants — Windows vs POSIX serialisation.
+        keys.add(s.replace("\\", "/").lower())
+        keys.add(s.replace("/", "\\").lower())
+
+        # Pathlib-resolved variants (handles redundant ./, trailing /, etc).
+        try:
+            p = Path(s)
+            keys.add(str(p).lower())
+            keys.add(p.as_posix().lower())
+            if p.exists():
+                rp = p.resolve()
+                keys.add(str(rp).lower())
+                keys.add(rp.as_posix().lower())
+            # Directory basename — when both sides reference the same
+            # model dir but with different parent paths (e.g. one is
+            # absolute, one is relative).
+            if p.name:
+                keys.add(p.name.lower())
+                # Sanitised basename -> hub id ("google__gemma-4-E4B-it"
+                # -> "google/gemma-4-E4B-it"). Two-component split is
+                # the safe default; any further "__" inside the model
+                # name is a Gemma/Llama-style separator that should
+                # stay as-is.
+                if "__" in p.name:
+                    keys.add(p.name.replace("__", "/", 1).lower())
+        except Exception:
+            pass
+
+        # If the raw form looks like a hub id ("org/name"), also add the
+        # disk-sanitised variant ("org__name") that the Models page uses.
+        if "/" in s and "\\" not in s and ":" not in s:
+            keys.add(s.replace("/", "__").lower())
+
+        return keys
+
+    def _find_base_onboarding(self, base_path: str) -> Optional[Dict[str, Any]]:
+        """Look up an onboarding row for a given base model.
+
+        Used to clone the base's env_key/backend/accelerator into the
+        adapter's row so the adapter inherits a working environment.
+
+        Two relaxations from the previous behaviour:
+
+        1. **Tolerant matching.** A base is considered the same row if
+           ANY of the candidate keys (path, hub id, basename,
+           slash-flipped, sanitised, ...) of the requested side
+           intersects ANY of the row's stored keys (against both
+           ``base_model_path`` AND ``model_id``). Strict
+           ``str(Path(x)).lower()`` equality misses across
+           POSIX/Windows slash differences and across the hub-id ↔
+           local-path representation gap that's standard in
+           ``adapter_config.json``.
+
+        2. **Status-tolerant.** We search ALL onboarding rows, not
+           just ``status='READY'``. A base flagged BROKEN by a stale
+           health check may still be functionally working (the user
+           literally just trained an adapter on it). We prefer READY
+           rows when several candidates match, but if only a non-READY
+           candidate exists we use it anyway — the alternative is
+           refusing to register a perfectly-trainable adapter, which
+           is what the user has been hitting.
+
+        Also falls back to the ``models`` table when no onboarding row
+        matches at all, so bases registered via the Models page but
+        never onboarded through the wizard still wire up correctly.
+        """
+        # Append a single diagnostic line per call to logs/app.log so a
+        # mismatch between "I see the row in sqlite" and "the matcher
+        # returned None" is debuggable from a fresh chair. Cheap, off
+        # the hot path.
+        def _diag(msg: str) -> None:
+            try:
+                self._log_to_app_log(f"[base-match] {msg}")
+            except Exception:
+                pass
+
         try:
             from core.state_store import StateStore
             ss = StateStore()
-            base_norm = str(Path(base_path)).lower()
-            for row in ss.list_onboarding_by_status("READY"):
-                if str(row.get("base_model_path", "")).lower() == base_norm:
-                    return row
+            wanted = self._base_model_match_keys(base_path)
+            _diag(f"input={base_path!r} wanted_keys={sorted(wanted)}")
+            if not wanted:
+                return None
+
+            # Pass 1 — onboarding table, ANY status. Collect every
+            # match and prefer READY at the end.
+            candidates: list[Dict[str, Any]] = []
+            try:
+                rows = ss.list_all_onboarding()
+            except Exception as exc:
+                _diag(f"list_all_onboarding raised: {exc!r} — falling back to READY-only")
+                rows = ss.list_onboarding_by_status("READY")  # legacy fallback
+            _diag(f"scanning {len(rows)} onboarding rows")
+            for row in rows:
+                row_keys = set()
+                row_keys |= self._base_model_match_keys(
+                    str(row.get("base_model_path", "") or "")
+                )
+                row_keys |= self._base_model_match_keys(
+                    str(row.get("model_id", "") or "")
+                )
+                if wanted & row_keys:
+                    candidates.append(row)
+
+            if candidates:
+                ready = [r for r in candidates if (r.get("status") or "").upper() == "READY"]
+                pick = ready[0] if ready else candidates[0]
+                _diag(f"matched onboarding row: {pick.get('model_id')!r} status={pick.get('status')!r}")
+                return pick
+
+            # Pass 1.5 — brute-force fallback. The keyset matcher should
+            # have caught any sane representation, but just in case the
+            # row stored a path with mixed separators, NTFS short names,
+            # an extra trailing slash, or some other oddity we haven't
+            # codified, do a final loose comparison: lowercased,
+            # separator-flattened (every \ and / becomes /). If that
+            # finds a substring match in either direction (one is a
+            # suffix of the other), accept it.
+            def _flat(x: str) -> str:
+                s = (x or "").lower().replace("\\", "/").rstrip("/")
+                return s
+
+            wanted_flat = {_flat(k) for k in wanted if k}
+            for row in rows:
+                bp = _flat(str(row.get("base_model_path", "") or ""))
+                mid = _flat(str(row.get("model_id", "") or ""))
+                for w in wanted_flat:
+                    if not w:
+                        continue
+                    if bp and (w == bp or w.endswith("/" + bp.split("/")[-1])
+                               or bp.endswith("/" + w.split("/")[-1])):
+                        _diag(f"loose-matched onboarding row via base_model_path: {row.get('model_id')!r}")
+                        return row
+                    if mid and (w == mid or w.endswith("/" + mid.split("/")[-1])):
+                        _diag(f"loose-matched onboarding row via model_id: {row.get('model_id')!r}")
+                        return row
+
+            # Pass 2 — fall back to the ``models`` table. This catches
+            # bases registered via a different code path (e.g. a direct
+            # download that bypassed the onboarding wizard). We hand
+            # back a synthesised onboarding-like dict so the caller's
+            # downstream code still finds env_key/backend/etc.
+            try:
+                conn = ss._get_connection()
+                model_rows = [dict(r) for r in conn.execute(
+                    "SELECT model_id, backend, model_path FROM models"
+                ).fetchall()]
+            except Exception as exc:
+                _diag(f"models-table query failed: {exc!r}")
+                model_rows = []
+            _diag(f"scanning {len(model_rows)} models-table rows as fallback")
+            for mr in model_rows:
+                m_keys = set()
+                m_keys |= self._base_model_match_keys(
+                    str(mr.get("model_path", "") or "")
+                )
+                m_keys |= self._base_model_match_keys(
+                    str(mr.get("model_id", "") or "")
+                )
+                if wanted & m_keys:
+                    _diag(f"matched models-table row: {mr.get('model_id')!r}")
+                    return {
+                        "model_id": mr.get("model_id"),
+                        "base_model_path": mr.get("model_path"),
+                        "backend": mr.get("backend"),
+                        "env_key": None,
+                        "accelerator": None,
+                        "status": "READY",  # synthetic — present in models table = usable
+                    }
+            _diag("NO MATCH in onboarding or models tables")
         except Exception as e:
-            self.train_log.appendPlainText(
-                f"[WARN] _find_base_onboarding failed: {e}"
-            )
+            try:
+                self.train_log.appendPlainText(
+                    f"[WARN] _find_base_onboarding failed: {e}"
+                )
+            except Exception:
+                pass
         return None
+
+    def _synthesize_base_row_from_adapter(
+        self, adapter_dir: "Path", base_path: str
+    ) -> Optional[Dict[str, Any]]:
+        """Build a usable base-onboarding-like row when nothing matched.
+
+        Strategy: read ``training_info.json`` (written by finetune.py
+        on success — see [LLM/finetune.py] save_training_metadata
+        block). It contains the exact base_model that was used to
+        train and is the most authoritative breadcrumb available when
+        the registry has no matching row.
+
+        Picks an env_key by scanning ``LLM/.envs`` for a venv whose
+        directory name contains the base's sanitised slug (e.g. for
+        ``google/gemma-4-E4B-it`` it'll prefer
+        ``...--dedicated--google__gemma-4-E4B-it`` if present).
+        Falls back to the active env_key resolver, then to a hardcoded
+        ``tf-cu121-t25-bnb-stable`` default that's known to load any
+        bf16-quantised PEFT adapter.
+
+        Returns ``None`` only when the adapter has no training metadata
+        AND no environment can be inferred — at which point we genuinely
+        can't proceed without user input.
+        """
+        import json as _json
+        info_path = Path(adapter_dir) / "training_info.json"
+        meta: Dict[str, Any] = {}
+        try:
+            if info_path.exists():
+                meta = _json.loads(info_path.read_text(encoding="utf-8"))
+        except Exception:
+            meta = {}
+
+        base_model = (
+            meta.get("base_model")
+            or base_path
+            or ""
+        )
+
+        # Attempt 1: pick the venv that was already used for training.
+        # finetune.py logs the active venv path in the training log;
+        # we can re-derive it from the model's sanitised slug.
+        env_key: Optional[str] = None
+        try:
+            base_slug = (
+                Path(base_model).name
+                if Path(base_model).exists() or "\\" in base_model or "/" in base_model
+                else base_model.replace("/", "__")
+            )
+            envs_dir = self.root / ".envs"
+            if envs_dir.exists():
+                # Prefer dedicated env for this exact base.
+                for d in envs_dir.iterdir():
+                    if d.is_dir() and base_slug.lower() in d.name.lower() and "dedicated" in d.name.lower():
+                        env_key = d.name
+                        break
+                # Fall back to any venv whose name contains the slug.
+                if env_key is None:
+                    for d in envs_dir.iterdir():
+                        if d.is_dir() and base_slug.lower() in d.name.lower():
+                            env_key = d.name
+                            break
+        except Exception:
+            env_key = None
+
+        # Attempt 2: ask the active profile resolver. This returns the
+        # env_key the GUI would pick for a vanilla PEFT load right now,
+        # which is always usable for adapter inference.
+        if not env_key:
+            try:
+                from desktop_app import training_env_manager as tem
+                env_key = tem._venv_dir(self.root).name  # type: ignore[attr-defined]
+            except Exception:
+                env_key = None
+
+        # Attempt 3: hardcoded last-resort default. Picked because
+        # ``tf-cu121-t25-bnb-stable`` ships with bitsandbytes + transformers
+        # + peft and is the env every recent stable build uses for
+        # PEFT-adapter inference. If it doesn't exist on disk, registration
+        # still succeeds — the env will be auto-built when the user first
+        # tries to chat with the adapter.
+        if not env_key:
+            env_key = "tf-cu121-t25-bnb-stable"
+
+        return {
+            "model_id": f"synth__{Path(base_model).name or 'unknown'}",
+            "base_model_path": str(base_path),
+            "env_key": env_key,
+            "backend": "tf",  # transformers; correct for any PEFT adapter
+            "accelerator": "cu121",
+            "status": "READY",
+        }
 
     def _register_tuned_adapter(self, name: str, adapter_dir: "Path") -> Tuple[bool, str]:
         """Register a tuned LoRA adapter as a usable model.
@@ -8860,14 +9161,55 @@ class MainWindow(QMainWindow):
                     "Onboard), then re-click Use here."
                 )
 
-        # Locate an existing READY row for this base — we need its env
-        # so the adapter inherits a working runtime.
+        # Locate an existing onboarding row for this base — we need its
+        # env so the adapter inherits a working runtime. The matcher
+        # is tolerant (see _find_base_onboarding for details), but if
+        # it still misses, we don't want to dead-end the user: the
+        # adapter is on disk, valid, and the user clearly trained it
+        # against a real base. Synthesize a usable row from the
+        # adapter's own training_info.json (written by finetune.py on
+        # success) and proceed with registration.
         base_row = self._find_base_onboarding(base_path)
+        synth_used = False
         if base_row is None:
+            try:
+                base_row = self._synthesize_base_row_from_adapter(adapter_dir, base_path)
+            except Exception:
+                base_row = None
+            if base_row is not None:
+                synth_used = True
+                try:
+                    self._log_to_app_log(
+                        "[base-match] no row matched; synthesised one from adapter "
+                        f"training_info.json (env_key={base_row.get('env_key')!r})."
+                    )
+                except Exception:
+                    pass
+        if base_row is None:
+            self._last_missing_base_path = str(base_path)
+            try:
+                self._last_missing_base_dirname = Path(base_path).name
+            except Exception:
+                self._last_missing_base_dirname = None
             return False, (
-                "The base model is not yet onboarded. Click Onboard on "
-                "the base in the Models page first, then return here."
+                "The base model isn't registered yet.\n\n"
+                f"Base: {base_path}\n\n"
+                "Click 'Open Models' below to jump to the Downloaded tab "
+                "where you can Onboard it, then come back and try again."
             )
+        # Clear any prior 'missing base' breadcrumbs.
+        self._last_missing_base_path = None
+        self._last_missing_base_dirname = None
+        # If the row we got was synthesised (no real onboarding row in
+        # either table), record a hint in the success message so the
+        # user knows the registration succeeded but health may be
+        # incomplete until the base goes through proper onboarding.
+        synth_note = (
+            "" if not synth_used
+            else " (Note: base wasn't in the registry — registered the "
+                 "adapter using the training metadata. Onboard the base "
+                 "from the Models tab if you want a fully-verified env.)"
+        )
 
         # Upsert the adapter row.
         try:
@@ -8890,7 +9232,7 @@ class MainWindow(QMainWindow):
             (adapter_dir / ".onboarded").touch(exist_ok=True)
         except Exception:
             pass
-        return True, "Adapter is now ready for chat."
+        return True, "Adapter is now ready for chat." + synth_note
 
     def _refresh_chat_pickers(self) -> None:
         """Re-populate every chat-tab model dropdown so a freshly
@@ -8924,6 +9266,53 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _navigate_to_models_for_onboarding(self, base_path_or_id: str) -> None:
+        """Switch to Models → Downloaded so the user can Onboard the base.
+
+        Called from the "base not registered" dialog on the tuned-adapter
+        card. The Downloaded sub-tab is where the Onboard button lives
+        (the ``Browse`` sub-tab is for searching new models to download).
+        Also runs the existing models refresh so freshly-installed bases
+        show up immediately.
+        """
+        try:
+            # Outer tabs — switch to Models (label-walked, same pattern
+            # as _navigate_to_chat_tab so renames don't break us).
+            for i in range(self.tabs.count()):
+                if "models" in self.tabs.tabText(i).strip().lower():
+                    self.tabs.setCurrentIndex(i)
+                    break
+        except Exception:
+            pass
+        # Inner tabs — switch to the Downloaded sub-tab. The button at
+        # main.py:6756 is wired to ``models_content_tabs.setCurrentIndex(1)``;
+        # we mirror that here.
+        try:
+            if hasattr(self, "models_content_tabs"):
+                self.models_content_tabs.setCurrentIndex(1)
+        except Exception:
+            pass
+        # Best-effort highlight: refresh the downloaded list so the
+        # base appears, and emit one log line so the user knows what to
+        # click next.
+        try:
+            for fn_name in ("_refresh_downloaded_models", "_refresh_models",
+                            "_load_downloaded_models"):
+                fn = getattr(self, fn_name, None)
+                if callable(fn):
+                    fn()
+                    break
+        except Exception:
+            pass
+        try:
+            self._log_to_app_log(
+                f"[GUIDE] Navigated to Models → Downloaded. Find '"
+                f"{base_path_or_id}' in the list and click Onboard, "
+                "then return to the Tuned tab and click Use in Chat."
+            )
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Tuned-model card actions (Use / Onboard / Delete)
     # ------------------------------------------------------------------
@@ -8943,6 +9332,54 @@ class MainWindow(QMainWindow):
         """
         ok, msg = self._register_tuned_adapter(name, path)
         if not ok:
+            # Actionable failure dialog. When the missing thing is the
+            # base model, give the user a one-click jump to the Models
+            # tab's Downloaded sub-tab (where the Onboard button lives)
+            # rather than expecting them to navigate manually. We only
+            # show that path when we actually have a missing base to
+            # point at — for other failure shapes (corrupt
+            # adapter_config.json, DB write error) the standard warning
+            # is right.
+            missing_base = getattr(self, "_last_missing_base_path", None)
+            if missing_base:
+                # QMessageBox auto-detects text format from content. The
+                # informative text starts with several plain-text lines
+                # (\n\n separators), so auto-detection picked PLAIN and
+                # any HTML tags came through literally. Force RichText
+                # AND format the entire body as HTML so it renders
+                # consistently — no more raw <br>/<i> bleeding into the
+                # UI.
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Warning)
+                box.setWindowTitle("Use Tuned Model — base not registered")
+                box.setTextFormat(Qt.RichText)
+                box.setText(
+                    "<b>The base model for this adapter isn't registered yet.</b>"
+                )
+                # Escape the path for HTML safety (backslashes are fine,
+                # but if a path ever contains <, >, or & this prevents
+                # mojibake). Use a fixed-width inline so the path stays
+                # visually distinct from the surrounding prose.
+                from html import escape as _h
+                box.setInformativeText(
+                    f"<p>Base:&nbsp;<code>{_h(missing_base)}</code></p>"
+                    "<p>Click <b>Open Models</b> below to jump to the "
+                    "Downloaded tab where you can Onboard it, then come "
+                    "back and try again.</p>"
+                    "<p><i>Tip: once the base is registered, your adapter "
+                    "automatically inherits its environment — you only "
+                    "need to click <b>Use in Chat</b> again.</i></p>"
+                )
+                open_btn = box.addButton("📁  Open Models", QMessageBox.AcceptRole)
+                box.addButton("Cancel", QMessageBox.RejectRole)
+                box.exec()
+                if box.clickedButton() is open_btn:
+                    self._navigate_to_models_for_onboarding(missing_base)
+                # Reset breadcrumbs after the dialog closes.
+                self._last_missing_base_path = None
+                self._last_missing_base_dirname = None
+                return
+            # Generic failure path — keep the original concise warning.
             QMessageBox.warning(self, "Use Tuned Model", msg)
             return
 
@@ -12228,7 +12665,38 @@ class MainWindow(QMainWindow):
         self.train_batch.setVisible(False)
         
         left_layout.addWidget(params_frame)
-        
+
+        # ------------------------------------------------------------------
+        # Save-checkpoints toggle.
+        # ------------------------------------------------------------------
+        # Run-mode is no longer a separate selector — the three modes
+        # (Fresh / Resume / Continue) are tile-buttons inside the new
+        # StartTrainingPanel further down. Clicking a tile both PICKS
+        # the mode AND launches training, so there's no "pick mode then
+        # press Start" two-step that confused users earlier.
+        #
+        # Save Checkpoints stays separate because it cuts across all
+        # modes — it controls whether THIS run produces resumable
+        # checkpoints for FUTURE Resume clicks. Off by default; flip on
+        # when you want this run to be resumable later.
+        save_frame = QFrame()
+        save_frame.setObjectName("save_frame")
+        save_frame.setStyleSheet("""
+            #save_frame {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 rgba(30, 41, 59, 220), stop:1 rgba(22, 33, 62, 220));
+                border: 1px solid #2c3a4f;
+                border-radius: 12px;
+            }
+            QLabel { background: transparent; }
+        """)
+        save_layout = QVBoxLayout(save_frame)
+        save_layout.setContentsMargins(14, 14, 14, 14)
+        save_layout.setSpacing(10)
+        self.train_save_toggle = CheckpointToggle(default_steps=50, parent=self)
+        save_layout.addWidget(self.train_save_toggle)
+        left_layout.addWidget(save_frame)
+
         # GPU Selection Section
         gpu_select_label = QLabel("💻 Select GPU(s) for Training")
         gpu_select_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
@@ -12323,22 +12791,88 @@ class MainWindow(QMainWindow):
         
         left_layout.addWidget(gpu_frame)
         
-        # Start Training Button
-        start_btn_layout = QHBoxLayout()
-        self.train_start = QPushButton("🚀 Start Training")
-        self.train_start.setObjectName("train_start")
-        self.train_start.setMinimumHeight(50)
-        self.train_start.clicked.connect(lambda: (self._start_training(), self._switch_to_dashboard()))
-        # Training button styling will be handled by theme system
-        start_btn_layout.addWidget(self.train_start)
-        
-        self.train_stop = QPushButton("⏹ Stop")
+        # ------------------------------------------------------------------
+        # Start panel + Stop button + status pill.
+        # ------------------------------------------------------------------
+        # The three run-modes (Fresh / Resume / Continue) are tile-buttons
+        # INSIDE the StartTrainingPanel — clicking a tile both picks the
+        # mode AND launches training in one click. No separate Start
+        # button. The Stop button is on its own row beneath because it's
+        # a destructive action with two-stage escalation (graceful via
+        # stop-file -> force-kill on second click within 4s) and needs
+        # to stay visually distinct from the launch surface.
+        self.train_status_pill = StatusPill(self)
+        status_row = QHBoxLayout()
+        status_row.addStretch(1)
+        status_row.addWidget(self.train_status_pill)
+        status_row.addStretch(1)
+        left_layout.addLayout(status_row)
+
+        # The Start panel — three mode tiles in one card.
+        self.train_start_panel = StartTrainingPanel(self)
+        self.train_start_panel.start_requested.connect(self._on_start_tile_clicked)
+        # Slave the base-model picker to whatever adapter the user
+        # selects in Continue mode. The adapter records its base; the
+        # base picker MUST follow it.
+        self.train_start_panel.adapter_selected.connect(self._on_continue_adapter_selected)
+        left_layout.addWidget(self.train_start_panel)
+
+        # ``self.train_start`` is referenced from a few defensive
+        # disable/enable paths and from the Use-Recommended button
+        # callback. Keep a hidden compatibility shim so we don't have
+        # to chase every reference. ``setEnabled`` on a hidden widget
+        # is harmless.
+        self.train_start = QPushButton(self)
+        self.train_start.setVisible(False)
+        self.train_start.setEnabled(True)
+
+        # Stop button on its own row.
+        self.train_stop = QPushButton("⏹  Stop")
         self.train_stop.setObjectName("train_stop")
         self.train_stop.setEnabled(False)
         self.train_stop.setMinimumHeight(50)
+        self.train_stop.setCursor(Qt.PointingHandCursor)
+        self.train_stop.setStyleSheet("""
+            QPushButton#train_stop {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #dc2626, stop:0.5 #ef4444, stop:1 #dc2626);
+                color: white;
+                font-size: 13pt;
+                font-weight: 800;
+                border: none;
+                border-radius: 12px;
+                padding: 0 18px;
+            }
+            QPushButton#train_stop:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                    stop:0 #b91c1c, stop:0.5 #f87171, stop:1 #b91c1c);
+            }
+            QPushButton#train_stop:pressed {
+                background: #b91c1c;
+            }
+            QPushButton#train_stop:disabled {
+                background: rgba(80,90,100,0.4);
+                color: #8595ad;
+            }
+        """)
+        _stop_glow = QGraphicsDropShadowEffect(self.train_stop)
+        _stop_glow.setBlurRadius(20)
+        _stop_glow.setOffset(0, 0)
+        _stop_glow.setColor(QColor(239, 68, 68, 140))
+        self.train_stop.setGraphicsEffect(_stop_glow)
         self.train_stop.clicked.connect(self._stop_training)
+        start_btn_layout = QHBoxLayout()
+        start_btn_layout.addStretch(1)
         start_btn_layout.addWidget(self.train_stop)
-        
+        start_btn_layout.addStretch(1)
+        left_layout.addLayout(start_btn_layout)
+
+        # Initial scan so Resume / Continue tiles reflect current state.
+        try:
+            self._refresh_resume_state()
+        except Exception:
+            pass
+
         left_layout.addLayout(start_btn_layout)
         
         left_layout.addStretch(1)
@@ -12468,6 +13002,196 @@ class MainWindow(QMainWindow):
     def _switch_to_dashboard(self):
         """Switch right panel back to training dashboard"""
         self.train_right_stack.setCurrentIndex(0)
+
+    # ----------------------------------------------------------------------
+    # Start-panel / mode helpers
+    # ----------------------------------------------------------------------
+    def _on_start_tile_clicked(self, mode: str, adapter_path: str) -> None:
+        """A start-tile was clicked. Stash the mode for
+        ``_start_training_impl`` and kick off the launch flow.
+        """
+        self._pending_run_mode = mode
+        self._pending_resume_adapter = adapter_path or ""
+        try:
+            self._start_training()
+            self._switch_to_dashboard()
+        except Exception:
+            # _start_training has its own modal-dialog error handler;
+            # if it raised here, something escaped that handler.
+            self._pending_run_mode = None
+            self._pending_resume_adapter = ""
+            raise
+
+    def _on_run_mode_changed(self, mode: str) -> None:  # legacy no-op
+        """Kept as a stub — old code paths reference this method but
+        the run-mode selector widget no longer exists. The mode is now
+        picked at click-time via the StartTrainingPanel tiles."""
+        return
+
+    def _on_continue_adapter_selected(self, adapter_path: str) -> None:
+        """Slave the base-model picker to the chosen Continue-mode adapter.
+
+        A Continue run MUST use the SAME base model the adapter was
+        trained on. Letting the user pick adapter X (trained on base A)
+        but leaving the base dropdown on B silently produced garbage
+        outputs and corrupt training (LoRA matrices applied to the
+        wrong Q/K/V/O weights).
+
+        Strategy: read the adapter's ``adapter_config.json``, resolve
+        the base reference to a local ``models/<sanitised>/`` dir if
+        possible, and set the train_base_model dropdown to match. The
+        launch path *also* hard-overrides the base for Continue mode
+        (see _start_training_impl) so even if this UI sync race-loses,
+        the actual training command is still correct.
+        """
+        try:
+            ap = Path(str(adapter_path))
+            if not ap.exists():
+                return
+            base_ref = self._resolve_adapter_base_path(ap)
+            if not base_ref:
+                return
+            # Resolve to a model-dir slug the dropdown actually carries.
+            base_p = Path(base_ref)
+            slug: Optional[str] = None
+            if base_p.exists():
+                slug = base_p.name  # e.g. 'google__gemma-4-E4B-it'
+            else:
+                # If it's a hub id like 'google/gemma-4-E4B-it', look
+                # for the sanitised local copy.
+                cand = self.root / "models" / base_ref.replace("/", "__")
+                if cand.exists():
+                    slug = cand.name
+                else:
+                    # Last resort — show the hub id verbatim.
+                    slug = base_ref.replace("/", "__")
+
+            if not hasattr(self, "train_base_model") or not slug:
+                return
+            # Try to switch via index; fall back to setEditText for
+            # editable combos. Avoid signaling a re-train of the
+            # auto-name field — handled by valueChanged hooks.
+            idx = self.train_base_model.findText(slug)
+            if idx >= 0:
+                self.train_base_model.setCurrentIndex(idx)
+            else:
+                try:
+                    self.train_base_model.setEditText(slug)
+                except Exception:
+                    pass
+            try:
+                self.train_log.appendPlainText(
+                    f"[INFO] Continue mode: locked base model to '{slug}' "
+                    "(matches the selected adapter's base)."
+                )
+            except Exception:
+                pass
+        except Exception as exc:
+            try:
+                self._log_to_app_log(
+                    f"[WARN] _on_continue_adapter_selected failed: {exc!r}"
+                )
+            except Exception:
+                pass
+
+    def _refresh_resume_state(self) -> None:
+        """Rescan the configured output directory for resumable artifacts.
+
+        Two scans:
+          • Trainer checkpoints — directories named ``checkpoint-N``
+            with a ``trainer_state.json`` (Trainer's signature). Newest
+            wins. Reflected in the Resume label.
+          • Saved adapters — directories with ``adapter_config.json``
+            and ``adapter_model.safetensors``/``.bin`` (PEFT's
+            signature). Sorted by mtime so the most recent run is
+            preselected. Reflected in the Continue dropdown.
+        """
+        out_dir_str = ""
+        try:
+            out_dir_str = self.train_out_dir.text().strip()
+        except Exception:
+            pass
+        if not out_dir_str:
+            self._set_resume_label("(no output directory selected)", missing=True)
+            self._populate_continue_combo([])
+            return
+
+        out_dir = Path(out_dir_str)
+        if not out_dir.exists():
+            self._set_resume_label(f"(does not exist: {out_dir})", missing=True)
+            self._populate_continue_combo([])
+            return
+
+        # --- Trainer checkpoints ---
+        ckpts: list[tuple[int, Path]] = []
+        try:
+            for p in out_dir.iterdir():
+                if not p.is_dir() or not p.name.startswith("checkpoint-"):
+                    continue
+                if not (p / "trainer_state.json").exists():
+                    continue
+                try:
+                    step = int(p.name.split("-", 1)[1])
+                except (IndexError, ValueError):
+                    continue
+                ckpts.append((step, p))
+        except Exception:
+            ckpts = []
+
+        if ckpts:
+            ckpts.sort()
+            step, ckpt_path = ckpts[-1]
+            self._set_resume_label(
+                f"step {step} — {ckpt_path.name}", missing=False
+            )
+        else:
+            self._set_resume_label(
+                "(none — enable Save Checkpoints, then Stop / Start to create one)",
+                missing=True,
+            )
+
+        # --- Saved adapters (for Continue mode) ---
+        adapters: list[tuple[float, Path]] = []
+        try:
+            for p in out_dir.iterdir():
+                if not p.is_dir():
+                    continue
+                if p.name.startswith("checkpoint-"):
+                    # Trainer checkpoints get their own resume path; don't
+                    # offer them as "continue" targets.
+                    continue
+                cfg = p / "adapter_config.json"
+                model_safe = p / "adapter_model.safetensors"
+                model_bin = p / "adapter_model.bin"
+                if cfg.exists() and (model_safe.exists() or model_bin.exists()):
+                    try:
+                        ref = model_safe if model_safe.exists() else model_bin
+                        adapters.append((ref.stat().st_mtime, p))
+                    except Exception:
+                        adapters.append((0.0, p))
+        except Exception:
+            adapters = []
+
+        adapters.sort(reverse=True)
+        self._populate_continue_combo([p for _, p in adapters])
+
+    def _set_resume_label(self, text: str, missing: bool) -> None:
+        # The standalone Resume label is gone (replaced by the Resume
+        # tile's subtitle). Forward to the StartTrainingPanel; if it
+        # doesn't exist yet (early init) silently no-op.
+        try:
+            self.train_start_panel.set_resume_state(text, enabled=not missing)
+        except Exception:
+            pass
+
+    def _populate_continue_combo(self, adapter_paths: list[Path]) -> None:
+        # Forward to the StartTrainingPanel's adapter picker.
+        try:
+            self.train_start_panel.set_adapter_options(
+                [str(p) for p in (adapter_paths or [])]
+            )
+        except Exception:
+            pass
     
     def _load_dataset_preview(self, path: str):
         """Load first few entries from dataset and update viewer"""
@@ -13099,10 +13823,105 @@ class MainWindow(QMainWindow):
         except Exception:
             adapter_name = ""
 
+        # ------------------------------------------------------------------
+        # Resume mode + checkpointing + stop file.
+        # ------------------------------------------------------------------
+        # The Run-mode card is the source of truth for what kind of run
+        # we're launching. Translate its state into the three trainer
+        # flags (--resume / --resume-adapter / --save-steps) and a
+        # stop-file path that the Stop button will write to.
+        # Run-mode is set by whichever tile was clicked in the
+        # StartTrainingPanel. ``_on_start_tile_clicked`` stashes the
+        # mode + adapter on self before calling _start_training, so we
+        # read them directly here. Fall back to fresh-start if a code
+        # path triggers training without going through the tiles.
+        run_mode = getattr(self, "_pending_run_mode", None) or RUN_MODE_NEW
+        pending_adapter = getattr(self, "_pending_resume_adapter", "") or ""
+        resume_arg: Optional[str] = None
+        resume_adapter_arg: Optional[Path] = None
+
+        if run_mode == RUN_MODE_RESUME:
+            resume_arg = "auto"
+        elif run_mode == RUN_MODE_CONTINUE:
+            if pending_adapter:
+                resume_adapter_arg = Path(pending_adapter)
+            if resume_adapter_arg is None:
+                QMessageBox.warning(
+                    self,
+                    "Continue training",
+                    "No adapter selected. Pick an adapter from the "
+                    "Continue tile's dropdown, or click the Fresh start tile instead.",
+                )
+                return
+
+            # HARD OVERRIDE: a Continue run MUST use the SAME base
+            # model the adapter was trained on. The base picker can be
+            # left on a different value (we slave it via the dropdown
+            # signal, but a race can leave it stale, OR the user might
+            # change it after picking the adapter). Whatever the form
+            # says, the source of truth is the adapter's
+            # ``adapter_config.json`` — read it and force the launch
+            # command to use that base. Anything else produces garbage:
+            # LoRA matrices learned on top of base A applied to base B.
+            try:
+                forced_base_ref = self._resolve_adapter_base_path(resume_adapter_arg)
+            except Exception:
+                forced_base_ref = None
+            if forced_base_ref:
+                forced_base_p = Path(forced_base_ref)
+                if not forced_base_p.exists():
+                    cand = self.root / "models" / forced_base_ref.replace("/", "__")
+                    if cand.exists():
+                        forced_base_p = cand
+                forced_base_str = str(forced_base_p)
+                if forced_base_str.lower() != base_model_for_finetune.lower():
+                    self._log_to_app_log(
+                        "[continue-override] form base="
+                        f"{base_model_for_finetune!r} adapter base="
+                        f"{forced_base_str!r} — using adapter's base."
+                    )
+                    base_model_for_finetune = forced_base_str
+                    _model_path_log_line = (
+                        "[INFO] Continue mode: base model overridden to match "
+                        f"the adapter's training base: {forced_base_str}"
+                    )
+
+        # Save-checkpoints toggle. Active automatically when the user
+        # picked Resume mode (we flipped it on in _on_run_mode_changed),
+        # but they can still override it here by toggling it off.
+        save_steps_val = 0
+        save_total_limit_val = 2
+        try:
+            if self.train_save_toggle.is_enabled():
+                save_steps_val = max(5, int(self.train_save_toggle.save_steps()))
+        except Exception:
+            save_steps_val = 0
+
+        # Stop-file path. One per run, lives in the output dir alongside
+        # the adapter. Pre-clean any stale file so the new subprocess
+        # doesn't think it was pre-stopped on the first step.
+        out_dir_path = Path(self.train_out_dir.text().strip())
+        try:
+            out_dir_path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        stop_file_path = out_dir_path / ".STOP_REQUESTED"
+        try:
+            if stop_file_path.exists():
+                stop_file_path.unlink()
+        except Exception:
+            pass
+
+        # Stash on self so _stop_training can write the file and
+        # _start_training_impl callbacks can reference the active mode.
+        self._active_run_mode = run_mode
+        self._active_stop_file = stop_file_path
+        self._stop_force_armed = False
+
         cfg = TrainingConfig(
             base_model=base_model_for_finetune,
             data_path=Path(data_path),
-            output_dir=Path(self.train_out_dir.text().strip()),
+            output_dir=out_dir_path,
             epochs=int(self.train_epochs.value()),
             batch_size=int(self.train_batch.value()),
             learning_rate=float(self.train_lr.value()),
@@ -13111,6 +13930,11 @@ class MainWindow(QMainWindow):
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
             adapter_name=(adapter_name or None),
+            resume=resume_arg,
+            resume_adapter=resume_adapter_arg,
+            save_steps=save_steps_val,
+            save_total_limit=save_total_limit_val,
+            stop_file=stop_file_path,
         )
 
         cmd = build_finetune_cmd(cfg)
@@ -13189,6 +14013,10 @@ class MainWindow(QMainWindow):
 
         self.train_start.setEnabled(False)
         self.train_stop.setEnabled(True)
+        try:
+            self.train_start_panel.set_running(True)
+        except Exception:
+            pass
 
         proc.start(
             cmd,
@@ -13200,17 +14028,37 @@ class MainWindow(QMainWindow):
             self._append_terminal("[ERROR] Failed to start training process!", source="train")
             self.train_start.setEnabled(True)
             self.train_stop.setEnabled(False)
+            try:
+                self.train_start_panel.set_running(False)
+                self._refresh_resume_state()
+            except Exception:
+                pass
             return
 
         self.train_proc = proc
         self.train_log.appendPlainText("[INFO] Training process started successfully")
         self._append_terminal("[INFO] Training process started successfully", source="train")
-        
+
+        # Status pill -> running.
+        try:
+            mode_label = {
+                RUN_MODE_NEW: "fresh run",
+                RUN_MODE_RESUME: "resuming from checkpoint",
+                RUN_MODE_CONTINUE: "continuing adapter",
+            }.get(getattr(self, "_active_run_mode", RUN_MODE_NEW), "")
+            self.train_status_pill.set_state("running", mode_label)
+        except Exception:
+            pass
+
+        # Reset stop-button state for the new run (graceful, not armed).
+        self._stop_force_armed = False
+        self.train_stop.setText("⏹  Stop")
+
         # Start background timer for GPU stats during training
         if not hasattr(self, '_train_stats_timer'):
             self._train_stats_timer = QTimer(self)
             self._train_stats_timer.timeout.connect(self._update_training_stats_periodic)
-        
+
         self._train_stats_timer.start(2000) # Update every 2 seconds
 
     def _preflight_training_or_repair(self, model_name_hf: str) -> bool:
@@ -13428,19 +14276,145 @@ class MainWindow(QMainWindow):
 
         self.train_start.setEnabled(True)
         self.train_stop.setEnabled(False)
+        try:
+            self.train_start_panel.set_running(False)
+            # Refresh tile context so freshly-written checkpoint /
+            # adapter shows up immediately on the next launch.
+            self._refresh_resume_state()
+        except Exception:
+            pass
 
     def _stop_training(self) -> None:
+        """Stop the running training process — graceful by default, with
+        a 4-second force-kill escalation on second click.
+
+        Why two-stage:
+          • Graceful (1st click) writes a sentinel file that finetune.py
+            polls every step. The trainer halts at the next step
+            boundary, **saves a checkpoint**, releases GPU memory, and
+            exits cleanly. Subsequent ``Resume`` runs then pick up
+            exactly where this stopped.
+          • Force-kill (2nd click within 4s, OR if graceful didn't
+            release in 30s) calls QProcess.kill(). This is the last
+            resort for a wedged subprocess — no checkpoint is saved,
+            and any in-flight CUDA op leaks until the OS reaps the
+            process. Reserved for cases where the trainer is unresponsive.
+        """
         if self.train_proc is None:
             return
-        
-        # Stop stats timer
+
+        # Second click within ~4s OR force-armed externally -> kill.
+        if getattr(self, "_stop_force_armed", False):
+            self._force_kill_training()
+            return
+
+        # First click: graceful stop.
+        stop_path = getattr(self, "_active_stop_file", None)
+        wrote_file = False
+        if stop_path is not None:
+            try:
+                Path(stop_path).parent.mkdir(parents=True, exist_ok=True)
+                Path(stop_path).write_text(
+                    "stop requested by GUI\n", encoding="utf-8"
+                )
+                wrote_file = True
+            except Exception as exc:
+                self.train_log.appendPlainText(
+                    f"\n[WARN] Could not write stop file ({stop_path}): {exc}. "
+                    "Falling back to immediate terminate."
+                )
+
+        if wrote_file:
+            self.train_log.appendPlainText(
+                "\n[INFO] Stop requested — finetune.py will save a "
+                "checkpoint and exit at the next step boundary."
+            )
+            self._append_terminal(
+                "[INFO] Graceful stop requested.", source="train",
+            )
+            try:
+                self.train_status_pill.set_state(
+                    "stopping", "press Stop again to force-kill"
+                )
+            except Exception:
+                pass
+            self.train_stop.setText("⛔  Force kill")
+            self._stop_force_armed = True
+
+            # Auto-disarm the force-kill latch after 4s so an absent
+            # second click doesn't leave the button silently armed for
+            # the next click much later.
+            QTimer.singleShot(4000, self._disarm_force_kill)
+            # Last-resort safety net: if graceful stop hasn't released
+            # the process in 30s, kill it. This handles a wedged
+            # trainer (CUDA op blocking, infinite loop in callback) so
+            # the user isn't stuck.
+            QTimer.singleShot(30000, self._force_kill_if_still_running)
+        else:
+            # No stop-file path was given OR write failed — go straight
+            # to terminate(). Same behaviour as before this refactor.
+            self._force_kill_training()
+
+    def _disarm_force_kill(self) -> None:
+        """Reset the Stop button after the 4s force-kill window expires.
+
+        Called by a single-shot QTimer. If the process already exited
+        gracefully, the button is already disabled by ``_train_finished``
+        — we just clear the latch + relabel for the next run.
+        """
+        if self.train_proc is None:
+            return
+        if not getattr(self, "_stop_force_armed", False):
+            return
+        # Process is still running but the force-kill window expired.
+        # Relabel back to the soft action so the next click stays graceful.
+        self._stop_force_armed = False
+        try:
+            self.train_stop.setText("⏹  Stop")
+        except Exception:
+            pass
+
+    def _force_kill_if_still_running(self) -> None:
+        """30s safety net for a wedged trainer that didn't honour the
+        stop-file. No-op if the process already exited or graceful
+        stop completed."""
+        if self.train_proc is None:
+            return
+        try:
+            self.train_log.appendPlainText(
+                "\n[WARN] Graceful stop did not release the trainer "
+                "within 30s — force-killing."
+            )
+        except Exception:
+            pass
+        self._force_kill_training()
+
+    def _force_kill_training(self) -> None:
+        """Hard-stop the subprocess. Used either by an explicit second
+        Stop click or by the 30s wedged-process safety net."""
+        if self.train_proc is None:
+            return
         if hasattr(self, '_train_stats_timer'):
             self._train_stats_timer.stop()
-            
-        self.train_log.appendPlainText("\n[INFO] Terminating training process...")
-        self.train_proc.terminate()
-        if not self.train_proc.waitForFinished(5000):
-            self.train_proc.kill()
+        try:
+            self.train_log.appendPlainText(
+                "\n[INFO] Force-killing training process (no checkpoint will "
+                "be saved by this code path; the OS will reclaim VRAM on exit)."
+            )
+        except Exception:
+            pass
+        try:
+            self.train_proc.terminate()
+            if not self.train_proc.waitForFinished(5000):
+                self.train_proc.kill()
+        except Exception as exc:
+            try:
+                self.train_log.appendPlainText(
+                    f"[WARN] terminate/kill raised: {exc}"
+                )
+            except Exception:
+                pass
+        self._stop_force_armed = False
 
     def _train_finished(self, exit_code=0, exit_status=QProcess.NormalExit) -> None:
         # Stop stats timer
@@ -13524,9 +14498,68 @@ class MainWindow(QMainWindow):
         # Reset the rolling tail for the next run.
         self._train_raw_tail = ""
 
+        # Status pill — terminal state. We distinguish three cases:
+        #   - normal exit + non-zero code  : failed
+        #   - normal exit + code 0         : completed (or 'stopped'
+        #                                    if user requested stop)
+        #   - crash exit                   : failed
+        # The 'stopped vs completed' signal comes from whether the
+        # stop file was ever armed during the run (we persist that on
+        # self._stop_force_armed-or-was-armed). Easier proxy: the stop
+        # file no longer exists AND either the user clicked Stop OR
+        # the trainer wrote 'stopped early by user request' in its log.
+        try:
+            stopped_by_user = False
+            try:
+                # The trainer logs this exact phrase when the stop file
+                # triggered. Cheap substring scan over the rolling tail.
+                stopped_by_user = "stopped early by user" in (
+                    getattr(self, "_train_raw_tail", "") or ""
+                )
+            except Exception:
+                pass
+
+            if exit_status != QProcess.NormalExit or exit_code != 0:
+                self.train_status_pill.set_state(
+                    "failed", f"exit code {exit_code}"
+                )
+            elif stopped_by_user:
+                self.train_status_pill.set_state(
+                    "stopped", "Resume picks up from the saved checkpoint"
+                )
+            else:
+                self.train_status_pill.set_state("done", "")
+        except Exception:
+            pass
+
+        # Clear stale stop-file state and refresh resume / continue
+        # selectors so a freshly written checkpoint or adapter shows up
+        # for the next run.
+        try:
+            if getattr(self, "_active_stop_file", None) is not None:
+                sf = Path(self._active_stop_file)
+                if sf.exists():
+                    sf.unlink()
+        except Exception:
+            pass
+        self._active_stop_file = None
+        self._stop_force_armed = False
+        try:
+            self.train_stop.setText("⏹  Stop")
+        except Exception:
+            pass
+        try:
+            self._refresh_resume_state()
+        except Exception:
+            pass
+
         self.train_proc = None
         self.train_start.setEnabled(True)
         self.train_stop.setEnabled(False)
+        try:
+            self.train_start_panel.set_running(False)
+        except Exception:
+            pass
         self._refresh_locals()
 
     def _render_training_summary(self) -> None:
@@ -22768,58 +23801,85 @@ respective package directories or official repositories.
                             pass
             
         if metrics and isinstance(metrics, dict):
+            # Skip-on-null helper. Every metric on the dashboard is
+            # populated from a JSON dict produced by finetune.py's
+            # DashboardCallback. That callback fires TWICE per step:
+            #   - on_step_end: emits {"step": N, ..., "loss": null,
+            #     "learning_rate": null} because the trainer hasn't
+            #     produced its log dict yet.
+            #   - on_log: emits the real values.
+            # The previous parser used ``'loss' in metrics`` which is
+            # True for ``"loss": null``, then ``float(None)`` raised
+            # TypeError. The exception bailed out of THIS function
+            # before ETA / speed / LR were even checked — that's why
+            # users saw Loss AND ETA stuck at "--" while only the
+            # cards that come earlier in the parse order updated. Use
+            # ``_get_num`` so a null value just skips that card and
+            # the rest of the parse continues.
+            def _get_num(d, key):
+                v = d.get(key)
+                if v is None:
+                    return None
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+
             # Update epoch (float value, e.g., 0.01)
-            if 'epoch' in metrics and hasattr(self, 'epoch_card'):
-                epoch_val = float(metrics['epoch'])
+            epoch_val_num = _get_num(metrics, 'epoch')
+            if epoch_val_num is not None and hasattr(self, 'epoch_card'):
                 total_epochs = getattr(self, '_active_epochs', 1)
                 # Show 2 decimal places if it's a fraction, otherwise int/total
-                if epoch_val < total_epochs and (epoch_val * 10) % 10 != 0:
-                    self._update_metric_card(self.epoch_card, f"{epoch_val:.2f}/{total_epochs}")
+                if epoch_val_num < total_epochs and (epoch_val_num * 10) % 10 != 0:
+                    self._update_metric_card(self.epoch_card, f"{epoch_val_num:.2f}/{total_epochs}")
                 else:
-                    self._update_metric_card(self.epoch_card, f"{int(epoch_val)}/{total_epochs}")
-            
+                    self._update_metric_card(self.epoch_card, f"{int(epoch_val_num)}/{total_epochs}")
+
             # Update step
-            if 'step' in metrics and hasattr(self, 'steps_card'):
-                step_val = int(metrics['step'])
-                # Try to get total steps or estimate
-                total_steps = metrics.get('total_steps', '?')
-                self._current_train_step = step_val
-                if isinstance(total_steps, int):
-                    self._total_train_steps = total_steps
-                self._update_metric_card(self.steps_card, f"{step_val}/{total_steps}")
-            
-            # Update loss
-            if 'loss' in metrics and hasattr(self, 'loss_card'):
-                loss_val = float(metrics['loss'])
+            step_val = None
+            if metrics.get('step') is not None and hasattr(self, 'steps_card'):
+                try:
+                    step_val = int(metrics['step'])
+                except (TypeError, ValueError):
+                    step_val = None
+                if step_val is not None:
+                    total_steps = metrics.get('total_steps', '?')
+                    self._current_train_step = step_val
+                    if isinstance(total_steps, int):
+                        self._total_train_steps = total_steps
+                    self._update_metric_card(self.steps_card, f"{step_val}/{total_steps}")
+
+            # Update loss — null on on_step_end emits, value on on_log
+            # emits. Skip silently when null so the LAST seen value
+            # stays on the card.
+            loss_val = _get_num(metrics, 'loss')
+            if loss_val is not None and hasattr(self, 'loss_card'):
                 self._update_metric_card(self.loss_card, f"{loss_val:.4f}")
-                self._record_loss_point(step_val if 'step' in metrics else None, loss_val)
-            
-            # Update learning rate
-            if 'learning_rate' in metrics and hasattr(self, 'learning_rate_card'):
-                lr_val = float(metrics['learning_rate'])
+                self._record_loss_point(step_val, loss_val)
+
+            # Update learning rate (also nullable on on_step_end emits).
+            lr_val = _get_num(metrics, 'learning_rate')
+            if lr_val is None:
+                lr_val = _get_num(metrics, 'lr')
+            if lr_val is not None and hasattr(self, 'learning_rate_card'):
                 self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
-            elif 'lr' in metrics and hasattr(self, 'learning_rate_card'):
-                lr_val = float(metrics['lr'])
-                self._update_metric_card(self.learning_rate_card, f"{lr_val:.2e}")
-            
+
             # Update speed
-            if 'samples_per_sec' in metrics and hasattr(self, 'speed_card'):
-                self._update_metric_card(self.speed_card, f"{float(metrics['samples_per_sec']):.1f} s/s")
-            elif 'samples_per_second' in metrics and hasattr(self, 'speed_card'):
-                self._update_metric_card(self.speed_card, f"{float(metrics['samples_per_second']):.1f} s/s")
-            elif 'train_samples_per_second' in metrics and hasattr(self, 'speed_card'):
-                self._update_metric_card(self.speed_card, f"{float(metrics['train_samples_per_second']):.1f} s/s")
+            sps = _get_num(metrics, 'samples_per_sec')
+            if sps is None:
+                sps = _get_num(metrics, 'samples_per_second')
+            if sps is None:
+                sps = _get_num(metrics, 'train_samples_per_second')
+            if sps is not None and hasattr(self, 'speed_card'):
+                self._update_metric_card(self.speed_card, f"{sps:.1f} s/s")
 
             # Update ETA
-            if 'eta_sec' in metrics and hasattr(self, 'eta_card'):
-                try:
-                    eta_val = float(metrics['eta_sec'])
-                    minutes = int(eta_val // 60)
-                    seconds = int(eta_val % 60)
-                    self._update_metric_card(self.eta_card, f"{minutes}m {seconds}s")
-                except:
-                    pass
-            
+            eta_val = _get_num(metrics, 'eta_sec')
+            if eta_val is not None and hasattr(self, 'eta_card'):
+                minutes = int(eta_val // 60)
+                seconds = int(eta_val % 60)
+                self._update_metric_card(self.eta_card, f"{minutes}m {seconds}s")
+
             return # Successfully parsed from dict
 
         # Ensure tracking fields exist
@@ -23694,6 +24754,46 @@ respective package directories or official repositories.
                         ):
                             self.tool_chat_model_a.addItem(label, payload)
                         ready_count += 1
+
+            # Locally-trained LoRA adapters. Mirrors the block in
+            # _fill_model_combo so the Tool Chat picker has parity with
+            # Test/M2M — adapter dirs are not in the onboarding table
+            # by default, but they're functional and the user has every
+            # right to expect them in this picker too.
+            try:
+                adapter_dir = self.root / "fine_tuned"
+                if adapter_dir.exists():
+                    trained = []
+                    for d in adapter_dir.iterdir():
+                        if not d.is_dir():
+                            continue
+                        # Skip Trainer ``checkpoint-*`` dirs — those are
+                        # in-progress / partial artefacts, not fine-tuned
+                        # adapters the user means to chat with.
+                        if d.name.startswith("checkpoint-"):
+                            continue
+                        has_weights = any(
+                            (d / f).exists()
+                            for f in (
+                                "adapter_model.safetensors",
+                                "adapter_model.bin",
+                                "pytorch_model.bin",
+                                "model.safetensors",
+                            )
+                        )
+                        if has_weights:
+                            trained.append(d)
+                    for adapter_path in sorted(trained):
+                        self.tool_chat_model_a.addItem(
+                            f"🎯 {adapter_path.name} (adapter)",
+                            str(adapter_path),
+                        )
+                        ready_count += 1
+            except Exception:
+                # Adapter scan is best-effort; a filesystem hiccup
+                # shouldn't blank out the entire picker.
+                pass
+
             if ready_count == 0:
                 self.tool_chat_model_a.addItem("(No READY models - run onboarding first)", None)
         except Exception as e:

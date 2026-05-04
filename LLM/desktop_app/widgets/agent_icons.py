@@ -16,7 +16,13 @@ from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
 from PySide6.QtCore import QRectF, QSize, Qt
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QFont, QIcon, QPainter, QPixmap
+
+
+# Qt's default font on Windows often lacks emoji glyphs, so palette
+# entries like "🛠️" / "📡" render as blank tofu boxes. Forcing
+# ``Segoe UI Emoji`` everywhere we paint an emoji icon fixes that.
+_EMOJI_FAMILY = "Segoe UI Emoji"
 
 
 OWL_PREFIX = "owl:"
@@ -101,8 +107,17 @@ def list_owl_icons() -> Iterable[Tuple[str, QPixmap]]:
             yield f"{OWL_PREFIX}{base}", pm
 
 
+def _emoji_font_for(point_size: int) -> QFont:
+    f = QFont(_EMOJI_FAMILY)
+    f.setPointSize(point_size)
+    return f
+
+
 def apply_to_button(button, icon: str, *, size: int = 28) -> None:
-    """Apply an icon string to a QAbstractButton (text vs QIcon)."""
+    """Apply an icon string to a QAbstractButton (text vs QIcon).
+
+    For emoji we also force a font that has the glyphs.
+    """
     pm = resolve_pixmap(icon)
     if pm is not None:
         button.setText("")
@@ -110,6 +125,9 @@ def apply_to_button(button, icon: str, *, size: int = 28) -> None:
         button.setIconSize(QSize(size, size))
     else:
         button.setIcon(QIcon())
+        # Match the font size to ~70% of the button's icon-equivalent
+        # box so the glyph reads at a similar weight to the PNG tiles.
+        button.setFont(_emoji_font_for(max(10, int(size * 0.55))))
         button.setText(icon or "🤖")
 
 
@@ -128,18 +146,23 @@ def apply_to_label(label, icon: str, *, size: int = 28) -> None:
         label.setText("")
     else:
         label.setPixmap(QPixmap())
+        label.setFont(_emoji_font_for(max(10, int(size * 0.55))))
         label.setText(icon or "🤖")
 
 
 def paint_icon(p: QPainter, rect: QRectF, icon: Optional[str], *, fallback: str = "🤖") -> None:
     """Draw an icon (PNG or emoji) centred inside ``rect``.
 
-    The caller is responsible for setting font/pen for the emoji path —
-    we only override when drawing a pixmap, and we restore on exit.
+    On the emoji path we force ``Segoe UI Emoji`` so the glyph isn't a
+    blank tofu box, while preserving the caller's pen/colour.
     """
     pm = resolve_pixmap(icon)
     if pm is None:
+        original = p.font()
+        emoji_font = _emoji_font_for(max(10, int(min(rect.width(), rect.height()) * 0.55)))
+        p.setFont(emoji_font)
         p.drawText(rect, Qt.AlignCenter, icon or fallback)
+        p.setFont(original)
         return
     target_size = min(rect.width(), rect.height())
     scaled = pm.scaled(

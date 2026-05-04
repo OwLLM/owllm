@@ -1417,6 +1417,16 @@ class AgentsPage(QWidget):
     # Team rendering
     # ------------------------------------------------------------------
 
+    def refresh_after_definitions_changed(self) -> None:
+        """Re-render the team using the latest agent definitions on disk.
+
+        Called by the host after the Studio saves/deletes an agent so
+        cards, the graph editor, and the orbital diagram pick up the
+        new icon / description / tools without needing a project switch.
+        """
+        self._team = None  # force a rebuild from the persisted defs
+        self._render_team()
+
     def _render_team(self) -> None:
         """(Re)populate the canvas + per-agent log buffers for the active project.
 

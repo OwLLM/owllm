@@ -223,11 +223,18 @@ class _GalleryCard(QFrame):
 class _AvatarPicker(QFrame):
     """Grid of avatar buttons (owl PNGs first, then emoji palette).
 
-    Every tile is rendered up-front — selection just changes the
-    border / glow, it doesn't gate visibility.
+    Every tile is rendered up-front at a comfortably clickable size —
+    selection just changes the border / glow, it doesn't gate
+    visibility. Emoji tiles use ``Segoe UI Emoji`` explicitly because
+    the default Qt font renders many glyphs as blank tofu boxes.
     """
 
     picked = Signal(str)
+
+    OWL_TILE = 76
+    OWL_ICON = 64
+    EMOJI_TILE = 60
+    EMOJI_FONT_PT = 28
 
     def __init__(self, current: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -236,8 +243,8 @@ class _AvatarPicker(QFrame):
             "QFrame#AvatarPicker { background:#14171d; border:none; border-radius:10px; }"
         )
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(10, 10, 10, 10)
-        outer.setSpacing(8)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(10)
 
         # Owl PNG row(s).
         owls = list(list_owl_icons())
@@ -251,13 +258,13 @@ class _AvatarPicker(QFrame):
 
             owl_grid = QGridLayout()
             owl_grid.setContentsMargins(0, 0, 0, 0)
-            owl_grid.setSpacing(6)
-            cols = 7
+            owl_grid.setSpacing(8)
+            cols = 6
             for i, (icon_str, pm) in enumerate(owls):
                 btn = QPushButton()
-                btn.setFixedSize(56, 56)
+                btn.setFixedSize(self.OWL_TILE, self.OWL_TILE)
                 btn.setIcon(QIcon(pm))
-                btn.setIconSize(QSize(44, 44))
+                btn.setIconSize(QSize(self.OWL_ICON, self.OWL_ICON))
                 btn.setToolTip(owl_label(owl_basename(icon_str)))
                 self._apply_tile_style(btn, selected=(icon_str == current))
                 btn.clicked.connect(
@@ -276,11 +283,14 @@ class _AvatarPicker(QFrame):
 
         emoji_grid = QGridLayout()
         emoji_grid.setContentsMargins(0, 0, 0, 0)
-        emoji_grid.setSpacing(4)
+        emoji_grid.setSpacing(6)
         cols = 7
+        emoji_font = QFont("Segoe UI Emoji")
+        emoji_font.setPointSize(self.EMOJI_FONT_PT)
         for i, emoji in enumerate(AVATAR_PALETTE):
             btn = QPushButton(emoji)
-            btn.setFixedSize(40, 40)
+            btn.setFixedSize(self.EMOJI_TILE, self.EMOJI_TILE)
+            btn.setFont(emoji_font)
             self._apply_tile_style(btn, selected=(emoji == current), emoji=True)
             btn.clicked.connect(
                 lambda _checked=False, e=emoji: self.picked.emit(e)
@@ -290,25 +300,38 @@ class _AvatarPicker(QFrame):
 
     @staticmethod
     def _apply_tile_style(btn: QPushButton, *, selected: bool, emoji: bool = False) -> None:
-        # rgba(255,255,255,0.10) on the dark backplate is bright enough to
+        # rgba(255,255,255,0.12) on the dark backplate is bright enough to
         # read every tile at a glance; selected tiles add a neon border so
-        # the *current* choice still stands out.
-        bg = "rgba(74,108,255,0.30)" if selected else "rgba(255,255,255,0.10)"
-        border = "1.5px solid #6f8aff" if selected else "1px solid rgba(255,255,255,0.08)"
-        font_size = "20px" if emoji else "12px"
-        btn.setStyleSheet(f"""
-            QPushButton {{
-                background:{bg};
-                border:{border};
-                border-radius:8px;
-                color:#ffffff;
-                font-size:{font_size};
-            }}
-            QPushButton:hover {{
-                background:rgba(74,108,255,0.45);
-                border:1.5px solid #8aa3ff;
-            }}
-        """)
+        # the *current* choice still stands out. We deliberately avoid
+        # overriding ``color`` on emoji buttons — Qt+Windows render colour
+        # emoji natively, and forcing ``color:#fff`` washes them to mono.
+        bg = "rgba(74,108,255,0.30)" if selected else "rgba(255,255,255,0.12)"
+        border = "1.5px solid #6f8aff" if selected else "1px solid rgba(255,255,255,0.10)"
+        if emoji:
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background:{bg};
+                    border:{border};
+                    border-radius:10px;
+                }}
+                QPushButton:hover {{
+                    background:rgba(74,108,255,0.45);
+                    border:1.5px solid #8aa3ff;
+                }}
+            """)
+        else:
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background:{bg};
+                    border:{border};
+                    border-radius:10px;
+                    color:#ffffff;
+                }}
+                QPushButton:hover {{
+                    background:rgba(74,108,255,0.45);
+                    border:1.5px solid #8aa3ff;
+                }}
+            """)
 
 
 # ---------------------------------------------------------------------------
@@ -631,6 +654,12 @@ class _EditorPanel(QFrame):
 
 
 class AgentStudioPage(QWidget):
+    # Emitted whenever the catalogue of agent definitions changes
+    # (save / delete / duplicate). The host wires this up so other
+    # pages (AgentsPage in particular) can refresh their cached views
+    # without us reaching into them directly.
+    definitions_changed = Signal()
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._build_ui()
@@ -756,10 +785,12 @@ class AgentStudioPage(QWidget):
     @Slot(str)
     def _on_saved(self, name: str) -> None:
         self._reload_gallery(select=name)
+        self.definitions_changed.emit()
 
     @Slot(str)
     def _on_deleted(self, name: str) -> None:
         self._reload_gallery()
+        self.definitions_changed.emit()
 
     def _on_library_clicked(self) -> None:
         dlg = SkillLibraryDialog(self)

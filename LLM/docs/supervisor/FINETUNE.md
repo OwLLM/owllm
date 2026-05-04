@@ -45,9 +45,24 @@ Sources to mine:
 | Existing user logs (with consent) | stderr + the eventual successful command |
 | `core/envs/capability_matrix.py` | rule entries → synthetic seed examples |
 
-Build script lives at [tools/build_failure_corpus.py](../../tools/) — proposed, not yet written.
+Build script: [LLM/tools/build_failure_corpus.py](../../tools/build_failure_corpus.py).
 
-Output schema (`bootstrap/recipes/failure_corpus.jsonl`):
+Run:
+```
+python LLM/tools/build_failure_corpus.py            # write
+python LLM/tools/build_failure_corpus.py --dry-run  # stats only
+```
+
+Output: `bootstrap/recipes/failure_corpus_raw.jsonl` — natural-language
+symptom→fix pairs scraped from CHANGELOG + git log, tagged by category. The
+v0 extractor finds ~215 candidates from the project's own history.
+
+Stage 2 (TODO): an LLM-assisted pass converts each raw row into the
+structured `{input: {hardware, trigger, current_env, error_log_tail},
+output: {action, args, reason, fallback}}` schema below, gated by human
+review. This is the next task after the extractor lands.
+
+Final structured schema (`bootstrap/recipes/failure_corpus.jsonl`):
 
 ```json
 {

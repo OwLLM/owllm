@@ -267,19 +267,31 @@ class AgentTeamCanvas(QWidget):
         self.update()
 
     def _recompute_depths(self) -> None:
-        """BFS over set_edges() starting from the orchestrator. Pure
-        data — never touches the painter. Failures stay silent and
-        leave self._depth empty, which makes _layout fall back to
-        the original single-ring behaviour."""
+        """Directed BFS over set_edges() starting at the orchestrator,
+        following only OUTGOING edges. The layer of an agent is the
+        number of dispatch hops it takes for input to flow from the
+        orchestrator down to that agent.
+
+        Why directed: an agent that gives feedback BACK to the
+        orchestrator (e.g. `critic → orchestrator`) shouldn't be
+        treated as a depth-1 sibling of the orchestrator's direct
+        reports — the critic still receives its input through the
+        chain (e.g. `orchestrator → researcher → coder → critic`),
+        so it belongs on the corresponding deeper ring.
+
+        Agents with no directed path from the orchestrator land on
+        the outermost ring (max_real_depth + 1) so isolated /
+        feedback-only agents don't collapse onto the inner ring.
+        """
         self._depth = {}
         try:
             if not self._orchestrator_name or self._orchestrator_name not in self._agents:
                 return
+            # Directed adjacency: a -> b means a dispatches into b.
             adj: Dict[str, set] = {n: set() for n in self._agents}
             for a, b in self._edges:
                 if a in adj and b in adj:
                     adj[a].add(b)
-                    adj[b].add(a)
             from collections import deque
             seen = {self._orchestrator_name: 0}
             q = deque([self._orchestrator_name])
@@ -290,6 +302,13 @@ class AgentTeamCanvas(QWidget):
                     if nb not in seen:
                         seen[nb] = d + 1
                         q.append(nb)
+            # Orphan agents (no input path from the orchestrator) go
+            # on the outermost ring, just past the deepest reachable
+            # layer. The orchestrator itself stays at depth 0.
+            max_real = max(seen.values()) if seen else 0
+            for name in self._agents:
+                if name not in seen:
+                    seen[name] = max_real + 1
             self._depth = seen
         except Exception:
             self._depth = {}
@@ -500,22 +519,20 @@ class AgentTeamCanvas(QWidget):
     def _paint_rings(self, p: QPainter, centre: QPointF) -> None:
         """Draw the concentric onion-ring orbital paths.
 
-        Uses the same neon palette as the rest of the diagram —
-        cyan, violet, pink — cycling per ring so successive rings
-        read as distinct. Thin lines, semi-transparent so the rings
-        sit in the background without competing with the agent
-        nodes.
+        Uses the SAME look as the orchestrator's central rotating
+        rings — solid neon strokes alternating cyan / violet /
+        pink / blue, around 200 alpha and 1.6px thick — so the
+        onion rings feel like extensions of the central crest
+        rather than a different visual language.
         """
         if not self._ring_radii:
             return
-        # Same palette as the central crest's rings + the dashed
-        # adjacency connections — keeps the diagram cohesive.
         ring_palette = [_NEON_CYAN, _NEON_VIOLET, _NEON_PINK, _NEON_BLUE]
         p.setBrush(Qt.NoBrush)
         for idx, r in enumerate(self._ring_radii):
             col = ring_palette[idx % len(ring_palette)]
-            pen = QPen(_alpha(col, 110), 1.2)
-            pen.setStyle(Qt.DashLine)
+            pen = QPen(_alpha(col, 200), 1.6)
+            pen.setCapStyle(Qt.RoundCap)
             p.setPen(pen)
             p.drawEllipse(centre, r, r)
 

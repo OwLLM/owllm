@@ -793,11 +793,46 @@ class AgentsPage(QWidget):
         """)
         self.cancel_btn.clicked.connect(self._cancel_clicked)
         self.cancel_btn.setEnabled(False)
+
+        # Telemetry button — opens a non-modal dialog showing per-tool
+        # call counts, error rates, p50/p95 latency, last error. Tied to
+        # this page's registry so stats reflect what the team has actually
+        # been doing in this session.
+        self.telemetry_btn = QPushButton("📊")
+        self.telemetry_btn.setMinimumHeight(38)
+        self.telemetry_btn.setFixedWidth(44)
+        self.telemetry_btn.setToolTip("Open the tool-call telemetry panel")
+        self.telemetry_btn.setStyleSheet("""
+            QPushButton {
+                background:rgba(255,255,255,0.05); color:#dadcdf;
+                border:none; border-radius:8px; font-size:16px;
+            }
+            QPushButton:hover { background:rgba(255,255,255,0.10); }
+        """)
+        self.telemetry_btn.clicked.connect(self._open_telemetry_panel)
+        self._telemetry_panel = None  # lazy-built on first click
+
         top.addWidget(self.attach_btn)
         top.addWidget(self.goal_input, 1)
         top.addWidget(self.run_btn)
         top.addWidget(self.cancel_btn)
+        top.addWidget(self.telemetry_btn)
         return top
+
+    def _open_telemetry_panel(self) -> None:
+        """Show (or re-raise) the non-modal telemetry dialog.
+
+        Reusing one instance per page so opening it twice doesn't
+        spawn duplicate refresh timers."""
+        from desktop_app.widgets.telemetry_panel import TelemetryPanel
+        if self._telemetry_panel is not None and self._telemetry_panel.isVisible():
+            self._telemetry_panel.raise_()
+            self._telemetry_panel.activateWindow()
+            return
+        # Either never opened or previously closed — build fresh so the
+        # refresh timer is bound to a live window.
+        self._telemetry_panel = TelemetryPanel(self._registry.telemetry, parent=self)
+        self._telemetry_panel.show()
 
     # ------------------------------------------------------------------
     # Attachment chip strip — appears below the goal row when files

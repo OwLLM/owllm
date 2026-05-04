@@ -442,21 +442,32 @@ class AgentTeamCanvas(QWidget):
             d = max(1, self._depth.get(name, 1))
             by_depth.setdefault(d, []).append(name)
 
-        # EQUAL ring spacing. orchestrator(centre) → ring1 → ring2 →
-        # ring3 should all be the same step apart. Solve:
-        #   ring_radius(d) = step * d
-        # so that step = max_radius / max_depth, picking the step
-        # that lands the OUTERMOST ring exactly at max_radius.
+        # Concentric ring layout. The user wants TWO independent
+        # things and they must not interfere:
+        #   1. A bigger empty area around the orchestrator crest so
+        #      arrows pointing at it stay visible outside the owl.
+        #   2. EQUAL spacing between consecutive rings (ring1↔ring2
+        #      should equal ring2↔ring3, regardless of how big the
+        #      centre area is).
+        # Solution: ``inner_offset`` shifts every ring outward by
+        # the same amount, so the gap *between* rings is purely
+        # ``step``. Increasing the offset enlarges the centre WITHOUT
+        # changing layer distances.
         max_depth = max(by_depth.keys()) if by_depth else 1
-        step = max_radius / max(1, max_depth)
-        # Don't let the inner ring crowd the orchestrator crest. The
-        # floor scales with zoom so it stays proportional.
-        min_step = 110.0 * zoom
-        if step < min_step and max_depth > 0:
+        # Centre clearance — a touch more than the orchestrator's hit
+        # radius (90·zoom in _layout below) so ring 1 sits comfortably
+        # outside the owl crest.
+        inner_offset = 130.0 * zoom
+        # Inter-ring gap. Falls back to a reasonable floor when there
+        # are only one or two layers so we don't crowd the centre.
+        step_budget = max_radius - inner_offset
+        step = step_budget / max(1, max_depth)
+        min_step = 90.0 * zoom
+        if step < min_step:
             step = min_step
         # Cache for the visible-ring painter.
         self._ring_radii: List[float] = [
-            min(max_radius, step * d) for d in sorted(by_depth.keys())
+            inner_offset + step * d for d in sorted(by_depth.keys())
         ]
 
         for depth in sorted(by_depth.keys()):
@@ -464,7 +475,7 @@ class AgentTeamCanvas(QWidget):
             count = len(ring_agents)
             if count == 0:
                 continue
-            ring_radius = min(max_radius, step * depth)
+            ring_radius = inner_offset + step * depth
             # Counter-rotate alternate rings so the layers feel like
             # distinct layers, not one big swarm.
             ring_rot = rot if (depth % 2 == 1) else -rot * 0.6
@@ -662,22 +673,16 @@ class AgentTeamCanvas(QWidget):
             sa = self._agents[src].status if src in self._agents else STATUS_IDLE
             da = self._agents[dst].status if dst in self._agents else STATUS_IDLE
             both_active = sa == STATUS_ACTIVE and da == STATUS_ACTIVE
-            grad = QLinearGradient(start, end)
-            if both_active:
-                # Brighter / thicker version of the same convention
-                # so an in-flight pair stands out without violating
-                # the colour language.
-                grad.setColorAt(0.0, _alpha(_EDGE_COLOR_OUT, 240))
-                grad.setColorAt(1.0, _alpha(_EDGE_COLOR_IN, 240))
-                pen_w = 2.0
-            else:
-                # Graph editor edge convention: gradient from blue
-                # (output port) at the source to orange (input port)
-                # at the destination.
-                grad.setColorAt(0.0, _alpha(_EDGE_COLOR_OUT, 200))
-                grad.setColorAt(1.0, _alpha(_EDGE_COLOR_IN, 200))
-                pen_w = 1.5
-            pen = QPen(QBrush(grad), pen_w)
+            # Graph editor convention: an edge inherits the colour of
+            # its TARGET node's layer — same code path as
+            # AgentEdgeItem._palette() in agent_canvas.py. So the
+            # arrow into a green-layer agent reads green, into a
+            # blue-layer agent reads blue, etc.
+            dst_layer = self._depth.get(dst, 0)
+            edge_col = _layer_color(dst_layer)
+            edge_alpha = 240 if both_active else 210
+            pen_w = 2.2 if both_active else 1.6
+            pen = QPen(_alpha(edge_col, edge_alpha), pen_w)
             pen.setCapStyle(Qt.RoundCap)
             p.setPen(pen)
             p.drawLine(start, end)

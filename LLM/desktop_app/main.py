@@ -4467,6 +4467,12 @@ class MainWindow(QMainWindow):
         Resolve model_id for runtime chat flows.
         If a model is already READY in onboarding but missing from llm_backends.yaml,
         create a config entry once so chat does not get stuck in re-onboard loops.
+
+        Also auto-registers fresh LoRA adapters: when the user just
+        finished training and picks the new adapter directly in the
+        Test/M2M/Arena picker (without first clicking Use in Chat from
+        the Tuned tab), this path detects it's an adapter dir, finds
+        its base, and registers it on the fly so chat can launch.
         """
         try:
             return self._resolve_model_id_from_path(model_path, allow_create=False)
@@ -4474,6 +4480,38 @@ class MainWindow(QMainWindow):
             err = str(e).lower()
             if "not in config" not in err:
                 raise
+
+            # On-demand adapter registration. If the path points to a
+            # directory with PEFT files, run the standard adapter
+            # registration flow (matcher → base lookup → DB upsert).
+            # On success, the onboarding row gets created with status
+            # READY, the next call to _resolve_model_id_from_path
+            # finds the base via the canonical lookup, and the chat
+            # launch proceeds normally — no popup, no re-onboard loop.
+            try:
+                _ap = Path(model_path)
+                if _ap.is_dir() and (_ap / "adapter_config.json").exists():
+                    _ok, _msg = self._register_tuned_adapter(_ap.name, _ap)
+                    if _ok:
+                        try:
+                            self._log_to_app_log(
+                                f"[chat-resolve] auto-registered adapter {_ap.name} "
+                                "on first chat use."
+                            )
+                        except Exception:
+                            pass
+                        # Re-run the resolution; the adapter row exists now.
+                        try:
+                            return self._resolve_model_id_from_path(
+                                model_path, allow_create=True
+                            )
+                        except Exception:
+                            # Fall through to legacy path on weird race.
+                            pass
+            except Exception:
+                # Adapter auto-register is best-effort; if it fails for
+                # any reason, fall through to the legacy READY-row scan.
+                pass
 
             # Only auto-register if this exact model path is already READY in onboarding.
             try:
@@ -4986,6 +5024,32 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self._sync_header_side_widths()
+        # Keep tuned-model cards at ~25 % of the window width.
+        try:
+            self._resize_tuned_cards()
+        except Exception:
+            pass
+
+    def _resize_tuned_cards(self) -> None:
+        """Pin every tuned-model card to ~25 % of the window's width.
+
+        The 4-column QGridLayout already lays them out evenly, but
+        without an explicit min/max width the cards can degenerate to
+        whatever the contents demand. Computing per-card width from
+        the current window keeps the page consistent on resize.
+        """
+        cards = getattr(self, "_tuned_cards", None)
+        if not cards:
+            return
+        # 25 % of the window minus a small allowance for grid spacing
+        # and outer margins so 4 cards fit comfortably on one row.
+        target = max(220, int(self.width() * 0.25) - 32)
+        for card in cards:
+            try:
+                card.setMinimumWidth(target)
+                card.setMaximumWidth(target)
+            except Exception:
+                continue
 
     def _sync_header_side_widths(self) -> None:
         """
@@ -8615,30 +8679,39 @@ class MainWindow(QMainWindow):
             self.tuned_layout.addWidget(empty, 0, 0, 1, 2)
             return
 
-        max_cols = 2
+        # Four columns so each card lands at ~25 % of the window width
+        # (matches the user's spec). Below, _resize_tuned_cards keeps
+        # min/max widths in step with the actual window size on resize.
+        max_cols = 4
         row = col = 0
+        self._tuned_cards: List[QFrame] = []
         for name in adapters:
             path = adapter_root / name
             card = self._build_tuned_model_card(name, path)
             self.tuned_layout.addWidget(card, row, col)
+            self._tuned_cards.append(card)
             col += 1
             if col >= max_cols:
                 col = 0
                 row += 1
+        self._resize_tuned_cards()
 
     def _build_tuned_model_card(self, name: str, path: "Path") -> QFrame:
-        """Render one fine-tuned adapter as a rich card.
+        """Render one fine-tuned adapter as a card.
 
-        Visual matches the Models / Downloaded card pattern:
-          - top row:  🎯 emoji  +  name (large)  +  status badge
-          - mid row:  base-model + size + last-modified
-          - bottom:   row of action buttons (Use / Onboard / Open / Delete)
+        Visual is intentionally identical to ``DownloadedModelCard`` —
+        same outer dimensions, same gradient + colored border, same
+        50×50 icon, same 14 pt bold name, same status-badge style,
+        same blue ``rgba(102, 126, 234, …)`` button palette. Only the
+        accent emoji (🎯) and the action set distinguish it from a
+        downloaded base model.
         """
         import json as _json
+        import os
+        import urllib.parse
         from datetime import datetime as _dt
 
-        # Pull metadata from adapter_config.json + training_info.json so the
-        # card shows useful context (which base model produced it, when).
+        # --- metadata ---------------------------------------------------
         base_model = "—"
         adapter_cfg_path = path / "adapter_config.json"
         if adapter_cfg_path.exists():
@@ -8657,7 +8730,6 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
-        # Disk size — sum every file in the adapter dir.
         size_bytes = 0
         try:
             for p in path.rglob("*"):
@@ -8668,7 +8740,6 @@ class MainWindow(QMainWindow):
         size_mb = size_bytes / (1024 * 1024) if size_bytes else 0.0
         size_str = f"{size_mb:.1f} MB" if size_mb < 1024 else f"{size_mb / 1024:.2f} GB"
 
-        # Last-modified.
         try:
             mtime = max((p.stat().st_mtime for p in path.rglob("*") if p.is_file()), default=0)
         except Exception:
@@ -8676,139 +8747,197 @@ class MainWindow(QMainWindow):
         date_str = (
             _dt.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M") if mtime else "—"
         )
-
-        # Has the user already onboarded this adapter? Best-effort heuristic:
-        # an "onboarded" flag file dropped by _start_model_onboarding.
         onboarded = (path / ".onboarded").exists()
 
+        # --- card frame: same border + gradient as DownloadedModelCard --
         card = QFrame()
-        card.setStyleSheet("""
-            QFrame {
+        card.setMinimumHeight(220)
+        card.setFrameShape(QFrame.Box)
+        # Match DownloadedModelCard's blue-accent dark gradient + 2 px
+        # border + hover pop. The colour values are copied verbatim
+        # from model_card_widget.DownloadedModelCard._apply_style so the
+        # two card types render identically side by side.
+        border_color = "#667eea"
+        card.setStyleSheet(f"""
+            QFrame {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(192, 138, 255, 0.14),
-                    stop:1 rgba(120, 80, 180, 0.06));
-                border: 1px solid rgba(192, 138, 255, 0.35);
-                border-radius: 12px;
-            }
-            QFrame:hover {
-                border: 1px solid rgba(192, 138, 255, 0.65);
-            }
+                    stop:0 #1e1e2e, stop:1 #16213e);
+                border: 2px solid {border_color};
+                border-radius: 10px;
+            }}
+            QFrame:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #262740, stop:1 #1a2540);
+            }}
+            QLabel {{ background: transparent; color: #fafafa; border: none; }}
         """)
-        v = QVBoxLayout(card)
-        v.setContentsMargins(16, 14, 16, 14)
-        v.setSpacing(10)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(20, 15, 20, 15)
+        layout.setSpacing(8)
 
-        # ----- Header row: icon + name + status badge -----
-        head = QHBoxLayout()
-        head.setSpacing(12)
+        # --- header: 50×50 icon + title column --------------------------
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(15)
 
-        icon = QLabel("🎯")
-        icon.setStyleSheet(
-            "font-size: 26pt; background: transparent; padding-right: 6px;"
+        icon_label = QLabel(card)
+        icon_label.setFixedSize(50, 50)
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setText("🎯")
+        icon_label.setStyleSheet(
+            "QLabel {"
+            "background-color: #c08aff;"
+            "color: white;"
+            "border-radius: 25px;"
+            "font-size: 24px;"
+            "font-weight: bold;"
+            "border: 2px solid rgba(255, 255, 255, 0.2);"
+            "}"
         )
-        head.addWidget(icon, 0, Qt.AlignVCenter)
+        header_layout.addWidget(icon_label)
 
-        title_box = QVBoxLayout()
-        title_box.setSpacing(2)
-        title = QLabel(name)
-        title.setStyleSheet(
-            "color:#ffffff; font-size: 14pt; font-weight: bold; background: transparent;"
-        )
-        title.setWordWrap(True)
-        title_box.addWidget(title)
+        title_stats_layout = QVBoxLayout()
+        title_stats_layout.setSpacing(2)
 
-        sub = QLabel(f"Base: {base_model}")
-        sub.setStyleSheet(
-            "color:#c8b3f0; font-size: 10pt; background: transparent;"
-        )
-        title_box.addWidget(sub)
-        head.addLayout(title_box, 1)
+        # Top row: name + status badge.
+        top_row = QHBoxLayout()
+        top_row.setSpacing(10)
+        name_label = QLabel(name, card)
+        name_font = QFont()
+        name_font.setPointSize(14)
+        name_font.setBold(True)
+        name_label.setFont(name_font)
+        name_label.setWordWrap(True)
+        name_label.setMaximumWidth(350)
+        top_row.addWidget(name_label)
 
-        # Status badge — green when onboarded, amber otherwise.
         if onboarded:
             badge_text = "✅ ONBOARDED"
-            badge_bg = "rgba(60, 242, 107, 0.18)"
-            badge_fg = "#3cf26b"
-            badge_border = "rgba(60, 242, 107, 0.6)"
+            badge_bg = "#4CAF50"
         else:
             badge_text = "🆕 NEW"
-            badge_bg = "rgba(255, 192, 96, 0.18)"
-            badge_fg = "#ffc060"
-            badge_border = "rgba(255, 192, 96, 0.6)"
-        badge = QLabel(badge_text)
-        badge.setStyleSheet(
-            f"background:{badge_bg}; color:{badge_fg}; "
-            f"border:1px solid {badge_border}; border-radius: 10px; "
-            "padding: 4px 10px; font-size: 9pt; font-weight: bold;"
-        )
-        badge.setAlignment(Qt.AlignCenter)
-        head.addWidget(badge, 0, Qt.AlignTop)
-        v.addLayout(head)
+            badge_bg = "#FF9800"
+        status_badge = QLabel(badge_text, card)
+        status_badge.setStyleSheet(f"""
+            QLabel {{
+                background-color: {badge_bg};
+                color: white;
+                padding: 3px 8px;
+                border-radius: 4px;
+                font-size: 11px;
+                font-weight: bold;
+            }}
+        """)
+        status_badge.setMaximumWidth(180)
+        top_row.addWidget(status_badge)
+        top_row.addStretch(1)
+        title_stats_layout.addLayout(top_row)
 
-        # ----- Stats strip -----
+        # Stats row: base model + modified date (mirrors the
+        # downloads/likes row on the other cards).
         stats_row = QHBoxLayout()
-        stats_row.setSpacing(20)
-        stats_row.setContentsMargins(0, 0, 0, 0)
-
-        def _stat(label_text: str, value_text: str) -> QVBoxLayout:
-            box = QVBoxLayout()
-            box.setSpacing(0)
-            lbl = QLabel(label_text)
-            lbl.setStyleSheet(
-                "color:#888; font-size: 8pt; background: transparent; "
-                "letter-spacing:0.5px; text-transform:uppercase;"
-            )
-            val = QLabel(value_text)
-            val.setStyleSheet(
-                "color:#e6f0ff; font-size: 10pt; font-weight: 600; background: transparent;"
-            )
-            box.addWidget(lbl)
-            box.addWidget(val)
-            return box
-
-        stats_row.addLayout(_stat("Size", size_str))
-        stats_row.addLayout(_stat("Modified", date_str))
+        stats_row.setSpacing(15)
+        base_lbl = QLabel(f"🧬 Base: {base_model}", card)
+        base_lbl.setStyleSheet("color: #888; font-size: 11px;")
+        stats_row.addWidget(base_lbl)
+        date_lbl = QLabel(f"🕒 {date_str}", card)
+        date_lbl.setStyleSheet("color: #888; font-size: 11px;")
+        stats_row.addWidget(date_lbl)
         stats_row.addStretch(1)
-        v.addLayout(stats_row)
+        title_stats_layout.addLayout(stats_row)
 
-        # ----- Action buttons -----
-        actions = QHBoxLayout()
-        actions.setSpacing(8)
-        actions.setContentsMargins(0, 4, 0, 0)
-
-        btn_css = """
-            QPushButton {
-                background: rgba(192, 138, 255, 0.18);
-                color: #f0e6ff;
-                border: 1px solid rgba(192, 138, 255, 0.5);
-                border-radius: 8px;
-                padding: 6px 14px;
-                font-size: 10pt;
-                font-weight: 600;
+        # Local-status badge row (matches DownloadedModelCard).
+        local_row = QHBoxLayout()
+        local_row.setSpacing(10)
+        local_badge = QLabel("🎯 Fine-tuned", card)
+        local_badge.setStyleSheet("""
+            QLabel {
+                background: rgba(192, 138, 255, 0.20);
+                color: #c08aff;
+                padding: 2px 6px;
+                border-radius: 3px;
+                font-size: 10px;
+                font-weight: bold;
             }
-            QPushButton:hover { background: rgba(192, 138, 255, 0.35); }
-            QPushButton:pressed { background: rgba(192, 138, 255, 0.55); }
-        """
-        btn_css_primary = btn_css.replace(
-            "rgba(192, 138, 255, 0.18)", "rgba(60, 242, 107, 0.20)"
-        ).replace(
-            "rgba(192, 138, 255, 0.5)", "rgba(60, 242, 107, 0.65)"
-        ).replace(
-            "rgba(192, 138, 255, 0.35)", "rgba(60, 242, 107, 0.40)"
-        ).replace(
-            "rgba(192, 138, 255, 0.55)", "rgba(60, 242, 107, 0.60)"
+        """)
+        local_row.addWidget(local_badge)
+        local_row.addStretch(1)
+        title_stats_layout.addLayout(local_row)
+
+        header_layout.addLayout(title_stats_layout, 1)
+        layout.addLayout(header_layout)
+
+        # --- middle row: size + accent emoji ----------------------------
+        middle_layout = QHBoxLayout()
+        size_label = QLabel(f"📦 {size_str}", card)
+        size_font = QFont()
+        size_font.setPointSize(13)
+        size_label.setFont(size_font)
+        middle_layout.addWidget(size_label)
+        middle_layout.addStretch(1)
+        accent_label = QLabel("🎯", card)
+        accent_font = QFont()
+        accent_font.setPointSize(18)
+        accent_label.setFont(accent_font)
+        middle_layout.addWidget(accent_label)
+        layout.addLayout(middle_layout)
+
+        # --- path link row (matches DownloadedModelCard) ---------------
+        abs_path = os.path.abspath(str(path))
+        file_url = f"file:///{urllib.parse.quote(abs_path.replace(os.sep, '/'))}"
+        path_label = QLabel(
+            f'📂 <a href="{file_url}" style="color: #667eea; text-decoration: none;">{path}</a>',
+            card,
         )
-        btn_css_danger = btn_css.replace(
-            "rgba(192, 138, 255, 0.18)", "rgba(255, 120, 120, 0.16)"
+        path_label.setOpenExternalLinks(True)
+        path_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        path_font = QFont()
+        path_font.setPointSize(11)
+        path_label.setFont(path_font)
+        path_label.setWordWrap(True)
+        layout.addWidget(path_label)
+
+        layout.addStretch(1)
+
+        # --- button row (same blue palette as DownloadedModelCard) ----
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(8)
+        button_style = """
+            QPushButton {
+                background: rgba(102, 126, 234, 0.15);
+                border: 1px solid rgba(102, 126, 234, 0.4);
+                color: white;
+                border-radius: 6px;
+                padding: 6px 15px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(102, 126, 234, 0.25);
+                border: 1px solid rgba(102, 126, 234, 0.6);
+            }
+            QPushButton:pressed {
+                background: rgba(102, 126, 234, 0.35);
+            }
+            QPushButton:disabled {
+                background: rgba(150, 150, 150, 0.05);
+                color: #888;
+                border: 1px solid rgba(150, 150, 150, 0.1);
+            }
+        """
+        delete_style = button_style.replace(
+            "rgba(102, 126, 234, 0.15)", "rgba(244, 67, 54, 0.18)"
         ).replace(
-            "rgba(192, 138, 255, 0.5)", "rgba(255, 120, 120, 0.55)"
+            "rgba(102, 126, 234, 0.4)", "rgba(244, 67, 54, 0.55)"
         ).replace(
-            "rgba(192, 138, 255, 0.35)", "rgba(255, 120, 120, 0.32)"
+            "rgba(102, 126, 234, 0.25)", "rgba(244, 67, 54, 0.30)"
+        ).replace(
+            "rgba(102, 126, 234, 0.6)", "rgba(244, 67, 54, 0.70)"
+        ).replace(
+            "rgba(102, 126, 234, 0.35)", "rgba(244, 67, 54, 0.45)"
         )
 
-        use_btn = QPushButton("🚀 Use in Chat")
-        use_btn.setMinimumHeight(34)
-        use_btn.setStyleSheet(btn_css_primary)
+        use_btn = QPushButton("🚀 Use in Chat", card)
+        use_btn.setMinimumHeight(35)
+        use_btn.setStyleSheet(button_style)
         use_btn.setToolTip(
             "Make this adapter the active model for chat. "
             "Loads the base model + applies the LoRA weights."
@@ -8816,12 +8945,12 @@ class MainWindow(QMainWindow):
         use_btn.clicked.connect(
             lambda _checked=False, n=name, p=path: self._use_tuned_model(n, p)
         )
-        actions.addWidget(use_btn)
+        button_layout.addWidget(use_btn)
 
         if not onboarded:
-            onboard_btn = QPushButton("🔧 Onboard")
-            onboard_btn.setMinimumHeight(34)
-            onboard_btn.setStyleSheet(btn_css)
+            onboard_btn = QPushButton("🔧 Onboard", card)
+            onboard_btn.setMinimumHeight(35)
+            onboard_btn.setStyleSheet(button_style)
             onboard_btn.setToolTip(
                 "Register this adapter with its base model and prepare the "
                 "runtime so it can be used for inference."
@@ -8829,27 +8958,27 @@ class MainWindow(QMainWindow):
             onboard_btn.clicked.connect(
                 lambda _checked=False, n=name, p=path: self._onboard_tuned_model(n, p)
             )
-            actions.addWidget(onboard_btn)
+            button_layout.addWidget(onboard_btn)
 
-        open_btn = QPushButton("📂 Open")
-        open_btn.setMinimumHeight(34)
-        open_btn.setStyleSheet(btn_css)
+        open_btn = QPushButton("📂 Open", card)
+        open_btn.setMinimumHeight(35)
+        open_btn.setStyleSheet(button_style)
         open_btn.clicked.connect(
             lambda _checked=False, p=path: self._open_path_in_explorer(str(p))
         )
-        actions.addWidget(open_btn)
+        button_layout.addWidget(open_btn)
 
-        actions.addStretch(1)
+        button_layout.addStretch(1)
 
-        delete_btn = QPushButton("🗑️ Delete")
-        delete_btn.setMinimumHeight(34)
-        delete_btn.setStyleSheet(btn_css_danger)
+        delete_btn = QPushButton("🗑️ Delete", card)
+        delete_btn.setMinimumHeight(35)
+        delete_btn.setStyleSheet(delete_style)
         delete_btn.clicked.connect(
             lambda _checked=False, n=name, p=path: self._delete_tuned_model(n, p)
         )
-        actions.addWidget(delete_btn)
+        button_layout.addWidget(delete_btn)
 
-        v.addLayout(actions)
+        layout.addLayout(button_layout)
 
         return card
 
@@ -24876,6 +25005,30 @@ respective package directories or official repositories.
             # right to expect them in this picker too.
             try:
                 adapter_dir = self.root / "fine_tuned"
+                # Same broken-filter as _fill_model_combo so a failed
+                # training run's adapter doesn't get surfaced and then
+                # immediately rejected at chat-launch with "Model not
+                # ready". See _fill_model_combo for the full rationale.
+                broken_names: set[str] = set()
+                try:
+                    from core.state_store import StateStore
+                    _ss = StateStore()
+                    for _row in _ss.list_all_onboarding():
+                        status = (_row.get("status") or "").upper()
+                        if status not in ("BROKEN", "FAILED"):
+                            continue
+                        mid = str(_row.get("model_id", "") or "")
+                        ad = str(_row.get("adapter_dir", "") or "")
+                        for cand in (mid, ad):
+                            if not cand:
+                                continue
+                            base = cand.replace("\\", "/").rstrip("/").split("/")[-1]
+                            if base.startswith("tuned__"):
+                                base = base[len("tuned__"):]
+                            broken_names.add(base.lower())
+                except Exception:
+                    broken_names = set()
+
                 if adapter_dir.exists():
                     trained = []
                     for d in adapter_dir.iterdir():
@@ -24885,6 +25038,8 @@ respective package directories or official repositories.
                         # in-progress / partial artefacts, not fine-tuned
                         # adapters the user means to chat with.
                         if d.name.startswith("checkpoint-"):
+                            continue
+                        if d.name.lower() in broken_names:
                             continue
                         has_weights = any(
                             (d / f).exists()
@@ -24944,9 +25099,47 @@ respective package directories or official repositories.
                         ):
                             combo.addItem(label, payload)
             if adapter_dir.exists():
+                # Build a set of known-broken adapter names from the DB so
+                # we don't surface them in the picker. A user who accidentally
+                # selects an adapter from a failed training run (grad_norm=0,
+                # LoRA matrices stuck at init) sees the "Model not ready"
+                # dialog at chat-launch time — confusing because the dir is
+                # there on disk and looks like a normal adapter.
+                broken_names: set[str] = set()
+                try:
+                    from core.state_store import StateStore
+                    _ss = StateStore()
+                    for _row in _ss.list_all_onboarding():
+                        status = (_row.get("status") or "").upper()
+                        if status not in ("BROKEN", "FAILED"):
+                            continue
+                        # The DB stores adapter rows under several naming
+                        # conventions: ``tuned__<name>``, ``adapter_<ts>``,
+                        # ``adapter/<ts>``, etc. Pull the basename out.
+                        mid = str(_row.get("model_id", "") or "")
+                        ad = str(_row.get("adapter_dir", "") or "")
+                        for cand in (mid, ad):
+                            if not cand:
+                                continue
+                            base = cand.replace("\\", "/").rstrip("/").split("/")[-1]
+                            if base.startswith("tuned__"):
+                                base = base[len("tuned__"):]
+                            broken_names.add(base.lower())
+                except Exception:
+                    broken_names = set()
+
                 trained_adapters = []
                 for d in adapter_dir.iterdir():
                     if not d.is_dir():
+                        continue
+                    if d.name.startswith("checkpoint-"):
+                        # Trainer-checkpoint dirs aren't user-pickable
+                        # adapters — they're partial state for --resume.
+                        continue
+                    if d.name.lower() in broken_names:
+                        # Skip adapters the DB has flagged as broken.
+                        # The user's just-trained working adapter is
+                        # still listed; only the failed ones are hidden.
                         continue
                     has_weights = any([
                         (d / "adapter_model.safetensors").exists(),

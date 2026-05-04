@@ -7567,7 +7567,24 @@ class MainWindow(QMainWindow):
         try:
             from core.models import fetch_recent_popular_models
             curated_hits = fetch_recent_popular_models(min_downloads=10_000, limit=20)
-            self._log_models(f"✓ Fetched {len(curated_hits)} recommended models from Hugging Face.")
+            if curated_hits:
+                self._log_models(
+                    f"✓ Fetched {len(curated_hits)} recommended models from Hugging Face."
+                )
+            else:
+                # Hub call didn't raise but came back empty — usually
+                # an API-kwargs mismatch on an older huggingface_hub.
+                # Surface the per-attempt errors so the user can tell
+                # what went wrong instead of silently dropping to the
+                # offline list.
+                self._log_models(
+                    "⚠ Hugging Face returned no recommended models. "
+                    "Showing offline fallback. Diagnostic detail:"
+                )
+                for line in getattr(
+                    fetch_recent_popular_models, "last_errors", []
+                ):
+                    self._log_models(f"  · {line}")
         except Exception as _curated_err:
             import traceback as _tb
             self._log_models(
@@ -14490,7 +14507,20 @@ class MainWindow(QMainWindow):
         # adapter is worth keeping. Heuristic only — a true judgement
         # needs eval data — but it catches the common pathological
         # cases (no convergence at all, tiny dataset, NaN loss).
-        if exit_code == 0 and exit_status == QProcess.NormalExit:
+        # Treat the run as successful when EITHER the exit code is
+        # clean OR the adapter clearly made it to disk. The latter
+        # covers the Windows CUDA-teardown crash (exit -1073741819 /
+        # 0xC0000005) that fires AFTER the adapter is fully written.
+        _tail_for_save = getattr(self, "_train_raw_tail", "") or ""
+        _adapter_saved_marker = (
+            "Finetuning complete!" in _tail_for_save
+            or "LoRA adapter saved successfully" in _tail_for_save
+        )
+        _treat_as_success = (
+            (exit_code == 0 and exit_status == QProcess.NormalExit)
+            or _adapter_saved_marker
+        )
+        if _treat_as_success:
             try:
                 self._render_training_summary()
             except Exception as e:
@@ -14546,16 +14576,64 @@ class MainWindow(QMainWindow):
         # the trainer wrote 'stopped early by user request' in its log.
         try:
             stopped_by_user = False
+            adapter_saved = False
             try:
-                # The trainer logs this exact phrase when the stop file
-                # triggered. Cheap substring scan over the rolling tail.
-                stopped_by_user = "stopped early by user" in (
-                    getattr(self, "_train_raw_tail", "") or ""
-                )
+                tail = getattr(self, "_train_raw_tail", "") or ""
+                stopped_by_user = "stopped early by user" in tail
+                # Did finetune.py actually finish saving the adapter
+                # before the process died? If yes, the run succeeded
+                # regardless of the exit code. The trainer prints this
+                # exact line at the end of save_pretrained — and the
+                # adapter dir is on disk by that point. A subsequent
+                # CUDA-teardown crash (Windows-specific exit code
+                # 0xC0000005 / -1073741819 is the canonical example)
+                # affects the process, not the artefact. Treating it
+                # as a failure scares users off perfectly good adapters.
+                if "Finetuning complete!" in tail or "LoRA adapter saved successfully" in tail:
+                    adapter_saved = True
             except Exception:
                 pass
 
-            if exit_status != QProcess.NormalExit or exit_code != 0:
+            # Cross-check on disk: if any adapter directory under
+            # ``train_out_dir`` was modified within the last 60 seconds
+            # AND has the required PEFT files, treat as saved.
+            if not adapter_saved:
+                try:
+                    out_dir = Path(self.train_out_dir.text().strip())
+                    if out_dir.exists():
+                        import time as _time
+                        cutoff = _time.time() - 60
+                        for d in out_dir.iterdir():
+                            if not d.is_dir() or d.name.startswith("checkpoint-"):
+                                continue
+                            cfg = d / "adapter_config.json"
+                            saf = d / "adapter_model.safetensors"
+                            binf = d / "adapter_model.bin"
+                            if cfg.exists() and (saf.exists() or binf.exists()):
+                                try:
+                                    if (saf if saf.exists() else binf).stat().st_mtime >= cutoff:
+                                        adapter_saved = True
+                                        break
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+
+            if adapter_saved and (exit_status != QProcess.NormalExit or exit_code != 0):
+                # The artefact is fine; only teardown crashed. Tell the
+                # user the truth: it succeeded. Add a short note so the
+                # log search ('exit code -1073741819') still reaches the
+                # explanation.
+                self.train_status_pill.set_state(
+                    "done", "saved (Windows teardown crash — harmless)"
+                )
+                self.train_log.appendPlainText(
+                    f"[INFO] Adapter saved successfully BEFORE the cleanup crash "
+                    f"(exit {exit_code}). The crash happened during CUDA context "
+                    "teardown and does not affect the saved adapter — it is on "
+                    "disk and ready to use."
+                )
+            elif exit_status != QProcess.NormalExit or exit_code != 0:
                 self.train_status_pill.set_state(
                     "failed", f"exit code {exit_code}"
                 )

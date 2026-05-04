@@ -769,9 +769,11 @@ class AgentTeamCanvas(QWidget):
         p.setPen(Qt.NoPen)
         p.drawEllipse(QPointF(cx, cy), r * 0.78, r * 0.78)
 
-        # Owl crest pixmap (with emoji fallback).
+        # Owl crest pixmap (with emoji fallback). 20% smaller than the
+        # surrounding centre disc so the orchestrator boundary stays
+        # large (arrows visible) while the icon itself is more modest.
         if self._owl_pixmap is not None and not self._owl_pixmap.isNull():
-            target = r * 1.4
+            target = r * 1.4 * 0.8
             scaled = self._owl_pixmap.scaled(
                 int(target),
                 int(target),
@@ -810,12 +812,9 @@ class AgentTeamCanvas(QWidget):
             phase_offset = i * 0.7
             pulse = 0.5 + 0.5 * math.sin(self._phase * 2.2 + phase_offset)
             # Scale the agent disc radius with the user's zoom so
-            # nodes stay proportional to the rings they sit on. Icons
-            # are 20% smaller than before so neighbouring agents on
-            # different rings don't overlap each other's connection
-            # arrows when they line up radially.
+            # nodes stay proportional to the rings they sit on.
             zoom = max(self._zoom_min, min(self._zoom_max, self._zoom))
-            r = (17.6 + 3.2 * pulse) * zoom
+            r = (22 + 4 * pulse) * zoom
             agent.radius = r
 
             is_selected = self._selected == name

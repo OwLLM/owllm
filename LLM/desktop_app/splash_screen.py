@@ -13,15 +13,17 @@ from PySide6.QtGui import QPixmap, QPainter, QColor, QLinearGradient, QFont, QTe
 
 
 class SplashScreen(QSplashScreen):
-    # Splash dimensions. Enlarged from the historical 550×350 so a 450
-    # px owl crest can sit above the progress + log area without
-    # cropping the bottom controls.
-    _SPLASH_W = 700
-    _SPLASH_H = 600
-    # Owl startup icon — 450 px, top-centered, shifted 150 px upward
-    # so it bleeds off the top edge and visually dominates the splash.
+    # Splash dimensions. Back to the historical 550×350 — the owl crest
+    # is now drawn in a SEPARATE top-level window that floats above the
+    # splash and bleeds out past its top edge, just like the corner
+    # frame overlays in the main app.
+    _SPLASH_W = 550
+    _SPLASH_H = 350
+    # Owl startup icon — 450 px, top-centered over the splash, shifted
+    # 150 px upward so it visibly extends above the splash window.
     _ICON_SIZE = 450
-    _ICON_Y_SHIFT = -150  # negative = up
+    _ICON_Y_SHIFT = -150  # negative = up; positions the icon's TOP
+                          # this many px above the splash's top edge.
 
     def __init__(self):
         # Create a custom pixmap with gradient background
@@ -37,46 +39,12 @@ class SplashScreen(QSplashScreen):
         self.content_widget = QWidget(self)
         self.content_widget.setGeometry(0, 0, self._SPLASH_W, self._SPLASH_H)
 
-        # Owl crest — absolute positioned so it can be top-centered AND
-        # shifted upward independently of the QVBoxLayout below. A
-        # layout-managed icon with a negative top margin would just be
-        # clipped to (0, 0).
-        self.title_icon = QLabel(self.content_widget)
-        self.title_icon.setAlignment(Qt.AlignCenter)
-        self.title_icon.setStyleSheet("background: transparent;")
-        icon_x = (self._SPLASH_W - self._ICON_SIZE) // 2
-        self.title_icon.setGeometry(
-            icon_x, self._ICON_Y_SHIFT, self._ICON_SIZE, self._ICON_SIZE
-        )
-        try:
-            # splash_screen.py is in LLM/desktop_app/ — repo root is parents[2].
-            icon_path = (
-                Path(__file__).resolve().parents[2]
-                / "icons" / "Page_icons" / "owl_startup.png"
-            )
-            if icon_path.exists():
-                pm = QPixmap(str(icon_path))
-                if not pm.isNull():
-                    self.title_icon.setPixmap(
-                        pm.scaled(
-                            self._ICON_SIZE, self._ICON_SIZE,
-                            Qt.KeepAspectRatio,
-                            Qt.SmoothTransformation,
-                        )
-                    )
-        except Exception:
-            pass
-        self.title_icon.raise_()
-
-        # Reserve room for the visible portion of the icon so the rest
-        # of the splash content (title text + progress + log) starts
-        # below it. Visible pixels = ICON_SIZE + ICON_Y_SHIFT.
-        visible_icon_h = self._ICON_SIZE + self._ICON_Y_SHIFT  # 300
-
         layout = QVBoxLayout(self.content_widget)
-        layout.setContentsMargins(20, visible_icon_h + 12, 20, 15)
+        layout.setContentsMargins(20, 15, 20, 15)
         layout.setSpacing(8)
 
+        # Title — text only here; the visual icon is the floating
+        # owl_startup overlay positioned in _position_owl_overlay below.
         self.title = QLabel("OWLLM")
         self.title.setAlignment(Qt.AlignCenter)
         self.title.setStyleSheet("""
@@ -89,6 +57,48 @@ class SplashScreen(QSplashScreen):
             }
         """)
         layout.addWidget(self.title)
+
+        # ---- floating owl crest -----------------------------------
+        # Independent top-level frameless window with a transparent
+        # background so the PNG can render OUTSIDE the splash bounds —
+        # exactly like the corner frame overlays in the main app. A
+        # child QLabel of the splash would be clipped to the splash
+        # rectangle, which is what was cropping the icon before.
+        self._owl_overlay = QWidget(
+            None,
+            Qt.FramelessWindowHint
+            | Qt.WindowStaysOnTopHint
+            | Qt.Tool
+            | Qt.WindowTransparentForInput,
+        )
+        self._owl_overlay.setAttribute(Qt.WA_TranslucentBackground, True)
+        self._owl_overlay.setAttribute(Qt.WA_NoSystemBackground, True)
+        self._owl_overlay.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self._owl_overlay.setFixedSize(self._ICON_SIZE, self._ICON_SIZE)
+
+        owl_label = QLabel(self._owl_overlay)
+        owl_label.setGeometry(0, 0, self._ICON_SIZE, self._ICON_SIZE)
+        owl_label.setAlignment(Qt.AlignCenter)
+        owl_label.setStyleSheet("background: transparent;")
+        try:
+            icon_path = (
+                Path(__file__).resolve().parents[2]
+                / "icons" / "Page_icons" / "owl_startup.png"
+            )
+            if icon_path.exists():
+                pm = QPixmap(str(icon_path))
+                if not pm.isNull():
+                    owl_label.setPixmap(
+                        pm.scaled(
+                            self._ICON_SIZE, self._ICON_SIZE,
+                            Qt.KeepAspectRatio,
+                            Qt.SmoothTransformation,
+                        )
+                    )
+        except Exception:
+            pass
+        # Stash for the move/show plumbing.
+        self.title_icon = owl_label
         
         # Progress bar (compact)
         self.progress = QProgressBar()
@@ -161,11 +171,56 @@ class SplashScreen(QSplashScreen):
         
         self.setStyleSheet("""
             QWidget {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, 
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 #1a1a2e, stop:0.5 #16213e, stop:1 #0f3460);
             }
         """)
-    
+
+    # ---- floating overlay plumbing ------------------------------------
+
+    def _position_owl_overlay(self) -> None:
+        """Park the floating owl-crest overlay over the splash, with its
+        top edge ``-_ICON_Y_SHIFT`` px above the splash. The overlay is a
+        separate top-level window — it intentionally extends past the
+        splash bounds, so global screen coordinates are required.
+        """
+        if not getattr(self, "_owl_overlay", None):
+            return
+        sx = self.x() + (self.width() - self._ICON_SIZE) // 2
+        sy = self.y() + self._ICON_Y_SHIFT
+        self._owl_overlay.move(sx, sy)
+        self._owl_overlay.raise_()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._position_owl_overlay()
+        if getattr(self, "_owl_overlay", None):
+            self._owl_overlay.show()
+            self._owl_overlay.raise_()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._position_owl_overlay()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if getattr(self, "_owl_overlay", None):
+            self._owl_overlay.hide()
+
+    def closeEvent(self, event):
+        if getattr(self, "_owl_overlay", None):
+            self._owl_overlay.close()
+            self._owl_overlay = None
+        super().closeEvent(event)
+
+    def finish(self, mainWindow):  # noqa: N802, N803
+        # QSplashScreen.finish closes the splash; tear down the floating
+        # overlay at the same time so it doesn't linger on screen.
+        if getattr(self, "_owl_overlay", None):
+            self._owl_overlay.close()
+            self._owl_overlay = None
+        super().finish(mainWindow)
+
     def update_progress(self, value: int, status: str, details: str = ""):
         """Update splash screen with detection progress.
 

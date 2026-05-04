@@ -550,18 +550,19 @@ class HybridFrameWindow(QWidget):
             return
         avail = screen.availableGeometry()
 
-        # All three snaps are half-screen width × full screen height —
+        # All three snaps are 60%-screen width × full screen height —
         # only the horizontal position differs (left edge / centred /
-        # right edge).
-        half_w = avail.width() // 2
+        # right edge). 60% (vs 50%) is wider than a clean half-split,
+        # which the user prefers for editor-style layouts.
+        snap_w = int(avail.width() * 0.6)
         if which == "tl":
-            target = QRect(avail.x(), avail.y(), half_w, avail.height())
+            target = QRect(avail.x(), avail.y(), snap_w, avail.height())
         elif which == "tc":
-            target = QRect(avail.x() + (avail.width() - half_w) // 2,
-                           avail.y(), half_w, avail.height())
+            target = QRect(avail.x() + (avail.width() - snap_w) // 2,
+                           avail.y(), snap_w, avail.height())
         elif which == "tr":
-            target = QRect(avail.x() + avail.width() - half_w, avail.y(),
-                           half_w, avail.height())
+            target = QRect(avail.x() + avail.width() - snap_w, avail.y(),
+                           snap_w, avail.height())
         else:
             return
 

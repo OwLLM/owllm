@@ -175,7 +175,7 @@ _STATUS_LABEL = {
 }
 
 
-def _add_shadow(widget: QWidget, blur: int = 24, y: int = 4, alpha: int = 110) -> None:
+def _add_shadow(widget: QWidget, blur: int = 24, y: int = 4, alpha: int = 132) -> None:
     """Soft drop shadow — used everywhere instead of 1px borders."""
     eff = QGraphicsDropShadowEffect(widget)
     eff.setBlurRadius(blur)
@@ -479,7 +479,7 @@ class ApprovalCard(QFrame):
                 border-radius: 12px;
             }
         """)
-        _add_shadow(self, blur=18, y=2, alpha=90)
+        _add_shadow(self, blur=18, y=2, alpha=108)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(18, 12, 18, 12)
@@ -1490,9 +1490,9 @@ class AgentsPage(QWidget):
             saved.autolayout_grid()
 
         self.canvas.load_graph(saved, orchestrator=leader_name)
-        # Push each agent's icon onto its canvas node so the title line
-        # shows the same emoji the agent definition declares (instead of
-        # the canvas's generic crown / robot fallback).
+        # Push each agent's icon + meta (description, skills) onto its
+        # canvas node so the graph view's info-card overlay can show
+        # the same fields the orbital diagram does.
         for d in team_defs:
             try:
                 self.canvas.set_node_icon(d.name, d.icon or "🤖")
@@ -1501,6 +1501,15 @@ class AgentsPage(QWidget):
             try:
                 if hasattr(self, "team_canvas") and self.team_canvas is not None:
                     self.team_canvas.set_node_icon(d.name, d.icon or "🤖")
+            except Exception:
+                pass
+            try:
+                graph_skills = list(d.tool_allowlist or [])
+                if d.can_dispatch and "dispatch" not in graph_skills:
+                    graph_skills = ["dispatch"] + graph_skills
+                self.canvas.set_node_meta(
+                    d.name, d.description or "", graph_skills,
+                )
             except Exception:
                 pass
 
@@ -1540,17 +1549,28 @@ class AgentsPage(QWidget):
             self.team_canvas.set_edges(edge_pairs)
 
             # Team metadata for the default info card shown when no
-            # agent is selected.
+            # agent is selected. Pushed into BOTH canvases so the
+            # graph view also shows the team card when no node is
+            # selected.
             proj = self._active_project
-            self.team_canvas.set_team_info(
-                name=getattr(proj, "name", "") or "Untitled team",
-                description=(
-                    getattr(proj, "description", "")
-                    or f"{len(team_defs)} agents · "
-                       f"{len(edge_pairs)} connections · "
-                       f"orchestrator: {leader_name or '—'}"
-                ),
+            team_name_value = getattr(proj, "name", "") or "Untitled team"
+            team_desc_value = (
+                getattr(proj, "description", "")
+                or f"{len(team_defs)} agents · "
+                   f"{len(edge_pairs)} connections · "
+                   f"orchestrator: {leader_name or '—'}"
             )
+            self.team_canvas.set_team_info(
+                name=team_name_value,
+                description=team_desc_value,
+            )
+            try:
+                self.canvas.set_team_info(
+                    name=team_name_value,
+                    description=team_desc_value,
+                )
+            except Exception:
+                pass
         except Exception:
             pass
 

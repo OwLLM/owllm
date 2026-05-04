@@ -39,6 +39,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QLinearGradient,
+    QPainter,
     QPainterPath,
     QPen,
     QPolygonF,
@@ -235,6 +236,11 @@ class _AgentNode(QGraphicsItem):
         # specialists. Overridden by ``set_icon`` once the page knows
         # the agent definition's own icon.
         self._icon = "👑" if is_orchestrator else "🤖"
+        # Description + skills are pushed in by AgentsPage so the
+        # info-card overlay (drawn by AgentCanvas.paintEvent) can
+        # populate the same fields the orbital diagram shows.
+        self._description: str = ""
+        self._skills: list[str] = []
 
         self.setFlags(
             QGraphicsItem.ItemIsMovable
@@ -388,6 +394,11 @@ class _AgentNode(QGraphicsItem):
             self.update()
 
     def set_layer(self, layer: int) -> None:
+        # Orchestrator is ALWAYS gold (layer 0) regardless of what
+        # BFS would compute — it's the conceptual root and its
+        # colour is part of the team's visual identity.
+        if self.is_orchestrator:
+            layer = 0
         if layer < 0:
             layer = 0
         if layer != self._layer:
@@ -401,6 +412,13 @@ class _AgentNode(QGraphicsItem):
         if icon != self._icon:
             self._icon = icon
             self.update()
+
+    def set_meta(self, description: str, skills: list[str]) -> None:
+        """Push description + skills from the AgentDefinition. Used by
+        the canvas's info-card overlay; doesn't affect painting of the
+        node body itself."""
+        self._description = description or ""
+        self._skills = list(skills or [])
 
     @property
     def layer(self) -> int:
@@ -1014,6 +1032,14 @@ class AgentCanvas(QGraphicsView):
         self._orchestrator_name: Optional[str] = None
         self._suspend_signals = False
 
+        # Team-level metadata for the default info card (shown when no
+        # agent is selected). Pushed in by AgentsPage._render_team.
+        self._team_name: str = ""
+        self._team_description: str = ""
+        # Cached owl crest pixmap for the team card avatar.
+        from desktop_app.widgets.agent_info_card import load_owl_pixmap as _load_owl
+        self._owl_pixmap = _load_owl()
+
     # ------------------------------------------------------------------
     # Public API used by AgentsPage
     # ------------------------------------------------------------------
@@ -1069,6 +1095,21 @@ class AgentCanvas(QGraphicsView):
         if node is not None:
             node.set_icon(icon)
 
+    def set_node_meta(self, name: str, description: str, skills: list[str]) -> None:
+        """Push description + skills metadata for the info-card overlay.
+        Has no effect on the graph node itself, just the top-left card."""
+        node = self._nodes.get(name)
+        if node is not None:
+            node.set_meta(description, skills)
+            self.viewport().update()
+
+    def set_team_info(self, name: str, description: str = "") -> None:
+        """Store team-level metadata for the default info card shown
+        when no agent is selected."""
+        self._team_name = name or ""
+        self._team_description = description or ""
+        self.viewport().update()
+
     def reset_all_status(self) -> None:
         for n in self._nodes.values():
             n.set_status(STATUS_IDLE)
@@ -1077,6 +1118,65 @@ class AgentCanvas(QGraphicsView):
         self._selected_name = name
         for nname, node in self._nodes.items():
             node.set_selected_visual(nname == name)
+        # Repaint the viewport so the info-card overlay tracks selection.
+        self.viewport().update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        """Draw the scene as usual, then overlay the info card on top of
+        the viewport in widget coordinates so it stays anchored to the
+        top-left and doesn't pan/zoom with the graph.
+        """
+        super().paintEvent(event)
+        try:
+            from desktop_app.widgets.agent_info_card import (
+                paint_agent_card,
+                paint_team_card,
+                STATUS_IDLE as _CARD_IDLE,
+                STATUS_ACTIVE as _CARD_ACTIVE,
+                STATUS_PENDING as _CARD_PENDING,
+                STATUS_ERROR as _CARD_ERROR,
+            )
+        except Exception:
+            return
+        if not self._nodes:
+            return
+
+        painter = QPainter(self.viewport())
+        try:
+            painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+            rect = self.viewport().rect()
+            sel = self._selected_name
+            if sel and sel in self._nodes:
+                node = self._nodes[sel]
+                # Map our internal status string to the card's enum.
+                status_map = {
+                    STATUS_IDLE: _CARD_IDLE,
+                    STATUS_ACTIVE: _CARD_ACTIVE,
+                    STATUS_PENDING: _CARD_PENDING,
+                    STATUS_ERROR: _CARD_ERROR,
+                }
+                paint_agent_card(
+                    painter,
+                    rect,
+                    name=node.name,
+                    icon=node._icon or "🤖",
+                    description=node._description,
+                    skills=node._skills,
+                    status=status_map.get(node._status, _CARD_IDLE),
+                    model_label=node._model_label,
+                )
+            elif self._team_name:
+                paint_team_card(
+                    painter,
+                    rect,
+                    team_name=self._team_name,
+                    team_description=self._team_description,
+                    agent_count=len(self._nodes),
+                    edge_count=len(self._edges),
+                    owl_pixmap=self._owl_pixmap,
+                )
+        finally:
+            painter.end()
 
     def _make_edge(self, src: _AgentNode, dst: _AgentNode) -> _AgentEdge:
         """Create an edge AND its sibling arrowhead and add both to the scene."""

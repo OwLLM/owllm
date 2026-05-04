@@ -13056,6 +13056,20 @@ class MainWindow(QMainWindow):
         self.train_log.appendPlainText(f"\n[INFO] Training process finished. exit_code={exit_code}, status={status_str}")
         self._append_terminal(f"[INFO] Training process finished. exit_code={exit_code}, status={status_str}", source="train")
 
+        # On a successful run, give the user a plain-language verdict
+        # so a non-ML-savvy operator can tell at a glance whether the
+        # adapter is worth keeping. Heuristic only — a true judgement
+        # needs eval data — but it catches the common pathological
+        # cases (no convergence at all, tiny dataset, NaN loss).
+        if exit_code == 0 and exit_status == QProcess.NormalExit:
+            try:
+                self._render_training_summary()
+            except Exception as e:
+                # Never let a summary-render bug mask a successful run.
+                self.train_log.appendPlainText(
+                    f"[WARN] Could not render training summary: {e}"
+                )
+
         # On crash / non-zero exit, dump the rolling raw tail into the
         # train_log so the user actually sees the traceback even if
         # the filter ate every line during the run. Persist it to disk
@@ -13095,6 +13109,123 @@ class MainWindow(QMainWindow):
         self.train_start.setEnabled(True)
         self.train_stop.setEnabled(False)
         self._refresh_locals()
+
+    def _render_training_summary(self) -> None:
+        """Append a plain-language quality summary to the training log.
+
+        Goal: a user who's never trained an LLM should be able to look
+        at this and know whether their adapter is worth keeping.
+        """
+        history = list(getattr(self, "loss_history", []) or [])
+        if not history:
+            self.train_log.appendPlainText(
+                "\n┌─ TRAINING SUMMARY ───────────────────────────────────"
+            )
+            self.train_log.appendPlainText(
+                "│ No loss data captured. The run completed but the dashboard"
+            )
+            self.train_log.appendPlainText(
+                "│ never received a metrics line — try increasing the dataset"
+            )
+            self.train_log.appendPlainText(
+                "│ size or check the Training Logs tab for warnings."
+            )
+            self.train_log.appendPlainText(
+                "└──────────────────────────────────────────────────────\n"
+            )
+            return
+
+        # Sort by step in case parser inserted out-of-order entries.
+        history.sort(key=lambda x: x[0])
+        first_step, first_loss = history[0]
+        last_step, last_loss = history[-1]
+        steps_logged = len(history)
+
+        # Detect NaN/Inf — the loss tracker stores floats parsed from
+        # stdout, so they can carry through.
+        import math as _math
+        if (
+            _math.isnan(first_loss) or _math.isinf(first_loss)
+            or _math.isnan(last_loss) or _math.isinf(last_loss)
+        ):
+            verdict = "❌ FAILED"
+            verdict_detail = (
+                "The training loss became NaN or infinite — the optimizer "
+                "diverged. Try lowering the learning rate (e.g. 1e-4 → 5e-5) "
+                "or reducing LoRA r/alpha."
+            )
+            drop = 0.0
+            drop_pct = 0.0
+        else:
+            drop = first_loss - last_loss
+            drop_pct = (drop / first_loss * 100.0) if first_loss > 0 else 0.0
+
+            # Verdict thresholds. These are heuristic — calibrated for
+            # 1-3 epoch SFT runs on small instruction datasets.
+            if last_loss > 5.0 or drop_pct < 5.0:
+                verdict = "⚠️  POOR"
+                verdict_detail = (
+                    "The loss barely moved. The model didn't really learn "
+                    "from your data. Common causes: dataset too small "
+                    "(<200 examples), wrong format, or the base model is "
+                    "already fluent in this domain. Try more epochs (3-5) "
+                    "or a higher learning rate (4e-4)."
+                )
+            elif drop_pct < 20.0:
+                verdict = "🟡 OK-ISH"
+                verdict_detail = (
+                    "Some learning happened but the convergence is weak. "
+                    "The adapter may help slightly. Consider another epoch "
+                    "or doubling the LoRA rank to give the adapter more "
+                    "capacity."
+                )
+            elif drop_pct < 50.0:
+                verdict = "🟢 GOOD"
+                verdict_detail = (
+                    "Solid convergence. The adapter has clearly absorbed "
+                    "your dataset. Test it on held-out prompts before "
+                    "trusting it in production."
+                )
+            else:
+                verdict = "🌟 EXCELLENT"
+                verdict_detail = (
+                    "Very strong convergence. Watch out for overfitting "
+                    "on small datasets — test on prompts NOT in your "
+                    "training set to make sure it still generalises."
+                )
+
+        # Pretty print to the log.
+        bar = "═" * 56
+        self.train_log.appendPlainText(f"\n┌─ TRAINING SUMMARY {bar[:38]}")
+        self.train_log.appendPlainText(f"│  Verdict:        {verdict}")
+        self.train_log.appendPlainText(
+            f"│  Loss:           {first_loss:.4f}  →  {last_loss:.4f}"
+        )
+        sign = "↓" if drop >= 0 else "↑"
+        self.train_log.appendPlainText(
+            f"│  Reduction:      {sign} {abs(drop):.4f}  ({drop_pct:+.1f}%)"
+        )
+        self.train_log.appendPlainText(
+            f"│  Steps logged:   {steps_logged} (step {first_step} → {last_step})"
+        )
+
+        # Wrap the verdict_detail to fit nicely under the bar.
+        words = verdict_detail.split()
+        line, lines = "", []
+        for w in words:
+            if len(line) + len(w) + 1 > 64:
+                lines.append(line)
+                line = w
+            else:
+                line = (line + " " + w).strip()
+        if line:
+            lines.append(line)
+        self.train_log.appendPlainText("│")
+        for ln in lines:
+            self.train_log.appendPlainText(f"│  {ln}")
+        self.train_log.appendPlainText(
+            "└──────────────────────────────────────────────────────────\n"
+        )
 
     # ---------------- Test tab ----------------
     def _build_test_tab(self) -> QWidget:

@@ -1366,12 +1366,24 @@ class AgentCanvas(QGraphicsView):
     def _compute_scene_rect(self) -> QRectF:
         if not self._nodes:
             return QRectF(0, 0, 800, 400)
+        # Start with the union of node and edge bounding rects so the
+        # scene encompasses the cross-layer "loop UNDER source" curves
+        # (whose control points sit ~200 px outside the source node).
+        # Falling back to node-positions-only made those curves
+        # render past the scrollable area, which produced the
+        # "arrows fly off-canvas" symptom users were seeing.
+        items_rect = self._scene.itemsBoundingRect()
         xs = [n.scenePos().x() for n in self._nodes.values()]
         ys = [n.scenePos().y() for n in self._nodes.values()]
-        pad = 100
-        return QRectF(
+        pad = 240
+        nodes_rect = QRectF(
             min(xs) - pad,
             min(ys) - pad,
             (max(xs) - min(xs)) + _NODE_W + 2 * pad,
             (max(ys) - min(ys)) + _NODE_H + 2 * pad,
         )
+        if items_rect.isNull():
+            return nodes_rect
+        # Union, then pad for arrowheads / repulsion overshoot.
+        union = nodes_rect.united(items_rect.adjusted(-60, -60, 60, 60))
+        return union

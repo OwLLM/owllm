@@ -1453,11 +1453,38 @@ class AgentsPage(QWidget):
         saved.nodes = [n for n in saved.nodes if n.name in present_names]
         saved.edges = [e for e in saved.edges
                        if e.source in present_names and e.target in present_names]
-        # Add any newly-added team members (not yet in graph).
+        # Add any newly-added team members (not yet in graph). When a
+        # member is added to an EXISTING graph (some nodes already
+        # have positions), the default (0, 0) would pile the new
+        # node on top of the orchestrator and make the graph look
+        # like it didn't update. Instead, drop new nodes to the
+        # right of the rightmost positioned node, on a fresh row,
+        # so they're immediately visible.
         saved_names = {n.name for n in saved.nodes}
+        existing_positioned = [
+            n for n in saved.nodes if not (n.pos_x == 0.0 and n.pos_y == 0.0)
+        ]
+        max_x = max((n.pos_x for n in existing_positioned), default=60.0)
+        min_y = min((n.pos_y for n in existing_positioned), default=60.0)
+        max_y = max((n.pos_y for n in existing_positioned), default=60.0)
+        col_w, row_h = 240.0, 150.0
+        next_x = max_x + col_w
+        next_y = min_y
         for d in team_defs:
             if d.name not in saved_names:
                 saved.add_node(d.name)
+                if existing_positioned:
+                    # Pin the new node to a fresh slot to the right
+                    # of everything else, stepping DOWN one row per
+                    # extra newcomer so multiple additions don't
+                    # overlap each other either.
+                    new_node = saved.nodes[-1]
+                    new_node.pos_x = next_x
+                    new_node.pos_y = next_y
+                    next_y += row_h
+                    if next_y > max_y + row_h * 3:
+                        next_y = min_y
+                        next_x += col_w
         # First-load auto-layout: if every node is at (0,0), space them out.
         if saved.nodes and all(n.pos_x == 0.0 and n.pos_y == 0.0 for n in saved.nodes):
             saved.autolayout_grid()

@@ -828,14 +828,25 @@ class _AgentEdge(QGraphicsPathItem):
         # the way of the shortest line from output→input.
         direct_route = end.x() > src_right + _PORT_RADIUS
 
+        # Build a SINGLE cubic from start (source output port) to end
+        # (target input port). One segment = no junctions = no kinks.
+        # Initial control-point placement is what enforces the
+        # "shortest path that doesn't cross a box" rule:
+        #
+        #   * direct: horizontal tangents at both ends, c1 right of
+        #     start, c2 left of end. Standard horizontal-S curve.
+        #   * loop:   c1 lifted above / below the source body so the
+        #     curve arcs around the shorter side; c2 still left of
+        #     end so the arrival tangent into the target's left port
+        #     stays rightward (clean horizontal entry).
+        #
+        # Repulsion (`_route_cubic`) then fine-tunes both control
+        # points to clear any third-party obstacles in the way.
+        dx = end.x() - start.x()
+        dy = end.y() - start.y()
+        handle = max(60.0, abs(dx) * 0.5, abs(dy) * 0.6)
+
         if direct_route:
-            # Same row → direct horizontal-tangent bezier (the original
-            # routing, fast and clean for orchestrator-and-friends).
-            dx = end.x() - start.x()
-            dy = end.y() - start.y()
-            handle = max(60.0, abs(dx) * 0.5, abs(dy) * 0.6)
-            if dx < 0:
-                handle = max(handle, abs(dx) * 0.6 + 80.0)
             c1 = QPointF(start.x() + handle, start.y())
             c2 = QPointF(end.x() - handle, end.y())
 
@@ -848,41 +859,14 @@ class _AgentEdge(QGraphicsPathItem):
             if sib_total > 1:
                 offset = (sib_idx - (sib_total - 1) / 2.0) * _FANOUT_SPACING
                 c1 = QPointF(c1.x(), c1.y() + offset)
-
-            # Magnet repulsion: iteratively relax the control points so
-            # the actual curve (sampled at fixed t-values) stays clear
-            # of every obstacle box. This pushes the LINE away from
-            # boxes — not just the puppet strings.
-            c1, c2 = self._route_cubic(start, c1, c2, end, obstacles)
-
-            # Tangent-direction guard: relaxation is free to push the
-            # control points anywhere — including PAST the endpoint.
-            # When that happens the cubic flips its end tangent and
-            # draws a tiny hook just before the arrowhead (the
-            # "fish-tail flick" the user kept seeing). Clamp so the
-            # natural exit/entry tangent stays rightward.
-            min_clearance = 12.0
-            if c1.x() < start.x() + min_clearance:
-                c1 = QPointF(start.x() + min_clearance, c1.y())
-            if c2.x() > end.x() - min_clearance:
-                c2 = QPointF(end.x() - min_clearance, c2.y())
-
-            path = QPainterPath(start)
-            path.cubicTo(c1, c2, end)
-            tangent_from = c2
         else:
-            # Target is BEHIND source — direct curve would cut through
-            # the source body, breaking rule #1 (never intersect a
-            # box). Detour around the source on the SHORTER side so
-            # rule #2 (shortest path) is honoured: over the top when
-            # the target sits above the source's mid-line, under
-            # when it sits below.
+            # Target is BEHIND source. Lift the curve above / below
+            # the source body via c1; keep c2 horizontal at end's y
+            # for a clean rightward arrival tangent. Single cubic.
             loop_above = end.y() < src_mid_y
 
             # Stagger looping siblings so two arrows from the same
-            # source don't overlap. Sibling order is deterministic
-            # (sort by target.y / target.x / name) so a given edge
-            # always renders in the same lane.
+            # source don't overlap. Sibling order is deterministic.
             sibling_index = 0
             try:
                 canvas = self.source._canvas
@@ -912,68 +896,45 @@ class _AgentEdge(QGraphicsPathItem):
             except Exception:
                 sibling_index = 0
 
-            # Just enough clearance to clear the source body —
-            # previous routing used ~70 + sibling*28 which pushed
-            # the detour 200+ px outside the source and clipped
-            # off-screen. Now: 28 px base, 18 px per sibling lane.
             base_pad = 28.0
             lane_spacing = 18.0
             loop_pad = base_pad + sibling_index * lane_spacing
 
-            # Detour Y: just outside the source on the shorter side.
+            # c1 just past the source's right edge, lifted above /
+            # below the source body — pulls the curve up/down right
+            # after it leaves the right port.
             if loop_above:
-                detour_y = src_top - loop_pad
+                c1_y = src_top - loop_pad
             else:
-                detour_y = src_bottom + loop_pad
-            # Exit point on the source's LEFT side at mid-height,
-            # only as far left as needed to clear the source's
-            # left edge plus the input-port circle.
-            exit_x = src_left - loop_pad - _PORT_RADIUS - _PORT_OFFSET
-            exit_pt = QPointF(exit_x, src_mid_y)
+                c1_y = src_bottom + loop_pad
+            c1 = QPointF(src_right + loop_pad, c1_y)
 
-            # Loop bezier: source output port → detour above/below
-            # source → exit point on source's left side. Repulsion
-            # against every OTHER box (rule #1) keeps the curve
-            # clear when the detour passes over another node.
-            loop_c1 = QPointF(src_right + loop_pad, detour_y)
-            loop_c2 = QPointF(src_left - loop_pad, detour_y)
-            loop_c1, loop_c2 = self._route_cubic(start, loop_c1, loop_c2, exit_pt, obstacles)
+            # c2 left of target's left port at target's y — keeps
+            # the arrival tangent horizontal. Force the handle big
+            # enough that c2.x is also LEFT of the source's left
+            # edge so the curve sweeps clear of the source body
+            # rather than re-entering it on the way to end.
+            min_handle_for_clearance = (src_right - end.x()) + loop_pad + 20.0
+            handle = max(handle, min_handle_for_clearance)
+            c2 = QPointF(end.x() - handle, end.y())
 
-            path = QPainterPath(start)
-            path.cubicTo(loop_c1, loop_c2, exit_pt)
+        # Magnet repulsion against every OTHER box keeps the curve
+        # clear when the path passes near a third-party node.
+        c1, c2 = self._route_cubic(start, c1, c2, end, obstacles)
 
-            # Final bezier from exit point to the target input port.
-            # C1 continuity at the junction: segment 2 must start
-            # heading in the SAME direction segment 1 ended, otherwise
-            # the path kinks visibly at exit_pt (the bug the user
-            # reported — a tiny S-bend just before the arrowhead).
-            # Segment 1 ended heading from loop_c2 → exit_pt; carry
-            # that unit tangent forward for f_c1.
-            t_dx = exit_pt.x() - loop_c2.x()
-            t_dy = exit_pt.y() - loop_c2.y()
-            t_len = math.hypot(t_dx, t_dy) or 1.0
-            ux = t_dx / t_len
-            uy = t_dy / t_len
+        # Tangent-direction guard: relaxation may push c1 past start
+        # or c2 past end, which would flip the natural rightward
+        # entry/exit tangent and produce a hook just before the
+        # arrowhead. Clamp.
+        min_clearance = 12.0
+        if c1.x() < start.x() + min_clearance:
+            c1 = QPointF(start.x() + min_clearance, c1.y())
+        if c2.x() > end.x() - min_clearance:
+            c2 = QPointF(end.x() - min_clearance, c2.y())
 
-            f_dx = end.x() - exit_pt.x()
-            f_dy = end.y() - exit_pt.y()
-            f_handle = max(60.0, abs(f_dx) * 0.5, abs(f_dy) * 0.5)
-            f_c1 = QPointF(
-                exit_pt.x() + ux * f_handle,
-                exit_pt.y() + uy * f_handle,
-            )
-            f_c2 = QPointF(end.x() - f_handle, end.y())
-            f_c1, f_c2 = self._route_cubic(exit_pt, f_c1, f_c2, end, obstacles)
-
-            # Tangent-direction guard at the target end (same fix as
-            # the direct route): keep f_c2 to the LEFT of end so the
-            # arrival tangent stays rightward into the input port.
-            min_clearance = 12.0
-            if f_c2.x() > end.x() - min_clearance:
-                f_c2 = QPointF(end.x() - min_clearance, f_c2.y())
-
-            path.cubicTo(f_c1, f_c2, end)
-            tangent_from = f_c2
+        path = QPainterPath(start)
+        path.cubicTo(c1, c2, end)
+        tangent_from = c2
 
         self.setPath(path)
         self._start_pt = QPointF(start)

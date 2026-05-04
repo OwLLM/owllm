@@ -128,9 +128,16 @@ class _GalleryCard(QFrame):
 
     clicked = Signal(str)  # agent name
 
-    def __init__(self, definition: AgentDefinition, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        definition: AgentDefinition,
+        parent: Optional[QWidget] = None,
+        *,
+        is_skill: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.definition = definition
+        self.is_skill = is_skill
 
         self.setObjectName("GalleryCard")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -142,8 +149,10 @@ class _GalleryCard(QFrame):
         self.setFixedHeight(118)
         self.setCursor(Qt.PointingHandCursor)
 
-        # Built-ins get a subtle accent border-left; customs are neutral.
-        accent = "#4a6cff" if definition.built_in else "#7a8a9c"
+        # Built-ins and installed skills share the blue left accent so
+        # they read as "shipped / installed" together; pure custom
+        # agents get the neutral accent.
+        accent = "#4a6cff" if (definition.built_in or is_skill) else "#7a8a9c"
         self.setStyleSheet(f"""
             QFrame#GalleryCard {{
                 background: qlineargradient(
@@ -194,6 +203,18 @@ class _GalleryCard(QFrame):
             badge = QLabel("BUILT-IN")
             badge.setStyleSheet(
                 "color:#7989ff; background:rgba(121,137,255,0.15); "
+                "border-radius:6px; padding:2px 8px; font-size:10px; "
+                "font-weight:600; letter-spacing:0.6px;"
+            )
+            name_row.addWidget(badge)
+        elif is_skill:
+            # Anthropic-library / community SKILL.md installs read as
+            # "built-in" in the gallery (left column, blue accent) but
+            # carry their own SKILL badge so the user can still tell
+            # them apart from the OWLLM-shipped roles.
+            badge = QLabel("SKILL")
+            badge.setStyleSheet(
+                "color:#7ad3ff; background:rgba(122,211,255,0.15); "
                 "border-radius:6px; padding:2px 8px; font-size:10px; "
                 "font-weight:600; letter-spacing:0.6px;"
             )
@@ -868,19 +889,36 @@ class AgentStudioPage(QWidget):
                 w.deleteLater()
 
         defs = list_all_definitions()
-        # Two-column layout: built-ins on the left, customs on the right.
-        # Orchestrators (can_dispatch=True) always sit on the FIRST row
-        # of their respective column so the team leaders are immediately
-        # visible at the top.
-        def _sort_key(d: AgentDefinition) -> tuple:
-            return (0 if d.can_dispatch else 1, d.name.lower())
+        # Two-column layout: built-ins AND installed skills (Anthropic
+        # library / community SKILL.md packs) on the left, pure custom
+        # agents on the right. Orchestrators (can_dispatch=True) always
+        # sit on the FIRST row of their respective column so the team
+        # leaders are immediately visible at the top.
+        try:
+            from core.agents.skill_md import list_skill_definitions
+            skill_names = set(list_skill_definitions().keys())
+        except Exception:
+            skill_names = set()
 
-        builtins = sorted(
-            (d for d in defs.values() if d.built_in),
+        def _sort_key(d: AgentDefinition) -> tuple:
+            # Built-ins above skills above the rest, with leaders at
+            # the top of every group.
+            if d.built_in:
+                bucket = 0
+            elif d.name in skill_names:
+                bucket = 1
+            else:
+                bucket = 2
+            return (bucket, 0 if d.can_dispatch else 1, d.name.lower())
+
+        left_col = sorted(
+            (d for d in defs.values()
+             if d.built_in or d.name in skill_names),
             key=_sort_key,
         )
-        customs = sorted(
-            (d for d in defs.values() if not d.built_in),
+        right_col = sorted(
+            (d for d in defs.values()
+             if not d.built_in and d.name not in skill_names),
             key=_sort_key,
         )
 
@@ -889,21 +927,21 @@ class AgentStudioPage(QWidget):
         def _add_column(items, col: int) -> Optional[str]:
             first: Optional[str] = None
             for row, d in enumerate(items):
-                card = _GalleryCard(d)
+                card = _GalleryCard(d, is_skill=(d.name in skill_names))
                 card.clicked.connect(self._on_card_clicked)
                 self.gallery_layout.addWidget(card, row, col)
                 if first is None:
                     first = d.name
             return first
 
-        first_builtin = _add_column(builtins, 0)
-        first_custom = _add_column(customs, 1)
+        first_builtin = _add_column(left_col, 0)
+        first_custom = _add_column(right_col, 1)
 
         first_name = first_builtin or first_custom
 
         # Push a row stretcher at the bottom so cards stay top-aligned
         # when one column has fewer rows than the other.
-        max_rows = max(len(builtins), len(customs), 1)
+        max_rows = max(len(left_col), len(right_col), 1)
         self.gallery_layout.setRowStretch(max_rows, 1)
 
         target = select or first_name

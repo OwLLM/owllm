@@ -779,29 +779,36 @@ class _AgentEdge(QGraphicsPathItem):
 
         obstacles = self._obstacle_rects()
 
-        # Routing rules:
-        #   * same layer                              → direct curve
-        #   * adjacent layer DOWNWARD  (gap == 1, target deeper)
-        #                                             → direct curve
-        #   * adjacent layer UPWARD    (gap == 1, target shallower)
-        #                                             → loop UNDER source
-        #   * any layer gap > 1, either direction     → loop UNDER source
-        # The "loop under" path is what keeps backward arrows from
-        # cutting through the source's body.
-        direct_route = True
+        # Routing rules (position-based, NOT layer-based):
+        #   1. NEVER intersect a box.
+        #   2. SHORTEST path that satisfies #1.
+        #
+        # In practice that means:
+        #   * If the target's input port sits to the RIGHT of the
+        #     source's right edge → direct horizontal-tangent bezier.
+        #     The curve never re-enters the source body (handles
+        #     point outward) and the repulsion field steers it
+        #     around any third-party boxes in between.
+        #   * Otherwise the target is BEHIND the source — a direct
+        #     curve would slice through the source body. Detour
+        #     around the source on the SHORTER side: over when the
+        #     target sits above the source's mid-line, under when
+        #     it sits below. The detour distance is just enough to
+        #     clear the source body plus a small breathing margin.
         try:
-            src_layer = self.source.layer
-            tgt_layer = self.target.layer
-            gap = abs(src_layer - tgt_layer)
-            if gap == 0:
-                direct_route = True
-            elif gap == 1 and tgt_layer > src_layer:
-                # going DOWN one layer — clean direct curve is fine.
-                direct_route = True
-            else:
-                direct_route = False
+            src_pos = self.source.scenePos()
         except (RuntimeError, AttributeError):
-            direct_route = True
+            src_pos = QPointF(start.x() - _NODE_W - _PORT_RADIUS - _PORT_OFFSET,
+                              start.y() - _NODE_H / 2)
+        src_left = src_pos.x()
+        src_right = src_pos.x() + _NODE_W
+        src_top = src_pos.y()
+        src_bottom = src_pos.y() + _NODE_H
+        src_mid_y = src_pos.y() + _NODE_H / 2
+        # "Behind" means the target's input port is at or to the left
+        # of the source's right edge — i.e., the source body is in
+        # the way of the shortest line from output→input.
+        direct_route = end.x() > src_right + _PORT_RADIUS
 
         if direct_route:
             # Same row → direct horizontal-tangent bezier (the original
@@ -833,87 +840,70 @@ class _AgentEdge(QGraphicsPathItem):
             path.cubicTo(c1, c2, end)
             tangent_from = c2
         else:
-            # Cross-layer (gap > 1) → loop AROUND the source so the arrow
-            # doesn't cut across intermediate layers. Direction is chosen
-            # based on whether the target sits BELOW (loop down/under) or
-            # ABOVE (loop up/over) the source.
-            try:
-                src_pos = self.source.scenePos()
-            except (RuntimeError, AttributeError):
-                src_pos = QPointF(start.x() - _NODE_W, start.y() - _NODE_H / 2)
-            src_left = src_pos.x()
-            src_right = src_pos.x() + _NODE_W
-            src_top = src_pos.y()
-            src_bottom = src_pos.y() + _NODE_H
-            src_mid_y = src_pos.y() + _NODE_H / 2
+            # Target is BEHIND source — direct curve would cut through
+            # the source body, breaking rule #1 (never intersect a
+            # box). Detour around the source on the SHORTER side so
+            # rule #2 (shortest path) is honoured: over the top when
+            # the target sits above the source's mid-line, under
+            # when it sits below.
+            loop_above = end.y() < src_mid_y
 
-            # Routing rule: ALWAYS loop UNDER the source (never over),
-            # regardless of whether the target sits below or above.
-            # The user explicitly wants the detour below the box for
-            # both downward and upward arrows.
-
-            # Stagger the detour distance so multiple cross-layer arrows
-            # from the same source don't overlap. Sibling order is
-            # deterministic so a given edge always renders in the same
-            # lane. Sibling pool covers EVERY looping edge (same-source,
-            # any direction) so up- and down-loops share the same fan
-            # and don't double up on top of each other.
+            # Stagger looping siblings so two arrows from the same
+            # source don't overlap. Sibling order is deterministic
+            # (sort by target.y / target.x / name) so a given edge
+            # always renders in the same lane.
             sibling_index = 0
             try:
                 canvas = self.source._canvas
 
-                def _is_looping(e: "_AgentEdge") -> bool:
+                def _is_behind_source(e: "_AgentEdge") -> bool:
                     try:
-                        g = abs(e.source.layer - e.target.layer)
-                        if g == 0:
-                            return False
-                        if g == 1 and e.target.layer > e.source.layer:
-                            return False
-                        return True
+                        sp = e.source.scenePos()
+                        ep = e.target.input_port_scene_pos()
+                        return ep.x() <= sp.x() + _NODE_W + _PORT_RADIUS
                     except Exception:
                         return False
 
                 siblings = [
                     e for e in canvas._edges.values()
-                    if e.source is self.source and _is_looping(e)
+                    if e.source is self.source and _is_behind_source(e)
                 ]
 
                 def _sib_key(e: "_AgentEdge") -> tuple:
                     try:
-                        return (abs(e.target.layer - e.source.layer), e.target.name)
+                        tp = e.target.scenePos()
+                        return (tp.y(), tp.x(), e.target.name)
                     except Exception:
-                        return (0, "")
+                        return (0.0, 0.0, "")
 
                 siblings.sort(key=_sib_key)
                 sibling_index = siblings.index(self) if self in siblings else 0
             except Exception:
                 sibling_index = 0
 
-            # MUCH more breathing room around the source than before.
-            # base_pad is the minimum distance from the source body
-            # in every direction; lane_spacing is the extra gap each
-            # additional sibling claims so 3-4 loops still fit cleanly.
-            base_pad = 70.0
-            lane_spacing = 28.0
+            # Just enough clearance to clear the source body —
+            # previous routing used ~70 + sibling*28 which pushed
+            # the detour 200+ px outside the source and clipped
+            # off-screen. Now: 28 px base, 18 px per sibling lane.
+            base_pad = 28.0
+            lane_spacing = 18.0
             loop_pad = base_pad + sibling_index * lane_spacing
 
-            # Drop well past the bottom of the source, exit on its
-            # LEFT side. The +30 px past loop_pad is the explicit
-            # "breathing room" the user asked for so the curve never
-            # hugs the source border.
-            detour_y = src_bottom + loop_pad + 30.0
-
-            # Exit point on the source's LEFT side at mid-height. Sits
-            # outside the input-port circle so it doesn't collide.
+            # Detour Y: just outside the source on the shorter side.
+            if loop_above:
+                detour_y = src_top - loop_pad
+            else:
+                detour_y = src_bottom + loop_pad
+            # Exit point on the source's LEFT side at mid-height,
+            # only as far left as needed to clear the source's
+            # left edge plus the input-port circle.
             exit_x = src_left - loop_pad - _PORT_RADIUS - _PORT_OFFSET
             exit_pt = QPointF(exit_x, src_mid_y)
 
-            # Loop bezier: (right output port) → detour BELOW source →
-            # (exit point on source's left). The detour is intentionally
-            # far below the source, so this segment usually doesn't need
-            # much help from repulsion — but if there are OTHER boxes
-            # in the row below, the relaxation will steer the curve
-            # around them too.
+            # Loop bezier: source output port → detour above/below
+            # source → exit point on source's left side. Repulsion
+            # against every OTHER box (rule #1) keeps the curve
+            # clear when the detour passes over another node.
             loop_c1 = QPointF(src_right + loop_pad, detour_y)
             loop_c2 = QPointF(src_left - loop_pad, detour_y)
             loop_c1, loop_c2 = self._route_cubic(start, loop_c1, loop_c2, exit_pt, obstacles)
@@ -922,13 +912,14 @@ class _AgentEdge(QGraphicsPathItem):
             path.cubicTo(loop_c1, loop_c2, exit_pt)
 
             # Final bezier from exit point to the target input port.
-            # Exit tangent points UP (the loop is climbing back from
-            # below to source mid-Y); arrival tangent points RIGHTWARD
-            # into the target's left input port.
+            # Tangent at the exit point points in the SAME direction
+            # the loop was travelling (up if we looped over, down if
+            # we looped under) so the two segments meet smoothly.
             f_dx = end.x() - exit_pt.x()
             f_dy = end.y() - exit_pt.y()
             f_handle = max(60.0, abs(f_dx) * 0.5, abs(f_dy) * 0.5)
-            f_c1 = QPointF(exit_pt.x(), exit_pt.y() - f_handle)
+            tangent_dy = -f_handle if loop_above else f_handle
+            f_c1 = QPointF(exit_pt.x(), exit_pt.y() + tangent_dy)
             f_c2 = QPointF(end.x() - f_handle, end.y())
             f_c1, f_c2 = self._route_cubic(exit_pt, f_c1, f_c2, end, obstacles)
             path.cubicTo(f_c1, f_c2, end)

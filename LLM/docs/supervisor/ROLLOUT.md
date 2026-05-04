@@ -63,6 +63,33 @@ Pending (not yet wired):
 - `core/runtime/self_heal_orchestrator.py` will get a `shadow.observe()` call in its repair entrypoint as the first wire-in. Validated locally; staged for a follow-up PR once the file's pending WIP changes land.
 - training, dataset, install, mcp wire-ins follow same pattern.
 
+UI:
+- `desktop_app/pages/supervisor_page.py` -- live shadow log table + flag state panel. Auto-refreshes every 3s. Self-contained Qt widget, ready to wire in.
+- `desktop_app/main.py` wiring is a one-hunk addition (~18 lines) staged for a follow-up PR once that file's pending WIP changes land. Snippet documented at the bottom of this file.
+
+## Pending main.py wire-in snippet
+
+When `desktop_app/main.py` is clean of unrelated WIP, append this hunk
+right before the `tabs.addTab(_timed_build("Info", ...))` line in
+`MainWindow._setup_ui` (around line 3245):
+
+```python
+# Supervisor tab -- conditional. Only rendered when the user has opted in
+# via feature_flags.json (supervisor.enabled = true). Production users
+# see no change.
+try:
+    from core.supervisor import flags as _supervisor_flags
+    if _supervisor_flags.supervisor_enabled():
+        from desktop_app.pages.supervisor_page import SupervisorPage
+        tabs.addTab(_timed_build("Supervisor", lambda: SupervisorPage(self)),
+                    "Supervisor")
+except Exception as _supervisor_e:
+    try:
+        self._log_to_app_log(f"[STARTUP] supervisor tab skipped: {_supervisor_e}")
+    except Exception:
+        pass
+```
+
 Net effect on production users today: **zero behavioral change.** Master switch is false; the new code is dead code in every prod install.
 
 To start collecting data on a dev machine:

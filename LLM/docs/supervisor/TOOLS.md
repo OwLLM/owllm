@@ -91,6 +91,13 @@ default policy:
   danger  → refuse; require user to flip "advanced supervisor mode" toggle
 ```
 
+The toast widget for `confirm` and `danger` lives at
+[desktop_app/widgets/supervisor_toast.py](../../desktop_app/widgets/supervisor_toast.py).
+Decision constants: `apply | skip | always_apply | never_apply | timeout`.
+Timeout always maps to `skip` (never silently apply on user absence).
+A standalone preview is at
+[tools/demo_supervisor_toast.py](../../tools/demo_supervisor_toast.py).
+
 User can opt into `auto-approve safe + confirm` mode after a few sessions of trusting the supervisor. Stored per-install, not synced.
 
 ## Why the surface is this small

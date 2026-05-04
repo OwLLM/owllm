@@ -65,6 +65,8 @@ Pending (not yet wired):
 
 UI:
 - `desktop_app/pages/supervisor_page.py` -- live shadow log table + flag state panel. Auto-refreshes every 3s. Self-contained Qt widget, ready to wire in.
+- `desktop_app/widgets/supervisor_toast.py` -- non-modal "Apply fix?" confirmation widget for Phase-3+ proposals. Three trust tiers (safe/confirm/danger) with countdown auto-skip. Pure helpers covered by 9 tests.
+- `tools/demo_supervisor_toast.py` -- standalone manual harness so devs can eyeball the toast layout without booting the full app.
 - `desktop_app/main.py` wiring is a one-hunk addition (~18 lines) staged for a follow-up PR once that file's pending WIP changes land. Snippet documented at the bottom of this file.
 
 ## Pending main.py wire-in snippet

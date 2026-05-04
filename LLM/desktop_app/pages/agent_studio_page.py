@@ -231,10 +231,12 @@ class _AvatarPicker(QFrame):
 
     picked = Signal(str)
 
-    OWL_TILE = 76
-    OWL_ICON = 64
-    EMOJI_TILE = 60
-    EMOJI_FONT_PT = 28
+    # Tile sizes — every visible glyph (owl PNG or emoji) is at least
+    # 100px tall so the user can actually see them at a glance.
+    OWL_TILE = 124
+    OWL_ICON = 108
+    EMOJI_TILE = 116
+    EMOJI_FONT_PT = 52
 
     def __init__(self, current: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -258,8 +260,8 @@ class _AvatarPicker(QFrame):
 
             owl_grid = QGridLayout()
             owl_grid.setContentsMargins(0, 0, 0, 0)
-            owl_grid.setSpacing(8)
-            cols = 6
+            owl_grid.setSpacing(10)
+            cols = 4
             for i, (icon_str, pm) in enumerate(owls):
                 btn = QPushButton()
                 btn.setFixedSize(self.OWL_TILE, self.OWL_TILE)
@@ -283,8 +285,8 @@ class _AvatarPicker(QFrame):
 
         emoji_grid = QGridLayout()
         emoji_grid.setContentsMargins(0, 0, 0, 0)
-        emoji_grid.setSpacing(6)
-        cols = 7
+        emoji_grid.setSpacing(8)
+        cols = 5
         emoji_font = QFont("Segoe UI Emoji")
         emoji_font.setPointSize(self.EMOJI_FONT_PT)
         for i, emoji in enumerate(AVATAR_PALETTE):

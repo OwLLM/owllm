@@ -3633,6 +3633,7 @@ class MainWindow(QMainWindow):
             "key": "finetuning",
             "title": "Fine Tuning",
             "icon": "🛠",
+            "icon_png": "owl_FineTuning.png",
             "tagline": "Models · Train · Test",
             "blurb": "Download base models, fine-tune adapters, and test prompts.",
             "accent_top": "#23304a",
@@ -3643,6 +3644,7 @@ class MainWindow(QMainWindow):
             "key": "agentic",
             "title": "Agentic Team",
             "icon": "🎭",
+            "icon_png": "owl_AgenticTeam.png",
             "tagline": "Agents · Studio · Code · Characters",
             "blurb": "Design agents, give them models and tools, and run multi-agent projects.",
             "accent_top": "#1f3a3a",
@@ -3691,11 +3693,45 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(34, 26, 34, 26)
         layout.setSpacing(26)
 
-        icon_lbl = QLabel(spec["icon"])
-        f = QFont()
-        f.setPointSize(56)
-        icon_lbl.setFont(f)
+        # Prefer the owl PNG (full size) when shipped; fall back to the
+        # plain emoji glyph if the asset is missing. Header navbar
+        # buttons are NOT touched — they keep their tiny emoji glyphs.
+        icon_lbl = QLabel()
         icon_lbl.setStyleSheet("background:transparent;")
+        icon_lbl.setAlignment(Qt.AlignCenter)
+        png_name = spec.get("icon_png")
+        png_path = None
+        if png_name:
+            from pathlib import Path as _Path
+            # main.py is at LLM/desktop_app/main.py — parents[2] is the
+            # repo root, where the icons/ folder lives.
+            candidate = (
+                _Path(__file__).resolve().parents[2]
+                / "icons" / "Page_icons" / png_name
+            )
+            if candidate.exists():
+                png_path = candidate
+        if png_path is not None:
+            from PySide6.QtGui import QPixmap as _QPixmap
+            pm = _QPixmap(str(png_path))
+            if not pm.isNull():
+                # Scale to 220×220 — the card's min height — so the
+                # owl artwork dominates the card the way the user
+                # asked for ("full size").
+                scaled = pm.scaled(
+                    220, 220,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+                icon_lbl.setPixmap(scaled)
+                icon_lbl.setFixedSize(scaled.width(), scaled.height())
+            else:
+                png_path = None
+        if png_path is None:
+            icon_lbl.setText(spec["icon"])
+            f = QFont()
+            f.setPointSize(56)
+            icon_lbl.setFont(f)
         layout.addWidget(icon_lbl)
 
         text_box = QVBoxLayout()

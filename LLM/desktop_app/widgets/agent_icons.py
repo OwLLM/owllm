@@ -58,6 +58,10 @@ def _icons_dir() -> Path:
     return Path(__file__).resolve().parents[3] / "icons" / "Page_icons"
 
 
+def _agents_dir() -> Path:
+    return _icons_dir() / "Agents"
+
+
 _pixmap_cache: dict[str, QPixmap] = {}
 
 
@@ -78,14 +82,25 @@ def owl_label(basename: str) -> str:
 
 
 def owl_pixmap(basename: str) -> Optional[QPixmap]:
-    """Load and cache the PNG for an owl icon. Returns None if missing."""
+    """Load and cache the PNG for an owl icon.
+
+    Looks in ``Page_icons/Agents`` first (the new home for picker
+    icons) and falls back to ``Page_icons`` so PNGs that historically
+    lived at the root (e.g. ``owl_agentic`` for the team crest, or
+    legacy saves) still resolve.
+    """
     if basename in _pixmap_cache:
         pm = _pixmap_cache[basename]
         return pm if not pm.isNull() else None
-    path = _icons_dir() / f"{basename}.png"
-    pm = QPixmap(str(path)) if path.exists() else QPixmap()
+    for candidate in (_agents_dir() / f"{basename}.png",
+                       _icons_dir() / f"{basename}.png"):
+        if candidate.exists():
+            pm = QPixmap(str(candidate))
+            _pixmap_cache[basename] = pm
+            return pm if not pm.isNull() else None
+    pm = QPixmap()
     _pixmap_cache[basename] = pm
-    return pm if not pm.isNull() else None
+    return None
 
 
 def resolve_pixmap(icon: Optional[str]) -> Optional[QPixmap]:
@@ -96,12 +111,19 @@ def resolve_pixmap(icon: Optional[str]) -> Optional[QPixmap]:
 
 
 def list_owl_icons() -> Iterable[Tuple[str, QPixmap]]:
-    """Yield (icon_string, pixmap) for each available owl PNG.
+    """Yield (icon_string, pixmap) for each PNG inside the Agents folder.
 
-    Skips entries whose PNG can't be loaded so the picker never shows a
-    blank tile.
+    The Studio's owl crew picker is sourced exclusively from
+    ``icons/Page_icons/Agents``: drop a PNG in there and it shows up
+    without a code change. Crest-only assets (``owl_AgenticTeam``,
+    ``owl_FineTuning``, etc.) live one level up in ``Page_icons`` and
+    are intentionally excluded.
     """
-    for base in OWL_ICON_BASENAMES:
+    folder = _agents_dir()
+    if not folder.exists():
+        return
+    for path in sorted(folder.glob("*.png")):
+        base = path.stem
         pm = owl_pixmap(base)
         if pm is not None:
             yield f"{OWL_PREFIX}{base}", pm

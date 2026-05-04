@@ -498,6 +498,16 @@ class AgentTeamCanvas(QWidget):
         # Make sure every visible layer has its own rotation rate.
         self._ensure_ring_motion(list(by_depth.keys()))
 
+        # Distribute agents on each ring across an arc of 340° (not
+        # the full 360°). The 20° "missing slice" guarantees two
+        # agents on the same ring are never exactly diametrically
+        # opposite — for n=2 they'd land at 180° apart on a full
+        # circle, which made the arrows between them lie on top of
+        # the orchestrator and on top of each other. With a 340°
+        # spread, n=2 sits 340° apart (20° gap on one side), n=3 at
+        # 170° apart, etc.
+        arc_span = math.tau * 340.0 / 360.0
+
         for depth in sorted(by_depth.keys()):
             ring_agents = by_depth[depth]
             count = len(ring_agents)
@@ -513,7 +523,10 @@ class AgentTeamCanvas(QWidget):
             phase_off = self._ring_phase.get(depth, 0.0)
             ring_rot = self._phase * speed + phase_off
             for i, name in enumerate(ring_agents):
-                theta = (math.tau * i) / count + ring_rot - math.pi / 2
+                if count == 1:
+                    theta = ring_rot - math.pi / 2
+                else:
+                    theta = (arc_span * i) / (count - 1) + ring_rot - math.pi / 2
                 x = cx + ring_radius * math.cos(theta)
                 y = cy + ring_radius * math.sin(theta)
                 pos = QPointF(x, y)

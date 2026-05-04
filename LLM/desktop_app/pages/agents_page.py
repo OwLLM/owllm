@@ -244,11 +244,15 @@ class AgentCard(QFrame):
         header = QHBoxLayout()
         header.setSpacing(12)
 
-        avatar = QLabel(role.icon or "🤖")
+        from desktop_app.widgets.agent_icons import apply_to_label as _apply_icon_label
+        avatar = QLabel()
+        avatar.setFixedSize(52, 52)
+        avatar.setAlignment(Qt.AlignCenter)
         af = QFont()
         af.setPointSize(26)
         avatar.setFont(af)
-        avatar.setStyleSheet("background:transparent;")
+        avatar.setStyleSheet("background:transparent; color:#fff;")
+        _apply_icon_label(avatar, role.icon or "🤖", size=48)
         header.addWidget(avatar)
 
         name_box = QVBoxLayout()
@@ -2979,10 +2983,15 @@ class _TeamPickerDialog(QDialog):
             cb.setChecked(d.name in selected)
             self._checks[d.name] = cb
             row.addWidget(cb)
-            avatar = QLabel(d.icon or "🤖")
+            from desktop_app.widgets.agent_icons import apply_to_label
+            avatar = QLabel()
+            avatar.setFixedSize(36, 36)
+            avatar.setAlignment(Qt.AlignCenter)
             af = QFont()
             af.setPointSize(16)
             avatar.setFont(af)
+            avatar.setStyleSheet("color:#fff;")
+            apply_to_label(avatar, d.icon or "🤖", size=32)
             row.addWidget(avatar)
 
             text = QVBoxLayout()

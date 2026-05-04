@@ -17,8 +17,8 @@ from __future__ import annotations
 import logging
 from typing import Callable, Dict, List, Optional
 
-from PySide6.QtCore import QObject, Qt, Signal, Slot
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtCore import QObject, QSize, Qt, Signal, Slot
+from PySide6.QtGui import QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
@@ -46,6 +46,14 @@ from core.agents.agent_definitions import (
 )
 from core.agents.backends import list_all_entries
 from core.agents.tools import builtin_registry
+from desktop_app.widgets.agent_icons import (
+    apply_to_button,
+    apply_to_label,
+    is_owl_icon,
+    list_owl_icons,
+    owl_basename,
+    owl_label,
+)
 from desktop_app.widgets.model_picker import ModelPickerButton
 from desktop_app.widgets.skill_library_dialog import SkillLibraryDialog
 
@@ -154,11 +162,14 @@ class _GalleryCard(QFrame):
         layout.setContentsMargins(16, 12, 16, 12)
         layout.setSpacing(14)
 
-        avatar = QLabel(definition.icon or "🤖")
+        avatar = QLabel()
+        avatar.setFixedSize(56, 56)
+        avatar.setAlignment(Qt.AlignCenter)
         af = QFont()
         af.setPointSize(28)
         avatar.setFont(af)
-        avatar.setStyleSheet("background:transparent;")
+        avatar.setStyleSheet("background:transparent; color:#fff;")
+        apply_to_label(avatar, definition.icon or "🤖", size=52)
         layout.addWidget(avatar)
 
         text = QVBoxLayout()
@@ -210,7 +221,11 @@ class _GalleryCard(QFrame):
 
 
 class _AvatarPicker(QFrame):
-    """Grid of emoji buttons. Click one → ``picked`` signal."""
+    """Grid of avatar buttons (owl PNGs first, then emoji palette).
+
+    Every tile is rendered up-front — selection just changes the
+    border / glow, it doesn't gate visibility.
+    """
 
     picked = Signal(str)
 
@@ -220,27 +235,80 @@ class _AvatarPicker(QFrame):
         self.setStyleSheet(
             "QFrame#AvatarPicker { background:#14171d; border:none; border-radius:10px; }"
         )
-        layout = QGridLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(4)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+
+        # Owl PNG row(s).
+        owls = list(list_owl_icons())
+        if owls:
+            owl_lbl = QLabel("Owl crew")
+            owl_lbl.setStyleSheet(
+                "color:#9aa0a6; background:transparent; "
+                "font-size:11px; font-weight:600; letter-spacing:0.6px;"
+            )
+            outer.addWidget(owl_lbl)
+
+            owl_grid = QGridLayout()
+            owl_grid.setContentsMargins(0, 0, 0, 0)
+            owl_grid.setSpacing(6)
+            cols = 7
+            for i, (icon_str, pm) in enumerate(owls):
+                btn = QPushButton()
+                btn.setFixedSize(56, 56)
+                btn.setIcon(QIcon(pm))
+                btn.setIconSize(QSize(44, 44))
+                btn.setToolTip(owl_label(owl_basename(icon_str)))
+                self._apply_tile_style(btn, selected=(icon_str == current))
+                btn.clicked.connect(
+                    lambda _checked=False, s=icon_str: self.picked.emit(s)
+                )
+                owl_grid.addWidget(btn, i // cols, i % cols)
+            outer.addLayout(owl_grid)
+
+        # Emoji row(s).
+        emoji_lbl = QLabel("Emoji")
+        emoji_lbl.setStyleSheet(
+            "color:#9aa0a6; background:transparent; "
+            "font-size:11px; font-weight:600; letter-spacing:0.6px;"
+        )
+        outer.addWidget(emoji_lbl)
+
+        emoji_grid = QGridLayout()
+        emoji_grid.setContentsMargins(0, 0, 0, 0)
+        emoji_grid.setSpacing(4)
         cols = 7
         for i, emoji in enumerate(AVATAR_PALETTE):
             btn = QPushButton(emoji)
             btn.setFixedSize(40, 40)
-            highlighted = emoji == current
-            btn.setStyleSheet(f"""
-                QPushButton {{
-                    background:{'rgba(74,108,255,0.25)' if highlighted else 'rgba(255,255,255,0.04)'};
-                    border:{'1px solid #4a6cff' if highlighted else 'none'};
-                    border-radius:8px;
-                    font-size:20px;
-                }}
-                QPushButton:hover {{
-                    background:rgba(74,108,255,0.35);
-                }}
-            """)
-            btn.clicked.connect(lambda _checked=False, e=emoji: self.picked.emit(e))
-            layout.addWidget(btn, i // cols, i % cols)
+            self._apply_tile_style(btn, selected=(emoji == current), emoji=True)
+            btn.clicked.connect(
+                lambda _checked=False, e=emoji: self.picked.emit(e)
+            )
+            emoji_grid.addWidget(btn, i // cols, i % cols)
+        outer.addLayout(emoji_grid)
+
+    @staticmethod
+    def _apply_tile_style(btn: QPushButton, *, selected: bool, emoji: bool = False) -> None:
+        # rgba(255,255,255,0.10) on the dark backplate is bright enough to
+        # read every tile at a glance; selected tiles add a neon border so
+        # the *current* choice still stands out.
+        bg = "rgba(74,108,255,0.30)" if selected else "rgba(255,255,255,0.10)"
+        border = "1.5px solid #6f8aff" if selected else "1px solid rgba(255,255,255,0.08)"
+        font_size = "20px" if emoji else "12px"
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background:{bg};
+                border:{border};
+                border-radius:8px;
+                color:#ffffff;
+                font-size:{font_size};
+            }}
+            QPushButton:hover {{
+                background:rgba(74,108,255,0.45);
+                border:1.5px solid #8aa3ff;
+            }}
+        """)
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +329,7 @@ class _EditorPanel(QFrame):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._current: Optional[AgentDefinition] = None
+        self._current_icon: str = "🤖"
         self._builtin_tool_checks: Dict[str, QCheckBox] = {}
         self._mcp_tool_checks: Dict[str, QCheckBox] = {}
 
@@ -294,13 +363,19 @@ class _EditorPanel(QFrame):
         header_row.setSpacing(14)
         self.avatar_button = QPushButton("🤖")
         self.avatar_button.setFixedSize(64, 64)
+        self.avatar_button.setIconSize(QSize(54, 54))
         self.avatar_button.setStyleSheet("""
             QPushButton {
-                background: rgba(255,255,255,0.06);
-                border: none; border-radius: 12px;
+                background: rgba(255,255,255,0.10);
+                border: 1px solid rgba(255,255,255,0.12);
+                border-radius: 12px;
+                color: #ffffff;
                 font-size: 32px;
             }
-            QPushButton:hover { background: rgba(255,255,255,0.10); }
+            QPushButton:hover {
+                background: rgba(74,108,255,0.30);
+                border: 1px solid #6f8aff;
+            }
         """)
         self.avatar_button.clicked.connect(self._toggle_avatar_picker)
         header_row.addWidget(self.avatar_button)
@@ -435,7 +510,8 @@ class _EditorPanel(QFrame):
 
     def load(self, definition: AgentDefinition) -> None:
         self._current = definition
-        self.avatar_button.setText(definition.icon or "🤖")
+        self._current_icon = definition.icon or "🤖"
+        apply_to_button(self.avatar_button, self._current_icon, size=54)
         self.avatar_picker.setVisible(False)
         self.name_input.setText(definition.name)
         self.desc_input.setText(definition.description)
@@ -475,8 +551,9 @@ class _EditorPanel(QFrame):
     def _toggle_avatar_picker(self) -> None:
         self.avatar_picker.setVisible(not self.avatar_picker.isVisible())
 
-    def _on_avatar_picked(self, emoji: str) -> None:
-        self.avatar_button.setText(emoji)
+    def _on_avatar_picked(self, icon: str) -> None:
+        self._current_icon = icon
+        apply_to_button(self.avatar_button, icon, size=54)
         self.avatar_picker.setVisible(False)
 
     # ------------------------------------------------------------------
@@ -488,7 +565,7 @@ class _EditorPanel(QFrame):
         return AgentDefinition(
             name=name,
             description=self.desc_input.text().strip(),
-            icon=self.avatar_button.text(),
+            icon=self._current_icon,
             system_prompt=self.prompt_input.toPlainText().strip(),
             tool_allowlist=[
                 n for n, cb in self._builtin_tool_checks.items() if cb.isChecked()

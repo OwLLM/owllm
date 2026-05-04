@@ -325,11 +325,8 @@ class _AgentNode(QGraphicsItem):
         # Title — icon (always) on the same line as the name, with the
         # crown badge overlaid for the orchestrator so the role still
         # reads even when the def's icon isn't a crown.
-        icon_glyph = self._icon or ("👑" if self.is_orchestrator else "🤖")
-        prefix = f"{icon_glyph} "
-        if self.is_orchestrator and "👑" not in icon_glyph:
-            prefix = f"👑 {icon_glyph} "
-        title_text = prefix + self.name
+        from desktop_app.widgets.agent_icons import is_owl_icon, resolve_pixmap
+        icon_value = self._icon or ("👑" if self.is_orchestrator else "🤖")
         # Pick text colours that contrast with the current fill — the
         # bright lime active fill needs near-black text to stay legible.
         if self._status == STATUS_ACTIVE:
@@ -345,7 +342,30 @@ class _AgentNode(QGraphicsItem):
         font.setPointSize(11)
         font.setBold(True)
         painter.setFont(font)
-        painter.drawText(QRectF(14, 8, _NODE_W - 28, 22), Qt.AlignLeft | Qt.AlignVCenter, title_text)
+
+        title_x = 14
+        if is_owl_icon(icon_value):
+            pm = resolve_pixmap(icon_value)
+            if pm is not None:
+                ico_size = 22
+                scaled = pm.scaled(
+                    ico_size, ico_size,
+                    Qt.KeepAspectRatio, Qt.SmoothTransformation,
+                )
+                painter.drawPixmap(14, 7, scaled)
+                title_x = 14 + ico_size + 6
+            crown = "👑 " if self.is_orchestrator else ""
+            title_text = crown + self.name
+        else:
+            prefix = f"{icon_value} "
+            if self.is_orchestrator and "👑" not in icon_value:
+                prefix = f"👑 {icon_value} "
+            title_text = prefix + self.name
+        painter.drawText(
+            QRectF(title_x, 8, _NODE_W - title_x - 14, 22),
+            Qt.AlignLeft | Qt.AlignVCenter,
+            title_text,
+        )
 
         # Model label.
         font2 = QFont()

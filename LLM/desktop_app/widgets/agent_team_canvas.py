@@ -873,13 +873,14 @@ class AgentTeamCanvas(QWidget):
             p.setPen(QPen(border_col, border_w))
             p.drawEllipse(pos, r, r)
 
-            # Icon (emoji) inside the disc.
+            # Icon (emoji or owl PNG) inside the disc.
+            from desktop_app.widgets.agent_icons import paint_icon as _paint_icon
             font = QFont()
             font.setPointSizeF(r * 0.85)
             p.setFont(font)
             p.setPen(_TEXT_BRIGHT)
             icon_rect = QRectF(pos.x() - r, pos.y() - r, r * 2, r * 2)
-            p.drawText(icon_rect, Qt.AlignCenter, agent.icon or "🤖")
+            _paint_icon(p, icon_rect, agent.icon)
 
             # Label below the node — agent name + a tiny status word when
             # not idle (Working / Pending / Error).
@@ -1114,13 +1115,13 @@ class AgentTeamCanvas(QWidget):
         p.setPen(QPen(_alpha(_TEXT_BRIGHT, 200), 1.4))
         p.drawEllipse(pic_rect)
 
-        # The "picture" is the agent's emoji icon at large size — we
-        # don't ship per-agent bitmap avatars yet.
+        # The "picture" is the agent's icon — emoji glyph or owl PNG.
+        from desktop_app.widgets.agent_icons import paint_icon as _paint_icon
         icon_font = QFont()
         icon_font.setPointSizeF(pic_size * 0.65)
         p.setFont(icon_font)
         p.setPen(_TEXT_BRIGHT)
-        p.drawText(pic_rect, Qt.AlignCenter, agent.icon or "🤖")
+        _paint_icon(p, pic_rect, agent.icon)
 
         # Name under the picture.
         name_font = QFont()

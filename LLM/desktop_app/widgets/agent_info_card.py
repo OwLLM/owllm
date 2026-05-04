@@ -50,7 +50,7 @@ def load_owl_pixmap() -> Optional[QPixmap]:
     """Best-effort load of the owl crest used as the team avatar."""
     try:
         owl_path = (
-            Path(__file__).resolve().parents[2]
+            Path(__file__).resolve().parents[3]
             / "icons"
             / "Page_icons"
             / "owl_agentic.png"
@@ -147,11 +147,12 @@ def paint_agent_card(
     p.setPen(QPen(_alpha(_TEXT_BRIGHT, 200), 1.4))
     p.drawEllipse(pic_rect)
 
+    from desktop_app.widgets.agent_icons import paint_icon as _paint_icon
     icon_font = QFont()
     icon_font.setPointSizeF(pic_size * 0.65)
     p.setFont(icon_font)
     p.setPen(_TEXT_BRIGHT)
-    p.drawText(pic_rect, Qt.AlignCenter, icon or "🤖")
+    _paint_icon(p, pic_rect, icon)
 
     # Name under the picture.
     name_font = QFont()

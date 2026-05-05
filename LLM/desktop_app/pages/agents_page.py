@@ -2227,13 +2227,17 @@ class AgentsPage(QWidget):
         # Per-project authoritative store. This is what bridges read at
         # goal-dispatch time, so writing here is what makes Telegram /
         # WhatsApp use the same model the desktop picker shows.
-        if self._active_project is None:
-            return
-        self._active_project.model_overrides[role_name] = composite_id
-        try:
-            self._project_store.save_project(self._active_project)
-        except Exception:
-            logger.exception("could not persist model_overrides for %s", role_name)
+        if self._active_project is not None:
+            self._active_project.model_overrides[role_name] = composite_id
+            try:
+                self._project_store.save_project(self._active_project)
+            except Exception:
+                logger.exception("could not persist model_overrides for %s", role_name)
+        # Invalidate the cached team so the next Run picks up the new
+        # selection. Without this, Agent.model_id stays bound to whatever
+        # was selected at build time and the picker change is silently
+        # ignored — the symptom is "I changed model but nothing happened".
+        self._team = None
         # Reflect the new pick on the canvas node.
         try:
             self._update_canvas_model_label(role_name)

@@ -198,6 +198,19 @@ def dispatch_model_fn(messages: List[ChatMessage], composite_id: str) -> str:
     at call time based on a routing strategy (cheapest, cheapest-local,
     premium) — see ``_resolve_auto``.
     """
+    # Empty/missing composite id is the #1 silent-failure mode in the
+    # Agents page: the picker hasn't been populated yet, the role has no
+    # saved override, or the previously-chosen model was uninstalled and
+    # the picker dropped its selection. Surface a clear error instead of
+    # the cryptic "composite id missing '|'" / "empty side" ValueError
+    # parse_id raises.
+    if not composite_id or "|" not in composite_id or composite_id.endswith("|") or composite_id.startswith("|"):
+        raise RuntimeError(
+            "No model is selected for this agent. Click the model picker "
+            "next to the agent name and choose one (e.g. a local Gemma 4 "
+            "entry, or auto|cheapest_local)."
+        )
+
     backend_name, model_key = parse_id(composite_id)
     if backend_name == "auto":
         resolved = _resolve_auto(model_key)
@@ -210,6 +223,11 @@ def dispatch_model_fn(messages: List[ChatMessage], composite_id: str) -> str:
     backend = _registry.get(backend_name)
     if backend is None:
         raise RuntimeError(f"unknown backend: {backend_name}. registered: {list(_registry)}")
+    if not model_key:
+        raise RuntimeError(
+            f"backend '{backend_name}' got an empty model key — the model "
+            "picker probably dropped its selection. Re-pick the model."
+        )
     return backend.generate(list(messages), model_key)
 
 

@@ -15087,8 +15087,15 @@ class MainWindow(QMainWindow):
         # Sort by step in case parser inserted out-of-order entries.
         history.sort(key=lambda x: x[0])
         first_step, first_loss = history[0]
-        last_step, last_loss = history[-1]
+        last_step, _last_raw = history[-1]
         steps_logged = len(history)
+
+        # Use a smoothed tail (mean of last 10% or last 10 steps, whichever
+        # is larger) for the verdict. Training loss spikes hard step-to-step
+        # — judging convergence on a single noisy point is misleading.
+        tail_n = max(10, steps_logged // 10)
+        tail = [l for (_s, l) in history[-tail_n:]]
+        last_loss = sum(tail) / len(tail) if tail else _last_raw
 
         # Detect NaN/Inf — the loss tracker stores floats parsed from
         # stdout, so they can carry through.
@@ -24467,8 +24474,12 @@ respective package directories or official repositories.
             self._update_metric_card(self.steps_card, val)
             self._update_epoch_from_progress()
         
-        # Parse loss: "loss: 0.1234" or "'loss': 0.1234"
-        loss_match = re.search(r"['\"]?loss['\"]?[:\s=]+([\d.]+)", line, re.IGNORECASE)
+        # Parse loss: "loss: 0.1234" or "'loss': 0.1234".
+        # Anchor with a word boundary so `train_loss` (the run-mean printed
+        # in the final summary line) does NOT clobber the per-step loss
+        # series — that mismatch was making the verdict report the average
+        # instead of the actual final-step loss.
+        loss_match = re.search(r"(?:^|[\s,'\"{])loss['\"]?[:\s=]+([\d.]+)", line, re.IGNORECASE)
         if loss_match:
             try:
                 loss_val = float(loss_match.group(1))

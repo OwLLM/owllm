@@ -1668,4 +1668,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Hard-exit after a successful run. Python's interpreter teardown of
+    # CUDA contexts on Windows + bf16 + PEFT triggers a 0xC0000005 access
+    # violation in the cuDNN/cuBLAS finalizer — harmless (the adapter is
+    # already on disk) but it makes the GUI report "CrashExit" on a run
+    # that actually succeeded. os._exit skips Python's atexit chain and
+    # the OS reclaims the GPU just fine on its own.
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:
+        # Real exceptions still propagate so the GUI sees the failure.
+        import traceback as _tb
+        _tb.print_exc()
+        os._exit(1)
+    os._exit(0)

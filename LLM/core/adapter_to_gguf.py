@@ -100,27 +100,72 @@ class ConvertConfig:
 
 
 def _merge_adapter(cfg: ConvertConfig, merged_dir: Path) -> None:
-    """Load base + adapter, merge LoRA in, save plain HF format."""
+    """Load base + adapter, merge LoRA in, save plain HF format.
+
+    CPU-only by design: merge is just ``W += B @ A``, doesn't need a
+    GPU, and avoiding CUDA here sidesteps the same Windows-specific
+    0xC0000005 access violation we hit during training (CUDA + bf16 +
+    Gemma 4's Clippable wrappers + transformers' kernelize() teardown
+    interact badly on Windows). Loading on CPU in fp32 burns RAM, not
+    VRAM, and the merge math is identical.
+    """
+    import os as _os
+    # Force-disable CUDA for this process. The merge runs entirely on
+    # CPU; this also kills the transformers / accelerate "device_map=auto"
+    # path that splits the model and triggers the meta-device warning.
+    _os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import PeftModel
 
     log = cfg.log_callback or (lambda m: print(f"[merge] {m}"))
-    log(f"loading base from {cfg.base_model}")
-    # bf16 if Ampere+ available; otherwise fp16. fp32 would double the
-    # memory footprint for no benefit at merge time.
-    dtype = (
-        torch.bfloat16
-        if torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-        else torch.float16
-    )
+    log(f"loading base from {cfg.base_model} (CPU-only, fp16)")
     base = AutoModelForCausalLM.from_pretrained(
         cfg.base_model,
-        torch_dtype=dtype,
-        device_map="auto",
+        torch_dtype=torch.float16,
+        device_map={"": "cpu"},
         trust_remote_code=True,
         low_cpu_mem_usage=True,
     )
+
+    # Apply the SAME stability shims the trainer uses:
+    #
+    # 1) Multimodal Gemma 4 wraps every Linear in Gemma4ClippableLinear,
+    #    whose torch.clamp during forward corrupts gradient flow AND
+    #    interacts badly with merge_and_unload. Disable the wrapper.
+    # 2) transformers' new kernelize() path swaps fused C++ kernels in
+    #    on .train() / .to() — on Windows + Gemma 4 it scribbles into
+    #    sub-module dicts. Disable it everywhere.
+    try:
+        n_clipped = 0
+        for sub in base.modules():
+            if hasattr(sub, "use_clipped_linears"):
+                try:
+                    sub.use_clipped_linears = False
+                    n_clipped += 1
+                except Exception:
+                    pass
+        if n_clipped:
+            log(f"disabled clipped-linear wrappers on {n_clipped} module(s) "
+                f"(Gemma 4 multimodal stability shim)")
+    except Exception as exc:
+        log(f"WARN: clipped-linear shim failed: {exc}")
+    try:
+        n_kernels = 0
+        for sub in base.modules():
+            if hasattr(sub, "use_kernels"):
+                try:
+                    sub.use_kernels = False
+                    n_kernels += 1
+                except Exception:
+                    pass
+        if n_kernels:
+            log(f"disabled use_kernels on {n_kernels} module(s) "
+                f"(prevents kernelize() teardown crash)")
+    except Exception as exc:
+        log(f"WARN: kernelize shim failed: {exc}")
+
     log(f"loading adapter from {cfg.adapter_dir}")
     peft_model = PeftModel.from_pretrained(base, cfg.adapter_dir)
     log("merging LoRA into base weights (merge_and_unload)…")
@@ -143,15 +188,14 @@ def _merge_adapter(cfg: ConvertConfig, merged_dir: Path) -> None:
         log("using tokenizer from base model")
     tok.save_pretrained(str(merged_dir))
 
-    # Free the GPU before kicking off the convert step — convert_hf_to_gguf
-    # only needs CPU + RAM, but the merged model is still resident.
+    # Free what we can — the converter step is a fresh subprocess so
+    # this is mostly cosmetic, but keeps RAM clean if anyone wires the
+    # function up in-process.
     del peft_model
     del merged
     del base
     import gc
     gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
     log("merge complete")
 
 
@@ -408,4 +452,18 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Hard-exit on success. Same rationale as finetune.py: Python's
+    # interpreter teardown of CUDA contexts on Windows + bf16 can
+    # raise 0xC0000005 in cuDNN/cuBLAS finalizers AFTER the GGUF is
+    # already on disk. os._exit skips atexit so a successful run
+    # reports as successful instead of CrashExit. Real exceptions
+    # still surface.
+    try:
+        rc = main()
+    except SystemExit:
+        raise
+    except BaseException:
+        import traceback as _tb
+        _tb.print_exc()
+        os._exit(1)
+    os._exit(int(rc or 0))

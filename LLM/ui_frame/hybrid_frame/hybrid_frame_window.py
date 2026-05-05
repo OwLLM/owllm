@@ -19,6 +19,14 @@ class FrameAssets:
     top_center: Optional[str] = None
 
 
+# Top-center badge geometry. The overlay window has to extend
+# ``BADGE_H // 2`` px above the parent's top edge so the badge can
+# render above the title bar without being clipped — keep these in
+# sync with the badge_w used in paintEvent's top-center block.
+BADGE_W = 300
+BADGE_H = int(BADGE_W * 0.65)
+
+
 class HybridFrameWindow(QWidget):
     """
     Pure decorative overlay window that:
@@ -170,7 +178,7 @@ class HybridFrameWindow(QWidget):
         if obj is self.parent_window:
             if event.type() == QEvent.Move:
                 # Parent moved - move overlay to match, offset upward for top image and left/up by shift_out
-                badge_h = int(90 * 0.65) if self.top_center and not self.top_center.isNull() else 0
+                badge_h = BADGE_H if self.top_center and not self.top_center.isNull() else 0
                 extra_top = badge_h // 2
                 shift_out = self.border_thickness // 2  # Shift outside by half thickness
                 new_pos = self.parent_window.pos()
@@ -181,7 +189,7 @@ class HybridFrameWindow(QWidget):
             elif event.type() == QEvent.Resize:
                 # Parent resized - resize overlay to match, add extra height for top image and width for right corner
                 # Also add shift_out on all sides for frame extension
-                badge_h = int(90 * 0.65) if self.top_center and not self.top_center.isNull() else 0
+                badge_h = BADGE_H if self.top_center and not self.top_center.isNull() else 0
                 extra_top = badge_h // 2
                 # Extend width to the right for corner_tr (120px wide, centered at edge = 60px extension)
                 extra_right = 60
@@ -219,7 +227,7 @@ class HybridFrameWindow(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         
         # Calculate offset for top image (widget is extended above)
-        badge_h = int(90 * 0.65) if self.top_center and not self.top_center.isNull() else 0
+        badge_h = BADGE_H if self.top_center and not self.top_center.isNull() else 0
         extra_top = badge_h // 2  # Half the image extends above
         extra_right = 75  # Extended width for corner_tr (150px wide, centered at edge = 75px extension)
         shift_out = t // 2  # Shift frame outside by half the border thickness
@@ -347,8 +355,10 @@ class HybridFrameWindow(QWidget):
 
         # Top-center badge image - now has space to extend above frame
         if self.top_center and not self.top_center.isNull():
-            badge_w = 300  # Fixed width (logical px)
-            badge_h = int(badge_w * 0.65)  # Height adapts proportionally
+            badge_w = BADGE_W  # Logical px
+            badge_h = BADGE_H  # 0.65 × badge_w, kept in step with the
+            # overlay-height calculation in eventFilter() above so the
+            # crest never spills past the overlay's top edge.
             # Center horizontally relative to parent window
             x = parent_x + (parent_w - badge_w) // 2
             # Position so center of image is at parent window's top edge

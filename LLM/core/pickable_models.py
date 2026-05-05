@@ -149,6 +149,23 @@ def get_pickable_models() -> List[PickableModel]:
         if model is not None:
             out.append(model)
 
+    # When a fine-tune exists in BOTH transformers PEFT form (slow) AND
+    # LoRA-GGUF form (fast, works on llama-server), hide the
+    # transformers entry so the user has exactly one button per
+    # fine-tune. Picking the slow path while a fast equivalent exists
+    # is never the right answer; double entries also surface a
+    # transformers integrity check that fails on PEFT-only dirs.
+    lora_stems = {
+        m.model_id[: -len("__lora_gguf")].lower()
+        for m in out
+        if m.kind == KIND_LORA_GGUF and m.model_id.lower().endswith("__lora_gguf")
+    }
+    if lora_stems:
+        out = [
+            m for m in out
+            if not (m.kind == KIND_PEFT_ADAPTER and m.model_id.lower() in lora_stems)
+        ]
+
     out.sort(key=_sort_key)
     return out
 

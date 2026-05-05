@@ -273,6 +273,47 @@ def split_display_answer(text: str) -> Tuple[str, str]:
             thought_parts.append(_normalize_reasoning_text(cleaned[earliest_cut:]))
             cleaned = cleaned[:earliest_cut]
 
+    # Gemma's internal CoT pattern (no special tokens, just numbered
+    # analytical steps). Looks like:
+    #   1. **Analyze the Request:** ...
+    #   2. **Determine the Context:** ...
+    #   3. **Identify the Goal:** ...
+    #   ...
+    #   *Self-Correction/Refinement:* ...
+    #
+    # When the model goes into this pattern at the START of a reply,
+    # the entire reply is reasoning -- there's no "final answer" after
+    # it. Strip the whole CoT block, surface what comes AFTER it as
+    # the answer, or fall through to placeholder if nothing follows.
+    # Detection: a leading numbered-step block with 2+ "**...:**"
+    # bold headers in the first few lines is unambiguously CoT framing
+    # (not legit prose).
+    _cot_signature = re.compile(
+        r"\A\s*1\.\s*\*\*[A-Z][^*\n]{2,40}:\*\*",
+        flags=re.MULTILINE,
+    )
+    if _cot_signature.match(cleaned):
+        # Find where the CoT block ends. The model's final answer (if
+        # any) comes after a blank line following the last analytical
+        # bullet, OR after a "*Self-Correction*" / "*Refinement*" line.
+        end_markers = [
+            r"\n\s*\*Self-Correction[^*\n]*\*[^\n]*\n\s*\n",
+            r"\n\s*\*Refinement[^*\n]*\*[^\n]*\n\s*\n",
+            r"\n\s*\n\s*[A-Z][a-z]",  # blank line then a sentence
+        ]
+        cot_end = -1
+        for pat in end_markers:
+            m = re.search(pat, cleaned, flags=re.DOTALL)
+            if m and (cot_end == -1 or m.end() < cot_end):
+                cot_end = m.end()
+        if cot_end == -1:
+            # No final-answer separator found — entire reply is CoT.
+            thought_parts.append(_normalize_reasoning_text(cleaned))
+            cleaned = ""
+        else:
+            thought_parts.append(_normalize_reasoning_text(cleaned[:cot_end]))
+            cleaned = cleaned[cot_end:].lstrip()
+
     # Drop garbage replacement-char tails (3+ U+FFFD in a row → noise
     # past EOS that the tokenizer couldn't decode cleanly).
     cleaned = re.sub(r"[� ]{3,}.*\Z", "", cleaned, flags=re.DOTALL)
@@ -376,8 +417,22 @@ def split_display_answer(text: str) -> Tuple[str, str]:
     # but the model DID produce text, show that text rather than the
     # placeholder. The placeholder used to fire whenever the model emitted
     # only a thought block, leaving the user staring at empty bubbles.
+    # Exception: if the captured thought itself is in Gemma's CoT-dump
+    # shape, surfacing it back as the answer is just hiding the same
+    # leak under a different label. Show a hint instead.
+    _is_cot_only = bool(thought) and bool(re.match(
+        r"\A\s*1\.\s*\*\*[A-Z][^*\n]{2,40}:\*\*",
+        thought,
+        flags=re.MULTILINE,
+    ))
     if not cleaned:
-        if thought:
+        if _is_cot_only:
+            cleaned = (
+                "(The model produced only internal reasoning, no final answer. "
+                "Try rephrasing your prompt — e.g. ask a complete question rather "
+                "than a single keyword. The reasoning is in the Unfiltered tab.)"
+            )
+        elif thought:
             cleaned = thought
         else:
             raw_stripped = str(text or "").strip()

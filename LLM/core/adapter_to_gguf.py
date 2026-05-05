@@ -907,24 +907,140 @@ def _find_gguf_base_for(hf_base_path: str) -> Optional[Path]:
     return None
 
 
+def _wire_lora_gguf_into_yaml(
+    adapter_id: str,
+    base_gguf_file: Path,
+    adapter_dir: Path,
+) -> None:
+    """Add a YAML entry for the LoRA-GGUF that shares the base's server.
+
+    Mirrors the transformers-side wiring in ``main._wire_adapter_into_yaml``:
+    the base GGUF entry stays unchanged and serves both the base and the
+    adapter; the adapter entry has ``shares_server_with`` set so
+    ``ensure_server_running`` reuses the base's process and port. The
+    ``--lora`` flag is added at startup time by the bundled-proxy env
+    injection wired earlier (see llm_server_manager + bundled_proxy_server).
+
+    Without this entry, ``ensure_server_running(<adapter_id>)`` raises
+    'Model at <path> is not in config' even though the onboarding row
+    is healthy — the YAML is a separate registry the server manager
+    consults at chat time.
+    """
+    import yaml as _yaml
+    root = Path(__file__).resolve().parents[1]  # .../LLM
+    config_path = root / "configs" / "llm_backends.yaml"
+
+    cfg: dict = {}
+    if config_path.exists():
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = _yaml.safe_load(f) or {}
+        except Exception:
+            cfg = {}
+    if "models" not in cfg or not isinstance(cfg.get("models"), dict):
+        cfg["models"] = {}
+    models = cfg["models"]
+
+    # Locate the YAML entry whose base_model matches the base GGUF.
+    # The base might be referenced by file path (...Q5_K_M.gguf) OR
+    # by directory path. Match either form against base_model.
+    base_id: Optional[str] = None
+    base_file_norm = str(base_gguf_file.resolve()).lower()
+    base_dir_norm = str(base_gguf_file.parent.resolve()).lower()
+    for mid, entry in models.items():
+        if not isinstance(entry, dict):
+            continue
+        bm = str(entry.get("base_model") or "")
+        if not bm:
+            continue
+        try:
+            bm_norm = str(Path(bm).resolve()).lower()
+        except OSError:
+            bm_norm = bm.lower()
+        if bm_norm == base_file_norm or bm_norm == base_dir_norm:
+            base_id = mid
+            break
+
+    # If no base entry exists yet, create one so ensure_server_running
+    # has a target to delegate to. Pick a free port and a sensible
+    # default config.
+    if base_id is None:
+        used_ports = {
+            int(e.get("port"))
+            for e in models.values()
+            if isinstance(e, dict) and isinstance(e.get("port"), (int, str)) and str(e.get("port")).isdigit()
+        }
+        port = 10500
+        while port in used_ports:
+            port += 1
+        base_id = f"{base_gguf_file.parent.name}__gguf"
+        models[base_id] = {
+            "base_model": str(base_gguf_file),
+            "adapter_dir": None,
+            "model_type": "instruct",
+            "port": port,
+            "use_4bit": False,
+            "system_prompt": "",
+        }
+
+    # Always (re)write the adapter entry so changes (path moves, quant
+    # changes) are reflected. shares_server_with tells the manager not
+    # to spawn a second process — base_id's server hosts the adapter
+    # via --lora.
+    base_entry = models[base_id]
+    adapter_entry = models.get(adapter_id, {}) or {}
+    adapter_entry.update({
+        "base_model": str(base_gguf_file),
+        "adapter_dir": str(adapter_dir),
+        "model_type": base_entry.get("model_type", "instruct"),
+        "port": int(base_entry.get("port", 10500)),
+        "use_4bit": base_entry.get("use_4bit", False),
+        "system_prompt": adapter_entry.get("system_prompt", ""),
+        "shares_server_with": base_id,
+    })
+    models[adapter_id] = adapter_entry
+
+    try:
+        with open(config_path, "w", encoding="utf-8") as f:
+            _yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
+    except Exception:
+        logger.exception("could not write llm_backends.yaml for %s", adapter_id)
+        return
+
+    # Best-effort: ask the global server manager to reload its cached
+    # config view so the new entries are visible without an app restart.
+    try:
+        from core.llm_server_manager import get_global_server_manager
+        mgr = get_global_server_manager()
+        if mgr is not None and hasattr(mgr, "_load_config"):
+            mgr._load_config()
+    except Exception:
+        pass
+
+
 def register_in_onboarding(
     gguf_path: Path,
     adapter_name: str,
     base_model_path: str,
     quant: str,
 ) -> str:
-    """Register the LoRA-GGUF in onboarding so it appears in dropdowns.
+    """Register the LoRA-GGUF in onboarding AND wire it into the YAML config.
 
-    Critical detail: ``base_model_path`` on the registered row must
-    point at the actual BASE GGUF FILE on disk — NOT at the HF
-    transformers dir the LoRA was trained against. The runtime probe
-    runs against base_model_path and a transformers dir would fail
-    the GGUF backend probe (and a LoRA file alone is unloadable
-    because it has no embeddings / vocab / architecture metadata).
+    Two registries to keep in sync:
 
-    We look up an already-onboarded GGUF base of the same family. If
-    none is found, raise — the user has to onboard a matching base
-    GGUF before the LoRA can be served.
+      * ``model_onboarding`` table — drives the dropdown lists. The
+        row has ``base_model_path`` = the BASE GGUF FILE (so the
+        runtime probe loads a real model) and ``adapter_dir`` = the
+        LoRA folder (so the server-manager knows which GGUF LoRA to
+        pass via ``--lora``).
+
+      * ``configs/llm_backends.yaml`` — drives the server-manager's
+        ``ensure_server_running`` lookup at chat time. Without an
+        entry here, picking the LoRA in chat raises 'Model at <path>
+        is not in config' even though onboarding is healthy.
+
+    If no GGUF base of the same family is on disk, raise — the user
+    has to onboard one first.
 
     Returns the model_id under which the row was registered.
     """
@@ -941,6 +1057,7 @@ def register_in_onboarding(
             f"{gguf_path} -- only the registration step is failing."
         )
 
+    # 1. Onboarding store row — drives dropdowns.
     store = get_state_store()
     try:
         store.upsert_onboarding(
@@ -956,6 +1073,15 @@ def register_in_onboarding(
         )
     except Exception:
         logger.exception("could not register onboarding row for %s", model_id)
+
+    # 2. YAML wiring — drives server-manager. Failure here doesn't
+    # break the artefact (it's still on disk and registered) but
+    # picking it in chat would error out, so log loudly.
+    try:
+        _wire_lora_gguf_into_yaml(model_id, gguf_base, gguf_path.parent)
+    except Exception:
+        logger.exception("could not wire %s into llm_backends.yaml", model_id)
+
     return model_id
 
 

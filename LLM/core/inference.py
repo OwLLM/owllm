@@ -244,22 +244,34 @@ def split_display_answer(text: str) -> Tuple[str, str]:
     # the answer, occasionally followed by a duplicate of the answer.
     # Cut everything from the first marker onward — the user wants the
     # answer, not the model's narration of producing it.
+    #
+    # IMPORTANT: every marker here must be specific enough that it can't
+    # match prose. Generic strings like "**Thinking" or "Thinking" alone
+    # would chop legitimate sentences ("**Thinking carefully...**", a
+    # markdown header) and produce empty answers. Stick to tokens that
+    # are unambiguous side-channel artefacts (literal special tokens,
+    # the exact "Thinking Process:" preamble, etc.).
     _thinking_markers = (
         "ꝓthought",
-        "Thinking Process:",
-        "Thinking process:",
+        "Thinking Process:\n",
+        "Thinking process:\n",
         "<start_of_thought>",
         "<|thinking|>",
-        "**Thinking",
     )
     earliest_cut = len(cleaned)
     for _m in _thinking_markers:
         _idx = cleaned.find(_m)
         if _idx != -1 and _idx < earliest_cut:
             earliest_cut = _idx
+    # Only apply the cut if it leaves substantive answer content. If the
+    # cut would empty the response (model produced ONLY a thought block,
+    # or a marker appears very early), better to show the raw output —
+    # the user can read it. Empty bubbles convey nothing and look broken.
     if earliest_cut < len(cleaned):
-        thought_parts.append(_normalize_reasoning_text(cleaned[earliest_cut:]))
-        cleaned = cleaned[:earliest_cut]
+        prefix = cleaned[:earliest_cut].strip()
+        if len(prefix) >= 20:
+            thought_parts.append(_normalize_reasoning_text(cleaned[earliest_cut:]))
+            cleaned = cleaned[:earliest_cut]
 
     # Drop garbage replacement-char tails (3+ U+FFFD in a row → noise
     # past EOS that the tokenizer couldn't decode cleanly).
@@ -360,7 +372,17 @@ def split_display_answer(text: str) -> Tuple[str, str]:
             cleaned = _a
 
     thought = _normalize_reasoning_text("\n\n".join(part for part in thought_parts if part))
-    return (cleaned or "(No clean answer produced.)", thought)
+    # Last-resort fallback: if every filter stripped the answer to nothing
+    # but the model DID produce text, show that text rather than the
+    # placeholder. The placeholder used to fire whenever the model emitted
+    # only a thought block, leaving the user staring at empty bubbles.
+    if not cleaned:
+        if thought:
+            cleaned = thought
+        else:
+            raw_stripped = str(text or "").strip()
+            cleaned = raw_stripped or "(No clean answer produced.)"
+    return (cleaned, thought)
 
 
 _REFUSAL_PATTERNS = (
@@ -720,17 +742,19 @@ _THINKING_CUT_PATTERNS = (
     # Gemma instruct models leak the reasoning channel as a literal token
     # name followed by a "Thinking Process:" preamble. Cut anything from
     # the first occurrence of either marker — the actual answer is what
-    # comes BEFORE the leak.
+    # comes BEFORE the leak. Markers MUST be unambiguous side-channel
+    # tokens; generic prose-shaped strings (`**Thinking`, bare
+    # `Thinking Process:` without the trailing newline, etc.) wrongly
+    # match legitimate text and cause empty answers.
     "ꝓthought",
     "<thought>",
     "</thought>",
     "<start_of_thought>",
-    "Thinking Process:",
-    "Thinking process:",
+    "Thinking Process:\n",
+    "Thinking process:\n",
     "<|thinking|>",
     "<thinking>",
     "</thinking>",
-    "**Thinking",
     # Some Gemma checkpoints emit BOM-like or stray decoder framing.
     "<start_of_turn>model",
     "<end_of_turn>",
@@ -756,14 +780,18 @@ def _filter_model_output(text: str) -> str:
     out = text
 
     # 1) Cut at the first thinking-channel marker we find. Anything
-    # after that point is leaked CoT (or a duplicate answer).
+    # after that point is leaked CoT (or a duplicate answer). Skip the
+    # cut if it would empty the response — better to show raw text than
+    # an empty bubble that says "(No clean answer produced.)".
     earliest = len(out)
     for marker in _THINKING_CUT_PATTERNS:
         idx = out.find(marker)
         if idx != -1 and idx < earliest:
             earliest = idx
     if earliest < len(out):
-        out = out[:earliest]
+        prefix = out[:earliest].strip()
+        if len(prefix) >= 20:
+            out = out[:earliest]
 
     # 2) Drop garbage replacement-char tails.
     out = _GARBAGE_TAIL_RE.sub("", out)

@@ -9006,7 +9006,24 @@ class MainWindow(QMainWindow):
         adapters = list_local_adapters()
         adapter_root = self.root / "fine_tuned"
 
-        if not adapters:
+        # Also list LoRA-GGUF artefacts from ``models/<adapter>__gguf``.
+        # These are produced by the ⚡ To GGUF action; they're fine-tuned
+        # outputs (just in a different format) and belong on this tab
+        # alongside the source PEFT adapters. Without this they vanish
+        # entirely after conversion — both from the Downloaded grid
+        # (correctly hidden, they're not standalone models) AND from
+        # the Tuned tab (incorrectly hidden, they ARE fine-tunes).
+        lora_gguf_dirs: List[Path] = []
+        models_root = self.root / "models"
+        if models_root.exists():
+            for d in sorted(models_root.iterdir()):
+                if not d.is_dir() or not d.name.endswith("__gguf"):
+                    continue
+                ggufs = list(d.glob("*-lora-*.gguf"))
+                if ggufs:
+                    lora_gguf_dirs.append(d)
+
+        if not adapters and not lora_gguf_dirs:
             empty = QLabel(
                 "No fine-tuned models yet.\n\n"
                 "Run a training job in the Train tab — finished LoRA adapters\n"
@@ -9036,7 +9053,284 @@ class MainWindow(QMainWindow):
             if col >= max_cols:
                 col = 0
                 row += 1
+        # Append LoRA-GGUF artefacts after the PEFT cards. They use the
+        # same card builder with a kind hint so the visual matches the
+        # Tuned look (🎯 icon, blue accent) while the action set / size
+        # readout reflects the GGUF flavour.
+        for gguf_dir in lora_gguf_dirs:
+            card = self._build_tuned_gguf_card(gguf_dir)
+            if card is None:
+                continue
+            self.tuned_layout.addWidget(card, row, col)
+            self._tuned_cards.append(card)
+            col += 1
+            if col >= max_cols:
+                col = 0
+                row += 1
         self._resize_tuned_cards()
+
+    def _build_tuned_gguf_card(self, gguf_dir: Path) -> Optional[QFrame]:
+        """Render a LoRA-GGUF artefact directory as a Tuned card.
+
+        Mirrors :meth:`_build_tuned_model_card` visually — same gradient,
+        border, icon size, colour palette — but the contents reflect the
+        GGUF flavour: file count, total size, base GGUF reference, and a
+        smaller action set (Open / Delete; the Convert action is on the
+        source PEFT card, not here).
+        """
+        try:
+            ggufs = sorted(gguf_dir.glob("*-lora-*.gguf"))
+            if not ggufs:
+                return None
+            primary = ggufs[0]
+            size_bytes = sum(p.stat().st_size for p in ggufs if p.is_file())
+            size_mb = size_bytes / (1024 * 1024) if size_bytes else 0.0
+            size_str = f"{size_mb:.1f} MB" if size_mb < 1024 else f"{size_mb / 1024:.2f} GB"
+
+            # Pull the source-adapter stem out of the dir name
+            # ("260505_..._kbeauty__gguf" → "260505_..._kbeauty").
+            stem = gguf_dir.name
+            if stem.endswith("__gguf"):
+                stem = stem[: -len("__gguf")]
+
+            # Look up base_model from the .selected_weights.json marker
+            # the converter wrote alongside the GGUF.
+            base_label = "—"
+            try:
+                marker = gguf_dir / ".selected_weights.json"
+                if marker.exists():
+                    import json as _json
+                    data = _json.loads(marker.read_text(encoding="utf-8")) or {}
+                    base_raw = str(data.get("source_base") or "")
+                    if base_raw:
+                        base_label = Path(base_raw).name
+                        if "/" in base_label:
+                            base_label = base_label.split("/")[-1]
+                        if len(base_label) > 50:
+                            base_label = base_label[:47] + "…"
+            except Exception:
+                pass
+
+            card = QFrame()
+            card.setMinimumHeight(220)
+            card.setFrameShape(QFrame.Box)
+            border_color = "#ffc400"  # yellow accent — matches the ⚡ To GGUF button
+            card.setStyleSheet(f"""
+                QFrame {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #1e1e2e, stop:1 #16213e);
+                    border: 2px solid {border_color};
+                    border-radius: 10px;
+                }}
+                QFrame:hover {{
+                    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                        stop:0 #2a2535, stop:1 #1a2540);
+                }}
+                QLabel {{ background: transparent; color: #fafafa; border: none; }}
+            """)
+            layout = QVBoxLayout(card)
+            layout.setContentsMargins(20, 15, 20, 15)
+            layout.setSpacing(8)
+
+            # Header: ⚡ icon + title.
+            header = QHBoxLayout()
+            header.setSpacing(15)
+            icon = QLabel(card)
+            icon.setFixedSize(50, 50)
+            icon.setAlignment(Qt.AlignCenter)
+            icon.setText("⚡")
+            icon.setStyleSheet(
+                "QLabel {"
+                "background-color: #ffc400;"
+                "color: #1e1e2e;"
+                "border-radius: 25px;"
+                "font-size: 26px;"
+                "font-weight: bold;"
+                "border: 2px solid rgba(255, 255, 255, 0.2);"
+                "}"
+            )
+            header.addWidget(icon)
+
+            text_col = QVBoxLayout()
+            text_col.setSpacing(2)
+            title = QLabel(stem, card)
+            tf = QFont(); tf.setPointSize(14); tf.setBold(True)
+            title.setFont(tf)
+            title.setWordWrap(True)
+            title.setMaximumWidth(350)
+            text_col.addWidget(title)
+
+            kind = QLabel("LoRA-GGUF · ready for chat", card)
+            kind.setStyleSheet("color: #ffc400; font-size: 11px; font-weight: bold;")
+            text_col.addWidget(kind)
+
+            stats = QLabel(f"🧬 Base: {base_label}    📦 {size_str}    📄 {len(ggufs)} file(s)", card)
+            stats.setStyleSheet("color: #888; font-size: 11px;")
+            text_col.addWidget(stats)
+
+            header.addLayout(text_col, 1)
+            layout.addLayout(header)
+
+            # Path link.
+            import os as _os, urllib.parse as _up
+            abs_path = _os.path.abspath(str(gguf_dir))
+            file_url = f"file:///{_up.quote(abs_path.replace(_os.sep, '/'))}"
+            path_lbl = QLabel(
+                f'📂 <a href="{file_url}" style="color: #ffc400; text-decoration: none;">{gguf_dir}</a>',
+                card,
+            )
+            path_lbl.setOpenExternalLinks(True)
+            path_lbl.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            pf = QFont(); pf.setPointSize(11)
+            path_lbl.setFont(pf)
+            path_lbl.setWordWrap(True)
+            layout.addWidget(path_lbl)
+
+            layout.addStretch(1)
+
+            # Actions: Open + Delete. Convert is owned by the source
+            # PEFT card; once converted the user works with this card
+            # for chat picks (already shown in dropdowns) or removal.
+            buttons = QHBoxLayout()
+            buttons.setSpacing(8)
+            btn_style = """
+                QPushButton {
+                    background: rgba(255, 196, 0, 0.15);
+                    border: 1px solid rgba(255, 196, 0, 0.45);
+                    color: white;
+                    border-radius: 6px;
+                    padding: 6px 15px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: rgba(255, 196, 0, 0.25);
+                    border: 1px solid rgba(255, 196, 0, 0.65);
+                }
+            """
+            del_style = """
+                QPushButton {
+                    background: rgba(244, 67, 54, 0.18);
+                    border: 1px solid rgba(244, 67, 54, 0.55);
+                    color: white;
+                    border-radius: 6px;
+                    padding: 6px 15px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: rgba(244, 67, 54, 0.30);
+                    border: 1px solid rgba(244, 67, 54, 0.70);
+                }
+            """
+            open_btn = QPushButton("📂 Open", card)
+            open_btn.setMinimumHeight(35)
+            open_btn.setStyleSheet(btn_style)
+            open_btn.clicked.connect(
+                lambda _checked=False, p=gguf_dir: self._open_path_in_explorer(str(p))
+            )
+            buttons.addWidget(open_btn)
+            buttons.addStretch(1)
+
+            del_btn = QPushButton("🗑️ Delete", card)
+            del_btn.setMinimumHeight(35)
+            del_btn.setStyleSheet(del_style)
+            del_btn.clicked.connect(
+                lambda _checked=False, p=gguf_dir: self._delete_lora_gguf(p)
+            )
+            buttons.addWidget(del_btn)
+            layout.addLayout(buttons)
+
+            return card
+        except Exception:
+            logger.exception("could not build LoRA-GGUF card for %s", gguf_dir)
+            return None
+
+    def _delete_lora_gguf(self, gguf_dir: "Path") -> None:
+        """Remove a LoRA-GGUF directory + its onboarding row + YAML entry.
+
+        Cleans up all three places the artefact lives so the dropdown
+        doesn't briefly show a phantom entry until the next refresh:
+          1. The directory + .gguf files on disk
+          2. The ``tuned__*__lora_gguf`` row in the onboarding store
+          3. The YAML entry in ``configs/llm_backends.yaml``
+        """
+        from PySide6.QtWidgets import QMessageBox
+        confirm = QMessageBox.question(
+            self,
+            "Delete LoRA-GGUF",
+            f"Delete <b>{gguf_dir.name}</b>?<br><br>"
+            "This removes the converted LoRA-GGUF directory, its onboarding "
+            "row, and its YAML entry. The original PEFT adapter under "
+            "<code>fine_tuned/</code> is NOT touched — you can re-convert "
+            "any time from its card.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        # 1. Disk.
+        try:
+            import shutil as _shutil
+            _shutil.rmtree(gguf_dir, ignore_errors=True)
+        except Exception:
+            logger.exception("could not delete %s", gguf_dir)
+
+        # 2. Onboarding row(s) referencing this dir.
+        try:
+            from core.state_store import get_state_store
+            store = get_state_store()
+            target = str(gguf_dir.resolve()).lower()
+            for row in (store.list_all_onboarding() or []):
+                ad = str(row.get("adapter_dir") or "")
+                try:
+                    if ad and str(Path(ad).resolve()).lower() == target:
+                        conn = store._get_connection()
+                        conn.execute("DELETE FROM model_onboarding WHERE model_id = ?", (row.get("model_id"),))
+                        conn.commit()
+                except Exception:
+                    continue
+        except Exception:
+            logger.exception("could not reap onboarding rows for %s", gguf_dir)
+
+        # 3. YAML entry.
+        try:
+            import yaml as _yaml
+            cfg_path = self.root / "configs" / "llm_backends.yaml"
+            if cfg_path.exists():
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = _yaml.safe_load(f) or {}
+                models = (cfg.get("models") or {})
+                target = str(gguf_dir.resolve()).lower()
+                drop = []
+                for mid, entry in models.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    ad = str(entry.get("adapter_dir") or "")
+                    try:
+                        if ad and str(Path(ad).resolve()).lower() == target:
+                            drop.append(mid)
+                    except Exception:
+                        continue
+                for mid in drop:
+                    models.pop(mid, None)
+                if drop:
+                    with open(cfg_path, "w", encoding="utf-8") as f:
+                        _yaml.safe_dump(cfg, f, sort_keys=False, default_flow_style=False)
+                    try:
+                        from core.llm_server_manager import get_global_server_manager
+                        mgr = get_global_server_manager()
+                        if mgr is not None and hasattr(mgr, "_load_config"):
+                            mgr._load_config()
+                    except Exception:
+                        pass
+        except Exception:
+            logger.exception("could not clean YAML for %s", gguf_dir)
+
+        try:
+            self._refresh_tuned_models()
+            self._refresh_locals()
+        except Exception:
+            pass
 
     def _build_tuned_model_card(self, name: str, path: "Path") -> QFrame:
         """Render one fine-tuned adapter as a card.

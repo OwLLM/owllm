@@ -26,9 +26,10 @@ import (
 )
 
 // Executor walks a plan and dispatches each step. State that survives
-// across steps -- currently just the active venv path -- lives here so
-// `install_pkg` can find what `create_venv` produced earlier in the
-// same run.
+// across steps -- currently the active venv path and the loaded profile
+// table -- lives here so later actions can reference what earlier ones
+// produced (install_pkg needs the venv create_venv made; pick_profile
+// reads the table from disk lazily on first use and caches it).
 type Executor struct {
 	dryRun       bool
 	srv          *server.Server
@@ -38,6 +39,11 @@ type Executor struct {
 
 	// State carried across steps in a single plan run.
 	activeVenv string
+	profiles   *ProfileTable
+
+	// Recursion guard for pick_profile expansion -- a profile must
+	// not include another pick_profile step (that would loop).
+	expandingProfile bool
 }
 
 func New(dryRun bool, srv *server.Server, systemPrompt, grammar []byte) *Executor {
@@ -91,7 +97,7 @@ func (e *Executor) dispatch(s plan.Step) error {
 	case "set_env":
 		return e.stub("set_env", s)
 	case "pick_profile":
-		return e.stub("pick_profile", s)
+		return e.runPickProfile(s)
 	case "ask_user":
 		return e.stub("ask_user", s)
 	case "uninstall_pkg":
@@ -107,4 +113,62 @@ func (e *Executor) stub(name string, s plan.Step) error {
 	log.Printf("  [STUB] would execute %s with args=%v reason=%q",
 		name, s.Args, s.Reason)
 	return nil
+}
+
+// runPickProfile loads the profile table (lazily, once per Executor),
+// looks up the requested profile, and dispatches each of its steps
+// through this same Executor so they share venv/profile state.
+//
+// The recursion guard refuses nested pick_profile to keep blast radius
+// bounded -- a runaway expansion can't compose into thousands of steps
+// no matter what the model emits.
+func (e *Executor) runPickProfile(s plan.Step) error {
+	if e.expandingProfile {
+		return fmt.Errorf("pick_profile inside pick_profile is not allowed")
+	}
+	id, err := argRequired(s.Args, "profile_id")
+	if err != nil {
+		return fmt.Errorf("pick_profile: %w", err)
+	}
+
+	if e.profiles == nil {
+		t, err := LoadProfileTable(e.bootDir)
+		if err != nil {
+			return fmt.Errorf("pick_profile: %w", err)
+		}
+		e.profiles = &t
+	}
+
+	profile, ok := e.profiles.FindProfile(id)
+	if !ok {
+		return fmt.Errorf("pick_profile: unknown profile id %q "+
+			"(known: %v)", id, profileIDs(e.profiles.Profiles))
+	}
+
+	log.Printf("  pick_profile: %s -- %s (%d steps)",
+		profile.ID, profile.Description, len(profile.Steps))
+
+	e.expandingProfile = true
+	defer func() { e.expandingProfile = false }()
+
+	for i, step := range profile.Steps {
+		log.Printf("    [%s/%d] %s %v", profile.ID, i+1, step.Action, step.Args)
+		if e.dryRun {
+			log.Printf("      (dry-run) skipping execution")
+			continue
+		}
+		if err := e.dispatch(step); err != nil {
+			return fmt.Errorf("pick_profile %s: sub-step %d (%s) failed: %w",
+				profile.ID, i+1, step.Action, err)
+		}
+	}
+	return nil
+}
+
+func profileIDs(profiles []ProfileSpec) []string {
+	ids := make([]string, len(profiles))
+	for i, p := range profiles {
+		ids[i] = p.ID
+	}
+	return ids
 }

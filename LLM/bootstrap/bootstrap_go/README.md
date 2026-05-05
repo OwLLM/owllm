@@ -16,9 +16,9 @@ model's plan, and now executes three real actions:
 | `create_venv`   | real     | `exec/create_venv.go`         |
 | `install_pkg`   | real     | `exec/install_pkg.go`         |
 | `download_file` | real     | `exec/download_file.go`       |
+| `pick_profile`  | real     | `exec/profile.go` + `stubs.go`|
 | `swap_wheel`    | stubbed  | `exec/stubs.go`               |
 | `set_env`       | stubbed  | `exec/stubs.go`               |
-| `pick_profile`  | stubbed  | `exec/stubs.go`               |
 | `ask_user`      | stubbed  | `exec/stubs.go`               |
 | `uninstall_pkg` | stubbed  | `exec/stubs.go`               |
 | `abort`         | terminal | aborts the plan with a reason |
@@ -29,9 +29,8 @@ Cutover order to "Phase 6 ready":
    `runtime/llama-server.exe` + `runtime/gemma-4-E2B-it-Q4_K_M.gguf` +
    `recipes/` and runs `bootstrap.exe` once.
 2. Promote remaining stubs to real executors with tests
-   (`pick_profile` is next -- selects a profile from
-   `recipes/hardware_profiles.json` and short-circuits the rest of
-   the plan).
+   (`swap_wheel` is next -- needed for the cuda-runtime mismatch
+   recovery path).
 3. Wire telemetry so each install run feeds back into the failure corpus.
 4. Ship as `OWLLM-Setup-AI.exe` (parallel installer flavor) per
    ROLLOUT.md Phase 6.

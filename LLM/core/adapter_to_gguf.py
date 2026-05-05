@@ -173,9 +173,21 @@ def _merge_adapter(cfg: ConvertConfig, merged_dir: Path) -> None:
 
     log(f"saving merged HF model to {merged_dir}")
     merged_dir.mkdir(parents=True, exist_ok=True)
-    # max_shard_size keeps any single .safetensors under 5 GB so HF's
-    # converter doesn't memory-spike on huge shards.
-    merged.save_pretrained(str(merged_dir), max_shard_size="5GB", safe_serialization=True)
+    # safe_serialization=False on purpose: safetensors uses a ctypes
+    # array size argument that's a signed 32-bit int, so any single
+    # tensor >2 GB on Windows overflows with
+    # "ValueError: Array length must be >= 0, not -2952790016".
+    # Gemma 4's embedding tensor (~256k vocab × 4608 hidden × 2 bytes
+    # ≈ 2.4 GB) trips this on every merge attempt.
+    # The pickle .bin path has no such cap, and llama.cpp's
+    # convert_hf_to_gguf.py reads both formats interchangeably, so the
+    # downstream pipeline doesn't care which we wrote.
+    # Smaller shard target so any single .bin stays manageable.
+    merged.save_pretrained(
+        str(merged_dir),
+        max_shard_size="2GB",
+        safe_serialization=False,
+    )
 
     # Tokenizer: prefer the adapter's saved tokenizer (training may
     # have added kbeauty-specific special tokens); fall back to the

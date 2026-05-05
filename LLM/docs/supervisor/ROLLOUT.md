@@ -57,7 +57,8 @@ The smallest unit that unblocks everything else: the **shadow logger**.
 Already landed:
 - `core/supervisor/flags.py` -- flag reader with safe defaults.
 - `core/supervisor/shadow.py` -- `observe(channel, trigger, rules_decision)` that writes to `~/.owllm/shadow_log.jsonl` only when both flags are on. Never raises.
-- `tests/test_supervisor_flags.py`, `tests/test_supervisor_shadow.py` -- 19 tests pinning the production-safety contract.
+- `core/supervisor/brain.py` -- HTTP client for the bundled llama-server. `ensure_running()` (idempotent spawn + health poll), `diagnose(trigger) -> Plan`, `shutdown_idle()` (5-min RAM reclaim). Fully testable via injected http/spawn/clock seams. Returns `ask_user` fallback Plan on every failure path -- never raises.
+- `tests/test_supervisor_*.py` -- 66 tests pinning production-safety contracts (flags, shadow, brain, page, toast, corpus pipeline). All offline.
 
 Pending (not yet wired):
 - `core/runtime/self_heal_orchestrator.py` will get a `shadow.observe()` call in its repair entrypoint as the first wire-in. Validated locally; staged for a follow-up PR once the file's pending WIP changes land.

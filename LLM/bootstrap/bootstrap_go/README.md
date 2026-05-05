@@ -18,22 +18,23 @@ model's plan, and now executes three real actions:
 | `download_file` | real     | `exec/download_file.go`       |
 | `pick_profile`  | real     | `exec/profile.go` + `stubs.go`|
 | `swap_wheel`    | real     | `exec/swap_wheel.go`          |
-| `set_env`       | stubbed  | `exec/stubs.go`               |
-| `ask_user`      | stubbed  | `exec/stubs.go`               |
-| `uninstall_pkg` | stubbed  | `exec/stubs.go`               |
+| `set_env`       | real     | `exec/set_env.go`             |
+| `ask_user`      | real     | `exec/ask_user.go`            |
+| `uninstall_pkg` | real     | `exec/uninstall_pkg.go`       |
 | `abort`         | terminal | aborts the plan with a reason |
 
-Cutover order to "Phase 6 ready":
+**All 8 actions are now real.** No more stubs.
 
-1. Build a tiny Windows installer that drops `bootstrap.exe` +
+Cutover order to "Phase 6 shipped":
+
+1. ~~Build a tiny Windows installer that drops `bootstrap.exe` +
    `runtime/llama-server.exe` + `runtime/gemma-4-E2B-it-Q4_K_M.gguf` +
-   `recipes/` and runs `bootstrap.exe` once.
-2. Promote remaining stubs to real executors with tests
-   (`set_env` is next -- needed for `PYTHONPATH` and `CUDA_HOME`
-   tweaks the model occasionally proposes).
+   `recipes/`.~~ Done -- see [../installer/OWLLM-Setup-AI.nsi](../installer/OWLLM-Setup-AI.nsi).
+2. ~~Promote remaining stubs to real executors with tests.~~ Done.
 3. Wire telemetry so each install run feeds back into the failure corpus.
-4. Ship as `OWLLM-Setup-AI.exe` (parallel installer flavor) per
-   ROLLOUT.md Phase 6.
+4. Ship `OWLLM-Setup-AI.exe` as the parallel installer flavor per
+   ROLLOUT.md Phase 6 (build it via [../build_installer.bat](../build_installer.bat)
+   on a machine that has Go + NSIS + Python + internet).
 
 ## Layout
 

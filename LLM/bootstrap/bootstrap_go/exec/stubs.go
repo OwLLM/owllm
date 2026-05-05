@@ -95,13 +95,13 @@ func (e *Executor) dispatch(s plan.Step) error {
 	case "swap_wheel":
 		return SwapWheel(SwapWheelOpts{VenvDir: e.activeVenv}, s)
 	case "set_env":
-		return e.stub("set_env", s)
+		return SetEnv(SetEnvOpts{BootDir: e.bootDir}, s)
 	case "pick_profile":
 		return e.runPickProfile(s)
 	case "ask_user":
-		return e.stub("ask_user", s)
+		return AskUser(AskUserOpts{BootDir: e.bootDir}, s)
 	case "uninstall_pkg":
-		return e.stub("uninstall_pkg", s)
+		return UninstallPkg(UninstallPkgOpts{VenvDir: e.activeVenv}, s)
 	case "abort":
 		return fmt.Errorf("model requested abort: %s", s.Reason)
 	default:

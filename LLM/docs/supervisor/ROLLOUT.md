@@ -39,7 +39,7 @@ Missing file = all defaults (production-safe).
 
 | # | Name | Duration | What's enabled | Ship criterion |
 | --- | --- | --- | --- | --- |
-| 0 | **Build** | now -> first PR | nothing user-visible | scaffold lands; existing tests still pass |
+| 0 | **Build** | done | nothing user-visible | scaffold lands; existing tests still pass -- **complete** |
 | 1 | **Shadow (internal)** | 2-4 weeks | `enabled=true, shadow_mode=true` for devs only | weekly review of `shadow_log.jsonl`; supervisor agreement with rules ranked |
 | 2 | **Shadow (beta)** | 2-4 weeks | same flags, opted-in beta channel | enough data: 500+ real failure events across hardware variety |
 | 3 | **Read-only fixes** | 1-2 weeks | `auto_apply_safe=true` for read-only tools (`read_log`, `pip_show`, `probe_hardware`) | no regression in install/training success rates |
@@ -74,7 +74,9 @@ Runtime artifacts:
 - `bootstrap/runtime/download_runtime.py` -- fetches `llama-server` + `gemma-4-E2B-it-Q4_K_M.gguf` from configurable URLs (defaults: llama.cpp GitHub releases, Hugging Face Unsloth mirror). Run once on a dev machine before flipping the master switch.
 
 Bootstrap (install-time):
-- `bootstrap/bootstrap_go/` -- Go skeleton for the native install-time launcher. Compiles to `bootstrap.exe` (Windows) via `go build -ldflags "-H=windowsgui"`. Components: hardware probe (nvidia-smi/wmic), llama-server lifecycle (spawn/health/shutdown with hidden console), tolerant plan parser, executor with stubbed actions for Phase 0. 7 Go unit tests for the parser. Action executors are no-ops for now -- safe to ship + iterate.
+- `bootstrap/bootstrap_go/` -- Go native install-time launcher. Compiles to `bootstrap.exe` (Windows) via `go build -ldflags "-H=windowsgui"`. Components: hardware probe (nvidia-smi/wmic), llama-server lifecycle (spawn/health/shutdown with hidden console), tolerant plan parser, action executors. **All 8 actions are now real**: `create_venv`, `install_pkg`, `download_file`, `pick_profile` (with inline expansion + recursion guard), `swap_wheel`, `set_env`, `ask_user`, `uninstall_pkg`. ~40 Go unit tests covering parser + every executor with injected fakes (no real subprocess, no real HTTP, no real LLM).
+- `bootstrap/installer/OWLLM-Setup-AI.nsi` -- NSIS installer source, per-user install layout under `%LOCALAPPDATA%\OWLLM\bootstrap\`. Auto-launches `bootstrap.exe` at end-of-install so the supervisor immediately drives the Python venv setup.
+- `bootstrap/build_installer.bat` -- one-shot orchestrator: `download_runtime.py` -> `go build` -> `makensis`. Produces `OWLLM-Setup-AI.exe` ready to ship as the Phase-6 parallel installer flavor.
 
 Net effect on production users today: **zero behavioral change.** Master switch is false; the new code is dead code in every prod install.
 

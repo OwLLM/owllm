@@ -26038,6 +26038,49 @@ respective package directories or official repositories.
                             prefix="✓ 📦 ",
                         ):
                             combo.addItem(label, payload)
+
+            # GGUF LoRA adapter rows (tuned__*__lora_gguf). These don't
+            # live under ``models/<dirname>`` so the directory-driven
+            # scan above misses them. Pull them straight from the
+            # onboarding store — single source of truth — and emit
+            # one entry per row, regardless of which directory the
+            # underlying .gguf file sits in. This is what was making
+            # the same LoRA show up in some places and not others.
+            try:
+                from core.model_onboarding import get_onboarding_service
+                ready_rows = get_onboarding_service().list_ready_models() or []
+            except Exception:
+                ready_rows = []
+            for row in ready_rows:
+                rid = str(row.get("model_id") or "")
+                if not rid.startswith("tuned__") or "__lora_gguf" not in rid:
+                    continue
+                ad = row.get("adapter_dir") or ""
+                if not ad:
+                    continue
+                ad_path = Path(ad)
+                if not ad_path.exists():
+                    continue
+                # Pretty short label: strip the prefix + suffix.
+                pretty = rid
+                if pretty.startswith("tuned__"):
+                    pretty = pretty[len("tuned__"):]
+                if pretty.endswith("__lora_gguf"):
+                    pretty = pretty[: -len("__lora_gguf")]
+                # Locate the .gguf file inside adapter_dir for the
+                # combo payload — same shape the directory variant
+                # entries use, so downstream code that reads
+                # payload["base_path"] / variant_relpath stays happy.
+                gguf_files = sorted(ad_path.glob("*-lora-*.gguf")) or sorted(ad_path.glob("*.gguf"))
+                if not gguf_files:
+                    continue
+                gguf_file = gguf_files[0]
+                payload = {
+                    "base_path": str(ad_path),
+                    "variant_relpath": gguf_file.name,
+                    "model_id": rid,
+                }
+                combo.addItem(f"🎯 {pretty} (LoRA-GGUF)", payload)
             if adapter_dir.exists():
                 # Build a set of known-broken adapter names from the DB so
                 # we don't surface them in the picker. A user who accidentally

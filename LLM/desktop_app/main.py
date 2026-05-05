@@ -6235,8 +6235,10 @@ class MainWindow(QMainWindow):
             8: "corner_br_owl_info",         # Info (changed from corner_br_owl_thanks)
         }
         
-        image_name = tab_to_image.get(tab_index, "corner_br")  # Default to corner_br if not found
-        image_path = self._get_frame_asset_path(image_name)
+        # No fallback to a generic "corner_br" — that asset was deleted.
+        # If the tab isn't in the map we just clear the per-tab owl.
+        image_name = tab_to_image.get(tab_index)
+        image_path = self._get_frame_asset_path(image_name) if image_name else None
         self._hybrid_frame.set_corner_br(image_path)
     
     def _install_pytorch(self):
@@ -26414,7 +26416,10 @@ def main() -> int:
                     corner_tl=_corner_path("corner_tl", "corner_ul.png"),
                     corner_tr=_corner_path("corner_tr", "corner_ur.png"),
                     corner_bl=_corner_path("corner_bl", "corner_bl.png"),
-                    corner_br=_corner_path("corner_br", "corner_br.png"),
+                    # corner_br left None on purpose — the static
+                    # background asset was removed; the per-tab owl
+                    # crest is pushed via frame.set_corner_br() below.
+                    corner_br=None,
                     top_center=top_center_path,
                 )
                 

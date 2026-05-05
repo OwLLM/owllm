@@ -709,12 +709,26 @@ def _quantize(cfg: ConvertConfig, fp16_gguf: Path, final_gguf: Path) -> None:
 
 
 def convert_adapter_to_gguf(cfg: ConvertConfig) -> Path:
-    """Run the full pipeline. Returns the path to the final .gguf."""
+    """Convert a PEFT LoRA adapter to a GGUF LoRA file.
+
+    Earlier iterations of this pipeline tried to merge the LoRA into
+    the base model and convert the resulting 17 GB HF model to GGUF.
+    That path is a minefield on Windows / Gemma 4 / current
+    transformers — every step had a separate bug (kernelize crashes,
+    safetensors >2 GB cap, save_pretrained regex bug, converter
+    architecture mismatch, post-write access violations).
+
+    Use llama.cpp's dedicated ``convert_lora_to_gguf.py`` instead.
+    The LoRA stays a LoRA — it gets converted to the GGUF wire format
+    (just the A/B matrices, ~140 MB for our 36 M-trainable adapter),
+    and llama-server applies it on top of the existing base GGUF at
+    inference time via ``--lora <path>``.
+
+    Output: a single ``<adapter_name>-lora-f16.gguf`` file in
+    ``output_dir``. No intermediate dirs, no merge, no quantise step.
+    """
     log = cfg.log_callback or (lambda m: print(m))
     t0 = time.monotonic()
-
-    if cfg.quant not in QUANT_PRESETS:
-        raise ValueError(f"unknown quant {cfg.quant!r}; pick from {sorted(QUANT_PRESETS)}")
 
     base = Path(cfg.base_model).resolve()
     adapter = Path(cfg.adapter_dir).resolve()
@@ -726,47 +740,77 @@ def convert_adapter_to_gguf(cfg: ConvertConfig) -> Path:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     adapter_name = adapter.name
-    final_gguf = out_dir / f"{adapter_name}-{cfg.quant}.gguf"
-    fp16_gguf = out_dir / f"{adapter_name}-F16.gguf"
-    merged_dir = out_dir / "_merged_hf"
+    final_gguf = out_dir / f"{adapter_name}-lora-f16.gguf"
 
-    # 1) merge
-    _merge_adapter(cfg, merged_dir)
+    # Locate the bundled convert_lora_to_gguf.py (master snapshot).
+    root = Path(__file__).resolve().parents[1]
+    lora_script = root / "runtime" / "llama.cpp" / "convert_lora_to_gguf.py"
+    if not lora_script.exists():
+        raise FileNotFoundError(
+            f"convert_lora_to_gguf.py not bundled at {lora_script}. "
+            "Re-run the OWLLM updater to fetch llama.cpp master tools."
+        )
 
-    # 2) convert to fp16 GGUF
-    _convert_to_fp16_gguf(cfg, merged_dir, fp16_gguf)
+    # Pick the llamacpp env's Python (has gguf master overlay + torch +
+    # safetensors); fall back to the running interpreter.
+    env_python_candidates = [
+        root / ".envs" / "llamacpp-cu121-edge" / ".venv" / "Scripts" / "python.exe",
+        root / ".envs" / "llamacpp-cu121-stable" / ".venv" / "Scripts" / "python.exe",
+    ]
+    env_python: Optional[Path] = None
+    for cand in env_python_candidates:
+        if cand.exists():
+            env_python = cand
+            break
+    if env_python is None:
+        env_python = Path(sys.executable)
 
-    # 3) quantize
-    _quantize(cfg, fp16_gguf, final_gguf)
+    cmd = [
+        str(env_python), "-u", str(lora_script),
+        "--base", str(base),
+        "--outfile", str(final_gguf),
+        "--outtype", "f16",
+        str(adapter),
+    ]
+    log(f"using converter: {lora_script}")
+    log(f"using python: {env_python}")
+    log(f"running: {' '.join(cmd)}")
 
-    # Cleanup
-    if not cfg.keep_merged:
-        log(f"removing intermediate merged HF dir {merged_dir}")
-        shutil.rmtree(merged_dir, ignore_errors=True)
-        if cfg.quant != "F16" and fp16_gguf.exists():
-            log(f"removing intermediate fp16 GGUF {fp16_gguf}")
-            try:
-                fp16_gguf.unlink()
-            except OSError:
-                pass
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.stdout:
+        log(f"STDOUT (last 800 chars):\n{proc.stdout[-800:]}")
+    if proc.stderr:
+        log(f"STDERR (last 800 chars):\n{proc.stderr[-800:]}")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"convert_lora_to_gguf.py failed (exit {proc.returncode})"
+        )
+    if not final_gguf.exists():
+        raise RuntimeError(
+            f"converter returned 0 but no output file at {final_gguf}"
+        )
 
-    # Write a sidecar so the dropdown auto-pins this variant.
+    log(f"GGUF LoRA written: {final_gguf} "
+        f"({final_gguf.stat().st_size / 1e6:.1f} MB)")
+
+    # Write a sidecar so any future GGUF dropdown picks this entry up
+    # as the canonical adapter file.
     try:
         marker = out_dir / ".selected_weights.json"
         marker.write_text(json.dumps({
-            "model_id": f"{adapter_name}-gguf",
+            "model_id": f"{adapter_name}-lora-gguf",
             "allow_patterns": [final_gguf.name],
             "active_variant": final_gguf.name,
             "saved_at": __import__("datetime").datetime.now().isoformat(),
             "source_adapter": str(adapter),
             "source_base": str(base),
-            "quant": cfg.quant,
+            "kind": "lora",
         }, indent=2))
     except Exception:
         logger.exception("could not write .selected_weights.json")
 
     elapsed = time.monotonic() - t0
-    log(f"DONE in {elapsed:.1f}s — {final_gguf}")
+    log(f"DONE in {elapsed:.1f}s -- {final_gguf}")
     return final_gguf
 
 
@@ -781,26 +825,27 @@ def register_in_onboarding(
     base_model_path: str,
     quant: str,
 ) -> str:
-    """Insert / update an onboarding row so this GGUF appears in every dropdown.
+    """Insert / update an onboarding row so the LoRA-GGUF appears in dropdowns.
+
+    Stored as an *adapter row* (adapter_dir set, base_model_path
+    points at the LoRA's source base). The picker / server-manager
+    side reads adapter_dir as "this row needs the base server with
+    --lora <adapter_dir>/<file.gguf> applied at runtime".
 
     Returns the model_id under which the row was registered.
     """
     from core.state_store import get_state_store
-    model_id = f"tuned__{adapter_name}__gguf__{quant}"
+    model_id = f"tuned__{adapter_name}__lora_gguf"
     store = get_state_store()
     try:
-        # Match the schema of base GGUF rows: base_model_path points at
-        # the .gguf file (or its parent dir, depending on how the rest
-        # of the app expects it). We write the parent dir because the
-        # variant marker (.selected_weights.json) lives there.
         store.upsert_onboarding(
             model_id=model_id,
             status="READY",
-            base_model_path=str(gguf_path.parent),
-            adapter_dir=None,
+            base_model_path=str(base_model_path),
+            adapter_dir=str(gguf_path.parent),
             backend="gguf",
             accelerator="cuda",
-            config_key="gguf",
+            config_key="gguf-lora",
             model_fingerprint="",
             env_key="llamacpp-cu121-stable",
         )

@@ -197,7 +197,73 @@ def clean_display_answer(text: str) -> str:
     This intentionally keeps only the human-readable answer and removes
     tool-call/result scaffolding that belongs in unfiltered/log views.
     """
+    cleaned, _thought = split_display_answer(text)
+    return cleaned
+
+
+def _normalize_reasoning_text(text: str) -> str:
     cleaned = str(text or "")
+    cleaned = re.sub(r"^\s*(?:thinking process|reasoning)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def split_display_answer(text: str) -> Tuple[str, str]:
+    """
+    Split raw model output into (final_answer, reasoning_text).
+
+    The final answer is stripped for clean chat bubbles.
+    The reasoning text is preserved separately for ghosted display and
+    the raw answer panel keeps the original text untouched.
+    """
+    raw = str(text or "")
+    thought_parts: List[str] = []
+    cleaned = raw
+
+    def _collect(pattern: str, value_group: int = 1) -> None:
+        nonlocal cleaned
+
+        regex = re.compile(pattern, flags=re.IGNORECASE | re.DOTALL)
+
+        def _repl(match: re.Match[str]) -> str:
+            captured = _normalize_reasoning_text(match.group(value_group))
+            if captured:
+                thought_parts.append(captured)
+            return ""
+
+        cleaned = regex.sub(_repl, cleaned)
+
+    _collect(r"<think>\s*(.*?)\s*</think>")
+    _collect(r"<thought>\s*(.*?)\s*</thought>")
+    _collect(r"<thinking>\s*(.*?)\s*</thinking>")
+    _collect(r"<\|?channel\|?>\s*thought\b(.*?)(?=<\|?channel\|?>|$)")
+    cleaned = re.sub(r"<\|?channel\|?>\s*(?:final|assistant)?\s*", "", cleaned, flags=re.IGNORECASE)
+
+    # Gemma 4 instruct + adapters sometimes leak the reasoning channel as
+    # a literal token sequence (`ꝓthought\nThinking Process:\n...`) AFTER
+    # the answer, occasionally followed by a duplicate of the answer.
+    # Cut everything from the first marker onward — the user wants the
+    # answer, not the model's narration of producing it.
+    _thinking_markers = (
+        "ꝓthought",
+        "Thinking Process:",
+        "Thinking process:",
+        "<start_of_thought>",
+        "<|thinking|>",
+        "**Thinking",
+    )
+    earliest_cut = len(cleaned)
+    for _m in _thinking_markers:
+        _idx = cleaned.find(_m)
+        if _idx != -1 and _idx < earliest_cut:
+            earliest_cut = _idx
+    if earliest_cut < len(cleaned):
+        thought_parts.append(_normalize_reasoning_text(cleaned[earliest_cut:]))
+        cleaned = cleaned[:earliest_cut]
+
+    # Drop garbage replacement-char tails (3+ U+FFFD in a row → noise
+    # past EOS that the tokenizer couldn't decode cleanly).
+    cleaned = re.sub(r"[� ]{3,}.*\Z", "", cleaned, flags=re.DOTALL)
 
     # Remove echoed tool-instruction block when model parrots system text.
     cleaned = re.sub(
@@ -282,7 +348,19 @@ def clean_display_answer(text: str) -> str:
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = cleaned.strip()
-    return cleaned or "(No clean answer produced.)"
+
+    # Dedupe: when generation ran past EOS and produced a "corrected"
+    # second copy of the same answer, the two halves are byte-identical
+    # after whitespace normalisation. Keep just the first.
+    if len(cleaned) > 80:
+        _half = len(cleaned) // 2
+        _a = cleaned[:_half].strip()
+        _b = cleaned[_half:].strip()
+        if _a and _a == _b:
+            cleaned = _a
+
+    thought = _normalize_reasoning_text("\n\n".join(part for part in thought_parts if part))
+    return (cleaned or "(No clean answer produced.)", thought)
 
 
 _REFUSAL_PATTERNS = (
@@ -638,6 +716,72 @@ def build_run_adapter_cmd(cfg: InferenceConfig) -> List[str]:
     return cmd
 
 
+_THINKING_CUT_PATTERNS = (
+    # Gemma instruct models leak the reasoning channel as a literal token
+    # name followed by a "Thinking Process:" preamble. Cut anything from
+    # the first occurrence of either marker — the actual answer is what
+    # comes BEFORE the leak.
+    "ꝓthought",
+    "<thought>",
+    "</thought>",
+    "<start_of_thought>",
+    "Thinking Process:",
+    "Thinking process:",
+    "<|thinking|>",
+    "<thinking>",
+    "</thinking>",
+    "**Thinking",
+    # Some Gemma checkpoints emit BOM-like or stray decoder framing.
+    "<start_of_turn>model",
+    "<end_of_turn>",
+)
+
+# 3+ consecutive Unicode replacement chars — generation ran past EOS into
+# byte-noise that the tokenizer couldn't decode cleanly.
+_GARBAGE_TAIL_RE = re.compile(r"[�]{3,}.*\Z", re.DOTALL)
+
+
+def _filter_model_output(text: str) -> str:
+    """Strip leaked CoT, replacement-char tails, and duplicated halves
+    from a raw model response before showing it to the user.
+
+    Why this exists: instruct-tuned Gemma 4 (and PEFT adapters on top)
+    sometimes emit the model's reasoning channel as a literal token
+    sequence ('ꝓthought\\nThinking Process:\\n...') after the answer.
+    They can also drift past EOS and produce byte-noise that decodes
+    to U+FFFD. Both should be filtered at the boundary, not shown.
+    """
+    if not text:
+        return text
+    out = text
+
+    # 1) Cut at the first thinking-channel marker we find. Anything
+    # after that point is leaked CoT (or a duplicate answer).
+    earliest = len(out)
+    for marker in _THINKING_CUT_PATTERNS:
+        idx = out.find(marker)
+        if idx != -1 and idx < earliest:
+            earliest = idx
+    if earliest < len(out):
+        out = out[:earliest]
+
+    # 2) Drop garbage replacement-char tails.
+    out = _GARBAGE_TAIL_RE.sub("", out)
+
+    # 3) De-duplicate: some runs emit the answer twice back-to-back
+    # (once before the thinking leak, once after it as a "corrected"
+    # version). After step 1 we already dropped the second copy, but
+    # also handle the case where the same paragraph appears twice in
+    # the kept prefix.
+    stripped = out.strip()
+    if stripped:
+        half = len(stripped) // 2
+        if half > 40 and stripped[:half].strip() == stripped[half:].strip():
+            out = stripped[:half]
+
+    return out.rstrip()
+
+
 def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback: Optional[Callable[[str], None]] = None) -> str:
     """
     Run inference using persistent server.
@@ -715,44 +859,71 @@ def run_inference(cfg: InferenceConfig, env: Optional[dict] = None, log_callback
                 msg += f"\n\nOnboarding log: {log_path}"
             raise RuntimeError(msg)
     
-    # Ensure server is running for this model
+    runtime_base_model = str(cfg.base_model or "").strip() or None
+
+    # Ensure server is running for this model/runtime
     manager = get_global_server_manager()
-    server_url = manager.ensure_server_running(cfg.model_id, log_callback=log_callback)
+    server_url = manager.ensure_server_running(
+        cfg.model_id,
+        log_callback=log_callback,
+        runtime_base_model=runtime_base_model,
+    )
     if log_callback:
         log_callback(f"Server ready: {server_url}")
     
+    # Decide whether to enable the LoRA layer for this request.
+    # The server-side toggle is a no-op when no adapter is loaded;
+    # we only need to flip LoRA on when this model_id is an adapter
+    # entry that shares a server with its base. The base's own
+    # entry — even if the server loads with adapter_dir set — gets
+    # ``adapter=None`` so its responses stay as the unmodified base.
+    _adapter_param: Optional[str] = None
+    try:
+        if isinstance(model_cfg, dict) and model_cfg.get("shares_server_with"):
+            _adapter_param = str(cfg.model_id)
+    except Exception:
+        _adapter_param = None
+
     # Call persistent server via HTTP
     client = InferenceClient(server_url)
     t0 = time.time()
     try:
         if log_callback:
             log_callback("Sending generation request to model server...")
-        return client.generate(
+        raw = client.generate(
             prompt=cfg.prompt,
             max_new_tokens=cfg.max_new_tokens,
             temperature=cfg.temperature,
             images=cfg.images,
+            adapter=_adapter_param,
         )
+        return _filter_model_output(raw)
     except EmptyModelResponseError as e:
         # Self-heal: this specific case means server returned 200 OK with {"text": ""}.
         # That is almost always a stale/bad server process. Restart once and retry.
         if log_callback:
             log_callback("⚠️ Server returned HTTP 200 with empty text. Restarting server and retrying once...")
         try:
-            manager.shutdown_server(cfg.model_id)
+            manager.shutdown_server(cfg.model_id, runtime_base_model=runtime_base_model)
         except Exception:
             # Best-effort restart; ignore shutdown errors and continue.
             pass
 
         # Start (or reuse) server again, then retry once.
-        server_url = manager.ensure_server_running(cfg.model_id, log_callback=log_callback)
+        server_url = manager.ensure_server_running(
+            cfg.model_id,
+            log_callback=log_callback,
+            runtime_base_model=runtime_base_model,
+        )
         client = InferenceClient(server_url)
-        return client.generate(
+        raw = client.generate(
             prompt=cfg.prompt,
             max_new_tokens=cfg.max_new_tokens,
             temperature=cfg.temperature,
             images=cfg.images,
+            adapter=_adapter_param,
         )
+        return _filter_model_output(raw)
     finally:
         if log_callback:
             try:

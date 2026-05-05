@@ -82,6 +82,8 @@ class _CharacterBusBridge(QObject):
     """
 
     message = Signal(object)  # core.agents.message.Message
+    speech_started = Signal(str)  # agent name
+    speech_ended = Signal(str)    # agent name
 
 
 class BridgePage(QWebEnginePage):
@@ -178,6 +180,24 @@ class Characters3DPage(QWidget):
         # bridge to land everything on the GUI thread before touching JS.
         self._agent_bridge = _CharacterBusBridge()
         self._agent_bridge.message.connect(self._on_agent_bus_message)
+        self._agent_bridge.speech_started.connect(self._on_speech_started)
+        self._agent_bridge.speech_ended.connect(self._on_speech_ended)
+        # Hook the TTS service so the bubble + label pulse while an agent
+        # is being spoken aloud. Listener fires on the worker thread, so
+        # we hop through the Qt bridge before touching JS.
+        try:
+            from core.voice import get_tts_service
+            tts = get_tts_service()
+            tts.add_listener(
+                on_start=lambda agent, text: (
+                    self._agent_bridge.speech_started.emit(agent) if agent else None
+                ),
+                on_end=lambda agent, text: (
+                    self._agent_bridge.speech_ended.emit(agent) if agent else None
+                ),
+            )
+        except Exception:  # noqa: BLE001 — voice is non-essential here
+            pass
         try:
             get_bus().subscribe(lambda m: self._agent_bridge.message.emit(m))
         except Exception:
@@ -409,6 +429,23 @@ class Characters3DPage(QWidget):
         except Exception:
             # Don't crash the page — if the JS bridge isn't ready (page
             # still loading) calls just no-op.
+            pass
+
+    def _on_speech_started(self, agent: str) -> None:
+        """TTS just started speaking ``agent``'s reply — pulse the bubble."""
+        try:
+            cid = AGENT_TO_CHARACTER.get(agent)
+            if cid is not None:
+                self._call_js("window.characterStartTalking", cid)
+        except Exception:
+            pass
+
+    def _on_speech_ended(self, agent: str) -> None:
+        try:
+            cid = AGENT_TO_CHARACTER.get(agent)
+            if cid is not None:
+                self._call_js("window.characterStopTalking", cid)
+        except Exception:
             pass
 
     def _start_inference(self, cid: str, prompt: str, done: Callable[[str], None] | None = None):

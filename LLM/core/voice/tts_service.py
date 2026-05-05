@@ -160,6 +160,14 @@ class _Job:
     text: str
     voice_id: str
     rate: int
+    agent: str = ""
+    """Origin agent name. Empty for ad-hoc previews. Listeners use this to
+    drive per-character animation in the 3D scene."""
+
+
+SpeechListener = "Optional[Callable[[str, str], None]]"
+"""``(agent_name, text)`` — fired before and after each utterance. Empty
+agent_name means an ad-hoc preview, not a live REPLY."""
 
 
 class TtsService:
@@ -191,6 +199,8 @@ class TtsService:
         self._sub_id: Optional[int] = None
         self._lock = threading.Lock()
         self._stable_voice_cache: dict = {}
+        self._start_listeners: list = []
+        self._end_listeners: list = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -257,27 +267,50 @@ class TtsService:
             logger.exception("voice enumeration failed")
             return []
 
-    def speak(self, text: str, *, voice_id: str = "", rate: int = 0) -> None:
+    def speak(
+        self,
+        text: str,
+        *,
+        voice_id: str = "",
+        rate: int = 0,
+        agent: str = "",
+    ) -> None:
         """Queue an utterance directly. Bypasses ``set_enabled`` only for
         the empty-text early return — the page must check ``enabled`` itself
         for the manual case."""
         if not self._backend or not text:
             return
+        job = _Job(
+            text=text[: self.MAX_CHARS], voice_id=voice_id, rate=rate, agent=agent,
+        )
         try:
-            self._queue.put_nowait(
-                _Job(text=text[: self.MAX_CHARS], voice_id=voice_id, rate=rate)
-            )
+            self._queue.put_nowait(job)
         except queue.Full:
             # The queue is generous (64 jobs). If we're past that the user
             # is firing replies faster than the engine can speak — drop the
             # oldest to keep the audio close to "live".
             try:
                 self._queue.get_nowait()
-                self._queue.put_nowait(
-                    _Job(text=text[: self.MAX_CHARS], voice_id=voice_id, rate=rate)
-                )
+                self._queue.put_nowait(job)
             except Exception:  # noqa: BLE001
                 pass
+
+    def add_listener(
+        self,
+        *,
+        on_start=None,
+        on_end=None,
+    ) -> None:
+        """Register start/end callbacks fired around each utterance.
+
+        Callbacks receive ``(agent_name, text)``. They run on the worker
+        thread, so subscribers MUST hop to their own thread (Qt signal,
+        queue) before touching UI state.
+        """
+        if on_start is not None:
+            self._start_listeners.append(on_start)
+        if on_end is not None:
+            self._end_listeners.append(on_end)
 
     def stable_voice_for(self, agent_name: str) -> str:
         """Pick a deterministic voice for ``agent_name`` from the installed
@@ -317,7 +350,7 @@ class TtsService:
         text = _strip_markup(msg.body)
         if not text:
             return
-        self.speak(text, voice_id=voice_id, rate=rate)
+        self.speak(text, voice_id=voice_id, rate=rate, agent=agent)
 
     def _resolve_voice_config(self, agent_name: str) -> tuple:
         """Look up ``voice_id``/``voice_rate``/``voice_enabled`` for the
@@ -350,12 +383,23 @@ class TtsService:
                 return
             if not self._enabled:
                 continue
+            self._fire(self._start_listeners, job.agent, job.text)
             try:
                 self._backend.speak(  # type: ignore[union-attr]
                     job.text, voice_id=job.voice_id, rate=job.rate
                 )
             except Exception:  # noqa: BLE001 — never let one bad utterance kill the loop
                 logger.exception("TTS speak failed")
+            finally:
+                self._fire(self._end_listeners, job.agent, job.text)
+
+    @staticmethod
+    def _fire(listeners, agent: str, text: str) -> None:
+        for cb in listeners:
+            try:
+                cb(agent, text)
+            except Exception:  # noqa: BLE001 — never trust observers
+                logger.exception("TTS listener raised")
 
 
 # ---------------------------------------------------------------------------

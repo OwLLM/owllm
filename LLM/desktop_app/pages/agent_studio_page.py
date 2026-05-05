@@ -21,6 +21,7 @@ from PySide6.QtCore import QObject, QSettings, QSize, Qt, Signal, Slot
 from PySide6.QtGui import QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QGraphicsDropShadowEffect,
     QGridLayout,
@@ -31,6 +32,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QTextEdit,
     QVBoxLayout,
@@ -530,6 +532,56 @@ class _EditorPanel(QFrame):
             mt_layout.addWidget(empty)
         outer.addWidget(self._mcp_tools_box)
 
+        # Voice — per-agent TTS settings. The voice list is whatever the
+        # system TTS engine reports (Windows SAPI on Windows). "Auto" =
+        # let the service hash-assign a stable voice from the agent name.
+        outer.addWidget(_section_label("Voice"))
+        voice_box = QFrame()
+        voice_box.setStyleSheet(_TOOLBOX_STYLE)
+        v_layout = QVBoxLayout(voice_box)
+        v_layout.setContentsMargins(12, 10, 12, 10)
+        v_layout.setSpacing(8)
+
+        self.voice_enabled_cb = QCheckBox("Speak this agent's replies aloud")
+        self.voice_enabled_cb.setStyleSheet("color:#dadcdf; font-size:14px;")
+        v_layout.addWidget(self.voice_enabled_cb)
+
+        voice_row = QHBoxLayout()
+        voice_row.setSpacing(8)
+        self.voice_combo = QComboBox()
+        self.voice_combo.setMinimumHeight(34)
+        self.voice_combo.setStyleSheet(
+            "QComboBox { background:#14171d; color:#fff; border:none; "
+            "border-radius:8px; padding:0 10px; font-size:13px; } "
+            "QComboBox::drop-down { border:none; }"
+        )
+        # Populated lazily on first load() — needs the running TtsService.
+        self.voice_combo.addItem("Auto (per-agent assignment)", "")
+        voice_row.addWidget(self.voice_combo, 1)
+
+        self.voice_rate_spin = QSpinBox()
+        self.voice_rate_spin.setRange(0, 400)
+        self.voice_rate_spin.setSingleStep(10)
+        self.voice_rate_spin.setSuffix(" wpm")
+        self.voice_rate_spin.setSpecialValueText("Default")
+        self.voice_rate_spin.setMinimumHeight(34)
+        self.voice_rate_spin.setFixedWidth(120)
+        self.voice_rate_spin.setStyleSheet(
+            "QSpinBox { background:#14171d; color:#fff; border:none; "
+            "border-radius:8px; padding:0 10px; font-size:13px; }"
+        )
+        voice_row.addWidget(self.voice_rate_spin)
+
+        self.voice_preview_btn = QPushButton("▶ Preview")
+        self.voice_preview_btn.setMinimumHeight(34)
+        self.voice_preview_btn.setFixedWidth(110)
+        self.voice_preview_btn.setStyleSheet(_GHOST_BTN_STYLE)
+        self.voice_preview_btn.clicked.connect(self._on_voice_preview)
+        voice_row.addWidget(self.voice_preview_btn)
+
+        v_layout.addLayout(voice_row)
+        outer.addWidget(voice_box)
+
         # Leader checkbox.
         self.leader_cb = QCheckBox(
             "Team leader — can dispatch work to other agents"
@@ -590,6 +642,21 @@ class _EditorPanel(QFrame):
             self.model_picker.set_current_id(definition.default_model_id)
         self.leader_cb.setChecked(definition.can_dispatch)
 
+        # Voice — populate the combo from the running service on first
+        # load so we don't pay the SAPI enumeration cost at page-build
+        # time. Skip if the service is unavailable (Linux without espeak,
+        # for instance).
+        self._populate_voice_combo_if_needed()
+        self.voice_enabled_cb.setChecked(definition.voice_enabled)
+        self.voice_rate_spin.setValue(int(definition.voice_rate or 0))
+        # Find the entry matching this agent's voice_id; default to "Auto".
+        idx = 0
+        for i in range(self.voice_combo.count()):
+            if self.voice_combo.itemData(i) == definition.voice_id:
+                idx = i
+                break
+        self.voice_combo.setCurrentIndex(idx)
+
         # Tool checkboxes — None means "all selected".
         bi_allow = definition.tool_allowlist
         for name, cb in self._builtin_tool_checks.items():
@@ -605,6 +672,11 @@ class _EditorPanel(QFrame):
         self.desc_input.setEnabled(editable)
         self.prompt_input.setReadOnly(not editable)
         self.leader_cb.setEnabled(editable)
+        self.voice_enabled_cb.setEnabled(editable)
+        self.voice_combo.setEnabled(editable)
+        self.voice_rate_spin.setEnabled(editable)
+        # Preview is allowed even on built-ins so the user can audition
+        # voices before duplicating to customise.
         # Keep the avatar button ENABLED even for built-ins so Qt
         # doesn't render the icon at 50% opacity. _toggle_avatar_picker
         # already no-ops when the current def is a built-in.
@@ -683,9 +755,72 @@ class _EditorPanel(QFrame):
             default_model_id=self.model_picker.current_id(),
             can_dispatch=self.leader_cb.isChecked(),
             default_temperature=(self._current.default_temperature if self._current else 0.4),
+            voice_id=str(self.voice_combo.currentData() or ""),
+            voice_rate=int(self.voice_rate_spin.value()),
+            voice_enabled=self.voice_enabled_cb.isChecked(),
             built_in=False,
             created_at=(self._current.created_at if self._current else ""),
         )
+
+    # ------------------------------------------------------------------
+    # Voice helpers
+    # ------------------------------------------------------------------
+
+    def _populate_voice_combo_if_needed(self) -> None:
+        """Lazy-load the voice list. The combo is built with one "Auto"
+        item; on first edit we ask the running TTS service what voices
+        the OS has installed and append them. Done once per panel
+        lifetime — adding a new voice on the OS side requires a restart,
+        which matches every other voice-enumerating app."""
+        # Detect by item count: 1 = the placeholder we built, anything
+        # more means we already populated.
+        if self.voice_combo.count() > 1:
+            return
+        try:
+            from core.voice import get_tts_service
+            svc = get_tts_service()
+        except Exception:  # noqa: BLE001
+            return
+        if not svc.available:
+            self.voice_combo.setEnabled(False)
+            self.voice_combo.setToolTip(
+                "Voice unavailable — system TTS engine not detected"
+            )
+            return
+        for v in svc.voices():
+            label = v.name or v.id.split("\\")[-1]
+            self.voice_combo.addItem(label, v.id)
+
+    def _on_voice_preview(self) -> None:
+        """Speak a sample line in the currently selected voice. Reaches
+        for the running service rather than spinning up a fresh engine
+        so the preview goes through the same audio path the live agent
+        replies will."""
+        try:
+            from core.voice import get_tts_service
+            svc = get_tts_service()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.information(self, "Voice", f"Voice unavailable: {exc}")
+            return
+        if not svc.available:
+            QMessageBox.information(
+                self, "Voice", "No TTS engine available on this system."
+            )
+            return
+        voice_id = str(self.voice_combo.currentData() or "")
+        if not voice_id and self._current is not None:
+            # "Auto" — show the user what the auto-assignment lands on.
+            voice_id = svc.stable_voice_for(self._current.name)
+        rate = int(self.voice_rate_spin.value())
+        name = (self._current.name if self._current else "Agent").capitalize()
+        sample = f"Hi, I'm {name}. This is what my voice sounds like."
+        # Bypass the page-level mute: the user explicitly asked to preview.
+        was_enabled = svc.enabled
+        try:
+            svc.set_enabled(True)
+            svc.speak(sample, voice_id=voice_id, rate=rate)
+        finally:
+            svc.set_enabled(was_enabled)
 
     def _on_save(self) -> None:
         if self._current is None:

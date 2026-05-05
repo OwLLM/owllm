@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, Optional
 
 from core.agents.backends.base import (
     ModelEntry,
@@ -53,18 +53,28 @@ class LocalBackend:
         # model_id equals canonical_id (the authoritative name), then
         # the first row inserted. Rows without a base_model_path stay
         # as their own entries — we can't dedupe what we can't compare.
-        by_path: Dict[str, List[dict]] = {}
+        # Bucket rows by (base_path, adapter_dir) so that an adapter row
+        # and its underlying base row don't collide — they share the
+        # same base_model_path but are distinct entries the user wants
+        # to pick between. Without `adapter_dir` in the key, the dedupe
+        # would silently swallow every fine-tuned adapter under its base.
+        by_path: Dict[tuple, List[dict]] = {}
         no_path: List[dict] = []
         for row in ready:
             base = row.get("base_model_path") or row.get("base_model") or ""
-            if not base:
+            adapter = row.get("adapter_dir") or ""
+            if not base and not adapter:
                 no_path.append(row)
                 continue
             try:
-                key = str(Path(base).resolve()).lower()
+                base_key = str(Path(base).resolve()).lower() if base else ""
             except OSError:
-                key = base.lower()
-            by_path.setdefault(key, []).append(row)
+                base_key = base.lower()
+            try:
+                adapter_key = str(Path(adapter).resolve()).lower() if adapter else ""
+            except OSError:
+                adapter_key = adapter.lower()
+            by_path.setdefault((base_key, adapter_key), []).append(row)
 
         def _rank(row: dict) -> tuple:
             base = row.get("base_model_path") or row.get("base_model") or ""
@@ -124,6 +134,13 @@ class LocalBackend:
         base_model_path = self._lookup_base_model_path(model_key)
         has_images = self._has_image_attachments(messages)
 
+        # Decide whether this model_key represents an adapter sharing the
+        # base server. The base entry sends adapter=None (LoRA OFF); an
+        # adapter entry sends adapter=<model_key> (LoRA ON). Without this,
+        # picking the BASE in agents would inherit whatever toggle state
+        # Test Chat last left the server in.
+        adapter_param = self._adapter_for_request(model_key)
+
         # Step 2: prefer a server that's already running with these weights.
         # Skips the entire ensure_server_running dance, which would otherwise
         # try to start a *duplicate* server because the ids don't match.
@@ -131,8 +148,8 @@ class LocalBackend:
         if running_url:
             logger.info("local backend: reusing running server at %s", running_url)
             if has_images:
-                return self._call_server_chat_completions(running_url, messages, model_key)
-            return self._call_server(running_url, messages)
+                return self._call_server_chat_completions(running_url, messages, model_key, adapter=adapter_param)
+            return self._call_server(running_url, messages, adapter=adapter_param)
 
         # Step 3: nothing running yet — auto-start. We pass runtime_base_model
         # so the manager knows exactly which weights to load, avoiding the
@@ -152,8 +169,8 @@ class LocalBackend:
                 )
                 if server_url:
                     if has_images:
-                        return self._call_server_chat_completions(server_url, messages, model_key)
-                    return self._call_server(server_url, messages)
+                        return self._call_server_chat_completions(server_url, messages, model_key, adapter=adapter_param)
+                    return self._call_server(server_url, messages, adapter=adapter_param)
         except Exception as exc:
             raise RuntimeError(
                 f"Could not start local server for {model_key!r}: {exc}\n"
@@ -192,6 +209,7 @@ class LocalBackend:
         server_url: str,
         messages: List[Mapping[str, Any]],
         model_key: str,
+        adapter: Optional[str] = None,
     ) -> str:
         """POST OpenAI-shape multipart messages to the running server.
 
@@ -236,6 +254,11 @@ class LocalBackend:
             "max_tokens": 1024,
             "stream": False,
         }
+        # Tell the server which LoRA state to use for THIS request — None
+        # = base only, str = enable that adapter. The server toggles
+        # under a lock so concurrent base/adapter calls don't interleave.
+        if adapter is not None:
+            payload["adapter"] = adapter
         # Long timeout: vision processing on CPU/GPU adds seconds.
         resp = requests.post(url, json=payload, timeout=900)
         if resp.status_code != 200:
@@ -251,6 +274,33 @@ class LocalBackend:
         return (out or "").strip()
 
     # -- inference helpers ----------------------------------------------
+
+    @staticmethod
+    def _adapter_for_request(model_key: str) -> Optional[str]:
+        """Return the adapter id to flip ON for this request, or None.
+
+        Reads llm_backends.yaml: an entry with ``shares_server_with``
+        set is an adapter sharing its base's server, so the per-request
+        LoRA toggle must be flipped ON. The base entry returns None so
+        its responses stay unmodified even though the same server has
+        the adapter loaded.
+
+        Falls through to None on any lookup failure — that matches the
+        old behaviour (server stays in last-set toggle state) instead
+        of failing the chat outright.
+        """
+        try:
+            from core.llm_server_manager import get_global_server_manager
+            mgr = get_global_server_manager()
+            if mgr is None:
+                return None
+            mgr._load_config()
+            cfg = (mgr.config.get("models") or {}).get(model_key) if hasattr(mgr, "config") else None
+            if isinstance(cfg, dict) and cfg.get("shares_server_with"):
+                return str(model_key)
+        except Exception:
+            logger.debug("local backend: adapter lookup failed for %r", model_key, exc_info=True)
+        return None
 
     @staticmethod
     def _lookup_base_model_path(model_key: str) -> str:
@@ -301,16 +351,29 @@ class LocalBackend:
         return ""
 
     @staticmethod
-    def _call_server(server_url: str, messages: List[Mapping[str, str]]) -> str:
-        """Generate via an existing server URL — no manager indirection."""
+    def _call_server(
+        server_url: str,
+        messages: List[Mapping[str, str]],
+        adapter: Optional[str] = None,
+    ) -> str:
+        """Generate via an existing server URL — no manager indirection.
+
+        ``adapter`` is forwarded so a base-vs-adapter toggle is applied
+        per request: None = base only, str = flip the named LoRA on for
+        this call. Without this flag the server would stay in whatever
+        toggle state Test Chat last left it in.
+        """
         from core.inference_client import InferenceClient
+        from core.inference import _filter_model_output
         prompt = render_messages_as_prompt(messages)
         client = InferenceClient(server_url)
-        return client.generate(
+        raw = client.generate(
             prompt=prompt,
             max_new_tokens=1024,
             temperature=0.4,
+            adapter=adapter,
         )
+        return _filter_model_output(raw)
 
     # -- helpers ---------------------------------------------------------
 

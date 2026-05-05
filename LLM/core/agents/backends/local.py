@@ -320,7 +320,23 @@ class LocalBackend:
 
     @staticmethod
     def _url_for_running_server(base_model_path: str) -> str:
-        """Find a RUNNING server whose model_path equals ``base_model_path``.
+        """Find a RUNNING server whose effective base weights match.
+
+        Match path: for each running server's model_id, resolve the
+        candidate base path through TWO sources:
+
+        1. ``models.model_path`` — the legacy field; works when the
+           server was started directly with the base id.
+        2. ``model_onboarding.base_model_path`` — the source of truth
+           that captures both base AND adapter rows. An adapter row's
+           ``base_model_path`` points at the SAME weights file as its
+           base row, so a server registered under an adapter id still
+           matches when the user picks the base in agents.
+
+        Without (2), a Test Chat session that started the server under
+        the adapter's id and a subsequent agents pick of the base would
+        miss each other and try to spawn a duplicate server (port
+        conflict or silent failure).
 
         Returns the ``http://host:port`` URL or empty string if no match.
         Match is case-insensitive on Windows-resolved absolute paths.
@@ -335,17 +351,24 @@ class LocalBackend:
                 cfg_id = row.get("model_id")
                 if not cfg_id:
                     continue
+                # Collect every base path that resolves to this server.
+                candidates: list[str] = []
                 model_row = store.get_model(cfg_id) if hasattr(store, "get_model") else None
-                if not model_row:
-                    continue
-                running_path = str(model_row.get("model_path") or "")
-                if not running_path:
-                    continue
-                if str(Path(running_path).resolve()).lower() == target:
-                    host = row.get("host") or "127.0.0.1"
-                    port = row.get("port")
-                    if port:
-                        return f"http://{host}:{port}"
+                if model_row and model_row.get("model_path"):
+                    candidates.append(str(model_row["model_path"]))
+                onb = store.get_onboarding(cfg_id) if hasattr(store, "get_onboarding") else None
+                if onb and onb.get("base_model_path"):
+                    candidates.append(str(onb["base_model_path"]))
+                for cand in candidates:
+                    try:
+                        if str(Path(cand).resolve()).lower() == target:
+                            host = row.get("host") or "127.0.0.1"
+                            port = row.get("port")
+                            if port:
+                                return f"http://{host}:{port}"
+                            break
+                    except OSError:
+                        continue
         except Exception:
             logger.exception("local backend: running server lookup failed")
         return ""
@@ -435,7 +458,14 @@ class LocalBackend:
 
     @staticmethod
     def _running_base_paths() -> set[str]:
-        """Resolve absolute paths of base-model files that have a server up."""
+        """Resolve absolute paths of base-model files that have a server up.
+
+        Pulls candidate paths from BOTH the models table (legacy field)
+        and the model_onboarding table (which stores the true base path
+        even for adapter rows). Without the onboarding fallback, a base
+        row whose server was started under an adapter id would never
+        get tagged ``(running)`` in the picker.
+        """
         out: set[str] = set()
         try:
             from core.state_store import get_state_store
@@ -444,12 +474,18 @@ class LocalBackend:
                 cfg_id = row.get("model_id")
                 if not cfg_id:
                     continue
+                candidates: list[str] = []
                 model_row = store.get_model(cfg_id) if hasattr(store, "get_model") else None
-                if not model_row:
-                    continue
-                base = model_row.get("model_path")
-                if base:
-                    out.add(str(Path(base).resolve()).lower())
+                if model_row and model_row.get("model_path"):
+                    candidates.append(str(model_row["model_path"]))
+                onb = store.get_onboarding(cfg_id) if hasattr(store, "get_onboarding") else None
+                if onb and onb.get("base_model_path"):
+                    candidates.append(str(onb["base_model_path"]))
+                for cand in candidates:
+                    try:
+                        out.add(str(Path(cand).resolve()).lower())
+                    except OSError:
+                        continue
         except Exception:
             # Server manager state is best-effort context for the dropdown
             # — never block listing if the lookup hiccups.

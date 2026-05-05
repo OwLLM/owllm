@@ -25,10 +25,16 @@ class SplashScreen(QSplashScreen):
     # -150 placement down by 200 px to close the gap).
     _ICON_SIZE = 200
     _ICON_Y_SHIFT = 50    # positive = below splash top; negative = up
-    # Vertical shift applied to the progress bar relative to its
-    # natural QVBoxLayout position. Negative = move up. Used to bring
-    # the bar nearer to the title without re-doing the whole layout.
-    _PROGRESS_Y_SHIFT = -100
+    # Absolute placement (inside the 550×350 splash) of the OWLLM
+    # title text and the progress bar. The 200 px owl PNG covers
+    # y=50..250 of the splash, so the title sits in the strip ABOVE
+    # the owl and the progress bar in the strip BELOW it. Tunable
+    # — bump these constants to nudge either widget without touching
+    # the rest of the file.
+    _TITLE_Y = 5
+    _TITLE_H = 40
+    _PROGRESS_Y = 270
+    _PROGRESS_H = 22
 
     def __init__(self):
         # Fully transparent backdrop — no gradient, no panel, no shadow.
@@ -57,13 +63,15 @@ class SplashScreen(QSplashScreen):
         self.content_widget.setAttribute(Qt.WA_TranslucentBackground, True)
         self.content_widget.setStyleSheet("background: transparent;")
 
-        layout = QVBoxLayout(self.content_widget)
-        layout.setContentsMargins(20, 15, 20, 15)
-        layout.setSpacing(8)
+        # No QVBoxLayout — every visible widget (title + progress) is
+        # absolutely positioned inside content_widget so it can be
+        # placed clear of the floating owl-PNG overlay (which covers
+        # y=_ICON_Y_SHIFT .. _ICON_Y_SHIFT+_ICON_SIZE = 50..250 by
+        # default). Mixing a layout with absolute children was hiding
+        # both labels behind the overlay.
 
-        # Title — text only here; the visual icon is the floating
-        # owl_startup overlay positioned in _position_owl_overlay below.
-        self.title = QLabel("OWLLM")
+        # Title — sits above the owl PNG.
+        self.title = QLabel("OWLLM", self.content_widget)
         self.title.setAlignment(Qt.AlignCenter)
         self.title.setStyleSheet("""
             QLabel {
@@ -71,10 +79,12 @@ class SplashScreen(QSplashScreen):
                 font-size: 18pt;
                 font-weight: bold;
                 background: transparent;
-                padding: 5px;
+                padding: 0px;
             }
         """)
-        layout.addWidget(self.title)
+        self.title.setGeometry(
+            0, self._TITLE_Y, self._SPLASH_W, self._TITLE_H,
+        )
 
         # ---- floating owl crest -----------------------------------
         # Top-level frameless tool window parented to the splash so it
@@ -120,12 +130,7 @@ class SplashScreen(QSplashScreen):
         # Stash for the move/show plumbing.
         self.title_icon = owl_label
         
-        # Progress bar — parented directly to content_widget and given
-        # an absolute geometry so we can shift it independently of the
-        # QVBoxLayout. The natural layout y was ~63 px (top margin 15 +
-        # title ~40 + spacing 8); applying _PROGRESS_Y_SHIFT lets the
-        # user dial the bar up/down a fixed amount without rewriting
-        # the rest of the layout.
+        # Progress bar — sits below the owl PNG.
         self.progress = QProgressBar(self.content_widget)
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
@@ -149,17 +154,14 @@ class SplashScreen(QSplashScreen):
                 border-radius: 4px;
             }
         """)
-        # Approximate baseline matches what the QVBoxLayout would have
-        # produced (top margin + title height + spacing).
-        _baseline_y = 63
-        _progress_y = _baseline_y + self._PROGRESS_Y_SHIFT
         self.progress.setGeometry(
             20,
-            _progress_y,
+            self._PROGRESS_Y,
             self._SPLASH_W - 40,
-            22,
+            self._PROGRESS_H,
         )
         self.progress.raise_()
+        self.title.raise_()
         
         # Scrollable details — kept as a hidden in-memory log so the
         # update_progress / set_checking / set_result API still works

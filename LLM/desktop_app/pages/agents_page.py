@@ -550,6 +550,7 @@ class AgentsPage(QWidget):
     _SETTINGS_APP = "OWLLM"
     _SETTINGS_PREFIX = "agents/model_for/"
     _SETTINGS_ACTIVE_PROJECT = "agents/active_project_id"
+    _SETTINGS_VOICE_ENABLED = "agents/voice_enabled"
 
     def __init__(self, main_window=None, parent=None) -> None:
         super().__init__(parent)
@@ -573,6 +574,7 @@ class AgentsPage(QWidget):
         self._build_ui()
         self._wire_bus()
         self._kick_off_bootstrap()
+        self._init_voice_service()
         # Restore active project from settings (or pick first), populate the
         # team grid + selectors. Selection persistence is wired AFTER the
         # initial pickers populate.
@@ -812,11 +814,33 @@ class AgentsPage(QWidget):
         self.telemetry_btn.clicked.connect(self._open_telemetry_panel)
         self._telemetry_panel = None  # lazy-built on first click
 
+        # 🔊 voice toggle — gates the TtsService for the whole team. Each
+        # agent's voice can also be muted individually via its definition,
+        # but this is the master switch the user reaches for first.
+        self.voice_btn = QPushButton("🔊")
+        self.voice_btn.setMinimumHeight(38)
+        self.voice_btn.setFixedWidth(44)
+        self.voice_btn.setCheckable(True)
+        self.voice_btn.setToolTip(
+            "Speak agent replies aloud (system TTS — voice per agent)"
+        )
+        self.voice_btn.setStyleSheet("""
+            QPushButton {
+                background:rgba(255,255,255,0.05); color:#dadcdf;
+                border:none; border-radius:8px; font-size:16px;
+            }
+            QPushButton:hover { background:rgba(255,255,255,0.10); }
+            QPushButton:checked { background:rgba(92,240,255,0.18); color:#5cf0ff; }
+            QPushButton:disabled { color:#555; }
+        """)
+        self.voice_btn.clicked.connect(self._on_voice_toggled)
+
         top.addWidget(self.attach_btn)
         top.addWidget(self.goal_input, 1)
         top.addWidget(self.run_btn)
         top.addWidget(self.cancel_btn)
         top.addWidget(self.telemetry_btn)
+        top.addWidget(self.voice_btn)
         return top
 
     def _open_telemetry_panel(self) -> None:
@@ -833,6 +857,55 @@ class AgentsPage(QWidget):
         # refresh timer is bound to a live window.
         self._telemetry_panel = TelemetryPanel(self._registry.telemetry, parent=self)
         self._telemetry_panel.show()
+
+    # ------------------------------------------------------------------
+    # Voice (TTS)
+    # ------------------------------------------------------------------
+
+    def _init_voice_service(self) -> None:
+        """Start the process-wide TTS service and reflect saved state on
+        the toggle. The service is a singleton — calling start twice is a
+        no-op, which makes this safe to run on every page open."""
+        try:
+            from core.voice import get_tts_service
+            self._tts = get_tts_service()
+        except Exception:  # noqa: BLE001 — voice is non-essential
+            logger.exception("voice service failed to start")
+            self._tts = None
+            self.voice_btn.setEnabled(False)
+            self.voice_btn.setToolTip(
+                "Voice unavailable — pyttsx3 not installed or system TTS is missing"
+            )
+            return
+
+        if not self._tts.available:
+            self.voice_btn.setEnabled(False)
+            self.voice_btn.setToolTip(
+                "Voice unavailable — pyttsx3 not installed or system TTS is missing"
+            )
+            return
+
+        # Default ON — the user opted in to "voice for all agents". They can
+        # turn it off any time with the button; their choice persists across
+        # sessions.
+        saved = self._settings.value(self._SETTINGS_VOICE_ENABLED, True)
+        if isinstance(saved, str):
+            saved = saved.lower() not in ("0", "false", "no")
+        enabled = bool(saved)
+        self.voice_btn.setChecked(enabled)
+        self._tts.set_enabled(enabled)
+        self._update_voice_btn_text(enabled)
+
+    def _on_voice_toggled(self, checked: bool) -> None:
+        if getattr(self, "_tts", None) is None:
+            return
+        self._tts.set_enabled(checked)
+        self._settings.setValue(self._SETTINGS_VOICE_ENABLED, checked)
+        self._update_voice_btn_text(checked)
+
+    def _update_voice_btn_text(self, enabled: bool) -> None:
+        # Icon flip is the visual cue: speaker-with-waves on, muted on off.
+        self.voice_btn.setText("🔊" if enabled else "🔈")
 
     # ------------------------------------------------------------------
     # Attachment chip strip — appears below the goal row when files

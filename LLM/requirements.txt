@@ -51,3 +51,9 @@ openai>=1.50.0,<2.0.0
 # LLM/runtime/whisper/ on first use. If absent, audio attachments still
 # flow through the pipeline but arrive without a transcript.
 faster-whisper>=1.0.0,<2.0.0
+# OWLLM voice output — agents speak their final replies through the system
+# TTS engine (Windows SAPI on Windows, NSSpeechSynthesizer on macOS, espeak
+# on Linux). Pure-Python wrapper, no model download, multiple voices on every
+# Windows install for free per-agent voice diversity. Optional at runtime —
+# the voice service degrades to silent if the import fails.
+pyttsx3>=2.90,<3.0

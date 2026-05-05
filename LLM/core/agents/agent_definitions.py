@@ -58,6 +58,18 @@ class AgentDefinition:
     agent. Empty = let the workspace picker pick."""
     can_dispatch: bool = False
     default_temperature: float = 0.4
+    voice_id: str = ""
+    """TTS voice identifier used when this agent speaks a final reply. The
+    string is backend-specific (e.g. a SAPI voice id on Windows). Empty
+    means ``TtsService`` auto-assigns one from the installed voices, hashed
+    on the agent name so each agent gets a stable distinct voice without
+    explicit config."""
+    voice_rate: int = 0
+    """Words-per-minute override. 0 = backend default (about 200 wpm)."""
+    voice_enabled: bool = True
+    """Per-agent mute. The page-level toggle gates everything; this lets the
+    user silence one specific agent (e.g. a noisy critic) without disabling
+    voice everywhere."""
     built_in: bool = False
     created_at: str = ""
     updated_at: str = ""
@@ -265,6 +277,9 @@ def duplicate(source_name: str, new_name: str) -> AgentDefinition:
         default_model_id=src.default_model_id,
         can_dispatch=src.can_dispatch,
         default_temperature=src.default_temperature,
+        voice_id=src.voice_id,
+        voice_rate=src.voice_rate,
+        voice_enabled=src.voice_enabled,
         built_in=False,
     )
     save_custom(clone)
@@ -293,6 +308,9 @@ def _from_dict(data: dict) -> AgentDefinition:
         default_model_id=str(data.get("default_model_id") or ""),
         can_dispatch=bool(data.get("can_dispatch", False)),
         default_temperature=float(data.get("default_temperature", 0.4)),
+        voice_id=str(data.get("voice_id") or ""),
+        voice_rate=int(data.get("voice_rate") or 0),
+        voice_enabled=bool(data.get("voice_enabled", True)),
         built_in=bool(data.get("built_in", False)),
         created_at=str(data.get("created_at") or ""),
         updated_at=str(data.get("updated_at") or ""),

@@ -26395,11 +26395,26 @@ def main() -> int:
                     if page_icons_top.exists()
                     else get_asset_path("top_center_owl")
                 )
+
+                # Corner crests: prefer the user's authoritative set in
+                # icons/Page_icons/CornersNew/ (mapping the internal
+                # tl/tr names to the user-supplied ul/ur filenames),
+                # falling back to the legacy hybrid_frame_module
+                # webp/png if the new file is missing. This bypasses
+                # get_asset_path's webp-over-png preference, which is
+                # what stops corner replacements from showing up.
+                corners_new = root_dir / "icons" / "Page_icons" / "CornersNew"
+                def _corner_path(internal: str, new_filename: str) -> str | None:
+                    candidate = corners_new / new_filename
+                    if candidate.exists():
+                        return str(candidate)
+                    return get_asset_path(internal)
+
                 assets = FrameAssets(
-                    corner_tl=get_asset_path("corner_tl"),
-                    corner_tr=get_asset_path("corner_tr"),
-                    corner_bl=get_asset_path("corner_bl"),
-                    corner_br=get_asset_path("corner_br"),
+                    corner_tl=_corner_path("corner_tl", "corner_ul.png"),
+                    corner_tr=_corner_path("corner_tr", "corner_ur.png"),
+                    corner_bl=_corner_path("corner_bl", "corner_bl.png"),
+                    corner_br=_corner_path("corner_br", "corner_br.png"),
                     top_center=top_center_path,
                 )
                 

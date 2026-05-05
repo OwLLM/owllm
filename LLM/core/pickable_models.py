@@ -197,22 +197,43 @@ def get_pickable_for_local_chat() -> List[PickableModel]:
 def to_combo_payload(m: PickableModel) -> Union[Dict, str]:
     """Payload for ``QComboBox.addItem(label, payload)`` in chat tabs.
 
-    Mirrors the legacy shape that ``_resolve_chat_model_id_from_path``
-    and friends consume:
+    Downstream chat flows treat ``base_path/variant_relpath`` as the
+    loadable model file the runtime probe targets. For LoRA-GGUF rows
+    we therefore point those at the BASE GGUF (the file llama-server
+    actually loads) and rely on ``model_id`` to route through the
+    YAML's ``shares_server_with`` delegation so the LoRA gets applied
+    via ``--lora`` at startup. Without this distinction the probe
+    runs against the LoRA file alone and fails because a LoRA has no
+    embeddings / vocab / architecture.
 
-      * For sharded GGUF / LoRA-GGUF — a dict with
-        ``{"base_path": <dir>, "variant_relpath": <file>, "model_id": ...}``
-      * For everything else — a path string.
+    Shapes:
+      * GGUF base / LoRA-GGUF — dict with
+        ``{"base_path": <base_dir>, "variant_relpath": <base.gguf>,
+            "model_id": <pick id>}``
+      * PEFT adapter — adapter dir string.
+      * Transformers base — model dir string.
     """
-    if m.kind == KIND_LORA_GGUF and m.adapter_dir is not None:
-        ggufs = sorted(m.adapter_dir.glob("*-lora-*.gguf")) or sorted(m.adapter_dir.glob("*.gguf"))
-        if ggufs:
+    if m.kind == KIND_LORA_GGUF:
+        # m.base_path is the BASE GGUF FILE (set by register_in_onboarding).
+        # The picker entry must point downstream code at that file, not
+        # at the LoRA file -- the LoRA isn't a loadable model on its own.
+        if m.base_path and m.base_path.suffix.lower() == ".gguf":
             return {
-                "base_path": str(m.adapter_dir),
-                "variant_relpath": ggufs[0].name,
+                "base_path": str(m.base_path.parent),
+                "variant_relpath": m.base_path.name,
                 "model_id": m.model_id,
             }
-        return str(m.adapter_dir)
+        # Defensive fallback if the row's base_path is somehow a directory.
+        if m.base_path and m.base_path.is_dir():
+            for g in sorted(m.base_path.glob("*.gguf")):
+                if g.name.lower().startswith(("mmproj", "mm-proj", "projector")):
+                    continue
+                return {
+                    "base_path": str(m.base_path),
+                    "variant_relpath": g.name,
+                    "model_id": m.model_id,
+                }
+        return str(m.base_path)
     if m.kind == KIND_PEFT_ADAPTER and m.adapter_dir is not None:
         return str(m.adapter_dir)
     if m.kind == KIND_GGUF_BASE:

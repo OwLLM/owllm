@@ -9266,6 +9266,37 @@ class MainWindow(QMainWindow):
         )
         button_layout.addWidget(open_btn)
 
+        # Per-card "Convert to GGUF" — turns the adapter into a
+        # quantised GGUF the llama-server backend can serve at full
+        # speed. Visible on every adapter card so the user doesn't
+        # have to retrain just to get the post-training prompt back.
+        gguf_btn = QPushButton("⚡ To GGUF", card)
+        gguf_btn.setMinimumHeight(35)
+        gguf_btn.setToolTip(
+            "Merge the LoRA into the base, convert to GGUF, quantise to "
+            "Q5_K_M. Result lands in models/<adapter>__gguf/ and shows "
+            "up in every dropdown — runs 3–8× faster than the "
+            "Transformers backend."
+        )
+        # Highlight visually with the kbeauty/llamacpp accent so the
+        # action stands out from the neutral Open button.
+        gguf_style = button_style.replace(
+            "rgba(102, 126, 234, 0.15)", "rgba(255, 196, 0, 0.18)"
+        ).replace(
+            "rgba(102, 126, 234, 0.4)", "rgba(255, 196, 0, 0.55)"
+        ).replace(
+            "rgba(102, 126, 234, 0.25)", "rgba(255, 196, 0, 0.30)"
+        ).replace(
+            "rgba(102, 126, 234, 0.6)", "rgba(255, 196, 0, 0.70)"
+        ).replace(
+            "rgba(102, 126, 234, 0.35)", "rgba(255, 196, 0, 0.45)"
+        )
+        gguf_btn.setStyleSheet(gguf_style)
+        gguf_btn.clicked.connect(
+            lambda _checked=False, p=path: self._convert_tuned_card_to_gguf(p)
+        )
+        button_layout.addWidget(gguf_btn)
+
         button_layout.addStretch(1)
 
         delete_btn = QPushButton("🗑️ Delete", card)
@@ -9279,6 +9310,95 @@ class MainWindow(QMainWindow):
         layout.addLayout(button_layout)
 
         return card
+
+    def _convert_tuned_card_to_gguf(self, adapter_path: "Path") -> None:
+        """Resolve the adapter's base, prompt for quant, kick off async conversion.
+
+        Wired to the ⚡ To GGUF button on every fine-tuned card. The
+        underlying _convert_adapter_to_gguf_async runs the same
+        pipeline used by the post-training prompt, so behaviour stays
+        consistent regardless of where the conversion was triggered.
+        """
+        from PySide6.QtWidgets import QMessageBox, QInputDialog
+
+        # Resolve the base path from adapter_config.json + onboarding
+        # store. Reusing _resolve_adapter_base_path handles HF hub ids
+        # and path variants the same way Onboard / Use-in-Chat do.
+        base_raw = self._resolve_adapter_base_path(adapter_path) or ""
+        base_path = ""
+        if base_raw:
+            cand = Path(base_raw)
+            if cand.exists():
+                base_path = str(cand)
+            else:
+                # Try as a folder under models/ (handles "google/gemma-4-E4B-it"
+                # → models/google__gemma-4-E4B-it).
+                slug = base_raw.replace("/", "__")
+                cand = self.root / "models" / slug
+                if cand.exists():
+                    base_path = str(cand)
+        if not base_path:
+            QMessageBox.warning(
+                self, "Convert to GGUF",
+                f"Couldn't resolve the base model for adapter "
+                f"<b>{adapter_path.name}</b>.<br><br>"
+                "The adapter's <code>adapter_config.json</code> names a "
+                "base model that isn't on disk under <code>models/</code>. "
+                "Download or onboard the base first."
+            )
+            return
+
+        # Quant picker — Q5_K_M default; let users pick smaller/larger
+        # without leaving the page.
+        from core.adapter_to_gguf import QUANT_PRESETS
+        labels = list(QUANT_PRESETS.keys())
+        try:
+            default_idx = labels.index("Q5_K_M")
+        except ValueError:
+            default_idx = 0
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Convert to GGUF",
+            f"Quantisation for <b>{adapter_path.name}</b>:\n\n"
+            "Q5_K_M is the recommended sweet spot.\n"
+            "Q4_K_M is smallest (low VRAM); Q8_0 is near-lossless.",
+            labels,
+            current=default_idx,
+            editable=False,
+        )
+        if not ok or not choice:
+            return
+
+        # Confirm — conversion can take 2–5 min and burns ~16 GB of disk
+        # for an 8B base while the merged HF model is on disk.
+        confirm = QMessageBox.question(
+            self,
+            "Convert to GGUF",
+            f"<b>Adapter:</b> {adapter_path.name}<br>"
+            f"<b>Base:</b> {Path(base_path).name}<br>"
+            f"<b>Quant:</b> {choice}<br><br>"
+            "Conversion runs in the background and writes to "
+            f"<code>models/{adapter_path.name}__gguf/</code>. "
+            "Progress streams into the Train log.<br><br>"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Yes,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        # Switch to the Train tab so the user sees the streaming log,
+        # then dispatch the same async conversion the post-training
+        # prompt uses.
+        try:
+            self._switch_tab(self.tabs, "train")
+        except Exception:
+            pass
+        self._convert_adapter_to_gguf_async(
+            adapter_dir=adapter_path,
+            base_model_path=Path(base_path),
+            quant=choice,
+        )
 
     # ------------------------------------------------------------------
     # Helpers shared by Onboard / Use in Chat for tuned adapters

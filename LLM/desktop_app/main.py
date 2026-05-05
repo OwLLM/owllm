@@ -3095,7 +3095,7 @@ class MainWindow(QMainWindow):
         # other reveal-toggle (Advanced).
         self.download_btn = QPushButton("📦 Models")
         self.train_btn = QPushButton("🎯 Train")
-        self.test_btn = QPushButton("🧪 Test")
+        self.test_btn = QPushButton("💬 Chat")
         self.logs_btn = QPushButton("📊 Logs")
         self.server_btn = QPushButton("🖧 Server")
         self.mcp_btn = QPushButton("🧩 MCP")
@@ -3199,7 +3199,7 @@ class MainWindow(QMainWindow):
             "home": "🏠 Home",
             "models": "Models",
             "train": "Train",
-            "test": "Test",
+            "test": "Chat",
             "logs": "Logs",
             "server": "Server",
             "mcp": "MCP",
@@ -3229,7 +3229,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(_timed_build("Home", self._build_home_tab), "🏠 Home")
         tabs.addTab(_timed_build("Models", self._build_models_tab), "Models")
         tabs.addTab(_timed_build("Train", self._build_train_tab), "Train")
-        tabs.addTab(_timed_build("Test", self._build_test_tab), "Test")
+        tabs.addTab(_timed_build("Test", self._build_test_tab), "Chat")
         tabs.addTab(_timed_build("Logs", self._build_logs_tab), "Logs")
         self.server_page = _timed_build("Server", lambda: ServerPage(self))
         tabs.addTab(self.server_page, "Server")

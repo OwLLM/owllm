@@ -26,6 +26,12 @@ class FrameAssets:
 BADGE_W = 300
 BADGE_H = int(BADGE_W * 0.65)
 
+# Extra room the overlay reserves on every side beyond ``shift_out``
+# so the corner crests can be drawn shifted outward without being
+# clipped by the overlay rectangle. Must match the ``corner_outset``
+# value in paintEvent below.
+CORNER_OUTSET = 22
+
 
 class HybridFrameWindow(QWidget):
     """
@@ -182,8 +188,8 @@ class HybridFrameWindow(QWidget):
                 extra_top = badge_h // 2
                 shift_out = self.border_thickness // 2  # Shift outside by half thickness
                 new_pos = self.parent_window.pos()
-                new_pos.setY(new_pos.y() - extra_top - shift_out)
-                new_pos.setX(new_pos.x() - shift_out)
+                new_pos.setY(new_pos.y() - extra_top - shift_out - CORNER_OUTSET)
+                new_pos.setX(new_pos.x() - shift_out - CORNER_OUTSET)
                 self.move(new_pos)
                 return False
             elif event.type() == QEvent.Resize:
@@ -195,8 +201,8 @@ class HybridFrameWindow(QWidget):
                 extra_right = 60
                 shift_out = self.border_thickness // 2  # Shift outside by half thickness
                 new_size = self.parent_window.size()
-                new_size.setHeight(new_size.height() + extra_top + 2 * shift_out)
-                new_size.setWidth(new_size.width() + extra_right + 2 * shift_out)
+                new_size.setHeight(new_size.height() + extra_top + 2 * shift_out + 2 * CORNER_OUTSET)
+                new_size.setWidth(new_size.width() + extra_right + 2 * shift_out + 2 * CORNER_OUTSET)
                 self.resize(new_size)
                 return False
             elif event.type() == QEvent.Close:
@@ -232,11 +238,13 @@ class HybridFrameWindow(QWidget):
         extra_right = 75  # Extended width for corner_tr (150px wide, centered at edge = 75px extension)
         shift_out = t // 2  # Shift frame outside by half the border thickness
 
-        # Parent window position within frame window coordinate system
-        parent_x = shift_out  # Parent window starts shift_out from left
-        parent_y = extra_top + shift_out  # Parent window starts extra_top + shift_out from top
-        parent_w = w - extra_right - 2 * shift_out  # Parent window width (frame width minus extensions)
-        parent_h = h - extra_top - 2 * shift_out  # Parent window height (frame height minus extensions)
+        # Parent window position within frame window coordinate system —
+        # account for the CORNER_OUTSET pad we added in eventFilter so
+        # the painted frame still maps onto the actual parent rect.
+        parent_x = shift_out + CORNER_OUTSET
+        parent_y = extra_top + shift_out + CORNER_OUTSET
+        parent_w = w - extra_right - 2 * shift_out - 2 * CORNER_OUTSET
+        parent_h = h - extra_top - 2 * shift_out - 2 * CORNER_OUTSET
 
         # Frame rectangles: outer extends beyond parent by shift_out on each side
         # Top extends up, right extends right, bottom extends down, left extends left
@@ -285,8 +293,15 @@ class HybridFrameWindow(QWidget):
         self._draw_corner_brackets(p, outer, length=36, inset=14)
         self._draw_edge_ticks(p, outer, tick_len=18, inset=10)
 
-        # Corner images - all 150 pixels width, positioned within frame boundaries
-        corner_width = 150
+        # Corner images. ``corner_width`` is the visible draw size for
+        # each corner. ``corner_outset`` shifts every corner image
+        # outward (negative x/y for TL, positive for BR, etc.) so the
+        # visible owl artwork overlaps the parent-window edge again
+        # the way the legacy WebP corners did. The CornersNew/ PNGs
+        # have more transparent padding inside their canvas, so
+        # without this outset the owl appears recessed.
+        corner_width = 180
+        corner_outset = CORNER_OUTSET
         
         # Helper function to calculate corner height from aspect ratio
         def get_corner_height(pixmap):
@@ -300,28 +315,28 @@ class HybridFrameWindow(QWidget):
         if self.corner_br_bg and not self.corner_br_bg.isNull():
             corner_br_bg_height = get_corner_height(self.corner_br_bg)
             self._draw_corner_pix(p, self.corner_br_bg, QRect(
-                outer.right() - corner_width + 1,  # Frame right edge minus width
-                outer.bottom() - corner_br_bg_height + 1,  # Frame bottom edge minus height
+                outer.right() - corner_width + 1 + corner_outset,
+                outer.bottom() - corner_br_bg_height + 1 + corner_outset,
                 corner_width,
                 corner_br_bg_height
             ))
-        
+
         # Corner BR owl image - draw AFTER background, so it appears on top
         if self.corner_br and not self.corner_br.isNull():
             corner_br_height = get_corner_height(self.corner_br)
             self._draw_corner_pix(p, self.corner_br, QRect(
-                outer.right() - corner_width + 1,  # Frame right edge minus width
-                outer.bottom() - corner_br_height + 1,  # Frame bottom edge minus height
+                outer.right() - corner_width + 1 + corner_outset,
+                outer.bottom() - corner_br_height + 1 + corner_outset,
                 corner_width,
                 corner_br_height
             ))
-        
+
         # Other corner images (TL, TR, BL) - draw LAST so they appear on top
         # Corner TL - at top-left corner of outer frame, contained within frame
         corner_tl_height = get_corner_height(self.corner_tl)
         corner_tl_rect = QRect(
-            outer.left(),  # Frame left edge
-            outer.top(),   # Frame top edge
+            outer.left() - corner_outset,
+            outer.top() - corner_outset,
             corner_width,
             corner_tl_height
         )
@@ -335,8 +350,8 @@ class HybridFrameWindow(QWidget):
         # Corner TR - at top-right corner of outer frame, contained within frame
         corner_tr_height = get_corner_height(self.corner_tr)
         corner_tr_rect = QRect(
-            outer.right() - corner_width + 1,  # Frame right edge minus width
-            outer.top(),   # Frame top edge
+            outer.right() - corner_width + 1 + corner_outset,
+            outer.top() - corner_outset,
             corner_width,
             corner_tr_height
         )
@@ -347,8 +362,8 @@ class HybridFrameWindow(QWidget):
         # Corner BL - at bottom-left corner of outer frame, contained within frame
         corner_bl_height = get_corner_height(self.corner_bl)
         self._draw_corner_pix(p, self.corner_bl, QRect(
-            outer.left(),  # Frame left edge
-            outer.bottom() - corner_bl_height + 1,  # Frame bottom edge minus height
+            outer.left() - corner_outset,
+            outer.bottom() - corner_bl_height + 1 + corner_outset,
             corner_width,
             corner_bl_height
         ))

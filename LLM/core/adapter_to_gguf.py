@@ -391,6 +391,94 @@ def _manual_sharded_save(model, output_dir: Path, log) -> None:
         log(f"WARN: generation_config.save_pretrained failed: {exc}")
 
 
+def _patch_transformers_weight_renaming(log) -> None:
+    """Monkey-patch the broken WeightRenaming.__post_init__ in transformers.
+
+    The bug: ``re.compile("|".join(branches))`` is called with branches
+    built from ``source_pattern.replace(".*.", r"\\..*\\.")`` — but
+    raw source_patterns contain regex specials (parens, dots, square
+    brackets, ``+``, etc.) that aren't escaped. On Gemma 4 those
+    patterns include strings the regex parser can't compile, raising
+    ``TypeError: 'bool' object does not support the context manager
+    protocol`` deep inside re/_parser.py.
+
+    Both load (convert_and_load_state_dict_in_model) and save
+    (revert_weight_conversion) paths instantiate WeightRenaming, so
+    both sides crash. Patching one place fixes both.
+
+    The patched __post_init__:
+
+    * Treats ``.*.`` as the only wildcard token; everything else is
+      regex-escaped so source patterns are matched literally as the
+      original code intended.
+    * Falls back to an always-no-match regex if the resulting pattern
+      still won't compile. ``rename_source_key`` then returns the
+      input key unchanged — which is the correct behaviour when no
+      renaming applies, and lets the rest of the load/save path
+      proceed with the model's own state-dict naming.
+
+    Idempotent: if already patched, returns silently.
+    """
+    try:
+        from transformers import core_model_loading as cml
+    except Exception as exc:
+        log(f"WARN: transformers core_model_loading not importable: {exc}")
+        return
+    if getattr(cml, "_owllm_weight_renaming_patched", False):
+        return
+
+    import re as _re
+    WR = getattr(cml, "WeightRenaming", None)
+    if WR is None:
+        log("WARN: WeightRenaming class not found — skipping patch")
+        return
+
+    _NO_MATCH = _re.compile(r"(?!x)x")  # never matches anything
+
+    def _safe_post_init(self):
+        # Recompute source_patterns the way the original does (via
+        # process_source_pattern in a loop). The original mutates
+        # self.source_patterns; we let that happen and only replace
+        # the compile step.
+        try:
+            unprocess_targets = getattr(self, "target_patterns", None) or []
+            for i, pattern in enumerate(self.source_patterns):
+                if i < len(unprocess_targets):
+                    pattern = cml.process_source_pattern(pattern, unprocess_targets[i])
+                self.source_patterns[i] = pattern
+        except Exception:
+            # If pre-processing itself fails, fall through with whatever
+            # source_patterns we already have.
+            pass
+
+        branches = []
+        for i, source_pattern in enumerate(self.source_patterns):
+            try:
+                group_name = f"g{i}"
+                # Split on the literal `.*.` wildcard token, escape
+                # every other character, then re-join with the regex
+                # equivalent. Mirrors the original intent without
+                # leaving regex specials un-escaped.
+                parts = str(source_pattern).split(".*.")
+                escaped = [_re.escape(p) for p in parts]
+                pattern = r"\..*\.".join(escaped)
+                branches.append(f"(?P<{group_name}>{pattern})")
+            except Exception:
+                continue
+
+        try:
+            self.compiled_sources = _re.compile("|".join(branches)) if branches else _NO_MATCH
+        except Exception:
+            # Last-resort fallback: a no-match regex makes
+            # rename_source_key a no-op, which is the correct
+            # behaviour when no renaming applies.
+            self.compiled_sources = _NO_MATCH
+
+    WR.__post_init__ = _safe_post_init
+    cml._owllm_weight_renaming_patched = True
+    log("patched transformers.WeightRenaming.__post_init__ (regex-safe)")
+
+
 def _merge_adapter(cfg: ConvertConfig, merged_dir: Path) -> None:
     """Load base + adapter, merge LoRA in, save plain HF format.
 
@@ -412,6 +500,10 @@ def _merge_adapter(cfg: ConvertConfig, merged_dir: Path) -> None:
     from peft import PeftModel
 
     log = cfg.log_callback or (lambda m: print(f"[merge] {m}"))
+
+    # Patch BEFORE loading anything — the bug fires during from_pretrained.
+    _patch_transformers_weight_renaming(log)
+
     log(f"loading base from {cfg.base_model} (CPU-only, fp16)")
     base = AutoModelForCausalLM.from_pretrained(
         cfg.base_model,

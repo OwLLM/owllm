@@ -9006,31 +9006,11 @@ class MainWindow(QMainWindow):
             "rgba(102, 126, 234, 0.35)", "rgba(244, 67, 54, 0.45)"
         )
 
-        use_btn = QPushButton("🚀 Use in Chat", card)
-        use_btn.setMinimumHeight(35)
-        use_btn.setStyleSheet(button_style)
-        use_btn.setToolTip(
-            "Make this adapter the active model for chat. "
-            "Loads the base model + applies the LoRA weights."
-        )
-        use_btn.clicked.connect(
-            lambda _checked=False, n=name, p=path: self._use_tuned_model(n, p)
-        )
-        button_layout.addWidget(use_btn)
-
-        if not onboarded:
-            onboard_btn = QPushButton("🔧 Onboard", card)
-            onboard_btn.setMinimumHeight(35)
-            onboard_btn.setStyleSheet(button_style)
-            onboard_btn.setToolTip(
-                "Register this adapter with its base model and prepare the "
-                "runtime so it can be used for inference."
-            )
-            onboard_btn.clicked.connect(
-                lambda _checked=False, n=name, p=path: self._onboard_tuned_model(n, p)
-            )
-            button_layout.addWidget(onboard_btn)
-
+        # 'Use in Chat' and 'Onboard' buttons removed at the user's
+        # request — adapters share their base model's onboarding, so
+        # there's nothing to onboard separately, and selecting the
+        # adapter from the Test / agent dropdowns is the canonical way
+        # to use it in chat.
         open_btn = QPushButton("📂 Open", card)
         open_btn.setMinimumHeight(35)
         open_btn.setStyleSheet(button_style)

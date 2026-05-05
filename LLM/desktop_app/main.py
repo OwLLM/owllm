@@ -9078,13 +9078,32 @@ class MainWindow(QMainWindow):
         header_layout = QHBoxLayout()
         header_layout.setSpacing(15)
 
+        # Adapter icon — mirror the family icon of its base model so a
+        # Gemma-tuned adapter shows 💎, a Llama-tuned one shows 🦙, etc.
+        # Falls back to the generic 🎯 only when the base name matches
+        # no known family.
         icon_label = QLabel(card)
         icon_label.setFixedSize(50, 50)
         icon_label.setAlignment(Qt.AlignCenter)
-        icon_label.setText("🎯")
+        family_lookup = (base_model or name or "").lower()
+        if "llama" in family_lookup:
+            icon_text, icon_bg = "🦙", "#4CAF50"
+        elif "qwen" in family_lookup:
+            icon_text, icon_bg = "💮", "#9C27B0"
+        elif "mistral" in family_lookup or "mixtral" in family_lookup:
+            icon_text, icon_bg = "🌬️", "#FF9800"
+        elif "gemma" in family_lookup or "google" in family_lookup:
+            icon_text, icon_bg = "💎", "#4285F4"
+        elif "phi" in family_lookup or "microsoft" in family_lookup:
+            icon_text, icon_bg = "Φ", "#00A4EF"
+        elif "deepseek" in family_lookup:
+            icon_text, icon_bg = "🐳", "#0000FF"
+        else:
+            icon_text, icon_bg = "🎯", "#c08aff"
+        icon_label.setText(icon_text)
         icon_label.setStyleSheet(
             "QLabel {"
-            "background-color: #c08aff;"
+            f"background-color: {icon_bg};"
             "color: white;"
             "border-radius: 25px;"
             "font-size: 24px;"

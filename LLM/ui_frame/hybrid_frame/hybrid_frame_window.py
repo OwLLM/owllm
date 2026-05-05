@@ -31,13 +31,12 @@ BADGE_H = int(BADGE_W * 0.65)
 # clipped by the overlay rectangle. Must match the ``corner_outset``
 # value in paintEvent below.
 #
-# Set back to 0 — the previous 22 px shifted the overlay off-screen
-# on top + left when the parent window was near the desktop's top-left,
-# which clipped TL/BL and made only TR look right. The new corner
-# PNGs in icons/Page_icons/CornersNew/ now sit at the original
-# parent-edge coords; if the artwork looks recessed, edit the PNG
-# canvas (less transparent padding) instead of overshooting in code.
-CORNER_OUTSET = 0
+# Modest 10 px — enough that the corner crests visibly overlap the
+# parent-window edge again, but small enough that the overlay's
+# left/top edge stays on-screen even when the parent window is
+# pushed against the desktop top-left (which is what made 22 px
+# clip TL/BL last time).
+CORNER_OUTSET = 10
 
 
 class HybridFrameWindow(QWidget):
@@ -306,7 +305,7 @@ class HybridFrameWindow(QWidget):
         # the way the legacy WebP corners did. The CornersNew/ PNGs
         # have more transparent padding inside their canvas, so
         # without this outset the owl appears recessed.
-        corner_width = 150
+        corner_width = 160
         corner_outset = CORNER_OUTSET
         
         # Helper function to calculate corner height from aspect ratio

@@ -1737,34 +1737,28 @@ class AgentsPage(QWidget):
             goal = self._bus.get_goal(latest)
             from core.agents.message import GoalStatus
             if goal is not None and goal.status == GoalStatus.RUNNING:
-                self._current_goal_id = latest
-                self.cancel_btn.setEnabled(True)
-                self.run_btn.setEnabled(False)
-                self.goal_input.setEnabled(False)
-                self.status_label.setText("Resuming live run…")
-                # Re-attach the elapsed timer to the goal's original start
-                # time so the user sees a continuous counter.
-                from datetime import datetime, timezone
-                import time as _time
+                # Goal is RUNNING in the bus, but a goal can only stay
+                # RUNNING while a runner thread inside *this* process is
+                # driving it — Team.run_goal blocks until the orchestrator
+                # replies and only then calls bus.end_goal. If we're seeing
+                # a RUNNING goal during page init, it's a stale row left
+                # behind by a previous app instance that crashed / was
+                # killed mid-run. Reap it so the user isn't locked out
+                # of the input by a phantom "Resuming live run…" state.
+                logger.warning(
+                    "agents page: reaping stale RUNNING goal %s "
+                    "(no runner thread is alive; previous app instance "
+                    "likely died mid-run)",
+                    latest,
+                )
                 try:
-                    started = datetime.strptime(
-                        goal.created_at.rstrip("Z"),
-                        "%Y-%m-%dT%H:%M:%S.%f"
-                        if "." in goal.created_at
-                        else "%Y-%m-%dT%H:%M:%S",
-                    ).replace(tzinfo=timezone.utc).timestamp()
-                    # Convert wall-clock epoch to monotonic-equivalent so
-                    # _tick_elapsed's math still works.
-                    self._run_started_at = _time.monotonic() - (
-                        _time.time() - started
+                    self._bus.end_goal(
+                        latest,
+                        GoalStatus.FAILED,
+                        summary="reaped on page init (stale RUNNING)",
                     )
-                    if not hasattr(self, "_elapsed_timer"):
-                        self._elapsed_timer = QTimer(self)
-                        self._elapsed_timer.setInterval(1000)
-                        self._elapsed_timer.timeout.connect(self._tick_elapsed)
-                    self._elapsed_timer.start()
                 except Exception:
-                    logger.exception("could not restore elapsed timer")
+                    logger.exception("could not reap stale RUNNING goal %s", latest)
         except Exception:
             logger.exception("could not check goal status during replay")
 
@@ -1975,6 +1969,20 @@ class AgentsPage(QWidget):
             pass
         try:
             self._loading_poll_timer.stop()
+        except Exception:
+            pass
+        # Belt-and-suspenders: nothing about workspace reveal should leave
+        # the input or run button disabled. If a stale RUNNING goal got
+        # reaped during _replay_messages, or a previous lifecycle disabled
+        # the input and never re-enabled it, this is the place to put the
+        # surface back into a sane idle state for the user.
+        try:
+            self._set_idle()
+        except Exception:
+            logger.exception("could not reset to idle on workspace reveal")
+        try:
+            self.goal_input.setEnabled(True)
+            self.goal_input.setFocus()
         except Exception:
             pass
 

@@ -124,65 +124,42 @@ class LocalBackend:
     # -- inference -------------------------------------------------------
 
     def generate(self, messages: List[Mapping[str, Any]], model_key: str) -> str:
-        # Step 1: look up the model's base_model_path (the actual weights file
-        # on disk). The user-facing model_id (e.g. "unsloth/gemma-4-E4B-it-GGUF")
-        # is what the picker shows, but the server manager keys running
-        # servers by a config_id like "Gemma 4 E4b Instruct GGUF__gguf__...".
-        # The reliable bridge between the two is base_model_path: if a
-        # server is already running with the same weights file, we can use
-        # it directly without any id matching.
+        # Single code path: route agents through the SAME run_inference()
+        # that Test Chat uses. The previous "fast path" (look up running
+        # URL, call directly) had its own bespoke id/path matching and
+        # was the source of every cascading agents-vs-test-chat bug.
+        # run_inference handles ensure_server_running, the shared-server
+        # adapter toggle (via shares_server_with), filtering, retries,
+        # and onboarding-status gating in one place.
         base_model_path = self._lookup_base_model_path(model_key)
         has_images = self._has_image_attachments(messages)
 
-        # Decide whether this model_key represents an adapter sharing the
-        # base server. The base entry sends adapter=None (LoRA OFF); an
-        # adapter entry sends adapter=<model_key> (LoRA ON). Without this,
-        # picking the BASE in agents would inherit whatever toggle state
-        # Test Chat last left the server in.
-        adapter_param = self._adapter_for_request(model_key)
-
-        # Step 2: prefer a server that's already running with these weights.
-        # Skips the entire ensure_server_running dance, which would otherwise
-        # try to start a *duplicate* server because the ids don't match.
-        running_url = self._url_for_running_server(base_model_path)
-        if running_url:
-            logger.info("local backend: reusing running server at %s", running_url)
-            if has_images:
-                return self._call_server_chat_completions(running_url, messages, model_key, adapter=adapter_param)
-            return self._call_server(running_url, messages, adapter=adapter_param)
-
-        # Step 3: nothing running yet — auto-start. We pass runtime_base_model
-        # so the manager knows exactly which weights to load, avoiding the
-        # id mismatch.
-        try:
+        # Vision still needs the OpenAI chat-completions path because the
+        # flat prompt drops image attachments. ensure_server_running first
+        # so we have a live URL to talk to, then call the vision endpoint.
+        if has_images:
             from core.llm_server_manager import get_global_server_manager
             manager = get_global_server_manager()
-            if manager is not None:
-                logger.info(
-                    "local backend: starting server for %s (base=%s)",
-                    model_key, base_model_path,
+            if manager is None:
+                raise RuntimeError("Server manager unavailable — cannot start local server.")
+            server_url = manager.ensure_server_running(
+                model_key,
+                log_callback=lambda line: logger.info("[server warmup] %s", line),
+                runtime_base_model=base_model_path or None,
+            )
+            if not server_url:
+                raise RuntimeError(
+                    f"Failed to start local server for {model_key!r}. "
+                    f"Open the Server tab and check onboarding status."
                 )
-                server_url = manager.ensure_server_running(
-                    model_key,
-                    log_callback=lambda line: logger.info("[server warmup] %s", line),
-                    runtime_base_model=base_model_path or None,
-                )
-                if server_url:
-                    if has_images:
-                        return self._call_server_chat_completions(server_url, messages, model_key, adapter=adapter_param)
-                    return self._call_server(server_url, messages, adapter=adapter_param)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Could not start local server for {model_key!r}: {exc}\n"
-                f"Open the Server tab and confirm the model's onboarding "
-                f"status is READY. If it isn't, run repair from the Models tab."
-            ) from exc
+            adapter_param = self._adapter_for_request(model_key)
+            return self._call_server_chat_completions(
+                server_url, messages, model_key, adapter=adapter_param
+            )
 
-        # Step 4: fall back to the legacy run_inference path (which has its
-        # own ensure_server_running but uses cfg.model_id alone for lookup).
-        # Image attachments can't survive the flat-prompt route so we drop
-        # to text-only here; the textual stub from attachments_to_prompt_block
-        # at least tells the model something is there.
+        # Text-only path: identical to Test Chat. run_inference internally
+        # decides the adapter toggle from llm_backends.yaml's
+        # shares_server_with field.
         from core.inference import InferenceConfig, run_inference
         cfg = InferenceConfig(
             prompt=render_messages_as_prompt(messages),
@@ -191,7 +168,15 @@ class LocalBackend:
             max_new_tokens=1024,
             temperature=0.4,
         )
-        return run_inference(cfg)
+        try:
+            return run_inference(cfg)
+        except Exception as exc:
+            # Surface a useful error to the agent transcript instead of
+            # leaving the user staring at a silent UI.
+            logger.exception("local backend: run_inference failed for %s", model_key)
+            raise RuntimeError(
+                f"[{model_key}] {exc}"
+            ) from exc
 
     # -- vision: chat-completions path ----------------------------------
 

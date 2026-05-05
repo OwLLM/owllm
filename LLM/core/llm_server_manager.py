@@ -976,27 +976,43 @@ class LLMServerManager:
         # work on a single 4090 without doubling VRAM.
         try:
             cfg_models = (self.config or {}).get("models", {}) or {}
+            # If the entry is missing from our cached view, the YAML
+            # may have been updated by another process (e.g. the
+            # adapter-to-GGUF subprocess wired a new tuned__*__lora_gguf
+            # entry). Reload from disk before giving up. Without this
+            # the manager falls through to synthesized-id paths and runs
+            # a runtime probe against the wrong file.
+            if model_id not in cfg_models:
+                try:
+                    self._load_config()
+                    cfg_models = (self.config or {}).get("models", {}) or {}
+                    log(f"[adapter-share] reloaded YAML — {len(cfg_models)} model(s) in config")
+                except Exception as _exc:
+                    log(f"[adapter-share] YAML reload failed: {_exc!r}")
             this_entry = cfg_models.get(model_id) or {}
             base_for_share = this_entry.get("shares_server_with")
             if base_for_share and base_for_share != model_id and base_for_share in cfg_models:
                 base_entry = cfg_models[base_for_share]
                 base_port = int(base_entry.get("port", 0) or 0)
-                this_port = int(this_entry.get("port", 0) or 0)
-                if base_port and base_port == this_port:
-                    log(
-                        f"[adapter-share] '{model_id}' shares server with "
-                        f"base '{base_for_share}' on port {base_port}. "
-                        "Starting (or reusing) the base server instead of "
-                        "spawning a duplicate."
-                    )
-                    # Delegate to the base. If a server is already running
-                    # there, the existing health-check logic short-circuits.
-                    return self._start_server(
-                        base_for_share,
-                        log_callback=log_callback,
-                        server_id=server_id,
-                        runtime_base_model=runtime_base_model,
-                    )
+                # Delegate unconditionally when shares_server_with is
+                # set — the base entry is the authoritative process for
+                # this fine-tune. We previously gated on matching ports
+                # which produced false negatives whenever the YAML
+                # entries had drifted (e.g. base port re-allocated by
+                # another launch). Same-process delegation is safer
+                # than spawning a second server with the same weights.
+                log(
+                    f"[adapter-share] '{model_id}' shares server with "
+                    f"base '{base_for_share}' on port {base_port or '?'}. "
+                    "Starting (or reusing) the base server instead of "
+                    "spawning a duplicate."
+                )
+                return self._start_server(
+                    base_for_share,
+                    log_callback=log_callback,
+                    server_id=server_id,
+                    runtime_base_model=runtime_base_model,
+                )
         except Exception as exc:
             log(f"[adapter-share] same-server check failed: {exc!r} — falling through to normal launch")
 

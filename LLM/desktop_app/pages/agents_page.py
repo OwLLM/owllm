@@ -33,6 +33,7 @@ from typing import Dict, Optional
 from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -49,6 +50,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QTabWidget,
@@ -159,6 +161,193 @@ class _GoalLineEdit(QLineEdit):
             event.acceptProposedAction()
             return
         super().dropEvent(event)
+
+class _AgentVoiceRow(QWidget):
+    """One agent's voice controls — enable, voice picker, rate, preview.
+
+    Edits are persisted to the agent's :class:`AgentDefinition` via
+    ``save_custom`` the moment the user changes them, mirroring how the
+    model picker auto-saves on selection_changed. Built-ins are shown
+    read-only with a "duplicate first" tooltip — the studio is where the
+    user clones a built-in to edit it. Preview always works regardless,
+    so the user can audition voices without committing.
+    """
+
+    def __init__(
+        self,
+        agent_name: str,
+        *,
+        on_install_voice,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._agent_name = agent_name
+        self._on_install_voice = on_install_voice
+        self._loading = False  # guards setter callbacks during populate
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self.enabled_cb = QCheckBox("🔊")
+        self.enabled_cb.setToolTip("Speak this agent's replies aloud")
+        self.enabled_cb.setStyleSheet(
+            "QCheckBox { color:#dadcdf; font-size:13px; spacing:4px; } "
+            "QCheckBox::indicator { width:16px; height:16px; }"
+        )
+        self.enabled_cb.toggled.connect(self._on_changed)
+        layout.addWidget(self.enabled_cb)
+
+        self.combo = QComboBox()
+        self.combo.setMinimumHeight(28)
+        self.combo.setToolTip("Voice")
+        self.combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.combo.setStyleSheet(
+            "QComboBox { background:rgba(0,0,0,0.28); color:#e6e8eb; "
+            "border:none; border-radius:6px; padding:0 8px; font-size:12px; } "
+            "QComboBox::drop-down { border:none; }"
+        )
+        self.combo.addItem("Auto voice", "")
+        self.combo.currentIndexChanged.connect(self._on_changed)
+        layout.addWidget(self.combo, 1)
+
+        self.rate_spin = QSpinBox()
+        self.rate_spin.setRange(0, 400)
+        self.rate_spin.setSingleStep(10)
+        self.rate_spin.setSuffix(" wpm")
+        self.rate_spin.setSpecialValueText("Default")
+        self.rate_spin.setMinimumHeight(28)
+        self.rate_spin.setFixedWidth(110)
+        self.rate_spin.setToolTip("Speaking rate (words per minute)")
+        self.rate_spin.setStyleSheet(
+            "QSpinBox { background:rgba(0,0,0,0.28); color:#e6e8eb; "
+            "border:none; border-radius:6px; padding:0 8px; font-size:12px; }"
+        )
+        self.rate_spin.valueChanged.connect(self._on_changed)
+        layout.addWidget(self.rate_spin)
+
+        self.preview_btn = QPushButton("▶")
+        self.preview_btn.setFixedSize(28, 28)
+        self.preview_btn.setToolTip("Preview this voice")
+        self.preview_btn.setStyleSheet(
+            "QPushButton { background:rgba(255,255,255,0.06); color:#dadcdf; "
+            "border:none; border-radius:6px; font-size:12px; } "
+            "QPushButton:hover { background:rgba(255,255,255,0.12); }"
+        )
+        self.preview_btn.clicked.connect(self._on_preview)
+        layout.addWidget(self.preview_btn)
+
+        self._populate_voices_and_load()
+
+    # ------------------------------------------------------------------
+    # Population
+    # ------------------------------------------------------------------
+
+    def _populate_voices_and_load(self) -> None:
+        """Fill the voice combo from the live TTS service, then load the
+        current agent's persisted voice config. Falls back to a disabled
+        row with an "install voice" prompt when the service is missing."""
+        self._loading = True
+        try:
+            tts = self._tts()
+            if tts is None or not tts.available:
+                self.combo.setEnabled(False)
+                self.rate_spin.setEnabled(False)
+                self.enabled_cb.setEnabled(False)
+                self.preview_btn.setEnabled(False)
+                self.combo.setItemText(0, "Voice unavailable — click ▶ to install")
+                # Preview becomes the install entry-point.
+                self.preview_btn.setEnabled(True)
+                self.preview_btn.setToolTip("Install the voice engine")
+                self.preview_btn.setText("⤓")
+                return
+            for v in tts.voices():
+                label = v.name or v.id.split("\\")[-1]
+                self.combo.addItem(label, v.id)
+            # Apply persisted state.
+            from core.agents.agent_definitions import get_definition
+            d = get_definition(self._agent_name)
+            if d is not None:
+                self.enabled_cb.setChecked(bool(d.voice_enabled))
+                self.rate_spin.setValue(int(d.voice_rate or 0))
+                idx = 0
+                for i in range(self.combo.count()):
+                    if self.combo.itemData(i) == d.voice_id:
+                        idx = i
+                        break
+                self.combo.setCurrentIndex(idx)
+                # Built-ins: lock the persisted controls (preview still
+                # works), with a hint about duplicating to edit.
+                if d.built_in:
+                    self.enabled_cb.setEnabled(False)
+                    self.combo.setEnabled(False)
+                    self.rate_spin.setEnabled(False)
+                    tip = "Built-in agent — duplicate it in Studio to customise"
+                    self.enabled_cb.setToolTip(tip)
+                    self.combo.setToolTip(tip)
+                    self.rate_spin.setToolTip(tip)
+        finally:
+            self._loading = False
+
+    @staticmethod
+    def _tts():
+        try:
+            from core.voice import get_tts_service
+            return get_tts_service()
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def _on_changed(self, *_args) -> None:
+        if self._loading:
+            return
+        try:
+            from core.agents.agent_definitions import get_definition, save_custom
+        except Exception:
+            return
+        d = get_definition(self._agent_name)
+        if d is None or d.built_in:
+            return
+        try:
+            d.voice_enabled = self.enabled_cb.isChecked()
+            d.voice_rate = int(self.rate_spin.value())
+            d.voice_id = str(self.combo.currentData() or "")
+            save_custom(d)
+        except Exception:
+            logger.exception("could not persist voice change for %s", self._agent_name)
+
+    # ------------------------------------------------------------------
+    # Preview
+    # ------------------------------------------------------------------
+
+    def _on_preview(self) -> None:
+        tts = self._tts()
+        if tts is None or not tts.available:
+            # The service ran but the engine isn't installed — call back
+            # to the page so it can offer to install pyttsx3.
+            try:
+                self._on_install_voice()
+            except Exception:
+                logger.exception("install-voice handler crashed")
+            return
+        voice_id = str(self.combo.currentData() or "")
+        if not voice_id:
+            voice_id = tts.stable_voice_for(self._agent_name)
+        rate = int(self.rate_spin.value())
+        sample = (
+            f"Hi, I'm {self._agent_name.capitalize()}. "
+            "This is what my voice sounds like."
+        )
+        was = tts.enabled
+        try:
+            tts.set_enabled(True)
+            tts.speak(sample, voice_id=voice_id, rate=rate, agent=self._agent_name)
+        finally:
+            tts.set_enabled(was)
+
 
 _STATUS_COLOR = {
     _STATUS_IDLE: "#4caf50",
@@ -907,6 +1096,67 @@ class AgentsPage(QWidget):
         # Icon flip is the visual cue: speaker-with-waves on, muted on off.
         self.voice_btn.setText("🔊" if enabled else "🔈")
 
+    def _build_voice_rows(self, team_defs: list) -> None:
+        """One :class:`_AgentVoiceRow` per agent, parented under
+        ``voice_host`` and hidden by default. The selection handler shows
+        whichever row matches the current agent."""
+        for d in team_defs:
+            row = _AgentVoiceRow(
+                d.name,
+                on_install_voice=self._install_voice_engine,
+                parent=self.voice_host,
+            )
+            row.setVisible(False)
+            self._voice_slot_layout.addWidget(row)
+            self._voice_rows[d.name] = row
+
+    def _install_voice_engine(self) -> None:
+        """Prompt the user, then pip-install pyttsx3 into the running
+        interpreter. Same install pattern the agent runtime manager uses
+        for the Anthropic / OpenAI SDKs."""
+        if QMessageBox.question(
+            self,
+            "Install voice",
+            "Voice output needs the pyttsx3 package (one-time install,"
+            " ~50 KB, no model download).\n\nInstall it now?",
+        ) != QMessageBox.Yes:
+            return
+        import subprocess, sys
+        try:
+            creationflags = 0x08000000 if sys.platform == "win32" else 0
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "pyttsx3>=2.90,<3.0"],
+                capture_output=True, text=True, check=False,
+                creationflags=creationflags,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Install voice", f"pip install failed: {exc}")
+            return
+        if proc.returncode != 0:
+            QMessageBox.warning(
+                self, "Install voice",
+                f"pip install failed (exit {proc.returncode}).\n\n"
+                f"{(proc.stderr or '').strip()[:600]}",
+            )
+            return
+        # Reset the cached service so the next get_tts_service() picks
+        # up the freshly-importable backend.
+        try:
+            import core.voice.tts_service as svc_mod
+            svc_mod._service = None  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        # Rebuild the voice rows so the combos populate from the live engine.
+        try:
+            self._render_team()
+        except Exception:
+            logger.exception("could not re-render team after voice install")
+        self._init_voice_service()
+        QMessageBox.information(
+            self, "Install voice",
+            "Voice engine installed. Click ▶ Preview on an agent to test.",
+        )
+
     # ------------------------------------------------------------------
     # Attachment chip strip — appears below the goal row when files
     # are attached, hidden when the queue is empty.
@@ -1058,6 +1308,7 @@ class AgentsPage(QWidget):
         # they live in a row inside the right pane (compact strip).
         self._cards = {}  # legacy attribute kept for `_render_team` clear
         self._model_picker_buttons: Dict[str, ModelPickerButton] = {}
+        self._voice_rows: Dict[str, "_AgentVoiceRow"] = {}
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(8)
@@ -1195,6 +1446,29 @@ class AgentsPage(QWidget):
         ph.addWidget(self._picker_slot, 1)
         rv.addWidget(self.picker_host)
         self.picker_host.setVisible(False)
+
+        # Voice host — sits directly under the model picker so the two
+        # "how this agent runs + sounds" controls are stacked together.
+        # One row of widgets per agent, only the selected agent's row is
+        # shown (same swap pattern as the model picker above).
+        self.voice_host = QFrame()
+        self.voice_host.setStyleSheet("background:transparent;")
+        vh = QHBoxLayout(self.voice_host)
+        vh.setContentsMargins(0, 0, 0, 4)
+        vh.setSpacing(8)
+        self._voice_label = QLabel("Voice")
+        self._voice_label.setStyleSheet(
+            "color:#aaa; font-size:11px; background:transparent; "
+            "letter-spacing:0.6px; text-transform:uppercase;"
+        )
+        vh.addWidget(self._voice_label)
+        self._voice_slot = QWidget()
+        self._voice_slot_layout = QHBoxLayout(self._voice_slot)
+        self._voice_slot_layout.setContentsMargins(0, 0, 0, 0)
+        self._voice_slot_layout.setSpacing(0)
+        vh.addWidget(self._voice_slot, 1)
+        rv.addWidget(self.voice_host)
+        self.voice_host.setVisible(False)
 
         # Two-tab log surface: Reply (filtered, default) + Thought (raw
         # chain-of-thought stripped from model output). Selecting an agent
@@ -1550,9 +1824,14 @@ class AgentsPage(QWidget):
             btn.setParent(None)
             btn.deleteLater()
         self._model_picker_buttons.clear()
+        for row in list(self._voice_rows.values()):
+            row.setParent(None)
+            row.deleteLater()
+        self._voice_rows.clear()
         self.log_view.clear()
         self.log_header.setText("Click an agent on the canvas to view its log.")
         self.picker_host.setVisible(False)
+        self.voice_host.setVisible(False)
 
         if self._active_project is None or not self._active_project.team:
             self.canvas.load_graph(AgentGraph(), orchestrator=None)
@@ -1743,6 +2022,11 @@ class AgentsPage(QWidget):
             picker.setVisible(False)
             self._picker_slot_layout.addWidget(picker)
             self._model_picker_buttons[d.name] = picker
+
+        # Voice control rows — one row per agent, only the selected
+        # agent's row is shown. Same pool-and-swap pattern as the model
+        # picker above. Skipped if voice is unavailable on this system.
+        self._build_voice_rows(team_defs)
 
         # Push entries to pickers + restore each agent's saved or default model.
         self._refresh_pickers()
@@ -2689,6 +2973,10 @@ class AgentsPage(QWidget):
         for name, picker in self._model_picker_buttons.items():
             picker.setVisible(name == agent_name)
         self.picker_host.setVisible(agent_name in self._model_picker_buttons)
+        # Same swap for the voice row right below it.
+        for name, row in self._voice_rows.items():
+            row.setVisible(name == agent_name)
+        self.voice_host.setVisible(agent_name in self._voice_rows)
         self._render_log_for_agent(agent_name)
         # Default to the Reply tab whenever a new agent is selected.
         if hasattr(self, "_log_tabs"):

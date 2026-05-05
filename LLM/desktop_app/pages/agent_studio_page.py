@@ -766,6 +766,41 @@ class _EditorPanel(QFrame):
     # Voice helpers
     # ------------------------------------------------------------------
 
+    def _offer_install_voice(self) -> bool:
+        """Offer a one-click pip install of pyttsx3. Returns True on
+        success so the caller can retry the action that triggered this."""
+        if QMessageBox.question(
+            self,
+            "Install voice",
+            "Voice output needs the pyttsx3 package (one-time install,"
+            " ~50 KB, no model download).\n\nInstall it now?",
+        ) != QMessageBox.Yes:
+            return False
+        import subprocess, sys
+        try:
+            creationflags = 0x08000000 if sys.platform == "win32" else 0
+            proc = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "pyttsx3>=2.90,<3.0"],
+                capture_output=True, text=True, check=False,
+                creationflags=creationflags,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "Install voice", f"pip install failed: {exc}")
+            return False
+        if proc.returncode != 0:
+            QMessageBox.warning(
+                self, "Install voice",
+                f"pip install failed (exit {proc.returncode}).\n\n"
+                f"{(proc.stderr or '').strip()[:600]}",
+            )
+            return False
+        try:
+            import core.voice.tts_service as svc_mod
+            svc_mod._service = None  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+        return True
+
     def _populate_voice_combo_if_needed(self) -> None:
         """Lazy-load the voice list. The combo is built with one "Auto"
         item; on first edit we ask the running TTS service what voices
@@ -795,7 +830,8 @@ class _EditorPanel(QFrame):
         """Speak a sample line in the currently selected voice. Reaches
         for the running service rather than spinning up a fresh engine
         so the preview goes through the same audio path the live agent
-        replies will."""
+        replies will. If the engine isn't installed yet, offer a one-click
+        pip install instead of bailing out with a dead-end alert."""
         try:
             from core.voice import get_tts_service
             svc = get_tts_service()
@@ -803,10 +839,18 @@ class _EditorPanel(QFrame):
             QMessageBox.information(self, "Voice", f"Voice unavailable: {exc}")
             return
         if not svc.available:
-            QMessageBox.information(
-                self, "Voice", "No TTS engine available on this system."
-            )
-            return
+            if self._offer_install_voice():
+                # Re-fetch the service after install — module cache reset.
+                try:
+                    from core.voice import get_tts_service as _rebuild
+                    svc = _rebuild()
+                except Exception:  # noqa: BLE001
+                    return
+                if not svc.available:
+                    return
+                self._populate_voice_combo_if_needed()
+            else:
+                return
         voice_id = str(self.voice_combo.currentData() or "")
         if not voice_id and self._current is not None:
             # "Auto" — show the user what the auto-assignment lands on.

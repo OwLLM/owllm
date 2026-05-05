@@ -110,27 +110,60 @@ class ConvertConfig:
 # ---------------------------------------------------------------------------
 
 
+def _max_tensor_bytes(model) -> int:
+    """Largest single tensor in the model's state dict, in bytes.
+
+    Decides which save tiers are viable BEFORE we attempt them. A tier
+    that we know will hard-crash (safetensors on Windows for any
+    tensor >2 GB) is worse than skipping it — a hard crash is a
+    process-level abort the parent can't catch with try/except.
+    """
+    biggest = 0
+    try:
+        sd = model.state_dict()
+    except Exception:
+        return 0
+    for v in sd.values():
+        try:
+            sz = int(v.numel()) * int(v.element_size())
+            if sz > biggest:
+                biggest = sz
+        except Exception:
+            continue
+    return biggest
+
+
+# Windows safetensors cap: ctypes signed int32 overflow → hard process
+# crash (STATUS_BREAKPOINT 0x80000003) once any single tensor exceeds
+# this. Be conservative — slightly under 2 GiB.
+_SAFETENSORS_WINDOWS_TENSOR_CAP = 2_100_000_000
+
+
 def _save_merged_with_fallback(model, output_dir: Path, log) -> None:
-    """Persist a PEFT-merged model with a 3-tier strategy.
+    """Persist a PEFT-merged model with a tiered, crash-aware strategy.
 
-    Tier 1: ``save_pretrained(safe_serialization=True)`` — the official
-    HF path. Works for most architectures; for Gemma 4 multimodal it
-    hits two bugs (revert_weight_conversion's regex compile, and the
-    safetensors >2 GB ctypes overflow), but for Llama / Mistral / Qwen
-    it's the right thing to call.
+    The naive "try tier 1, except, try tier 2" approach doesn't work
+    on Windows because tier 1 (safetensors) HARD-crashes the process
+    via STATUS_BREAKPOINT when any tensor exceeds the ctypes int32
+    cap — the except clause never runs.
 
-    Tier 2: ``save_pretrained(safe_serialization=False)`` — pickle .bin
-    bypass for the safetensors size cap. Still goes through the
-    weight-conversion regex path, so it doesn't help Gemma 4 — but
-    catches cases where ONLY the safetensors size limit is the issue.
+    So we pre-flight: measure the largest single tensor, and SKIP any
+    tier we know will crash. Each surviving tier is then run with
+    try/except to catch the bugs that DO raise cleanly (e.g. the
+    revert_weight_conversion regex TypeError on PEFT-merged Gemma 4).
 
-    Tier 3: manual sharded save — writes config.json + shards directly,
-    bypassing the entire transformers save pipeline. Output format is
-    canonical HF sharded checkpoint, byte-identical to what
-    save_pretrained(safe_serialization=False) WOULD produce.
+    Tiers, in order:
 
-    Each tier is tried in turn; on failure we wipe partial output and
-    move on. The function only returns when one tier succeeded.
+      1. ``save_pretrained(safe_serialization=True)`` — official HF
+         safetensors path. Skipped automatically when any tensor
+         >~2 GiB (Windows ctypes cap).
+      2. ``save_pretrained(safe_serialization=False)`` — pickle .bin
+         path. No size cap. Still goes through transformers'
+         weight-conversion logic, so it can hit the regex TypeError
+         on Gemma 4 + PEFT.
+      3. Manual sharded save — bypasses transformers entirely.
+         Output is canonical HF sharded-pickle format, byte-identical
+         to what tier 2 produces on success.
     """
     last_error: Optional[BaseException] = None
 
@@ -144,19 +177,32 @@ def _save_merged_with_fallback(model, output_dir: Path, log) -> None:
             except Exception:
                 pass
 
-    # --- Tier 1: official safetensors save ----------------------------
-    try:
-        log("save tier 1: save_pretrained(safe_serialization=True)")
-        model.save_pretrained(
-            str(output_dir),
-            max_shard_size="2GB",
-            safe_serialization=True,
+    # Pre-flight: find the largest single tensor.
+    biggest = _max_tensor_bytes(model)
+    log(f"largest single tensor: {biggest / 1e9:.2f} GB")
+
+    skip_tier_1 = biggest > _SAFETENSORS_WINDOWS_TENSOR_CAP
+    if skip_tier_1:
+        log(
+            f"skipping tier 1 (safetensors): largest tensor exceeds Windows "
+            f"ctypes int32 cap ({_SAFETENSORS_WINDOWS_TENSOR_CAP / 1e9:.2f} GB) — "
+            "save_pretrained would hard-crash the subprocess."
         )
-        return
-    except BaseException as exc:
-        last_error = exc
-        log(f"  tier 1 failed: {type(exc).__name__}: {exc}")
-        _wipe_partial()
+
+    # --- Tier 1: official safetensors save ----------------------------
+    if not skip_tier_1:
+        try:
+            log("save tier 1: save_pretrained(safe_serialization=True)")
+            model.save_pretrained(
+                str(output_dir),
+                max_shard_size="2GB",
+                safe_serialization=True,
+            )
+            return
+        except BaseException as exc:
+            last_error = exc
+            log(f"  tier 1 failed: {type(exc).__name__}: {exc}")
+            _wipe_partial()
 
     # --- Tier 2: official pickle save ---------------------------------
     try:

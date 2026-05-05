@@ -828,29 +828,125 @@ def convert_adapter_to_gguf(cfg: ConvertConfig) -> Path:
 # ---------------------------------------------------------------------------
 
 
+def _find_gguf_base_for(hf_base_path: str) -> Optional[Path]:
+    """Find a GGUF base on disk that pairs with the given HF base.
+
+    The LoRA was trained against an HF transformers model (e.g.
+    ``google/gemma-4-E4B-it``), but llama-server can only serve GGUF.
+    Look for an already-onboarded GGUF dir under ``models/`` whose
+    base_model_path resolves to the same family — typically the
+    unsloth GGUF variant of the same model.
+
+    Strategy:
+      1. Read every onboarded GGUF row from the state store.
+      2. Pick the one whose model_id family stem matches the HF
+         base's family stem (case-insensitive, ignoring vendor
+         prefixes and the trailing -GGUF marker).
+      3. Resolve to the active_variant .gguf file inside its dir.
+
+    Returns None if no match — caller must error out cleanly.
+    """
+    try:
+        from core.state_store import get_state_store
+    except Exception:
+        return None
+
+    def _family_key(s: str) -> str:
+        s = (s or "").lower()
+        s = s.replace("\\", "/").rstrip("/")
+        # Strip vendor prefix and -gguf suffix.
+        s = s.split("/")[-1]
+        s = s.replace("__", "/").split("/")[-1]
+        for suffix in ("-gguf", "_gguf"):
+            if s.endswith(suffix):
+                s = s[: -len(suffix)]
+        return s
+
+    target_family = _family_key(hf_base_path)
+    if not target_family:
+        return None
+
+    store = get_state_store()
+    try:
+        rows = store.list_onboarding_by_status("READY") or []
+    except Exception:
+        rows = []
+
+    for row in rows:
+        rid = (row.get("model_id") or "").lower()
+        bp = row.get("base_model_path") or ""
+        # Skip the LoRA-GGUF rows themselves and adapter rows.
+        if "__lora_gguf" in rid or row.get("adapter_dir"):
+            continue
+        # Backend must be a GGUF runtime.
+        if str(row.get("backend") or "").lower() not in ("gguf", "llama_cpp_server"):
+            continue
+        if _family_key(rid) != target_family and _family_key(bp) != target_family:
+            continue
+        # Found a candidate base — resolve to the active variant.
+        bp_path = Path(bp)
+        if bp_path.is_file() and bp_path.suffix.lower() == ".gguf":
+            return bp_path
+        if bp_path.is_dir():
+            marker = bp_path / ".selected_weights.json"
+            try:
+                if marker.exists():
+                    data = json.loads(marker.read_text(encoding="utf-8"))
+                    av = (data or {}).get("active_variant")
+                    if av:
+                        cand = bp_path / av
+                        if cand.exists():
+                            return cand
+            except Exception:
+                pass
+            # No marker — pick the first non-mmproj .gguf.
+            for g in sorted(bp_path.glob("*.gguf")):
+                if g.name.lower().startswith(("mmproj", "mm-proj", "projector")):
+                    continue
+                return g
+    return None
+
+
 def register_in_onboarding(
     gguf_path: Path,
     adapter_name: str,
     base_model_path: str,
     quant: str,
 ) -> str:
-    """Insert / update an onboarding row so the LoRA-GGUF appears in dropdowns.
+    """Register the LoRA-GGUF in onboarding so it appears in dropdowns.
 
-    Stored as an *adapter row* (adapter_dir set, base_model_path
-    points at the LoRA's source base). The picker / server-manager
-    side reads adapter_dir as "this row needs the base server with
-    --lora <adapter_dir>/<file.gguf> applied at runtime".
+    Critical detail: ``base_model_path`` on the registered row must
+    point at the actual BASE GGUF FILE on disk — NOT at the HF
+    transformers dir the LoRA was trained against. The runtime probe
+    runs against base_model_path and a transformers dir would fail
+    the GGUF backend probe (and a LoRA file alone is unloadable
+    because it has no embeddings / vocab / architecture metadata).
+
+    We look up an already-onboarded GGUF base of the same family. If
+    none is found, raise — the user has to onboard a matching base
+    GGUF before the LoRA can be served.
 
     Returns the model_id under which the row was registered.
     """
     from core.state_store import get_state_store
     model_id = f"tuned__{adapter_name}__lora_gguf"
+
+    gguf_base = _find_gguf_base_for(base_model_path)
+    if gguf_base is None:
+        raise RuntimeError(
+            f"No GGUF base model found on disk that pairs with "
+            f"{base_model_path!r}. Onboard a matching GGUF (e.g. "
+            f"unsloth/...-GGUF for the same family) before the LoRA "
+            f"can be served. The .gguf adapter file is on disk at "
+            f"{gguf_path} -- only the registration step is failing."
+        )
+
     store = get_state_store()
     try:
         store.upsert_onboarding(
             model_id=model_id,
             status="READY",
-            base_model_path=str(base_model_path),
+            base_model_path=str(gguf_base),
             adapter_dir=str(gguf_path.parent),
             backend="gguf",
             accelerator="cuda",

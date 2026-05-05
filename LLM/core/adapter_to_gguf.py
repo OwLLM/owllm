@@ -99,6 +99,103 @@ class ConvertConfig:
 # ---------------------------------------------------------------------------
 
 
+def _manual_sharded_save(model, output_dir: Path, log) -> None:
+    """Write a HF-compatible state-dict to disk WITHOUT save_pretrained.
+
+    transformers.modeling_utils.save_pretrained on this version raises
+    `TypeError: 'int' object is not subscriptable` deep inside
+    revert_weight_conversion when handed a PEFT-merged Gemma 4. The
+    regex it compiles for weight renaming gets ints in places that
+    expect strings.
+
+    We sidestep all of that and write what convert_hf_to_gguf.py
+    actually reads: ``config.json``, optional ``generation_config.json``,
+    a sharded ``pytorch_model.bin`` index, and shards on disk.
+    """
+    import json as _json
+    import torch as _torch
+
+    state_dict = model.state_dict()
+    # Force every tensor onto CPU + contiguous memory before pickling —
+    # avoids "tensor is not contiguous" errors and guarantees torch.save
+    # can serialise without copying through unexpected memory layouts.
+    cleaned: dict = {}
+    for k, v in state_dict.items():
+        if hasattr(v, "detach"):
+            t = v.detach()
+            if hasattr(t, "cpu"):
+                t = t.cpu()
+            if hasattr(t, "contiguous"):
+                t = t.contiguous()
+            cleaned[k] = t
+        else:
+            cleaned[k] = v
+
+    # Bucket tensors into ~2 GB shards. We never need more than that for
+    # a single pickle file; smaller shards keep peak RAM during torch.save
+    # bounded too.
+    target_bytes = 2_000_000_000
+    shards: list = []
+    current: dict = {}
+    current_size = 0
+    for name, tensor in cleaned.items():
+        try:
+            sz = int(tensor.numel()) * int(tensor.element_size())
+        except Exception:
+            sz = 0
+        if current and current_size + sz > target_bytes:
+            shards.append(current)
+            current = {}
+            current_size = 0
+        current[name] = tensor
+        current_size += sz
+    if current:
+        shards.append(current)
+
+    total_shards = max(1, len(shards))
+    weight_map: dict = {}
+    total_size = 0
+    log(f"writing {total_shards} shard(s) to {output_dir}")
+    for idx, shard in enumerate(shards, start=1):
+        shard_name = f"pytorch_model-{idx:05d}-of-{total_shards:05d}.bin"
+        shard_path = output_dir / shard_name
+        for k, v in shard.items():
+            weight_map[k] = shard_name
+            try:
+                total_size += int(v.numel()) * int(v.element_size())
+            except Exception:
+                pass
+        log(f"  shard {idx}/{total_shards}: {len(shard)} tensors → {shard_name}")
+        _torch.save(shard, str(shard_path))
+
+    # Write the standard HF index file so loaders (including
+    # convert_hf_to_gguf.py) can find each tensor.
+    index = {
+        "metadata": {"total_size": int(total_size)},
+        "weight_map": weight_map,
+    }
+    (output_dir / "pytorch_model.bin.index.json").write_text(
+        _json.dumps(index, indent=2),
+        encoding="utf-8",
+    )
+
+    # Save the model config — without this the converter doesn't know
+    # the architecture. config.save_pretrained is a thin file-write and
+    # doesn't go through the broken revert_weight_conversion path.
+    try:
+        model.config.save_pretrained(str(output_dir))
+        log("saved config.json")
+    except Exception as exc:
+        log(f"WARN: config.save_pretrained failed: {exc}")
+    try:
+        gc = getattr(model, "generation_config", None)
+        if gc is not None:
+            gc.save_pretrained(str(output_dir))
+            log("saved generation_config.json")
+    except Exception as exc:
+        log(f"WARN: generation_config.save_pretrained failed: {exc}")
+
+
 def _merge_adapter(cfg: ConvertConfig, merged_dir: Path) -> None:
     """Load base + adapter, merge LoRA in, save plain HF format.
 
@@ -173,21 +270,17 @@ def _merge_adapter(cfg: ConvertConfig, merged_dir: Path) -> None:
 
     log(f"saving merged HF model to {merged_dir}")
     merged_dir.mkdir(parents=True, exist_ok=True)
-    # safe_serialization=False on purpose: safetensors uses a ctypes
-    # array size argument that's a signed 32-bit int, so any single
-    # tensor >2 GB on Windows overflows with
-    # "ValueError: Array length must be >= 0, not -2952790016".
-    # Gemma 4's embedding tensor (~256k vocab × 4608 hidden × 2 bytes
-    # ≈ 2.4 GB) trips this on every merge attempt.
-    # The pickle .bin path has no such cap, and llama.cpp's
-    # convert_hf_to_gguf.py reads both formats interchangeably, so the
-    # downstream pipeline doesn't care which we wrote.
-    # Smaller shard target so any single .bin stays manageable.
-    merged.save_pretrained(
-        str(merged_dir),
-        max_shard_size="2GB",
-        safe_serialization=False,
-    )
+    # save_pretrained itself is unsafe on Gemma 4 + PEFT-merged models
+    # in current transformers: revert_weight_conversion blindly compiles
+    # a regex from "|".join(branches) where branches contains ints,
+    # raising "TypeError: 'int' object is not subscriptable". Bypass
+    # save_pretrained entirely and write the shards manually. The
+    # downstream llama.cpp converter only needs:
+    #   - config.json
+    #   - generation_config.json (optional)
+    #   - tokenizer files
+    #   - state-dict shards + pytorch_model.bin.index.json
+    _manual_sharded_save(merged, merged_dir, log)
 
     # Tokenizer: prefer the adapter's saved tokenizer (training may
     # have added kbeauty-specific special tokens); fall back to the

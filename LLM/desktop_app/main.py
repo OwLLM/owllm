@@ -9023,6 +9023,63 @@ class MainWindow(QMainWindow):
                 if ggufs:
                     lora_gguf_dirs.append(d)
 
+        # Auto-heal: every LoRA-GGUF dir on disk should have a matching
+        # onboarding row + YAML entry. Repair / re-onboard cycles can
+        # reap rows out from under the user, which makes the artefact
+        # vanish from chat dropdowns even though the .gguf is right
+        # there. Re-register any missing row so the dropdown stays in
+        # sync with the disk reality after every Tuned-tab refresh.
+        try:
+            from core.state_store import get_state_store as _gs
+            store_ = _gs()
+            for d in lora_gguf_dirs:
+                stem = d.name[: -len("__gguf")] if d.name.endswith("__gguf") else d.name
+                expected_id = f"tuned__{stem}__lora_gguf"
+                row = None
+                try:
+                    row = store_.get_onboarding(expected_id)
+                except Exception:
+                    row = None
+                if row and (row.get("status") or "").upper() == "READY":
+                    continue  # row is healthy; nothing to do
+                # Recover the source HF base from the sibling PEFT
+                # adapter's adapter_config.json — that's the only field
+                # we need to call register_in_onboarding.
+                try:
+                    peft_cfg = self.root / "fine_tuned" / stem / "adapter_config.json"
+                    if not peft_cfg.exists():
+                        continue
+                    import json as _json
+                    cfg_data = _json.loads(peft_cfg.read_text(encoding="utf-8"))
+                    hf_base_raw = (
+                        cfg_data.get("base_model_name_or_path")
+                        or cfg_data.get("base_model")
+                        or ""
+                    )
+                    if not hf_base_raw:
+                        continue
+                    hf_base = hf_base_raw
+                    if not Path(hf_base).exists():
+                        slug = hf_base.replace("/", "__")
+                        cand = self.root / "models" / slug
+                        if cand.exists():
+                            hf_base = str(cand)
+                    gguf_files = sorted(d.glob("*-lora-*.gguf"))
+                    if not gguf_files:
+                        continue
+                    from core.adapter_to_gguf import register_in_onboarding
+                    register_in_onboarding(gguf_files[0], stem, hf_base, "Q5_K_M")
+                    self._log_to_app_log(
+                        f"[lora-gguf-heal] re-registered {expected_id} "
+                        f"from disk after missing onboarding row"
+                    )
+                except Exception as _exc:
+                    self._log_to_app_log(
+                        f"[lora-gguf-heal] could not re-register {expected_id}: {_exc!r}"
+                    )
+        except Exception:
+            logger.exception("LoRA-GGUF auto-heal pass failed")
+
         if not adapters and not lora_gguf_dirs:
             empty = QLabel(
                 "No fine-tuned models yet.\n\n"

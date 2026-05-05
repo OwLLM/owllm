@@ -866,44 +866,87 @@ def _find_gguf_base_for(hf_base_path: str) -> Optional[Path]:
     if not target_family:
         return None
 
+    def _resolve_active_gguf(dir_path: Path) -> Optional[Path]:
+        """Pick the active .gguf inside a model dir (marker > first non-mmproj)."""
+        if not dir_path.is_dir():
+            return None
+        marker = dir_path / ".selected_weights.json"
+        try:
+            if marker.exists():
+                data = json.loads(marker.read_text(encoding="utf-8"))
+                av = (data or {}).get("active_variant")
+                if av:
+                    cand = dir_path / av
+                    if cand.exists():
+                        return cand
+        except Exception:
+            pass
+        for g in sorted(dir_path.glob("*.gguf")):
+            if g.name.lower().startswith(("mmproj", "mm-proj", "projector")):
+                continue
+            return g
+        return None
+
+    # Pass 1: onboarded GGUF rows of the same family. This is the fast
+    # path when the registry is healthy.
     store = get_state_store()
     try:
         rows = store.list_onboarding_by_status("READY") or []
     except Exception:
         rows = []
-
     for row in rows:
         rid = (row.get("model_id") or "").lower()
         bp = row.get("base_model_path") or ""
-        # Skip the LoRA-GGUF rows themselves and adapter rows.
         if "__lora_gguf" in rid or row.get("adapter_dir"):
             continue
-        # Backend must be a GGUF runtime.
         if str(row.get("backend") or "").lower() not in ("gguf", "llama_cpp_server"):
             continue
         if _family_key(rid) != target_family and _family_key(bp) != target_family:
             continue
-        # Found a candidate base — resolve to the active variant.
         bp_path = Path(bp)
         if bp_path.is_file() and bp_path.suffix.lower() == ".gguf":
             return bp_path
-        if bp_path.is_dir():
-            marker = bp_path / ".selected_weights.json"
-            try:
-                if marker.exists():
-                    data = json.loads(marker.read_text(encoding="utf-8"))
-                    av = (data or {}).get("active_variant")
-                    if av:
-                        cand = bp_path / av
-                        if cand.exists():
-                            return cand
-            except Exception:
-                pass
-            # No marker — pick the first non-mmproj .gguf.
-            for g in sorted(bp_path.glob("*.gguf")):
-                if g.name.lower().startswith(("mmproj", "mm-proj", "projector")):
+        resolved = _resolve_active_gguf(bp_path)
+        if resolved:
+            return resolved
+
+    # Pass 2: disk-only fallback. The onboarding row may have been
+    # reaped by a Repair / re-onboard cycle even though the directory
+    # still exists on disk. Scan ``models/`` directly for any folder
+    # whose family matches and contains a GGUF — that's a usable base
+    # regardless of registry state. Forces re-onboarding back into the
+    # store as a side effect so the next call hits the fast path.
+    try:
+        models_root = Path(__file__).resolve().parents[1] / "models"
+        if models_root.is_dir():
+            for d in sorted(models_root.iterdir()):
+                if not d.is_dir():
                     continue
-                return g
+                if _family_key(d.name) != target_family:
+                    continue
+                resolved = _resolve_active_gguf(d)
+                if resolved is None:
+                    continue
+                # Best-effort heal of the missing row so this doesn't
+                # repeat: write the GGUF base back into onboarding.
+                try:
+                    store.upsert_onboarding(
+                        model_id=d.name.replace("__", "/"),
+                        status="READY",
+                        base_model_path=str(d),
+                        adapter_dir=None,
+                        backend="llama_cpp_server",
+                        accelerator="cuda",
+                        config_key="gguf",
+                        env_key="llamacpp-cu121-stable",
+                    )
+                except Exception:
+                    logger.exception(
+                        "could not heal onboarding row for %s", d.name
+                    )
+                return resolved
+    except Exception:
+        logger.exception("disk-fallback for GGUF base lookup failed")
     return None
 
 

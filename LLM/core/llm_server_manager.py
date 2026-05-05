@@ -966,6 +966,40 @@ class LLMServerManager:
                 log_callback(msg)
             logger.info(msg)
 
+        # Same-server adapter detection. If this model_id is just a
+        # LoRA adapter sharing its base's process (``shares_server_with``
+        # field set in the YAML by ``_wire_adapter_into_yaml``), DO NOT
+        # start a second server. Start the BASE instead — it loads
+        # base + adapter together — and let the per-request ``adapter``
+        # field on chat calls toggle the LoRA layer at inference time.
+        # This is what lets Test page Model A=base + Model B=adapter
+        # work on a single 4090 without doubling VRAM.
+        try:
+            cfg_models = (self.config or {}).get("models", {}) or {}
+            this_entry = cfg_models.get(model_id) or {}
+            base_for_share = this_entry.get("shares_server_with")
+            if base_for_share and base_for_share != model_id and base_for_share in cfg_models:
+                base_entry = cfg_models[base_for_share]
+                base_port = int(base_entry.get("port", 0) or 0)
+                this_port = int(this_entry.get("port", 0) or 0)
+                if base_port and base_port == this_port:
+                    log(
+                        f"[adapter-share] '{model_id}' shares server with "
+                        f"base '{base_for_share}' on port {base_port}. "
+                        "Starting (or reusing) the base server instead of "
+                        "spawning a duplicate."
+                    )
+                    # Delegate to the base. If a server is already running
+                    # there, the existing health-check logic short-circuits.
+                    return self._start_server(
+                        base_for_share,
+                        log_callback=log_callback,
+                        server_id=server_id,
+                        runtime_base_model=runtime_base_model,
+                    )
+        except Exception as exc:
+            log(f"[adapter-share] same-server check failed: {exc!r} — falling through to normal launch")
+
         from core.inference import get_app_root
         from core.gpu_config import get_chosen_gpu_index
         app_root = get_app_root()
@@ -2003,6 +2037,26 @@ class LLMServerManager:
             env["LLM_RUNTIME_MODEL_NAME"] = server_id
             if use_bundled_backend:
                 env["LLM_RUNTIME_BACKEND"] = "llama_cpp_server"
+            # If the onboarding row is a tuned__*__lora_gguf entry (a LoRA
+            # adapter converted to GGUF format), wire the adapter file
+            # through to the bundled proxy so llama-server starts with
+            # `--lora <path>`. The proxy reads LORA_GGUF from env. Resolves
+            # the .gguf file from adapter_dir; if multiple .gguf files
+            # exist, picks the first matching `*-lora-*.gguf`, falling
+            # back to any .gguf in the dir.
+            if use_bundled_backend and is_gguf_model and adapter_dir:
+                try:
+                    from pathlib import Path as _Path
+                    adir = _Path(str(adapter_dir))
+                    if adir.is_dir():
+                        lora_candidates = sorted(adir.glob("*-lora-*.gguf"))
+                        if not lora_candidates:
+                            lora_candidates = sorted(adir.glob("*.gguf"))
+                        if lora_candidates:
+                            env["LORA_GGUF"] = str(lora_candidates[0])
+                            log(f"[lora] applying LoRA-GGUF: {lora_candidates[0]}")
+                except Exception as _ex:
+                    log(f"[lora] failed to resolve adapter GGUF: {_ex}")
             # Force server process to use the selected GPU (or highest-VRAM default)
             if chosen_gpu is not None:
                 env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"

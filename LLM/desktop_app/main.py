@@ -5327,23 +5327,26 @@ class MainWindow(QMainWindow):
             pass
 
     def _resize_tuned_cards(self) -> None:
-        """Pin every tuned-model card to ~25 % of the window's width.
+        """Pin every tuned-model card to 1/3 of the window's width and
+        a 5:4 (width:height) aspect ratio.
 
-        The 4-column QGridLayout already lays them out evenly, but
-        without an explicit min/max width the cards can degenerate to
-        whatever the contents demand. Computing per-card width from
-        the current window keeps the page consistent on resize.
+        With three columns and an explicit width AND height, all the
+        cards on a row line up flush regardless of their content. A
+        floor of 280 × 224 px keeps the layout sensible on tiny
+        windows; the QGridLayout column count below is set to 3 in
+        ``_render_tuned_models``.
         """
         cards = getattr(self, "_tuned_cards", None)
         if not cards:
             return
-        # 25 % of the window minus a small allowance for grid spacing
-        # and outer margins so 4 cards fit comfortably on one row.
-        target = max(220, int(self.width() * 0.25) - 32)
+        target_w = max(280, int(self.width() / 3) - 32)
+        target_h = max(224, int(target_w * 4 / 5))
         for card in cards:
             try:
-                card.setMinimumWidth(target)
-                card.setMaximumWidth(target)
+                card.setMinimumWidth(target_w)
+                card.setMaximumWidth(target_w)
+                card.setMinimumHeight(target_h)
+                card.setMaximumHeight(target_h)
             except Exception:
                 continue
 
@@ -8978,10 +8981,11 @@ class MainWindow(QMainWindow):
             self.tuned_layout.addWidget(empty, 0, 0, 1, 2)
             return
 
-        # Four columns so each card lands at ~25 % of the window width
-        # (matches the user's spec). Below, _resize_tuned_cards keeps
-        # min/max widths in step with the actual window size on resize.
-        max_cols = 4
+        # Three columns so each card lands at 1/3 of the window width.
+        # _resize_tuned_cards keeps the min/max width AND height in
+        # step with the actual window size, applying the 5:4 aspect
+        # ratio (W:H = 5:4 → H = 0.8 × W).
+        max_cols = 3
         row = col = 0
         self._tuned_cards: List[QFrame] = []
         for name in adapters:

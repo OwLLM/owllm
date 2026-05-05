@@ -9074,6 +9074,30 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(20, 15, 20, 15)
         layout.setSpacing(8)
 
+        # Full-card-width adapter name. Pulled out of the header row
+        # so it isn't competing with the 50 px icon AND the status
+        # badge for ~130 px of inner width — adapter ids like
+        # ``260504_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_2104`` need
+        # the full card width to wrap into. Zero-width spaces after
+        # every ``_`` / ``-`` / ``.`` give the QLabel wrapper break
+        # opportunities QLabel-default (word-only) wrap can't see.
+        wrappable_name = name
+        for _ch in ("_", "-", "."):
+            wrappable_name = wrappable_name.replace(_ch, _ch + "​")
+        name_label = QLabel(wrappable_name, card)
+        name_font = QFont()
+        name_font.setPointSize(14)
+        name_font.setBold(True)
+        name_label.setFont(name_font)
+        name_label.setWordWrap(True)
+        name_label.setTextFormat(Qt.PlainText)
+        name_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        name_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.MinimumExpanding)
+        name_label.setMinimumWidth(0)
+        name_label.setToolTip(name)
+        layout.addWidget(name_label)
+
         # --- header: 50×50 icon + title column --------------------------
         header_layout = QHBoxLayout()
         header_layout.setSpacing(15)
@@ -9116,31 +9140,9 @@ class MainWindow(QMainWindow):
         title_stats_layout = QVBoxLayout()
         title_stats_layout.setSpacing(2)
 
-        # Top row: name + status badge.
-        top_row = QHBoxLayout()
-        top_row.setSpacing(10)
-        # Show the FULL adapter name even when long. QLabel only wraps
-        # at word boundaries, and adapter ids like
-        # ``260504_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_2104`` have
-        # none — so Qt happily clips them. Inject zero-width spaces
-        # after every ``_`` / ``-`` / ``.`` to give the wrapper break
-        # opportunities everywhere; the user still sees the original
-        # text since ZWSP is invisible.
-        wrappable_name = name
-        for _ch in ("_", "-", "."):
-            wrappable_name = wrappable_name.replace(_ch, _ch + "​")
-        name_label = QLabel(wrappable_name, card)
-        name_font = QFont()
-        name_font.setPointSize(14)
-        name_font.setBold(True)
-        name_label.setFont(name_font)
-        name_label.setWordWrap(True)
-        name_label.setTextFormat(Qt.PlainText)
-        name_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        name_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
-        name_label.setToolTip(name)
-        top_row.addWidget(name_label, 1)
-
+        # Status badge gets its own line — the FULL card width is
+        # reserved for the name underneath so long adapter ids actually
+        # show in full.
         if onboarded:
             badge_text = "✅ ONBOARDED"
             badge_bg = "#4CAF50"
@@ -9159,9 +9161,11 @@ class MainWindow(QMainWindow):
             }}
         """)
         status_badge.setMaximumWidth(180)
-        top_row.addWidget(status_badge)
-        top_row.addStretch(1)
-        title_stats_layout.addLayout(top_row)
+        badge_row = QHBoxLayout()
+        badge_row.setSpacing(10)
+        badge_row.addWidget(status_badge)
+        badge_row.addStretch(1)
+        title_stats_layout.addLayout(badge_row)
 
         # Stats row: base model + modified date (mirrors the
         # downloads/likes row on the other cards).

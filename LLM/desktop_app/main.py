@@ -5310,6 +5310,41 @@ class MainWindow(QMainWindow):
             self._size_arena_right_tabs()
         except Exception:
             pass
+        # Re-mask the window so the corners stay rounded across every
+        # resize. setMask is cheap and beats fighting with frameless
+        # window painting / WS_EX_LAYERED on Windows.
+        try:
+            self._apply_rounded_corners()
+        except Exception:
+            pass
+
+    _WINDOW_CORNER_RADIUS = 14
+
+    def _apply_rounded_corners(self) -> None:
+        """Clip the main window's outer rectangle to a rounded rect.
+
+        Uses ``QWidget.setMask`` with a ``QRegion`` built from a
+        rounded ``QPainterPath`` — the only Qt-portable way to round
+        the corners of a frameless window without dragging in
+        translucency tricks (which we already avoid because the
+        decorative HybridFrame overlay paints around the window).
+        """
+        if self.width() <= 0 or self.height() <= 0:
+            return
+        from PySide6.QtGui import QPainterPath, QRegion
+        from PySide6.QtCore import QRectF
+        path = QPainterPath()
+        r = float(self._WINDOW_CORNER_RADIUS)
+        path.addRoundedRect(
+            QRectF(0.0, 0.0, float(self.width()), float(self.height())),
+            r, r,
+        )
+        # Build a region from the polygon — QRegion accepts a polygon
+        # directly, and QPainterPath.toFillPolygon() gives us the
+        # rounded outline as a list of points Qt can fill.
+        region = QRegion(path.toFillPolygon().toPolygon())
+        if not region.isEmpty():
+            self.setMask(region)
 
     def _size_arena_right_tabs(self) -> None:
         """Pin Arena's Logs / Unfiltered Answer tabs to 10 % of the

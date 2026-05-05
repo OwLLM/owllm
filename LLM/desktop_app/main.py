@@ -7806,6 +7806,25 @@ class MainWindow(QMainWindow):
                     if model_dir.is_dir():
                         raw_dir_name = model_dir.name
 
+                        # Skip LoRA-GGUF directories — they hold ONLY a
+                        # ``*-lora-*.gguf`` adapter file and depend on a
+                        # separate base GGUF served via ``--lora``.
+                        # Treating them as standalone "downloaded models"
+                        # gave the user a "Broken" card because the
+                        # runtime probe tries to load the adapter alone
+                        # (no embeddings / vocab / architecture). The
+                        # adapter is already exposed via its
+                        # ``tuned__*__lora_gguf`` onboarding row.
+                        try:
+                            ggufs = list(model_dir.glob("*.gguf"))
+                            if ggufs and all(
+                                ("-lora-" in g.name.lower() or g.name.lower().startswith("lora-"))
+                                for g in ggufs
+                            ):
+                                continue
+                        except Exception:
+                            pass
+
                         # Try to extract model ID from directory name (e.g., unsloth__model -> unsloth/model)
                         model_id = raw_dir_name.replace("__", "/")
 

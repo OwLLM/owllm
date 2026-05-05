@@ -347,7 +347,7 @@ class HybridFrameWindow(QWidget):
 
         # Top-center badge image - now has space to extend above frame
         if self.top_center and not self.top_center.isNull():
-            badge_w = 90  # Fixed width
+            badge_w = 300  # Fixed width (logical px)
             badge_h = int(badge_w * 0.65)  # Height adapts proportionally
             # Center horizontally relative to parent window
             x = parent_x + (parent_w - badge_w) // 2

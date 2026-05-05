@@ -216,10 +216,12 @@ class HybridFrameWindow(QWidget):
 
         # Top-center badge image
         if self.top_center and not self.top_center.isNull():
-            # Requirement: top-center badge must be 150px wide (logical px),
-            # and should keep the same vertical placement behavior as before.
-            badge_h = int(cs * 0.65)
-            badge_w = 150
+            # Requirement: top-center badge is 300 px wide (logical
+            # px). Vertical placement unchanged — height grows with
+            # the corner-size baseline so the new wider badge keeps
+            # the same proportions as before.
+            badge_w = 300
+            badge_h = int(cs * 1.30)
             x = (w - badge_w) // 2
             y = max(0, t // 2)
             target = QRect(x, y, badge_w, badge_h)

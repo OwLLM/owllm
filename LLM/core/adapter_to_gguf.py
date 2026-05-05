@@ -45,6 +45,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+# Force UTF-8 stdout/stderr so log lines containing non-ASCII characters
+# don't crash the subprocess when the parent (the GUI's QProcess) reads
+# them through whatever the Windows console codepage happens to be —
+# default cp1252 chokes on a literal `->` arrow we happened to print.
+# This must run BEFORE any logging or print, so it sits at module top.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,6 +108,144 @@ class ConvertConfig:
 # ---------------------------------------------------------------------------
 # Step 1 — merge LoRA into base
 # ---------------------------------------------------------------------------
+
+
+def _save_merged_with_fallback(model, output_dir: Path, log) -> None:
+    """Persist a PEFT-merged model with a 3-tier strategy.
+
+    Tier 1: ``save_pretrained(safe_serialization=True)`` — the official
+    HF path. Works for most architectures; for Gemma 4 multimodal it
+    hits two bugs (revert_weight_conversion's regex compile, and the
+    safetensors >2 GB ctypes overflow), but for Llama / Mistral / Qwen
+    it's the right thing to call.
+
+    Tier 2: ``save_pretrained(safe_serialization=False)`` — pickle .bin
+    bypass for the safetensors size cap. Still goes through the
+    weight-conversion regex path, so it doesn't help Gemma 4 — but
+    catches cases where ONLY the safetensors size limit is the issue.
+
+    Tier 3: manual sharded save — writes config.json + shards directly,
+    bypassing the entire transformers save pipeline. Output format is
+    canonical HF sharded checkpoint, byte-identical to what
+    save_pretrained(safe_serialization=False) WOULD produce.
+
+    Each tier is tried in turn; on failure we wipe partial output and
+    move on. The function only returns when one tier succeeded.
+    """
+    last_error: Optional[BaseException] = None
+
+    def _wipe_partial() -> None:
+        for p in output_dir.iterdir():
+            try:
+                if p.is_file():
+                    p.unlink()
+                elif p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
+
+    # --- Tier 1: official safetensors save ----------------------------
+    try:
+        log("save tier 1: save_pretrained(safe_serialization=True)")
+        model.save_pretrained(
+            str(output_dir),
+            max_shard_size="2GB",
+            safe_serialization=True,
+        )
+        return
+    except BaseException as exc:
+        last_error = exc
+        log(f"  tier 1 failed: {type(exc).__name__}: {exc}")
+        _wipe_partial()
+
+    # --- Tier 2: official pickle save ---------------------------------
+    try:
+        log("save tier 2: save_pretrained(safe_serialization=False)")
+        model.save_pretrained(
+            str(output_dir),
+            max_shard_size="2GB",
+            safe_serialization=False,
+        )
+        return
+    except BaseException as exc:
+        last_error = exc
+        log(f"  tier 2 failed: {type(exc).__name__}: {exc}")
+        _wipe_partial()
+
+    # --- Tier 3: manual sharded save (canonical HF format) ------------
+    try:
+        log("save tier 3: manual sharded save (canonical HF format)")
+        _manual_sharded_save(model, output_dir, log)
+        return
+    except BaseException as exc:
+        last_error = exc
+        log(f"  tier 3 failed: {type(exc).__name__}: {exc}")
+        _wipe_partial()
+
+    raise RuntimeError(
+        f"All save tiers failed for the merged model. Last error:\n"
+        f"  {type(last_error).__name__}: {last_error}"
+    )
+
+
+def _verify_merged_dir(output_dir: Path, log) -> None:
+    """Check that the saved merged dir is structurally complete.
+
+    convert_hf_to_gguf.py needs at minimum:
+      - ``config.json`` parseable as JSON with an ``architectures`` field
+      - At least one weight shard:
+          * ``model.safetensors`` (single-file safetensors)
+          * ``model.safetensors.index.json`` + matching shards (sharded
+            safetensors)
+          * ``pytorch_model.bin`` (single-file pickle)
+          * ``pytorch_model.bin.index.json`` + matching shards (sharded
+            pickle)
+
+    Any other state means the converter will fail with a confusing
+    error 30 seconds in — better to fail loud here.
+    """
+    cfg_path = output_dir / "config.json"
+    if not cfg_path.exists():
+        raise RuntimeError(f"saved merged dir is missing config.json: {output_dir}")
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"config.json is not parseable: {exc}") from exc
+    if not cfg.get("architectures"):
+        raise RuntimeError(
+            f"config.json has no `architectures` field — converter will reject this dir"
+        )
+
+    weights_present = (
+        (output_dir / "model.safetensors").exists()
+        or (output_dir / "pytorch_model.bin").exists()
+        or (output_dir / "model.safetensors.index.json").exists()
+        or (output_dir / "pytorch_model.bin.index.json").exists()
+    )
+    if not weights_present:
+        raise RuntimeError(
+            f"saved merged dir has no weight files (.safetensors / .bin / "
+            f"index.json): {output_dir}"
+        )
+
+    # If there's an index, every shard it references must actually exist.
+    for index_name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        idx_path = output_dir / index_name
+        if not idx_path.exists():
+            continue
+        try:
+            idx = json.loads(idx_path.read_text(encoding="utf-8"))
+            referenced = set((idx.get("weight_map") or {}).values())
+        except Exception as exc:
+            raise RuntimeError(f"{index_name} is corrupt: {exc}") from exc
+        missing = [s for s in referenced if not (output_dir / s).exists()]
+        if missing:
+            raise RuntimeError(
+                f"{index_name} references {len(missing)} missing shard(s): "
+                f"{missing[:3]}{'...' if len(missing) > 3 else ''}"
+            )
+
+    log(f"merged dir verified: {output_dir}")
 
 
 def _manual_sharded_save(model, output_dir: Path, log) -> None:
@@ -165,7 +314,7 @@ def _manual_sharded_save(model, output_dir: Path, log) -> None:
                 total_size += int(v.numel()) * int(v.element_size())
             except Exception:
                 pass
-        log(f"  shard {idx}/{total_shards}: {len(shard)} tensors → {shard_name}")
+        log(f"  shard {idx}/{total_shards}: {len(shard)} tensors -> {shard_name}")
         _torch.save(shard, str(shard_path))
 
     # Write the standard HF index file so loaders (including
@@ -265,22 +414,13 @@ def _merge_adapter(cfg: ConvertConfig, merged_dir: Path) -> None:
 
     log(f"loading adapter from {cfg.adapter_dir}")
     peft_model = PeftModel.from_pretrained(base, cfg.adapter_dir)
-    log("merging LoRA into base weights (merge_and_unload)…")
+    log("merging LoRA into base weights (merge_and_unload)...")
     merged = peft_model.merge_and_unload()
 
     log(f"saving merged HF model to {merged_dir}")
     merged_dir.mkdir(parents=True, exist_ok=True)
-    # save_pretrained itself is unsafe on Gemma 4 + PEFT-merged models
-    # in current transformers: revert_weight_conversion blindly compiles
-    # a regex from "|".join(branches) where branches contains ints,
-    # raising "TypeError: 'int' object is not subscriptable". Bypass
-    # save_pretrained entirely and write the shards manually. The
-    # downstream llama.cpp converter only needs:
-    #   - config.json
-    #   - generation_config.json (optional)
-    #   - tokenizer files
-    #   - state-dict shards + pytorch_model.bin.index.json
-    _manual_sharded_save(merged, merged_dir, log)
+    _save_merged_with_fallback(merged, merged_dir, log)
+    _verify_merged_dir(merged_dir, log)
 
     # Tokenizer: prefer the adapter's saved tokenizer (training may
     # have added kbeauty-specific special tokens); fall back to the

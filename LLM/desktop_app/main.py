@@ -9119,14 +9119,27 @@ class MainWindow(QMainWindow):
         # Top row: name + status badge.
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
-        name_label = QLabel(name, card)
+        # Show the FULL adapter name even when long. QLabel only wraps
+        # at word boundaries, and adapter ids like
+        # ``260504_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_2104`` have
+        # none — so Qt happily clips them. Inject zero-width spaces
+        # after every ``_`` / ``-`` / ``.`` to give the wrapper break
+        # opportunities everywhere; the user still sees the original
+        # text since ZWSP is invisible.
+        wrappable_name = name
+        for _ch in ("_", "-", "."):
+            wrappable_name = wrappable_name.replace(_ch, _ch + "​")
+        name_label = QLabel(wrappable_name, card)
         name_font = QFont()
         name_font.setPointSize(14)
         name_font.setBold(True)
         name_label.setFont(name_font)
         name_label.setWordWrap(True)
-        name_label.setMaximumWidth(350)
-        top_row.addWidget(name_label)
+        name_label.setTextFormat(Qt.PlainText)
+        name_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        name_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.MinimumExpanding)
+        name_label.setToolTip(name)
+        top_row.addWidget(name_label, 1)
 
         if onboarded:
             badge_text = "✅ ONBOARDED"

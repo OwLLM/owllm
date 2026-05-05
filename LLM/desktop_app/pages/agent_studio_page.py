@@ -467,6 +467,52 @@ class _EditorPanel(QFrame):
         self.model_picker.selection_changed.connect(self._on_model_changed)
         name_box.addWidget(self.model_picker)
 
+        # Voice — directly under the model picker, inside the same
+        # right header column so the user sees Name / Model / Voice
+        # stacked next to the avatar.
+        lbl_v = QLabel("Voice")
+        lbl_v.setFont(nf2)
+        lbl_v.setStyleSheet("color:#9aa0a6; background:transparent; font-size:13px;")
+        name_box.addWidget(lbl_v)
+
+        self.voice_enabled_cb = QCheckBox("Speak this agent's replies aloud")
+        self.voice_enabled_cb.setStyleSheet("color:#dadcdf; font-size:13px;")
+        name_box.addWidget(self.voice_enabled_cb)
+
+        v_row = QHBoxLayout()
+        v_row.setSpacing(8)
+        self.voice_combo = QComboBox()
+        self.voice_combo.setMinimumHeight(32)
+        self.voice_combo.setStyleSheet(
+            "QComboBox { background:#14171d; color:#fff; border:none; "
+            "border-radius:8px; padding:0 10px; font-size:13px; } "
+            "QComboBox::drop-down { border:none; }"
+        )
+        self.voice_combo.addItem("Auto (per-agent assignment)", "")
+        v_row.addWidget(self.voice_combo, 1)
+
+        self.voice_rate_spin = QSpinBox()
+        self.voice_rate_spin.setRange(0, 400)
+        self.voice_rate_spin.setSingleStep(10)
+        self.voice_rate_spin.setSuffix(" wpm")
+        self.voice_rate_spin.setSpecialValueText("Default")
+        self.voice_rate_spin.setMinimumHeight(32)
+        self.voice_rate_spin.setFixedWidth(110)
+        self.voice_rate_spin.setStyleSheet(
+            "QSpinBox { background:#14171d; color:#fff; border:none; "
+            "border-radius:8px; padding:0 10px; font-size:13px; }"
+        )
+        v_row.addWidget(self.voice_rate_spin)
+
+        self.voice_preview_btn = QPushButton("▶")
+        self.voice_preview_btn.setFixedSize(32, 32)
+        self.voice_preview_btn.setToolTip("Preview this voice")
+        self.voice_preview_btn.setStyleSheet(_GHOST_BTN_STYLE)
+        self.voice_preview_btn.clicked.connect(self._on_voice_preview)
+        v_row.addWidget(self.voice_preview_btn)
+
+        name_box.addLayout(v_row)
+
         name_box.addStretch(1)
         header_row.addLayout(name_box, 1)
         outer.addLayout(header_row)
@@ -531,56 +577,6 @@ class _EditorPanel(QFrame):
             empty.setStyleSheet("color:#9aa0a6; font-size:13px; font-style:italic;")
             mt_layout.addWidget(empty)
         outer.addWidget(self._mcp_tools_box)
-
-        # Voice — per-agent TTS settings. The voice list is whatever the
-        # system TTS engine reports (Windows SAPI on Windows). "Auto" =
-        # let the service hash-assign a stable voice from the agent name.
-        outer.addWidget(_section_label("Voice"))
-        voice_box = QFrame()
-        voice_box.setStyleSheet(_TOOLBOX_STYLE)
-        v_layout = QVBoxLayout(voice_box)
-        v_layout.setContentsMargins(12, 10, 12, 10)
-        v_layout.setSpacing(8)
-
-        self.voice_enabled_cb = QCheckBox("Speak this agent's replies aloud")
-        self.voice_enabled_cb.setStyleSheet("color:#dadcdf; font-size:14px;")
-        v_layout.addWidget(self.voice_enabled_cb)
-
-        voice_row = QHBoxLayout()
-        voice_row.setSpacing(8)
-        self.voice_combo = QComboBox()
-        self.voice_combo.setMinimumHeight(34)
-        self.voice_combo.setStyleSheet(
-            "QComboBox { background:#14171d; color:#fff; border:none; "
-            "border-radius:8px; padding:0 10px; font-size:13px; } "
-            "QComboBox::drop-down { border:none; }"
-        )
-        # Populated lazily on first load() — needs the running TtsService.
-        self.voice_combo.addItem("Auto (per-agent assignment)", "")
-        voice_row.addWidget(self.voice_combo, 1)
-
-        self.voice_rate_spin = QSpinBox()
-        self.voice_rate_spin.setRange(0, 400)
-        self.voice_rate_spin.setSingleStep(10)
-        self.voice_rate_spin.setSuffix(" wpm")
-        self.voice_rate_spin.setSpecialValueText("Default")
-        self.voice_rate_spin.setMinimumHeight(34)
-        self.voice_rate_spin.setFixedWidth(120)
-        self.voice_rate_spin.setStyleSheet(
-            "QSpinBox { background:#14171d; color:#fff; border:none; "
-            "border-radius:8px; padding:0 10px; font-size:13px; }"
-        )
-        voice_row.addWidget(self.voice_rate_spin)
-
-        self.voice_preview_btn = QPushButton("▶ Preview")
-        self.voice_preview_btn.setMinimumHeight(34)
-        self.voice_preview_btn.setFixedWidth(110)
-        self.voice_preview_btn.setStyleSheet(_GHOST_BTN_STYLE)
-        self.voice_preview_btn.clicked.connect(self._on_voice_preview)
-        voice_row.addWidget(self.voice_preview_btn)
-
-        v_layout.addLayout(voice_row)
-        outer.addWidget(voice_box)
 
         # Leader checkbox.
         self.leader_cb = QCheckBox(

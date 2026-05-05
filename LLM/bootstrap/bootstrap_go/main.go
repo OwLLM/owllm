@@ -114,6 +114,7 @@ func main() {
 	log.Printf("model returned %d steps", len(steps))
 
 	executor := exec.New(*dryRun, srv, systemPrompt, grammar)
+	executor.SetBootDir(bootDir)
 	if err := executor.RunPlan(steps, maxStepsPerRun, maxRetriesPerStep); err != nil {
 		fatal("plan execution failed: %v", err)
 	}

@@ -8,16 +8,30 @@ Full design: [../../docs/supervisor/BOOTSTRAP.md](../../docs/supervisor/BOOTSTRA
 
 ## Status
 
-**Skeleton.** This compiles, probes hardware, can spawn `llama-server.exe`,
-and parses the structured plan the model returns -- but the action
-executors (install_pkg, swap_wheel, ...) are stubs that log "would
-execute X". Cutover order:
+Compiles, probes hardware, spawns `llama-server.exe`, parses the
+model's plan, and now executes three real actions:
+
+| Action          | Status   | File                          |
+| --------------- | -------- | ----------------------------- |
+| `create_venv`   | real     | `exec/create_venv.go`         |
+| `install_pkg`   | real     | `exec/install_pkg.go`         |
+| `download_file` | real     | `exec/download_file.go`       |
+| `swap_wheel`    | stubbed  | `exec/stubs.go`               |
+| `set_env`       | stubbed  | `exec/stubs.go`               |
+| `pick_profile`  | stubbed  | `exec/stubs.go`               |
+| `ask_user`      | stubbed  | `exec/stubs.go`               |
+| `uninstall_pkg` | stubbed  | `exec/stubs.go`               |
+| `abort`         | terminal | aborts the plan with a reason |
+
+Cutover order to "Phase 6 ready":
 
 1. Build a tiny Windows installer that drops `bootstrap.exe` +
    `runtime/llama-server.exe` + `runtime/gemma-4-E2B-it-Q4_K_M.gguf` +
    `recipes/` and runs `bootstrap.exe` once.
-2. Implement real action executors (one at a time, with E2E tests):
-   `create_venv` -> `install_pkg` -> `download_file` -> `pick_profile`.
+2. Promote remaining stubs to real executors with tests
+   (`pick_profile` is next -- selects a profile from
+   `recipes/hardware_profiles.json` and short-circuits the rest of
+   the plan).
 3. Wire telemetry so each install run feeds back into the failure corpus.
 4. Ship as `OWLLM-Setup-AI.exe` (parallel installer flavor) per
    ROLLOUT.md Phase 6.

@@ -65,33 +65,16 @@ Pending (not yet wired):
 - training, dataset, install, mcp wire-ins follow same pattern.
 
 UI:
-- `desktop_app/pages/supervisor_page.py` -- live shadow log table + flag state panel. Auto-refreshes every 3s. Self-contained Qt widget, ready to wire in.
-- `desktop_app/widgets/supervisor_toast.py` -- non-modal "Apply fix?" confirmation widget for Phase-3+ proposals. Three trust tiers (safe/confirm/danger) with countdown auto-skip. Pure helpers covered by 9 tests.
+- `desktop_app/pages/supervisor_page.py` -- live shadow log table + flag state panel. Auto-refreshes every 3s.
+- `desktop_app/widgets/supervisor_toast.py` -- non-modal "Apply fix?" confirmation widget for Phase-3+ proposals. Three trust tiers (safe/confirm/danger) with countdown auto-skip. 9 tests pinning the timeout-never-applies safety contract.
 - `tools/demo_supervisor_toast.py` -- standalone manual harness so devs can eyeball the toast layout without booting the full app.
-- `desktop_app/main.py` wiring is a one-hunk addition (~18 lines) staged for a follow-up PR once that file's pending WIP changes land. Snippet documented at the bottom of this file.
+- `desktop_app/main.py` -- adds the Supervisor tab to MainWindow ONLY when `supervisor.enabled` is true. Production users never see this tab.
 
-## Pending main.py wire-in snippet
+Runtime artifacts:
+- `bootstrap/runtime/download_runtime.py` -- fetches `llama-server` + `gemma-4-E2B-it-Q4_K_M.gguf` from configurable URLs (defaults: llama.cpp GitHub releases, Hugging Face Unsloth mirror). Run once on a dev machine before flipping the master switch.
 
-When `desktop_app/main.py` is clean of unrelated WIP, append this hunk
-right before the `tabs.addTab(_timed_build("Info", ...))` line in
-`MainWindow._setup_ui` (around line 3245):
-
-```python
-# Supervisor tab -- conditional. Only rendered when the user has opted in
-# via feature_flags.json (supervisor.enabled = true). Production users
-# see no change.
-try:
-    from core.supervisor import flags as _supervisor_flags
-    if _supervisor_flags.supervisor_enabled():
-        from desktop_app.pages.supervisor_page import SupervisorPage
-        tabs.addTab(_timed_build("Supervisor", lambda: SupervisorPage(self)),
-                    "Supervisor")
-except Exception as _supervisor_e:
-    try:
-        self._log_to_app_log(f"[STARTUP] supervisor tab skipped: {_supervisor_e}")
-    except Exception:
-        pass
-```
+Bootstrap (install-time):
+- `bootstrap/bootstrap_go/` -- Go skeleton for the native install-time launcher. Compiles to `bootstrap.exe` (Windows) via `go build -ldflags "-H=windowsgui"`. Components: hardware probe (nvidia-smi/wmic), llama-server lifecycle (spawn/health/shutdown with hidden console), tolerant plan parser, executor with stubbed actions for Phase 0. 7 Go unit tests for the parser. Action executors are no-ops for now -- safe to ship + iterate.
 
 Net effect on production users today: **zero behavioral change.** Master switch is false; the new code is dead code in every prod install.
 

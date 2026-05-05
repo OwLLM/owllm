@@ -3236,8 +3236,22 @@ class MainWindow(QMainWindow):
         tabs.addTab(_timed_build("MCP", lambda: MCPPage(self)), "MCP")
         tabs.addTab(_timed_build("GitHub Import", lambda: GitHubImportPage(self)), "GitHub Import")
         
-        # 3D Characters page
-        tabs.addTab(_timed_build("Characters", lambda: Characters3DPage(self)), "Characters")
+        # 3D Characters page — left panel is replaced with an Arena-
+        # style model A/B/C selector column (Avatar Selection +
+        # Instruction Templates + System Prompt + Logs tabs) so the
+        # Characters page exposes the same per-model controls the
+        # Arena page does, on its left side, while keeping the 3D
+        # scene on the right.
+        def _build_characters():
+            page = Characters3DPage(self)
+            self._characters_page = page
+            try:
+                arena_panel = self._build_characters_arena_style_panel()
+                page.replace_left_panel(arena_panel)
+            except Exception:
+                logger.exception("[CHARACTERS] arena-style panel injection failed")
+            return page
+        tabs.addTab(_timed_build("Characters", _build_characters), "Characters")
 
         # Gamify — merged 3D playground (Characters scene + Arena's
         # right-column model + character selectors). Lazy-built on
@@ -3988,6 +4002,79 @@ class MainWindow(QMainWindow):
             self._studio_page = None
         finally:
             self._studio_tab_initializing = False
+
+    def _build_characters_arena_style_panel(self) -> "QWidget":
+        """Return a panel that mirrors the Arena page's right column.
+
+        Stack: [A | B | C] tab buttons → ``QStackedWidget`` of three
+        per-model settings pages (Avatar Selection / Instruction
+        Templates / System Prompt / Generation Parameters via the
+        existing ``_create_m2m_model_settings_page`` helper) →
+        Logs / Unfiltered Answer tabs at the bottom.
+
+        Used by the Characters tab to replace the legacy '3D Character
+        Arena' left panel with the Arena-style selector column the
+        user wanted.
+        """
+        panel = QWidget()
+        panel.setMinimumWidth(360)
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(12)
+
+        # A / B / C model-tab buttons.
+        selector_layout = QHBoxLayout()
+        selector_layout.setSpacing(5)
+        a_btn = QPushButton("🔵 A")
+        a_btn.setCheckable(True)
+        a_btn.setChecked(True)
+        b_btn = QPushButton("🟢 B")
+        b_btn.setCheckable(True)
+        c_btn = QPushButton("🟣 C")
+        c_btn.setCheckable(True)
+        for b in (a_btn, b_btn, c_btn):
+            b.setMinimumHeight(34)
+        selector_layout.addWidget(a_btn)
+        selector_layout.addWidget(b_btn)
+        selector_layout.addWidget(c_btn)
+        panel_layout.addLayout(selector_layout)
+
+        # Stacked per-model settings pages — same builder the Arena
+        # right column uses (is_arena=True ⇒ Avatar Selection block).
+        stack = QStackedWidget()
+        for cid in ("A", "B", "C"):
+            stack.addWidget(self._create_m2m_model_settings_page(cid, is_arena=True))
+        panel_layout.addWidget(stack, 1)
+        # Stash so future code (saved-prompt sync, etc.) can reach the
+        # pages without walking the widget tree.
+        self.characters_model_settings_stack = stack
+        self.characters_model_a_settings = stack.widget(0)
+        self.characters_model_b_settings = stack.widget(1)
+        self.characters_model_c_settings = stack.widget(2)
+
+        def _switch(idx_: int) -> None:
+            for i, btn in enumerate((a_btn, b_btn, c_btn)):
+                btn.setChecked(i == idx_)
+            stack.setCurrentIndex(idx_)
+
+        a_btn.clicked.connect(lambda: _switch(0))
+        b_btn.clicked.connect(lambda: _switch(1))
+        c_btn.clicked.connect(lambda: _switch(2))
+
+        # Logs / Unfiltered Answer tabs — visual parity with the Arena
+        # right column. Wired to dedicated text-edits stored on self
+        # so generation calls from the Characters page can route
+        # output here once the Characters3DPage gets rewired.
+        log_tabs = QTabWidget()
+        self.characters_log_view = QTextEdit()
+        self.characters_log_view.setReadOnly(True)
+        self.characters_unfiltered_view = QTextEdit()
+        self.characters_unfiltered_view.setReadOnly(True)
+        log_tabs.addTab(self.characters_log_view, "Logs")
+        log_tabs.addTab(self.characters_unfiltered_view, "Unfiltered Answer")
+        panel_layout.addWidget(log_tabs, 1)
+
+        return panel
 
     def _init_gamify_page_if_needed(self, tabs, idx: int) -> None:
         """Lazily build the Gamify tab on first open.

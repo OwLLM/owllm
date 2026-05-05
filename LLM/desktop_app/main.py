@@ -15286,6 +15286,173 @@ class MainWindow(QMainWindow):
             pass
         self._refresh_locals()
 
+        # Post-training: offer to convert the freshly-saved adapter to
+        # GGUF. The Transformers backend is 3-8x slower than llama.cpp
+        # for the same weights — a one-time conversion turns "test in
+        # the GUI" speeds into "production chat" speeds. We only ask
+        # when the run actually saved an adapter and the run wasn't a
+        # user-stopped checkpoint (those are still incomplete).
+        try:
+            if adapter_saved and not stopped_by_user:
+                self._maybe_offer_gguf_conversion()
+        except Exception:
+            logger.exception("could not offer GGUF conversion after training")
+
+    def _maybe_offer_gguf_conversion(self) -> None:
+        """Prompt the user to convert the just-trained adapter to GGUF.
+
+        Locates the most recently saved adapter under the trainer's
+        output dir and asks whether to convert. Skipped silently when
+        we can't find an adapter so the prompt never appears spuriously.
+        """
+        try:
+            out_dir = Path(self.train_out_dir.text().strip())
+            if not out_dir.exists():
+                return
+            adapters = []
+            for d in out_dir.iterdir():
+                if not d.is_dir() or d.name.startswith("checkpoint-"):
+                    continue
+                cfg = d / "adapter_config.json"
+                saf = d / "adapter_model.safetensors"
+                binf = d / "adapter_model.bin"
+                if cfg.exists() and (saf.exists() or binf.exists()):
+                    adapters.append((d.stat().st_mtime, d))
+            if not adapters:
+                return
+            adapters.sort(reverse=True)
+            adapter_dir = adapters[0][1]
+        except Exception:
+            return
+
+        # Resolve the base model path the adapter was trained against.
+        base_path = ""
+        try:
+            ti = adapter_dir / "training_info.json"
+            if ti.exists():
+                meta = json.loads(ti.read_text(encoding="utf-8"))
+                base_path = (meta or {}).get("base_model_path") or (meta or {}).get("model_name") or ""
+        except Exception:
+            pass
+        if not base_path:
+            try:
+                base_path = self.train_base_model.currentText().strip()
+                if base_path and not Path(base_path).exists():
+                    base_path = str((self.root / "models" / base_path).resolve())
+            except Exception:
+                base_path = ""
+        if not base_path or not Path(base_path).exists():
+            return
+
+        from PySide6.QtWidgets import QMessageBox
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Convert to GGUF?")
+        msg.setIcon(QMessageBox.Question)
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(
+            f"<b>Adapter saved:</b> {adapter_dir.name}<br><br>"
+            "Convert it to <b>GGUF</b> for 3–8× faster chat / agent / "
+            "Telegram inference?"
+        )
+        msg.setInformativeText(
+            "<p>The Transformers backend is slow because it runs in pure "
+            "PyTorch. GGUF runs on llama.cpp with fused CUDA kernels and "
+            "quantised weights.</p>"
+            "<p>Conversion happens in the background:<br>"
+            "&nbsp;&nbsp;1. merge LoRA into base (~30 s)<br>"
+            "&nbsp;&nbsp;2. convert HF → GGUF fp16 (~1–2 min)<br>"
+            "&nbsp;&nbsp;3. quantise to <b>Q5_K_M</b> (~30 s)</p>"
+            "<p>The result lands in <code>models/&lt;adapter&gt;__gguf/</code> "
+            "and shows up in every model dropdown automatically.</p>"
+        )
+        btn_yes = msg.addButton("Convert now (Q5_K_M)", QMessageBox.AcceptRole)
+        msg.addButton("Skip", QMessageBox.RejectRole)
+        msg.exec()
+        if msg.clickedButton() is not btn_yes:
+            return
+
+        self._convert_adapter_to_gguf_async(
+            adapter_dir=adapter_dir,
+            base_model_path=Path(base_path),
+            quant="Q5_K_M",
+        )
+
+    def _convert_adapter_to_gguf_async(
+        self,
+        adapter_dir: "Path",
+        base_model_path: "Path",
+        quant: str = "Q5_K_M",
+    ) -> None:
+        """Spawn the adapter→GGUF pipeline as a subprocess and stream
+        progress into the train log.
+
+        Runs against the training env's Python so PEFT, torch, and bf16
+        are all available. The llama.cpp converter and quantizer are
+        auto-discovered inside the script.
+        """
+        out_root = self.root / "models" / f"{adapter_dir.name}__gguf"
+        out_root.mkdir(parents=True, exist_ok=True)
+
+        # The training env is the only one with PEFT + torch + bf16
+        # support. Falls back to sys.executable defensively.
+        train_python = self.root / ".envs" / "tf-cu121-t25-base-stable" / ".venv" / "Scripts" / "python.exe"
+        if not train_python.exists():
+            train_python = Path(sys.executable)
+
+        script = self.root / "core" / "adapter_to_gguf.py"
+        cmd = [
+            str(train_python), "-u", str(script),
+            "--base-model", str(base_model_path),
+            "--adapter-dir", str(adapter_dir),
+            "--output-dir", str(out_root),
+            "--quant", quant,
+            "--register",
+        ]
+
+        self.train_log.appendPlainText("\n=== Converting adapter to GGUF ===")
+        self.train_log.appendPlainText("Command: " + " ".join(cmd))
+        self.train_log.appendPlainText("=" * 50)
+        try:
+            self.train_status_pill.set_state("converting", "merging + quantising → GGUF")
+        except Exception:
+            pass
+
+        proc = QProcess(self)
+        proc.setProcessChannelMode(QProcess.MergedChannels)
+        proc.setWorkingDirectory(str(self.root))
+
+        def _on_out():
+            try:
+                data = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace")
+                if data:
+                    self.train_log.appendPlainText(data.rstrip())
+            except Exception:
+                pass
+
+        def _on_done(exit_code: int, _exit_status):
+            self.train_log.appendPlainText(
+                f"\n[adapter-to-gguf] process finished. exit_code={exit_code}"
+            )
+            if exit_code == 0:
+                try:
+                    self.train_status_pill.set_state("done", "GGUF ready — picker refreshed")
+                except Exception:
+                    pass
+                try:
+                    self._refresh_locals()
+                except Exception:
+                    pass
+            else:
+                try:
+                    self.train_status_pill.set_state("failed", f"GGUF convert exit {exit_code}")
+                except Exception:
+                    pass
+
+        proc.readyReadStandardOutput.connect(_on_out)
+        proc.finished.connect(_on_done)
+        proc.start(cmd[0], cmd[1:])
+        self._gguf_convert_proc = proc
+
     def _render_training_summary(self) -> None:
         """Append a plain-language quality summary to the training log.
 

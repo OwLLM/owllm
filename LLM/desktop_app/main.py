@@ -5304,6 +5304,27 @@ class MainWindow(QMainWindow):
             self._resize_tuned_cards()
         except Exception:
             pass
+        # Keep the Arena Logs / Unfiltered Answer tab area at ~10 %
+        # of the window height.
+        try:
+            self._size_arena_right_tabs()
+        except Exception:
+            pass
+
+    def _size_arena_right_tabs(self) -> None:
+        """Pin Arena's Logs / Unfiltered Answer tabs to 10 % of the
+        window height. Called once after the arena page is built and
+        again on every window resize so the proportion holds.
+        """
+        tabs_widget = getattr(self, "arena_right_tabs", None)
+        if tabs_widget is None:
+            return
+        target = max(80, int(self.height() * 0.10))
+        try:
+            tabs_widget.setMinimumHeight(target)
+            tabs_widget.setMaximumHeight(target)
+        except Exception:
+            pass
 
     def _resize_tuned_cards(self) -> None:
         """Pin every tuned-model card to ~25 % of the window's width.
@@ -17096,6 +17117,12 @@ class MainWindow(QMainWindow):
         left_layout.setSpacing(15)
         self.arena_left_layout = left_layout
 
+        # Title + Number of models + Max turns all on one row.
+        # Hardware Settings has been removed at the user's request — GPU
+        # selection is governed by the global GPU config now. The legacy
+        # arena_gpu_select / arena_gpu_info / arena_gpu_index_map names
+        # are still referenced by elsewhere in the file, so we keep
+        # invisible stubs so those reads don't crash.
         title_row = QHBoxLayout()
         arena_title = QLabel("Arena - Model To Model 3D")
         arena_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
@@ -17112,14 +17139,18 @@ class MainWindow(QMainWindow):
         self.arena_model_count_3.setTristate(False)
         self.arena_model_count_3.toggled.connect(self._on_arena_model_count_3_toggled)
         title_row.addWidget(self.arena_model_count_3)
+        # Max-turns spinner shares the row with the model-count toggles.
+        title_row.addSpacing(20)
+        title_row.addWidget(QLabel("Max turns:"))
+        self.arena_max_turns = QSpinBox()
+        self.arena_max_turns.setRange(1, 200)
+        self.arena_max_turns.setValue(20)
+        self.arena_max_turns.setMinimumWidth(70)
+        title_row.addWidget(self.arena_max_turns)
         left_layout.addLayout(title_row)
 
-        settings_row = QHBoxLayout()
-        settings_row.setSpacing(15)
-        gpu_frame = QGroupBox("Hardware Settings")
-        gpu_layout = QVBoxLayout(gpu_frame)
-        gpu_row = QHBoxLayout()
-        gpu_row.addWidget(QLabel("GPU for Inference:"))
+        # GPU selector stubs — kept hidden so legacy references stay
+        # alive without painting a Hardware Settings panel.
         self.arena_gpu_select = QComboBox()
         self.arena_gpu_index_map = []
         gpus = self._sort_gpus_by_memory(self._get_filtered_gpus())
@@ -17130,40 +17161,28 @@ class MainWindow(QMainWindow):
                 orig_idx = gpu.get("_orig_index", idx)
                 self.arena_gpu_select.addItem(f"GPU {orig_idx}: {gpu_name} ({vram})")
                 self.arena_gpu_index_map.append(orig_idx)
-            info_text = f"{len(gpus)} GPU(s) detected - select one for inference"
         else:
             self.arena_gpu_select.addItem("No GPUs available - CPU mode")
             self.arena_gpu_select.setEnabled(False)
-            info_text = "No GPUs detected (CPU mode)"
-        gpu_row.addWidget(self.arena_gpu_select, 1)
-        gpu_layout.addLayout(gpu_row)
-        self.arena_gpu_info = QLabel(info_text)
-        self.arena_gpu_info.setWordWrap(True)
-        self.arena_gpu_info.setStyleSheet("color: #888; padding: 5px; font-size: 10pt;")
-        gpu_layout.addWidget(self.arena_gpu_info)
-        settings_row.addWidget(gpu_frame, 2)
+        self.arena_gpu_select.setVisible(False)
+        self.arena_gpu_info = QLabel("")
+        self.arena_gpu_info.setVisible(False)
 
-        conv_frame = QGroupBox("Conversation")
-        conv_layout = QHBoxLayout(conv_frame)
-        conv_layout.addWidget(QLabel("Max turns:"))
-        self.arena_max_turns = QSpinBox()
-        self.arena_max_turns.setRange(1, 200)
-        self.arena_max_turns.setValue(20)
-        self.arena_max_turns.setMinimumWidth(60)
-        conv_layout.addWidget(self.arena_max_turns)
-        settings_row.addWidget(conv_frame, 1)
-        left_layout.addLayout(settings_row)
-
-        headers_layout = QHBoxLayout()
-        headers_layout.setContentsMargins(0, 0, 0, 0)
-        headers_layout.setSpacing(6)
+        # Model A/B/C combos and headers — built but NOT added to the
+        # left column. The user moved them onto the right column above
+        # Avatar Selection (see right_widget below). Keeping them as
+        # widgets owned by ``self`` preserves every elsewhere-in-file
+        # reference (``self.arena_model_a`` etc.).
         colors = self._get_theme_colors()
+        self._arena_model_header_widgets: list[QWidget] = []
         for key, icon in [("a", "🔵"), ("b", "🟢"), ("c", "🟣")]:
             hw = QWidget()
             hl = QVBoxLayout(hw)
             hl.setContentsMargins(0, 0, 0, 0)
             hl.setSpacing(6)
-            header = QLabel(f"{icon} <b>Model {key.upper()}</b> <span style='font-size:16pt;color:#000000;'>(Port: -)</span>")
+            header = QLabel(
+                f"{icon} <b>Model {key.upper()}</b> <span style='font-size:16pt;color:#000000;'>(Port: -)</span>"
+            )
             header.setStyleSheet(
                 f"font-size: 16pt; padding: 10px; background: {self._get_gradient_style(colors['primary'], colors['secondary'])}; color: white; border-radius: 6px;"
             )
@@ -17173,12 +17192,10 @@ class MainWindow(QMainWindow):
             combo.currentTextChanged.connect(lambda _t, k=key: self._update_arena_scene_label(k))
             hl.addWidget(header)
             hl.addWidget(combo)
-            headers_layout.addWidget(hw, 1)
             setattr(self, f"arena_model_{key}_header_widget", hw)
             setattr(self, f"arena_model_{key}_header", header)
             setattr(self, f"arena_model_{key}", combo)
-        self.arena_model_c_header_widget.setVisible(True)
-        left_layout.addLayout(headers_layout)
+            self._arena_model_header_widgets.append(hw)
 
         self.arena_scene_view = QWebEngineView()
         scene_path = self.root / "desktop_app" / "assets" / "3d" / "index.html"
@@ -17228,6 +17245,19 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(12)
+
+        # Model A/B/C combos with their coloured headers — moved out
+        # of the left column and stacked at the top of the right
+        # column, directly above the Avatar Selection block.
+        model_headers_layout = QVBoxLayout()
+        model_headers_layout.setContentsMargins(0, 0, 0, 0)
+        model_headers_layout.setSpacing(8)
+        for hw in getattr(self, "_arena_model_header_widgets", []):
+            model_headers_layout.addWidget(hw)
+        right_layout.addLayout(model_headers_layout)
+
+        # A/B/C tab switcher (controls which model's settings page
+        # the QStackedWidget below shows).
         model_selector_layout = QHBoxLayout()
         model_selector_layout.setSpacing(5)
         self.arena_model_a_btn = QPushButton("🔵 A")
@@ -17246,6 +17276,10 @@ class MainWindow(QMainWindow):
         model_selector_layout.addWidget(self.arena_model_c_btn)
         right_layout.addLayout(model_selector_layout)
 
+        # Per-model settings (Avatar Selection / Instruction Templates /
+        # System Prompt / Generation Parameters). Stretches to fill
+        # whatever vertical space is left after the headers above and
+        # the slim logs tabs below.
         self.arena_model_settings_stack = QStackedWidget()
         self._arena_settings_built = False
         for _ in range(3):
@@ -17260,8 +17294,10 @@ class MainWindow(QMainWindow):
         self.arena_model_a_settings = None
         self.arena_model_b_settings = None
         self.arena_model_c_settings = None
-        right_layout.addWidget(self.arena_model_settings_stack, 0)
+        right_layout.addWidget(self.arena_model_settings_stack, 1)
 
+        # Logs / Unfiltered Answer tabs — fixed at ~10 % of the window
+        # height, kept in step on resize via _resize_arena_right_tabs.
         self.arena_right_tabs = QTabWidget()
         self.arena_chat_log_display = QTextEdit()
         self.arena_chat_log_display.setReadOnly(True)
@@ -17269,7 +17305,10 @@ class MainWindow(QMainWindow):
         self.arena_unfiltered_display.setReadOnly(True)
         self.arena_right_tabs.addTab(self.arena_chat_log_display, "Logs")
         self.arena_right_tabs.addTab(self.arena_unfiltered_display, "Unfiltered Answer")
-        right_layout.addWidget(self.arena_right_tabs, 1)
+        # Initial 10 % sizing happens once we know the window height —
+        # main_window.resizeEvent calls _resize_arena_right_tabs.
+        right_layout.addWidget(self.arena_right_tabs, 0)
+        self._size_arena_right_tabs()
 
         main_layout.addWidget(left_widget, 1)
         main_layout.addWidget(right_widget, 0)

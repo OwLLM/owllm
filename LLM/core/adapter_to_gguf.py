@@ -45,6 +45,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+# When this file is invoked directly (e.g. `python core/adapter_to_gguf.py
+# ...`), Python sets sys.path[0] to the script's directory (.../core),
+# which means `from core.state_store import ...` raises
+# ModuleNotFoundError. Add the LLM root so `core.*` resolves regardless
+# of how the script was launched.
+_LLM_ROOT = Path(__file__).resolve().parent.parent
+if str(_LLM_ROOT) not in sys.path:
+    sys.path.insert(0, str(_LLM_ROOT))
+
 # Force UTF-8 stdout/stderr so log lines containing non-ASCII characters
 # don't crash the subprocess when the parent (the GUI's QProcess) reads
 # them through whatever the Windows console codepage happens to be —

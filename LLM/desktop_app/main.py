@@ -2869,11 +2869,16 @@ class MainWindow(QMainWindow):
         # navbar; the owl_agentic.png asset is reserved for the canvas
         # surface and intentionally NOT used here.
         self.agentic_group_btn = _make_header_toggle("🎭\nAgentic Team")
+        # 'Gamify' — joypad glyph. Hosts the merged 3D playground that
+        # combines the legacy Arena (under Test) and Characters pages.
+        self.gamify_group_btn = _make_header_toggle("🎮\nGamify")
 
         theme_layout.addSpacing(4)
         theme_layout.addWidget(self.finetuning_group_btn)
         theme_layout.addSpacing(4)
         theme_layout.addWidget(self.agentic_group_btn)
+        theme_layout.addSpacing(4)
+        theme_layout.addWidget(self.gamify_group_btn)
 
         # Left column (theme controls)
         header_left = QWidget()
@@ -3101,6 +3106,8 @@ class MainWindow(QMainWindow):
         self.studio_btn = QPushButton("🎭 Studio")
         self.accounts_btn = QPushButton("🔐 Accounts")
         self.bridges_btn = QPushButton("📱 Bridges")
+        self.gamify_btn = QPushButton("🎮 Gamify")
+        self.arena_top_btn = QPushButton("🏟 Arena")
         self.info_btn = QPushButton("ℹ️ Info")
 
         # Navigation buttons will be styled by theme system
@@ -3110,7 +3117,8 @@ class MainWindow(QMainWindow):
             self.train_btn, self.download_btn, self.test_btn,
             self.logs_btn, self.server_btn, self.mcp_btn, self.envs_btn,
             self.characters_btn, self.code_btn, self.agents_btn,
-            self.studio_btn, self.accounts_btn, self.bridges_btn, self.info_btn,
+            self.studio_btn, self.accounts_btn, self.bridges_btn,
+            self.gamify_btn, self.arena_top_btn, self.info_btn,
         ]:
             btn.setCheckable(True)
             # Strong active-tab highlight — the theme's default :checked
@@ -3156,11 +3164,14 @@ class MainWindow(QMainWindow):
         navbar_layout.addWidget(self.train_btn)
         navbar_layout.addWidget(self.test_btn)
         # Agentic Team sub-tabs — hidden until the header group toggle is on.
-        navbar_layout.addWidget(self.characters_btn)
         navbar_layout.addWidget(self.code_btn)
         navbar_layout.addWidget(self.agents_btn)
         navbar_layout.addWidget(self.studio_btn)
         navbar_layout.addWidget(self.bridges_btn)
+        # Gamify sub-tabs — hidden until the Gamify header toggle is on.
+        navbar_layout.addWidget(self.gamify_btn)
+        navbar_layout.addWidget(self.characters_btn)
+        navbar_layout.addWidget(self.arena_top_btn)
         navbar_layout.addWidget(self.server_btn)
 
         # Add stretch to consume remaining space
@@ -3186,7 +3197,7 @@ class MainWindow(QMainWindow):
         # Page name constants for reliable tab navigation
         self.tab_page_names = {
             "home": "🏠 Home",
-            "models": "Models", 
+            "models": "Models",
             "train": "Train",
             "test": "Test",
             "logs": "Logs",
@@ -3198,6 +3209,8 @@ class MainWindow(QMainWindow):
             "studio": "Studio",
             "accounts": "Accounts",
             "bridges": "Bridges",
+            "gamify": "Gamify",
+            "arena": "Arena",
             "github_import": "GitHub Import",
             "environment": "Environment Manager",
             "info": "Info"
@@ -3225,6 +3238,30 @@ class MainWindow(QMainWindow):
         
         # 3D Characters page
         tabs.addTab(_timed_build("Characters", lambda: Characters3DPage(self)), "Characters")
+
+        # Gamify — merged 3D playground (Characters scene + Arena's
+        # right-column model + character selectors). Lazy-built on
+        # first open so startup stays light when the user isn't using
+        # the playground.
+        self._gamify_page = None
+        self._gamify_tab_placeholder = QWidget()
+        _gp_layout = QVBoxLayout(self._gamify_tab_placeholder)
+        _gp_layout.setContentsMargins(20, 20, 20, 20)
+        _gp_layout.addWidget(QLabel("Gamify loads when opened…"))
+        _gp_layout.addStretch(1)
+        self._gamify_tab_index = tabs.addTab(self._gamify_tab_placeholder, "Gamify")
+
+        # Arena (top-level) — surfaces the existing Test → Arena
+        # sub-tab as its own top-level tab so the Gamify navbar can
+        # link to it directly. The Test page's Arena sub-tab is
+        # hidden in _build_test_tab when this top-level entry exists.
+        self._arena_top_page = None
+        self._arena_top_tab_placeholder = QWidget()
+        _atp = QVBoxLayout(self._arena_top_tab_placeholder)
+        _atp.setContentsMargins(20, 20, 20, 20)
+        _atp.addWidget(QLabel("Arena loads when opened…"))
+        _atp.addStretch(1)
+        self._arena_top_tab_index = tabs.addTab(self._arena_top_tab_placeholder, "Arena")
 
         # Code tab — bundled VSCodium + Cline embedded in OWLLM. Lazy-built
         # so the (potentially first-run) bootstrap doesn't block startup.
@@ -3278,6 +3315,8 @@ class MainWindow(QMainWindow):
         _br_layout.addStretch(1)
         self._bridges_tab_index = tabs.addTab(self._bridges_tab_placeholder, "Bridges")
         tabs.currentChanged.connect(lambda idx: self._init_bridges_page_if_needed(tabs, idx))
+        tabs.currentChanged.connect(lambda idx: self._init_gamify_page_if_needed(tabs, idx))
+        tabs.currentChanged.connect(lambda idx: self._init_arena_top_page_if_needed(tabs, idx))
         
         # Lazy-init Environment Manager page (can be expensive on startup due environment scans).
         self._env_page_initialized = False
@@ -3304,6 +3343,8 @@ class MainWindow(QMainWindow):
         self.accounts_btn.clicked.connect(lambda: self._switch_tab(tabs, "accounts"))
         self.studio_btn.clicked.connect(lambda: self._switch_tab(tabs, "studio"))
         self.bridges_btn.clicked.connect(lambda: self._switch_tab(tabs, "bridges"))
+        self.gamify_btn.clicked.connect(lambda: self._switch_tab(tabs, "gamify"))
+        self.arena_top_btn.clicked.connect(lambda: self._switch_tab(tabs, "arena"))
         # Group buttons: switch to first tab in their group AND show that
         # group's sub-buttons (collapsing the other group).
         self.finetuning_group_btn.clicked.connect(
@@ -3311,6 +3352,9 @@ class MainWindow(QMainWindow):
         )
         self.agentic_group_btn.clicked.connect(
             lambda: self._activate_navbar_group("agentic", tabs)
+        )
+        self.gamify_group_btn.clicked.connect(
+            lambda: self._activate_navbar_group("gamify", tabs)
         )
         # Home button collapses both groups so the navbar reads cleanly.
         self.home_btn.clicked.connect(
@@ -3819,7 +3863,9 @@ class MainWindow(QMainWindow):
     # buttons appear under which group label — no other code touches it.
     _NAVBAR_GROUPS = {
         "finetuning": ("download_btn", "train_btn", "test_btn"),
-        "agentic":   ("characters_btn", "code_btn", "agents_btn", "studio_btn", "bridges_btn"),
+        "agentic":   ("code_btn", "agents_btn", "studio_btn", "bridges_btn"),
+        # Gamify hosts the merged 3D playground (characters + arena).
+        "gamify":    ("gamify_btn", "characters_btn", "arena_top_btn"),
     }
     # Buttons revealed by the Advanced toggle.
     _ADVANCED_BUTTONS = ("mcp_btn", "envs_btn", "accounts_btn", "logs_btn")
@@ -3827,6 +3873,7 @@ class MainWindow(QMainWindow):
     _GROUP_FIRST_TAB = {
         "finetuning": "models",
         "agentic":   "agents",
+        "gamify":    "gamify",
     }
 
     def _activate_navbar_group(self, group: str, tabs) -> None:
@@ -3859,6 +3906,7 @@ class MainWindow(QMainWindow):
         for attr, expected in (
             ("finetuning_group_btn", "finetuning"),
             ("agentic_group_btn", "agentic"),
+            ("gamify_group_btn", "gamify"),
         ):
             btn = getattr(self, attr, None)
             if btn is not None:
@@ -3940,6 +3988,75 @@ class MainWindow(QMainWindow):
             self._studio_page = None
         finally:
             self._studio_tab_initializing = False
+
+    def _init_gamify_page_if_needed(self, tabs, idx: int) -> None:
+        """Lazily build the Gamify tab on first open.
+
+        For now, the Gamify content is the existing Characters3DPage —
+        it already pairs a 3D scene with per-character model pickers,
+        which matches the user's spec ('looks like character page with
+        the model + character selection column'). Future work:
+        rebuild as a dedicated widget that puts the selectors in a
+        right-side column matching the Arena layout.
+        """
+        if getattr(self, "_gamify_tab_initializing", False):
+            return
+        try:
+            if idx != getattr(self, "_gamify_tab_index", -1):
+                return
+            if getattr(self, "_gamify_page", None) is not None:
+                return
+            self._gamify_tab_initializing = True
+            page = Characters3DPage(self)
+            self._gamify_page = page
+            tabs.removeTab(self._gamify_tab_index)
+            self._gamify_tab_index = tabs.insertTab(idx, page, "Gamify")
+            tabs.setCurrentIndex(self._gamify_tab_index)
+        except Exception as e:
+            import traceback
+            try:
+                self._log_to_app_log(
+                    f"[GAMIFY TAB] init failed: {e}\n{traceback.format_exc()}"
+                )
+            except Exception:
+                pass
+            self._gamify_page = None
+        finally:
+            self._gamify_tab_initializing = False
+
+    def _init_arena_top_page_if_needed(self, tabs, idx: int) -> None:
+        """Move the existing arena widget into the top-level Arena tab
+        on first open. The arena page is built eagerly inside
+        _build_test_tab so all its sibling widget references resolve;
+        we just re-parent it here so the Gamify > Arena navbar entry
+        shows the real page instead of a placeholder.
+        """
+        if getattr(self, "_arena_top_tab_initializing", False):
+            return
+        try:
+            if idx != getattr(self, "_arena_top_tab_index", -1):
+                return
+            if getattr(self, "_arena_top_page", None) is not None:
+                return
+            arena_widget = getattr(self, "_arena_built_widget", None)
+            if arena_widget is None:
+                return
+            self._arena_top_tab_initializing = True
+            self._arena_top_page = arena_widget
+            tabs.removeTab(self._arena_top_tab_index)
+            self._arena_top_tab_index = tabs.insertTab(idx, arena_widget, "Arena")
+            tabs.setCurrentIndex(self._arena_top_tab_index)
+        except Exception as e:
+            import traceback
+            try:
+                self._log_to_app_log(
+                    f"[ARENA TAB] init failed: {e}\n{traceback.format_exc()}"
+                )
+            except Exception:
+                pass
+            self._arena_top_page = None
+        finally:
+            self._arena_top_tab_initializing = False
 
     def _on_agent_definitions_changed(self) -> None:
         """Studio reported a save/delete — push the new defs to the
@@ -5898,13 +6015,16 @@ class MainWindow(QMainWindow):
         "studio":      "studio_btn",
         "accounts":    "accounts_btn",
         "bridges":     "bridges_btn",
+        "gamify":      "gamify_btn",
+        "arena":       "arena_top_btn",
         "environment": "envs_btn",
         "info":        "info_btn",
     }
     # Group buttons stay lit when any of their children is active.
     _GROUP_MEMBERSHIP = {
         "finetuning_group_btn": {"models", "train", "test"},
-        "agentic_group_btn":    {"characters", "code", "agents", "studio", "bridges"},
+        "agentic_group_btn":    {"code", "agents", "studio", "bridges"},
+        "gamify_group_btn":     {"gamify", "characters", "arena"},
     }
 
     def _sync_navbar_buttons_for_index(self, index: int, *, tab_widget: Optional[QTabWidget] = None) -> None:
@@ -15219,7 +15339,11 @@ class MainWindow(QMainWindow):
         sub_tabs.addTab(test_page, "🧪 Test")
         sub_tabs.addTab(tool_chat_page, "🔧 Tool Chat")
         sub_tabs.addTab(model_to_model_page, "Model To Model")
-        sub_tabs.addTab(arena_page, "Arena")
+        # Arena was built above so all its widget references still
+        # resolve, but the sub-tab is reachable only via the Gamify
+        # header group's "Arena" navbar button. Stash the widget so
+        # the top-level Arena tab can adopt it on first open.
+        self._arena_built_widget = arena_page
         sub_tabs.currentChanged.connect(self._on_test_sub_tab_changed)
 
         layout.addWidget(sub_tabs)

@@ -17,7 +17,7 @@ model's plan, and now executes three real actions:
 | `install_pkg`   | real     | `exec/install_pkg.go`         |
 | `download_file` | real     | `exec/download_file.go`       |
 | `pick_profile`  | real     | `exec/profile.go` + `stubs.go`|
-| `swap_wheel`    | stubbed  | `exec/stubs.go`               |
+| `swap_wheel`    | real     | `exec/swap_wheel.go`          |
 | `set_env`       | stubbed  | `exec/stubs.go`               |
 | `ask_user`      | stubbed  | `exec/stubs.go`               |
 | `uninstall_pkg` | stubbed  | `exec/stubs.go`               |
@@ -29,8 +29,8 @@ Cutover order to "Phase 6 ready":
    `runtime/llama-server.exe` + `runtime/gemma-4-E2B-it-Q4_K_M.gguf` +
    `recipes/` and runs `bootstrap.exe` once.
 2. Promote remaining stubs to real executors with tests
-   (`swap_wheel` is next -- needed for the cuda-runtime mismatch
-   recovery path).
+   (`set_env` is next -- needed for `PYTHONPATH` and `CUDA_HOME`
+   tweaks the model occasionally proposes).
 3. Wire telemetry so each install run feeds back into the failure corpus.
 4. Ship as `OWLLM-Setup-AI.exe` (parallel installer flavor) per
    ROLLOUT.md Phase 6.

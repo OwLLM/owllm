@@ -93,7 +93,7 @@ func (e *Executor) dispatch(s plan.Step) error {
 	case "download_file":
 		return DownloadFile(DownloadFileOpts{}, s)
 	case "swap_wheel":
-		return e.stub("swap_wheel", s)
+		return SwapWheel(SwapWheelOpts{VenvDir: e.activeVenv}, s)
 	case "set_env":
 		return e.stub("set_env", s)
 	case "pick_profile":

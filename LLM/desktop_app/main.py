@@ -25909,178 +25909,79 @@ respective package directories or official repositories.
         return out
 
     def _fill_tool_chat_selector(self, ready_paths: dict, downloaded_models: list, models_dir: Path) -> None:
-        """Populate Tool Chat model combo from same READY data as Test/M2M (single source)."""
+        """Populate Tool Chat model combo from the canonical pickable-models layer.
+
+        Old args (``ready_paths`` / ``downloaded_models`` / ``models_dir``)
+        kept for call-site compatibility but ignored — the source of
+        truth is :func:`core.pickable_models.get_pickable_for_local_chat`.
+        """
+        from core.pickable_models import (
+            get_pickable_for_local_chat, to_combo_label, to_combo_payload,
+            KIND_GGUF_BASE,
+        )
         try:
             self.tool_chat_model_a.clear()
-            ready_path_keys = set()
-            for p in (ready_paths or {}).keys():
-                try:
-                    ready_path_keys.add(str(Path(str(p)).resolve()).lower())
-                except Exception:
-                    ready_path_keys.add(str(p).lower())
             ready_count = 0
-            if downloaded_models:
-                for model_name in downloaded_models:
-                    model_path = models_dir / model_name
-                    try:
-                        model_path_str = str(model_path.resolve()).lower()
-                    except Exception:
-                        model_path_str = str(model_path).lower()
-                    if model_path_str in ready_path_keys:
-                        model_id = (ready_paths or {}).get(model_path_str, "")
-                        display_name = model_name.replace("__", "/")
-                        for label, payload in self._build_ready_model_variant_entries(
-                            display_name=display_name,
-                            model_path=model_path,
-                            model_id=model_id,
-                            prefix="✓ ",
-                        ):
-                            self.tool_chat_model_a.addItem(label, payload)
+            for m in get_pickable_for_local_chat():
+                # Multi-variant GGUF dirs: expand via the same builder
+                # the chat tabs use, so quant choice / mmproj filtering
+                # stays consistent.
+                if m.kind == KIND_GGUF_BASE and m.base_path.is_dir():
+                    for label, payload in self._build_ready_model_variant_entries(
+                        display_name=m.display_name,
+                        model_path=m.base_path,
+                        model_id=m.model_id,
+                        prefix="✓ ",
+                    ):
+                        self.tool_chat_model_a.addItem(label, payload)
                         ready_count += 1
-
-            # Locally-trained LoRA adapters. Mirrors the block in
-            # _fill_model_combo so the Tool Chat picker has parity with
-            # Test/M2M — adapter dirs are not in the onboarding table
-            # by default, but they're functional and the user has every
-            # right to expect them in this picker too.
-            try:
-                adapter_dir = self.root / "fine_tuned"
-                # Same broken-filter as _fill_model_combo so a failed
-                # training run's adapter doesn't get surfaced and then
-                # immediately rejected at chat-launch with "Model not
-                # ready". See _fill_model_combo for the full rationale.
-                broken_names: set[str] = set()
-                try:
-                    from core.state_store import get_state_store
-                    _ss = get_state_store()
-                    for _row in _ss.list_all_onboarding():
-                        status = (_row.get("status") or "").upper()
-                        if status not in ("BROKEN", "FAILED"):
-                            continue
-                        mid = str(_row.get("model_id", "") or "")
-                        ad = str(_row.get("adapter_dir", "") or "")
-                        for cand in (mid, ad):
-                            if not cand:
-                                continue
-                            base = cand.replace("\\", "/").rstrip("/").split("/")[-1]
-                            if base.startswith("tuned__"):
-                                base = base[len("tuned__"):]
-                            broken_names.add(base.lower())
-                except Exception:
-                    broken_names = set()
-
-                if adapter_dir.exists():
-                    trained = []
-                    for d in adapter_dir.iterdir():
-                        if not d.is_dir():
-                            continue
-                        # Skip Trainer ``checkpoint-*`` dirs — those are
-                        # in-progress / partial artefacts, not fine-tuned
-                        # adapters the user means to chat with.
-                        if d.name.startswith("checkpoint-"):
-                            continue
-                        if d.name.lower() in broken_names:
-                            continue
-                        has_weights = any(
-                            (d / f).exists()
-                            for f in (
-                                "adapter_model.safetensors",
-                                "adapter_model.bin",
-                                "pytorch_model.bin",
-                                "model.safetensors",
-                            )
-                        )
-                        if has_weights:
-                            trained.append(d)
-                    for adapter_path in sorted(trained):
-                        self.tool_chat_model_a.addItem(
-                            f"🎯 {adapter_path.name} (adapter)",
-                            str(adapter_path),
-                        )
-                        ready_count += 1
-            except Exception:
-                # Adapter scan is best-effort; a filesystem hiccup
-                # shouldn't blank out the entire picker.
-                pass
-
+                    continue
+                self.tool_chat_model_a.addItem(to_combo_label(m), to_combo_payload(m))
+                ready_count += 1
             if ready_count == 0:
                 self.tool_chat_model_a.addItem("(No READY models - run onboarding first)", None)
         except Exception as e:
             self.tool_chat_model_a.addItem(f"(Error: {e})", None)
 
     def _fill_model_combo(self, combo, downloaded_models, models_dir, ready_paths, adapter_dir):
-        """Populate a model combo from downloaded_models + adapters (READY only). Reuses data from _refresh_locals to avoid duplicate filesystem scan."""
+        """Populate a model combo from the canonical pickable-models layer.
+
+        This used to do its own ``models/`` directory scan + ready_paths
+        lookup + per-adapter logic, which was the long-tail source of
+        'shows up in dropdown X but not dropdown Y' bugs. Single source
+        of truth now lives in :mod:`core.pickable_models` — every chat
+        tab dropdown drives off that.
+
+        The legacy ``downloaded_models`` / ``ready_paths`` / ``adapter_dir``
+        arguments are kept for call-site compatibility but ignored; new
+        code shouldn't pass them.
+        """
+        from core.pickable_models import (
+            get_pickable_for_local_chat, to_combo_label, to_combo_payload,
+            KIND_GGUF_BASE,
+        )
+
         current = combo.currentText()
         combo.blockSignals(True)
         combo.setUpdatesEnabled(False)
         try:
             combo.clear()
-            ready_path_keys = set()
-            for p in (ready_paths or {}).keys():
-                try:
-                    ready_path_keys.add(str(Path(str(p)).resolve()).lower())
-                except Exception:
-                    ready_path_keys.add(str(p).lower())
-            if downloaded_models:
-                for model_name in downloaded_models:
-                    model_path = models_dir / model_name
-                    try:
-                        model_path_str = str(model_path.resolve()).lower()
-                    except Exception:
-                        model_path_str = str(model_path).lower()
-                    if model_path_str in ready_path_keys:
-                        display_name = model_name.replace("__", "/")
-                        model_id = (ready_paths or {}).get(model_path_str, "")
-                        for label, payload in self._build_ready_model_variant_entries(
-                            display_name=display_name,
-                            model_path=model_path,
-                            model_id=model_id,
-                            prefix="✓ 📦 ",
-                        ):
-                            combo.addItem(label, payload)
-
-            # GGUF LoRA adapter rows (tuned__*__lora_gguf). These don't
-            # live under ``models/<dirname>`` so the directory-driven
-            # scan above misses them. Pull them straight from the
-            # onboarding store — single source of truth — and emit
-            # one entry per row, regardless of which directory the
-            # underlying .gguf file sits in. This is what was making
-            # the same LoRA show up in some places and not others.
-            try:
-                from core.model_onboarding import get_onboarding_service
-                ready_rows = get_onboarding_service().list_ready_models() or []
-            except Exception:
-                ready_rows = []
-            for row in ready_rows:
-                rid = str(row.get("model_id") or "")
-                if not rid.startswith("tuned__") or "__lora_gguf" not in rid:
+            for m in get_pickable_for_local_chat():
+                # Multi-variant GGUF base dirs (no active_variant pinned)
+                # need to expand to one entry per .gguf so the user can
+                # pick a quant. The variant builder also filters mmproj
+                # / projector sidecars and honours the .selected_weights
+                # marker — keep using it for that case.
+                if m.kind == KIND_GGUF_BASE and m.base_path.is_dir():
+                    for label, payload in self._build_ready_model_variant_entries(
+                        display_name=m.display_name,
+                        model_path=m.base_path,
+                        model_id=m.model_id,
+                        prefix="✓ 📦 ",
+                    ):
+                        combo.addItem(label, payload)
                     continue
-                ad = row.get("adapter_dir") or ""
-                if not ad:
-                    continue
-                ad_path = Path(ad)
-                if not ad_path.exists():
-                    continue
-                # Pretty short label: strip the prefix + suffix.
-                pretty = rid
-                if pretty.startswith("tuned__"):
-                    pretty = pretty[len("tuned__"):]
-                if pretty.endswith("__lora_gguf"):
-                    pretty = pretty[: -len("__lora_gguf")]
-                # Locate the .gguf file inside adapter_dir for the
-                # combo payload — same shape the directory variant
-                # entries use, so downstream code that reads
-                # payload["base_path"] / variant_relpath stays happy.
-                gguf_files = sorted(ad_path.glob("*-lora-*.gguf")) or sorted(ad_path.glob("*.gguf"))
-                if not gguf_files:
-                    continue
-                gguf_file = gguf_files[0]
-                payload = {
-                    "base_path": str(ad_path),
-                    "variant_relpath": gguf_file.name,
-                    "model_id": rid,
-                }
-                combo.addItem(f"🎯 {pretty} (LoRA-GGUF)", payload)
+                combo.addItem(to_combo_label(m), to_combo_payload(m))
             if adapter_dir.exists():
                 # Build a set of known-broken adapter names from the DB so
                 # we don't surface them in the picker. A user who accidentally

@@ -37,87 +37,32 @@ class LocalBackend:
     # -- listing ---------------------------------------------------------
 
     def list_entries(self) -> List[ModelEntry]:
-        ready = self._list_ready_models()
-        running_paths = self._running_base_paths()
+        """Enumerate local pickable models for the agents picker.
 
-        # Dedupe by resolved base_model_path: when a model has been
-        # onboarded under two different model_id strings (e.g. once via
-        # the user-typed slug and once via the canonical id, or once
-        # per repo variant) the underlying .gguf on disk is the same
-        # file. Showing both rows in the dropdown lets the user pick a
-        # "wrong" one that nonetheless serves the same weights — that's
-        # the GLM-4.7 "two entries, only one active" symptom.
-        # Strategy: bucket rows by absolute lower-cased path; within
-        # each bucket pick a single representative, preferring (in
-        # order): the row that's currently RUNNING, then the row whose
-        # model_id equals canonical_id (the authoritative name), then
-        # the first row inserted. Rows without a base_model_path stay
-        # as their own entries — we can't dedupe what we can't compare.
-        # Bucket rows by (base_path, adapter_dir) so that an adapter row
-        # and its underlying base row don't collide — they share the
-        # same base_model_path but are distinct entries the user wants
-        # to pick between. Without `adapter_dir` in the key, the dedupe
-        # would silently swallow every fine-tuned adapter under its base.
-        by_path: Dict[tuple, List[dict]] = {}
-        no_path: List[dict] = []
-        for row in ready:
-            base = row.get("base_model_path") or row.get("base_model") or ""
-            adapter = row.get("adapter_dir") or ""
-            if not base and not adapter:
-                no_path.append(row)
-                continue
-            try:
-                base_key = str(Path(base).resolve()).lower() if base else ""
-            except OSError:
-                base_key = base.lower()
-            try:
-                adapter_key = str(Path(adapter).resolve()).lower() if adapter else ""
-            except OSError:
-                adapter_key = adapter.lower()
-            by_path.setdefault((base_key, adapter_key), []).append(row)
-
-        def _rank(row: dict) -> tuple:
-            base = row.get("base_model_path") or row.get("base_model") or ""
-            try:
-                key = str(Path(base).resolve()).lower()
-            except OSError:
-                key = base.lower()
-            is_running = key in running_paths
-            mid = row.get("model_id") or ""
-            cid = row.get("canonical_id") or ""
-            is_canonical = bool(mid) and mid == cid
-            # Lower tuple sorts first.
-            return (0 if is_running else 1, 0 if is_canonical else 1)
-
-        chosen_rows: List[dict] = []
-        for path_key, rows in by_path.items():
-            rows.sort(key=_rank)
-            chosen_rows.append(rows[0])
-        chosen_rows.extend(no_path)
+        Drives off the canonical :func:`core.pickable_models.get_pickable_for_local_chat`
+        — the same source every chat tab uses. Previously this method
+        had its own dedupe + classification logic, which kept drifting
+        out of sync with the chat-tab version (the user's recurring
+        'shows up in test chat but not agents' bug).
+        """
+        from core.pickable_models import get_pickable_for_local_chat
 
         entries: List[ModelEntry] = []
-        for row in chosen_rows:
-            model_id = row.get("model_id") or row.get("canonical_id") or ""
-            base = row.get("base_model_path") or row.get("base_model") or ""
-            if not model_id:
-                continue
-            display = self._pretty(model_id)
-            note = ""
-            if base and str(Path(base).resolve()).lower() in running_paths:
-                note = "(running)"
+        for m in get_pickable_for_local_chat():
+            note = "(running)" if m.is_running else ""
             entries.append(
                 ModelEntry(
                     backend=self.name,
-                    model_key=model_id,
-                    display=f"{display}  {note}".strip(),
+                    model_key=m.model_id,
+                    display=f"{m.display_name}  {note}".strip(),
                     available=True,
                     note=note,
-                    cost_tier="free",  # local inference has no per-token cost
+                    cost_tier="free",
                 )
             )
-
-        # Hoist running rows to the top — that's the model the user just
-        # started, and almost certainly the one they want pinned.
+        # Running rows hoisted; otherwise alphabetical. The pickable
+        # layer already sorts this way, but keep the explicit sort so
+        # callers don't depend on upstream ordering.
         entries.sort(key=lambda e: (0 if "(running)" in e.note else 1, e.display.lower()))
         return entries
 

@@ -905,8 +905,50 @@ class ModelOnboardingService:
             }
     
     def list_ready_models(self) -> List[Dict[str, Any]]:
-        """List all models with status=READY."""
-        return self.state_store.list_onboarding_by_status("READY")
+        """List all models with status=READY whose files still exist on disk.
+
+        Single source of truth for "what models can the user actually
+        pick right now". The state store keeps a row at status=READY
+        even after the user deletes the underlying weights — onboarding
+        only writes rows, it never reaps them — so every dropdown that
+        read this raw was showing zombies.
+
+        Filtering rules (mirror what each dropdown was reinventing):
+
+        * Adapter rows (``adapter_dir`` set): keep iff the adapter
+          directory exists on disk. The base path may be a hub id, a
+          deleted file, or stale — that's the loader's problem at run
+          time, not a reason to hide an adapter the user trained.
+        * Base-model rows (``adapter_dir`` empty): keep iff
+          ``base_model_path`` exists on disk.
+        * Rows missing both paths: keep (defensive — API targets,
+          synthetic placeholders, FS hiccups).
+        * OSError on the disk check: keep (transient I/O blip
+          shouldn't blank a real entry).
+        """
+        from pathlib import Path as _P
+        rows = self.state_store.list_onboarding_by_status("READY") or []
+
+        def _exists(path: str) -> bool:
+            try:
+                return bool(path) and _P(path).exists()
+            except OSError:
+                return True
+
+        alive: List[Dict[str, Any]] = []
+        for row in rows:
+            adapter = row.get("adapter_dir") or ""
+            base = row.get("base_model_path") or row.get("base_model") or ""
+            if adapter:
+                if _exists(adapter):
+                    alive.append(row)
+                continue
+            if not base:
+                alive.append(row)
+                continue
+            if _exists(base):
+                alive.append(row)
+        return alive
     
     def list_unready_models(self) -> List[Dict[str, Any]]:
         """List all models with status != READY."""

@@ -25440,28 +25440,61 @@ respective package directories or official repositories.
         model_id: str = "",
         prefix: str = "✓ 📦 ",
     ) -> List[Tuple[str, object]]:
-        """Return one combo entry per GGUF variant when multiple variants exist."""
+        """Return ONE combo entry per pickable GGUF chat model.
+
+        Rules (this is the dropdown the user sees in Test / M2M / Arena /
+        Tool Chat — they all share this builder):
+
+        * mmproj-* files are vision PROJECTORS, not chat weights. They
+          ride alongside a chat GGUF and never get picked as standalone
+          models. Filter them out.
+        * If the user has marked an ``active_variant`` (the weight the
+          launcher pinned for this model id), show ONLY that variant.
+          The marker is the source of truth for "which GGUF is in use"
+          — every other quant on disk is just storage.
+        * If no marker is set and there's only one chat GGUF on disk,
+          show that one.
+        * If no marker AND multiple chat GGUFs exist, fall back to the
+          old behaviour (one entry per variant) so the user can pick
+          before the marker is set. This is only a transient state.
+        """
         try:
             gguf_rel = self._list_local_gguf_relpaths(model_path)
         except Exception:
             gguf_rel = []
-        if len(gguf_rel) <= 1:
+
+        # Drop projector / sidecar files — they aren't pickable models.
+        chat_gguf = [
+            rel for rel in gguf_rel
+            if not Path(rel).name.lower().startswith(("mmproj", "mm-proj", "projector"))
+        ]
+
+        if len(chat_gguf) <= 1:
             return [(f"{prefix}{display_name}", str(model_path))]
 
-        # Keep marker synchronized and prefer active_variant at the top.
+        # Honour the active_variant marker — that's what the chat
+        # actually uses. Showing the other quants in the dropdown
+        # creates the "I have 1 file but 3 entries appear" zombie list.
         active_rel = ""
         try:
             marker = self._sync_selected_weights_marker(model_path, model_id=model_id or None)
             active_rel = str((marker or {}).get("active_variant") or "").strip().replace("\\", "/")
         except Exception:
             pass
-        ordered = list(gguf_rel)
-        if active_rel and active_rel in ordered:
-            ordered.remove(active_rel)
-            ordered.insert(0, active_rel)
 
+        if active_rel and active_rel in chat_gguf:
+            payload = {
+                "base_path": str(model_path),
+                "variant_relpath": active_rel,
+                "model_id": model_id or "",
+            }
+            return [(f"{prefix}{display_name}", payload)]
+
+        # No marker yet — show every chat GGUF so the user can pick
+        # one. Once they do, the marker pins it and future refreshes
+        # collapse back to a single entry.
         out: List[Tuple[str, object]] = []
-        for rel in ordered:
+        for rel in chat_gguf:
             payload = {
                 "base_path": str(model_path),
                 "variant_relpath": rel,

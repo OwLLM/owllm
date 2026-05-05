@@ -15,7 +15,7 @@ class FrameAssets:
     corner_tl: Optional[str] = None
     corner_tr: Optional[str] = None
     corner_bl: Optional[str] = None
-    corner_br: Optional[str] = None  # Per-tab owl image set dynamically via set_corner_br()
+    corner_br: Optional[str] = None  # Background layer (CornersNew/corner_br.png) — drawn under the per-tab owl image
     top_center: Optional[str] = None
 
 
@@ -91,8 +91,9 @@ class HybridFrameWindow(QWidget):
         self.corner_tl = self._load_pixmap(self._assets.corner_tl)
         self.corner_tr = self._load_pixmap(self._assets.corner_tr)
         self.corner_bl = self._load_pixmap(self._assets.corner_bl)
-        # corner_br is now ONLY the per-tab owl image (set via set_corner_br()).
-        # The static background layer was removed at the user's request.
+        # corner_br_bg = static background crest from CornersNew/corner_br.png.
+        # corner_br = per-tab owl image, set dynamically via set_corner_br().
+        self.corner_br_bg = self._load_pixmap(self._assets.corner_br)
         self.corner_br = None
         self.top_center = self._load_pixmap(self._assets.top_center)
 
@@ -140,8 +141,10 @@ class HybridFrameWindow(QWidget):
         self.corner_tl = self._load_pixmap(self._assets.corner_tl)
         self.corner_tr = self._load_pixmap(self._assets.corner_tr)
         self.corner_bl = self._load_pixmap(self._assets.corner_bl)
-        # corner_br is the per-tab owl image only — keep whatever the
-        # caller already pushed via set_corner_br(), don't overwrite.
+        # Reload the static background from the new assets bundle.
+        self.corner_br_bg = self._load_pixmap(self._assets.corner_br)
+        # corner_br is the per-tab owl image — keep whatever the caller
+        # already pushed via set_corner_br(), don't overwrite.
         if not hasattr(self, 'corner_br') or self.corner_br is None:
             self.corner_br = None
         self.top_center = self._load_pixmap(self._assets.top_center)
@@ -315,8 +318,19 @@ class HybridFrameWindow(QWidget):
                 return int(corner_width * aspect_ratio)
             return corner_width
         
-        # Corner BR — per-tab owl image only. Static background layer
-        # was removed at user request (see set_corner_br()).
+        # Corner BR background (CornersNew/corner_br.png) — drawn first
+        # so the per-tab owl crest renders on top of it.
+        if self.corner_br_bg and not self.corner_br_bg.isNull():
+            corner_br_bg_height = get_corner_height(self.corner_br_bg)
+            self._draw_corner_pix(p, self.corner_br_bg, QRect(
+                outer.right() - corner_width + 1 + corner_outset,
+                outer.bottom() - corner_br_bg_height + 1 + corner_outset,
+                corner_width,
+                corner_br_bg_height
+            ))
+
+        # Corner BR — per-tab owl image, painted on top of the static
+        # background above.
         if self.corner_br and not self.corner_br.isNull():
             corner_br_height = get_corner_height(self.corner_br)
             self._draw_corner_pix(p, self.corner_br, QRect(

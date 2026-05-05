@@ -3340,6 +3340,24 @@ class MainWindow(QMainWindow):
         _env_placeholder_layout.addWidget(QLabel("Environment Manager will load when opened..."))
         _env_placeholder_layout.addStretch(1)
         tabs.addTab(self.env_page, "Environment Manager")
+
+        # Supervisor tab — conditional. Only rendered when the user has opted in
+        # via feature_flags.json (supervisor.enabled = true). Production users
+        # see no change. See LLM/docs/supervisor/ROLLOUT.md.
+        try:
+            from core.supervisor import flags as _supervisor_flags
+            if _supervisor_flags.supervisor_enabled():
+                from desktop_app.pages.supervisor_page import SupervisorPage
+                tabs.addTab(_timed_build("Supervisor", lambda: SupervisorPage(self)),
+                            "Supervisor")
+        except Exception as _supervisor_e:
+            # Never let supervisor wiring block app startup. The whole point
+            # of the feature flag is that production stays unaffected.
+            try:
+                self._log_to_app_log(f"[STARTUP] supervisor tab skipped: {_supervisor_e}")
+            except Exception:
+                pass
+
         tabs.addTab(_timed_build("Info", self._build_info_tab), "Info")
         
         # Connect buttons to tab switching using page names
@@ -26412,14 +26430,18 @@ def main() -> int:
                         return str(candidate)
                     return get_asset_path(internal)
 
+                # corner_br is sourced ONLY from CornersNew/. The legacy
+                # icons/Page_icons/corner_br.* files MUST NOT be loaded
+                # — explicit no-fallback path. If CornersNew/corner_br.png
+                # is missing, the background layer simply isn't drawn.
+                cornersnew_br = corners_new / "corner_br.png"
+                corner_br_path = str(cornersnew_br) if cornersnew_br.exists() else None
+
                 assets = FrameAssets(
                     corner_tl=_corner_path("corner_tl", "corner_ul.png"),
                     corner_tr=_corner_path("corner_tr", "corner_ur.png"),
                     corner_bl=_corner_path("corner_bl", "corner_bl.png"),
-                    # corner_br left None on purpose — the static
-                    # background asset was removed; the per-tab owl
-                    # crest is pushed via frame.set_corner_br() below.
-                    corner_br=None,
+                    corner_br=corner_br_path,
                     top_center=top_center_path,
                 )
                 

@@ -496,9 +496,22 @@ def _merge_adapter(cfg: ConvertConfig, merged_dir: Path) -> None:
 
 
 def _discover_convert_script() -> str:
-    """Locate the convert_hf_to_gguf.py shipped with the bundled llamacpp env."""
+    """Locate convert_hf_to_gguf.py — preferring the master copy.
+
+    The script bundled inside the llamacpp env (under
+    ``.../bin/convert_hf_to_gguf.py``) lags llama.cpp master by months
+    and doesn't know about Gemma 3 / Gemma 4 / many newer architectures.
+    We ship a master-snapshot at ``LLM/runtime/llama.cpp/`` and use it
+    in preference to the env-bundled one — the gguf-py package in the
+    same env is also overlaid with master sources so the new script's
+    dependencies are satisfied.
+    """
     root = Path(__file__).resolve().parents[1]  # .../LLM
     candidates = [
+        # Master snapshot — preferred. Updated alongside the gguf-py
+        # source files in the llamacpp-cu121-edge env.
+        root / "runtime" / "llama.cpp" / "convert_hf_to_gguf.py",
+        # Env-bundled fallbacks (months out of date).
         root / ".envs" / "llamacpp-cu121-edge" / ".venv" / "Lib" / "site-packages" / "bin" / "convert_hf_to_gguf.py",
         root / ".envs" / "llamacpp-cu121-stable" / ".venv" / "Lib" / "site-packages" / "bin" / "convert_hf_to_gguf.py",
     ]
@@ -506,8 +519,8 @@ def _discover_convert_script() -> str:
         if c.exists():
             return str(c)
     raise FileNotFoundError(
-        "convert_hf_to_gguf.py not found in any bundled llamacpp env. "
-        "Expected one of:\n  " + "\n  ".join(str(c) for c in candidates)
+        "convert_hf_to_gguf.py not found. Expected one of:\n  "
+        + "\n  ".join(str(c) for c in candidates)
     )
 
 
@@ -529,13 +542,22 @@ def _convert_to_fp16_gguf(cfg: ConvertConfig, merged_dir: Path, fp16_gguf: Path)
     convert_script = cfg.convert_script or _discover_convert_script()
     log(f"using converter: {convert_script}")
 
-    # The script lives in the llamacpp env — invoke it with that env's
-    # python so it has the right deps (gguf, sentencepiece, torch).
-    env_python = (
-        Path(convert_script).parents[3] / "Scripts" / "python.exe"
-    ).resolve()
-    if not env_python.exists():
-        # Fallback: same interpreter that's running this module.
+    # The converter has heavy deps (gguf master, sentencepiece, torch,
+    # safetensors). The llamacpp-cu121-edge env is where we maintain
+    # those — that's also where the gguf master overlay lives. Always
+    # use that env's python regardless of where the script file sits
+    # (env-bundled vs. our runtime snapshot).
+    root = Path(__file__).resolve().parents[1]  # .../LLM
+    env_python_candidates = [
+        root / ".envs" / "llamacpp-cu121-edge" / ".venv" / "Scripts" / "python.exe",
+        root / ".envs" / "llamacpp-cu121-stable" / ".venv" / "Scripts" / "python.exe",
+    ]
+    env_python = None
+    for cand in env_python_candidates:
+        if cand.exists():
+            env_python = cand
+            break
+    if env_python is None:
         env_python = Path(sys.executable)
     log(f"using python: {env_python}")
 

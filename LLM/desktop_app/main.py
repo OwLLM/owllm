@@ -26242,12 +26242,24 @@ def main() -> int:
                         return str(png_path)
                     return None
                 
+                # Top-center crest: prefer the user's authoritative
+                # icon set in icons/Page_icons (owl_studio_square.png)
+                # so updates to that file are picked up immediately.
+                # The legacy hybrid_frame_module/assets/top_center_owl.*
+                # is only used as a fallback if the Page_icons asset is
+                # missing.
+                page_icons_top = root_dir / "icons" / "Page_icons" / "owl_studio_square.png"
+                top_center_path = (
+                    str(page_icons_top)
+                    if page_icons_top.exists()
+                    else get_asset_path("top_center_owl")
+                )
                 assets = FrameAssets(
                     corner_tl=get_asset_path("corner_tl"),
                     corner_tr=get_asset_path("corner_tr"),
                     corner_bl=get_asset_path("corner_bl"),
                     corner_br=get_asset_path("corner_br"),
-                    top_center=get_asset_path("top_center_owl"),
+                    top_center=top_center_path,
                 )
                 
                 # Create frame as overlay

@@ -52,6 +52,7 @@ from core.agents.orchestrator import Team, build_team
 from core.agents.projects import Project, get_project_store
 from core.agents.tools import builtin_registry, register_mcp_tools
 from core.agents.agent_definitions import list_all_definitions
+from core.inference import clean_display_answer
 
 logger = logging.getLogger(__name__)
 
@@ -370,8 +371,12 @@ class TelegramBridge:
 
             try:
                 reply = team.run_goal(goal, attachments=attachments)
+                # Phone users get only the final clean answer — strip
+                # leaked CoT, tool transcripts, and EOS-noise tails the
+                # GUI's "Filtered" panel already hides.
+                clean_body = clean_display_answer(reply.body or "")
                 self._send_message(
-                    chat_id, f"✅ Done.\n\n{reply.body}"
+                    chat_id, f"✅ Done.\n\n{clean_body}"
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Telegram goal run failed")
@@ -401,9 +406,14 @@ class TelegramBridge:
                 # Only mirror message kinds that have value to the user;
                 # filter out internal tool plumbing that would be noise.
                 if msg.kind == MessageKind.REPLY and msg.from_agent != "user":
-                    self._send_message(
-                        chat_id, f"💬 {msg.from_agent}: {(msg.body or '').strip()[:1500]}"
-                    )
+                    # Phone view = filtered view. Drop CoT/tool/EOS noise
+                    # before sending so the user sees the same clean text
+                    # the GUI shows in its "Filtered" tab.
+                    body_clean = clean_display_answer((msg.body or "").strip())
+                    if body_clean:
+                        self._send_message(
+                            chat_id, f"💬 {msg.from_agent}: {body_clean[:1500]}"
+                        )
                 elif msg.kind == MessageKind.EVENT and "error" in (msg.body or "").lower():
                     self._send_message(chat_id, f"⚠️ {msg.from_agent}: {msg.body}")
             except Exception:  # noqa: BLE001

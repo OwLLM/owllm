@@ -48,6 +48,7 @@ from core.agents.orchestrator import Team, build_team
 from core.agents.projects import Project, get_project_store
 from core.agents.tools import builtin_registry, register_mcp_tools
 from core.agents.agent_definitions import list_all_definitions
+from core.inference import clean_display_answer
 
 logger = logging.getLogger(__name__)
 
@@ -401,7 +402,11 @@ class WhatsAppBridge:
             self._wire_chat_listener(sender)
             try:
                 reply = team.run_goal(goal, attachments=attachments)
-                self.send_text(sender, f"✅ Done.\n\n{reply.body}")
+                # Phone view = filtered view. Strip CoT / tool transcripts /
+                # EOS noise so what lands on WhatsApp matches the GUI's
+                # "Filtered" panel, not the raw model dump.
+                clean_body = clean_display_answer(reply.body or "")
+                self.send_text(sender, f"✅ Done.\n\n{clean_body}")
             except Exception as exc:  # noqa: BLE001
                 logger.exception("WhatsApp goal run failed")
                 try:
@@ -425,9 +430,11 @@ class WhatsAppBridge:
         def on_msg(msg: Message) -> None:
             try:
                 if msg.kind == MessageKind.REPLY and msg.from_agent != "user":
-                    self.send_text(
-                        sender, f"💬 {msg.from_agent}: {(msg.body or '').strip()[:1500]}"
-                    )
+                    body_clean = clean_display_answer((msg.body or "").strip())
+                    if body_clean:
+                        self.send_text(
+                            sender, f"💬 {msg.from_agent}: {body_clean[:1500]}"
+                        )
                 elif msg.kind == MessageKind.EVENT and "error" in (msg.body or "").lower():
                     self.send_text(sender, f"⚠️ {msg.from_agent}: {msg.body}")
             except Exception:  # noqa: BLE001

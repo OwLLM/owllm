@@ -159,7 +159,7 @@ class _GalleryCard(QFrame):
             QFrame#GalleryCard {{
                 background: qlineargradient(
                     x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #232936, stop:1 #181b22
+                    stop:0 palette(alternate-base), stop:1 palette(alternate-base)
                 );
                 border: none;
                 border-left: 3px solid {accent};
@@ -272,7 +272,7 @@ class _AvatarPicker(QFrame):
         super().__init__(parent)
         self.setObjectName("AvatarPicker")
         self.setStyleSheet(
-            "QFrame#AvatarPicker { background:#14171d; border:none; border-radius:10px; }"
+            "QFrame#AvatarPicker { background:palette(base); border:none; border-radius:10px; }"
         )
         outer = QVBoxLayout(self)
         outer.setContentsMargins(12, 12, 12, 12)
@@ -390,7 +390,7 @@ class _EditorPanel(QFrame):
 
         self.setObjectName("EditorPanel")
         self.setStyleSheet(
-            "QFrame#EditorPanel { background:#1a1d24; border:none; border-radius:12px; }"
+            "QFrame#EditorPanel { background:palette(base); border:none; border-radius:12px; }"
         )
         _add_shadow(self)
         self._build_ui()
@@ -484,7 +484,7 @@ class _EditorPanel(QFrame):
         self.voice_combo = QComboBox()
         self.voice_combo.setMinimumHeight(32)
         self.voice_combo.setStyleSheet(
-            "QComboBox { background:#14171d; color:#fff; border:none; "
+            "QComboBox { background:palette(base); color:#fff; border:none; "
             "border-radius:8px; padding:0 10px; font-size:13px; } "
             "QComboBox::drop-down { border:none; }"
         )
@@ -499,7 +499,7 @@ class _EditorPanel(QFrame):
         self.voice_rate_spin.setMinimumHeight(32)
         self.voice_rate_spin.setFixedWidth(110)
         self.voice_rate_spin.setStyleSheet(
-            "QSpinBox { background:#14171d; color:#fff; border:none; "
+            "QSpinBox { background:palette(base); color:#fff; border:none; "
             "border-radius:8px; padding:0 10px; font-size:13px; }"
         )
         v_row.addWidget(self.voice_rate_spin)
@@ -1233,24 +1233,24 @@ def _section_label(text: str) -> QLabel:
 
 _INPUT_STYLE = """
     QLineEdit {
-        background:#14171d; color:#fff; border:none;
+        background:palette(base); color:#fff; border:none;
         border-radius:8px; padding:0 12px; font-size:15px;
     }
-    QLineEdit:focus { background:#1a1d24; }
+    QLineEdit:focus { background:palette(base); }
     QLineEdit:disabled { color:#888; background:#101218; }
 """
 
 _INPUT_STYLE_TEXTAREA = """
     QTextEdit {
-        background:#14171d; color:#fff; border:none;
+        background:palette(base); color:#fff; border:none;
         border-radius:8px; padding:8px 12px; font-size:15px;
     }
-    QTextEdit:focus { background:#1a1d24; }
+    QTextEdit:focus { background:palette(base); }
 """
 
 _TOOLBOX_STYLE = """
     QFrame {
-        background:#14171d; border:none; border-radius:8px;
+        background:palette(base); border:none; border-radius:8px;
     }
     QCheckBox { background:transparent; }
 """

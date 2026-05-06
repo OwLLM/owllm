@@ -127,7 +127,7 @@ class ChatBubble(QFrame):
                 else:
                     self.setStyleSheet("""
                         ChatBubble {
-                            background: #2a2a3e;
+                            background: palette(alternate-base);
                             border: 1px solid #3a3a4e;
                             border-radius: 12px;
                         }

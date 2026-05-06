@@ -85,7 +85,7 @@ class _TelegramCard(QFrame):
             QFrame#TelegramCard {
                 background: qlineargradient(
                     x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #1c2540, stop:0.6 #1a1d24, stop:1 #1a1d24
+                    stop:0 #1c2540, stop:0.6 palette(base), stop:1 palette(base)
                 );
                 border: none;
                 border-radius: 16px;
@@ -157,7 +157,7 @@ class _TelegramCard(QFrame):
         self.project_combo = QComboBox()
         self.project_combo.setMinimumHeight(32)
         self.project_combo.setStyleSheet(
-            "QComboBox { background:#14171d; color:#fff; border:none; "
+            "QComboBox { background:palette(base); color:#fff; border:none; "
             "border-radius:8px; padding:0 12px; font-size:13px; }"
         )
         outer.addWidget(self.project_combo)
@@ -365,7 +365,7 @@ class _WhatsAppCard(QFrame):
             QFrame#WhatsAppCard {
                 background: qlineargradient(
                     x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #16322a, stop:0.6 #1a1d24, stop:1 #1a1d24
+                    stop:0 #16322a, stop:0.6 palette(base), stop:1 palette(base)
                 );
                 border: none;
                 border-radius: 16px;
@@ -434,7 +434,7 @@ class _WhatsAppCard(QFrame):
         self.project_combo = QComboBox()
         self.project_combo.setMinimumHeight(32)
         self.project_combo.setStyleSheet(
-            "QComboBox { background:#14171d; color:#fff; border:none; "
+            "QComboBox { background:palette(base); color:#fff; border:none; "
             "border-radius:8px; padding:0 12px; font-size:13px; }"
         )
         grid.addWidget(self.project_combo, 7, 1)

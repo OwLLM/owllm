@@ -323,7 +323,7 @@ class ModelCard(QFrame):
         
         req = getattr(self, "requires_token", False)
         if self.is_dark:
-            bg0 = "#2a2610" if req else "#1e1e2e"
+            bg0 = "#2a2610" if req else "palette(base)"
             bg1 = "#2a2610" if req else "#16213e"
             h0 = "#332a18" if req else "#262740"
             h1 = "#2a2540" if req else "#1a2540"
@@ -865,7 +865,7 @@ class DownloadedModelCard(QFrame):
         
         req = getattr(self, "requires_token", False)
         if self.is_dark:
-            bg0 = "#2a2610" if req else "#1e1e2e"
+            bg0 = "#2a2610" if req else "palette(base)"
             bg1 = "#2a2610" if req else "#16213e"
             h0 = "#332a18" if req else "#262740"
             h1 = "#2a2540" if req else "#1a2540"

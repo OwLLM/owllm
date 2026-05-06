@@ -856,7 +856,7 @@ class AgentsPage(QWidget):
         frame.setObjectName("AccountsStrip")
         frame.setStyleSheet("""
             QFrame#AccountsStrip {
-                background:#181b22;
+                background:palette(alternate-base);
                 border:none;
                 border-radius:10px;
             }
@@ -929,13 +929,13 @@ class AgentsPage(QWidget):
         self.attach_btn.setToolTip("Attach an image or audio file")
         self.attach_btn.setStyleSheet("""
             QPushButton {
-                background:#14171d;
+                background:palette(base);
                 color:#dadcdf;
                 border:none;
                 border-radius:10px;
                 font-size:16px;
             }
-            QPushButton:hover { background:#1a1d24; }
+            QPushButton:hover { background:palette(base); }
         """)
         self.attach_btn.clicked.connect(self._on_attach_clicked)
 
@@ -947,14 +947,14 @@ class AgentsPage(QWidget):
         self.goal_input.setMinimumHeight(38)
         self.goal_input.setStyleSheet("""
             QLineEdit {
-                background:#14171d;
+                background:palette(base);
                 color:#fff;
                 border:none;
                 border-radius:10px;
                 padding:0 14px;
                 font-size:13px;
             }
-            QLineEdit:focus { background:#1a1d24; }
+            QLineEdit:focus { background:palette(base); }
         """)
         self.goal_input.returnPressed.connect(self._run_clicked)
 
@@ -1557,7 +1557,7 @@ class AgentsPage(QWidget):
             QFrame#ProjectStrip {
                 background: qlineargradient(
                     x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #1f2632, stop:1 #181b22
+                    stop:0 #1f2632, stop:1 palette(alternate-base)
                 );
                 border:none; border-radius:10px;
             }
@@ -1584,10 +1584,10 @@ class AgentsPage(QWidget):
         )
         self._location_input.setStyleSheet("""
             QLineEdit {
-                background:#14171d; color:#fff; border:none;
+                background:palette(base); color:#fff; border:none;
                 border-radius:8px; padding:0 12px; font-size:13px;
             }
-            QLineEdit:focus { background:#1a1d24; }
+            QLineEdit:focus { background:palette(base); }
         """)
         # Persist whenever the user finishes typing (focus-out or Enter).
         self._location_input.editingFinished.connect(self._on_location_changed)
@@ -1605,7 +1605,7 @@ class AgentsPage(QWidget):
         self._project_combo.setMinimumWidth(200)
         self._project_combo.setStyleSheet("""
             QComboBox {
-                background:#14171d; color:#fff; border:none;
+                background:palette(base); color:#fff; border:none;
                 border-radius:8px; padding:0 12px; font-size:13px;
             }
         """)

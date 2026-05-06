@@ -275,7 +275,7 @@ class SkillLibraryDialog(QDialog):
         # Preview pane.
         preview_host = QFrame()
         preview_host.setStyleSheet(
-            "QFrame { background:#14171d; border:none; border-radius:10px; }"
+            "QFrame { background:palette(base); border:none; border-radius:10px; }"
         )
         pv = QVBoxLayout(preview_host)
         pv.setContentsMargins(12, 10, 12, 10)

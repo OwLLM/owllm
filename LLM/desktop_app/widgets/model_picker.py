@@ -173,7 +173,7 @@ class _ModelPickerPopup(QMenu):
         # default tearing/highlight behaviour that fights with our painting.
         self.setStyleSheet("""
             QMenu {
-                background:#14171d;
+                background:palette(base);
                 border:1px solid #2c313c;
                 border-radius:10px;
                 padding:6px;

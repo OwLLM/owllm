@@ -16624,6 +16624,26 @@ class MainWindow(QMainWindow):
         proc.setProcessChannelMode(QProcess.MergedChannels)
         proc.setWorkingDirectory(str(self.root))
 
+        # Arm the converter with a per-run crash log path so its
+        # faulthandler trace + heartbeat lands somewhere we can read on
+        # a non-zero exit. Same pattern as training launches.
+        gguf_env = QProcessEnvironment.systemEnvironment()
+        gguf_env.insert("PYTHONIOENCODING", "utf-8")
+        gguf_env.insert("PYTHONUTF8", "1")
+        gguf_env.insert("PYTHONUNBUFFERED", "1")
+        gguf_env.insert("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        gguf_crash_log = None
+        try:
+            _crash_dir = out_root / "_crash_logs"
+            _crash_dir.mkdir(parents=True, exist_ok=True)
+            gguf_crash_log = _crash_dir / (
+                "gguf_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
+            )
+            gguf_env.insert("OWLLM_CRASH_LOG", str(gguf_crash_log))
+        except Exception:
+            gguf_crash_log = None
+        proc.setProcessEnvironment(gguf_env)
+
         def _on_out():
             try:
                 data = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace")
@@ -16648,6 +16668,24 @@ class MainWindow(QMainWindow):
             else:
                 try:
                     self.train_status_pill.set_state("failed", f"GGUF convert exit {exit_code}")
+                except Exception:
+                    pass
+                # Surface the faulthandler trace if the crash was
+                # native (segfault / 0xC0000005). Stdout already
+                # streamed live, but the trace catches things that
+                # happened in C land with no Python print.
+                try:
+                    if gguf_crash_log is not None and gguf_crash_log.exists():
+                        text = gguf_crash_log.read_text(
+                            encoding="utf-8", errors="replace"
+                        ).strip()
+                        if text:
+                            self.train_log.appendPlainText(
+                                f"\n--- FAULTHANDLER TRACE ({gguf_crash_log}) ---"
+                            )
+                            for line in text.splitlines():
+                                self.train_log.appendPlainText(line)
+                            self.train_log.appendPlainText("--- end faulthandler trace ---\n")
                 except Exception:
                     pass
 

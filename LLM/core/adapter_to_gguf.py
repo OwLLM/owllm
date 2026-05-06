@@ -65,6 +65,91 @@ try:
 except Exception:
     pass
 
+# ---------------------------------------------------------------------
+# Crash diagnostics — same pattern as finetune.py. The conversion
+# pipeline runs torch+PEFT+safetensors at peak VRAM (loading the base
+# in fp16 then merging the LoRA), so the same Windows native-crash
+# class hits here too: cuDNN/cuBLAS finalizer access violations on
+# teardown, safetensors >2 GB ctypes overflow, etc. Without this the
+# converter just dies and the user sees an exit code with no clue
+# which stage failed.
+# ---------------------------------------------------------------------
+import faulthandler as _fh
+import threading as _threading
+from datetime import datetime as _dt
+
+_CRASH_LOG_FH = None
+try:
+    _crash_log = os.environ.get("OWLLM_CRASH_LOG")
+    if _crash_log:
+        try:
+            Path(_crash_log).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        _CRASH_LOG_FH = open(_crash_log, "w", buffering=1, encoding="utf-8")
+        _CRASH_LOG_FH.write(
+            f"[adapter_to_gguf] faulthandler armed at {_dt.now().isoformat()}\n"
+        )
+        _fh.enable(file=_CRASH_LOG_FH, all_threads=True)
+        sys.stderr.write(f"[INFO] [DIAG] faulthandler enabled — crash trace -> {_crash_log}\n")
+        sys.stderr.flush()
+    else:
+        _fh.enable(all_threads=True)
+        sys.stderr.write("[INFO] [DIAG] faulthandler enabled (stderr only, no log path)\n")
+        sys.stderr.flush()
+except Exception as _diag_exc:
+    sys.stderr.write(
+        f"[WARN] [DIAG] faulthandler init failed: {type(_diag_exc).__name__}: {_diag_exc}\n"
+    )
+    sys.stderr.flush()
+
+# Same heartbeat + phase tracking as finetune.py — converter has at
+# least three multi-minute phases (merge, fp16 GGUF write, quantise)
+# during which there's zero stdout if the underlying tool is silent.
+_PHASE = {"name": "init", "since": time.monotonic()}
+
+def _set_phase(name: str) -> None:
+    _PHASE["name"] = name
+    _PHASE["since"] = time.monotonic()
+    try:
+        sys.stderr.write(f"[INFO] [PHASE] -> {name}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+def _heartbeat_loop():
+    while True:
+        try:
+            time.sleep(20)
+            elapsed = time.monotonic() - _PHASE["since"]
+            sys.stderr.write(
+                f"[HEARTBEAT] alive — phase={_PHASE['name']!r} for {elapsed:.0f}s "
+                f"(pid={os.getpid()})\n"
+            )
+            sys.stderr.flush()
+        except Exception:
+            pass
+
+try:
+    _hb_thread = _threading.Thread(
+        target=_heartbeat_loop, name="owllm-gguf-heartbeat", daemon=True
+    )
+    _hb_thread.start()
+except Exception as _hb_exc:
+    sys.stderr.write(
+        f"[WARN] [DIAG] heartbeat thread failed to start: {type(_hb_exc).__name__}: {_hb_exc}\n"
+    )
+
+try:
+    if _CRASH_LOG_FH is not None:
+        _fh.dump_traceback_later(90, repeat=True, file=_CRASH_LOG_FH)
+    else:
+        _fh.dump_traceback_later(90, repeat=True)
+except Exception as _dt_exc:
+    sys.stderr.write(
+        f"[WARN] [DIAG] dump_traceback_later failed: {type(_dt_exc).__name__}: {_dt_exc}\n"
+    )
+
 logger = logging.getLogger(__name__)
 
 
@@ -739,6 +824,7 @@ def convert_adapter_to_gguf(cfg: ConvertConfig) -> Path:
     log = cfg.log_callback or (lambda m: print(m))
     t0 = time.monotonic()
 
+    _set_phase("validating-inputs")
     base = Path(cfg.base_model).resolve()
     adapter = Path(cfg.adapter_dir).resolve()
     out_dir = Path(cfg.output_dir).resolve()
@@ -785,14 +871,32 @@ def convert_adapter_to_gguf(cfg: ConvertConfig) -> Path:
     log(f"using python: {env_python}")
     log(f"running: {' '.join(cmd)}")
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.stdout:
-        log(f"STDOUT (last 800 chars):\n{proc.stdout[-800:]}")
-    if proc.stderr:
-        log(f"STDERR (last 800 chars):\n{proc.stderr[-800:]}")
+    _set_phase("running-converter")
+    # Stream child output LIVE instead of buffering with capture_output.
+    # The previous code waited for the subprocess to finish then dumped
+    # the last 800 chars — fine for clean failures, terrible for stalls
+    # (the user saw nothing for minutes) and for native crashes (if the
+    # parent also died, the buffered output was lost).
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, encoding="utf-8", errors="replace", bufsize=1,
+    )
+    last_lines: List[str] = []
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line = line.rstrip()
+            log(line)
+            last_lines.append(line)
+            if len(last_lines) > 200:
+                last_lines = last_lines[-200:]
+    finally:
+        proc.wait()
     if proc.returncode != 0:
+        tail = "\n".join(last_lines[-40:])
         raise RuntimeError(
-            f"convert_lora_to_gguf.py failed (exit {proc.returncode})"
+            f"convert_lora_to_gguf.py failed (exit {proc.returncode}). "
+            f"Last lines:\n{tail}"
         )
     if not final_gguf.exists():
         raise RuntimeError(
@@ -802,6 +906,7 @@ def convert_adapter_to_gguf(cfg: ConvertConfig) -> Path:
     log(f"GGUF LoRA written: {final_gguf} "
         f"({final_gguf.stat().st_size / 1e6:.1f} MB)")
 
+    _set_phase("writing-sidecar")
     # Write a sidecar so any future GGUF dropdown picks this entry up
     # as the canonical adapter file.
     try:

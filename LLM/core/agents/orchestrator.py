@@ -113,8 +113,33 @@ def _make_dispatch_tool(
         if target == orchestrator_name:
             raise ToolError("dispatch cannot target the orchestrator")
         if target not in specialists:
-            available = ", ".join(sorted(specialists)) or "(none)"
-            raise ToolError(f"unknown agent '{target}'. available: {available}")
+            # Alias-tolerant resolution: team templates materialise
+            # specialists as ``<team>.<short_name>`` (e.g.
+            # ``learning_tutor.explainer``). The orchestrator's prompt
+            # carries an AUTHORITATIVE roster using the prefixed names,
+            # but the user-written extra_prompt and the base role's
+            # default team list both use the short names — so models
+            # often call dispatch(agent="explainer"). Resolve the short
+            # name when it uniquely identifies a specialist; otherwise
+            # raise the ambiguous-/unknown-name error so the model can
+            # self-correct.
+            suffix_matches = [
+                n for n in specialists
+                if n.endswith("." + target) or n == target
+            ]
+            if len(suffix_matches) == 1:
+                target = suffix_matches[0]
+            else:
+                available = ", ".join(sorted(specialists)) or "(none)"
+                if len(suffix_matches) > 1:
+                    raise ToolError(
+                        f"agent '{args.get('agent', '')}' is ambiguous — "
+                        f"matches {', '.join(suffix_matches)}. "
+                        f"Use the full name."
+                    )
+                raise ToolError(
+                    f"unknown agent '{args.get('agent', '')}'. available: {available}"
+                )
 
         # Active goal lookup via any specialist's team back-reference.
         goal_id = specialists[target].team.active_goal_id

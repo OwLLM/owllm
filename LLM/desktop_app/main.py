@@ -13956,6 +13956,45 @@ class MainWindow(QMainWindow):
             v.addWidget(t)
             return f, v
 
+        def _make_wrap_mirror(line_edit: QLineEdit) -> QLabel:
+            """Wrapping QLabel that mirrors a QLineEdit's text.
+
+            QLineEdit can't wrap, so when the user pastes a long path
+            or run-name into one inside a narrow Train column the tail
+            gets clipped. This builds a sibling QLabel that updates
+            from ``textChanged`` and injects zero-width spaces after
+            every separator so unbroken strings still wrap. The label
+            is hidden when the line edit is empty so it doesn't claim
+            a layout row when there's nothing to mirror.
+            """
+            mirror = QLabel("")
+            mirror.setWordWrap(True)
+            mirror.setTextFormat(Qt.PlainText)
+            mirror.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            mirror.setMinimumWidth(0)
+            mirror.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            mirror.setStyleSheet(
+                "color: #8595ad; font-size: 9pt; padding: 2px 6px; "
+                "background: rgba(8, 10, 16, 0.55); border-radius: 4px;"
+            )
+            mirror.setVisible(False)
+
+            def _update(text: str) -> None:
+                if not text:
+                    mirror.setVisible(False)
+                    mirror.setText("")
+                    return
+                wrapped = text
+                for _ch in ("\\", "/", "_", "-", "."):
+                    wrapped = wrapped.replace(_ch, _ch + "​")
+                mirror.setText(wrapped)
+                mirror.setToolTip(text)
+                mirror.setVisible(True)
+
+            line_edit.textChanged.connect(_update)
+            _update(line_edit.text())
+            return mirror
+
         # ── Card 1: Model + Name ──────────────────────────────────────
         model_frame, model_layout = _make_card("🤖  BASE MODEL")
         
@@ -13996,6 +14035,11 @@ class MainWindow(QMainWindow):
         self.train_model_name.setPlaceholderText("auto-generated")
         name_row.addWidget(self.train_model_name, 1)
         model_layout.addLayout(name_row)
+        # Wrap-friendly mirror — shows the full Run name across as
+        # many lines as needed when the column is narrow. QLineEdit
+        # can't wrap, so we mirror its value on a wrapping QLabel.
+        self.train_model_name_wrap = _make_wrap_mirror(self.train_model_name)
+        model_layout.addWidget(self.train_model_name_wrap)
 
         # ── Card 2: Dataset ──────────────────────────────────────────
         dataset_frame, dataset_layout = _make_card("📊  DATASET")
@@ -14004,6 +14048,10 @@ class MainWindow(QMainWindow):
         self.train_data_path.textChanged.connect(self._validate_dataset)
         self.train_data_path.textChanged.connect(self._auto_generate_model_name)
         dataset_layout.addWidget(self.train_data_path)
+        # Wrap-friendly mirror so the dataset path shows in full even
+        # when the .jsonl path is too long for the narrow column.
+        self.train_data_path_wrap = _make_wrap_mirror(self.train_data_path)
+        dataset_layout.addWidget(self.train_data_path_wrap)
 
         dataset_btn_row = QHBoxLayout()
         dataset_btn_row.setSpacing(6)
@@ -14199,24 +14247,37 @@ class MainWindow(QMainWindow):
         params_grid.addWidget(self.batch_size_auto, 2, 2, 1, 2)
         params_layout.addLayout(params_grid)
 
-        # Output dir — small inline row, less prominent than legacy.
+        # Output dir — wrapping label (was a QLineEdit, which can't
+        # wrap, so long paths got clipped in the narrow Train column).
+        # The 📁 browse button writes the chosen path back via
+        # _set_train_out_dir, which mirrors it onto the label with
+        # zero-width-space injection so unbroken path strings still
+        # wrap at separators.
         output_row = QHBoxLayout()
         output_row.setSpacing(6)
+        output_row.setAlignment(Qt.AlignTop)
         out_lab = QLabel("Output")
         out_lab.setStyleSheet("color: #8595ad; font-size: 10pt;")
-        output_row.addWidget(out_lab)
-        self.train_out_dir = QLineEdit(str(default_output_dir()))
-        self.train_out_dir.setReadOnly(True)
+        output_row.addWidget(out_lab, 0, Qt.AlignTop)
+        self.train_out_dir_path = str(default_output_dir())
+        self.train_out_dir = QLabel()
+        self.train_out_dir.setWordWrap(True)
+        self.train_out_dir.setTextFormat(Qt.PlainText)
+        self.train_out_dir.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.train_out_dir.setMinimumWidth(0)
+        self.train_out_dir.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.train_out_dir.setStyleSheet(
-            "background: rgba(8, 10, 16, 0.85); color: #8595ad; font-size: 9pt;"
+            "background: rgba(8, 10, 16, 0.85); color: #8595ad; "
+            "font-size: 9pt; padding: 4px 8px; border-radius: 4px;"
         )
+        self._set_train_out_dir(self.train_out_dir_path)
         output_row.addWidget(self.train_out_dir, 1)
         out_browse = QPushButton("📁")
         out_browse.setProperty("class", "cardBtn")
         out_browse.setMaximumWidth(40)
         out_browse.setToolTip("Browse output directory")
         out_browse.clicked.connect(self._browse_train_out)
-        output_row.addWidget(out_browse)
+        output_row.addWidget(out_browse, 0, Qt.AlignTop)
         params_layout.addLayout(output_row)
 
         # Internal-only widget — batch size used by the launcher; not
@@ -14901,7 +14962,24 @@ class MainWindow(QMainWindow):
         if model_id:
             capabilities = detect_model_capabilities(model_id=model_id)
             icons = get_capability_icons(capabilities)
-            self.model_info_label.setText(f"Selected: {model_id}\n{icons} Capabilities detected")
+            # Inject zero-width spaces after every separator so the
+            # QLabel actually wraps long unbroken model IDs (e.g.
+            # ``DavidAU__gemma-4-E4B-it-The-DECKARD-Expresso-Universe-…``)
+            # in the narrow Train column.
+            wrapped_id = model_id
+            for _ch in ("/", "_", "-", "."):
+                wrapped_id = wrapped_id.replace(_ch, _ch + "​")
+            self.model_info_label.setText(
+                f"Selected: {wrapped_id}\n{icons} Capabilities detected"
+            )
+            self.model_info_label.setToolTip(model_id)
+            try:
+                self.model_info_label.setSizePolicy(
+                    QSizePolicy.Ignored, QSizePolicy.Preferred
+                )
+                self.model_info_label.setMinimumWidth(0)
+            except Exception:
+                pass
     
     def _auto_generate_model_name(self):
         """Auto-generate model name based on base model and dataset"""
@@ -15082,7 +15160,7 @@ class MainWindow(QMainWindow):
         """
         out_dir_str = ""
         try:
-            out_dir_str = self.train_out_dir.text().strip()
+            out_dir_str = self.train_out_dir_path.strip()
         except Exception:
             pass
         if not out_dir_str:
@@ -15608,7 +15686,23 @@ class MainWindow(QMainWindow):
     def _browse_train_out(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Select output folder", str(self.root))
         if d:
-            self.train_out_dir.setText(d)
+            self._set_train_out_dir(d)
+
+    def _set_train_out_dir(self, path: str) -> None:
+        """Set the training-output directory.
+
+        Stores the canonical path on ``self.train_out_dir_path`` and
+        updates the wrap-friendly QLabel with zero-width-space-injected
+        text so long Windows paths wrap inside the narrow Train column
+        without ever clipping or being interpreted as a single
+        unbreakable token.
+        """
+        self.train_out_dir_path = str(path or "")
+        wrapped = self.train_out_dir_path
+        for _ch in ("\\", "/", "_", "-", "."):
+            wrapped = wrapped.replace(_ch, _ch + "​")
+        self.train_out_dir.setText(wrapped)
+        self.train_out_dir.setToolTip(self.train_out_dir_path)
 
     def _start_training(self) -> None:
         # GROUND-TRUTH SIGNAL: write directly to logs/train_click.log
@@ -15627,7 +15721,7 @@ class MainWindow(QMainWindow):
                     _f.write(
                         f"  dropdown={self.train_base_model.currentText()!r}\n"
                         f"  data_path={self.train_data_path.text()!r}\n"
-                        f"  out_dir={self.train_out_dir.text()!r}\n"
+                        f"  out_dir={self.train_out_dir_path!r}\n"
                         f"  epochs={self.train_epochs.value()}\n"
                         f"  batch_size={self.train_batch.value()}\n"
                         f"  lr={self.train_lr.value()}\n"
@@ -15648,7 +15742,7 @@ class MainWindow(QMainWindow):
                 snap = {
                     "dropdown": self.train_base_model.currentText(),
                     "data_path": self.train_data_path.text(),
-                    "out_dir": self.train_out_dir.text(),
+                    "out_dir": self.train_out_dir_path,
                     "epochs": self.train_epochs.value(),
                     "batch_size": self.train_batch.value(),
                     "lr": self.train_lr.value(),
@@ -16086,7 +16180,7 @@ class MainWindow(QMainWindow):
         # Stop-file path. One per run, lives in the output dir alongside
         # the adapter. Pre-clean any stale file so the new subprocess
         # doesn't think it was pre-stopped on the first step.
-        out_dir_path = Path(self.train_out_dir.text().strip())
+        out_dir_path = Path(self.train_out_dir_path.strip())
         try:
             out_dir_path.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -16779,7 +16873,7 @@ class MainWindow(QMainWindow):
             # AND has the required PEFT files, treat as saved.
             if not adapter_saved:
                 try:
-                    out_dir = Path(self.train_out_dir.text().strip())
+                    out_dir = Path(self.train_out_dir_path.strip())
                     if out_dir.exists():
                         import time as _time
                         cutoff = _time.time() - 60
@@ -16881,7 +16975,7 @@ class MainWindow(QMainWindow):
         we can't find an adapter so the prompt never appears spuriously.
         """
         try:
-            out_dir = Path(self.train_out_dir.text().strip())
+            out_dir = Path(self.train_out_dir_path.strip())
             if not out_dir.exists():
                 return
             adapters = []

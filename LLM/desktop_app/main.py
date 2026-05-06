@@ -14876,6 +14876,16 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+        # Preflight: GPU environment must be clean before launching a
+        # training job. Lets us catch the 'something else is using
+        # VRAM' cases (lingering llama-server, stale Python from an
+        # earlier crashed run, browser GPU compositors holding GBs)
+        # BEFORE the user invests 30+ minutes only to crash on a
+        # 0xC0000409 / 0xC0000005 swap-pressure abort. Returns False
+        # if the user explicitly cancels.
+        if not self._preflight_gpu_for_training():
+            return
+
         try:
             self._start_training_impl()
         except Exception as exc:
@@ -14914,6 +14924,205 @@ class MainWindow(QMainWindow):
                 self.train_stop.setEnabled(False)
             except Exception:
                 pass
+
+    def _preflight_gpu_for_training(self) -> bool:
+        """Check the GPU is clean enough to start a training run.
+
+        Why: every training run we've watched fail with Windows
+        ``0xC0000409`` / ``0xC0000005`` 30-90 minutes in had the same
+        signature — sustained step-time inflation (33s -> 80s+) caused
+        by VRAM swap pressure once the trainer's working set spilled
+        through unified memory. The fix is to refuse to start until
+        VRAM is actually free, not to chase the abort post-mortem.
+
+        Returns False ONLY if the user explicitly cancels at the
+        warning dialog. Returns True (proceed) when the environment
+        looks clean OR when nvidia-smi can't report (e.g. no NVIDIA
+        driver — let the trainer's own fallback handle it).
+        """
+        try:
+            import subprocess as _sp
+            from PySide6.QtWidgets import QMessageBox as _QMB
+
+            sub_flags = getattr(self, "subprocess_flags", {})
+
+            # Direct measure: how much VRAM is actually free? This is
+            # the metric that matters for 'will the trainer swap'. An
+            # 8B model in bf16 needs ~18 GB for forward + activations
+            # + optimizer; below that the trainer pages and Windows
+            # eventually corrupts memory.
+            free_mb = total_mb_gpu = -1
+            try:
+                gpu_proc = _sp.run(
+                    [
+                        "nvidia-smi",
+                        "--query-gpu=memory.free,memory.total",
+                        "--format=csv,noheader,nounits",
+                        "-i", "0",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=8,
+                    **sub_flags,
+                )
+                if gpu_proc.returncode == 0 and gpu_proc.stdout:
+                    parts = [p.strip() for p in gpu_proc.stdout.splitlines()[0].split(",")]
+                    if len(parts) >= 2:
+                        free_mb = int(parts[0])
+                        total_mb_gpu = int(parts[1])
+            except Exception:
+                pass
+
+            # Per-process compute-app list — pid + name + used_memory.
+            # On Windows many GPU consumers (Chrome, Edge WebView, the
+            # Windows shell, EXCEL) show ``[N/A]`` for memory because
+            # the user-mode driver doesn't expose per-process memory.
+            # We still flag them — they DO consume VRAM, we just don't
+            # know how much. Combined with free_mb, that's enough.
+            proc = _sp.run(
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=pid,process_name,used_memory",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                **sub_flags,
+            )
+            consumers: List[Tuple[int, str, Optional[int]]] = []
+            if proc.returncode == 0:
+                for line in (proc.stdout or "").splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) < 3:
+                        continue
+                    try:
+                        pid = int(parts[0])
+                    except ValueError:
+                        continue
+                    pname = parts[1]
+                    raw_mb = parts[2]
+                    used_mb: Optional[int]
+                    try:
+                        used_mb = int(raw_mb)
+                    except ValueError:
+                        used_mb = None
+                    consumers.append((pid, pname, used_mb))
+
+            our_pid = os.getpid()
+            # Real consumers = non-trainer entries with any non-zero
+            # known usage OR unknown usage (N/A). The N/A rows are the
+            # Windows shell / browser / desktop apps that DO use VRAM;
+            # we flag them when free_mb is below the safety threshold.
+            real: List[Tuple[int, str, Optional[int]]] = []
+            for pid, pname, mb in consumers:
+                if pid == our_pid:
+                    continue
+                if mb is None or mb >= 200:
+                    real.append((pid, pname, mb))
+
+            # Decide whether to warn. Two triggers:
+            #   1. free_mb < 18000 — empirical floor for 8B bf16 training
+            #      with batch=2 + max_seq=2048 + gradient checkpointing.
+            #   2. real consumers exist with combined known usage >= 1 GB.
+            known_total = sum(mb for _, _, mb in real if mb is not None)
+            low_free = (free_mb >= 0) and (free_mb < 18000)
+            heavy_consumers = known_total >= 1024
+            many_consumers = len(real) >= 4  # 4+ N/A rows on a desktop
+            if not (low_free or heavy_consumers or many_consumers):
+                return True
+
+            # Categorise process names so the user knows exactly what
+            # to close.
+            def _category(name: str) -> str:
+                low = name.lower()
+                if "llama-server" in low or "llama_server" in low:
+                    return "llama-server (running chat / inference)"
+                if "python" in low:
+                    return "python (chat / agent / earlier training)"
+                if "ollama" in low:
+                    return "ollama"
+                if "lmstudio" in low or "lm-studio" in low:
+                    return "LM Studio"
+                if any(b in low for b in ("chrome", "msedge", "firefox", "brave")):
+                    return "browser (close GPU-heavy tabs)"
+                if "explorer" in low:
+                    return "Windows Explorer (DWM)"
+                if "shellexperiencehost" in low or "textinputhost" in low:
+                    return "Windows shell"
+                if "excel" in low or "winword" in low or "powerpnt" in low:
+                    return "Office (close it)"
+                if "msedgewebview" in low:
+                    return "Edge WebView (often spawned by Office / Teams / Outlook)"
+                if "bambu" in low:
+                    return "Bambu Studio"
+                return name
+
+            # Sort by known usage desc, unknowns last.
+            def _sort_key(t):
+                _, _, mb = t
+                return (-mb if mb is not None else 1, 0)
+            lines = []
+            for pid, pname, mb in sorted(real, key=_sort_key):
+                mb_str = f"{mb:>6} MB" if mb is not None else "    N/A"
+                lines.append(f"  PID {pid:>6}  {mb_str}  {_category(pname)}")
+            body = "\n".join(lines)
+
+            free_str = (
+                f"{free_mb / 1024:.1f} GB free / {total_mb_gpu / 1024:.1f} GB total"
+                if free_mb >= 0 else "free VRAM unavailable"
+            )
+
+            msg = _QMB(self)
+            msg.setWindowTitle("GPU not clean — training may swap and crash")
+            msg.setIcon(_QMB.Warning)
+            msg.setTextFormat(Qt.RichText)
+            headline = []
+            if low_free:
+                headline.append(
+                    f"<b>Only {free_str.split(' / ')[0]} of VRAM is free.</b> "
+                    "An 8B bf16 training run needs ~18 GB of headroom; below "
+                    "that the trainer pages weights and Windows eventually "
+                    "kills the process with a <code>0xC0000409</code> / "
+                    "<code>0xC0000005</code> abort."
+                )
+            else:
+                headline.append(
+                    f"<b>{len(real)} other process(es) are using the GPU.</b> "
+                    f"({free_str})"
+                )
+            msg.setText(headline[0])
+            msg.setInformativeText(
+                "<p><b>VRAM consumers right now:</b></p>"
+                f"<pre style='font-family: Consolas, monospace; font-size: 10pt; "
+                f"background: #1a1a1a; color: #f5f5f5; padding: 8px; "
+                f"border-radius: 4px;'>{body}</pre>"
+                "<p>Stop the LoRA-related ones (Server tab → Stop, close chat "
+                "windows). Browsers / Office / Bambu Studio also hold VRAM — "
+                "close them or accept a slower / riskier run.</p>"
+            )
+            btn_cancel = msg.addButton("Cancel — I'll free VRAM first", _QMB.RejectRole)
+            btn_proceed = msg.addButton("Proceed anyway", _QMB.AcceptRole)
+            msg.setDefaultButton(btn_cancel)
+            msg.exec()
+            if msg.clickedButton() is btn_cancel:
+                self._log_to_app_log(
+                    f"[TRAIN-PREFLIGHT] cancelled; free={free_mb}MB known_used={known_total}MB "
+                    f"unknown_consumers={sum(1 for _, _, mb in real if mb is None)}"
+                )
+                return False
+            self._log_to_app_log(
+                f"[TRAIN-PREFLIGHT] user proceeded with contention; free={free_mb}MB "
+                f"known_used={known_total}MB"
+            )
+            return True
+        except Exception as exc:
+            # Preflight must NEVER block launch on its own bug.
+            try:
+                self._log_to_app_log(f"[TRAIN-PREFLIGHT] check failed: {exc!r}")
+            except Exception:
+                pass
+            return True
 
     def _start_training_impl(self) -> None:
         if self.train_proc is not None:

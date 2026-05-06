@@ -17044,50 +17044,31 @@ class MainWindow(QMainWindow):
                 if deferred:
                     # GGUF was created but couldn't be wired into the
                     # dropdowns because the matching base GGUF isn't on
-                    # disk. Surface it so the user knows their LoRA is
-                    # ready but needs one more onboarding step.
+                    # disk. Offer to download the suggested base GGUF
+                    # and auto-retry registration so the user goes from
+                    # "trained adapter" to "usable in chat" in one
+                    # click + one confirm — instead of having to switch
+                    # tabs, search, download, and re-click To-GGUF.
                     try:
                         self.train_status_pill.set_state(
                             "warn", "GGUF ready — base GGUF not onboarded yet"
                         )
                     except Exception:
                         pass
-                    try:
-                        from PySide6.QtWidgets import QMessageBox
-                        # Pull the suggested repo + path out of the
-                        # marker lines so the user sees actionable info.
-                        suggested = ""
-                        gguf_path = ""
-                        for ln in deferred:
-                            if "Suggested base GGUF to download:" in ln:
-                                suggested = ln.split(":", 2)[-1].strip()
-                            if "GGUF created at" in ln:
-                                gguf_path = ln.split("created at", 1)[-1].strip()
-                        body = (
-                            "<b>The GGUF LoRA was written successfully</b>"
-                            f"{'<br>at <code>' + gguf_path + '</code>' if gguf_path else ''}"
-                            ".<br><br>"
-                            "But it can't appear in chat dropdowns yet — "
-                            "llama-server applies a LoRA <i>on top of</i> a "
-                            "base GGUF, and no matching base GGUF is "
-                            "onboarded.<br><br>"
-                        )
-                        if suggested:
-                            body += (
-                                "<b>Suggested base to onboard:</b><br>"
-                                f"<code>{suggested}</code><br><br>"
-                            )
-                        body += (
-                            "Open the Models tab → Search → download a "
-                            "<code>*-GGUF</code> for the same model family. "
-                            "Once it's on disk, click <b>To GGUF</b> on this "
-                            "adapter again and registration will succeed."
-                        )
-                        QMessageBox.information(
-                            self, "GGUF ready (registration deferred)", body
-                        )
-                    except Exception:
-                        pass
+                    suggested = ""
+                    gguf_path = ""
+                    for ln in deferred:
+                        if "Suggested base GGUF to download:" in ln:
+                            suggested = ln.split(":", 2)[-1].strip()
+                        if "GGUF created at" in ln:
+                            gguf_path = ln.split("created at", 1)[-1].strip()
+                    self._offer_base_gguf_download(
+                        suggested_repo=suggested,
+                        gguf_lora_path=gguf_path,
+                        adapter_dir=adapter_dir,
+                        base_model_path=base_model_path,
+                        quant=quant,
+                    )
                 else:
                     try:
                         self.train_status_pill.set_state("done", "GGUF ready — picker refreshed")
@@ -17125,6 +17106,193 @@ class MainWindow(QMainWindow):
         proc.finished.connect(_on_done)
         proc.start(cmd[0], cmd[1:])
         self._gguf_convert_proc = proc
+
+    def _offer_base_gguf_download(
+        self,
+        suggested_repo: str,
+        gguf_lora_path: str,
+        adapter_dir: "Path",
+        base_model_path: "Path",
+        quant: str,
+    ) -> None:
+        """Show a Yes/No dialog offering to download the base GGUF, then
+        retry registration so the LoRA appears in dropdowns.
+
+        Wired from the GGUF conversion's deferred-registration branch.
+        End-state: user clicks one Yes button, watches the download,
+        and the LoRA shows up in chat dropdowns automatically when
+        it's done. No tab switching, no re-clicks.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        body = (
+            "<b>Your fine-tune is ready as a GGUF LoRA.</b>"
+            f"{'<br>File: <code>' + gguf_lora_path + '</code>' if gguf_lora_path else ''}"
+            "<br><br>"
+            "But to <b>use it in chat</b>, OWLLM also needs a matching "
+            "<b>base GGUF</b> on disk — llama-server runs the base and "
+            "applies the LoRA on top.<br><br>"
+        )
+        if suggested_repo:
+            body += (
+                f"Download <code>{suggested_repo}</code> now?<br><br>"
+                "When the download finishes, OWLLM will automatically "
+                "register the LoRA so it appears in every chat dropdown."
+            )
+            buttons = QMessageBox.Yes | QMessageBox.No
+            default = QMessageBox.Yes
+        else:
+            body += (
+                "I couldn't guess a matching GGUF repo to suggest. "
+                "Open the Models tab → Search for a "
+                "<code>*-GGUF</code> in the same family, download it, "
+                "then re-click <b>To GGUF</b> on the adapter card."
+            )
+            buttons = QMessageBox.Ok
+            default = QMessageBox.Ok
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("LoRA ready — base GGUF needed")
+        msg.setTextFormat(Qt.RichText)
+        msg.setText(body)
+        msg.setStandardButtons(buttons)
+        msg.setDefaultButton(default)
+        choice = msg.exec()
+
+        if not suggested_repo or choice != QMessageBox.Yes:
+            return
+
+        # Kick off the download via the same DownloadThread the Models
+        # page uses. We bypass the curated-card flow because there's
+        # no card to attach progress to here — instead we stream
+        # progress into the train log so the user has live feedback.
+        self.train_log.appendPlainText(
+            f"\n=== Downloading base GGUF: {suggested_repo} ==="
+        )
+
+        token = self._resolve_hf_token()
+        try:
+            target = Path(self.hf_target_dir.text().strip())
+        except Exception:
+            target = self.root / "models"
+
+        # Pick a single GGUF file from the repo so we don't pull every
+        # quant variant. Prefer Q5_K_M (matches our converter default);
+        # fall back to any *.gguf if Q5_K_M isn't published.
+        allow_patterns = ["*Q5_K_M*.gguf", "*q5_k_m*.gguf", "*.gguf"]
+
+        thread = DownloadThread(
+            suggested_repo,
+            target,
+            cache_dir=getattr(self, "hf_cache_dir", None),
+            token=token,
+            allow_patterns=allow_patterns,
+        )
+
+        def _on_progress(p: int) -> None:
+            try:
+                self.train_status_pill.set_state(
+                    "running", f"downloading base GGUF — {p}%"
+                )
+            except Exception:
+                pass
+
+        def _on_status(msg: str) -> None:
+            self.train_log.appendPlainText(f"  {msg}")
+
+        def _on_dl_finished(dest: str) -> None:
+            self.train_log.appendPlainText(
+                f"\n[base-gguf-download] complete -> {dest}"
+            )
+            # Refresh the local model list so the new GGUF appears.
+            try:
+                self._refresh_locals()
+            except Exception:
+                pass
+            # Now retry registration. The LoRA-GGUF is already on
+            # disk; we just need to re-call register_in_onboarding
+            # against the new base GGUF.
+            try:
+                from core.adapter_to_gguf import register_in_onboarding
+                model_id = register_in_onboarding(
+                    Path(gguf_lora_path),
+                    adapter_name=adapter_dir.name,
+                    base_model_path=str(base_model_path),
+                    quant=quant,
+                )
+                self.train_log.appendPlainText(
+                    f"[base-gguf-download] registered LoRA as model_id={model_id}"
+                )
+                try:
+                    self.train_status_pill.set_state(
+                        "done", "GGUF + base ready — picker refreshed"
+                    )
+                except Exception:
+                    pass
+                # Refresh dropdowns so the LoRA appears immediately.
+                try:
+                    self._refresh_tuned_models()
+                except Exception:
+                    pass
+                try:
+                    self._refresh_locals()
+                except Exception:
+                    pass
+                QMessageBox.information(
+                    self,
+                    "LoRA ready in chat",
+                    f"<b>{adapter_dir.name}</b> is now selectable in "
+                    "every chat / agent dropdown."
+                )
+            except Exception as exc:
+                self.train_log.appendPlainText(
+                    f"[base-gguf-download] registration retry failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                try:
+                    self.train_status_pill.set_state(
+                        "failed", "registration retry failed"
+                    )
+                except Exception:
+                    pass
+                QMessageBox.warning(
+                    self,
+                    "Registration retry failed",
+                    f"<b>{type(exc).__name__}: {exc}</b><br><br>"
+                    "The base GGUF downloaded successfully, but the "
+                    "registration retry hit an unexpected error. The "
+                    "GGUF LoRA file is still on disk — re-clicking "
+                    "<b>To GGUF</b> on the adapter card should pick "
+                    "it up now."
+                )
+
+        def _on_dl_error(err: str) -> None:
+            self.train_log.appendPlainText(
+                f"[base-gguf-download] failed: {err}"
+            )
+            try:
+                self.train_status_pill.set_state(
+                    "failed", "base GGUF download failed"
+                )
+            except Exception:
+                pass
+            QMessageBox.warning(
+                self,
+                "Base GGUF download failed",
+                f"<b>{err}</b><br><br>"
+                "Try downloading <code>" + suggested_repo + "</code> "
+                "manually from the Models tab, then re-click "
+                "<b>To GGUF</b> on the adapter card."
+            )
+
+        thread.progress.connect(_on_progress)
+        thread.status.connect(_on_status)
+        thread.finished.connect(_on_dl_finished)
+        thread.error.connect(_on_dl_error)
+        thread.start()
+        # Keep a hard reference so Qt doesn't GC it mid-download.
+        self._gguf_base_download_thread = thread
 
     def _render_training_summary(self) -> None:
         """Append a plain-language quality summary to the training log.

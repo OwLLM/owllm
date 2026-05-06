@@ -1063,6 +1063,11 @@ class AgentCanvas(QGraphicsView):
     node_selected = Signal(str)
     graph_changed = Signal()
     node_context_menu_requested = Signal(str, object)
+    selection_mode_changed = Signal(str)
+    """Mirror of :attr:`AgentTeamCanvas.selection_mode_changed`. Emits
+    ``"agent:<name>"`` / ``"team"`` / ``""`` whenever the painted
+    overlay card flips, so the agents page can re-bind the model
+    picker that lives inside the card."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -1104,6 +1109,13 @@ class AgentCanvas(QGraphicsView):
         # Cached owl crest pixmap for the team card avatar.
         from desktop_app.widgets.agent_info_card import load_owl_pixmap as _load_owl
         self._owl_pixmap = _load_owl()
+
+        # Overlay model picker — parented to the viewport (where the card
+        # is painted) so ``setGeometry`` lands in the right coordinate
+        # space. The agents page hands us the widget via
+        # :meth:`attach_card_picker`.
+        self._card_picker: Optional[QWidget] = None
+        self._last_card_mode: str = ""
 
     # ------------------------------------------------------------------
     # Public API used by AgentsPage
@@ -1207,6 +1219,8 @@ class AgentCanvas(QGraphicsView):
             return
 
         painter = QPainter(self.viewport())
+        agent_card_visible = False
+        team_card_visible = False
         try:
             painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
             rect = self.viewport().rect()
@@ -1230,6 +1244,7 @@ class AgentCanvas(QGraphicsView):
                     status=status_map.get(node._status, _CARD_IDLE),
                     model_label=node._model_label,
                 )
+                agent_card_visible = True
             elif self._team_name:
                 paint_team_card(
                     painter,
@@ -1240,8 +1255,70 @@ class AgentCanvas(QGraphicsView):
                     edge_count=len(self._edges),
                     owl_pixmap=self._owl_pixmap,
                 )
+                team_card_visible = True
         finally:
             painter.end()
+
+        # After the card is painted, anchor the overlay model picker
+        # inside it and broadcast the mode so AgentsPage can re-bind
+        # the picker's value + signal target.
+        if agent_card_visible:
+            mode = f"agent:{self._selected_name}"
+        elif team_card_visible:
+            mode = "team"
+        else:
+            mode = ""
+        self._position_card_picker(agent_card=agent_card_visible,
+                                   team_card=team_card_visible)
+        if mode != self._last_card_mode:
+            self._last_card_mode = mode
+            try:
+                self.selection_mode_changed.emit(mode)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # Overlay model picker
+    # ------------------------------------------------------------------
+
+    def attach_card_picker(self, picker: Optional[QWidget]) -> None:
+        """Mount the agents-page overlay model picker on top of the
+        info card. Parented to the viewport since paintEvent draws
+        there too — coordinates line up without any extra math.
+        Pass ``None`` to detach."""
+        if self._card_picker is not None and self._card_picker is not picker:
+            try:
+                self._card_picker.setParent(None)
+            except Exception:
+                pass
+        self._card_picker = picker
+        if picker is not None:
+            try:
+                picker.setParent(self.viewport())
+                picker.setVisible(False)
+                picker.raise_()
+            except Exception:
+                pass
+
+    def _position_card_picker(self, *, agent_card: bool, team_card: bool) -> None:
+        """Pin the overlay picker to the bottom of the painted card.
+        Hidden when no card is on screen."""
+        picker = self._card_picker
+        if picker is None:
+            return
+        if not (agent_card or team_card):
+            picker.setVisible(False)
+            return
+        try:
+            from desktop_app.widgets.agent_info_card import card_picker_geometry
+            x, y, w, h = card_picker_geometry(self.viewport().width(),
+                                              agent_card=agent_card)
+        except Exception:
+            picker.setVisible(False)
+            return
+        picker.setGeometry(int(x), int(y), int(w), int(h))
+        picker.setVisible(True)
+        picker.raise_()
 
     def _make_edge(self, src: _AgentNode, dst: _AgentNode) -> _AgentEdge:
         """Create an edge AND its sibling arrowhead and add both to the scene."""

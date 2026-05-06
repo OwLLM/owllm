@@ -154,6 +154,16 @@ class AgentTeamCanvas(QWidget):
     """
 
     node_selected = Signal(str)  # agent name when user clicks a node
+    selection_mode_changed = Signal(str)
+    """Emitted when the painted card switches kind. Payload is one of:
+
+      * ``"agent:<name>"`` — agent's character-sheet card is showing
+      * ``"team"``        — team-level card is showing (no agent selected)
+      * ``""``            — no card is showing (no agents yet)
+
+    The agents page subscribes to this so the overlay model picker
+    can re-bind its current value + signal routing whenever the card
+    flips between agent and team modes."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -169,6 +179,13 @@ class AgentTeamCanvas(QWidget):
         self._orchestrator_name: Optional[str] = None
         self._selected: Optional[str] = None
         self._hover: Optional[str] = None
+
+        # Overlay model picker — a real Qt widget the agents page parents
+        # to us via :meth:`attach_card_picker`. We position it inside the
+        # painted card on every paintEvent and emit
+        # :attr:`selection_mode_changed` so the page can re-bind it.
+        self._card_picker: Optional[QWidget] = None
+        self._last_card_mode: str = ""
 
         # Per-layer rotation speed + phase offset. Each ring spins at
         # its own random rate (some clockwise, some counter-clockwise)
@@ -408,6 +425,51 @@ class AgentTeamCanvas(QWidget):
             self.node_selected.emit(name)
 
     # ------------------------------------------------------------------
+    # Overlay model picker
+    # ------------------------------------------------------------------
+
+    def attach_card_picker(self, picker: Optional[QWidget]) -> None:
+        """Mount the agents-page overlay model picker as our child.
+
+        Parented here (and not at the canvas-stack level) because each
+        canvas owns its own card geometry — the page hands one picker
+        per canvas to keep state local. Pass ``None`` to detach."""
+        # Drop any previous picker so we don't leak parented widgets.
+        if self._card_picker is not None and self._card_picker is not picker:
+            try:
+                self._card_picker.setParent(None)
+            except Exception:
+                pass
+        self._card_picker = picker
+        if picker is not None:
+            try:
+                picker.setParent(self)
+                picker.setVisible(False)
+                picker.raise_()
+            except Exception:
+                pass
+
+    def _position_card_picker(self, *, agent_card: bool, team_card: bool) -> None:
+        """Move + show / hide the overlay picker so it sits inside the
+        bottom of the painted card. Called from ``paintEvent`` so the
+        overlay tracks resizes without an extra repaint pass."""
+        picker = self._card_picker
+        if picker is None:
+            return
+        if not (agent_card or team_card):
+            picker.setVisible(False)
+            return
+        try:
+            from desktop_app.widgets.agent_info_card import card_picker_geometry
+            x, y, w, h = card_picker_geometry(self.width(), agent_card=agent_card)
+        except Exception:
+            picker.setVisible(False)
+            return
+        picker.setGeometry(int(x), int(y), int(w), int(h))
+        picker.setVisible(True)
+        picker.raise_()
+
+    # ------------------------------------------------------------------
     # Animation tick
     # ------------------------------------------------------------------
 
@@ -580,14 +642,36 @@ class AgentTeamCanvas(QWidget):
         # Selected agent → that agent's card.
         # Otherwise, if team metadata was supplied → team-level card.
         # Otherwise → simple bottom hint.
+        agent_card_visible = False
+        team_card_visible = False
         if self._selected is not None:
             agent = self._agents.get(self._selected)
             if agent is not None:
                 self._paint_info_card(p, rect, agent)
+                agent_card_visible = True
         elif self._team_name and self._agents:
             self._paint_team_card(p, rect)
+            team_card_visible = True
         elif self._agents:
             self._paint_hint(p, rect)
+
+        # Now that we know which card (if any) is on screen, position
+        # the overlay model picker inside it and announce the mode so
+        # the page can re-bind the picker's value + signal routing.
+        if agent_card_visible:
+            mode = f"agent:{self._selected}"
+        elif team_card_visible:
+            mode = "team"
+        else:
+            mode = ""
+        self._position_card_picker(agent_card=agent_card_visible,
+                                   team_card=team_card_visible)
+        if mode != self._last_card_mode:
+            self._last_card_mode = mode
+            try:
+                self.selection_mode_changed.emit(mode)
+            except Exception:
+                pass
 
     def _paint_background(self, p: QPainter, rect) -> None:
         grad = QLinearGradient(0, 0, 0, rect.height())
@@ -940,10 +1024,14 @@ class AgentTeamCanvas(QWidget):
         """Top-left card describing the team itself, shown when no
         agent is selected. Same gamey character-sheet look as the
         per-agent card so the visual language stays consistent.
+
+        Width was trimmed by 20px and height grew by 44px to host the
+        team-wide model picker overlay that the canvas positions inside
+        this same rectangle (see :meth:`_position_card_picker`).
         """
         margin = 14
-        card_w = min(380, rect.width() - 2 * margin)
-        card_h = 200
+        card_w = min(360, rect.width() - 2 * margin)
+        card_h = 244
         card = QRectF(margin, margin, card_w, card_h)
 
         bg = QLinearGradient(card.topLeft(), card.bottomRight())
@@ -1036,8 +1124,9 @@ class AgentTeamCanvas(QWidget):
             desc,
         )
 
-        # Bottom stats row.
-        stat_y = card.y() + card.height() - 38
+        # Bottom stats row — pushed above the picker reserve area so the
+        # overlay model picker has clear room at the bottom of the card.
+        stat_y = card.y() + card.height() - 38 - 44
         h_font = QFont()
         h_font.setPointSize(8)
         h_font.setBold(True)
@@ -1057,13 +1146,15 @@ class AgentTeamCanvas(QWidget):
     def _paint_info_card(self, p: QPainter, rect, agent: _Agent) -> None:
         """Top-left gamey character-sheet panel for the selected agent.
 
-        Layout: 320 × 200 panel, picture (96×96) on the left with the
-        agent name beneath it, info on the right (description, model,
-        status, skills).
+        Layout: 360 × 264 panel (was 380 × 220 before the model picker
+        overlay landed). Picture (100×100) on the left with the agent
+        name beneath it, info on the right (description, model, status,
+        skills). The bottom 44px is reserved for the agent-specific
+        model picker overlay positioned by :meth:`_position_card_picker`.
         """
         margin = 14
-        card_w = min(380, rect.width() - 2 * margin)
-        card_h = 220
+        card_w = min(360, rect.width() - 2 * margin)
+        card_h = 264
         card_x = margin
         card_y = margin
 
@@ -1202,6 +1293,7 @@ class AgentTeamCanvas(QWidget):
 
         shown = 0
         max_shown = 5
+        chip_floor = card.y() + card.height() - 12 - 44
         for skill in skills:
             label = skill if len(skill) <= 24 else skill[:23] + "…"
             metrics = p.fontMetrics()
@@ -1212,7 +1304,7 @@ class AgentTeamCanvas(QWidget):
                     break
                 chip_x = info_x
                 chip_y += chip_h + chip_gap
-                if chip_y + chip_h > card.y() + card.height() - 12:
+                if chip_y + chip_h > chip_floor:
                     break
             chip_rect = QRectF(chip_x, chip_y, w, chip_h)
 
@@ -1238,7 +1330,7 @@ class AgentTeamCanvas(QWidget):
             if chip_x + w > info_x + info_w:
                 chip_x = info_x
                 chip_y += chip_h + chip_gap
-            if chip_y + chip_h <= card.y() + card.height() - 12:
+            if chip_y + chip_h <= chip_floor:
                 more_rect = QRectF(chip_x, chip_y, w, chip_h)
                 p.setBrush(QBrush(QColor(40, 46, 64, 200)))
                 p.setPen(QPen(_alpha(_TEXT_DIM, 160), 1))

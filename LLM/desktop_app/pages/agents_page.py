@@ -1630,6 +1630,24 @@ class AgentsPage(QWidget):
         self._model_picker_buttons: Dict[str, ModelPickerButton] = {}
         self._voice_rows: Dict[str, "_AgentVoiceRow"] = {}
 
+        # Overlay model pickers — one per canvas — sit inside the
+        # painted info card. The right-pane picker still exists; these
+        # are an additional surface that lets the user change the model
+        # without leaving the team diagram. Mode tracks where the next
+        # selection_changed signal should be routed: a specific agent
+        # (per-agent override) or "team" (apply to every team member).
+        self._overlay_picker_team: Optional[ModelPickerButton] = None
+        self._overlay_picker_canvas: Optional[ModelPickerButton] = None
+        self._overlay_mode: str = ""  # "agent:<name>" | "team" | ""
+        # ModelPickerButton.refresh_entries() auto-picks the first
+        # available model and emits selection_changed when its current_id
+        # is empty. For the per-agent right-pane pickers that's harmless
+        # (their handler is connected last, on purpose); for the overlay
+        # picker we MUST squash that emit, otherwise a programmatic
+        # refresh during init / bootstrap would silently apply that
+        # default model to every team member via the team-mode handler.
+        self._suspend_overlay_signal: bool = False
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(8)
         splitter.setStyleSheet("""
@@ -1720,6 +1738,43 @@ class AgentsPage(QWidget):
         self.team_canvas.setVisible(True)
         self.canvas.setVisible(False)
         lv.addWidget(self._canvas_stack, 1)
+
+        # Mount the overlay model pickers — one per canvas — into the
+        # bottom of the painted info card. Each canvas re-positions its
+        # picker on every paintEvent. selection_mode_changed tells us
+        # whether to bind the picker to a specific agent's override or
+        # to "team" mode (apply to all members on change).
+        self._overlay_picker_team = ModelPickerButton(
+            on_install_local=self._open_models_tab, parent=self.team_canvas
+        )
+        self._suspend_overlay_signal = True
+        try:
+            self._overlay_picker_team.refresh_entries()
+        finally:
+            self._suspend_overlay_signal = False
+        self.team_canvas.attach_card_picker(self._overlay_picker_team)
+        self.team_canvas.selection_mode_changed.connect(
+            self._on_overlay_selection_mode_changed
+        )
+        self._overlay_picker_team.selection_changed.connect(
+            self._on_overlay_picker_changed
+        )
+
+        self._overlay_picker_canvas = ModelPickerButton(
+            on_install_local=self._open_models_tab, parent=self.canvas.viewport()
+        )
+        self._suspend_overlay_signal = True
+        try:
+            self._overlay_picker_canvas.refresh_entries()
+        finally:
+            self._suspend_overlay_signal = False
+        self.canvas.attach_card_picker(self._overlay_picker_canvas)
+        self.canvas.selection_mode_changed.connect(
+            self._on_overlay_selection_mode_changed
+        )
+        self._overlay_picker_canvas.selection_changed.connect(
+            self._on_overlay_picker_changed
+        )
 
         self.status_label = QLabel("Idle.")
         self.status_label.setStyleSheet(
@@ -2221,6 +2276,17 @@ class AgentsPage(QWidget):
         # Clear caches that pertain to the previous team.
         self._agent_logs = {}
         self._selected_agent = None
+        # Force the canvases to re-emit their selection_mode on the next
+        # paintEvent. Without this, switching from project A (team-mode)
+        # to project B (team-mode) leaves the overlay picker showing
+        # project A's unanimous model — same mode string, suppressed
+        # signal, stale binding.
+        for c in (getattr(self, "team_canvas", None), getattr(self, "canvas", None)):
+            if c is not None:
+                try:
+                    c._last_card_mode = ""
+                except Exception:
+                    pass
         for btn in list(self._model_picker_buttons.values()):
             btn.setParent(None)
             btn.deleteLater()
@@ -2432,6 +2498,14 @@ class AgentsPage(QWidget):
         # Push entries to pickers + restore each agent's saved or default model.
         self._refresh_pickers()
         self._restore_saved_selections()
+        # Re-wire selection persistence on the freshly-built pickers.
+        # _render_team is called on every project switch / team edit and
+        # rebuilds the per-agent pickers; without re-wiring here, the new
+        # pickers' selection_changed signal lands nowhere and "I changed
+        # the model but the bridge still uses the old one" silently
+        # returns. Connecting AFTER _restore_saved_selections preserves
+        # the original "no echo on bulk restore" guarantee.
+        self._wire_selection_persistence()
         # Mirror each agent's current picker selection onto its canvas node.
         for role_name in self._model_picker_buttons.keys():
             try:
@@ -2914,6 +2988,23 @@ class AgentsPage(QWidget):
     def _refresh_pickers(self) -> None:
         for picker in self._model_picker_buttons.values():
             picker.refresh_entries()
+        # Same backend / account list feeds the overlay pickers too —
+        # without this, after bootstrap the in-card picker still shows
+        # the bootstrap-time empty list. Squash the auto-pick emit so
+        # bootstrap doesn't accidentally rewrite every team member's
+        # model_overrides (refresh_entries auto-picks when current_id
+        # is empty and emits selection_changed, which our team-mode
+        # handler would otherwise apply to all agents).
+        self._suspend_overlay_signal = True
+        try:
+            for overlay in (self._overlay_picker_team, self._overlay_picker_canvas):
+                if overlay is not None:
+                    try:
+                        overlay.refresh_entries()
+                    except Exception:
+                        pass
+        finally:
+            self._suspend_overlay_signal = False
 
     def _model_id_for(self, role_name: str) -> str:
         picker = self._model_picker_buttons.get(role_name)
@@ -3009,6 +3100,155 @@ class AgentsPage(QWidget):
             self._update_canvas_model_label(role_name)
         except Exception:
             pass
+        # Keep the right-pane and overlay pickers in sync — set_current_id
+        # does NOT re-emit selection_changed, so this is recursion-safe.
+        try:
+            right = self._model_picker_buttons.get(role_name)
+            if right is not None and right.current_id() != composite_id:
+                right.set_current_id(composite_id)
+        except Exception:
+            pass
+        try:
+            if (
+                self._overlay_mode == f"agent:{role_name}"
+                and composite_id
+            ):
+                for overlay in (
+                    self._overlay_picker_team,
+                    self._overlay_picker_canvas,
+                ):
+                    if overlay is not None and overlay.current_id() != composite_id:
+                        overlay.set_current_id(composite_id)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Overlay picker (lives inside the painted info card)
+    # ------------------------------------------------------------------
+
+    def _on_overlay_selection_mode_changed(self, mode: str) -> None:
+        """The active canvas flipped which card it's painting. Re-bind
+        both overlay pickers so they reflect the right model:
+
+          * ``"agent:<name>"`` — show that agent's saved override
+          * ``"team"``         — leave value blank; next change applies
+                                 to every team member at once
+          * ``""``             — no card is on screen
+        """
+        self._overlay_mode = mode or ""
+        if mode.startswith("agent:"):
+            agent_name = mode[len("agent:"):]
+            saved = ""
+            if self._active_project is not None:
+                saved = self._active_project.model_overrides.get(agent_name, "") or ""
+            for overlay in (
+                self._overlay_picker_team,
+                self._overlay_picker_canvas,
+            ):
+                if overlay is None:
+                    continue
+                # Mirror the right-pane picker rather than re-reading
+                # the override directly — the right-pane picker is the
+                # single source of truth for the *displayed* selection
+                # (it survives changes to model_overrides done via
+                # bridges, settings, etc.).
+                right = self._model_picker_buttons.get(agent_name)
+                if right is not None and right.current_id():
+                    overlay.set_current_id(right.current_id())
+                elif saved:
+                    overlay.set_current_id(saved)
+        elif mode == "team":
+            # Team mode: no single "current" model — show whichever
+            # model the entire team agrees on (if any). When team is
+            # mixed, leave the picker on its last value so the user
+            # sees a starting point but isn't misled into thinking
+            # everyone's already on it.
+            unanimous = self._team_unanimous_model_id()
+            for overlay in (
+                self._overlay_picker_team,
+                self._overlay_picker_canvas,
+            ):
+                if overlay is None:
+                    continue
+                if unanimous:
+                    overlay.set_current_id(unanimous)
+
+    def _on_overlay_picker_changed(self, composite_id: str) -> None:
+        """User picked a model in the overlay. Route per the current
+        :attr:`_overlay_mode`:
+
+          * agent mode  → :meth:`_on_picker_changed` for that agent only
+          * team mode   → :meth:`_on_picker_changed` for every team member
+                          (so Telegram / WhatsApp bridges that read
+                          ``model_overrides`` see the change too)
+        """
+        if not composite_id:
+            return
+        if self._suspend_overlay_signal:
+            return
+        mode = self._overlay_mode or ""
+        if mode.startswith("agent:"):
+            agent_name = mode[len("agent:"):]
+            self._on_picker_changed(agent_name, composite_id)
+            return
+        if mode == "team":
+            self._apply_model_to_all_agents(composite_id)
+            return
+        # No card is on screen — nothing to bind. (Shouldn't happen because
+        # the picker is hidden in that state, but guard anyway.)
+
+    def _apply_model_to_all_agents(self, composite_id: str) -> None:
+        """Set the same model id for every agent on the active team.
+
+        Writes ``Project.model_overrides`` for each member, mirrors the
+        change to the legacy QSettings keys, invalidates the cached team
+        once at the end (instead of N times), and pushes the new label
+        onto every canvas node so the diagram updates immediately.
+        """
+        if self._active_project is None or not self._active_project.team:
+            return
+        for role_name in list(self._active_project.team):
+            try:
+                self._settings.setValue(self._settings_key(role_name), composite_id)
+            except Exception:
+                pass
+            self._active_project.model_overrides[role_name] = composite_id
+            # Sync the right-pane per-agent picker so the user sees the
+            # same value when they click into an individual agent.
+            right = self._model_picker_buttons.get(role_name)
+            if right is not None and right.current_id() != composite_id:
+                try:
+                    right.set_current_id(composite_id)
+                except Exception:
+                    pass
+            try:
+                self._update_canvas_model_label(role_name)
+            except Exception:
+                pass
+        try:
+            self._project_store.save_project(self._active_project)
+        except Exception:
+            logger.exception("could not persist team-wide model selection")
+        # One cache-bust at the end — see _on_picker_changed.
+        self._team = None
+
+    def _team_unanimous_model_id(self) -> str:
+        """Return a composite_id if every team member's override is the
+        same non-empty value, otherwise ``""``. Used so the team-card
+        picker shows that model as the current pick instead of looking
+        unselected."""
+        if self._active_project is None or not self._active_project.team:
+            return ""
+        seen: Optional[str] = None
+        for name in self._active_project.team:
+            val = self._active_project.model_overrides.get(name, "")
+            if not val:
+                return ""
+            if seen is None:
+                seen = val
+            elif seen != val:
+                return ""
+        return seen or ""
 
     def _update_canvas_model_label(self, role_name: str) -> None:
         """Mirror the picker's current selection under the agent's

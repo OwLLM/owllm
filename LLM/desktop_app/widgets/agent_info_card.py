@@ -64,6 +64,36 @@ def load_owl_pixmap() -> Optional[QPixmap]:
     return None
 
 
+CARD_PICKER_RESERVE = 44
+"""Pixels reserved at the bottom of every painted card for the overlay
+:class:`ModelPickerButton`. Skill chips and stat rows must paint above
+this band so the picker doesn't sit on top of them."""
+
+CARD_MARGIN = 14
+CARD_W_MAX = 360
+"""Card width matches both painters in this module — kept as a constant
+so the canvas can compute the overlay picker's geometry without
+duplicating the painter's local layout numbers."""
+
+_PICKER_INSET_X = 12
+_PICKER_INSET_Y = 6
+_PICKER_HEIGHT = 32
+
+
+def card_picker_geometry(widget_w: int, agent_card: bool) -> tuple:
+    """Return ``(x, y, w, h)`` (widget pixel coords) for the overlay
+    :class:`ModelPickerButton` that sits inside the bottom of the painted
+    card. ``agent_card`` toggles between agent (264h) and team (244h)
+    card heights since the two have different chip / stats areas above."""
+    card_w = min(CARD_W_MAX, max(0, widget_w - 2 * CARD_MARGIN))
+    card_h = 264 if agent_card else 244
+    x = CARD_MARGIN + _PICKER_INSET_X
+    y = CARD_MARGIN + card_h - CARD_PICKER_RESERVE + _PICKER_INSET_Y
+    w = max(0, card_w - 2 * _PICKER_INSET_X)
+    h = _PICKER_HEIGHT
+    return x, y, w, h
+
+
 def paint_agent_card(
     p: QPainter,
     rect,
@@ -77,13 +107,13 @@ def paint_agent_card(
 ) -> None:
     """Top-left character-sheet panel for the selected agent.
 
-    Layout: 380×220 panel anchored at (14, 14), picture (100×100) on the
-    left with the agent name beneath it, info on the right (description,
-    status, skills).
+    Layout: 360×264 panel anchored at (14, 14). Width was trimmed by 20px
+    (was 380) and height grew by 44px to host the model picker overlay
+    that the canvas widget positions inside this same rectangle.
     """
     margin = 14
-    card_w = min(380, rect.width() - 2 * margin)
-    card_h = 220
+    card_w = min(360, rect.width() - 2 * margin)
+    card_h = 264
     card = QRectF(margin, margin, card_w, card_h)
 
     bg = QLinearGradient(card.topLeft(), card.bottomRight())
@@ -211,6 +241,7 @@ def paint_agent_card(
 
     shown = 0
     max_shown = 5
+    chip_floor = card.y() + card.height() - 12 - CARD_PICKER_RESERVE
     for skill in skills_list:
         label = skill if len(skill) <= 24 else skill[:23] + "…"
         metrics = p.fontMetrics()
@@ -220,7 +251,7 @@ def paint_agent_card(
                 break
             chip_x = info_x
             chip_y += chip_h + chip_gap
-            if chip_y + chip_h > card.y() + card.height() - 12:
+            if chip_y + chip_h > chip_floor:
                 break
         chip_rect = QRectF(chip_x, chip_y, w, chip_h)
 
@@ -246,7 +277,7 @@ def paint_agent_card(
         if chip_x + w > info_x + info_w:
             chip_x = info_x
             chip_y += chip_h + chip_gap
-        if chip_y + chip_h <= card.y() + card.height() - 12:
+        if chip_y + chip_h <= chip_floor:
             more_rect = QRectF(chip_x, chip_y, w, chip_h)
             p.setBrush(QBrush(QColor(40, 46, 64, 200)))
             p.setPen(QPen(_alpha(_TEXT_DIM, 160), 1))
@@ -267,10 +298,14 @@ def paint_team_card(
 ) -> None:
     """Top-left card describing the team itself, shown when no agent is
     selected. Same gamey character-sheet visual language as the agent
-    card so both canvases speak the same overlay grammar."""
+    card so both canvases speak the same overlay grammar.
+
+    Width / height match :func:`paint_agent_card` (minus the chips area)
+    so the overlay model picker sits in the same rectangle regardless of
+    which card is currently showing."""
     margin = 14
-    card_w = min(380, rect.width() - 2 * margin)
-    card_h = 200
+    card_w = min(360, rect.width() - 2 * margin)
+    card_h = 244
     card = QRectF(margin, margin, card_w, card_h)
 
     bg = QLinearGradient(card.topLeft(), card.bottomRight())
@@ -361,7 +396,8 @@ def paint_team_card(
         desc,
     )
 
-    stat_y = card.y() + card.height() - 38
+    # Push stats above the picker reserve area at the bottom of the card.
+    stat_y = card.y() + card.height() - 38 - CARD_PICKER_RESERVE
     h_font = QFont()
     h_font.setPointSize(8)
     h_font.setBold(True)

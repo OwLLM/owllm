@@ -9977,6 +9977,40 @@ class MainWindow(QMainWindow):
         pipeline used by the post-training prompt, so behaviour stays
         consistent regardless of where the conversion was triggered.
         """
+        # Defensive wrapper: Qt's slot-call machinery swallows
+        # exceptions raised inside a clicked.connect lambda's target,
+        # producing the "click does nothing" symptom. Wrap the whole
+        # body so any failure surfaces as a visible popup instead of
+        # vanishing silently into Qt's swallow log.
+        try:
+            self._log_to_app_log(
+                f"[gguf] convert clicked for adapter {adapter_path}"
+            )
+        except Exception:
+            pass
+        try:
+            self._convert_tuned_card_to_gguf_impl(adapter_path)
+        except Exception as exc:
+            import traceback as _tb
+            tb_text = _tb.format_exc()
+            try:
+                self._log_to_app_log(f"[gguf] click handler raised:\n{tb_text}")
+            except Exception:
+                pass
+            try:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.critical(
+                    self,
+                    "Convert to GGUF — handler crashed",
+                    f"<b>{type(exc).__name__}: {exc}</b><br><br>"
+                    "<pre style='font-size:9pt'>"
+                    + tb_text.replace("<", "&lt;").replace(">", "&gt;")
+                    + "</pre>"
+                )
+            except Exception:
+                pass
+
+    def _convert_tuned_card_to_gguf_impl(self, adapter_path: "Path") -> None:
         from PySide6.QtWidgets import QMessageBox, QInputDialog
 
         # Resolve the base path from adapter_config.json + onboarding

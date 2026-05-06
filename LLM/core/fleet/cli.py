@@ -28,13 +28,17 @@ import argparse
 import contextlib
 import json
 import logging
-import os
 import sys
 import uuid
-from pathlib import Path
 from typing import Iterator, List, Optional
 
 from core.fleet.broker import Broker, PoolConfig, PoolExhausted
+from core.fleet.config import (
+    DEFAULT_PORT_HIGH,
+    DEFAULT_PORT_LOW,
+    default_db,
+    default_workspaces,
+)
 from core.fleet.manifest import Claim, ClaimConflict, Manifest
 from core.fleet.workspace import (
     WorkspaceError,
@@ -46,44 +50,18 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
-
-
-def _default_root() -> Path:
-    env = os.environ.get("OWLLM_FLEET_ROOT")
-    if env:
-        return Path(env)
-    return Path.home() / ".owllm" / "fleet"
-
-
-def _default_db() -> Path:
-    env = os.environ.get("OWLLM_FLEET_DB")
-    if env:
-        return Path(env)
-    return _default_root() / "manifest.sqlite"
-
-
-def _default_workspaces() -> Path:
-    return _default_root() / "workspaces"
-
-
-# ---------------------------------------------------------------------------
 # Broker lifecycle
 # ---------------------------------------------------------------------------
 
 
 @contextlib.contextmanager
 def _open_broker(args: argparse.Namespace) -> Iterator[Broker]:
-    db = Path(args.db) if args.db else _default_db()
-    ws_root = Path(args.workspace_root) if args.workspace_root \
-        else _default_workspaces()
     pool = PoolConfig(
-        workspace_root=ws_root,
+        workspace_root=default_workspaces(args.workspace_root),
         port_range=range(args.port_low, args.port_high),
         gpu_slots=tuple(args.gpu_slots) if args.gpu_slots else (),
     )
-    manifest = Manifest(db)
+    manifest = Manifest(default_db(args.db))
     manifest.open()
     try:
         yield Broker(manifest, pool)
@@ -236,10 +214,10 @@ def _add_global_args(p: argparse.ArgumentParser) -> None:
         "--workspace-root",
         help="root for per-agent workspaces (env: OWLLM_FLEET_ROOT; default: ~/.owllm/fleet/workspaces)",
     )
-    p.add_argument("--port-low", type=int, default=8081,
-                   help="inclusive low end of broker port pool (default: 8081)")
-    p.add_argument("--port-high", type=int, default=8181,
-                   help="exclusive high end of broker port pool (default: 8181)")
+    p.add_argument("--port-low", type=int, default=DEFAULT_PORT_LOW,
+                   help=f"inclusive low end of broker port pool (default: {DEFAULT_PORT_LOW})")
+    p.add_argument("--port-high", type=int, default=DEFAULT_PORT_HIGH,
+                   help=f"exclusive high end of broker port pool (default: {DEFAULT_PORT_HIGH})")
     p.add_argument("--gpu-slots", type=int, nargs="*", default=None,
                    help="ordered list of GPU slot ids the broker may hand out")
 

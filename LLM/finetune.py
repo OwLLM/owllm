@@ -108,6 +108,75 @@ except Exception as _diag_exc:
 # suspenders so a manual `python finetune.py` run also gets it.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+# ---------------------------------------------------------------------
+# Heartbeat + stall watchdog. The faulthandler above catches CRASHES
+# (process dies). It does nothing for a STALL — process is alive but
+# the trainer is wedged inside a slow C call (sharded model load,
+# first-step kernel autotune, deadlocked dataloader worker, …) and the
+# user sees no output for minutes.
+#
+# Two diagnostics:
+#   1. A heartbeat thread that prints `[HEARTBEAT] phase=<x> for Ns`
+#      every 20s. Even when nothing else is logging, the user sees
+#      proof of life and the current phase so a stall is obvious.
+#   2. faulthandler.dump_traceback_later(timeout=N, repeat=True) — the
+#      stdlib's stall debugger. Every N seconds it dumps Python
+#      tracebacks of ALL threads to the same file faulthandler is
+#      armed on. If we stall, the next dump shows EXACTLY which line
+#      every thread is parked on. Set to 90s so it doesn't spam the
+#      log on a healthy run, and arm only after the heartbeat starts
+#      emitting (so we don't see a misleading "stuck in argparse").
+# ---------------------------------------------------------------------
+import threading as _threading
+
+_PHASE = {"name": "init", "since": time.monotonic()}
+
+def _set_phase(name: str) -> None:
+    _PHASE["name"] = name
+    _PHASE["since"] = time.monotonic()
+    try:
+        sys.stderr.write(f"[INFO] [PHASE] -> {name}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+def _heartbeat_loop():
+    while True:
+        try:
+            time.sleep(20)
+            elapsed = time.monotonic() - _PHASE["since"]
+            sys.stderr.write(
+                f"[HEARTBEAT] alive — phase={_PHASE['name']!r} for {elapsed:.0f}s "
+                f"(pid={os.getpid()})\n"
+            )
+            sys.stderr.flush()
+        except Exception:
+            # A heartbeat must never crash the trainer.
+            pass
+
+try:
+    _hb_thread = _threading.Thread(
+        target=_heartbeat_loop, name="owllm-heartbeat", daemon=True
+    )
+    _hb_thread.start()
+except Exception as _hb_exc:
+    sys.stderr.write(
+        f"[WARN] [DIAG] heartbeat thread failed to start: {type(_hb_exc).__name__}: {_hb_exc}\n"
+    )
+
+try:
+    # 90s feels like the right cadence: shorter than a typical "is it
+    # stalled?" user gut-check (~2 min), longer than the heartbeat so
+    # the log isn't crowded on healthy runs.
+    if _CRASH_LOG_FH is not None:
+        _fh.dump_traceback_later(90, repeat=True, file=_CRASH_LOG_FH)
+    else:
+        _fh.dump_traceback_later(90, repeat=True)
+except Exception as _dt_exc:
+    sys.stderr.write(
+        f"[WARN] [DIAG] dump_traceback_later failed: {type(_dt_exc).__name__}: {_dt_exc}\n"
+    )
+
 # Fix Windows console encoding for emojis and ensure unbuffered output for real-time GUI updates
 if sys.platform == "win32":
     # On Windows, we need to ensure the standard streams are using UTF-8
@@ -746,6 +815,7 @@ def main():
     # and subsequent `dataset.map(...)` calls (including the trainer's
     # internal tokenisation map) reuse the already-built Arrow buffers
     # without re-entering the broken init path.
+    _set_phase("preparing-dataset")
     print(f"[INFO] Preparing dataset...")
     file_format = detect_file_format(DATASET_PATH)
 
@@ -906,6 +976,7 @@ def main():
     # isolation. Building a list of dicts in Python and passing it to
     # Dataset.from_list avoids the broken IPC code path — Arrow
     # builds the table directly from Python objects.
+    _set_phase("pre-tokenising")
     print(f"[INFO] Pre-tokenising {len(dataset)} examples (max_length={MAX_SEQ_LENGTH})...")
     tokenised_rows = []
     texts = dataset["text"]
@@ -930,6 +1001,7 @@ def main():
     # Free the now-redundant Python list before model load.
     del raw_data, normalized_data
 
+    _set_phase("loading-model")
     print(f"[INFO] Loading model: {MODEL_NAME}")
 
     # Use compatibility module to detect model type and capabilities
@@ -1491,6 +1563,7 @@ def main():
     # (the pyarrow allocator is corrupted by then on Windows). We
     # also omit dataset_text_field and max_length — both are
     # preprocessing-only and irrelevant for an already-tokenised set.
+    _set_phase("building-trainer")
     trainer = SFTTrainer(
         model=model,
         processing_class=tokenizer,
@@ -1643,6 +1716,7 @@ def main():
     # Train and capture training state. ``resume_from_checkpoint`` is
     # honoured even when None — Trainer treats None as 'fresh run',
     # so we don't branch the call.
+    _set_phase("training-loop")
     print("[INFO] Starting training loop...")
     train_result = trainer.train(resume_from_checkpoint=resume_ckpt)
     # Free the guard once training has converged on its own working set.

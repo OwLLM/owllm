@@ -16313,7 +16313,13 @@ class MainWindow(QMainWindow):
         # train_log so the user actually sees the traceback even if
         # the filter ate every line during the run. Persist it to disk
         # too so post-mortems work after the window closes.
-        if exit_code != 0 or exit_status != QProcess.NormalExit:
+        # SKIP this dump if the run actually succeeded — the only
+        # CrashExit on a treat-as-success run is the known post-train
+        # CUDA finalizer access violation, and the user has already
+        # seen the EXCELLENT verdict; appending a "RAW OUTPUT TAIL"
+        # under the success summary is just noise that makes a working
+        # run LOOK broken.
+        if (exit_code != 0 or exit_status != QProcess.NormalExit) and not _treat_as_success:
             tail = getattr(self, "_train_raw_tail", "") or ""
             if tail.strip():
                 self.train_log.appendPlainText(

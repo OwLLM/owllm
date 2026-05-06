@@ -1879,8 +1879,20 @@ def main():
     # here makes 'stop one run, immediately start another in the same
     # interpreter' work, and keeps VRAM usage honest in any embedded
     # use of this script (e.g. notebooks, batch runners).
-    print("[INFO] Releasing GPU memory…")
-    _release_gpu(trainer, model)
+    #
+    # SKIP on Windows when running as a top-level subprocess: the
+    # explicit ``torch.cuda.synchronize()`` inside ``_release_gpu``
+    # forces a CUDA context state check during teardown, which itself
+    # triggers the 0xC0000005 access violation in the cuDNN/cuBLAS
+    # finalizer (the very crash ``os._exit(0)`` was supposed to skip).
+    # The OS reclaims VRAM on process exit either way, so we lose
+    # nothing by not calling it. Embedded callers can still use
+    # ``_release_gpu`` directly.
+    if sys.platform == "win32" and __name__ == "__main__":
+        print("[INFO] Skipping explicit GPU release on Windows — OS reclaims VRAM on exit.")
+    else:
+        print("[INFO] Releasing GPU memory…")
+        _release_gpu(trainer, model)
 
 
 if __name__ == "__main__":

@@ -14107,14 +14107,361 @@ class MainWindow(QMainWindow):
         columns_widget.setLayout(columns_layout)
         
         main_layout.addWidget(columns_widget)
-        
+
+        # Training History — full-width row beneath the config + logs.
+        # Reads ``training_info.json`` from every adapter dir under
+        # ``fine_tuned/`` (and ``models/<adapter>__gguf`` markers) and
+        # surfaces a single audit row per run: timestamp, base model,
+        # dataset, hyperparams, final loss, status, and quick actions.
+        # The user asked for this to make it easy to spot 'what worked',
+        # 'what crashed', and 'what to retry from'.
+        history_section = self._build_training_history_section()
+        if history_section is not None:
+            main_layout.addWidget(history_section)
+
         # Store metric cards for updates (they're now just QWidgets with value_label and set_value)
         self.metric_cards = [
             self.epoch_card, self.steps_card, self.loss_card, self.eta_card,
             self.learning_rate_card, self.speed_card, self.gpu_mem_card
         ]
-        
+
         return w
+
+    def _build_training_history_section(self) -> Optional[QWidget]:
+        """Build the Training History panel for the Train tab.
+
+        Renders a sortable table of every past training run found on
+        disk. Source of truth: ``fine_tuned/<adapter>/training_info.json``
+        — written by the trainer at save time. Adapters without a
+        training_info.json still appear with what we can discover from
+        disk (mtime, size).
+
+        Columns: When | Adapter | Base | Epochs | Steps | Final loss
+        | Status | Actions.
+        """
+        try:
+            from PySide6.QtWidgets import (
+                QTableWidget, QTableWidgetItem, QHeaderView, QPushButton,
+                QHBoxLayout, QVBoxLayout, QLabel, QFrame, QWidget,
+            )
+        except Exception:
+            return None
+
+        section = QFrame()
+        section.setObjectName("trainingHistorySection")
+        section.setStyleSheet(
+            """
+            QFrame#trainingHistorySection {
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                    stop:0 rgba(15, 15, 26, 0.6), stop:1 rgba(25, 25, 36, 0.8));
+                border: 1px solid rgba(102, 126, 234, 0.3);
+                border-radius: 12px;
+                padding: 10px;
+            }
+            QTableWidget {
+                background: rgba(10, 10, 15, 0.8);
+                color: #e8eef7;
+                gridline-color: rgba(102, 126, 234, 0.2);
+                border: 1px solid rgba(102, 126, 234, 0.2);
+                border-radius: 6px;
+                font-size: 11pt;
+            }
+            QHeaderView::section {
+                background: rgba(102, 126, 234, 0.2);
+                color: #fafafa;
+                padding: 6px;
+                border: none;
+                font-weight: bold;
+            }
+            """
+        )
+        layout = QVBoxLayout(section)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        header = QHBoxLayout()
+        title = QLabel("📋 Training History")
+        title.setStyleSheet("font-size: 14pt; font-weight: bold; color: #c08aff; border: none;")
+        header.addWidget(title)
+        header.addStretch(1)
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.setStyleSheet(
+            """
+            QPushButton {
+                background: rgba(102, 126, 234, 0.18);
+                border: 1px solid rgba(102, 126, 234, 0.45);
+                color: white;
+                border-radius: 6px;
+                padding: 5px 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: rgba(102, 126, 234, 0.30);
+            }
+            """
+        )
+        refresh_btn.clicked.connect(self._refresh_training_history)
+        header.addWidget(refresh_btn)
+        layout.addLayout(header)
+
+        self.train_history_table = QTableWidget(0, 8)
+        self.train_history_table.setHorizontalHeaderLabels([
+            "When", "Adapter", "Base", "Epochs", "Steps",
+            "Final loss", "Status", "Actions",
+        ])
+        self.train_history_table.verticalHeader().setVisible(False)
+        self.train_history_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.train_history_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.train_history_table.setAlternatingRowColors(True)
+        h = self.train_history_table.horizontalHeader()
+        h.setStretchLastSection(False)
+        h.setSectionResizeMode(QHeaderView.Interactive)
+        h.setSectionResizeMode(1, QHeaderView.Stretch)  # Adapter
+        h.setSectionResizeMode(2, QHeaderView.Stretch)  # Base
+        h.setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        self.train_history_table.setMinimumHeight(180)
+        layout.addWidget(self.train_history_table)
+
+        # Initial fill — best-effort, never blocks tab construction.
+        try:
+            self._refresh_training_history()
+        except Exception:
+            pass
+
+        return section
+
+    def _refresh_training_history(self) -> None:
+        """(Re)populate the Training History table from disk."""
+        if not hasattr(self, "train_history_table"):
+            return
+        from PySide6.QtWidgets import (
+            QTableWidget, QTableWidgetItem, QPushButton, QWidget, QHBoxLayout,
+        )
+        from datetime import datetime as _dt
+
+        rows = self._collect_training_history_rows()
+        self.train_history_table.setRowCount(0)
+        for row_idx, run in enumerate(rows):
+            self.train_history_table.insertRow(row_idx)
+
+            when_str = run.get("when_pretty") or "—"
+            self.train_history_table.setItem(row_idx, 0, QTableWidgetItem(when_str))
+            self.train_history_table.setItem(row_idx, 1, QTableWidgetItem(run.get("adapter") or "—"))
+            self.train_history_table.setItem(row_idx, 2, QTableWidgetItem(run.get("base") or "—"))
+            self.train_history_table.setItem(row_idx, 3, QTableWidgetItem(str(run.get("epochs") or "—")))
+            self.train_history_table.setItem(row_idx, 4, QTableWidgetItem(str(run.get("steps") or "—")))
+            loss = run.get("final_loss")
+            loss_str = f"{loss:.4f}" if isinstance(loss, (int, float)) else "—"
+            self.train_history_table.setItem(row_idx, 5, QTableWidgetItem(loss_str))
+
+            status_item = QTableWidgetItem(run.get("status") or "—")
+            colour = {
+                "DONE": "#4caf50",
+                "PARTIAL": "#ffb74d",
+                "FAILED": "#ef5350",
+                "RUNNING": "#42a5f5",
+                "GGUF": "#ffc400",
+            }.get((run.get("status") or "").upper(), "#bdbdbd")
+            from PySide6.QtGui import QBrush, QColor
+            status_item.setForeground(QBrush(QColor(colour)))
+            self.train_history_table.setItem(row_idx, 6, status_item)
+
+            # Actions column — small button bar.
+            action_widget = QWidget()
+            action_layout = QHBoxLayout(action_widget)
+            action_layout.setContentsMargins(2, 2, 2, 2)
+            action_layout.setSpacing(4)
+
+            adapter_path_str = run.get("adapter_path")
+            if adapter_path_str:
+                open_btn = QPushButton("📂")
+                open_btn.setToolTip("Open adapter folder")
+                open_btn.setMaximumWidth(36)
+                open_btn.clicked.connect(
+                    lambda _checked=False, p=adapter_path_str: self._open_path_in_explorer(p)
+                )
+                action_layout.addWidget(open_btn)
+
+            log_path_str = run.get("log_path")
+            if log_path_str and Path(log_path_str).exists():
+                log_btn = QPushButton("📄")
+                log_btn.setToolTip("Open training log")
+                log_btn.setMaximumWidth(36)
+                log_btn.clicked.connect(
+                    lambda _checked=False, p=log_path_str: self._open_path_in_explorer(p)
+                )
+                action_layout.addWidget(log_btn)
+
+            action_layout.addStretch(1)
+            self.train_history_table.setCellWidget(row_idx, 7, action_widget)
+
+    def _collect_training_history_rows(self) -> List[Dict[str, Any]]:
+        """Build the per-run audit list from disk.
+
+        Sources, in priority order:
+          1. ``fine_tuned/<adapter>/training_info.json`` — authoritative.
+          2. Adapter dir mtime + size when training_info.json is absent.
+          3. ``models/<adapter>__gguf`` markers (extra row tagged GGUF).
+        """
+        rows: List[Dict[str, Any]] = []
+        from datetime import datetime as _dt
+        import json as _json
+
+        ft_root = self.root / "fine_tuned"
+        if ft_root.exists():
+            for d in sorted(ft_root.iterdir()):
+                if not d.is_dir() or d.name.startswith("checkpoint-"):
+                    continue
+                cfg = d / "adapter_config.json"
+                weights = (d / "adapter_model.safetensors").exists() or (d / "adapter_model.bin").exists()
+                if not (cfg.exists() and weights):
+                    continue
+
+                info_path = d / "training_info.json"
+                info: Dict[str, Any] = {}
+                if info_path.exists():
+                    try:
+                        info = _json.loads(info_path.read_text(encoding="utf-8")) or {}
+                    except Exception:
+                        info = {}
+
+                # Timestamps. The trainer's training_info.json schema
+                # uses ``created_at``; older runs may have
+                # ``finished_at`` / ``ended_at`` / ``started_at``.
+                try:
+                    mtime = max(
+                        (p.stat().st_mtime for p in d.rglob("*") if p.is_file()),
+                        default=0,
+                    )
+                except Exception:
+                    mtime = 0
+                when_iso = (
+                    info.get("finished_at")
+                    or info.get("ended_at")
+                    or info.get("created_at")
+                    or info.get("started_at")
+                )
+                if when_iso:
+                    try:
+                        ts = _dt.fromisoformat(str(when_iso).replace("Z", "+00:00"))
+                        when_pretty = ts.strftime("%Y-%m-%d %H:%M")
+                    except Exception:
+                        when_pretty = str(when_iso)[:16]
+                elif mtime:
+                    when_pretty = _dt.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+                else:
+                    when_pretty = "—"
+
+                # Base model — config first, then training_info, then "—".
+                base = ""
+                try:
+                    if cfg.exists():
+                        cfg_data = _json.loads(cfg.read_text(encoding="utf-8")) or {}
+                        base = (
+                            cfg_data.get("base_model_name_or_path")
+                            or cfg_data.get("base_model")
+                            or ""
+                        )
+                except Exception:
+                    pass
+                if not base:
+                    base = info.get("base_model") or info.get("model_name") or ""
+                if base and "/" in base:
+                    base = base.split("/")[-1]
+                if len(base) > 60:
+                    base = base[:57] + "…"
+
+                # Pull from the actual schema: training_info.json has
+                # ``training_params`` (epochs, batch_size, lr, …) and
+                # ``train_result`` (train_loss, train_runtime, …).
+                params = info.get("training_params") or {}
+                result = info.get("train_result") or {}
+                epochs = (
+                    params.get("epochs")
+                    or params.get("num_train_epochs")
+                    or info.get("epochs")
+                    or info.get("num_train_epochs")
+                )
+                # train_result.global_step exists on some HF Trainer
+                # versions; fall through to top-level fields and finally
+                # to None (the table renders "—").
+                steps = (
+                    result.get("global_step")
+                    or info.get("global_step")
+                    or info.get("total_steps")
+                )
+                final_loss = (
+                    result.get("train_loss")
+                    if result.get("train_loss") is not None
+                    else (
+                        info.get("final_loss")
+                        if info.get("final_loss") is not None
+                        else info.get("train_loss")
+                    )
+                )
+
+                # Status: DONE when we have a non-null train_loss; else
+                # PARTIAL — the run wrote the adapter but didn't reach
+                # the post-training metric write (likely
+                # checkpoint-recovered or stop-early).
+                status = (info.get("status") or "").upper()
+                if not status:
+                    status = "DONE" if final_loss is not None else "PARTIAL"
+
+                rows.append({
+                    "adapter": d.name,
+                    "adapter_path": str(d),
+                    "base": base or "—",
+                    "epochs": epochs,
+                    "steps": steps,
+                    "final_loss": final_loss,
+                    "status": status,
+                    "when_iso": when_iso or "",
+                    "when_pretty": when_pretty,
+                    "log_path": info.get("log_path"),
+                    "_sort_key": when_iso or (
+                        _dt.fromtimestamp(mtime).isoformat() if mtime else ""
+                    ),
+                })
+
+        # Add LoRA-GGUF artefacts as separate rows so the user sees
+        # which fine-tunes have been converted.
+        models_root = self.root / "models"
+        if models_root.exists():
+            for d in sorted(models_root.iterdir()):
+                if not d.is_dir() or not d.name.endswith("__gguf"):
+                    continue
+                ggufs = list(d.glob("*-lora-*.gguf"))
+                if not ggufs:
+                    continue
+                stem = d.name[: -len("__gguf")]
+                size_mb = sum(p.stat().st_size for p in ggufs) / 1e6
+                try:
+                    when = _dt.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+                except Exception:
+                    when = "—"
+                rows.append({
+                    "adapter": f"{stem} (GGUF)",
+                    "adapter_path": str(d),
+                    "base": "—",
+                    "epochs": None,
+                    "steps": None,
+                    "final_loss": None,
+                    "status": "GGUF",
+                    "when_iso": "",
+                    "when_pretty": when,
+                    "log_path": None,
+                    "_sort_key": d.stat().st_mtime if d.exists() else 0,
+                })
+
+        # Sort newest first.
+        def _key(r):
+            v = r.get("_sort_key", "")
+            return (str(v), r.get("when_pretty", ""))
+        rows.sort(key=_key, reverse=True)
+        for r in rows:
+            r.pop("_sort_key", None)
+        return rows
     
     def _on_model_selected_for_training(self, model_id: str):
         """Show model info when selected"""
@@ -16025,6 +16372,11 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._refresh_locals()
+        # Training History also needs to pick up the just-finished run.
+        try:
+            self._refresh_training_history()
+        except Exception:
+            pass
 
         # Post-training: offer to convert the freshly-saved adapter to
         # GGUF. The Transformers backend is 3-8x slower than llama.cpp

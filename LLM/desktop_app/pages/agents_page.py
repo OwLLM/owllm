@@ -80,7 +80,13 @@ from core.agents.tools import (
 )
 from core.agents.backends import dispatch_model_fn
 from desktop_app import agent_runtime_manager
-from PySide6.QtWidgets import QListWidget, QListWidgetItem, QMenu, QProgressDialog
+from PySide6.QtWidgets import (
+    QListWidget,
+    QListWidgetItem,
+    QMenu,
+    QProgressDialog,
+    QToolButton,
+)
 
 from desktop_app.widgets.agent_canvas import (
     AgentCanvas,
@@ -1162,28 +1168,52 @@ class AgentsPage(QWidget):
         # 🔊 voice toggle — gates the TtsService for the whole team. Each
         # agent's voice can also be muted individually via its definition,
         # but this is the master switch the user reaches for first.
-        self.voice_btn = QPushButton("🔊")
+        # QToolButton + MenuButtonPopup gives us the speaker icon on the
+        # left and a dropdown arrow on the right. Clicking the icon area
+        # toggles the global voice mute (same UX as before); clicking
+        # the arrow opens a menu with the engine indicator, the
+        # "Install natural voices" upgrade and the Piper voice manager.
+        # The visible arrow is the discoverability fix — the previous
+        # right-click-only menu was effectively hidden.
+        self.voice_btn = QToolButton()
+        self.voice_btn.setText("🔊")
         self.voice_btn.setMinimumHeight(38)
-        self.voice_btn.setFixedWidth(44)
+        self.voice_btn.setMinimumWidth(64)  # +20 px over the old fixed 44 to fit the arrow
         self.voice_btn.setCheckable(True)
+        self.voice_btn.setPopupMode(QToolButton.MenuButtonPopup)
+        self.voice_btn.setToolButtonStyle(Qt.ToolButtonTextOnly)
         self.voice_btn.setToolTip(
             "Speak agent replies aloud — voice per agent.\n"
-            "Right-click to switch engine or install natural voices (Piper)."
+            "Click the arrow to switch engine or install natural voices (Piper)."
         )
         self.voice_btn.setStyleSheet("""
-            QPushButton {
+            QToolButton {
                 background:rgba(255,255,255,0.05); color:#dadcdf;
                 border:none; border-radius:8px; font-size:16px;
+                padding:0 6px;
             }
-            QPushButton:hover { background:rgba(255,255,255,0.10); }
-            QPushButton:checked { background:rgba(92,240,255,0.18); color:#5cf0ff; }
-            QPushButton:disabled { color:#555; }
+            QToolButton:hover { background:rgba(255,255,255,0.10); }
+            QToolButton:checked { background:rgba(92,240,255,0.18); color:#5cf0ff; }
+            QToolButton:disabled { color:#555; }
+            QToolButton::menu-button {
+                border:none;
+                width:18px;
+                background:rgba(255,255,255,0.04);
+                border-top-right-radius:8px;
+                border-bottom-right-radius:8px;
+            }
+            QToolButton::menu-button:hover {
+                background:rgba(255,255,255,0.14);
+            }
+            QToolButton::menu-arrow { image:none; }
         """)
         self.voice_btn.clicked.connect(self._on_voice_toggled)
-        # Right-click for engine selection / Piper voice management.
-        # Discoverability: the tooltip flags "right-click to manage voices".
-        self.voice_btn.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.voice_btn.customContextMenuRequested.connect(self._open_voice_menu)
+
+        # Build the menu once, refresh its items just before each show
+        # so "Install" vs "Manage" reflects the live install state.
+        self._voice_menu = QMenu(self.voice_btn)
+        self._voice_menu.aboutToShow.connect(self._refresh_voice_menu)
+        self.voice_btn.setMenu(self._voice_menu)
 
         top.addWidget(self.attach_btn)
         top.addWidget(self.goal_input, 1)
@@ -1322,15 +1352,18 @@ class AgentsPage(QWidget):
     # Voice engine selection / Piper management
     # ------------------------------------------------------------------
 
-    def _open_voice_menu(self, pos) -> None:
-        """Right-click menu on the 🔊 button.
+    def _refresh_voice_menu(self) -> None:
+        """Rebuild the dropdown menu items just before it shows.
 
-        Lists the active engine, offers a one-click upgrade to Piper
-        when SAPI is the current backend, and opens the Piper voice
-        manager so the user can add or remove neural voices.
+        Rebuilding rather than statically populating in ``_build_goal_row``
+        means the install state (piper installed yet? voices downloaded?)
+        is always live: as soon as a download completes the menu shows
+        "Manage Piper voices" instead of "Install natural voices" without
+        any explicit refresh call.
         """
-        menu = QMenu(self)
-        # Engine label — informational only.
+        menu = self._voice_menu
+        menu.clear()
+
         active = self._active_engine_label()
         engine_act = menu.addAction(f"Engine: {active}")
         engine_act.setEnabled(False)
@@ -1349,8 +1382,6 @@ class AgentsPage(QWidget):
         menu.addSeparator()
         repair = menu.addAction("Restart voice engine")
         repair.triggered.connect(self._restart_voice_engine)
-
-        menu.exec_(self.voice_btn.mapToGlobal(pos))
 
     def _active_engine_label(self) -> str:
         tts = getattr(self, "_tts", None)

@@ -33,7 +33,7 @@ class HybridFrameWindow(QWidget):
         *,
         corner_size: int = 96,
         border_thickness: int = 12,
-        resize_margin: int = 10,
+        resize_margin: int = 14,
         safe_padding: int = 8,
         min_size: QSize = QSize(520, 360),
         frame_color: QColor = QColor(200, 240, 255, 220),

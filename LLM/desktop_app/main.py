@@ -2522,7 +2522,12 @@ class MainWindow(QMainWindow):
         self.resize_edge = None  # Track which edge is being resized
         self.resize_start_pos = None
         self.resize_start_geometry = None
-        self.edge_margin = 8  # Pixels from edge to trigger resize (increased for easier detection)
+        # 14 px hit zone for window resize. The bottom corners in
+        # particular need to be easy to grab — was 8 px and users
+        # struggled to hit them. Bigger zones don't hurt because
+        # mousePressEvent only consumes the event when the cursor is
+        # actually inside the zone AND on a left-button press.
+        self.edge_margin = 14
         self.cursor_override_active = False  # Track if we have an override cursor active
         self.current_cursor_shape = None  # Track current cursor shape to avoid unnecessary changes
         self._drag_disabled = False  # Flag to disable drag when wrapped in HybridFrameWindow
@@ -14001,43 +14006,26 @@ class MainWindow(QMainWindow):
         gpu_layout.addWidget(self.training_info_label)
 
         left_layout.addWidget(compute_frame)
-        
-        # ------------------------------------------------------------------
-        # Start panel + Stop button + status pill.
-        # ------------------------------------------------------------------
-        # The three run-modes (Fresh / Resume / Continue) are tile-buttons
-        # INSIDE the StartTrainingPanel — clicking a tile both picks the
-        # mode AND launches training in one click. No separate Start
-        # button. The Stop button is on its own row beneath because it's
-        # a destructive action with two-stage escalation (graceful via
-        # stop-file -> force-kill on second click within 4s) and needs
-        # to stay visually distinct from the launch surface.
-        self.train_status_pill = StatusPill(self)
-        status_row = QHBoxLayout()
-        status_row.addStretch(1)
-        status_row.addWidget(self.train_status_pill)
-        status_row.addStretch(1)
-        left_layout.addLayout(status_row)
+        left_layout.addStretch(1)
 
-        # The Start panel — three mode tiles in one card.
+        # The launch surface (status pill + tiles + Stop) NO LONGER
+        # lives in the left column — the user moved it to the new
+        # third column so the config column is purely the inputs and
+        # the launch decision is right next to the run history. The
+        # widgets are still constructed here (so all the existing
+        # references and connections work) but parented onto a
+        # placeholder; they get reparented into the third column
+        # further down.
+        self.train_status_pill = StatusPill(self)
         self.train_start_panel = StartTrainingPanel(self)
         self.train_start_panel.start_requested.connect(self._on_start_tile_clicked)
-        # Slave the base-model picker to whatever adapter the user
-        # selects in Continue mode. The adapter records its base; the
-        # base picker MUST follow it.
         self.train_start_panel.adapter_selected.connect(self._on_continue_adapter_selected)
-        left_layout.addWidget(self.train_start_panel)
 
-        # ``self.train_start`` is referenced from a few defensive
-        # disable/enable paths and from the Use-Recommended button
-        # callback. Keep a hidden compatibility shim so we don't have
-        # to chase every reference. ``setEnabled`` on a hidden widget
-        # is harmless.
+        # Hidden compatibility shim — see legacy comments.
         self.train_start = QPushButton(self)
         self.train_start.setVisible(False)
         self.train_start.setEnabled(True)
 
-        # Stop button on its own row.
         self.train_stop = QPushButton("⏹  Stop")
         self.train_stop.setObjectName("train_stop")
         self.train_stop.setEnabled(False)
@@ -14058,9 +14046,7 @@ class MainWindow(QMainWindow):
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
                     stop:0 #b91c1c, stop:0.5 #f87171, stop:1 #b91c1c);
             }
-            QPushButton#train_stop:pressed {
-                background: #b91c1c;
-            }
+            QPushButton#train_stop:pressed { background: #b91c1c; }
             QPushButton#train_stop:disabled {
                 background: rgba(80,90,100,0.4);
                 color: #8595ad;
@@ -14072,21 +14058,12 @@ class MainWindow(QMainWindow):
         _stop_glow.setColor(QColor(239, 68, 68, 140))
         self.train_stop.setGraphicsEffect(_stop_glow)
         self.train_stop.clicked.connect(self._stop_training)
-        start_btn_layout = QHBoxLayout()
-        start_btn_layout.addStretch(1)
-        start_btn_layout.addWidget(self.train_stop)
-        start_btn_layout.addStretch(1)
-        left_layout.addLayout(start_btn_layout)
 
         # Initial scan so Resume / Continue tiles reflect current state.
         try:
             self._refresh_resume_state()
         except Exception:
             pass
-
-        left_layout.addLayout(start_btn_layout)
-        
-        left_layout.addStretch(1)
         
         # RIGHT COLUMN: Stacked Widget (Dashboard OR Dataset Viewer)
         self.train_right_stack = QStackedWidget()
@@ -14102,39 +14079,96 @@ class MainWindow(QMainWindow):
         # Start with dashboard
         self.train_right_stack.setCurrentIndex(0)
         
-        # Add to splitter
-        # Left column is long; make it scrollable so larger fonts don't get clipped.
+        # ── 3-column splitter (40 / 30 / 30, user-resizable) ────────
+        # Left column = config inputs (scrollable so vertical content
+        # doesn't get clipped at narrow widths). Centre = live
+        # dashboard / dataset viewer. Right = launch surface + run
+        # history. Using QSplitter so the user can drag the dividers;
+        # the 40/30/30 ratio is the INITIAL placement, not a lock.
+        from PySide6.QtWidgets import QSplitter
+
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         left_scroll.setFrameShape(QFrame.NoFrame)
         left_scroll.setWidget(left_widget)
+        left_scroll.setMinimumWidth(360)
 
-        # Give each side a sensible minimum so the dashboard can't get crushed.
-        left_scroll.setMinimumWidth(520)
-        self.train_right_stack.setMinimumWidth(400)
+        # Centre column wraps the existing dashboard / dataset viewer
+        # stack in a scroll area so it shrinks gracefully when the
+        # user drags the divider in.
+        centre_scroll = QScrollArea()
+        centre_scroll.setWidgetResizable(True)
+        centre_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        centre_scroll.setFrameShape(QFrame.NoFrame)
+        centre_scroll.setWidget(self.train_right_stack)
+        self.train_right_stack.setMinimumWidth(280)
+        centre_scroll.setMinimumWidth(280)
 
-        # Add to layout with fixed 75/25 ratio using stretch factors
-        # Stretch factor 3:1 = 75%:25% ratio (guaranteed, no manual resizing possible)
-        columns_layout.addWidget(left_scroll, 3)  # Left = 75% (3 parts)
-        columns_layout.addWidget(self.train_right_stack, 1)  # Right = 25% (1 part)
-        
-        # Create a container widget for the columns layout
-        columns_widget = QWidget()
-        columns_widget.setLayout(columns_layout)
-        
-        main_layout.addWidget(columns_widget)
+        # Right column: status pill + Start tiles + Stop + History.
+        right_widget = QWidget()
+        right_layout_v = QVBoxLayout(right_widget)
+        right_layout_v.setContentsMargins(0, 0, 0, 0)
+        right_layout_v.setSpacing(10)
 
-        # Training History — full-width row beneath the config + logs.
-        # Reads ``training_info.json`` from every adapter dir under
-        # ``fine_tuned/`` (and ``models/<adapter>__gguf`` markers) and
-        # surfaces a single audit row per run: timestamp, base model,
-        # dataset, hyperparams, final loss, status, and quick actions.
-        # The user asked for this to make it easy to spot 'what worked',
-        # 'what crashed', and 'what to retry from'.
+        status_row = QHBoxLayout()
+        status_row.addStretch(1)
+        status_row.addWidget(self.train_status_pill)
+        status_row.addStretch(1)
+        right_layout_v.addLayout(status_row)
+
+        right_layout_v.addWidget(self.train_start_panel)
+
+        stop_row = QHBoxLayout()
+        stop_row.addStretch(1)
+        stop_row.addWidget(self.train_stop)
+        stop_row.addStretch(1)
+        right_layout_v.addLayout(stop_row)
+
+        # Training History sits at the bottom of the right column,
+        # right next to the Start panel — pre / post the run, the user
+        # is looking at the same column.
         history_section = self._build_training_history_section()
         if history_section is not None:
-            main_layout.addWidget(history_section)
+            right_layout_v.addWidget(history_section, 1)
+        right_layout_v.addStretch(1)
+
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_scroll.setWidget(right_widget)
+        right_scroll.setMinimumWidth(280)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(left_scroll)
+        splitter.addWidget(centre_scroll)
+        splitter.addWidget(right_scroll)
+        # Initial 40 / 30 / 30 ratio. setSizes uses absolute pixels, so
+        # we compute against a representative width — the splitter
+        # rebalances to the requested ratios on first layout.
+        splitter.setSizes([400, 300, 300])
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 3)
+        splitter.setStretchFactor(2, 3)
+        splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(6)
+        splitter.setStyleSheet(
+            """
+            QSplitter::handle {
+                background: rgba(102, 126, 234, 0.18);
+                border-radius: 3px;
+            }
+            QSplitter::handle:hover {
+                background: rgba(102, 126, 234, 0.45);
+            }
+            """
+        )
+        # Keep the legacy ``columns_layout`` reference alive for any
+        # outside code that might inspect it; not used after this
+        # point.
+        del columns_layout
+        main_layout.addWidget(splitter)
 
         # Store metric cards for updates (they're now just QWidgets with value_label and set_value)
         self.metric_cards = [

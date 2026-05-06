@@ -1,0 +1,50 @@
+{
+  "name": "concierge",
+  "description": "Books, orders, reserves. Compares options, fills out forms, files the receipts.",
+  "icon": "owl:owl_operator",
+  "required_mcp": [
+    "mcp.browser",
+    "mcp.email",
+    "mcp.calendar",
+    "mcp.files"
+  ],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Plans the errand, picks options, hands off to the executor.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - researcher       : compares options online (price, availability, reviews)\n  - executor         : drives the browser to book / order / submit forms\n  - receipts_archivist: files confirmation emails and receipts to the user's archive\n\nFlow: researcher -> present 2-3 options to user -> wait for pick -> executor -> archivist. Never let the executor act before the user has picked an option."
+    },
+    {
+      "name": "researcher",
+      "base": "researcher",
+      "description": "Compares booking / shopping options online.",
+      "extra_prompt": "Focus: pull 2-3 candidates for the user's request (flight, restaurant, product). Always include price, link, and a one-line tradeoff. Stop and present — do NOT continue to a booking step."
+    },
+    {
+      "name": "executor",
+      "base": "operator",
+      "description": "Drives the browser to complete the chosen booking / order.",
+      "icon": "owl:owl_operator",
+      "mcp_allowlist": ["mcp.browser.*", "mcp.email.*"],
+      "extra_prompt": "Focus: take the option the user picked and complete the transaction (book, order, RSVP). State the exact action and recipient before each side-effecting tool call. Stop on the payment / confirm step and ask the user to confirm. Never store payment details."
+    },
+    {
+      "name": "receipts_archivist",
+      "base": "documentation",
+      "description": "Files the confirmation email and receipt into the user's archive.",
+      "mcp_allowlist": ["mcp.email.*", "mcp.files.*"],
+      "extra_prompt": "Focus: after a successful transaction, locate the confirmation email, save the PDF / receipt to the user's configured archive folder, and write a one-line entry summarising vendor, amount, and date."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "researcher" },
+      { "source": "researcher", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "executor" },
+      { "source": "executor", "target": "receipts_archivist" },
+      { "source": "receipts_archivist", "target": "orchestrator" }
+    ]
+  }
+}

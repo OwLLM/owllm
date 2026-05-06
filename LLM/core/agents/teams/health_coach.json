@@ -1,0 +1,54 @@
+{
+  "name": "health_coach",
+  "description": "Logs habits, plans the week, critiques nutrition, runs the weekly review.",
+  "icon": "owl:owl_documentation",
+  "required_mcp": [
+    "mcp.calendar",
+    "mcp.files"
+  ],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Plans health-related work and routes it to the right specialist.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - logger            : records workouts, meals, sleep, weight\n  - planner           : drafts the weekly schedule\n  - nutrition_critic  : reviews logged meals against the user's goals\n  - reviewer          : runs the Sunday weekly review\n\nNever give clinical medical advice. Defer to a doctor for symptoms or medication."
+    },
+    {
+      "name": "logger",
+      "base": "operator",
+      "description": "Records workouts, meals, sleep, weight to the user's habit log.",
+      "mcp_allowlist": ["mcp.files.*", "mcp.calendar.*"],
+      "extra_prompt": "Focus: append to the user's habit log file with a timestamped entry. One line per event. If the user gives a vague entry ('went for a run'), ask once for the missing fields (duration, distance) — don't invent."
+    },
+    {
+      "name": "planner",
+      "base": "operator",
+      "description": "Drafts the weekly workout / meal schedule and puts holds on the calendar.",
+      "mcp_allowlist": ["mcp.calendar.*", "mcp.files.*"],
+      "extra_prompt": "Focus: build a 7-day plan based on the user's stated goals and last week's actuals. Put holds on the calendar (approval-gated) for workouts. Keep the plan realistic — bias toward fewer sessions actually done over more sessions skipped."
+    },
+    {
+      "name": "nutrition_critic",
+      "base": "critic",
+      "description": "Reviews logged meals against the user's nutrition goals.",
+      "extra_prompt": "Focus: read the meal log for a window the orchestrator names, compare macros / calories against the user's goal, and reply with one of {APPROVE, REVISE, REJECT}. Be specific — 'protein 30g under target on 4/7 days' not 'eat more protein'."
+    },
+    {
+      "name": "reviewer",
+      "base": "documentation",
+      "description": "Runs the Sunday weekly review.",
+      "mcp_allowlist": ["mcp.files.*", "mcp.calendar.*"],
+      "extra_prompt": "Focus: produce a 6-bullet weekly review: workouts done vs. planned, sleep avg, weight delta, nutrition critic's verdict, top win, top miss. Plain text, no markdown headings."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "logger" },
+      { "source": "orchestrator", "target": "planner" },
+      { "source": "logger", "target": "nutrition_critic" },
+      { "source": "nutrition_critic", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "reviewer" }
+    ]
+  }
+}

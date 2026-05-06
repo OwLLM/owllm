@@ -1,0 +1,54 @@
+{
+  "name": "data_analyst",
+  "description": "SQL writer, notebook runner, visualizer, narrator. Turns a question into a chart + a paragraph.",
+  "icon": "owl:owl_coder",
+  "required_mcp": [
+    "mcp.db",
+    "mcp.notebook"
+  ],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Translates the user's question into a query plan and runs it through the team.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - sql_writer       : drafts and validates SQL\n  - notebook_runner  : executes the query and shapes the result in a notebook\n  - visualizer       : produces the chart\n  - narrator         : writes the one-paragraph plain-English answer\n\nFlow: sql_writer -> notebook_runner -> visualizer -> narrator. If sql_writer can't reach a unique answer, ask the user once; don't guess at schema."
+    },
+    {
+      "name": "sql_writer",
+      "base": "coder",
+      "description": "Drafts and validates SQL against the configured database.",
+      "mcp_allowlist": ["mcp.db.*"],
+      "extra_prompt": "Focus: write the smallest SQL query that answers the question. Validate against the schema (introspect first; never guess column names). For destructive queries, refuse — this team is read-only."
+    },
+    {
+      "name": "notebook_runner",
+      "base": "coder",
+      "description": "Executes the query and shapes the result.",
+      "mcp_allowlist": ["mcp.notebook.*", "mcp.db.*"],
+      "extra_prompt": "Focus: run the SQL inside a notebook cell, load the result into a DataFrame, do any post-processing (window aggregations, joins to lookup tables). Output: the DataFrame head + summary stats."
+    },
+    {
+      "name": "visualizer",
+      "base": "coder",
+      "description": "Produces the chart from the result frame.",
+      "mcp_allowlist": ["mcp.notebook.*"],
+      "extra_prompt": "Focus: pick the right chart for the question (time series -> line, distribution -> hist, comparison -> bar). Plot in the notebook and save to disk. Title and axis labels are mandatory."
+    },
+    {
+      "name": "narrator",
+      "base": "documentation",
+      "description": "Writes the one-paragraph plain-English answer.",
+      "extra_prompt": "Focus: read the result frame and chart, write 3-5 sentences that answer the user's original question. Lead with the headline number, then context, then caveats."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "sql_writer" },
+      { "source": "sql_writer", "target": "notebook_runner" },
+      { "source": "notebook_runner", "target": "visualizer" },
+      { "source": "visualizer", "target": "narrator" },
+      { "source": "narrator", "target": "orchestrator" }
+    ]
+  }
+}

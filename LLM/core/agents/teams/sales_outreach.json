@@ -1,0 +1,57 @@
+{
+  "name": "sales_outreach",
+  "description": "Researches prospects, writes openers, schedules follow-ups, logs to CRM.",
+  "icon": "owl:owl_documentation",
+  "required_mcp": [
+    "mcp.email",
+    "mcp.linkedin",
+    "mcp.crm",
+    "mcp.calendar"
+  ],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Plans an outreach campaign and routes per prospect.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - prospect_researcher : pulls prospect background (recent posts, role, company news)\n  - opener              : drafts the first-touch message (cold email or LinkedIn DM)\n  - follow_up_scheduler : schedules the follow-up cadence\n  - crm_logger          : writes the activity into the CRM\n\nNever auto-send. Every outbound message goes through approval. Be honest — no fake personalisation, no fake mutual connections."
+    },
+    {
+      "name": "prospect_researcher",
+      "base": "researcher",
+      "description": "Pulls prospect background.",
+      "mcp_allowlist": ["mcp.linkedin.*"],
+      "extra_prompt": "Focus: for one prospect, output role, company, last 3 public posts (with dates), recent company news. Cite sources. Don't speculate about personal interests not visible in their public profile."
+    },
+    {
+      "name": "opener",
+      "base": "documentation",
+      "description": "Drafts the first-touch message.",
+      "extra_prompt": "Focus: write a 4-6 sentence opener tying the prospect's recent context to the user's offer. One specific concrete reference per message — no generic 'I saw you work at X'. End with a single concrete ask (15-min call / answer one question)."
+    },
+    {
+      "name": "follow_up_scheduler",
+      "base": "operator",
+      "description": "Schedules the follow-up cadence.",
+      "mcp_allowlist": ["mcp.calendar.*", "mcp.email.*"],
+      "extra_prompt": "Focus: schedule follow-ups at +3d, +7d, +14d unless the user specifies a different cadence. Each follow-up draft must add new value (not 'just bumping this'). Stop the cadence on a reply."
+    },
+    {
+      "name": "crm_logger",
+      "base": "operator",
+      "description": "Writes the activity into the CRM.",
+      "mcp_allowlist": ["mcp.crm.*"],
+      "extra_prompt": "Focus: after each touch (sent, replied, scheduled), update the CRM record: stage, last-touch date, next-action date, one-line note. Idempotent — don't duplicate entries."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "prospect_researcher" },
+      { "source": "prospect_researcher", "target": "opener" },
+      { "source": "opener", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "follow_up_scheduler" },
+      { "source": "follow_up_scheduler", "target": "crm_logger" },
+      { "source": "crm_logger", "target": "orchestrator" }
+    ]
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "name": "bug_hunter",
+  "description": "Reproduce, bisect, root-cause, patch, and add a regression test.",
+  "icon": "owl:owl_critic",
+  "required_mcp": [],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Drives the bug-hunt pipeline.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - reproducer            : pins down a minimal reproduction\n  - bisector              : git-bisects to the introducing commit\n  - root_cause            : explains *why* the bug exists\n  - patcher               : writes the smallest fix\n  - regression_test_author: adds a test that fails before the fix and passes after\n\nFlow: reproducer -> bisector -> root_cause -> patcher -> regression_test_author. Don't skip steps; jumping straight to a patch without a repro is how regressions ship."
+    },
+    {
+      "name": "reproducer",
+      "base": "coder",
+      "description": "Pins down a minimal reproduction of the bug.",
+      "extra_prompt": "Focus: produce the smallest test case (or shell session) that reliably triggers the bug. Strip everything that isn't load-bearing. Output: repro steps + observed vs. expected behaviour."
+    },
+    {
+      "name": "bisector",
+      "base": "coder",
+      "description": "Git-bisects to the introducing commit.",
+      "extra_prompt": "Focus: run git bisect using the reproducer's repro as the test predicate. Output the offending commit hash, its message, and a one-line theory of what changed."
+    },
+    {
+      "name": "root_cause",
+      "base": "researcher",
+      "description": "Explains *why* the bug exists.",
+      "extra_prompt": "Focus: read the offending commit and surrounding code. Explain the root cause in plain English: what invariant was violated, under what conditions. Don't propose a fix yet — that's the patcher's job."
+    },
+    {
+      "name": "patcher",
+      "base": "coder",
+      "description": "Writes the smallest fix.",
+      "extra_prompt": "Focus: write the minimal diff that fixes the root cause. Don't refactor unrelated code. Don't over-generalise — fix THIS bug, not the entire family of bugs near it."
+    },
+    {
+      "name": "regression_test_author",
+      "base": "coder",
+      "description": "Adds a test that fails before the fix and passes after.",
+      "extra_prompt": "Focus: write one test that captures the regression. Verify it fails on main (without the patch applied) and passes on the patched branch. Add it next to the existing test for the same area, matching the project's test style."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "reproducer" },
+      { "source": "reproducer", "target": "bisector" },
+      { "source": "bisector", "target": "root_cause" },
+      { "source": "root_cause", "target": "patcher" },
+      { "source": "patcher", "target": "regression_test_author" },
+      { "source": "regression_test_author", "target": "orchestrator" }
+    ]
+  }
+}

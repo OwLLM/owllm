@@ -1,0 +1,47 @@
+{
+  "name": "code_reviewer",
+  "description": "Multi-axis code review: security, performance, style. Read-only.",
+  "icon": "owl:owl_critic",
+  "required_mcp": [],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Coordinates the per-axis reviews and produces the unified summary.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - security_reviewer : looks for auth, injection, secret-handling, supply-chain issues\n  - perf_reviewer     : looks for hot-path regressions, N+1 queries, bad allocations\n  - style_critic      : checks consistency with the existing codebase's style\n  - summarizer        : merges the three reviews into a single ranked verdict\n\nFlow: dispatch all three reviewers in sequence, then send their outputs to summarizer. Pure read; never write. The user takes the verdict and acts on it."
+    },
+    {
+      "name": "security_reviewer",
+      "base": "critic",
+      "description": "Looks for auth, injection, secret-handling, supply-chain issues.",
+      "extra_prompt": "Focus: read the changed code and flag security issues only. Be specific: file:line, the issue, and a concrete remediation. If nothing of concern, say so explicitly. Reply APPROVE / REVISE / REJECT."
+    },
+    {
+      "name": "perf_reviewer",
+      "base": "critic",
+      "description": "Looks for hot-path regressions, N+1 queries, allocation hot-spots.",
+      "extra_prompt": "Focus: read the changed code and flag performance issues only. Quantify where possible (loop bound, expected query count, allocation frequency). Reply APPROVE / REVISE / REJECT."
+    },
+    {
+      "name": "style_critic",
+      "base": "critic",
+      "description": "Checks consistency with the existing codebase's style.",
+      "extra_prompt": "Focus: read NEIGHBOURING files first to learn the codebase's conventions, then review the diff for deviations. Don't impose external preferences — match what's already there. Reply APPROVE / REVISE / REJECT."
+    },
+    {
+      "name": "summarizer",
+      "base": "documentation",
+      "description": "Merges the three reviews into a single ranked verdict.",
+      "extra_prompt": "Focus: produce one ranked list (P0 blockers, P1 should-fix, P2 nice-to-have) merging the three reviewers' notes. Deduplicate. End with a single APPROVE / REVISE / REJECT verdict — REVISE if any reviewer said REVISE/REJECT."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "security_reviewer" },
+      { "source": "orchestrator", "target": "perf_reviewer" },
+      { "source": "orchestrator", "target": "style_critic" },
+      { "source": "orchestrator", "target": "summarizer" }
+    ]
+  }
+}

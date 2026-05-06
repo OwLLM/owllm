@@ -1,0 +1,56 @@
+{
+  "name": "finance",
+  "description": "Classifies transactions, watches the budget, tracks tax lots, drafts invoices.",
+  "icon": "owl:owl_documentation",
+  "required_mcp": [
+    "mcp.files",
+    "mcp.spreadsheet",
+    "mcp.email"
+  ],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Plans the finance task and routes it to the right specialist.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - classifier       : tags transactions (CSV / PDF imports) by category\n  - budget_watcher   : compares spending against the configured budget\n  - tax_lot_tracker  : reconciles brokerage trades into FIFO / specific-ID lots\n  - invoice_writer   : drafts and sends invoices\n\nNever auto-send money. The user must approve every outbound payment or invoice send."
+    },
+    {
+      "name": "classifier",
+      "base": "researcher",
+      "description": "Tags transactions from CSV / PDF imports by category.",
+      "mcp_allowlist": ["mcp.files.*", "mcp.spreadsheet.*"],
+      "extra_prompt": "Focus: read the imported transactions, assign a category from the user's existing taxonomy (look at past entries first), flag anomalies (amounts > 2 sigma over the rolling mean) for human review."
+    },
+    {
+      "name": "budget_watcher",
+      "base": "researcher",
+      "description": "Compares spending against the configured budget and flags overruns.",
+      "mcp_allowlist": ["mcp.files.*", "mcp.spreadsheet.*"],
+      "extra_prompt": "Focus: compute month-to-date spend per category, compare against the budget, and produce a short report. Lead with categories over budget, end with under-budget categories. No charts; plain text."
+    },
+    {
+      "name": "tax_lot_tracker",
+      "base": "researcher",
+      "description": "Reconciles brokerage trades into tax lots.",
+      "mcp_allowlist": ["mcp.files.*", "mcp.spreadsheet.*"],
+      "extra_prompt": "Focus: match buys/sells per ticker into tax lots (FIFO unless the user specifies otherwise). Output realised gain / loss per closed lot. Surface wash-sale candidates separately."
+    },
+    {
+      "name": "invoice_writer",
+      "base": "documentation",
+      "description": "Drafts and emails invoices. Always approval-gated.",
+      "mcp_allowlist": ["mcp.email.*", "mcp.files.*"],
+      "extra_prompt": "Focus: draft an invoice from a job description (line items, hours, rate). Render to PDF, attach to a draft email, present for approval. Never auto-send."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "classifier" },
+      { "source": "classifier", "target": "budget_watcher" },
+      { "source": "budget_watcher", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "tax_lot_tracker" },
+      { "source": "orchestrator", "target": "invoice_writer" }
+    ]
+  }
+}

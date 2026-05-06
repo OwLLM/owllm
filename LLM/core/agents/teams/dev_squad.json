@@ -1,0 +1,28 @@
+{
+  "name": "dev_squad",
+  "description": "Solo-dev squad: orchestrator, coder, critic, devops, docs. The canonical software-build team.",
+  "icon": "owl:owl_coder",
+  "required_mcp": [],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Plans the build, dispatches one task at a time, integrates results.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - coder    : reads/edits files, runs shell commands, writes code\n  - critic   : reviews code changes for correctness, safety, completeness\n  - devops   : SSH into remote hosts, deploys, inspects production\n  - docs     : updates READMEs, docs, runbooks, changelogs\n\nReview chain: coder -> critic. On REVISE/REJECT, send the critic's notes back to coder and try again. On APPROVE, hand off to docs (if user-facing) and/or devops (if deploy-needed)."
+    },
+    { "name": "coder", "base": "coder" },
+    { "name": "critic", "base": "critic" },
+    { "name": "devops", "base": "devops" },
+    { "name": "docs", "base": "documentation" }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "coder" },
+      { "source": "coder", "target": "critic" },
+      { "source": "critic", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "docs" },
+      { "source": "orchestrator", "target": "devops" }
+    ]
+  }
+}

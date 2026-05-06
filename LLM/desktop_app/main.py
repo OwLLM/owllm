@@ -6618,12 +6618,79 @@ class MainWindow(QMainWindow):
             btn.setChecked(name == theme_name)
         # Reapply theme with new color
         self._apply_theme()
+
+    def _apply_qpalette_from_theme(self) -> None:
+        """Push the active theme into ``QApplication.palette`` and walk
+        the live widget tree to reapply each widget's own stylesheet
+        (forcing a re-resolution of any ``palette(*)`` references) so
+        the colour shift takes effect even on widgets that set inline
+        stylesheets.
+        """
+        from PySide6.QtGui import QPalette, QColor as _QColor
+        from PySide6.QtCore import Qt as _Qt
+        from PySide6.QtWidgets import QApplication as _QApp
+
+        cset = COLOR_THEMES[self.color_theme]["dark" if self.dark_mode else "light"]
+        primary = _QColor(cset["primary"])
+        secondary = _QColor(cset["secondary"])
+        accent = _QColor(cset["accent"])
+        window = _QColor(cset.get("window", "#0e1117" if self.dark_mode else "#ffffff"))
+        panel = _QColor(cset.get("panel", "#161a22" if self.dark_mode else "#f5f5f7"))
+        input_bg = _QColor(cset.get("input", "#14171d" if self.dark_mode else "#ffffff"))
+        text_col = _QColor(cset.get("text", "#fafafa" if self.dark_mode else "#262730"))
+        muted_col = _QColor(cset.get("muted", "#9aa0a6" if self.dark_mode else "#5a6068"))
+
+        pal = QPalette()
+        # Window / dialog backgrounds + the text drawn directly on them.
+        pal.setColor(QPalette.Window, window)
+        pal.setColor(QPalette.WindowText, text_col)
+        pal.setColor(QPalette.Base, input_bg)
+        pal.setColor(QPalette.AlternateBase, panel)
+        pal.setColor(QPalette.Text, text_col)
+        pal.setColor(QPalette.Button, panel)
+        pal.setColor(QPalette.ButtonText, text_col)
+        pal.setColor(QPalette.ToolTipBase, panel)
+        pal.setColor(QPalette.ToolTipText, text_col)
+        pal.setColor(QPalette.PlaceholderText, muted_col)
+        pal.setColor(QPalette.BrightText, _QColor("#ffffff"))
+        pal.setColor(QPalette.Highlight, primary)
+        pal.setColor(QPalette.HighlightedText, _QColor("#ffffff"))
+        pal.setColor(QPalette.Link, accent)
+        pal.setColor(QPalette.LinkVisited, secondary)
+        pal.setColor(QPalette.Mid, muted_col)
+        pal.setColor(QPalette.Midlight, panel)
+        pal.setColor(QPalette.Dark, panel.darker(120))
+        pal.setColor(QPalette.Shadow, _QColor(0, 0, 0, 80))
+
+        app = _QApp.instance()
+        if app is not None:
+            app.setPalette(pal)
+
+        # Force every widget that has its own stylesheet to re-evaluate
+        # — palette(*) references inside inline stylesheets are
+        # resolved at parse time, so we have to reassign the same
+        # stylesheet string to make Qt re-resolve them.
+        for w in self.findChildren(QWidget):
+            ss = w.styleSheet()
+            if ss and "palette(" in ss:
+                w.setStyleSheet(ss)
     
     def _apply_theme(self) -> None:
         """Apply the current theme"""
         # Use dynamic theme with selected color
         stylesheet = get_theme_stylesheet(self.dark_mode, self.color_theme)
         self.setStyleSheet(stylesheet)
+
+        # Drive QApplication's palette from the same colour family so
+        # widgets that set their own inline stylesheets STILL flip
+        # when the user switches themes (Qt's stylesheet system can't
+        # override an inline setStyleSheet, but ``palette(*)`` calls
+        # inside those stylesheets DO read from QApplication.palette,
+        # and unstyled widgets inherit it directly).
+        try:
+            self._apply_qpalette_from_theme()
+        except Exception:
+            logger.exception("could not push theme into QApplication palette")
         
         # Update theme button icon and text
         if self.dark_mode:
@@ -9917,7 +9984,9 @@ class MainWindow(QMainWindow):
         # and path variants the same way Onboard / Use-in-Chat do.
         base_raw = self._resolve_adapter_base_path(adapter_path) or ""
         base_path = ""
+        attempts = []
         if base_raw:
+            attempts.append(base_raw)
             cand = Path(base_raw)
             if cand.exists():
                 base_path = str(cand)
@@ -9926,16 +9995,39 @@ class MainWindow(QMainWindow):
                 # → models/google__gemma-4-E4B-it).
                 slug = base_raw.replace("/", "__")
                 cand = self.root / "models" / slug
+                attempts.append(str(cand))
                 if cand.exists():
                     base_path = str(cand)
+            # Fall back to the HF hub cache. When training had to swap
+            # a *-bnb-4bit local model to its de-quantized hub id (see
+            # finetune.py _resolve_base_for_swap), transformers
+            # downloads the base into HF_HOME, NOT into LLM/models/.
+            # The cached snapshot (parent of config.json) is a real HF
+            # model directory we can hand straight to the converter.
+            if not base_path and "/" in base_raw:
+                try:
+                    from huggingface_hub import try_to_load_from_cache
+                    cfg_path = try_to_load_from_cache(
+                        repo_id=base_raw, filename="config.json"
+                    )
+                    if cfg_path and Path(cfg_path).exists():
+                        snapshot_dir = Path(cfg_path).parent
+                        attempts.append(str(snapshot_dir))
+                        if snapshot_dir.is_dir():
+                            base_path = str(snapshot_dir)
+                except Exception as exc:
+                    attempts.append(f"(HF cache probe raised {type(exc).__name__}: {exc})")
         if not base_path:
             QMessageBox.warning(
                 self, "Convert to GGUF",
                 f"Couldn't resolve the base model for adapter "
                 f"<b>{adapter_path.name}</b>.<br><br>"
                 "The adapter's <code>adapter_config.json</code> names a "
-                "base model that isn't on disk under <code>models/</code>. "
-                "Download or onboard the base first."
+                f"base model (<code>{base_raw or '(empty)'}</code>) "
+                "that isn't on disk.<br><br>"
+                "<b>Tried:</b><br>" +
+                "<br>".join(f"• <code>{a}</code>" for a in attempts) +
+                "<br><br>Download or onboard the base first."
             )
             return
 

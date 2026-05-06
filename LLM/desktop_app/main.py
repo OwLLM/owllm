@@ -3539,6 +3539,29 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+        # Fleet tab — conditional, gated on fleet.enabled. Same flag mechanism
+        # as supervisor; the FleetService owns a SQLite manifest connection
+        # for the app's lifetime, closed via QApplication.aboutToQuit.
+        self.fleet_service = None
+        try:
+            from core.supervisor import flags as _flags
+            if _flags.fleet_enabled():
+                from desktop_app.fleet_service import FleetService
+                from desktop_app.pages.fleet_page import FleetPage
+                self.fleet_service = FleetService(parent=self)
+                tabs.addTab(
+                    _timed_build("Fleet", lambda: FleetPage(self.fleet_service, self)),
+                    "Fleet",
+                )
+                QApplication.instance().aboutToQuit.connect(
+                    self.fleet_service.shutdown
+                )
+        except Exception as _fleet_e:
+            try:
+                self._log_to_app_log(f"[STARTUP] fleet tab skipped: {_fleet_e}")
+            except Exception:
+                pass
+
         tabs.addTab(_timed_build("Info", self._build_info_tab), "Info")
         
         # Connect buttons to tab switching using page names

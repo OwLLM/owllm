@@ -52,6 +52,12 @@ DEFAULTS: Mapping[str, Any] = {
     # Python-based installer unchanged. The new bootstrap.exe path only
     # ships through OWLLM-Setup-AI.exe (opt-in download) until this flips.
     "bootstrap.use_ai_installer": False,
+
+    # Fleet tab. While False, the Fleet tab is hidden — production users
+    # see no change. Independent product surface from the supervisor;
+    # lives in this same flags file because the file IS OWLLM's feature-
+    # flag mechanism (the module name is legacy). See core/fleet/.
+    "fleet.enabled": False,
 }
 
 
@@ -100,6 +106,11 @@ def snapshot() -> dict[str, Any]:
 def supervisor_enabled() -> bool:
     """Convenience: master switch only."""
     return bool(flag("supervisor.enabled"))
+
+
+def fleet_enabled() -> bool:
+    """Convenience: True when the Fleet tab should be rendered."""
+    return bool(flag("fleet.enabled"))
 
 
 def supervisor_active(channel: str) -> bool:

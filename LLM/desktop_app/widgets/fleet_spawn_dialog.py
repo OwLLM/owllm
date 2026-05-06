@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -27,6 +28,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from core.fleet.profiles import Profile, ProfileStore
 
 
 _HELP_OWNS = (
@@ -44,13 +47,26 @@ _HELP_READS = (
 
 
 class FleetSpawnDialog(QDialog):
-    """Form for ``FleetService.spawn_async`` arguments."""
+    """Form for ``FleetService.spawn_async`` arguments.
 
-    def __init__(self, parent: Optional[QWidget] = None):
+    The "profile" picker at the top prefills the role-shaped fields
+    (owns / reads / reason / ttl / base-branch) — the spawn-shaped
+    fields (target repo, branch, agent id, port, gpu) stay user-driven
+    because they vary per call.
+    """
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        profile_store: Optional[ProfileStore] = None,
+    ):
         super().__init__(parent)
         self.setWindowTitle("Spawn fleet agent")
-        self.setMinimumWidth(540)
+        self.setMinimumWidth(560)
+        self._profile_store = profile_store or ProfileStore()
 
+        # ------- per-spawn fields -------
         self._target_repo = QLineEdit()
         self._target_repo.setPlaceholderText(
             "git URL or local path, e.g. https://github.com/me/alpha.git"
@@ -61,6 +77,7 @@ class FleetSpawnDialog(QDialog):
 
         self._base_branch = QLineEdit("main")
 
+        # ------- profile-driven fields -------
         self._owns = QPlainTextEdit()
         self._owns.setPlaceholderText("src/billing/**\ntests/billing/**")
         self._owns.setFixedHeight(80)
@@ -72,14 +89,15 @@ class FleetSpawnDialog(QDialog):
         self._reason = QLineEdit()
         self._reason.setPlaceholderText("implement refund flow")
 
-        self._agent_id = QLineEdit()
-        self._agent_id.setPlaceholderText("(auto-generated if empty)")
-
         self._ttl = QSpinBox()
         self._ttl.setRange(60, 24 * 3600)
         self._ttl.setSingleStep(60)
         self._ttl.setValue(3600)
         self._ttl.setSuffix(" s")
+
+        # ------- per-spawn pinning fields -------
+        self._agent_id = QLineEdit()
+        self._agent_id.setPlaceholderText("(auto-generated if empty)")
 
         self._pin_port = QCheckBox("pin port")
         self._port = QSpinBox()
@@ -95,7 +113,15 @@ class FleetSpawnDialog(QDialog):
         self._gpu.setEnabled(False)
         self._pin_gpu.toggled.connect(self._gpu.setEnabled)
 
+        # ------- profile picker (built last so it can prefill fields) -----
+        self._profile_picker = QComboBox()
+        for p in self._profile_store.list_all():
+            label = f"{p.icon}  {p.name} — {p.description}"
+            self._profile_picker.addItem(label, userData=p)
+
+        # ------- form layout -------
         form = QFormLayout()
+        form.addRow("profile", self._profile_picker)
         form.addRow("target repo *", self._target_repo)
         form.addRow("branch *", self._branch)
         form.addRow("base branch", self._base_branch)
@@ -123,6 +149,13 @@ class FleetSpawnDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.addLayout(form)
         outer.addWidget(buttons)
+
+        # Wire profile picker last so the initial population doesn't
+        # clobber user typing — users can still override every field
+        # the profile sets.
+        self._profile_picker.currentIndexChanged.connect(self._apply_profile)
+        # Apply the initial selection (custom = blank defaults).
+        self._apply_profile(self._profile_picker.currentIndex())
 
     # ------------------------------------------------------------------
     # Public
@@ -152,6 +185,28 @@ class FleetSpawnDialog(QDialog):
         if self._pin_gpu.isChecked():
             kwargs["gpu_slot"] = int(self._gpu.value())
         return kwargs
+
+    # ------------------------------------------------------------------
+    # Profile application
+    # ------------------------------------------------------------------
+
+    def _apply_profile(self, idx: int) -> None:
+        """Overwrite the profile-shaped fields with the picked preset.
+
+        Per-spawn fields (target repo, branch, agent id, port, gpu)
+        are left untouched — those are what the user is here to fill
+        in for THIS spawn, not what the role implies.
+        """
+        if idx < 0:
+            return
+        profile = self._profile_picker.itemData(idx)
+        if not isinstance(profile, Profile):
+            return
+        self._owns.setPlainText("\n".join(profile.owns_modules))
+        self._reads.setPlainText("\n".join(profile.reads_modules))
+        self._reason.setText(profile.default_reason)
+        self._ttl.setValue(profile.ttl_seconds)
+        self._base_branch.setText(profile.base_branch)
 
     # ------------------------------------------------------------------
     # Validation

@@ -286,3 +286,40 @@ def test_each_template_instantiates(template_name, tmp_path, monkeypatch):
     ]
     leader_count = sum(1 for d in leaders if d and d.can_dispatch)
     assert leader_count == 1, f"{template_name}: expected 1 leader, got {leader_count}"
+
+
+@pytest.mark.parametrize("template_name", sorted(EXPECTED_TEMPLATES))
+def test_each_template_role_conversion(template_name, tmp_path, monkeypatch):
+    """Every template's agents must convert to Role without raising.
+
+    Regression: ``_role_from_definition`` used to do ``list(d.tool_allowlist)
+    + list(d.mcp_allowlist or [])`` which crashed with 'NoneType is not
+    iterable' whenever ``tool_allowlist=None`` ("all builtins") and the
+    user had also set an mcp_allowlist — the exact shape several
+    templates produce (e.g. learning_tutor.srs_scheduler inherits "all"
+    from the operator base and adds an mcp_allowlist filter)."""
+    from desktop_app.pages.agents_page import _role_from_definition
+
+    custom_dir = tmp_path / "agent_definitions"
+    custom_dir.mkdir()
+    monkeypatch.setattr(
+        "core.agents.agent_definitions._custom_dir", lambda: custom_dir
+    )
+    store = ProjectStore(tmp_path / "owllm.db")
+    tpl = builtin_templates()[template_name]
+    instantiate_template(tpl, project_store=store)
+
+    for short in (a.name for a in tpl.agents):
+        defn = get_definition(tpl.prefixed_agent_name(short))
+        assert defn is not None
+        # MUST not raise.
+        role = _role_from_definition(defn)
+        # When tool_allowlist is None on the AgentDefinition, the runtime
+        # Role must keep it None (= all tools) so the agent doesn't
+        # silently lose every builtin (read_file, dispatch, …) the
+        # moment we attach an mcp filter.
+        if defn.tool_allowlist is None:
+            assert role.tool_allowlist is None, (
+                f"{defn.name}: tool_allowlist=None on definition collapsed "
+                f"to {role.tool_allowlist!r} on Role — would strip every builtin"
+            )

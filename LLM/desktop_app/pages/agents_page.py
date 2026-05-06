@@ -4028,16 +4028,29 @@ def _role_from_definition(d: AgentDefinition) -> Role:
     The runtime team-builder still consumes Role objects; AgentDefinition
     is the user-facing superset. This bridge keeps the runtime untouched
     and lets the Studio evolve independently.
+
+    Allowlist merge semantics:
+
+      * ``tool_allowlist=None`` means "all built-in tools allowed". When
+        an mcp_allowlist is *also* set we keep the runtime allowlist
+        ``None`` rather than collapse to the MCP-only list — there's no
+        way to express "all builtins + specific MCP tools" as a single
+        runtime allowlist without enumerating every builtin name, and
+        silently dropping every builtin (read_file, dispatch, …) was the
+        previous bug that surfaced as a crash on team templates whose
+        agents inherit "all" from a base role and add an mcp filter.
+      * ``tool_allowlist=[...]`` is honoured exactly: builtins are
+        restricted to that list, plus every entry from mcp_allowlist.
     """
+    if d.tool_allowlist is None:
+        merged: Optional[List[str]] = None
+    else:
+        merged = list(d.tool_allowlist) + list(d.mcp_allowlist or [])
     return Role(
         name=d.name,
         description=d.description,
         system_prompt=d.system_prompt,
-        tool_allowlist=(
-            list(d.tool_allowlist) + list(d.mcp_allowlist or [])
-            if d.tool_allowlist is not None or d.mcp_allowlist is not None
-            else None
-        ),
+        tool_allowlist=merged,
         can_dispatch=d.can_dispatch,
         default_temperature=d.default_temperature,
         icon=d.icon,

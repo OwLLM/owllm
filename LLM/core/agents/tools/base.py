@@ -152,6 +152,24 @@ class ApprovalRequest:
     goal_id: str
 
 
+@dataclass
+class AutoApproveRule:
+    """A predicate-based shortcut around the gate.
+
+    The user can register rules like "always approve shell commands that
+    just run pytest" or "auto-reject anything that targets /etc". The
+    gate evaluates rules in registration order on every ``request()``
+    call BEFORE blocking — a matching rule short-circuits to its decision
+    and the UI never sees the pending. Rules are first-class so they can
+    be listed, removed, or persisted by the caller.
+    """
+
+    name: str                                        # human-readable label
+    predicate: Callable[["ApprovalRequest"], bool]   # match function
+    decision: "ApprovalDecision"                     # APPROVE or REJECT
+    reason: str = "auto-rule"
+
+
 class ApprovalGate:
     """Blocks the agent loop on risky tools until the user decides.
 
@@ -159,12 +177,32 @@ class ApprovalGate:
     on an ``Event``. ``resolve`` is called from the UI thread when the user
     clicks. ``listeners`` is for the UI to subscribe so it can surface new
     pending items as they arrive.
+
+    Reliability features layered on top of the basic block-and-resolve loop:
+
+    * **Auto-approve rules** — predicates registered via ``add_rule`` run
+      synchronously inside ``request``. A matching rule resolves the call
+      immediately without ever publishing a pending. Use these for "I
+      always trust the verify command" or "auto-reject any shell that
+      touches /etc". Rules can be listed and removed by name.
+    * **Bulk resolution** — ``resolve_matching(predicate, decision)``
+      decides every currently-pending approval that matches at once. The
+      UI uses this to surface "Approve all 5 pending shell commands"
+      without clicking through each individually.
+    * **Pending-count listener** — a separate listener channel fires with
+      the new pending count whenever it changes, so the UI can update a
+      badge live without polling ``list_pending`` on a timer.
+
+    The original per-request ``add_listener`` channel still works
+    unchanged; the new mechanisms are additive.
     """
 
     def __init__(self, default_timeout_seconds: float = 300.0) -> None:
         self._lock = threading.Lock()
         self._pending: Dict[str, PendingApproval] = {}
         self._listeners: List[Callable[[ApprovalRequest], None]] = []
+        self._count_listeners: List[Callable[[int], None]] = []
+        self._rules: List[AutoApproveRule] = []
         self.default_timeout_seconds = default_timeout_seconds
 
     # --- agent side -----------------------------------------------------
@@ -177,9 +215,39 @@ class ApprovalGate:
         goal_id: str,
         timeout_seconds: Optional[float] = None,
     ) -> ApprovalDecision:
-        """Block until the user approves/rejects, or the timeout expires."""
-        pending = PendingApproval(
+        """Block until the user approves/rejects, or the timeout expires.
+
+        Auto-approve rules fire synchronously here — if any rule's
+        predicate matches the request snapshot, we return its decision
+        immediately without publishing a pending or notifying listeners.
+        That's the path most "I always trust pytest" calls take.
+        """
+        snap = ApprovalRequest(
             id=uuid.uuid4().hex,
+            agent=agent,
+            tool_name=tool_name,
+            args=dict(args),
+            goal_id=goal_id,
+        )
+
+        # Evaluate auto-approve rules first. A rule's predicate may
+        # raise (user-supplied code) — treat that as no-match rather
+        # than failing the whole request.
+        with self._lock:
+            rules = list(self._rules)
+        for rule in rules:
+            try:
+                if rule.predicate(snap):
+                    logger.info(
+                        "auto-rule '%s' resolved %s/%s -> %s",
+                        rule.name, agent, tool_name, rule.decision.value,
+                    )
+                    return rule.decision
+            except Exception:  # noqa: BLE001
+                logger.exception("auto-approve rule '%s' raised; skipping", rule.name)
+
+        pending = PendingApproval(
+            id=snap.id,
             agent=agent,
             tool_name=tool_name,
             args=dict(args),
@@ -188,24 +256,24 @@ class ApprovalGate:
         with self._lock:
             self._pending[pending.id] = pending
             listeners = list(self._listeners)
-        snap = ApprovalRequest(
-            id=pending.id,
-            agent=pending.agent,
-            tool_name=pending.tool_name,
-            args=pending.args,
-            goal_id=pending.goal_id,
-        )
+            count_listeners = list(self._count_listeners)
+            new_count = len(self._pending)
+
         for cb in listeners:
             try:
                 cb(snap)
             except Exception:  # noqa: BLE001
                 pass
+        self._fire_count(count_listeners, new_count)
 
         timeout = self.default_timeout_seconds if timeout_seconds is None else timeout_seconds
         fired = pending._event.wait(timeout=timeout)
 
         with self._lock:
             self._pending.pop(pending.id, None)
+            count_listeners = list(self._count_listeners)
+            new_count = len(self._pending)
+        self._fire_count(count_listeners, new_count)
 
         if not fired:
             return ApprovalDecision.TIMEOUT
@@ -226,6 +294,10 @@ class ApprovalGate:
                 for p in self._pending.values()
             ]
 
+    def pending_count(self) -> int:
+        with self._lock:
+            return len(self._pending)
+
     def resolve(self, approval_id: str, decision: ApprovalDecision, reason: str = "") -> bool:
         with self._lock:
             pending = self._pending.get(approval_id)
@@ -236,9 +308,98 @@ class ApprovalGate:
         pending._event.set()
         return True
 
+    def resolve_matching(
+        self,
+        predicate: Callable[["ApprovalRequest"], bool],
+        decision: ApprovalDecision,
+        *,
+        reason: str = "bulk decision",
+    ) -> int:
+        """Resolve every currently-pending approval whose snapshot matches.
+
+        Returns the number of approvals resolved. Used by UI primitives
+        like "Approve all pending shell commands". Predicate errors on
+        any single pending are treated as no-match (don't poison the
+        whole batch) and logged.
+        """
+        with self._lock:
+            snapshots = [
+                (p.id, ApprovalRequest(
+                    id=p.id,
+                    agent=p.agent,
+                    tool_name=p.tool_name,
+                    args=p.args,
+                    goal_id=p.goal_id,
+                ), p)
+                for p in self._pending.values()
+            ]
+        resolved = 0
+        for approval_id, snap, pending in snapshots:
+            try:
+                if not predicate(snap):
+                    continue
+            except Exception:  # noqa: BLE001
+                logger.exception("resolve_matching predicate raised; skipping %s", approval_id)
+                continue
+            with self._lock:
+                if approval_id not in self._pending:
+                    continue
+                pending.decision = decision
+                pending.reason = reason
+            pending._event.set()
+            resolved += 1
+        if resolved:
+            with self._lock:
+                count_listeners = list(self._count_listeners)
+                new_count = len(self._pending)
+            self._fire_count(count_listeners, new_count)
+        return resolved
+
     def add_listener(self, cb: Callable[[ApprovalRequest], None]) -> None:
         with self._lock:
             self._listeners.append(cb)
+
+    def add_count_listener(self, cb: Callable[[int], None]) -> None:
+        """Register a callback fired with the new pending-count whenever
+        it changes (a request lands, a request resolves, a bulk-decision
+        fires). Use this for a UI badge — cheaper than polling."""
+        with self._lock:
+            self._count_listeners.append(cb)
+
+    @staticmethod
+    def _fire_count(callbacks: List[Callable[[int], None]], count: int) -> None:
+        for cb in callbacks:
+            try:
+                cb(count)
+            except Exception:  # noqa: BLE001
+                pass
+
+    # --- auto-approve rules --------------------------------------------
+
+    def add_rule(self, rule: AutoApproveRule) -> None:
+        """Register an auto-approve / auto-reject rule. Rules evaluate in
+        registration order; the first match wins. Names should be unique
+        — registering the same name twice silently replaces the old rule
+        (so reloading config from disk is idempotent)."""
+        with self._lock:
+            self._rules = [r for r in self._rules if r.name != rule.name]
+            self._rules.append(rule)
+
+    def remove_rule(self, name: str) -> bool:
+        """Remove a rule by name. Returns True if anything was removed."""
+        with self._lock:
+            before = len(self._rules)
+            self._rules = [r for r in self._rules if r.name != name]
+            return len(self._rules) != before
+
+    def list_rules(self) -> List[AutoApproveRule]:
+        """Return a snapshot of currently-registered rules in order."""
+        with self._lock:
+            return list(self._rules)
+
+    def clear_rules(self) -> None:
+        with self._lock:
+            self._rules.clear()
 
 
 # ---------------------------------------------------------------------------

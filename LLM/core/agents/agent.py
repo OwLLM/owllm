@@ -80,6 +80,23 @@ DEFAULT_MAX_HISTORY_CHARS = 60_000
 # preamble on a long stdout dump.
 DEFAULT_MAX_MESSAGE_CHARS = 12_000
 
+# When chat history exceeds this fraction of ``max_history_chars``, we
+# attempt to compact it via a summarization round-trip rather than just
+# dropping the oldest messages. Tuned to fire well before the hard
+# budget so the summary call itself has room to land. Set to 1.0 to
+# disable compaction entirely (falls back to drop-oldest only).
+DEFAULT_COMPACTION_THRESHOLD = 0.75
+
+# How many of the most-recent messages to preserve verbatim during a
+# compaction pass. Older messages get folded into a single summary
+# message; the original user request (chat_history[0]) is also kept
+# verbatim so the agent never loses sight of what it was asked to do.
+DEFAULT_PRESERVE_RECENT = 6
+
+# Marker the compaction summary uses so we can detect a previously-
+# compacted message and skip re-summarizing it (would be lossy).
+_COMPACTION_MARKER = "[CONVERSATION SUMMARY]"
+
 
 # ---------------------------------------------------------------------------
 # Agent
@@ -110,6 +127,12 @@ class Agent:
     current goal_id so the UI can surface a $ figure. Backends with real
     token usage should record_usage() directly; this loop estimates from
     chars (~4 chars/token rule of thumb)."""
+    compaction_threshold: float = DEFAULT_COMPACTION_THRESHOLD
+    """Fraction of ``max_history_chars`` at which to trigger a
+    summarization round-trip. 1.0 disables compaction (falls back to
+    drop-oldest)."""
+    preserve_recent: int = DEFAULT_PRESERVE_RECENT
+    """Number of most-recent messages kept verbatim during compaction."""
 
     # Per-instance scratch — the rolling chat memory across all inbox items.
     # We keep this on the agent (not the bus) because two agents on the same
@@ -291,23 +314,25 @@ class Agent:
     def _build_messages(self) -> List[ChatMessage]:
         """Render system prompt + chat history with budget enforcement.
 
-        Two safety nets stack up here:
+        Three safety nets stack up here:
 
         1. Per-message cap — any single message whose content exceeds
            ``max_message_chars`` is truncated to the tail. Big tool results
            (a cat of a 200KB file, an http_get of a long page) used to
            blow past the per-call context limit on their own; we trim them
            in place so the rest of the conversation still fits.
-        2. History budget — after per-message capping, if the total still
-           exceeds ``max_history_chars`` we drop OLDEST messages first
-           until it fits. The most recent user message (the current
-           request) is always preserved so the agent never loses sight of
-           what it was asked to do.
+        2. Compaction — if the post-cap total exceeds
+           ``compaction_threshold`` of the budget, fold the older portion
+           of the history into a single SUMMARY message (via the same
+           model_fn) and keep the original user ask + the most recent
+           ``preserve_recent`` messages verbatim. This preserves the
+           original goal across long jobs that drop-oldest would lose.
+        3. Drop-oldest fallback — if compaction couldn't bring us under
+           budget (or it's disabled), drop oldest messages until we fit.
+           The latest message is always preserved.
 
         Without these, a long-running goal blows the context window on
-        Gemma-4 (32K tokens) and even on subscription Claude — the "Critic
-        gives errors" symptom the user reported was almost always a token
-        limit hit on the dispatched specialist.
+        Gemma-4 (32K tokens) and even on subscription Claude.
         """
         system = (
             self.role_prompt.rstrip()
@@ -333,14 +358,120 @@ class Agent:
                 entry["attachments"] = atts
             capped.append(entry)
 
-        # 2. History budget — drop oldest until we fit.
         budget = max(0, self.max_history_chars - len(system))
-        # Always keep the latest message (the current ask). Trim from the
-        # head, never from the tail.
+
+        # 2. Compaction — only fires when we're actually over the
+        # configured threshold AND we have enough messages that
+        # summarizing the older half is meaningful (else drop-oldest is
+        # just as good and cheaper). threshold >= 1.0 disables it
+        # entirely; threshold <= 0.0 would fire on every call which is
+        # almost certainly a misconfiguration, so we treat that as
+        # "disabled" too.
+        compaction_enabled = 0.0 < self.compaction_threshold < 1.0
+        threshold_chars = int(budget * self.compaction_threshold) if compaction_enabled else budget + 1
+        total_chars = sum(len(c.get("content") or "") for c in capped)
+        if (
+            compaction_enabled
+            and total_chars > threshold_chars
+            and len(capped) > self.preserve_recent + 2
+        ):
+            try:
+                capped = self._compact_history(capped)
+                # Persist the compaction back to the agent's rolling
+                # history so we don't redo it on every step.
+                self._chat_history = list(capped)
+                total_chars = sum(len(c.get("content") or "") for c in capped)
+            except Exception:  # noqa: BLE001
+                logger.exception("compaction failed for agent %s; falling back to drop-oldest", self.name)
+
+        # 3. Drop-oldest fallback. If compaction succeeded we'll
+        # usually fit; if it didn't or wasn't triggered, this still
+        # keeps us under the per-call ceiling.
         while sum(len(c.get("content") or "") for c in capped) > budget and len(capped) > 1:
             capped.pop(0)
 
         return [{"role": "system", "content": system}, *capped]
+
+    # ------------------------------------------------------------------
+    # Compaction
+    # ------------------------------------------------------------------
+
+    def _compact_history(self, capped: List[ChatMessage]) -> List[ChatMessage]:
+        """Summarize the older portion of ``capped`` via model_fn.
+
+        Layout after compaction:
+
+            [original user ask]                          (verbatim, msg 0)
+            [SUMMARY of msg 1 .. -preserve_recent]       (synthetic)
+            [last preserve_recent messages]              (verbatim)
+
+        If the original ask is itself a previously-rendered summary
+        (marker present), we don't double-wrap it. If preserve_recent
+        is too large for the available history, we just no-op and let
+        drop-oldest take over.
+        """
+        if len(capped) <= self.preserve_recent + 1:
+            return capped
+
+        original_ask = capped[0]
+        recent = capped[-self.preserve_recent :]
+        middle = capped[1 : len(capped) - self.preserve_recent]
+        if not middle:
+            return capped
+
+        # Skip if the middle is already mostly a summary block (avoid
+        # repeatedly re-summarizing the same content).
+        already_compacted = any(
+            _COMPACTION_MARKER in (m.get("content") or "") for m in middle
+        )
+        if already_compacted and len(middle) <= self.preserve_recent:
+            return capped
+
+        # Build a one-shot summarization prompt. Kept terse on purpose;
+        # smaller models are fine at this with explicit framing.
+        rendered_middle = "\n\n".join(
+            f"[{m.get('role', 'user').upper()}]\n{m.get('content', '')}"
+            for m in middle
+        )
+        summarization_prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "You compress agent conversation history. Produce a "
+                    "concise summary (max ~800 words) that preserves: "
+                    "(1) decisions made, (2) files read or edited and any "
+                    "key findings, (3) tools called and their salient "
+                    "results, (4) outstanding TODOs or open questions. "
+                    "Drop chit-chat. Use bullet points. Output ONLY the "
+                    "summary body — no preamble."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Summarize the following conversation segment:\n\n"
+                    f"{rendered_middle}"
+                ),
+            },
+        ]
+
+        try:
+            summary_text = self.model_fn(summarization_prompt, self.model_id)
+        except Exception:
+            # Re-raise so the caller's blanket except logs + falls back
+            # to drop-oldest. Compaction is best-effort.
+            raise
+
+        summary_msg: ChatMessage = {
+            "role": "user",
+            "content": (
+                f"{_COMPACTION_MARKER}\n"
+                f"({len(middle)} earlier messages collapsed by the "
+                f"compaction layer to fit context budget.)\n\n"
+                f"{(summary_text or '').strip() or '(empty summary)'}"
+            ),
+        }
+        return [original_ask, summary_msg, *recent]
 
     def _format_inbox(self, msg: Message) -> str:
         # Surface enough metadata that the model knows who's talking.

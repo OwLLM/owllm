@@ -2840,21 +2840,8 @@ class MainWindow(QMainWindow):
         # Advanced; width is allowed to grow with the label so labels
         # like "Fine Tuning" don't wrap or truncate.
         def _make_header_toggle(text: str) -> QPushButton:
-            # Parse the legacy "icon\nlabel" format so we can render the
-            # icon line at a much larger font than the label below it.
-            # QPushButton's setText only accepts plain text and applies a
-            # single font, so we mount two QLabels inside the button —
-            # icon glyph (large) above the label (small) — and mark them
-            # transparent for mouse events so clicks still route to the
-            # button itself.
-            icon_glyph, _, label_text = text.partition("\n")
-            if not label_text:
-                # Fallback: legacy single-line text. Treat the whole
-                # string as the label, no icon line.
-                icon_glyph, label_text = "", text
-            btn = QPushButton()
-            btn.setFixedHeight(72)
-            btn.setMinimumWidth(118)
+            btn = QPushButton(text)
+            btn.setFixedHeight(50)
             btn.setCursor(QCursor(Qt.PointingHandCursor))
             btn.setCheckable(True)
             btn.setStyleSheet("""
@@ -2864,7 +2851,10 @@ class MainWindow(QMainWindow):
                     border: 1px solid rgba(255, 255, 255, 0.2);
                     border-radius: 6px;
                     color: white;
+                    font-size: 9pt;
+                    font-weight: bold;
                     padding: 0 14px;
+                    text-align: center;
                 }
                 QPushButton:hover {
                     border: 1px solid rgba(255, 255, 255, 0.4);
@@ -2875,27 +2865,6 @@ class MainWindow(QMainWindow):
                         stop:0 rgba(80, 70, 50, 0.85), stop:1 rgba(60, 50, 30, 0.85));
                 }
             """)
-
-            inner = QVBoxLayout(btn)
-            inner.setContentsMargins(6, 4, 6, 6)
-            inner.setSpacing(0)
-            if icon_glyph:
-                ico = QLabel(icon_glyph)
-                ico.setAlignment(Qt.AlignCenter)
-                ico.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-                ico.setStyleSheet(
-                    "background: transparent; color: white; "
-                    "font-family: 'Segoe UI Emoji'; font-size: 26pt;"
-                )
-                inner.addWidget(ico)
-            lbl = QLabel(label_text)
-            lbl.setAlignment(Qt.AlignCenter)
-            lbl.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            lbl.setStyleSheet(
-                "background: transparent; color: white; "
-                "font-size: 9pt; font-weight: bold;"
-            )
-            inner.addWidget(lbl)
             return btn
 
         # 'Fine Tuning' — wrench glyph + label, two-line layout matching
@@ -3828,9 +3797,8 @@ class MainWindow(QMainWindow):
         column was reclaimed for System Status)."""
         card = QFrame()
         card.setObjectName("LauncherCard")
-        # Min height bumped from 150 → 220; cards are now the page's
-        # primary visual element.
-        card.setMinimumHeight(220)
+        # Min height bumped to fit the larger 360-px PNG icons.
+        card.setMinimumHeight(380)
         card.setCursor(QCursor(Qt.PointingHandCursor))
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         card.setStyleSheet(f"""
@@ -3872,11 +3840,11 @@ class MainWindow(QMainWindow):
             from PySide6.QtGui import QPixmap as _QPixmap
             pm = _QPixmap(str(png_path))
             if not pm.isNull():
-                # Scale to 220×220 — the card's min height — so the
-                # owl artwork dominates the card the way the user
-                # asked for ("full size").
+                # Scale to 360×360 — bigger than the previous 220 px so
+                # the owl artwork really dominates the card. Card's
+                # min height was bumped to 380 to fit.
                 scaled = pm.scaled(
-                    220, 220,
+                    360, 360,
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation,
                 )

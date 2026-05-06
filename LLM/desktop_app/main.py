@@ -17016,11 +17016,22 @@ class MainWindow(QMainWindow):
             gguf_crash_log = None
         proc.setProcessEnvironment(gguf_env)
 
+        # Detect the converter's deferred-registration marker. The
+        # GGUF file gets written even when no matching base GGUF is on
+        # disk to pair with — converter exits 0 in that case but emits
+        # [REGISTER-DEFERRED] lines so we know NOT to claim "picker
+        # refreshed".
+        gguf_state = {"deferred_lines": []}
+
         def _on_out():
             try:
                 data = bytes(proc.readAllStandardOutput()).decode("utf-8", errors="replace")
-                if data:
-                    self.train_log.appendPlainText(data.rstrip())
+                if not data:
+                    return
+                self.train_log.appendPlainText(data.rstrip())
+                for line in data.splitlines():
+                    if "[REGISTER-DEFERRED]" in line:
+                        gguf_state["deferred_lines"].append(line.rstrip())
             except Exception:
                 pass
 
@@ -17029,10 +17040,59 @@ class MainWindow(QMainWindow):
                 f"\n[adapter-to-gguf] process finished. exit_code={exit_code}"
             )
             if exit_code == 0:
-                try:
-                    self.train_status_pill.set_state("done", "GGUF ready — picker refreshed")
-                except Exception:
-                    pass
+                deferred = gguf_state["deferred_lines"]
+                if deferred:
+                    # GGUF was created but couldn't be wired into the
+                    # dropdowns because the matching base GGUF isn't on
+                    # disk. Surface it so the user knows their LoRA is
+                    # ready but needs one more onboarding step.
+                    try:
+                        self.train_status_pill.set_state(
+                            "warn", "GGUF ready — base GGUF not onboarded yet"
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        from PySide6.QtWidgets import QMessageBox
+                        # Pull the suggested repo + path out of the
+                        # marker lines so the user sees actionable info.
+                        suggested = ""
+                        gguf_path = ""
+                        for ln in deferred:
+                            if "Suggested base GGUF to download:" in ln:
+                                suggested = ln.split(":", 2)[-1].strip()
+                            if "GGUF created at" in ln:
+                                gguf_path = ln.split("created at", 1)[-1].strip()
+                        body = (
+                            "<b>The GGUF LoRA was written successfully</b>"
+                            f"{'<br>at <code>' + gguf_path + '</code>' if gguf_path else ''}"
+                            ".<br><br>"
+                            "But it can't appear in chat dropdowns yet — "
+                            "llama-server applies a LoRA <i>on top of</i> a "
+                            "base GGUF, and no matching base GGUF is "
+                            "onboarded.<br><br>"
+                        )
+                        if suggested:
+                            body += (
+                                "<b>Suggested base to onboard:</b><br>"
+                                f"<code>{suggested}</code><br><br>"
+                            )
+                        body += (
+                            "Open the Models tab → Search → download a "
+                            "<code>*-GGUF</code> for the same model family. "
+                            "Once it's on disk, click <b>To GGUF</b> on this "
+                            "adapter again and registration will succeed."
+                        )
+                        QMessageBox.information(
+                            self, "GGUF ready (registration deferred)", body
+                        )
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        self.train_status_pill.set_state("done", "GGUF ready — picker refreshed")
+                    except Exception:
+                        pass
                 try:
                     self._refresh_locals()
                 except Exception:

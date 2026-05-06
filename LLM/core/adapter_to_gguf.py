@@ -1293,13 +1293,49 @@ def main() -> int:
     )
     final = convert_adapter_to_gguf(cfg)
     if args.register:
-        model_id = register_in_onboarding(
-            final,
-            adapter_name=Path(args.adapter_dir).name,
-            base_model_path=args.base_model,
-            quant=args.quant,
-        )
-        print(f"[adapter-to-gguf] registered as model_id={model_id}")
+        # Registration is the LAST step and depends on a matching base
+        # GGUF being on disk (so llama-server can serve base + LoRA).
+        # If that's not present, the conversion artefact ITSELF is
+        # still good — the user just can't use it from the dropdowns
+        # yet. Don't fail the whole run; emit a structured marker the
+        # GUI parses to show a "GGUF ready, base needed" notice.
+        try:
+            model_id = register_in_onboarding(
+                final,
+                adapter_name=Path(args.adapter_dir).name,
+                base_model_path=args.base_model,
+                quant=args.quant,
+            )
+            print(f"[adapter-to-gguf] registered as model_id={model_id}")
+        except Exception as reg_exc:
+            # Suggest the canonical sibling repo when we can guess it
+            # (unsloth/<name>  →  unsloth/<name>-GGUF). Pure heuristic;
+            # the GUI also shows the raw error so the user can verify.
+            base_ref = str(args.base_model)
+            suggested = ""
+            try:
+                # If the base path is the HF cache, derive the repo id
+                # from the cache directory name.
+                from pathlib import Path as _P
+                p = _P(base_ref)
+                marker = "models--"
+                for parent in [p] + list(p.parents):
+                    if parent.name.startswith(marker):
+                        repo = parent.name[len(marker):].replace("--", "/")
+                        suggested = f"{repo}-GGUF"
+                        break
+            except Exception:
+                suggested = ""
+            print(
+                f"[adapter-to-gguf] [REGISTER-DEFERRED] GGUF created at {final}\n"
+                f"[adapter-to-gguf] [REGISTER-DEFERRED] But no matching base GGUF on disk -> can't wire into dropdowns yet.\n"
+                f"[adapter-to-gguf] [REGISTER-DEFERRED] Reason: {reg_exc}\n"
+                + (
+                    f"[adapter-to-gguf] [REGISTER-DEFERRED] Suggested base GGUF to download: {suggested}\n"
+                    if suggested else ""
+                )
+                + f"[adapter-to-gguf] [REGISTER-DEFERRED] The .gguf file itself is valid and ready to use once a base GGUF is onboarded."
+            )
     print(f"[adapter-to-gguf] OUTPUT={final}")
     return 0
 

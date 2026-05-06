@@ -73,82 +73,106 @@ except Exception:
 # teardown, safetensors >2 GB ctypes overflow, etc. Without this the
 # converter just dies and the user sees an exit code with no clue
 # which stage failed.
+#
+# CRITICAL: this WHOLE block runs only when the file is invoked as a
+# script (``__name__ == "__main__"``), NOT on import. The desktop
+# GUI imports this module just to grab QUANT_PRESETS / ConvertConfig,
+# and pythonw.exe (the GUI's Python) has a stderr handle that raises
+# ``OSError [Errno 22] Invalid argument`` on every write — so a
+# bare ``sys.stderr.write`` at module top would crash every entry
+# into the GGUF flow. The script-only gate keeps the GUI path clean
+# and still arms the converter subprocess when it's launched for
+# real conversion. The helper functions below are still importable
+# (the GUI doesn't call them).
 # ---------------------------------------------------------------------
 import faulthandler as _fh
 import threading as _threading
 from datetime import datetime as _dt
 
-_CRASH_LOG_FH = None
-try:
-    _crash_log = os.environ.get("OWLLM_CRASH_LOG")
-    if _crash_log:
-        try:
-            Path(_crash_log).parent.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
-        _CRASH_LOG_FH = open(_crash_log, "w", buffering=1, encoding="utf-8")
-        _CRASH_LOG_FH.write(
-            f"[adapter_to_gguf] faulthandler armed at {_dt.now().isoformat()}\n"
-        )
-        _fh.enable(file=_CRASH_LOG_FH, all_threads=True)
-        sys.stderr.write(f"[INFO] [DIAG] faulthandler enabled — crash trace -> {_crash_log}\n")
-        sys.stderr.flush()
-    else:
-        _fh.enable(all_threads=True)
-        sys.stderr.write("[INFO] [DIAG] faulthandler enabled (stderr only, no log path)\n")
-        sys.stderr.flush()
-except Exception as _diag_exc:
-    sys.stderr.write(
-        f"[WARN] [DIAG] faulthandler init failed: {type(_diag_exc).__name__}: {_diag_exc}\n"
-    )
-    sys.stderr.flush()
 
-# Same heartbeat + phase tracking as finetune.py — converter has at
-# least three multi-minute phases (merge, fp16 GGUF write, quantise)
-# during which there's zero stdout if the underlying tool is silent.
+def _safe_stderr(msg: str) -> None:
+    """sys.stderr.write that doesn't blow up on a closed handle."""
+    try:
+        sys.stderr.write(msg)
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+_CRASH_LOG_FH = None
 _PHASE = {"name": "init", "since": time.monotonic()}
+
 
 def _set_phase(name: str) -> None:
     _PHASE["name"] = name
     _PHASE["since"] = time.monotonic()
-    try:
-        sys.stderr.write(f"[INFO] [PHASE] -> {name}\n")
-        sys.stderr.flush()
-    except Exception:
-        pass
+    _safe_stderr(f"[INFO] [PHASE] -> {name}\n")
+
 
 def _heartbeat_loop():
     while True:
         try:
             time.sleep(20)
             elapsed = time.monotonic() - _PHASE["since"]
-            sys.stderr.write(
+            _safe_stderr(
                 f"[HEARTBEAT] alive — phase={_PHASE['name']!r} for {elapsed:.0f}s "
                 f"(pid={os.getpid()})\n"
             )
-            sys.stderr.flush()
         except Exception:
             pass
 
-try:
-    _hb_thread = _threading.Thread(
-        target=_heartbeat_loop, name="owllm-gguf-heartbeat", daemon=True
-    )
-    _hb_thread.start()
-except Exception as _hb_exc:
-    sys.stderr.write(
-        f"[WARN] [DIAG] heartbeat thread failed to start: {type(_hb_exc).__name__}: {_hb_exc}\n"
-    )
 
-try:
-    if _CRASH_LOG_FH is not None:
-        _fh.dump_traceback_later(90, repeat=True, file=_CRASH_LOG_FH)
-    else:
-        _fh.dump_traceback_later(90, repeat=True)
-except Exception as _dt_exc:
-    sys.stderr.write(
-        f"[WARN] [DIAG] dump_traceback_later failed: {type(_dt_exc).__name__}: {_dt_exc}\n"
-    )
+def _arm_diagnostics() -> None:
+    """Enable faulthandler + heartbeat + periodic stack dumps.
+
+    Idempotent. Called only when running as a top-level script.
+    """
+    global _CRASH_LOG_FH
+    try:
+        _crash_log = os.environ.get("OWLLM_CRASH_LOG")
+        if _crash_log:
+            try:
+                Path(_crash_log).parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            _CRASH_LOG_FH = open(_crash_log, "w", buffering=1, encoding="utf-8")
+            _CRASH_LOG_FH.write(
+                f"[adapter_to_gguf] faulthandler armed at {_dt.now().isoformat()}\n"
+            )
+            _fh.enable(file=_CRASH_LOG_FH, all_threads=True)
+            _safe_stderr(
+                f"[INFO] [DIAG] faulthandler enabled — crash trace -> {_crash_log}\n"
+            )
+        else:
+            _fh.enable(all_threads=True)
+            _safe_stderr(
+                "[INFO] [DIAG] faulthandler enabled (stderr only, no log path)\n"
+            )
+    except Exception as _diag_exc:
+        _safe_stderr(
+            f"[WARN] [DIAG] faulthandler init failed: {type(_diag_exc).__name__}: {_diag_exc}\n"
+        )
+
+    try:
+        _hb_thread = _threading.Thread(
+            target=_heartbeat_loop, name="owllm-gguf-heartbeat", daemon=True
+        )
+        _hb_thread.start()
+    except Exception as _hb_exc:
+        _safe_stderr(
+            f"[WARN] [DIAG] heartbeat thread failed to start: {type(_hb_exc).__name__}: {_hb_exc}\n"
+        )
+
+    try:
+        if _CRASH_LOG_FH is not None:
+            _fh.dump_traceback_later(90, repeat=True, file=_CRASH_LOG_FH)
+        else:
+            _fh.dump_traceback_later(90, repeat=True)
+    except Exception as _dump_exc:
+        _safe_stderr(
+            f"[WARN] [DIAG] dump_traceback_later failed: {type(_dump_exc).__name__}: {_dump_exc}\n"
+        )
+
 
 logger = logging.getLogger(__name__)
 
@@ -1281,6 +1305,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Arm diagnostics ONLY in the script path. Importing this module
+    # for QUANT_PRESETS/ConvertConfig from the GUI must not touch
+    # sys.stderr (pythonw has a broken stderr handle that raises
+    # OSError [Errno 22] on every write).
+    _arm_diagnostics()
+
     # Hard-exit on success. Same rationale as finetune.py: Python's
     # interpreter teardown of CUDA contexts on Windows + bf16 can
     # raise 0xC0000005 in cuDNN/cuBLAS finalizers AFTER the GGUF is

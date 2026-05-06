@@ -608,6 +608,47 @@ def _preflight_checks(args) -> tuple[bool, list[str]]:
     return (len(errs) == 0), errs
 
 
+def _resolve_base_for_swap(original: str, base_candidate: str) -> str:
+    """Resolve a de-quantized base model swap so it's actually loadable.
+
+    `_extract_base_model_name` strips ``-bnb-4bit`` etc. off the end of
+    whatever string we hand it, including a local Windows path. That
+    produces e.g. ``C:\\...\\models\\unsloth__gemma-2-2b-it`` — and if
+    the user only downloaded the bnb-4bit variant, that base path
+    doesn't exist on disk, so transformers tries to interpret the
+    Windows path as a hub repo id and the validator rejects the
+    backslashes (HFValidationError).
+
+    Fix: when the swap yields a non-existent local path, fall back to a
+    hub id derived from the directory slug (``unsloth__gemma-2-2b-it``
+    → ``unsloth/gemma-2-2b-it``). Transformers will download it.
+    """
+    base = base_candidate
+    if not base or base == original:
+        return base
+    try:
+        orig_p = Path(original)
+        if not orig_p.exists():
+            # Original wasn't a local path → swap result is whatever
+            # _extract_base_model_name produced (likely a hub id). Fine.
+            return base
+        base_p = Path(base)
+        if base_p.exists() and base_p.is_dir():
+            # De-quantized variant exists locally next to the original.
+            return str(base_p)
+        # Local original, no local base → derive hub id from the slug.
+        slug = base_p.name
+        hub_id = slug.replace("__", "/", 1) if "__" in slug else slug
+        print(
+            f"[INFO] [SWAP] de-quantized variant {base_p.name!r} not "
+            f"found locally; using hub id {hub_id!r} so transformers "
+            f"can download it instead of treating the path as a repo id."
+        )
+        return hub_id
+    except Exception:
+        return base
+
+
 def main():
     args = parse_args()
 
@@ -914,7 +955,7 @@ def main():
         if model_info["requires_quantization"] and not bnb_caps["functional"]:
             print("[WARNING] Model requires quantization but bitsandbytes is not available/functional")
             print("[WARNING] Will attempt to load base model without quantization")
-            MODEL_NAME = model_info["base_model_name"]
+            MODEL_NAME = _resolve_base_for_swap(MODEL_NAME, model_info["base_model_name"])
             if MODEL_NAME != model_info["original_name"]:
                 print(f"[INFO] Using base model: {MODEL_NAME}")
 
@@ -969,7 +1010,7 @@ def main():
                 print(f"[WARNING] Unsloth failed due to version incompatibility: {e}")
                 print(f"[WARNING] peft version {peft_caps.get('version', 'unknown')} may not support all unsloth features")
                 print("[INFO] Automatically falling back to standard PEFT training (slower but compatible)")
-                MODEL_NAME = model_info["base_model_name"]
+                MODEL_NAME = _resolve_base_for_swap(MODEL_NAME, model_info["base_model_name"])
                 should_try_unsloth = False
             else:
                 # Re-raise if it's a different error
@@ -978,7 +1019,7 @@ def main():
             # Other unsloth errors - also fall back gracefully
             print(f"[WARNING] Unsloth failed: {e}")
             print("[INFO] Automatically falling back to standard PEFT training")
-            MODEL_NAME = model_info["base_model_name"]
+            MODEL_NAME = _resolve_base_for_swap(MODEL_NAME, model_info["base_model_name"])
             should_try_unsloth = False
     
     if not should_try_unsloth:

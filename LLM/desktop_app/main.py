@@ -13697,10 +13697,11 @@ class MainWindow(QMainWindow):
         # the legacy layout used. Validation feedback updates THIS chip
         # so the card never has empty rows when no dataset is loaded.
         self.examples_label = QLabel("No dataset loaded")
+        self.examples_label.setWordWrap(True)
         self.examples_label.setStyleSheet(
             "color: #8595ad; font-size: 10pt; padding: 0 6px;"
         )
-        dataset_btn_row.addWidget(self.examples_label)
+        dataset_btn_row.addWidget(self.examples_label, 1)
         dataset_layout.addLayout(dataset_btn_row)
 
         # Hidden but kept — _validate_dataset writes here too. Empty
@@ -13971,6 +13972,7 @@ class MainWindow(QMainWindow):
             self.gpu_status_label.setStyleSheet(
                 "color: #ff9800; font-size: 10pt; font-weight: 600;"
             )
+        self.gpu_status_label.setWordWrap(True)
 
         # GPU selection dropdown
         self.gpu_select = QComboBox()
@@ -14264,6 +14266,15 @@ class MainWindow(QMainWindow):
         self.train_history_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.train_history_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.train_history_table.setAlternatingRowColors(True)
+        # Wrap long adapter / base names instead of clipping them when the
+        # column is narrow. Qt's default elide ("Foo_long…") hides info;
+        # WrapAnywhere + word-wrap + ResizeToContents on rows lets the
+        # row grow vertically so the full name stays visible.
+        self.train_history_table.setWordWrap(True)
+        self.train_history_table.setTextElideMode(Qt.ElideNone)
+        self.train_history_table.verticalHeader().setSectionResizeMode(
+            QHeaderView.ResizeToContents
+        )
         h = self.train_history_table.horizontalHeader()
         h.setStretchLastSection(False)
         h.setSectionResizeMode(QHeaderView.Interactive)
@@ -14880,19 +14891,22 @@ class MainWindow(QMainWindow):
         right_layout.setSpacing(0)
         right_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Training Dashboard Header
+        # Training Dashboard Header — wraps when the centre column is
+        # narrow so the title never gets clipped.
         dashboard_header = QLabel("📊 TRAINING DASHBOARD")
         dashboard_header.setAlignment(Qt.AlignCenter)
         dashboard_header.setMinimumHeight(50)
+        dashboard_header.setWordWrap(True)
         dashboard_header.setStyleSheet("""
             QLabel {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, 
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 rgba(102, 126, 234, 0.8), stop:1 rgba(118, 75, 162, 0.8));
                 color: white;
-                font-size: 16pt;
+                font-size: 14pt;
                 font-weight: bold;
                 border: none;
                 border-radius: 12px;
+                padding: 8px 12px;
             }
         """)
         right_layout.addWidget(dashboard_header)

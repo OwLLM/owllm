@@ -600,8 +600,8 @@ class _StartTile(QPushButton):
         self._title = QLabel(title)
         tf = QFont(); tf.setPointSize(12); tf.setBold(True)
         self._title.setFont(tf)
-        top.addWidget(self._title)
-        top.addStretch(1)
+        self._title.setWordWrap(True)
+        top.addWidget(self._title, 1)
         layout.addLayout(top)
 
         self._subtitle = QLabel("")
@@ -706,17 +706,17 @@ class StartTrainingPanel(QFrame):
         outer.setContentsMargins(14, 14, 14, 14)
         outer.setSpacing(10)
 
-        # Header row
-        head = QHBoxLayout()
+        # Header row — title and hint stack vertically so the hint can
+        # wrap when the panel is narrow (the third column is only ~30%
+        # of the Train tab width, so the single-line hint used to clip).
         head_lbl = QLabel("🚀  Start Training")
         hf = QFont(); hf.setPointSize(15); hf.setBold(True)
         head_lbl.setFont(hf)
-        head.addWidget(head_lbl)
-        head.addStretch(1)
+        outer.addWidget(head_lbl)
         hint = QLabel("Click a tile — it both picks the mode AND starts.")
         hint.setStyleSheet("color: #8595ad; font-size: 9pt; font-style: italic;")
-        head.addWidget(hint)
-        outer.addLayout(head)
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
 
         # Tiles row
         tiles = QHBoxLayout()

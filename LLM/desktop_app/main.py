@@ -2869,12 +2869,12 @@ class MainWindow(QMainWindow):
             QLabel {
                 background: transparent;
                 color: white;
-                font-size: 20pt;
+                font-size: 22pt;
                 border: none;
             }
         """)
         theme_btn_layout.addWidget(theme_icon)
-        
+
         # Text label
         theme_text = QLabel("Dark")
         theme_text.setAlignment(Qt.AlignCenter)
@@ -2882,7 +2882,7 @@ class MainWindow(QMainWindow):
             QLabel {
                 background: transparent;
                 color: white;
-                font-size: 9pt;
+                font-size: 11pt;
                 font-weight: bold;
                 border: none;
             }
@@ -2985,7 +2985,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid rgba(255, 255, 255, 0.2);
                 border-radius: 6px;
                 color: white;
-                font-size: 9pt;
+                font-size: 11pt;
                 font-weight: bold;
                 padding: 0;
                 text-align: center;
@@ -3027,7 +3027,7 @@ class MainWindow(QMainWindow):
                     border: 1px solid rgba(255, 255, 255, 0.2);
                     border-radius: 6px;
                     color: white;
-                    font-size: 9pt;
+                    font-size: 11pt;
                     font-weight: bold;
                     padding: 0 14px;
                     text-align: center;
@@ -3084,8 +3084,8 @@ class MainWindow(QMainWindow):
         title_label.setStyleSheet("""
             QLabel {
                 background: transparent;
-                color: white; 
-                font-size: 24pt; 
+                color: white;
+                font-size: 26pt;
                 font-weight: bold;
                 border: none;
                 padding: 0px;
@@ -3121,7 +3121,7 @@ class MainWindow(QMainWindow):
         servers_row_layout.setContentsMargins(0, 0, 0, 0)
         servers_row_layout.setSpacing(6)
         servers_label = QLabel("🟢 Servers: …", servers_row)
-        servers_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
+        servers_label.setStyleSheet("color: white; font-size: 13pt; font-weight: bold; background: transparent;")
         servers_label.setToolTip("Models with an inference server currently running.")
         servers_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
         servers_row_layout.addWidget(servers_label, 1)
@@ -3133,7 +3133,7 @@ class MainWindow(QMainWindow):
         restart_btn.setToolTip("Restart running inference server(s).")
         restart_btn.setStyleSheet(
             "QPushButton { background: transparent; color: #ffd080; border: 1px solid rgba(255,208,128,0.55); "
-            "border-radius: 4px; font-size: 11pt; font-weight: bold; padding: 0px; }"
+            "border-radius: 4px; font-size: 13pt; font-weight: bold; padding: 0px; }"
             "QPushButton:hover { background: rgba(255,208,128,0.18); border-color: #ffd080; }"
             "QPushButton:pressed { background: rgba(255,208,128,0.30); }"
         )
@@ -3154,11 +3154,11 @@ class MainWindow(QMainWindow):
         apikey_row_layout.setContentsMargins(0, 0, 0, 0)
         apikey_row_layout.setSpacing(4)
         apikey_icon = QLabel("🔑", apikey_row)
-        apikey_icon.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
+        apikey_icon.setStyleSheet("color: white; font-size: 13pt; font-weight: bold; background: transparent;")
         apikey_icon.setCursor(Qt.PointingHandCursor)
         apikey_icon.setToolTip("Click to copy API key to clipboard.")
         apikey_text = QLabel("API key: owllm-local", apikey_row)
-        apikey_text.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
+        apikey_text.setStyleSheet("color: white; font-size: 13pt; font-weight: bold; background: transparent;")
         apikey_text.setToolTip(
             "API key clients use to talk to OWLLM's OpenAI-compatible proxy at "
             "http://127.0.0.1:9999/v1."
@@ -3178,7 +3178,7 @@ class MainWindow(QMainWindow):
         self.header_apikey_label = apikey_text
 
         vram_label = QLabel("💾 VRAM: …", self)
-        vram_label.setStyleSheet("color: white; font-size: 11pt; font-weight: bold; background: transparent;")
+        vram_label.setStyleSheet("color: white; font-size: 13pt; font-weight: bold; background: transparent;")
         vram_label.setToolTip("Total GPU VRAM in use; per-server breakdown in tooltip when servers are running.")
         vram_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
         vram_label.setMinimumWidth(520)

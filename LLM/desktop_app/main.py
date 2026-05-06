@@ -13545,41 +13545,90 @@ class MainWindow(QMainWindow):
         columns_layout.setContentsMargins(0, 0, 0, 0)
         
         # LEFT COLUMN: Configuration
+        # Redesigned for compactness and cohesion: one accent palette
+        # (#667eea / blue-violet), one card style, inline labels, no
+        # giant section headers eating vertical space. Advanced /
+        # rarely-touched settings live in a collapsed group at the
+        # bottom of the params card.
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
-        left_layout.setSpacing(15)
-        
-        # TOP ROW: Model and Dataset in 2 columns
-        top_row_header = QLabel("🎯 Model & Dataset Configuration")
-        top_row_header.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
-        left_layout.addWidget(top_row_header)
-        
-        top_row_widget = QWidget()
-        top_row_layout = QHBoxLayout(top_row_widget)
-        top_row_layout.setSpacing(20)
-        top_row_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # LEFT SUB-COLUMN: Model Configuration
-        model_frame = QFrame()
-        model_frame.setFrameShape(QFrame.StyledPanel)
-        model_frame.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
-                border: 2px solid #667eea;
-                border-radius: 12px;
-                padding: 15px;
+        left_layout.setSpacing(10)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Shared card style — one visual identity instead of four. Sub-
+        # sections are visually separated by a slim header strip inside
+        # the same card, not by gradient + colour switches.
+        _CARD_STYLE = """
+            QFrame.cfgCard {
+                background: rgba(20, 25, 40, 0.55);
+                border: 1px solid rgba(102, 126, 234, 0.28);
+                border-radius: 10px;
             }
-        """)
-        model_layout = QVBoxLayout(model_frame)
-        model_layout.setSpacing(12)
-        
-        model_header = QLabel("🤖 <b>Select Base Model</b>")
-        model_header.setObjectName("trainModelHeader")
-        colors = self._get_theme_colors()
-        model_header.setStyleSheet(f"font-size: 14pt; color: {colors['primary']}; border: none; padding: 0;")
-        self.themed_widgets["labels"].append(model_header)
-        model_layout.addWidget(model_header)
+            QFrame.cfgCard QLabel { background: transparent; border: none; }
+            QFrame.cfgCard QLabel.cardTitle {
+                color: #c08aff;
+                font-size: 11pt;
+                font-weight: 800;
+                letter-spacing: 0.4px;
+            }
+            QFrame.cfgCard QLineEdit, QFrame.cfgCard QComboBox {
+                background: rgba(10, 14, 24, 0.85);
+                border: 1px solid rgba(102, 126, 234, 0.22);
+                border-radius: 6px;
+                padding: 6px 10px;
+                color: #e8eef7;
+                font-size: 11pt;
+                min-height: 28px;
+            }
+            QFrame.cfgCard QLineEdit:focus, QFrame.cfgCard QComboBox:focus {
+                border: 1px solid #667eea;
+            }
+            QFrame.cfgCard QSpinBox, QFrame.cfgCard QDoubleSpinBox {
+                background: rgba(10, 14, 24, 0.85);
+                border: 1px solid rgba(102, 126, 234, 0.22);
+                border-radius: 6px;
+                padding: 4px 8px;
+                color: #e8eef7;
+                font-size: 11pt;
+                min-height: 28px;
+            }
+            QFrame.cfgCard QSpinBox::up-button,
+            QFrame.cfgCard QDoubleSpinBox::up-button,
+            QFrame.cfgCard QSpinBox::down-button,
+            QFrame.cfgCard QDoubleSpinBox::down-button {
+                width: 14px;
+                background: transparent;
+                border: none;
+            }
+            QFrame.cfgCard QPushButton.cardBtn {
+                background: rgba(102, 126, 234, 0.18);
+                border: 1px solid rgba(102, 126, 234, 0.45);
+                border-radius: 6px;
+                color: #fafafa;
+                padding: 6px 12px;
+                font-weight: 600;
+                min-height: 28px;
+            }
+            QFrame.cfgCard QPushButton.cardBtn:hover {
+                background: rgba(102, 126, 234, 0.30);
+            }
+        """
+
+        def _make_card(title: str) -> Tuple[QFrame, QVBoxLayout]:
+            f = QFrame()
+            f.setProperty("class", "cfgCard")
+            f.setObjectName("cfgCard")
+            f.setStyleSheet(_CARD_STYLE)
+            v = QVBoxLayout(f)
+            v.setContentsMargins(14, 10, 14, 12)
+            v.setSpacing(8)
+            t = QLabel(title)
+            t.setProperty("class", "cardTitle")
+            v.addWidget(t)
+            return f, v
+
+        # ── Card 1: Model + Name ──────────────────────────────────────
+        model_frame, model_layout = _make_card("🤖  BASE MODEL")
         
         self.train_base_model = QComboBox()
         self.train_base_model.setEditable(True)
@@ -13595,87 +13644,82 @@ class MainWindow(QMainWindow):
         self.train_base_model.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Fixed
         )
-        self.train_base_model.setMinimumHeight(40)
+        self.train_base_model.setMinimumHeight(32)
         self.train_base_model.addItems(DEFAULT_BASE_MODELS)
         self.train_base_model.currentTextChanged.connect(self._on_model_selected_for_training)
         self.train_base_model.currentTextChanged.connect(self._auto_generate_model_name)
         model_layout.addWidget(self.train_base_model)
-        
-        # Model info label
-        self.model_info_label = QLabel("Select a model to see details")
+
+        # Model info — single concise line, no min-height padding.
+        self.model_info_label = QLabel("Pick a base model to see capabilities.")
         self.model_info_label.setWordWrap(True)
-        model_info_font = QFont()
-        model_info_font.setPointSize(13)
-        self.model_info_label.setFont(model_info_font)
-        self.model_info_label.setStyleSheet("color: #888;")
-        self.model_info_label.setMinimumHeight(50)
+        self.model_info_label.setStyleSheet("color: #8595ad; font-size: 9pt;")
         model_layout.addWidget(self.model_info_label)
-        
-        top_row_layout.addWidget(model_frame, 1)
-        
-        # RIGHT SUB-COLUMN: Dataset Upload
-        dataset_frame = QFrame()
-        dataset_frame.setFrameShape(QFrame.StyledPanel)
-        dataset_frame.setStyleSheet("""
-            QFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(60, 80, 60, 0.4), stop:1 rgba(40, 60, 40, 0.4));
-                border: 2px solid #4CAF50;
-                border-radius: 12px;
-                padding: 15px;
-            }
-        """)
-        dataset_layout = QVBoxLayout(dataset_frame)
-        dataset_layout.setSpacing(10)
-        
-        dataset_header = QLabel("📊 <b>Upload Training Dataset</b>")
-        dataset_header.setStyleSheet("font-size: 14pt; color: #4CAF50; border: none; padding: 0;")
-        dataset_layout.addWidget(dataset_header)
-        
+
+        # Inline 'Run name' under the same card — saves a whole row
+        # vs the legacy layout that put it in the params block.
+        name_row = QHBoxLayout()
+        name_row.setSpacing(8)
+        name_lbl = QLabel("Run name")
+        name_lbl.setStyleSheet("color: #8595ad; font-size: 10pt;")
+        name_row.addWidget(name_lbl)
+        self.train_model_name = QLineEdit()
+        self.train_model_name.setPlaceholderText("auto-generated")
+        name_row.addWidget(self.train_model_name, 1)
+        model_layout.addLayout(name_row)
+
+        # ── Card 2: Dataset ──────────────────────────────────────────
+        dataset_frame, dataset_layout = _make_card("📊  DATASET")
         self.train_data_path = QLineEdit()
-        self.train_data_path.setPlaceholderText("Drag and drop file or browse...")
+        self.train_data_path.setPlaceholderText("Drag a .jsonl here, or browse...")
         self.train_data_path.textChanged.connect(self._validate_dataset)
         self.train_data_path.textChanged.connect(self._auto_generate_model_name)
         dataset_layout.addWidget(self.train_data_path)
-        
+
         dataset_btn_row = QHBoxLayout()
+        dataset_btn_row.setSpacing(6)
         browse_btn = QPushButton("📁 Browse")
+        browse_btn.setProperty("class", "cardBtn")
         browse_btn.clicked.connect(self._browse_train_data)
         dataset_btn_row.addWidget(browse_btn)
-        
-        check_btn = QPushButton("🔍 Check Dataset")
+        check_btn = QPushButton("🔍 Check")
+        check_btn.setProperty("class", "cardBtn")
         check_btn.clicked.connect(self._check_dataset)
         dataset_btn_row.addWidget(check_btn)
+        dataset_btn_row.addStretch(1)
+
+        # Inline status / count chip — replaces the two large labels
+        # the legacy layout used. Validation feedback updates THIS chip
+        # so the card never has empty rows when no dataset is loaded.
+        self.examples_label = QLabel("No dataset loaded")
+        self.examples_label.setStyleSheet(
+            "color: #8595ad; font-size: 10pt; padding: 0 6px;"
+        )
+        dataset_btn_row.addWidget(self.examples_label)
         dataset_layout.addLayout(dataset_btn_row)
-        
-        # Dataset validation status
+
+        # Hidden but kept — _validate_dataset writes here too. Empty
+        # styling so it doesn't claim a row when there's no message.
         self.dataset_status_label = QLabel("")
         self.dataset_status_label.setWordWrap(True)
-        self.dataset_status_label.setMinimumHeight(30)
+        self.dataset_status_label.setStyleSheet("font-size: 10pt;")
         dataset_layout.addWidget(self.dataset_status_label)
-        
-        # Total examples count
-        self.examples_label = QLabel("Total Examples: --")
-        examples_font = QFont()
-        examples_font.setPointSize(15)
-        examples_font.setBold(True)
-        self.examples_label.setFont(examples_font)
-        self.examples_label.setMinimumHeight(40)
-        dataset_layout.addWidget(self.examples_label)
-        
-        top_row_layout.addWidget(dataset_frame, 1)
-        
-        left_layout.addWidget(top_row_widget)
-        
-        # Training Parameters Section
-        params_label = QLabel("⚙️ Training Parameters")
-        params_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
-        left_layout.addWidget(params_label)
-        
-        params_frame = QFrame()
-        params_frame.setFrameShape(QFrame.StyledPanel)
-        params_frame.setStyleSheet("""
-            QFrame {
+
+        # Stack the two cards in a single column — no more 2-up
+        # side-by-side that crammed labels.
+        left_layout.addWidget(model_frame)
+        left_layout.addWidget(dataset_frame)
+
+        # ── Card 3: Training params ──────────────────────────────────
+        params_frame, params_layout = _make_card("⚙️  TRAINING PARAMETERS")
+        # Keep the legacy widget vars below alive but stop using the
+        # heavy frame styling — we already applied cfgCard.
+        params_layout.setSpacing(10)
+        # Old code path expects ``params_frame`` to be a styled frame —
+        # neutralise the legacy stylesheet block by NOT applying it.
+        _LEGACY_PARAMS_NOSTYLE = QFrame()
+        _LEGACY_PARAMS_NOSTYLE.setStyleSheet("""
+            QFrame#__legacy_unused {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 rgba(70, 60, 90, 0.4), stop:1 rgba(50, 40, 70, 0.4));
                 border: 2px solid #9c27b0;
@@ -13728,177 +13772,142 @@ class MainWindow(QMainWindow):
                 font-size: 11pt;
             }
         """)
-        params_layout = QVBoxLayout(params_frame)
-        params_layout.setSpacing(15)
-        
-        # Use recommended settings button
-        self.use_recommended_btn = QPushButton("✨ Use Recommended Settings")
-        self.use_recommended_btn.setMinimumHeight(40)
-        self.use_recommended_btn.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #667eea, stop:1 #764ba2);
-                color: white;
-                font-size: 13pt;
-                font-weight: bold;
-                border-radius: 8px;
-                padding: 8px;
-            }
-            QPushButton:hover {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                    stop:0 #7b8ff0, stop:1 #8a5ab8);
-            }
-        """)
-        self.use_recommended_btn.clicked.connect(lambda: (self._use_recommended_settings(), self._switch_to_dashboard()))
+        # NB: ``params_layout`` is the QVBoxLayout already attached to
+        # ``params_frame`` by ``_make_card``. Re-creating one would
+        # raise. The legacy stylesheet block is intentionally stashed
+        # in ``_LEGACY_PARAMS_NOSTYLE`` (unused).
+
+        # Compact "Use recommended" pill — replaces the giant gradient
+        # button. Same handler.
+        self.use_recommended_btn = QPushButton("✨ Use recommended settings")
+        self.use_recommended_btn.setProperty("class", "cardBtn")
+        self.use_recommended_btn.clicked.connect(
+            lambda: (self._use_recommended_settings(), self._switch_to_dashboard())
+        )
         params_layout.addWidget(self.use_recommended_btn)
-        
-        # Model Name (auto-generated)
-        name_row = QHBoxLayout()
-        name_row.addWidget(QLabel("<b>Model Name:</b>"))
-        self.train_model_name = QLineEdit()
-        self.train_model_name.setPlaceholderText("Auto-generated: YYMMDD_modelname_dataset_HHMM")
-        self.train_model_name.setMinimumHeight(35)
-        name_row.addWidget(self.train_model_name, 1)
-        params_layout.addLayout(name_row)
+        # ``train_model_name`` already lives inside the BASE MODEL card
+        # (placed there in the redesign). Creating it again here would
+        # be a duplicate widget — skip.
         
         # Parameters in compact grid
         params_grid = QGridLayout()
-        params_grid.setSpacing(12)
+        params_grid.setHorizontalSpacing(8)
+        params_grid.setVerticalSpacing(8)
         params_grid.setColumnStretch(1, 1)
         params_grid.setColumnStretch(3, 1)
-        
-        # Row 0: Epochs + LoRA R
-        params_grid.addWidget(QLabel("<b>Epochs:</b>"), 0, 0)
+
+        def _grid_label(text: str) -> QLabel:
+            lab = QLabel(text)
+            lab.setStyleSheet("color: #8595ad; font-size: 10pt;")
+            return lab
+
+        # Row 0 — Epochs + LoRA r
+        params_grid.addWidget(_grid_label("Epochs"), 0, 0)
         self.train_epochs = QSpinBox()
         self.train_epochs.setRange(1, 1000)
         self.train_epochs.setValue(1)
-        self.train_epochs.setMinimumHeight(40)
         params_grid.addWidget(self.train_epochs, 0, 1)
-        
-        params_grid.addWidget(QLabel("<b>LoRA R:</b>"), 0, 2)
+
+        params_grid.addWidget(_grid_label("LoRA r"), 0, 2)
         self.train_lora_r = QSpinBox()
         self.train_lora_r.setRange(8, 256)
         self.train_lora_r.setValue(16)
-        self.train_lora_r.setMinimumHeight(40)
         params_grid.addWidget(self.train_lora_r, 0, 3)
-        
-        # Row 1: Learning Rate + LoRA Alpha (auto-calculated, display only)
-        params_grid.addWidget(QLabel("<b>Learning Rate:</b>"), 1, 0)
+
+        # Row 1 — Learning rate + LoRA α (derived)
+        params_grid.addWidget(_grid_label("Learning rate"), 1, 0)
         self.train_lr = QDoubleSpinBox()
         self.train_lr.setDecimals(6)
         self.train_lr.setRange(1e-6, 1.0)
         self.train_lr.setValue(2e-4)
         self.train_lr.setSingleStep(1e-5)
-        self.train_lr.setMinimumHeight(40)
         params_grid.addWidget(self.train_lr, 1, 1)
-        
-        params_grid.addWidget(QLabel("<b>LoRA Alpha:</b>"), 1, 2)
-        # Alpha is derived (= 2 × r) and matches what _start_training
-        # actually passes. The label tooltip explains the rule so users
-        # don't think this is a free parameter.
+
+        params_grid.addWidget(_grid_label("LoRA α"), 1, 2)
         self.train_lora_alpha_label = QLabel("32")
-        self.train_lora_alpha_label.setStyleSheet("font-size: 14pt; font-weight: bold; color: #4CAF50; padding: 8px;")
-        self.train_lora_alpha_label.setMinimumHeight(40)
+        self.train_lora_alpha_label.setStyleSheet(
+            "color: #4caf50; font-size: 11pt; font-weight: bold; "
+            "background: rgba(10, 14, 24, 0.85); border: 1px solid rgba(76, 175, 80, 0.35); "
+            "border-radius: 6px; padding: 6px;"
+        )
         self.train_lora_alpha_label.setAlignment(Qt.AlignCenter)
         self.train_lora_alpha_label.setToolTip(
-            "LoRA alpha = 2 × r (PEFT/Unsloth convention). "
-            "Effective scaling is alpha / r."
+            "Derived as 2 × r (PEFT convention). Effective scaling = α / r."
         )
         params_grid.addWidget(self.train_lora_alpha_label, 1, 3)
-        self.train_lora_r.valueChanged.connect(lambda v: self.train_lora_alpha_label.setText(str(v * 2)))
-        
-        # Row 2: Max Seq Length + Batch Size toggle
-        params_grid.addWidget(QLabel("<b>Max Seq Length:</b>"), 2, 0)
+        self.train_lora_r.valueChanged.connect(
+            lambda v: self.train_lora_alpha_label.setText(str(v * 2))
+        )
+
+        # Row 2 — Max seq length + auto-batch toggle
+        params_grid.addWidget(_grid_label("Max seq"), 2, 0)
         self.train_max_seq = QSpinBox()
         self.train_max_seq.setRange(128, 8192)
         self.train_max_seq.setValue(2048)
         self.train_max_seq.setSingleStep(128)
-        self.train_max_seq.setMinimumHeight(40)
         params_grid.addWidget(self.train_max_seq, 2, 1)
-        
+
         self.batch_size_auto = QPushButton("✅ Optimal batch size")
         self.batch_size_auto.setCheckable(True)
         self.batch_size_auto.setChecked(True)
-        self.batch_size_auto.setMinimumHeight(40)
         self.batch_size_auto.setStyleSheet("""
             QPushButton {
-                background: rgba(76, 175, 80, 0.3);
-                border: 2px solid #4CAF50;
+                background: rgba(76, 175, 80, 0.18);
+                border: 1px solid rgba(76, 175, 80, 0.45);
                 border-radius: 6px;
-                font-size: 11pt;
-                font-weight: bold;
+                font-size: 10pt;
+                font-weight: 600;
+                color: #fafafa;
+                padding: 6px 10px;
+                min-height: 28px;
             }
             QPushButton:checked {
-                background: rgba(76, 175, 80, 0.6);
+                background: rgba(76, 175, 80, 0.40);
             }
         """)
         self.batch_size_auto.clicked.connect(self._toggle_batch_size)
         params_grid.addWidget(self.batch_size_auto, 2, 2, 1, 2)
-        
         params_layout.addLayout(params_grid)
-        
-        # Output directory - show base path + generated folder name
+
+        # Output dir — small inline row, less prominent than legacy.
         output_row = QHBoxLayout()
-        output_row.addWidget(QLabel("<b>Output:</b>"))
+        output_row.setSpacing(6)
+        out_lab = QLabel("Output")
+        out_lab.setStyleSheet("color: #8595ad; font-size: 10pt;")
+        output_row.addWidget(out_lab)
         self.train_out_dir = QLineEdit(str(default_output_dir()))
-        self.train_out_dir.setMinimumHeight(35)
-        self.train_out_dir.setReadOnly(True)  # Read-only, user browses to change
-        self.train_out_dir.setStyleSheet("background: rgba(50, 50, 60, 0.5);")
+        self.train_out_dir.setReadOnly(True)
+        self.train_out_dir.setStyleSheet(
+            "background: rgba(8, 10, 16, 0.85); color: #8595ad; font-size: 9pt;"
+        )
         output_row.addWidget(self.train_out_dir, 1)
-        out_browse = QPushButton("📁 Browse")
-        out_browse.setMinimumHeight(35)
-        out_browse.setMinimumWidth(100)
+        out_browse = QPushButton("📁")
+        out_browse.setProperty("class", "cardBtn")
+        out_browse.setMaximumWidth(40)
+        out_browse.setToolTip("Browse output directory")
         out_browse.clicked.connect(self._browse_train_out)
         output_row.addWidget(out_browse)
         params_layout.addLayout(output_row)
-        
-        # Batch size kept for internal use but not displayed
+
+        # Internal-only widget — batch size used by the launcher; not
+        # exposed in the redesigned UI (the auto toggle owns it).
         self.train_batch = QSpinBox()
         self.train_batch.setRange(1, 512)
         self.train_batch.setValue(2)
         self.train_batch.setVisible(False)
-        
+
         left_layout.addWidget(params_frame)
 
-        # ------------------------------------------------------------------
-        # Save-checkpoints toggle.
-        # ------------------------------------------------------------------
-        # Run-mode is no longer a separate selector — the three modes
-        # (Fresh / Resume / Continue) are tile-buttons inside the new
-        # StartTrainingPanel further down. Clicking a tile both PICKS
-        # the mode AND launches training, so there's no "pick mode then
-        # press Start" two-step that confused users earlier.
-        #
-        # Save Checkpoints stays separate because it cuts across all
-        # modes — it controls whether THIS run produces resumable
-        # checkpoints for FUTURE Resume clicks. Off by default; flip on
-        # when you want this run to be resumable later.
-        save_frame = QFrame()
-        save_frame.setObjectName("save_frame")
-        save_frame.setStyleSheet("""
-            #save_frame {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                    stop:0 rgba(30, 41, 59, 220), stop:1 rgba(22, 33, 62, 220));
-                border: 1px solid #2c3a4f;
-                border-radius: 12px;
-            }
-            QLabel { background: transparent; }
-        """)
-        save_layout = QVBoxLayout(save_frame)
-        save_layout.setContentsMargins(14, 14, 14, 14)
-        save_layout.setSpacing(10)
-        self.train_save_toggle = CheckpointToggle(default_steps=25, parent=self)
-        save_layout.addWidget(self.train_save_toggle)
-        left_layout.addWidget(save_frame)
+        # ── Card 4: Compute & Recovery ───────────────────────────────
+        # Combines the legacy Save-checkpoints + GPU sections. The user
+        # only needs to glance at one line each to confirm what GPU is
+        # used and whether the run is resumable.
+        compute_frame, gpu_layout = _make_card("💻  COMPUTE & RECOVERY")
 
-        # GPU Selection Section
-        gpu_select_label = QLabel("💻 Select GPU(s) for Training")
-        gpu_select_label.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
-        left_layout.addWidget(gpu_select_label)
-        
-        gpu_frame = QFrame()
-        gpu_frame.setFrameShape(QFrame.StyledPanel)
-        gpu_layout = QVBoxLayout(gpu_frame)
+        # Save-checkpoints toggle inline at the top — still its own
+        # widget so the rest of the codebase keeps working unchanged.
+        self.train_save_toggle = CheckpointToggle(default_steps=25, parent=self)
+        gpu_layout.addWidget(self.train_save_toggle)
         
         # GPU status using REAL system detection (filtered by selection)
         cuda_info = self.system_info.get("cuda", {})
@@ -13943,47 +13952,55 @@ class MainWindow(QMainWindow):
         except Exception:
             torch_gpus = []
 
+        # GPU status — single chip, shows count + colour-coded health.
         if torch_gpus:
             gpu_count = len(torch_gpus)
-            self.gpu_status_label = QLabel(f"✅ {gpu_count} GPU{'s' if gpu_count > 1 else ''} detected")
-            self.gpu_status_label.setStyleSheet("font-weight: bold; color: #4CAF50;")
+            self.gpu_status_label = QLabel(
+                f"🟢 {gpu_count} GPU{'s' if gpu_count > 1 else ''} detected"
+            )
+            self.gpu_status_label.setStyleSheet(
+                "color: #4caf50; font-size: 10pt; font-weight: 600;"
+            )
         else:
-            self.gpu_status_label = QLabel("⚠️ No GPUs detected")
-            self.gpu_status_label.setStyleSheet("font-weight: bold; color: #FF9800;")
+            self.gpu_status_label = QLabel("🟠 No GPU detected (CPU fallback)")
+            self.gpu_status_label.setStyleSheet(
+                "color: #ff9800; font-size: 10pt; font-weight: 600;"
+            )
 
-        gpu_layout.addWidget(self.gpu_status_label)
-
-        # GPU selection dropdown — preserves CUDA index order exactly.
+        # GPU selection dropdown
         self.gpu_select = QComboBox()
-        # gpu_index_map[display_index] = real CUDA index passed via
-        # CUDA_VISIBLE_DEVICES. Same value torch.cuda.device(i) takes.
         self.gpu_index_map = []
         if torch_gpus:
             for cuda_idx, name, mem_gb in torch_gpus:
                 self.gpu_select.addItem(f"cuda:{cuda_idx} — {name} ({mem_gb:.1f} GB)")
                 self.gpu_index_map.append(cuda_idx)
-            self.training_info_label = QLabel(f"⚡ Training will use: {self.gpu_select.currentText()}")
+            self.training_info_label = QLabel(self.gpu_select.currentText())
         else:
             self.gpu_select.addItem("No GPUs available - CPU mode")
             self.gpu_select.setEnabled(False)
-            self.training_info_label = QLabel("⚠️ Training will use CPU (slower)")
-        
-        # Connect GPU selection change to update label and switch to dashboard
+            self.training_info_label = QLabel("CPU (slower)")
+
         self.gpu_select.currentIndexChanged.connect(
             lambda idx: (
-                self.training_info_label.setText(f"⚡ Training will use: {self.gpu_select.currentText()}"),
-                self._switch_to_dashboard()
+                self.training_info_label.setText(self.gpu_select.currentText()),
+                self._switch_to_dashboard(),
             )
         )
-            
-        gpu_layout.addWidget(self.gpu_select)
-        
-        # Training info
-        self.training_info_label.setStyleSheet("color: #2196F3; padding: 5px;")
+        self.training_info_label.setStyleSheet("color: #8595ad; font-size: 9pt;")
         self.training_info_label.setWordWrap(True)
+        self.training_info_label.setVisible(False)  # absorbed into the chip
+
+        # GPU row: status chip + picker on one line.
+        gpu_row = QHBoxLayout()
+        gpu_row.setSpacing(8)
+        gpu_row.addWidget(self.gpu_status_label)
+        gpu_row.addWidget(self.gpu_select, 1)
+        gpu_layout.addLayout(gpu_row)
+        # Keep the now-hidden info label parented somewhere so callers
+        # that .setText() it don't crash on a None parent.
         gpu_layout.addWidget(self.training_info_label)
-        
-        left_layout.addWidget(gpu_frame)
+
+        left_layout.addWidget(compute_frame)
         
         # ------------------------------------------------------------------
         # Start panel + Stop button + status pill.

@@ -53,6 +53,61 @@ for _sig_name in ("SIGINT", "SIGTERM", "SIGBREAK"):
             #   can hit on Windows for SIGTERM in some environments.
             pass
 
+# ---------------------------------------------------------------------
+# Crash diagnostics — turn on Python's faulthandler so a segfault /
+# access violation / abort produces a Python traceback to a log file
+# the GUI can surface to the user. Without this, native crashes (e.g.
+# 0xC0000005 inside a CUDA kernel teardown) just kill the process and
+# we get an exit code with zero info on WHERE it died.
+#
+# The launcher (desktop_app/main.py) sets OWLLM_CRASH_LOG to a per-run
+# path under the output dir; we open it line-buffered so partial dumps
+# survive a hard kill. If the env var isn't set, dump to stderr — the
+# GUI captures stderr too.
+# ---------------------------------------------------------------------
+import faulthandler as _fh
+
+_CRASH_LOG_FH = None
+try:
+    _crash_log = os.environ.get("OWLLM_CRASH_LOG")
+    if _crash_log:
+        try:
+            Path(_crash_log).parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        _CRASH_LOG_FH = open(_crash_log, "w", buffering=1, encoding="utf-8")
+        _CRASH_LOG_FH.write(
+            f"[finetune] faulthandler armed at {datetime.now().isoformat()}\n"
+        )
+        _fh.enable(file=_CRASH_LOG_FH, all_threads=True)
+        # Extra signals where supported. SIGABRT covers C++ aborts
+        # (CUDA driver assertions); SIGFPE / SIGBUS / SIGILL are the
+        # other native fatals we care about. Windows lacks SIGBUS.
+        for _xsig_name in ("SIGABRT", "SIGFPE", "SIGBUS", "SIGILL"):
+            _xsig = getattr(signal, _xsig_name, None)
+            if _xsig is not None:
+                try:
+                    _fh.register(_xsig, file=_CRASH_LOG_FH, all_threads=True, chain=True)
+                except Exception:
+                    pass
+        sys.stderr.write(f"[INFO] [DIAG] faulthandler enabled — crash trace -> {_crash_log}\n")
+        sys.stderr.flush()
+    else:
+        _fh.enable(all_threads=True)
+        sys.stderr.write("[INFO] [DIAG] faulthandler enabled (stderr only, no log path)\n")
+        sys.stderr.flush()
+except Exception as _diag_exc:
+    sys.stderr.write(f"[WARN] [DIAG] faulthandler init failed: {type(_diag_exc).__name__}: {_diag_exc}\n")
+    sys.stderr.flush()
+
+# CUDA caching-allocator hint: ``expandable_segments:True`` cuts
+# fragmentation so the same VRAM serves more tensors during long runs.
+# This MUST be set BEFORE PyTorch's allocator initialises — once it's
+# read the var, later changes are ignored. The launcher injects it
+# into the subprocess env too; setdefault here is the belt-and-
+# suspenders so a manual `python finetune.py` run also gets it.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 # Fix Windows console encoding for emojis and ensure unbuffered output for real-time GUI updates
 if sys.platform == "win32":
     # On Windows, we need to ensure the standard streams are using UTF-8
@@ -1505,11 +1560,57 @@ def main():
     except Exception as exc:
         print(f"[WARN] [PARAM-AUDIT] inspection raised {type(exc).__name__}: {exc}")
 
+    # ---------------------------------------------------------------------
+    # VRAM guard tensor — defensive mitigation for "another process
+    # spiked mid-run and OOM'd us" failures. We allocate a small slab
+    # NOW so it's owned by PyTorch's caching allocator. The allocator
+    # then keeps that block resident even when the trainer's working
+    # set briefly dips, which prevents:
+    #   (a) the allocator handing the freed block back to the driver
+    #       only for another CUDA process to grab it, and
+    #   (b) the next allocation having to re-fragment a fresh slab.
+    # This is NOT a true OS-level reservation — Windows WDDM can still
+    # evict pages — but in practice it catches the bulk of "DWM /
+    # browser spike killed me" cases. Disable with OWLLM_DISABLE_GUARD=1.
+    # ---------------------------------------------------------------------
+    _vram_guard = None
+    if torch.cuda.is_available() and os.environ.get("OWLLM_DISABLE_GUARD") != "1":
+        try:
+            _free_b, _total_b = torch.cuda.mem_get_info()
+            # Reserve min(256 MB, 5% of free) — small enough not to crowd
+            # the trainer's first forward, large enough to keep a slab
+            # claimed in the allocator.
+            _guard_bytes = min(256 * 1024 * 1024, int(_free_b * 0.05))
+            if _guard_bytes >= 16 * 1024 * 1024:
+                _vram_guard = torch.empty(
+                    (_guard_bytes,), dtype=torch.uint8, device="cuda"
+                )
+                # Touch it so the allocation isn't optimised away.
+                _vram_guard.zero_()
+                print(
+                    f"[INFO] [GUARD] Reserved {_guard_bytes / 1024 / 1024:.0f} MB "
+                    f"VRAM guard slab (free was {_free_b / 1024 / 1024 / 1024:.2f} GB)."
+                )
+            else:
+                print(
+                    f"[INFO] [GUARD] Skipping guard — only "
+                    f"{_free_b / 1024 / 1024:.0f} MB free."
+                )
+        except Exception as _guard_exc:
+            print(f"[WARN] [GUARD] guard alloc failed: {type(_guard_exc).__name__}: {_guard_exc}")
+
     # Train and capture training state. ``resume_from_checkpoint`` is
     # honoured even when None — Trainer treats None as 'fresh run',
     # so we don't branch the call.
     print("[INFO] Starting training loop...")
     train_result = trainer.train(resume_from_checkpoint=resume_ckpt)
+    # Free the guard once training has converged on its own working set.
+    if _vram_guard is not None:
+        del _vram_guard
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
     if _STOP_REQUESTED:
         print("[INFO] Training was stopped early by user request — the "
               "Trainer wrote a checkpoint on the way out, so a future "

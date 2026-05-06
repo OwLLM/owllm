@@ -15792,6 +15792,25 @@ class MainWindow(QMainWindow):
         env.insert("PYTHONUTF8", "1")
         env.insert("PYTHONUNBUFFERED", "1")  # Force unbuffered output (even stronger than -u)
         env.insert("PYTHONLEGACYWINDOWSSTDIO", "0")  # Use new Windows stdio for better real-time output
+        # Belt-and-suspenders mitigations for the Windows VRAM-contention
+        # crashes (kernelize teardown / CUDA finalizer access violations).
+        # 1) expandable_segments cuts caching-allocator fragmentation —
+        #    the same total VRAM serves more tensors over a long run.
+        # 2) faulthandler (armed inside finetune.py) writes a Python
+        #    traceback to OWLLM_CRASH_LOG when a native fatal arrives,
+        #    so the GUI can surface the failing thread / frame instead
+        #    of just an exit code.
+        env.insert("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        try:
+            _crash_dir = out_dir_path / "_crash_logs"
+            _crash_dir.mkdir(parents=True, exist_ok=True)
+            _crash_log_path = _crash_dir / (
+                "crash_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"
+            )
+            env.insert("OWLLM_CRASH_LOG", str(_crash_log_path))
+            self._active_crash_log = _crash_log_path
+        except Exception:
+            self._active_crash_log = None
         if hasattr(self, 'gpu_select') and self.gpu_select.isEnabled():
             selected_display_idx = self.gpu_select.currentIndex()
             real_cuda_idx = None
@@ -16321,6 +16340,28 @@ class MainWindow(QMainWindow):
                     "[WARN] Process crashed but no raw output captured. "
                     "If this keeps happening, check logs/spawn.log."
                 )
+
+            # NEW: surface the faulthandler trace for native crashes
+            # (0xC0000005 / 0xC0000409 / SIGABRT etc.). finetune.py opens
+            # OWLLM_CRASH_LOG line-buffered, so partial dumps survive a
+            # hard kill — exactly the case where the rolling tail above
+            # doesn't help because the crash happened in C++ land with
+            # no Python print to capture.
+            try:
+                fh_log = getattr(self, "_active_crash_log", None)
+                if fh_log is not None and Path(fh_log).exists():
+                    fh_text = Path(fh_log).read_text(
+                        encoding="utf-8", errors="replace"
+                    ).strip()
+                    if fh_text:
+                        self.train_log.appendPlainText(
+                            f"\n--- FAULTHANDLER TRACE ({fh_log}) ---"
+                        )
+                        for line in fh_text.splitlines():
+                            self.train_log.appendPlainText(line)
+                        self.train_log.appendPlainText("--- end faulthandler trace ---\n")
+            except Exception:
+                pass
 
         # Reset the rolling tail for the next run.
         self._train_raw_tail = ""

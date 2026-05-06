@@ -130,13 +130,13 @@ class TelemetryPanel(QDialog):
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setAlternatingRowColors(True)
+        # No inline stylesheet — let the global theme stylesheet drive
+        # the table colours so light mode and the picked theme tint
+        # actually apply. The global rules cover QTableView,
+        # QHeaderView::section, selection colours, etc. The only
+        # table-specific tweak we keep is rounded corners.
         self.table.setStyleSheet(
-            "QTableWidget { background:#14171d; color:#dadcdf; gridline-color:#23283a; "
-            " border:none; border-radius:8px; }"
-            "QTableWidget::item:selected { background:#2a3142; color:#fff; }"
-            "QHeaderView::section { background:#1a1d24; color:#9aa0a6; padding:6px;"
-            " border:none; border-right:1px solid #23283a; font-weight:600; }"
-            "QTableWidget { alternate-background-color:#181b22; }"
+            "QTableWidget { border-radius:8px; }"
         )
         # Last-error column should expand; numeric columns sized to content.
         hdr = self.table.horizontalHeader()

@@ -100,9 +100,12 @@ class _SkillRow(QFrame):
         self._build()
 
     def _build(self) -> None:
+        # Theme-friendly: rounded card with a hover lift, but the
+        # actual background colour comes from the global stylesheet
+        # (palette(base)) so light mode + colour themes apply.
         self.setStyleSheet(
-            "QFrame#SkillRow { background:#1a1d24; border:none; border-radius:8px; }"
-            "QFrame#SkillRow:hover { background:#222632; }"
+            "QFrame#SkillRow { background: palette(base); border:none; border-radius:8px; }"
+            "QFrame#SkillRow:hover { background: palette(alternate-base); }"
         )
         rlay = QVBoxLayout(self)
         rlay.setContentsMargins(14, 10, 14, 10)
@@ -111,7 +114,7 @@ class _SkillRow(QFrame):
         head = QHBoxLayout()
         head.setSpacing(8)
         self.checkbox = QCheckBox(self.skill.name)
-        self.checkbox.setStyleSheet("color:#fff; font-weight:600; font-size:17px;")
+        self.checkbox.setStyleSheet("font-weight:600; font-size:17px;")
         head.addWidget(self.checkbox)
         head.addStretch(1)
         if self.installed:

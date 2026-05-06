@@ -2167,11 +2167,52 @@ QTabBar::tab:selected {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary}, stop:1 {primary});
 }}
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
-    background-color: #262730;
-    color: #fafafa;
-    border: 1px solid #3a3a3a;
+    background-color: {input_bg};
+    color: {text_col};
+    border: 1px solid {border_col};
     border-radius: 4px;
     padding: 4px;
+}}
+QGroupBox {{
+    background-color: {panel};
+    color: {text_col};
+    border: 1px solid {border_col};
+    border-radius: 8px;
+    margin-top: 14px;
+    padding-top: 8px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+    color: {text_col};
+}}
+QListWidget, QListView, QTreeWidget, QTreeView, QTableView {{
+    background-color: {input_bg};
+    color: {text_col};
+    border: 1px solid {border_col};
+    selection-background-color: {primary_rgba};
+    selection-color: {text_col};
+}}
+QHeaderView::section {{
+    background-color: {panel};
+    color: {muted_col};
+    border: none;
+    border-right: 1px solid {border_col};
+    padding: 6px;
+    font-weight: 600;
+}}
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QCheckBox, QRadioButton {{
+    color: {text_col};
+    background: transparent;
+}}
+QStatusBar {{
+    background-color: {panel};
+    color: {muted_col};
 }}
 /* Training dashboard buttons */
 QPushButton#train_start, QPushButton#train_stop {{

@@ -306,6 +306,19 @@ class Manifest:
             ).fetchall()
             return [self._row_to_claim(r) for r in rows]
 
+    def list_all(self) -> List[Claim]:
+        """Return every claim ever recorded (active + released).
+
+        Useful for audit / history views. For runtime allocation use
+        :meth:`list_active` — released rows must not influence pool
+        decisions.
+        """
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM claims ORDER BY started_at"
+            ).fetchall()
+            return [self._row_to_claim(r) for r in rows]
+
     def reap_stale(self, now: Optional[datetime] = None) -> List[Claim]:
         """Mark every active claim past its TTL as released.
 

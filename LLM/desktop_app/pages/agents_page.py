@@ -80,7 +80,7 @@ from core.agents.tools import (
 )
 from core.agents.backends import dispatch_model_fn
 from desktop_app import agent_runtime_manager
-from PySide6.QtWidgets import QMenu
+from PySide6.QtWidgets import QListWidget, QListWidgetItem, QMenu, QProgressDialog
 
 from desktop_app.widgets.agent_canvas import (
     AgentCanvas,
@@ -347,6 +347,162 @@ class _AgentVoiceRow(QWidget):
             tts.speak(sample, voice_id=voice_id, rate=rate, agent=self._agent_name)
         finally:
             tts.set_enabled(was)
+
+
+class _PiperVoiceManagerDialog(QDialog):
+    """List + download / delete dialog for Piper neural voices.
+
+    The catalog comes from :data:`core.voice.piper_backend.PIPER_CATALOG`.
+    Each row shows: voice label, language, size, status (installed /
+    not), action button (Download / Delete). Downloads run on a worker
+    thread so the GUI keeps redrawing during the request.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Piper voices")
+        self.resize(560, 440)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "Piper neural voices sound noticeably more natural than the "
+            "system TTS. Download voices once, then pick them per agent "
+            "in the Voice row under Default model."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#9aa0a6; background:transparent;")
+        layout.addWidget(intro)
+
+        self._list = QListWidget()
+        self._list.setStyleSheet(
+            "QListWidget { background:#14171d; color:#fff; border:none; "
+            "border-radius:8px; padding:6px; font-size:13px; }"
+        )
+        layout.addWidget(self._list, 1)
+
+        # Status line — last download progress / error.
+        self._status = QLabel("")
+        self._status.setStyleSheet("color:#aaa; background:transparent; font-size:12px;")
+        layout.addWidget(self._status)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        close_btn.setMinimumHeight(34)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        self._populate()
+
+    # ------------------------------------------------------------------
+    # Population
+    # ------------------------------------------------------------------
+
+    def _populate(self) -> None:
+        self._list.clear()
+        from core.voice import (
+            PIPER_CATALOG,
+            piper_voices_dir,
+        )
+        installed_dir = piper_voices_dir()
+        for entry in PIPER_CATALOG:
+            installed = (installed_dir / f"{entry.voice_id}.onnx").exists()
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(8, 6, 8, 6)
+            rl.setSpacing(10)
+
+            txt = QLabel(
+                f"<b>{entry.label}</b><br>"
+                f"<span style='color:#9aa0a6'>{entry.language} · "
+                f"{entry.quality} · ~{entry.size_mb} MB</span>"
+            )
+            txt.setStyleSheet("background:transparent;")
+            rl.addWidget(txt, 1)
+
+            tag = QLabel("✓ Installed" if installed else "Not installed")
+            tag.setStyleSheet(
+                f"color:{'#7ad3a8' if installed else '#9aa0a6'}; "
+                f"background:transparent; font-size:12px;"
+            )
+            rl.addWidget(tag)
+
+            action = QPushButton("Delete" if installed else "Download")
+            action.setFixedWidth(96)
+            action.setMinimumHeight(28)
+            action.setStyleSheet(
+                "QPushButton { background:rgba(255,255,255,0.06); color:#dadcdf; "
+                "border:none; border-radius:6px; font-size:12px; } "
+                "QPushButton:hover { background:rgba(255,255,255,0.12); }"
+            )
+            if installed:
+                action.clicked.connect(
+                    lambda _checked=False, e=entry: self._delete(e)
+                )
+            else:
+                action.clicked.connect(
+                    lambda _checked=False, e=entry: self._download(e)
+                )
+            rl.addWidget(action)
+
+            item = QListWidgetItem(self._list)
+            item.setSizeHint(row.sizeHint())
+            self._list.addItem(item)
+            self._list.setItemWidget(item, row)
+
+    # ------------------------------------------------------------------
+    # Actions
+    # ------------------------------------------------------------------
+
+    def _delete(self, entry) -> None:
+        from core.voice import delete_piper_voice
+        if QMessageBox.question(
+            self, "Delete voice",
+            f"Delete {entry.label}?\nFiles will be removed from disk.",
+        ) != QMessageBox.Yes:
+            return
+        if delete_piper_voice(entry.voice_id):
+            self._status.setText(f"Deleted {entry.voice_id}.")
+        else:
+            self._status.setText(f"Could not delete {entry.voice_id}.")
+        self._populate()
+
+    def _download(self, entry) -> None:
+        from PySide6.QtCore import QThread, Signal as _Signal
+        from core.voice import download_piper_voice
+
+        self._status.setText(f"Downloading {entry.label}…")
+
+        class _Worker(QThread):
+            log = _Signal(str)
+            done = _Signal(str)  # error or ""
+
+            def run(self_w) -> None:  # noqa: N805
+                try:
+                    download_piper_voice(
+                        entry, progress=lambda m: self_w.log.emit(m)
+                    )
+                    self_w.done.emit("")
+                except Exception as exc:  # noqa: BLE001
+                    self_w.done.emit(str(exc))
+
+        w = _Worker(self)
+        w.log.connect(self._status.setText)
+
+        def _finish(err: str) -> None:
+            if err:
+                self._status.setText(f"Download failed: {err}")
+            else:
+                self._status.setText(f"{entry.label} ready.")
+            self._populate()
+
+        w.done.connect(_finish)
+        w.start()
+        self._active_worker = w  # hold a reference until GC
 
 
 _STATUS_COLOR = {
@@ -1011,7 +1167,8 @@ class AgentsPage(QWidget):
         self.voice_btn.setFixedWidth(44)
         self.voice_btn.setCheckable(True)
         self.voice_btn.setToolTip(
-            "Speak agent replies aloud (system TTS — voice per agent)"
+            "Speak agent replies aloud — voice per agent.\n"
+            "Right-click to switch engine or install natural voices (Piper)."
         )
         self.voice_btn.setStyleSheet("""
             QPushButton {
@@ -1023,6 +1180,10 @@ class AgentsPage(QWidget):
             QPushButton:disabled { color:#555; }
         """)
         self.voice_btn.clicked.connect(self._on_voice_toggled)
+        # Right-click for engine selection / Piper voice management.
+        # Discoverability: the tooltip flags "right-click to manage voices".
+        self.voice_btn.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.voice_btn.customContextMenuRequested.connect(self._open_voice_menu)
 
         top.addWidget(self.attach_btn)
         top.addWidget(self.goal_input, 1)
@@ -1156,6 +1317,165 @@ class AgentsPage(QWidget):
             self, "Install voice",
             "Voice engine installed. Click ▶ Preview on an agent to test.",
         )
+
+    # ------------------------------------------------------------------
+    # Voice engine selection / Piper management
+    # ------------------------------------------------------------------
+
+    def _open_voice_menu(self, pos) -> None:
+        """Right-click menu on the 🔊 button.
+
+        Lists the active engine, offers a one-click upgrade to Piper
+        when SAPI is the current backend, and opens the Piper voice
+        manager so the user can add or remove neural voices.
+        """
+        menu = QMenu(self)
+        # Engine label — informational only.
+        active = self._active_engine_label()
+        engine_act = menu.addAction(f"Engine: {active}")
+        engine_act.setEnabled(False)
+        menu.addSeparator()
+
+        from core.voice import is_piper_importable, list_installed_piper_voice_files
+        piper_pkg = is_piper_importable()
+        piper_voices = list_installed_piper_voice_files()
+        if not piper_pkg or not piper_voices:
+            up = menu.addAction("✨ Install natural voices (Piper)")
+            up.triggered.connect(self._upgrade_to_piper)
+        else:
+            mgr = menu.addAction("Manage Piper voices…")
+            mgr.triggered.connect(self._open_piper_voice_manager)
+
+        menu.addSeparator()
+        repair = menu.addAction("Restart voice engine")
+        repair.triggered.connect(self._restart_voice_engine)
+
+        menu.exec_(self.voice_btn.mapToGlobal(pos))
+
+    def _active_engine_label(self) -> str:
+        tts = getattr(self, "_tts", None)
+        if tts is None or not tts.available:
+            return "none"
+        backend = getattr(tts, "_backend", None)
+        return getattr(backend, "name", "?") if backend is not None else "?"
+
+    def _restart_voice_engine(self) -> None:
+        """Drop the cached service so the next call rebuilds it. Useful
+        after manually adding voices or installing a package outside the
+        in-app installer."""
+        try:
+            import core.voice.tts_service as svc_mod
+            if svc_mod._service is not None:  # type: ignore[attr-defined]
+                try:
+                    svc_mod._service.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+            svc_mod._service = None  # type: ignore[attr-defined]
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._render_team()
+        except Exception:
+            logger.exception("could not re-render team after engine restart")
+        self._init_voice_service()
+
+    def _upgrade_to_piper(self) -> None:
+        """One-click upgrade: pip-install piper-tts (if missing) then
+        download the default Piper voice. Runs the heavy work on a
+        worker thread so the GUI stays responsive — the dialog updates
+        as steps complete."""
+        from core.voice import (
+            DEFAULT_PIPER_VOICE_ID,
+            find_piper_catalog_entry,
+            is_piper_importable,
+        )
+        entry = find_piper_catalog_entry(DEFAULT_PIPER_VOICE_ID)
+        if entry is None:
+            QMessageBox.warning(
+                self, "Install Piper",
+                "Default voice missing from catalog — please report this.",
+            )
+            return
+        msg = (
+            "About to install the Piper neural-voice engine:\n\n"
+            f"  • pip install piper-tts (~80 MB, includes onnxruntime)\n"
+            f"  • download {entry.label} (~{entry.size_mb} MB)\n\n"
+            "Continue?"
+        )
+        if QMessageBox.question(self, "Install natural voices", msg) != QMessageBox.Yes:
+            return
+
+        progress = QProgressDialog(
+            "Preparing…", "Cancel", 0, 0, self,
+        )
+        progress.setWindowTitle("Installing Piper")
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setCancelButton(None)  # cancellation mid-pip would corrupt env
+        progress.show()
+
+        # Worker — runs pip + download off the GUI thread. Any output
+        # the worker wants on screen goes through a Qt signal so we
+        # never touch QWidget state from the wrong thread.
+        from PySide6.QtCore import QThread, Signal as _Signal
+
+        class _Worker(QThread):
+            log = _Signal(str)
+            done = _Signal(str)  # error string, "" on success
+
+            def run(self_w) -> None:  # noqa: N805
+                import subprocess, sys
+                try:
+                    if not is_piper_importable():
+                        self_w.log.emit("pip install piper-tts… (this can take a minute)")
+                        creationflags = 0x08000000 if sys.platform == "win32" else 0
+                        proc = subprocess.run(
+                            [sys.executable, "-m", "pip", "install",
+                             "piper-tts>=1.2.0,<2.0.0"],
+                            capture_output=True, text=True, check=False,
+                            creationflags=creationflags, timeout=600,
+                        )
+                        if proc.returncode != 0:
+                            self_w.done.emit(
+                                f"pip install failed (exit {proc.returncode}):\n"
+                                f"{(proc.stderr or '').strip()[:600]}"
+                            )
+                            return
+                    self_w.log.emit("downloading default voice…")
+                    from core.voice import download_piper_voice
+                    download_piper_voice(entry, progress=lambda m: self_w.log.emit(m))
+                    self_w.done.emit("")
+                except Exception as exc:  # noqa: BLE001
+                    self_w.done.emit(str(exc))
+
+        worker = _Worker(self)
+        worker.log.connect(progress.setLabelText)
+
+        def _finish(err: str) -> None:
+            progress.close()
+            if err:
+                QMessageBox.warning(self, "Install Piper", err)
+                return
+            self._restart_voice_engine()
+            QMessageBox.information(
+                self, "Install Piper",
+                "Piper installed and the default voice is ready. Right-click "
+                "🔊 → Manage Piper voices to add more.",
+            )
+
+        worker.done.connect(_finish)
+        worker.start()
+        # Keep a reference so the worker isn't GC'd mid-run.
+        self._piper_install_worker = worker
+
+    def _open_piper_voice_manager(self) -> None:
+        """Modal dialog listing the curated Piper catalog with download /
+        delete buttons per voice."""
+        dlg = _PiperVoiceManagerDialog(self)
+        dlg.exec_()
+        # Refresh after the user closes the dialog so any newly-downloaded
+        # voices show up in the per-agent voice combos immediately.
+        self._restart_voice_engine()
 
     # ------------------------------------------------------------------
     # Attachment chip strip — appears below the goal row when files

@@ -137,7 +137,18 @@ class Pyttsx3Backend:
 
 
 def _select_backend() -> Optional[TtsBackend]:
-    """Pick the first backend that imports cleanly. ``None`` = no voice."""
+    """Pick the first backend that imports cleanly. ``None`` = no voice.
+
+    Order matters: Piper produces noticeably more natural speech than
+    SAPI, so we prefer it whenever the package + at least one local
+    voice are present. SAPI is the universal fallback because it's
+    built into Windows and needs zero downloads.
+    """
+    try:
+        from .piper_backend import PiperBackend
+        return PiperBackend()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Piper backend unavailable: %s", exc)
     try:
         return Pyttsx3Backend()
     except Exception as exc:  # noqa: BLE001

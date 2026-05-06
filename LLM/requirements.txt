@@ -57,3 +57,10 @@ faster-whisper>=1.0.0,<2.0.0
 # Windows install for free per-agent voice diversity. Optional at runtime —
 # the voice service degrades to silent if the import fails.
 pyttsx3>=2.90,<3.0
+# Piper neural TTS — preferred OWLLM voice backend. Markedly more natural
+# than SAPI; ~12-60 MB ONNX voice files run faster than realtime on CPU.
+# Pulled in opportunistically: the in-app "Install natural voices" button
+# pip-installs piper-tts on demand, so users on slow links aren't forced
+# through the ~80 MB onnxruntime download at first launch. Listed here
+# (commented) so build_launcher / requirements snapshots see the intent.
+# piper-tts>=1.2.0,<2.0.0

@@ -391,6 +391,7 @@ def build_team(
     model_fn: ModelFn,
     base_registry: Optional[ToolRegistry] = None,
     graph_resolver: Optional[Callable[[str], Optional[str]]] = None,
+    cost_tracker: Optional[Any] = None,
 ) -> Team:
     """Wire up a Team from role definitions.
 
@@ -413,6 +414,7 @@ def build_team(
             model_fn=model_fn,
             base_registry=registry,
             bus=bus,
+            cost_tracker=cost_tracker,
         )
         registry.register(spawn_tool)
 
@@ -436,6 +438,7 @@ def build_team(
             bus=bus,
             tools=registry.for_allowlist(allowlist),
             model_fn=model_fn,
+            cost_tracker=cost_tracker,
         )
         specialists[role.name] = _SpecialistRunner(agent, team=None)  # team back-ref set below
 
@@ -491,6 +494,7 @@ def build_team(
         bus=bus,
         tools=orch_registry,
         model_fn=model_fn,
+        cost_tracker=cost_tracker,
     )
     team.orchestrator = orchestrator
 

@@ -99,6 +99,7 @@ def make_spawn_agent_tool(
     default_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     definition_resolver: Optional[Callable[[str], Any]] = None,
     available_names_resolver: Optional[Callable[[], list]] = None,
+    cost_tracker: Optional[Any] = None,
 ) -> Tool:
     """Build a ``spawn_agent`` tool bound to a team's runtime.
 
@@ -203,6 +204,7 @@ def make_spawn_agent_tool(
             bus=bus,
             tools=sub_tools,
             model_fn=model_fn,
+            cost_tracker=cost_tracker,
         )
 
         # Synthesize an inbox message addressed to the sub-agent. The

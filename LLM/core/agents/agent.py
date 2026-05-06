@@ -104,6 +104,12 @@ class Agent:
     max_steps: int = DEFAULT_MAX_STEPS
     max_history_chars: int = DEFAULT_MAX_HISTORY_CHARS
     max_message_chars: int = DEFAULT_MAX_MESSAGE_CHARS
+    cost_tracker: Optional[Any] = None
+    """Optional :class:`core.agents.cost.CostTracker`. If set, every model
+    call's input + output character counts are recorded against the
+    current goal_id so the UI can surface a $ figure. Backends with real
+    token usage should record_usage() directly; this loop estimates from
+    chars (~4 chars/token rule of thumb)."""
 
     # Per-instance scratch — the rolling chat memory across all inbox items.
     # We keep this on the agent (not the bus) because two agents on the same
@@ -174,6 +180,22 @@ class Agent:
                     )
                 )
                 return None
+
+            # Cost accounting. Best-effort: a tracking failure must never
+            # break the model call. Estimate input chars from the prompt
+            # we just sent, output from the response.
+            if self.cost_tracker is not None:
+                try:
+                    in_chars = sum(len(m.get("content") or "") for m in messages)
+                    self.cost_tracker.record_chars(
+                        goal_id=goal_id,
+                        agent=self.name,
+                        model_id=self.model_id,
+                        input_chars=in_chars,
+                        output_chars=len(response or ""),
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception("cost tracking failed for agent %s", self.name)
 
             self._chat_history.append({"role": "assistant", "content": response})
 

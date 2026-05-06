@@ -1855,78 +1855,159 @@ QToolBar {
 }
 """
 
-# Color theme definitions - each color has dark and light variants
+# Color theme definitions - each color has dark and light variants.
+# Beyond the primary / secondary / accent button tones, every variant
+# now carries a *surface* family (window/panel/input backgrounds plus
+# matching text + border colours) so the theme actually retints the
+# whole UI instead of just the buttons.
+#
+# The light variants are deliberately tinted toward the theme hue
+# (e.g. purple light has slight purple-grey panels, green light has
+# faint green-grey panels) so picking a colour from the header
+# really does shift the whole palette into that family.
 COLOR_THEMES = {
     "purple": {
         "dark": {
             "primary": "#667eea",
             "secondary": "#764ba2",
-            "accent": "#7c8ef5"
+            "accent": "#7c8ef5",
+            "window": "#0e0f1a",
+            "panel": "#1a1c2e",
+            "input": "#14152a",
+            "text": "#fafafa",
+            "muted": "#9aa0c0",
+            "border": "#3b3f6e",
         },
         "light": {
-            "primary": "#667eea",
-            "secondary": "#764ba2",
-            "accent": "#7c8ef5"
+            "primary": "#6d4cff",
+            "secondary": "#8a5cff",
+            "accent": "#5a3fd9",
+            "window": "#f6f4ff",
+            "panel": "#ecebff",
+            "input": "#ffffff",
+            "text": "#211a3d",
+            "muted": "#5a4f7a",
+            "border": "#cfc8ff",
         }
     },
     "yellow": {
         "dark": {
             "primary": "#fbbf24",
             "secondary": "#f59e0b",
-            "accent": "#fcd34d"
+            "accent": "#fcd34d",
+            "window": "#1a1408",
+            "panel": "#241b0e",
+            "input": "#1d1609",
+            "text": "#fffbe8",
+            "muted": "#c9b78a",
+            "border": "#5a4720",
         },
         "light": {
-            "primary": "#d97706",
-            "secondary": "#f59e0b",
-            "accent": "#fbbf24"
+            "primary": "#b9760a",
+            "secondary": "#d4920c",
+            "accent": "#9a5e08",
+            "window": "#fdf6e3",
+            "panel": "#faeec5",
+            "input": "#ffffff",
+            "text": "#3a2700",
+            "muted": "#7a5a16",
+            "border": "#e9c97a",
         }
     },
     "red": {
         "dark": {
             "primary": "#ef4444",
             "secondary": "#dc2626",
-            "accent": "#f87171"
+            "accent": "#f87171",
+            "window": "#1a0f0f",
+            "panel": "#251818",
+            "input": "#1d1010",
+            "text": "#ffeaea",
+            "muted": "#c89696",
+            "border": "#5a2828",
         },
         "light": {
-            "primary": "#dc2626",
-            "secondary": "#b91c1c",
-            "accent": "#ef4444"
+            "primary": "#c0212a",
+            "secondary": "#9b1620",
+            "accent": "#dc3a44",
+            "window": "#fff1f1",
+            "panel": "#ffe2e2",
+            "input": "#ffffff",
+            "text": "#3b0a0c",
+            "muted": "#7a2c30",
+            "border": "#f4b6b6",
         }
     },
     "navy": {
         "dark": {
             "primary": "#3b82f6",
             "secondary": "#1e40af",
-            "accent": "#60a5fa"
+            "accent": "#60a5fa",
+            "window": "#0a0f1d",
+            "panel": "#121a2c",
+            "input": "#0e1426",
+            "text": "#eaf2ff",
+            "muted": "#90a3c4",
+            "border": "#2a3a5c",
         },
         "light": {
-            "primary": "#1e40af",
+            "primary": "#1d4ed8",
             "secondary": "#1e3a8a",
-            "accent": "#3b82f6"
+            "accent": "#2563eb",
+            "window": "#eef3ff",
+            "panel": "#dde6ff",
+            "input": "#ffffff",
+            "text": "#0a1838",
+            "muted": "#3a4a78",
+            "border": "#a8baea",
         }
     },
     "green": {
         "dark": {
             "primary": "#10b981",
             "secondary": "#059669",
-            "accent": "#34d399"
+            "accent": "#34d399",
+            "window": "#0a1612",
+            "panel": "#11221c",
+            "input": "#0c1814",
+            "text": "#eafff5",
+            "muted": "#8db8a8",
+            "border": "#1f4538",
         },
         "light": {
-            "primary": "#059669",
-            "secondary": "#047857",
-            "accent": "#10b981"
+            "primary": "#04774f",
+            "secondary": "#055d3e",
+            "accent": "#0a9968",
+            "window": "#ecfaf3",
+            "panel": "#d6f3e3",
+            "input": "#ffffff",
+            "text": "#0a2a1d",
+            "muted": "#3a6a55",
+            "border": "#a4dcc1",
         }
     },
     "gray": {
         "dark": {
             "primary": "#6b7280",
             "secondary": "#4b5563",
-            "accent": "#9ca3af"
+            "accent": "#9ca3af",
+            "window": "#111317",
+            "panel": "#1a1d22",
+            "input": "#14171c",
+            "text": "#eef0f3",
+            "muted": "#9aa1ad",
+            "border": "#2a2f37",
         },
         "light": {
-            "primary": "#4b5563",
-            "secondary": "#374151",
-            "accent": "#6b7280"
+            "primary": "#475063",
+            "secondary": "#2f3645",
+            "accent": "#6b7382",
+            "window": "#f4f5f8",
+            "panel": "#e6e8ee",
+            "input": "#ffffff",
+            "text": "#1c2330",
+            "muted": "#566273",
+            "border": "#c5cbd6",
         }
     }
 }
@@ -1941,12 +2022,25 @@ def hex_to_rgba(hex_color: str, alpha: float = 1.0) -> str:
     return f"rgba({r}, {g}, {b}, {alpha})"
 
 def get_theme_stylesheet(dark_mode: bool, color_theme: str) -> str:
-    """Generate theme stylesheet with specified color theme"""
+    """Generate theme stylesheet with specified color theme.
+
+    Pulls EVERY colour from ``COLOR_THEMES[color_theme][mode]``: the
+    primary/secondary/accent button tones, plus the surface family
+    (window/panel/input/text/muted/border) added so the chosen colour
+    actually retints panels, inputs, lists, etc., instead of only
+    affecting button gradients.
+    """
     colors = COLOR_THEMES[color_theme]["dark" if dark_mode else "light"]
     primary = colors["primary"]
     secondary = colors["secondary"]
     accent = colors["accent"]
-    
+    window = colors.get("window", "#0e1117" if dark_mode else "#ffffff")
+    panel = colors.get("panel", "#161a22" if dark_mode else "#f5f5f7")
+    input_bg = colors.get("input", "#14171d" if dark_mode else "#ffffff")
+    text_col = colors.get("text", "#fafafa" if dark_mode else "#262730")
+    muted_col = colors.get("muted", "#9aa0a6" if dark_mode else "#5a6068")
+    border_col = colors.get("border", "#2a2f37" if dark_mode else "#d0d0d0")
+
     # Convert to rgba with 40% transparency (60% opacity) for transparent elements
     primary_rgba = hex_to_rgba(primary, 0.6)
     secondary_rgba = hex_to_rgba(secondary, 0.6)
@@ -2255,11 +2349,52 @@ QTabBar::tab:selected {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {secondary}, stop:1 {primary});
 }}
 QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
-    background-color: #f5f5f5;
-    color: #262730;
-    border: 1px solid #d0d0d0;
+    background-color: {input_bg};
+    color: {text_col};
+    border: 1px solid {border_col};
     border-radius: 4px;
     padding: 4px;
+}}
+QGroupBox {{
+    background-color: {panel};
+    color: {text_col};
+    border: 1px solid {border_col};
+    border-radius: 8px;
+    margin-top: 14px;
+    padding-top: 8px;
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+    color: {text_col};
+}}
+QListWidget, QListView, QTreeWidget, QTreeView, QTableView {{
+    background-color: {input_bg};
+    color: {text_col};
+    border: 1px solid {border_col};
+    selection-background-color: {primary_rgba};
+    selection-color: {text_col};
+}}
+QHeaderView::section {{
+    background-color: {panel};
+    color: {muted_col};
+    border: none;
+    border-right: 1px solid {border_col};
+    padding: 6px;
+    font-weight: 600;
+}}
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QCheckBox, QRadioButton {{
+    color: {text_col};
+    background: transparent;
+}}
+QStatusBar {{
+    background-color: {panel};
+    color: {muted_col};
 }}
 /* Training dashboard buttons */
 QPushButton#train_start, QPushButton#train_stop {{
@@ -14266,14 +14401,61 @@ class MainWindow(QMainWindow):
         self.train_history_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.train_history_table.setAlternatingRowColors(True)
         # Wrap long adapter / base names instead of clipping them when the
-        # column is narrow. Qt's default elide ("Foo_long…") hides info;
-        # WrapAnywhere + word-wrap + ResizeToContents on rows lets the
-        # row grow vertically so the full name stays visible.
+        # column is narrow. Qt's default setWordWrap(True) only breaks at
+        # whitespace — long HuggingFace IDs like
+        # ``meta-llama/Meta-Llama-3.1-8B-Instruct`` have no spaces, so
+        # they still got cut. The WrapAnywhere delegate below paints +
+        # measures with ``Qt.TextWrapAnywhere`` so words break on any
+        # character; combined with ResizeToContents on rows the row
+        # grows vertically to fit the wrapped name.
         self.train_history_table.setWordWrap(True)
         self.train_history_table.setTextElideMode(Qt.ElideNone)
         self.train_history_table.verticalHeader().setSectionResizeMode(
             QHeaderView.ResizeToContents
         )
+
+        from PySide6.QtWidgets import QStyledItemDelegate, QStyle
+        from PySide6.QtGui import QTextOption
+        from PySide6.QtCore import QSize as _QSize
+
+        class _WrapAnywhereDelegate(QStyledItemDelegate):
+            def paint(self, painter, option, index):
+                self.initStyleOption(option, index)
+                widget = option.widget
+                style = widget.style() if widget is not None else painter.device().style()
+                option.text = ""
+                style.drawControl(QStyle.CE_ItemViewItem, option, painter, widget)
+
+                text = index.data() or ""
+                if not text:
+                    return
+                rect = option.rect.adjusted(6, 4, -6, -4)
+                opt = QTextOption()
+                opt.setWrapMode(QTextOption.WrapAnywhere)
+                opt.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                painter.save()
+                painter.setPen(option.palette.color(option.palette.Text))
+                painter.drawText(rect, str(text), opt)
+                painter.restore()
+
+            def sizeHint(self, option, index):
+                self.initStyleOption(option, index)
+                text = str(index.data() or "")
+                col_width = option.rect.width() if option.rect.width() > 0 else 160
+                metrics = option.fontMetrics
+                bounding = metrics.boundingRect(
+                    0, 0, max(40, col_width - 12), 10000,
+                    int(Qt.TextWordWrap | Qt.TextWrapAnywhere),
+                    text,
+                )
+                return _QSize(bounding.width() + 12, bounding.height() + 8)
+
+        self._train_history_wrap_delegate = _WrapAnywhereDelegate(self.train_history_table)
+        # Apply to the two name columns only — short numeric / status
+        # fields don't need wrapping and would just inflate row height.
+        self.train_history_table.setItemDelegateForColumn(1, self._train_history_wrap_delegate)
+        self.train_history_table.setItemDelegateForColumn(2, self._train_history_wrap_delegate)
+
         h = self.train_history_table.horizontalHeader()
         h.setStretchLastSection(False)
         h.setSectionResizeMode(QHeaderView.Interactive)

@@ -23,6 +23,7 @@ and the UI integration land in later slices.
 from __future__ import annotations
 
 from core.fleet.broker import Broker, PoolConfig, PoolExhausted
+from core.fleet.container_runtime import ContainerRuntime, container_name_for
 from core.fleet.manifest import (
     GPU_MODE_RO,
     GPU_MODE_RW,
@@ -47,6 +48,7 @@ __all__ = [
     "Broker",
     "Claim",
     "ClaimConflict",
+    "ContainerRuntime",
     "GPU_MODE_RO",
     "GPU_MODE_RW",
     "Manifest",
@@ -59,6 +61,7 @@ __all__ = [
     "STATUS_ACTIVE",
     "STATUS_RELEASED",
     "WorktreeRuntime",
+    "container_name_for",
     "default_runtime",
     "set_default_runtime",
 ]

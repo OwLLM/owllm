@@ -49,6 +49,11 @@ class ProcessHandle:
     successful ``stop`` or after polling detects exit). The
     :class:`subprocess.Popen` and log file handle are private — only
     the runtime that created them should touch those.
+
+    ``metadata`` is a free-form dict runtimes use to stash backend-
+    specific state. ``WorktreeRuntime`` doesn't write here;
+    ``ContainerRuntime`` stores ``container_name`` so ``stop`` can
+    issue ``docker stop`` against the right container.
     """
 
     agent_id: str
@@ -57,6 +62,7 @@ class ProcessHandle:
     log_path: Path
     started_at: str = field(default_factory=_utcnow_iso)
     exited_at: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
     _popen: Any = None  # subprocess.Popen — private to the runtime
     _log_handle: Optional[IO] = None  # file handle, closed on stop
 
@@ -119,6 +125,7 @@ class ProcessHandle:
             "exited_at": self.exited_at,
             "is_running": self.is_running(),
             "returncode": self.returncode(),
+            "metadata": dict(self.metadata),
         }
 
 
@@ -236,6 +243,7 @@ class ProcessRegistry:
             "argv": list(handle.argv),
             "log_path": str(handle.log_path),
             "started_at": handle.started_at,
+            "metadata": dict(handle.metadata),
         }
         try:
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
@@ -263,6 +271,7 @@ class ProcessRegistry:
                 argv=tuple(str(x) for x in data.get("argv", []) or []),
                 log_path=Path(str(data.get("log_path", ""))),
                 started_at=str(data.get("started_at", "")),
+                metadata=dict(data.get("metadata") or {}),
             )
         except (KeyError, ValueError, TypeError) as e:
             logger.warning(

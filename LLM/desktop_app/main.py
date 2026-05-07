@@ -4424,6 +4424,34 @@ class MainWindow(QMainWindow):
         """Get appropriate text color based on theme"""
         return "#262730" if not self.dark_mode else "white"
 
+    @staticmethod
+    def _wrap_for_label(text: str, max_chars: int = 32) -> str:
+        """Force explicit line breaks on separator chars when chunks
+        would otherwise exceed ``max_chars``.
+
+        QLabel.setWordWrap does not reliably break on zero-width
+        spaces when the text is rendered as plain text — long
+        identifiers like
+        ``DavidAU__gemma-4-E4B-it-The-DECKARD-Expresso-Universe-HERETIC-UNCENSORED``
+        render as a single overflowing line and push the column
+        sideways. This helper inserts real ``\\n`` characters after
+        ``/``, ``\\``, ``_``, ``-``, ``.`` whenever the running chunk
+        is already at or above the per-line budget, so the QLabel
+        word-wrap engine has unambiguous break points.
+        """
+        if not text:
+            return ""
+        out = []
+        current = ""
+        for ch in text:
+            current += ch
+            if ch in "/\\_-." and len(current) >= max_chars:
+                out.append(current)
+                current = ""
+        if current:
+            out.append(current)
+        return "\n".join(out)
+
     def _ensure_onboarding_aliases_for_downloaded_models(self) -> None:
         """
         Make sure onboarding entries are keyed by HF model_id (folder name `org__repo` -> `org/repo`).
@@ -14018,10 +14046,11 @@ class MainWindow(QMainWindow):
                     mirror.setVisible(False)
                     mirror.setText("")
                     return
-                wrapped = text
-                for _ch in ("\\", "/", "_", "-", "."):
-                    wrapped = wrapped.replace(_ch, _ch + "​")
-                mirror.setText(wrapped)
+                # ZWSP injection silently failed inside QLabel — switch
+                # to hard ``\n`` breaks via _wrap_for_label so the
+                # mirror reliably wraps to multiple lines instead of
+                # rendering one overflowing line.
+                mirror.setText(MainWindow._wrap_for_label(text))
                 mirror.setToolTip(text)
                 mirror.setVisible(True)
 
@@ -14996,15 +15025,13 @@ class MainWindow(QMainWindow):
         if model_id:
             capabilities = detect_model_capabilities(model_id=model_id)
             icons = get_capability_icons(capabilities)
-            # Inject zero-width spaces after every separator so the
-            # QLabel actually wraps long unbroken model IDs (e.g.
-            # ``DavidAU__gemma-4-E4B-it-The-DECKARD-Expresso-Universe-…``)
-            # in the narrow Train column.
-            wrapped_id = model_id
-            for _ch in ("/", "_", "-", "."):
-                wrapped_id = wrapped_id.replace(_ch, _ch + "​")
+            # Force explicit ``\n`` breaks on separator chars — the
+            # previous ZWSP-based wrap was silently dropped by QLabel
+            # in plain-text mode and the line just overflowed the
+            # column.
+            wrapped_id = self._wrap_for_label(model_id)
             self.model_info_label.setText(
-                f"Selected: {wrapped_id}\n{icons} Capabilities detected"
+                f"Selected:\n{wrapped_id}\n{icons} Capabilities detected"
             )
             self.model_info_label.setToolTip(model_id)
             try:
@@ -15012,6 +15039,7 @@ class MainWindow(QMainWindow):
                     QSizePolicy.Ignored, QSizePolicy.Preferred
                 )
                 self.model_info_label.setMinimumWidth(0)
+                self.model_info_label.setWordWrap(True)
             except Exception:
                 pass
     
@@ -15726,16 +15754,13 @@ class MainWindow(QMainWindow):
         """Set the training-output directory.
 
         Stores the canonical path on ``self.train_out_dir_path`` and
-        updates the wrap-friendly QLabel with zero-width-space-injected
-        text so long Windows paths wrap inside the narrow Train column
-        without ever clipping or being interpreted as a single
-        unbreakable token.
+        updates the wrap-friendly QLabel with hard-newline-injected
+        text so long Windows paths render across multiple lines inside
+        the narrow Train column. (ZWSPs were ignored by QLabel and
+        the path just overflowed the column edge.)
         """
         self.train_out_dir_path = str(path or "")
-        wrapped = self.train_out_dir_path
-        for _ch in ("\\", "/", "_", "-", "."):
-            wrapped = wrapped.replace(_ch, _ch + "​")
-        self.train_out_dir.setText(wrapped)
+        self.train_out_dir.setText(self._wrap_for_label(self.train_out_dir_path))
         self.train_out_dir.setToolTip(self.train_out_dir_path)
 
     def _start_training(self) -> None:

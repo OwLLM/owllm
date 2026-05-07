@@ -2699,7 +2699,13 @@ class _WrapLineEdit(QPlainTextEdit):
         )
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # ``Ignored`` width policy + ``minimumWidth(0)`` strip every
+        # content-based minimum so the field follows the column when
+        # the user shrinks it. Long content then re-wraps onto more
+        # lines (the field's auto-grow height handles that) instead
+        # of forcing the column to stay wide.
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        self.setMinimumWidth(0)
         self.setTabChangesFocus(True)
         # ContentsChanged fires on every text edit; resizeEvent is
         # overridden below to also catch column-width changes.
@@ -14169,18 +14175,21 @@ class MainWindow(QMainWindow):
         
         self.train_base_model = QComboBox()
         self.train_base_model.setEditable(True)
-        # Without these explicit policies the combo defaults to
-        # AdjustToContentsOnFirstShow + a Preferred width: it sizes
-        # itself to the longest item once and never grows, so the
-        # "Select Base Model" container looked stuck at a narrow width
-        # while the other rows (Model Name, Epochs, …) stretched to
-        # fill. Make the combo behave like the other inputs.
+        # Combo must be free to shrink below the longest item's width —
+        # otherwise it forces the whole left column to stay as wide as
+        # the widest model id and the column refuses to follow the
+        # splitter when the user drags it narrow. ``Ignored`` width
+        # policy + ``minimumWidth(0)`` + ``minimumContentsLength(0)``
+        # together strip every content-based minimum so the combo
+        # tracks whatever width the column actually has.
         self.train_base_model.setSizeAdjustPolicy(
             QComboBox.AdjustToMinimumContentsLengthWithIcon
         )
+        self.train_base_model.setMinimumContentsLength(0)
         self.train_base_model.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Fixed
+            QSizePolicy.Ignored, QSizePolicy.Fixed
         )
+        self.train_base_model.setMinimumWidth(0)
         self.train_base_model.setMinimumHeight(32)
         self.train_base_model.addItems(DEFAULT_BASE_MODELS)
         self.train_base_model.currentTextChanged.connect(self._on_model_selected_for_training)
@@ -14645,7 +14654,11 @@ class MainWindow(QMainWindow):
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         left_scroll.setFrameShape(QFrame.NoFrame)
         left_scroll.setWidget(left_widget)
-        left_scroll.setMinimumWidth(360)
+        # Lowered 360→200 so the splitter can actually drag the
+        # column narrow. The fields inside (QComboBox, _WrapLineEdit)
+        # now have Ignored width policies so they re-wrap rather
+        # than fight the shrink.
+        left_scroll.setMinimumWidth(200)
 
         # Centre column wraps the existing dashboard / dataset viewer
         # stack in a scroll area so it shrinks gracefully when the

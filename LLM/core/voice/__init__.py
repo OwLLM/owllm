@@ -28,6 +28,10 @@ from .piper_backend import (
     list_installed_piper_voice_files,
     piper_voices_dir,
 )
+from .edge_backend import (
+    DEFAULT_VOICE_ID as DEFAULT_EDGE_VOICE_ID,
+    is_edge_tts_importable,
+)
 
 __all__ = [
     "TtsBackend",
@@ -44,4 +48,6 @@ __all__ = [
     "is_piper_importable",
     "list_installed_piper_voice_files",
     "piper_voices_dir",
+    "DEFAULT_EDGE_VOICE_ID",
+    "is_edge_tts_importable",
 ]

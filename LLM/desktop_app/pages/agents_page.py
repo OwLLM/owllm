@@ -186,6 +186,7 @@ class _AgentVoiceRow(QWidget):
         on_install_voice,
         on_open_voice_manager=None,
         on_changed=None,
+        on_broadcast=None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -193,6 +194,7 @@ class _AgentVoiceRow(QWidget):
         self._on_install_voice = on_install_voice
         self._on_open_voice_manager = on_open_voice_manager
         self._on_changed_external = on_changed
+        self._on_broadcast = on_broadcast
         self._loading = False  # guards setter callbacks during populate
 
         layout = QHBoxLayout(self)
@@ -246,6 +248,26 @@ class _AgentVoiceRow(QWidget):
         )
         self.preview_btn.clicked.connect(self._on_preview)
         layout.addWidget(self.preview_btn)
+
+        # ➤ broadcast button — copies this row's current voice to every
+        # other agent's definition in one click. Solves the "I picked
+        # Ryan but the next reply was Amy" confusion: the user thought
+        # they configured the team voice when they actually only set
+        # the orchestrator's, and other agents were still on Auto.
+        self.broadcast_btn = QPushButton("➤")
+        self.broadcast_btn.setFixedSize(28, 28)
+        self.broadcast_btn.setToolTip(
+            "Apply this voice (and rate / mute) to every agent on the team"
+        )
+        self.broadcast_btn.setStyleSheet(
+            "QPushButton { background:rgba(255,255,255,0.06); color:#dadcdf; "
+            "border:none; border-radius:6px; font-size:14px; } "
+            "QPushButton:hover { background:rgba(255,255,255,0.12); } "
+            "QPushButton:disabled { color:#555; }"
+        )
+        self.broadcast_btn.clicked.connect(self._on_broadcast_clicked)
+        self.broadcast_btn.setEnabled(self._on_broadcast is not None)
+        layout.addWidget(self.broadcast_btn)
 
         # Tiny "+" button — opens the Piper voice manager so the user can
         # download more voices straight from the row, instead of hunting
@@ -364,6 +386,17 @@ class _AgentVoiceRow(QWidget):
     # ------------------------------------------------------------------
     # Preview
     # ------------------------------------------------------------------
+
+    def _on_broadcast_clicked(self) -> None:
+        if self._on_broadcast is None:
+            return
+        voice_id = str(self.combo.currentData() or "")
+        rate = int(self.rate_spin.value())
+        enabled = self.enabled_cb.isChecked()
+        try:
+            self._on_broadcast(voice_id, rate, enabled, self._agent_name)
+        except Exception:
+            logger.exception("voice broadcast handler crashed")
 
     def _on_open_manager(self) -> None:
         if self._on_open_voice_manager is None:
@@ -1501,6 +1534,76 @@ class AgentsPage(QWidget):
         # Icon flip is the visual cue: speaker-with-waves on, muted on off.
         self.voice_btn.setText("🔊" if enabled else "🔈")
 
+    def _broadcast_voice_to_team(
+        self, voice_id: str, rate: int, enabled: bool, source_agent: str
+    ) -> None:
+        """Copy ``source_agent``'s voice config onto every other agent in
+        the team. Skips built-ins (Studio enforces "duplicate first" for
+        edits — silently skipping them keeps the broadcast UX consistent
+        with everywhere else in OWLLM).
+
+        Each row's combo / spinbox is updated in-place under the
+        ``_loading`` guard so the persistence callback doesn't fire for
+        rows we just touched programmatically.
+        """
+        if QMessageBox.question(
+            self,
+            "Apply voice to team",
+            "Apply this voice setting to all custom agents on the team?\n"
+            "(Built-in agents stay unchanged — duplicate them in Studio "
+            "to override.)",
+        ) != QMessageBox.Yes:
+            return
+
+        from core.agents.agent_definitions import get_definition, save_custom
+
+        applied: list = []
+        skipped: list = []
+        for name in list(self._voice_rows.keys()):
+            if name == source_agent:
+                continue
+            try:
+                d = get_definition(name)
+            except Exception:  # noqa: BLE001
+                continue
+            if d is None or d.built_in:
+                skipped.append(name)
+                continue
+            try:
+                d.voice_id = voice_id
+                d.voice_rate = int(rate or 0)
+                d.voice_enabled = bool(enabled)
+                save_custom(d)
+                applied.append(name)
+            except Exception:  # noqa: BLE001
+                logger.exception("could not apply voice to %s", name)
+                continue
+            # Sync the live row widgets to the new state.
+            row = self._voice_rows.get(name)
+            if row is not None:
+                row._loading = True  # type: ignore[attr-defined]
+                try:
+                    row.enabled_cb.setChecked(bool(enabled))
+                    row.rate_spin.setValue(int(rate or 0))
+                    idx = 0
+                    for i in range(row.combo.count()):
+                        if row.combo.itemData(i) == voice_id:
+                            idx = i
+                            break
+                    row.combo.setCurrentIndex(idx)
+                finally:
+                    row._loading = False  # type: ignore[attr-defined]
+            # Push the new label onto the canvas node + info card.
+            try:
+                self._update_canvas_voice_label(name)
+            except Exception:
+                pass
+
+        msg = f"Applied to {len(applied)} agent(s)."
+        if skipped:
+            msg += f"\nSkipped built-ins: {', '.join(skipped)}."
+        QMessageBox.information(self, "Apply voice to team", msg)
+
     def _build_voice_rows(self, team_defs: list) -> None:
         """One :class:`_AgentVoiceRow` per agent, parented under
         ``voice_host`` and hidden by default. The selection handler shows
@@ -1511,6 +1614,7 @@ class AgentsPage(QWidget):
                 on_install_voice=self._install_voice_engine,
                 on_open_voice_manager=self._open_piper_voice_manager,
                 on_changed=self._update_canvas_voice_label,
+                on_broadcast=self._broadcast_voice_to_team,
                 parent=self.voice_host,
             )
             row.setVisible(False)
@@ -1585,11 +1689,25 @@ class AgentsPage(QWidget):
         engine_act.setEnabled(False)
         menu.addSeparator()
 
-        from core.voice import is_piper_importable, list_installed_piper_voice_files
+        from core.voice import (
+            is_edge_tts_importable,
+            is_piper_importable,
+            list_installed_piper_voice_files,
+        )
+
+        # Edge-TTS — top-tier quality (Microsoft Azure neural voices).
+        # Only entry point is install; once installed it's auto-preferred
+        # by the service factory and the per-agent voice combos light
+        # up with the full list (~80 voices) on the next refresh.
+        if not is_edge_tts_importable():
+            ed = menu.addAction("⭐ Install premium voices (Edge-TTS, online)")
+            ed.triggered.connect(self._install_edge_tts)
+
+        # Piper — local neural voices.
         piper_pkg = is_piper_importable()
         piper_voices = list_installed_piper_voice_files()
         if not piper_pkg or not piper_voices:
-            up = menu.addAction("✨ Install natural voices (Piper)")
+            up = menu.addAction("✨ Install natural voices (Piper, offline)")
             up.triggered.connect(self._upgrade_to_piper)
         else:
             mgr = menu.addAction("Manage Piper voices…")
@@ -1715,6 +1833,77 @@ class AgentsPage(QWidget):
         worker.start()
         # Keep a reference so the worker isn't GC'd mid-run.
         self._piper_install_worker = worker
+
+    def _install_edge_tts(self) -> None:
+        """One-click install of the ``edge-tts`` package. No model
+        download — Edge synthesizes server-side, so installing the
+        client is the entire setup. Runs on a worker thread; the engine
+        flips to Edge automatically once the package is importable."""
+        msg = (
+            "Install the Edge-TTS client?\n\n"
+            "  • pip install edge-tts (~150 KB)\n"
+            "  • ~80 Microsoft Azure neural voices (Aria, Jenny, "
+            "Andrew, Guy, Ryan, etc.) across 50+ languages\n"
+            "  • Quality is significantly better than Piper / SAPI\n"
+            "  • Internet required at speak time (no API key)\n"
+        )
+        if QMessageBox.question(self, "Install Edge voices", msg) != QMessageBox.Yes:
+            return
+
+        progress = QProgressDialog("Installing edge-tts…", "Cancel", 0, 0, self)
+        progress.setWindowTitle("Installing Edge-TTS")
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setCancelButton(None)
+        progress.show()
+
+        from PySide6.QtCore import QThread, Signal as _Signal
+
+        class _Worker(QThread):
+            log = _Signal(str)
+            done = _Signal(str)
+
+            def run(self_w) -> None:  # noqa: N805
+                import subprocess, sys
+                self_w.log.emit("pip install edge-tts…")
+                creationflags = 0x08000000 if sys.platform == "win32" else 0
+                try:
+                    proc = subprocess.run(
+                        [sys.executable, "-m", "pip", "install",
+                         "edge-tts>=6.1.0,<8.0.0"],
+                        capture_output=True, text=True, check=False,
+                        creationflags=creationflags, timeout=300,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self_w.done.emit(str(exc))
+                    return
+                if proc.returncode != 0:
+                    self_w.done.emit(
+                        f"pip install failed (exit {proc.returncode}):\n"
+                        f"{(proc.stderr or '').strip()[:600]}"
+                    )
+                    return
+                self_w.done.emit("")
+
+        worker = _Worker(self)
+        worker.log.connect(progress.setLabelText)
+
+        def _finish(err: str) -> None:
+            progress.close()
+            if err:
+                QMessageBox.warning(self, "Install Edge-TTS", err)
+                return
+            self._restart_voice_engine()
+            QMessageBox.information(
+                self, "Edge-TTS ready",
+                "Edge voices installed. The agent voice picker now lists "
+                "~80 premium voices. Use the ➤ button on a voice row to "
+                "broadcast a single voice to all agents.",
+            )
+
+        worker.done.connect(_finish)
+        worker.start()
+        self._edge_install_worker = worker
 
     def _open_piper_voice_manager(self) -> None:
         """Modal dialog listing the curated Piper catalog with download /

@@ -2669,6 +2669,79 @@ class ModelDetailsWorker(QObject):
                 time.sleep(wait_time)
 
 
+class _WrapLineEdit(QPlainTextEdit):
+    """Drop-in replacement for QLineEdit that wraps long content
+    onto additional lines instead of truncating at the right edge.
+
+    The Train tab's first column is narrow; long run names and
+    dataset paths kept getting clipped inside a normal QLineEdit
+    even when a wrap-mirror QLabel showed the full text below.
+    This widget renders the full string inline by auto-growing its
+    height as content wraps, so the input field itself shows the
+    same multi-line text you'd otherwise need a separate label for.
+
+    Public API mirrors QLineEdit:
+      - :meth:`text` / :meth:`setText`
+      - :meth:`setPlaceholderText`
+      - inherited :attr:`textChanged` signal (no-arg, fires on edit)
+      - :meth:`clear`
+
+    Pressing Enter blurs the field instead of inserting a newline,
+    matching QLineEdit's commit-on-Enter behaviour.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        from PySide6.QtGui import QTextOption
+        self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.setWordWrapMode(
+            QTextOption.WrapAtWordBoundaryOrAnywhere
+        )
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setTabChangesFocus(True)
+        self.document().contentsChanged.connect(self._adjust_height)
+        self._adjust_height()
+
+    def text(self) -> str:
+        return self.toPlainText()
+
+    def setText(self, text) -> None:
+        text = text or ""
+        if text != self.toPlainText():
+            self.setPlainText(text)
+            cursor = self.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            self.setTextCursor(cursor)
+
+    def clear(self) -> None:  # noqa: D401 — match QLineEdit
+        self.setPlainText("")
+
+    def _adjust_height(self) -> None:
+        # Use the document's laid-out size so the height tracks the
+        # actual wrapped line count, not just the character count.
+        doc_h = self.document().size().height()
+        line_h = self.fontMetrics().lineSpacing()
+        # Always at least one line tall.
+        content_h = max(line_h, int(doc_h))
+        # Padding to roughly match the QLineEdit visual height.
+        self.setFixedHeight(int(content_h + 12))
+
+    def keyPressEvent(self, event):  # noqa: N802 — Qt API
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+            # Single-line UX: Enter blurs instead of inserting \n.
+            self.clearFocus()
+            return
+        super().keyPressEvent(event)
+
+    def resizeEvent(self, event):  # noqa: N802
+        super().resizeEvent(event)
+        # Document layout depends on widget width — height needs to
+        # be recomputed when the column is resized.
+        self._adjust_height()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, splash: SplashScreen = None) -> None:
         super().__init__()
@@ -13962,7 +14035,9 @@ class MainWindow(QMainWindow):
                 font-weight: 800;
                 letter-spacing: 0.4px;
             }
-            QFrame.cfgCard QLineEdit, QFrame.cfgCard QComboBox {
+            QFrame.cfgCard QLineEdit,
+            QFrame.cfgCard QComboBox,
+            QFrame.cfgCard QPlainTextEdit {
                 background: rgba(10, 14, 24, 0.85);
                 border: 1px solid rgba(102, 126, 234, 0.22);
                 border-radius: 6px;
@@ -13971,7 +14046,9 @@ class MainWindow(QMainWindow):
                 font-size: 11pt;
                 min-height: 28px;
             }
-            QFrame.cfgCard QLineEdit:focus, QFrame.cfgCard QComboBox:focus {
+            QFrame.cfgCard QLineEdit:focus,
+            QFrame.cfgCard QComboBox:focus,
+            QFrame.cfgCard QPlainTextEdit:focus {
                 border: 1px solid #667eea;
             }
             QFrame.cfgCard QSpinBox, QFrame.cfgCard QDoubleSpinBox {
@@ -14094,27 +14171,24 @@ class MainWindow(QMainWindow):
         name_lbl = QLabel("Run name")
         name_lbl.setStyleSheet("color: #8595ad; font-size: 10pt;")
         name_row.addWidget(name_lbl)
-        self.train_model_name = QLineEdit()
+        # Multi-line wrapping editor (auto-grows vertically) so a long
+        # run name renders on multiple lines inside the input itself
+        # instead of getting clipped at the column edge.
+        self.train_model_name = _WrapLineEdit()
         self.train_model_name.setPlaceholderText("auto-generated")
         name_row.addWidget(self.train_model_name, 1)
         model_layout.addLayout(name_row)
-        # Wrap-friendly mirror — shows the full Run name across as
-        # many lines as needed when the column is narrow. QLineEdit
-        # can't wrap, so we mirror its value on a wrapping QLabel.
-        self.train_model_name_wrap = _make_wrap_mirror(self.train_model_name)
-        model_layout.addWidget(self.train_model_name_wrap)
 
         # ── Card 2: Dataset ──────────────────────────────────────────
         dataset_frame, dataset_layout = _make_card("📊  DATASET")
-        self.train_data_path = QLineEdit()
+        # Multi-line wrapping editor (auto-grows vertically) so long
+        # Windows .jsonl paths render across multiple lines inside the
+        # field itself instead of being truncated.
+        self.train_data_path = _WrapLineEdit()
         self.train_data_path.setPlaceholderText("Drag a .jsonl here, or browse...")
         self.train_data_path.textChanged.connect(self._validate_dataset)
         self.train_data_path.textChanged.connect(self._auto_generate_model_name)
         dataset_layout.addWidget(self.train_data_path)
-        # Wrap-friendly mirror so the dataset path shows in full even
-        # when the .jsonl path is too long for the narrow column.
-        self.train_data_path_wrap = _make_wrap_mirror(self.train_data_path)
-        dataset_layout.addWidget(self.train_data_path_wrap)
 
         dataset_btn_row = QHBoxLayout()
         dataset_btn_row.setSpacing(6)

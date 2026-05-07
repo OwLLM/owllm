@@ -164,3 +164,88 @@ def test_store_get_unknown_raises(tmp_path: Path) -> None:
     store = ProfileStore(custom_dir=tmp_path / "profiles")
     with pytest.raises(KeyError):
         store.get("ghost")
+
+
+# ---------------------------------------------------------------------------
+# ProfileStore — mutations (save / delete)
+# ---------------------------------------------------------------------------
+
+
+def test_save_writes_json_and_lists(tmp_path: Path) -> None:
+    custom_dir = tmp_path / "profiles"
+    store = ProfileStore(custom_dir=custom_dir)
+    saved = store.save(Profile(
+        name="my-team-lead",
+        description="owns the platform layer",
+        icon="👑",
+        owns_modules=("src/platform/**",),
+        default_reason="platform stewardship",
+        ttl_seconds=14400,
+    ))
+    # Saved instance always reports built_in=False.
+    assert saved.built_in is False
+
+    # File exists with sanitised name.
+    files = list(custom_dir.glob("*.json"))
+    assert len(files) == 1
+    data = json.loads(files[0].read_text(encoding="utf-8"))
+    assert data["name"] == "my-team-lead"
+    assert data["owns_modules"] == ["src/platform/**"]
+
+    # Round-trips through list_all.
+    names = [p.name for p in store.list_all()]
+    assert "my-team-lead" in names
+
+
+def test_save_refuses_builtin_name(tmp_path: Path) -> None:
+    store = ProfileStore(custom_dir=tmp_path / "profiles")
+    with pytest.raises(ValueError, match="built-in"):
+        store.save(Profile(name="test-writer", description="overrides built-in"))
+
+
+def test_save_refuses_empty_name(tmp_path: Path) -> None:
+    store = ProfileStore(custom_dir=tmp_path / "profiles")
+    with pytest.raises(ValueError, match="required"):
+        store.save(Profile(name="   ", description="x"))
+
+
+def test_save_strips_built_in_flag_even_if_set(tmp_path: Path) -> None:
+    store = ProfileStore(custom_dir=tmp_path / "profiles")
+    saved = store.save(Profile(
+        name="custom-x",
+        description="claims to be built-in but isn't",
+        built_in=True,  # should be stripped
+    ))
+    assert saved.built_in is False
+    # The on-disk JSON also says built_in=false.
+    path = next((tmp_path / "profiles").glob("*.json"))
+    assert json.loads(path.read_text(encoding="utf-8"))["built_in"] is False
+
+
+def test_delete_removes_custom_profile(tmp_path: Path) -> None:
+    store = ProfileStore(custom_dir=tmp_path / "profiles")
+    store.save(Profile(name="kill-me", description=""))
+    assert "kill-me" in [p.name for p in store.list_all()]
+    assert store.delete("kill-me") is True
+    assert "kill-me" not in [p.name for p in store.list_all()]
+
+
+def test_delete_refuses_builtin(tmp_path: Path) -> None:
+    store = ProfileStore(custom_dir=tmp_path / "profiles")
+    assert store.delete("test-writer") is False
+    # Built-in still listed.
+    assert "test-writer" in [p.name for p in store.list_all()]
+
+
+def test_delete_unknown_returns_false(tmp_path: Path) -> None:
+    store = ProfileStore(custom_dir=tmp_path / "profiles")
+    assert store.delete("never-existed") is False
+
+
+def test_save_with_unsafe_name_sanitised_on_disk(tmp_path: Path) -> None:
+    store = ProfileStore(custom_dir=tmp_path / "profiles")
+    store.save(Profile(name="weird/name with spaces", description="x"))
+    files = list((tmp_path / "profiles").glob("*.json"))
+    assert len(files) == 1
+    assert "/" not in files[0].name
+    assert " " not in files[0].name

@@ -175,8 +175,55 @@ class ProfileStore:
         raise KeyError(name)
 
     # ------------------------------------------------------------------
+    # Mutations (custom profiles only — built-ins are immutable code)
+    # ------------------------------------------------------------------
+
+    def save(self, profile: Profile) -> Profile:
+        """Write a custom profile to disk.
+
+        Returns the profile that was actually persisted — always with
+        ``built_in=False`` because anything reaching disk is by
+        definition not a built-in. Raises :class:`ValueError` on a
+        profile with a name that collides with a built-in or whose
+        name is empty / unsanitisable.
+        """
+        if not profile.name.strip():
+            raise ValueError("profile name is required")
+        if any(p.name == profile.name for p in BUILTIN_PROFILES):
+            raise ValueError(
+                f"'{profile.name}' is the name of a built-in profile; "
+                "pick a different name to override safely"
+            )
+        on_disk = replace(profile, built_in=False)
+        self._custom_dir.mkdir(parents=True, exist_ok=True)
+        path = self._path_for(on_disk.name)
+        path.write_text(
+            json.dumps(on_disk.to_dict(), indent=2),
+            encoding="utf-8",
+        )
+        return on_disk
+
+    def delete(self, name: str) -> bool:
+        """Remove a custom profile. Built-ins can't be deleted —
+        returns False without touching anything."""
+        if any(p.name == name for p in BUILTIN_PROFILES):
+            return False
+        path = self._path_for(name)
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _path_for(self, name: str) -> Path:
+        safe = "".join(
+            c if (c.isalnum() or c in "-_") else "_" for c in name
+        )
+        return self._custom_dir / f"{safe}.json"
 
     def _load_custom(self) -> Iterable[Profile]:
         if not self._custom_dir.exists():

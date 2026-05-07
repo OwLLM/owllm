@@ -1661,6 +1661,15 @@ class AgentsPage(QWidget):
         # here was redundant noise.
         outer.addWidget(self._build_project_strip())
 
+        # User card — persistent presence indicator. Idle gray border;
+        # blinks amber/cyan when the team requests user input (an
+        # approval, a NEEDS_INPUT-style event). Optionally fires an
+        # external Telegram/etc. notification — see notify_settings.
+        from desktop_app.widgets.user_card import UserCard
+        self._user_card = UserCard(self)
+        self._user_card.settings_clicked.connect(self._open_notify_settings)
+        outer.addWidget(self._user_card)
+
         # Goal row + (initially-hidden) attachment chip strip beneath it.
         outer.addLayout(self._build_goal_row())
         outer.addWidget(self._build_attachment_strip())
@@ -4810,6 +4819,19 @@ class AgentsPage(QWidget):
         self._approval_cards[req.id] = card
         self._approvals_layout.addWidget(card)
         self.approvals_frame.setVisible(True)
+        # Light up the User card so the user sees something to act on
+        # even if the approvals frame is below the fold, and ping the
+        # configured external channel (Telegram, …) if one is set.
+        body = f"{req.agent} wants to run {req.tool_name}"
+        try:
+            self._user_card.set_attention(True, body)
+        except Exception:
+            logger.exception("could not set User-card attention")
+        try:
+            from core.notify import notify_async
+            notify_async("OWLLM — input needed", body)
+        except Exception:
+            logger.exception("notify_async raised unexpectedly")
 
     def _resolve_approval(self, request: ApprovalRequest, decision: ApprovalDecision) -> None:
         self._registry.gate.resolve(request.id, decision)
@@ -4819,6 +4841,21 @@ class AgentsPage(QWidget):
             card.deleteLater()
         if not self._approval_cards:
             self.approvals_frame.setVisible(False)
+            try:
+                self._user_card.set_attention(False)
+            except Exception:
+                logger.exception("could not clear User-card attention")
+
+    def _open_notify_settings(self) -> None:
+        """Open the notify-settings dialog (Telegram bot token, chat id)."""
+        try:
+            from desktop_app.widgets.notify_settings_dialog import (
+                NotifySettingsDialog,
+            )
+            dlg = NotifySettingsDialog(self)
+            dlg.show()
+        except Exception:
+            logger.exception("could not open notify settings")
 
 
 # ---------------------------------------------------------------------------

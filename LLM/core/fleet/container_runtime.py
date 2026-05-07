@@ -31,6 +31,7 @@ change.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -74,6 +75,20 @@ class Mount:
     def to_docker_v(self) -> str:
         """Render as the value of a ``-v host:container:mode`` flag."""
         return f"{self.host_path}:{self.container_path}:{self.mode}"
+
+
+def default_user_id() -> Optional[str]:
+    """Return ``"<uid>:<gid>"`` on POSIX, ``None`` on Windows.
+
+    Used as the default for ContainerRuntime's ``--user`` flag so
+    files the agent creates inside the container land on the host
+    owned by the calling user instead of root. On Windows / Docker
+    Desktop the user-namespace translation handles this for you, so
+    the flag is omitted.
+    """
+    if hasattr(os, "getuid") and hasattr(os, "getgid"):
+        return f"{os.getuid()}:{os.getgid()}"
+    return None
 
 
 def default_auth_mounts() -> List[Mount]:
@@ -120,6 +135,7 @@ class ContainerRuntime(Runtime):
         network: Optional[str] = None,
         gpu_runtime: Optional[str] = None,
         enforce_module_mounts: bool = False,
+        user: Optional[str] = None,
     ):
         """Configure the container runtime.
 
@@ -142,6 +158,12 @@ class ContainerRuntime(Runtime):
                              physically cannot write outside its declared
                              modules. When False (default), the whole
                              workspace is rw — owns/reads stay advisory.
+        :param user:         Value passed to ``--user`` (``"uid:gid"``).
+                             ``None`` means root inside the container.
+                             On POSIX, pass :func:`default_user_id` to
+                             keep host file ownership sane; on Windows
+                             / Docker Desktop the translation layer
+                             handles this without ``--user``.
         """
         self._image = image
         self._docker = docker_bin
@@ -149,6 +171,7 @@ class ContainerRuntime(Runtime):
         self._network = network
         self._gpu_runtime = gpu_runtime
         self._enforce_module_mounts = enforce_module_mounts
+        self._user = user
         # Composition: workspace lifecycle is identical to plain
         # WorktreeRuntime — only the process launch differs.
         self._inner = WorktreeRuntime()
@@ -350,6 +373,8 @@ class ContainerRuntime(Runtime):
             cmd.extend(["--gpus", f"device={claim.gpu_slot}"])
         if self._gpu_runtime:
             cmd.extend(["--runtime", self._gpu_runtime])
+        if self._user:
+            cmd.extend(["--user", self._user])
         cmd.append(self._image)
         cmd.extend(argv)
         return cmd

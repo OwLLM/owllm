@@ -31,6 +31,7 @@ from core.fleet.container_runtime import (
     Mount,
     container_name_for,
     default_auth_mounts,
+    default_user_id,
 )
 from core.fleet.manifest import (
     GPU_MODE_RO,
@@ -76,5 +77,6 @@ __all__ = [
     "container_name_for",
     "default_auth_mounts",
     "default_runtime",
+    "default_user_id",
     "set_default_runtime",
 ]

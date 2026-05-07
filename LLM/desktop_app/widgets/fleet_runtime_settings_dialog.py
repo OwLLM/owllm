@@ -45,6 +45,7 @@ from core.fleet.container_runtime import (
 from core.fleet.runtime_config import (
     KIND_CONTAINER,
     KIND_WORKTREE,
+    USER_HOST_SENTINEL,
     RuntimeConfig,
 )
 
@@ -158,6 +159,10 @@ class FleetRuntimeSettingsDialog(QDialog):
             "Enforce per-module mounts (whole clone ro + owns_modules rw)"
         )
 
+        self._user_as_host = QCheckBox(
+            "Run as host user (avoids root-owned files; POSIX only)"
+        )
+
         # Warning banner (shown only when Docker isn't available).
         self._warning = QLabel(
             "⚠  Docker isn't available on this host. The container "
@@ -175,6 +180,7 @@ class FleetRuntimeSettingsDialog(QDialog):
         form.addRow("network", self._network)
         form.addRow(self._auth_mounts)
         form.addRow(self._enforce_modules)
+        form.addRow(self._user_as_host)
         outer.addLayout(form)
 
         hint = QLabel(
@@ -211,13 +217,14 @@ class FleetRuntimeSettingsDialog(QDialog):
                 break
         self._auth_mounts.setChecked(cfg.use_default_auth_mounts)
         self._enforce_modules.setChecked(cfg.enforce_module_mounts)
+        self._user_as_host.setChecked(cfg.user == USER_HOST_SENTINEL)
         self._on_kind_changed(kind_idx)
 
     def _on_kind_changed(self, idx: int) -> None:
         is_container = (self._kind.currentData() == KIND_CONTAINER)
         for w in (
             self._image, self._network,
-            self._auth_mounts, self._enforce_modules,
+            self._auth_mounts, self._enforce_modules, self._user_as_host,
         ):
             w.setEnabled(is_container)
         self._warning.setVisible(
@@ -238,6 +245,10 @@ class FleetRuntimeSettingsDialog(QDialog):
             use_default_auth_mounts=self._auth_mounts.isChecked(),
             extra_auth_mounts=list(self._loaded.extra_auth_mounts),
             enforce_module_mounts=self._enforce_modules.isChecked(),
+            user=(USER_HOST_SENTINEL if self._user_as_host.isChecked()
+                  else self._loaded.user
+                  if self._loaded.user not in (None, USER_HOST_SENTINEL)
+                  else None),
         )
         try:
             self._apply(cfg)

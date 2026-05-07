@@ -37,6 +37,7 @@ from core.fleet.container_runtime import (
     ContainerRuntime,
     Mount,
     default_auth_mounts,
+    default_user_id,
 )
 from core.fleet.runtime import Runtime, WorktreeRuntime
 
@@ -45,6 +46,12 @@ logger = logging.getLogger(__name__)
 
 KIND_WORKTREE = "worktree"
 KIND_CONTAINER = "container"
+
+USER_HOST_SENTINEL = "host"
+"""When ``RuntimeConfig.user`` equals this string, ``to_runtime()``
+resolves it to the host's actual UID:GID via :func:`default_user_id`
+at apply time. Stored as a sentinel rather than a UID so the JSON
+stays portable across machines."""
 
 
 @dataclass
@@ -58,6 +65,10 @@ class RuntimeConfig:
     use_default_auth_mounts: bool = True
     extra_auth_mounts: List[Mount] = field(default_factory=list)
     enforce_module_mounts: bool = False
+    user: Optional[str] = None
+    """``None`` = run container as root. ``"host"`` = resolve to the
+    host's UID:GID at apply time (via :func:`default_user_id`).
+    Otherwise treated as a literal ``"uid:gid"`` value."""
 
     def to_dict(self) -> dict:
         return {
@@ -74,6 +85,7 @@ class RuntimeConfig:
                 for m in self.extra_auth_mounts
             ],
             "enforce_module_mounts": self.enforce_module_mounts,
+            "user": self.user,
         }
 
     @classmethod
@@ -108,6 +120,10 @@ class RuntimeConfig:
             extra_auth_mounts=mounts,
             enforce_module_mounts=bool(
                 data.get("enforce_module_mounts", False)
+            ),
+            user=(
+                None if data.get("user") in (None, "")
+                else str(data["user"])
             ),
         )
 
@@ -158,10 +174,19 @@ class RuntimeConfig:
             if self.use_default_auth_mounts:
                 mounts.extend(default_auth_mounts())
             mounts.extend(self.extra_auth_mounts)
+            user_value: Optional[str] = self.user
+            if user_value == USER_HOST_SENTINEL:
+                user_value = default_user_id()
+                if user_value is None:
+                    logger.info(
+                        "runtime config: user=host requested but the host "
+                        "doesn't expose UIDs (Windows) — omitting --user"
+                    )
             return ContainerRuntime(
                 image=self.image,
                 auth_mounts=mounts,
                 network=self.network,
                 enforce_module_mounts=self.enforce_module_mounts,
+                user=user_value,
             )
         return WorktreeRuntime()

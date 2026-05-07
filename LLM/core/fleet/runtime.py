@@ -26,6 +26,8 @@ don't have to migrate it later.
 from __future__ import annotations
 
 import logging
+import os
+import signal
 import subprocess
 import threading
 import time
@@ -259,6 +261,12 @@ class WorktreeRuntime(Runtime):
     ) -> Optional[int]:
         popen = handle._popen
         if popen is None:
+            # Cross-process scenario: this fleet client didn't launch
+            # the agent (the CLI did, or another UI window did) so we
+            # don't have the Popen. Best we can do is signal the pid.
+            # On Windows os.kill(pid, SIGTERM) maps to TerminateProcess.
+            self._signal_stop(handle, timeout)
+            handle.mark_exited()
             handle.close_log()
             return None
         if popen.poll() is None:
@@ -282,6 +290,42 @@ class WorktreeRuntime(Runtime):
         handle.mark_exited()
         handle.close_log()
         return rc
+
+    @staticmethod
+    def _signal_stop(handle: ProcessHandle, timeout: float) -> None:
+        """SIGTERM the pid, wait briefly, SIGKILL on holdout.
+
+        Used only when the local process doesn't own a Popen for the
+        agent — a cross-process stop initiated from a different fleet
+        client than the launcher.
+        """
+        try:
+            os.kill(handle.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return  # already dead
+        except (PermissionError, OSError) as e:
+            logger.warning(
+                "agent %s: SIGTERM via os.kill failed: %s",
+                handle.agent_id, e,
+            )
+            return
+        # Wait for the OS to actually reap; poll cheaply.
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if not handle.is_running():
+                return
+            time.sleep(0.1)
+        # Still alive — escalate. signal.SIGKILL doesn't exist on
+        # Windows; SIGTERM there already maps to TerminateProcess so
+        # the first signal usually does the trick. Fall back to it.
+        kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+        try:
+            os.kill(handle.pid, kill_signal)
+        except (ProcessLookupError, OSError) as e:
+            logger.warning(
+                "agent %s: kill via os.kill failed: %s",
+                handle.agent_id, e,
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ import argparse
 import contextlib
 import json
 import logging
+import shlex
 import sys
 import uuid
 from typing import Iterator, List, Optional
@@ -37,9 +38,12 @@ from core.fleet.config import (
     DEFAULT_PORT_HIGH,
     DEFAULT_PORT_LOW,
     default_db,
+    default_process_index,
     default_workspaces,
 )
 from core.fleet.manifest import Claim, ClaimConflict, Manifest
+from core.fleet.process import ProcessRegistry
+from core.fleet.runtime import default_runtime
 from core.fleet.workspace import (
     WorkspaceError,
     setup_workspace,
@@ -102,6 +106,22 @@ def cmd_spawn(args: argparse.Namespace) -> int:
                   file=sys.stderr)
             return 3
 
+    # Optional: launch the configured CLI inside the workspace and
+    # register the resulting handle in the persistent registry so
+    # other fleet clients (the UI, ops scripts) can discover it.
+    # Failure to launch is non-fatal: the workspace is up, the user
+    # can still launch manually.
+    process_info: Optional[dict] = None
+    if args.launch_command:
+        argv = shlex.split(args.launch_command)
+        try:
+            handle = default_runtime().start(claim, layout, argv)
+            ProcessRegistry(default_process_index()).register(handle)
+            process_info = handle.to_dict()
+        except Exception as e:
+            print(f"launch failed (workspace is up): {e}", file=sys.stderr)
+            process_info = {"launch_error": str(e)}
+
     print(json.dumps({
         "agent_id": claim.agent_id,
         "workspace": str(layout.root),
@@ -114,7 +134,8 @@ def cmd_spawn(args: argparse.Namespace) -> int:
         "port": claim.port,
         "gpu_slot": claim.gpu_slot,
         "ttl_seconds": claim.ttl_seconds,
-    }, indent=2))
+        "process": process_info,
+    }, indent=2, default=str))
     return 0
 
 
@@ -124,6 +145,20 @@ def cmd_finish(args: argparse.Namespace) -> int:
         if claim is None:
             print(f"unknown agent: {args.agent_id}", file=sys.stderr)
             return 4
+
+        # Stop the registered process FIRST so its file handles release
+        # the clone (otherwise rmtree fails on Windows). Use the
+        # persistent registry so this works whether the agent was
+        # launched by THIS CLI invocation, by a previous one, or by
+        # the UI.
+        registry = ProcessRegistry(default_process_index())
+        handle = registry.pop(args.agent_id)
+        if handle is not None:
+            try:
+                default_runtime().stop(handle)
+            except Exception as e:
+                print(f"warning: stopping process failed: {e}",
+                      file=sys.stderr)
 
         pr_url: Optional[str] = None
         teardown_failed: Optional[str] = None
@@ -251,6 +286,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="branch to fork from (default: main)")
     sp.add_argument("--agent-id", default=None,
                     help="custom id (default: agent-<uuid8>)")
+    sp.add_argument(
+        "--launch-command", default=None,
+        help="shell-style command string to launch inside the workspace, "
+             "e.g. --launch-command 'claude -p \"follow AGENT_CONTEXT.md\"'. "
+             "shlex-parsed into argv. Empty = workspace only.",
+    )
     sp.set_defaults(func=cmd_spawn)
 
     fp = sub.add_parser(

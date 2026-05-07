@@ -424,6 +424,97 @@ class TeamGridView(QScrollArea):
 
 
 # ---------------------------------------------------------------------------
+# Agent mini-card (used inside the detail panel's AGENTS grid)
+# ---------------------------------------------------------------------------
+
+
+class _AgentMiniCard(QFrame):
+    """Compact card representing one agent inside :class:`TeamDetailPanel`'s
+    grid. Avatar on top, agent name + base role under it, LEADER ribbon
+    in the top-right corner when ``spec.can_dispatch`` is true (or the
+    base role is ``orchestrator``).
+    """
+
+    def __init__(self, spec, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._spec = spec
+        self.setObjectName("AgentMiniCard")
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setMinimumHeight(110)
+        self.setMaximumHeight(130)
+        is_leader = bool(spec.can_dispatch) or spec.base == "orchestrator"
+        accent = "#ffc060" if is_leader else "rgba(255,255,255,0.06)"
+        self.setStyleSheet(
+            "QFrame#AgentMiniCard {"
+            "  background:qlineargradient("
+            "x1:0,y1:0,x2:1,y2:1, stop:0 #161b29, stop:1 #0c0f17);"
+            f"  border:1px solid {accent};"
+            "  border-radius:10px;"
+            "}"
+            "QFrame#AgentMiniCard:hover {"
+            "  border-color:#74a4ff;"
+            "}"
+        )
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 10, 8, 10)
+        outer.setSpacing(4)
+        outer.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+
+        # Top row: avatar centered, LEADER ribbon as a top-right overlay
+        # within the same row.
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(0)
+        top.addStretch(1)
+
+        avatar = QLabel()
+        avatar.setFixedSize(40, 40)
+        avatar.setAlignment(Qt.AlignCenter)
+        apply_to_label(avatar, spec.icon or "🤖", size=36)
+        top.addWidget(avatar)
+
+        # Right-side stretch hosts the LEADER ribbon flushed-right; the
+        # widget is omitted entirely on non-leader cards so the title
+        # stays vertically aligned with the avatar.
+        if is_leader:
+            tag = QLabel("LEADER")
+            tag.setStyleSheet(
+                "color:#ffc060; background:rgba(255,192,96,0.10); "
+                "border-radius:4px; padding:1px 5px; font-size:8px;"
+                "letter-spacing:0.6px;"
+            )
+            top.addWidget(tag, 0, Qt.AlignTop | Qt.AlignRight)
+        else:
+            top.addStretch(1)
+
+        outer.addLayout(top)
+
+        # Name (truncated by elision when wider than the card).
+        name_str = spec.name
+        # Trim very long prefixed names — keep readable in narrow cells.
+        display = name_str if len(name_str) <= 18 else name_str[:17] + "…"
+        name_label = QLabel(display)
+        nf = QFont()
+        nf.setPointSize(10)
+        nf.setBold(True)
+        name_label.setFont(nf)
+        name_label.setAlignment(Qt.AlignCenter)
+        name_label.setStyleSheet("color:#dde3ff; background:transparent;")
+        name_label.setToolTip(name_str)
+        outer.addWidget(name_label)
+
+        if spec.base:
+            base = QLabel(spec.base)
+            base.setStyleSheet(
+                "color:#7888a8; background:transparent; "
+                "font-size:9px; letter-spacing:0.3px;"
+            )
+            base.setAlignment(Qt.AlignCenter)
+            outer.addWidget(base)
+
+
+# ---------------------------------------------------------------------------
 # Detail panel
 # ---------------------------------------------------------------------------
 
@@ -565,36 +656,22 @@ class TeamDetailPanel(QFrame):
         )
         self._layout.addWidget(h)
 
-        for spec in t.agents:
-            row = QHBoxLayout()
-            row.setSpacing(10)
-            icon = QLabel()
-            icon.setFixedSize(28, 28)
-            icon.setAlignment(Qt.AlignCenter)
-            apply_to_label(icon, spec.icon or "🤖", size=24)
-            row.addWidget(icon)
-
-            name = QLabel(f"<b>{spec.name}</b>")
-            name.setStyleSheet("color:#dde3ff; background:transparent;")
-            row.addWidget(name)
-
-            if spec.base:
-                base = QLabel(f"base: {spec.base}")
-                base.setStyleSheet(
-                    "color:#7888a8; background:transparent; font-size:10px;"
-                )
-                row.addWidget(base)
-            row.addStretch(1)
-
-            if spec.can_dispatch or spec.base == "orchestrator":
-                tag = QLabel("LEADER")
-                tag.setStyleSheet(
-                    "color:#ffc060; background:rgba(255,192,96,0.10); "
-                    "border-radius:4px; padding:1px 6px; font-size:9px;"
-                )
-                row.addWidget(tag)
-
-            self._layout.addLayout(row)
+        # Grid of compact agent cards. Uses 3 columns at the panel's
+        # default width — Qt grids reflow nothing on resize, but with
+        # the QSizePolicy.Expanding cells the cards just stretch evenly,
+        # which reads fine across the panel widths the splitter allows.
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(8)
+        cols = 3
+        for c in range(cols):
+            grid.setColumnStretch(c, 1)
+        for i, spec in enumerate(t.agents):
+            grid.addWidget(_AgentMiniCard(spec), i // cols, i % cols)
+        wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
+        wrap.setLayout(grid)
+        self._layout.addWidget(wrap)
 
     def _build_graph(self, t: Template) -> None:
         if not t.graph_edges:

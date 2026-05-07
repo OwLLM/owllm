@@ -54,6 +54,13 @@ def default_process_index(override: Optional[str] = None) -> Path:
     return fleet_root() / ".process"
 
 
+def default_audit_log(override: Optional[str] = None) -> Path:
+    """JSONL audit log of fleet actions."""
+    if override:
+        return Path(override)
+    return fleet_root() / "audit.log.jsonl"
+
+
 def default_pool(
     *,
     workspace_root: Optional[str] = None,

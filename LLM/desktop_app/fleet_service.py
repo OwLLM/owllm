@@ -24,10 +24,23 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from core.fleet.audit import (
+    EVENT_FINISH,
+    EVENT_FINISH_FAILED,
+    EVENT_HEARTBEAT,
+    EVENT_PROCESS_START,
+    EVENT_PROCESS_START_FAILED,
+    EVENT_PROCESS_STOP,
+    EVENT_REAP,
+    EVENT_SPAWN,
+    EVENT_SPAWN_FAILED,
+    AuditLog,
+)
 from core.fleet.broker import Broker, PoolConfig, PoolExhausted
 from core.fleet.config import (
     DEFAULT_PORT_HIGH,
     DEFAULT_PORT_LOW,
+    default_audit_log,
     default_db,
     default_process_index,
     default_workspaces,
@@ -83,6 +96,7 @@ class FleetService(QObject):
         db_path: Optional[str] = None,
         workspace_root: Optional[str] = None,
         process_index_dir: Optional[str] = None,
+        audit_log_path: Optional[str] = None,
         port_low: int = DEFAULT_PORT_LOW,
         port_high: int = DEFAULT_PORT_HIGH,
         gpu_slots: Sequence[int] = (),
@@ -104,6 +118,7 @@ class FleetService(QObject):
         self._registry = ProcessRegistry(
             default_process_index(process_index_dir),
         )
+        self._audit = AuditLog(default_audit_log(audit_log_path))
         # Keep references to running workers so they're not GC'd
         # mid-flight.
         self._workers: List[QThread] = []
@@ -142,14 +157,24 @@ class FleetService(QObject):
     def heartbeat(self, agent_id: str) -> bool:
         ok = self._broker.heartbeat(agent_id)
         if ok:
+            self._audit.log(EVENT_HEARTBEAT, agent_id=agent_id)
             self._emit_changed()
         return ok
 
     def reap_stale(self) -> List[Dict[str, Any]]:
         reaped = self._broker.reap_stale()
         if reaped:
+            for c in reaped:
+                self._audit.log(
+                    EVENT_REAP, agent_id=c.agent_id,
+                    branch=c.branch, target_repo=c.target_repo,
+                )
             self._emit_changed()
         return [_claim_dict(c, self._registry) for c in reaped]
+
+    def list_audit_events(self, n: int = 200) -> List[Dict[str, Any]]:
+        """Return the most recent ``n`` audit events, oldest-first."""
+        return self._audit.tail(n)
 
     def refresh(self) -> None:
         self._emit_changed()
@@ -177,6 +202,7 @@ class FleetService(QObject):
             self._broker,
             self._runtime,
             self._registry,
+            self._audit,
             agent_id=agent_id or f"agent-{uuid.uuid4().hex[:8]}",
             target_repo=target_repo,
             branch=branch,
@@ -209,6 +235,7 @@ class FleetService(QObject):
             self._broker,
             self._runtime,
             self._registry,
+            self._audit,
             agent_id=agent_id,
             push=push,
             open_pr=open_pr,
@@ -276,6 +303,7 @@ class _SpawnWorker(QThread):
         broker: Broker,
         runtime: Runtime,
         registry: ProcessRegistry,
+        audit: AuditLog,
         *,
         agent_id: str,
         target_repo: str,
@@ -293,6 +321,7 @@ class _SpawnWorker(QThread):
         self._broker = broker
         self._runtime = runtime
         self._registry = registry
+        self._audit = audit
         self._agent_id = agent_id
         self._spawn_kwargs = dict(
             target_repo=target_repo,
@@ -313,6 +342,12 @@ class _SpawnWorker(QThread):
                 agent_id=self._agent_id, **self._spawn_kwargs,
             )
         except (ClaimConflict, PoolExhausted) as e:
+            self._audit.log(
+                EVENT_SPAWN_FAILED, agent_id=self._agent_id,
+                reason=str(e),
+                target_repo=self._spawn_kwargs["target_repo"],
+                branch=self._spawn_kwargs["branch"],
+            )
             self.failed.emit(self._agent_id, f"refused: {e}")
             return
 
@@ -321,8 +356,20 @@ class _SpawnWorker(QThread):
         except WorkspaceError as e:
             # Roll back so the user can retry the same branch.
             self._broker.release(self._agent_id)
+            self._audit.log(
+                EVENT_SPAWN_FAILED, agent_id=self._agent_id,
+                reason=f"workspace setup failed: {e}",
+                target_repo=claim.target_repo, branch=claim.branch,
+            )
             self.failed.emit(self._agent_id, f"workspace setup failed: {e}")
             return
+
+        self._audit.log(
+            EVENT_SPAWN, agent_id=self._agent_id,
+            target_repo=claim.target_repo, branch=claim.branch,
+            owns_modules=list(claim.owns_modules),
+            reason_text=claim.reason,
+        )
 
         # Process launch is best-effort: if the configured command
         # isn't on PATH or fails to exec, the workspace still ships
@@ -333,11 +380,20 @@ class _SpawnWorker(QThread):
                     claim, layout, list(self._launch_command),
                 )
                 self._registry.register(handle)
+                self._audit.log(
+                    EVENT_PROCESS_START, agent_id=self._agent_id,
+                    pid=handle.pid, argv=list(handle.argv),
+                    log_path=str(handle.log_path),
+                )
             except Exception as e:
                 logger.warning(
                     "spawn %s: launch failed (%s) — workspace is up, "
                     "no process registered",
                     self._agent_id, e,
+                )
+                self._audit.log(
+                    EVENT_PROCESS_START_FAILED, agent_id=self._agent_id,
+                    reason=str(e), argv=list(self._launch_command),
                 )
 
         self.succeeded.emit(_claim_dict(claim, self._registry))
@@ -355,6 +411,7 @@ class _FinishWorker(QThread):
         broker: Broker,
         runtime: Runtime,
         registry: ProcessRegistry,
+        audit: AuditLog,
         *,
         agent_id: str,
         push: bool,
@@ -366,6 +423,7 @@ class _FinishWorker(QThread):
         self._broker = broker
         self._runtime = runtime
         self._registry = registry
+        self._audit = audit
         self._agent_id = agent_id
         self._push = push
         self._open_pr = open_pr
@@ -375,6 +433,10 @@ class _FinishWorker(QThread):
     def run(self) -> None:
         claim = self._broker.get(self._agent_id)
         if claim is None:
+            self._audit.log(
+                EVENT_FINISH_FAILED, agent_id=self._agent_id,
+                reason="unknown agent",
+            )
             self.failed.emit(self._agent_id, "unknown agent")
             return
 
@@ -384,11 +446,19 @@ class _FinishWorker(QThread):
         handle = self._registry.pop(self._agent_id)
         if handle is not None:
             try:
-                self._runtime.stop(handle)
+                rc = self._runtime.stop(handle)
+                self._audit.log(
+                    EVENT_PROCESS_STOP, agent_id=self._agent_id,
+                    pid=handle.pid, returncode=rc,
+                )
             except Exception as e:
                 logger.warning(
                     "finish %s: stopping process failed (%s)",
                     self._agent_id, e,
+                )
+                self._audit.log(
+                    EVENT_PROCESS_STOP, agent_id=self._agent_id,
+                    pid=handle.pid, reason=f"stop failed: {e}",
                 )
 
         pr_url: Optional[str] = None
@@ -407,9 +477,19 @@ class _FinishWorker(QThread):
             self._broker.release(self._agent_id)
 
         if teardown_failed is not None:
+            self._audit.log(
+                EVENT_FINISH_FAILED, agent_id=self._agent_id,
+                reason=f"teardown failed: {teardown_failed}",
+                branch=claim.branch, target_repo=claim.target_repo,
+            )
             self.failed.emit(
                 self._agent_id, f"teardown failed: {teardown_failed}",
             )
             return
 
+        self._audit.log(
+            EVENT_FINISH, agent_id=self._agent_id,
+            branch=claim.branch, target_repo=claim.target_repo,
+            pushed=self._push, pr_url=pr_url,
+        )
         self.succeeded.emit(self._agent_id, pr_url)

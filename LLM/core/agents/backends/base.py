@@ -11,12 +11,19 @@ Every dropdown row carries a *composite id* of shape ``backend|model_key``.
 ``dispatch_model_fn`` parses that id, looks up the backend, and forwards the
 call. The Agent class doesn't know any of this — it just gets a single
 ``ModelFn`` callable.
+
+Optional ``cwd`` kwarg: backends that shell out to a CLI (claude, codex)
+read it to set the subprocess working directory, so the project's Location
+folder becomes the actual cwd of the agent process — and any
+``.claude/settings.local.json`` materialized there takes effect. API and
+local backends ignore it.
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Mapping, Protocol
+from typing import Callable, Dict, List, Mapping, Optional, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -188,7 +195,12 @@ def list_all_entries() -> List[ModelEntry]:
     return out
 
 
-def dispatch_model_fn(messages: List[ChatMessage], composite_id: str) -> str:
+def dispatch_model_fn(
+    messages: List[ChatMessage],
+    composite_id: str,
+    *,
+    cwd: Optional[str] = None,
+) -> str:
     """``ModelFn`` that routes by composite id.
 
     This is what the Agents UI passes to ``build_team`` so the same loop can
@@ -197,6 +209,11 @@ def dispatch_model_fn(messages: List[ChatMessage], composite_id: str) -> str:
     Special case: the synthetic ``auto`` backend resolves to a real entry
     at call time based on a routing strategy (cheapest, cheapest-local,
     premium) — see ``_resolve_auto``.
+
+    The ``cwd`` kwarg is forwarded to backends whose ``generate`` accepts it
+    (CLI backends), so the agent subprocess inherits the project's Location
+    as its working directory rather than the desktop app's launch dir.
+    Backends that don't accept the kwarg are called without it.
     """
     # Empty/missing composite id is the #1 silent-failure mode in the
     # Agents page: the picker hasn't been populated yet, the role has no
@@ -228,7 +245,30 @@ def dispatch_model_fn(messages: List[ChatMessage], composite_id: str) -> str:
             f"backend '{backend_name}' got an empty model key — the model "
             "picker probably dropped its selection. Re-pick the model."
         )
-    return backend.generate(list(messages), model_key)
+    return _call_with_optional_cwd(backend, list(messages), model_key, cwd)
+
+
+def _call_with_optional_cwd(
+    backend: "Backend",
+    messages: List[ChatMessage],
+    model_key: str,
+    cwd: Optional[str],
+) -> str:
+    """Forward ``cwd`` only to backends whose ``generate`` accepts it.
+
+    Avoids requiring every backend (local, API) to declare a parameter it
+    doesn't use. CLI backends opt in by adding ``cwd`` to their
+    ``generate`` signature."""
+    if cwd:
+        try:
+            sig = inspect.signature(backend.generate)
+            if "cwd" in sig.parameters:
+                return backend.generate(messages, model_key, cwd=cwd)
+        except (TypeError, ValueError):
+            # Some C-implemented callables don't expose a signature; fall
+            # back to the no-cwd call rather than raising.
+            pass
+    return backend.generate(messages, model_key)
 
 
 # ---------------------------------------------------------------------------

@@ -4463,11 +4463,25 @@ class AgentsPage(QWidget):
                 def graph_resolver(from_name: str, _g=graph, _o=orchestrator_name) -> Optional[str]:
                     return _g.next_target(from_name, _o)
 
+        # Wrap dispatch_model_fn so CLI backends see the project's Location
+        # as their subprocess cwd. Without this, the trust_writes settings
+        # file (materialized into <Location>/.claude/) is not consulted by
+        # the agent, and the CLI inherits the desktop app's launch dir as
+        # its working tree — i.e. the wrong project.
+        proj_loc = ""
+        if self._active_project and self._active_project.location:
+            cand = str(self._active_project.location).strip()
+            if cand and os.path.isdir(cand):
+                proj_loc = cand
+
+        def _model_fn_with_cwd(messages, composite_id, _cwd=proj_loc):
+            return dispatch_model_fn(messages, composite_id, cwd=_cwd or None)
+
         return build_team(
             self._bus,
             roles=roles,
             model_id_for=self._model_id_for,
-            model_fn=dispatch_model_fn,
+            model_fn=_model_fn_with_cwd,
             base_registry=self._registry,
             graph_resolver=graph_resolver,
         )

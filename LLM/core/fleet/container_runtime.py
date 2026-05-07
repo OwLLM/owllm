@@ -33,7 +33,9 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
-from typing import Optional, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import List, Optional, Sequence
 
 from core.fleet.manifest import Claim
 from core.fleet.process import ProcessHandle, _utcnow_iso
@@ -50,6 +52,61 @@ via the constructor for image-specific or smaller bases."""
 CONTAINER_NAME_PREFIX = "fleet-"
 WORKDIR_INSIDE_CONTAINER = "/workspace"
 
+# Network policy values accepted by the constructor — mirror Docker's
+# own naming so users who already know the platform aren't surprised.
+NETWORK_BRIDGE = "bridge"   # Docker default — outbound + DNS, no inbound
+NETWORK_HOST = "host"       # share host network namespace
+NETWORK_NONE = "none"       # offline; loopback only
+
+
+@dataclass(frozen=True)
+class Mount:
+    """One bind mount from host to container.
+
+    ``mode`` is ``"rw"`` (default) or ``"ro"``. Both paths must be
+    absolute; relative paths cause Docker to error confusingly.
+    """
+
+    host_path: str
+    container_path: str
+    mode: str = "rw"
+
+    def to_docker_v(self) -> str:
+        """Render as the value of a ``-v host:container:mode`` flag."""
+        return f"{self.host_path}:{self.container_path}:{self.mode}"
+
+
+def default_auth_mounts() -> List[Mount]:
+    """Best-effort common-CLI auth mounts.
+
+    Walks the host's home directory for the auth dirs the major
+    agent CLIs use (claude, codex, gh, anthropic, openai) and
+    returns ``ro`` mounts for the ones that exist. Missing dirs are
+    skipped silently — the user might not have every CLI installed.
+
+    The container destination uses ``/root/<basename>`` because
+    Docker's default user is root unless you pass ``--user``.
+    """
+    home = Path.home()
+    candidates = [
+        # (host basename relative to ~, container path)
+        (".claude",        "/root/.claude"),
+        (".config/codex",  "/root/.config/codex"),
+        (".anthropic",     "/root/.anthropic"),
+        (".openai",        "/root/.openai"),
+        (".config/gh",     "/root/.config/gh"),
+    ]
+    mounts: List[Mount] = []
+    for rel, dest in candidates:
+        host = home / rel
+        if host.exists():
+            mounts.append(Mount(
+                host_path=str(host),
+                container_path=dest,
+                mode="ro",
+            ))
+    return mounts
+
 
 class ContainerRuntime(Runtime):
     """Docker container per agent. Workspace mounted at /workspace."""
@@ -59,9 +116,30 @@ class ContainerRuntime(Runtime):
         *,
         image: str = DEFAULT_IMAGE,
         docker_bin: str = "docker",
+        auth_mounts: Optional[Sequence[Mount]] = None,
+        network: Optional[str] = None,
+        gpu_runtime: Optional[str] = None,
     ):
+        """Configure the container runtime.
+
+        :param image:        Docker image to run agents inside.
+        :param docker_bin:   ``docker`` CLI path (override for podman, etc.).
+        :param auth_mounts:  ``Mount`` records bind-mounted on every
+                             container start. Use :func:`default_auth_mounts`
+                             for sensible defaults; pass ``[]`` to skip.
+        :param network:      ``--network`` value passed to ``docker run``.
+                             ``None`` = Docker default (bridge); use
+                             :data:`NETWORK_NONE` for offline isolation
+                             or :data:`NETWORK_HOST` to share the host net.
+        :param gpu_runtime:  Override Docker's GPU runtime label. Most
+                             setups don't need this — when ``claim.gpu_slot``
+                             is set we just pass ``--gpus device=N``.
+        """
         self._image = image
         self._docker = docker_bin
+        self._auth_mounts: List[Mount] = list(auth_mounts or [])
+        self._network = network
+        self._gpu_runtime = gpu_runtime
         # Composition: workspace lifecycle is identical to plain
         # WorktreeRuntime — only the process launch differs.
         self._inner = WorktreeRuntime()
@@ -127,16 +205,23 @@ class ContainerRuntime(Runtime):
         container_name = container_name_for(claim.agent_id)
         log_path = layout.root / LOG_FILE_NAME
         log_handle = log_path.open("a", encoding="utf-8", buffering=1)
+        cmd = self._build_run_cmd(container_name, claim, layout, argv)
         log_handle.write(
             f"--- agent {claim.agent_id} launched in container "
             f"{container_name!r} at {_utcnow_iso()} ---\n"
-            f"image: {self._image}\n"
-            f"argv:  {list(argv)}\n"
-            f"mount: {layout.clone} → {WORKDIR_INSIDE_CONTAINER}\n\n"
+            f"image:   {self._image}\n"
+            f"argv:    {list(argv)}\n"
+            f"network: {self._network or '(docker default)'}\n"
+            f"gpu:     {claim.gpu_slot if claim.gpu_slot is not None else '(none)'}\n"
+            f"mounts:  {layout.clone} → {WORKDIR_INSIDE_CONTAINER}\n"
         )
+        for m in self._auth_mounts:
+            log_handle.write(
+                f"         {m.host_path} → {m.container_path} ({m.mode})\n"
+            )
+        log_handle.write("\n")
         log_handle.flush()
 
-        cmd = self._build_run_cmd(container_name, layout, argv)
         try:
             popen = subprocess.Popen(
                 cmd,
@@ -159,6 +244,8 @@ class ContainerRuntime(Runtime):
             metadata={
                 "container_name": container_name,
                 "image": self._image,
+                "network": self._network or "",
+                "gpu_slot": claim.gpu_slot if claim.gpu_slot is not None else "",
             },
             _popen=popen,
             _log_handle=log_handle,
@@ -225,19 +312,34 @@ class ContainerRuntime(Runtime):
     def _build_run_cmd(
         self,
         container_name: str,
+        claim: Claim,
         layout: WorkspaceLayout,
         argv: Sequence[str],
     ) -> list:
         """Compose ``docker run`` argv. Public for tests."""
-        return [
+        cmd: List[str] = [
             self._docker, "run",
             "--rm",                 # auto-cleanup container metadata
             "--name", container_name,
             "-v", f"{layout.clone}:{WORKDIR_INSIDE_CONTAINER}",
             "-w", WORKDIR_INSIDE_CONTAINER,
-            self._image,
-            *argv,
         ]
+        # Auth + ad-hoc bind mounts.
+        for m in self._auth_mounts:
+            cmd.extend(["-v", m.to_docker_v()])
+        # Network policy. None = let Docker pick its default (bridge).
+        if self._network:
+            cmd.extend(["--network", self._network])
+        # GPU passthrough. Pinned slot from the claim becomes
+        # `--gpus device=N`. The custom runtime override is rarely
+        # needed but available for non-NVIDIA setups.
+        if claim.gpu_slot is not None:
+            cmd.extend(["--gpus", f"device={claim.gpu_slot}"])
+        if self._gpu_runtime:
+            cmd.extend(["--runtime", self._gpu_runtime])
+        cmd.append(self._image)
+        cmd.extend(argv)
+        return cmd
 
 
 def container_name_for(agent_id: str) -> str:

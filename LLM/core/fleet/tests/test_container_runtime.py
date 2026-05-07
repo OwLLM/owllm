@@ -22,9 +22,12 @@ import pytest
 from core.fleet.container_runtime import (
     CONTAINER_NAME_PREFIX,
     DEFAULT_IMAGE,
+    NETWORK_NONE,
     WORKDIR_INSIDE_CONTAINER,
     ContainerRuntime,
+    Mount,
     container_name_for,
+    default_auth_mounts,
 )
 from core.fleet.manifest import Claim
 from core.fleet.workspace import CONTEXT_FILE, WorkspaceLayout
@@ -78,7 +81,8 @@ def test_run_cmd_includes_workspace_mount(tmp_path: Path) -> None:
     layout = _make_layout(tmp_path / "ws-a1")
     rt = ContainerRuntime(image="alpine:3.20")
     cmd = rt._build_run_cmd(
-        container_name_for("a1"), layout, ["echo", "hi"],
+        container_name_for("a1"), _make_claim(tmp_path / "ws-a1"),
+        layout, ["echo", "hi"],
     )
     assert "docker" in cmd[0]
     assert "run" in cmd
@@ -99,8 +103,116 @@ def test_run_cmd_includes_workspace_mount(tmp_path: Path) -> None:
 def test_run_cmd_uses_default_image_when_unspecified(tmp_path: Path) -> None:
     layout = _make_layout(tmp_path / "ws-a1")
     rt = ContainerRuntime()
-    cmd = rt._build_run_cmd(container_name_for("a1"), layout, ["true"])
+    cmd = rt._build_run_cmd(
+        container_name_for("a1"), _make_claim(tmp_path / "ws-a1"),
+        layout, ["true"],
+    )
     assert DEFAULT_IMAGE in cmd
+
+
+# ---------------------------------------------------------------------------
+# Auth mounts (4-c-c)
+# ---------------------------------------------------------------------------
+
+
+def test_run_cmd_includes_auth_mounts(tmp_path: Path) -> None:
+    auth_host = tmp_path / "auth-claude"
+    auth_host.mkdir()
+    rt = ContainerRuntime(auth_mounts=[
+        Mount(str(auth_host), "/root/.claude", "ro"),
+    ])
+    layout = _make_layout(tmp_path / "ws-a1")
+    cmd = rt._build_run_cmd(
+        container_name_for("a1"), _make_claim(tmp_path / "ws-a1"),
+        layout, ["true"],
+    )
+    # Workspace mount + auth mount both appear.
+    v_args = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+    assert any(WORKDIR_INSIDE_CONTAINER in v for v in v_args)
+    assert any(
+        v.startswith(str(auth_host)) and v.endswith(":/root/.claude:ro")
+        for v in v_args
+    ), v_args
+
+
+def test_default_auth_mounts_skips_missing_dirs(tmp_path: Path, monkeypatch) -> None:
+    """Returns mounts only for dirs that actually exist on the host."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / ".claude").mkdir()
+    # codex/anthropic/openai/gh deliberately not created.
+
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    mounts = default_auth_mounts()
+    paths = [m.host_path for m in mounts]
+    assert any(".claude" in p for p in paths)
+    assert all("codex" not in p for p in paths)
+
+
+def test_default_auth_mounts_marks_them_readonly(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    (fake_home / ".claude").mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+    for m in default_auth_mounts():
+        assert m.mode == "ro"
+
+
+# ---------------------------------------------------------------------------
+# Network policy (4-c-c)
+# ---------------------------------------------------------------------------
+
+
+def test_network_default_omits_flag(tmp_path: Path) -> None:
+    rt = ContainerRuntime()
+    cmd = rt._build_run_cmd(
+        container_name_for("a1"), _make_claim(tmp_path / "ws-a1"),
+        _make_layout(tmp_path / "ws-a1"), ["true"],
+    )
+    assert "--network" not in cmd
+
+
+def test_network_none_isolates(tmp_path: Path) -> None:
+    rt = ContainerRuntime(network=NETWORK_NONE)
+    cmd = rt._build_run_cmd(
+        container_name_for("a1"), _make_claim(tmp_path / "ws-a1"),
+        _make_layout(tmp_path / "ws-a1"), ["true"],
+    )
+    idx = cmd.index("--network")
+    assert cmd[idx + 1] == "none"
+
+
+# ---------------------------------------------------------------------------
+# GPU passthrough (4-c-c)
+# ---------------------------------------------------------------------------
+
+
+def test_gpu_slot_in_claim_emits_gpus_flag(tmp_path: Path) -> None:
+    rt = ContainerRuntime()
+    claim = Claim(
+        agent_id="a1", target_repo="alpha", branch="b",
+        workspace_path=str(tmp_path / "ws-a1"),
+        owns_modules=["src/x/**"],
+        gpu_slot=2,
+    )
+    cmd = rt._build_run_cmd(
+        container_name_for("a1"), claim,
+        _make_layout(tmp_path / "ws-a1"), ["true"],
+    )
+    idx = cmd.index("--gpus")
+    assert cmd[idx + 1] == "device=2"
+
+
+def test_no_gpu_in_claim_omits_gpus_flag(tmp_path: Path) -> None:
+    rt = ContainerRuntime()
+    cmd = rt._build_run_cmd(
+        container_name_for("a1"), _make_claim(tmp_path / "ws-a1"),
+        _make_layout(tmp_path / "ws-a1"), ["true"],
+    )
+    assert "--gpus" not in cmd
 
 
 # ---------------------------------------------------------------------------

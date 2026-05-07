@@ -23,7 +23,15 @@ and the UI integration land in later slices.
 from __future__ import annotations
 
 from core.fleet.broker import Broker, PoolConfig, PoolExhausted
-from core.fleet.container_runtime import ContainerRuntime, container_name_for
+from core.fleet.container_runtime import (
+    NETWORK_BRIDGE,
+    NETWORK_HOST,
+    NETWORK_NONE,
+    ContainerRuntime,
+    Mount,
+    container_name_for,
+    default_auth_mounts,
+)
 from core.fleet.manifest import (
     GPU_MODE_RO,
     GPU_MODE_RW,
@@ -52,6 +60,10 @@ __all__ = [
     "GPU_MODE_RO",
     "GPU_MODE_RW",
     "Manifest",
+    "Mount",
+    "NETWORK_BRIDGE",
+    "NETWORK_HOST",
+    "NETWORK_NONE",
     "OutputRegistry",
     "PoolConfig",
     "PoolExhausted",
@@ -62,6 +74,7 @@ __all__ = [
     "STATUS_RELEASED",
     "WorktreeRuntime",
     "container_name_for",
+    "default_auth_mounts",
     "default_runtime",
     "set_default_runtime",
 ]

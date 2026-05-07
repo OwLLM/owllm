@@ -1665,9 +1665,12 @@ class AgentsPage(QWidget):
         # blinks amber/cyan when the team requests user input (an
         # approval, a NEEDS_INPUT-style event). Optionally fires an
         # external Telegram/etc. notification — see notify_settings.
+        # Has a built-in reply field that pipes through the main goal
+        # input so existing run logic applies untouched.
         from desktop_app.widgets.user_card import UserCard
         self._user_card = UserCard(self)
         self._user_card.settings_clicked.connect(self._open_notify_settings)
+        self._user_card.reply_submitted.connect(self._on_user_reply)
         outer.addWidget(self._user_card)
 
         # Goal row + (initially-hidden) attachment chip strip beneath it.
@@ -3098,6 +3101,8 @@ class AgentsPage(QWidget):
         self._run_started_at = None
         self._current_goal_id = None
         self.goal_input.setEnabled(True)
+        if hasattr(self, "_user_card"):
+            self._user_card.set_reply_enabled(True)
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.status_label.setText("Idle.")
@@ -3755,6 +3760,8 @@ class AgentsPage(QWidget):
             logger.exception("could not reset to idle on workspace reveal")
         try:
             self.goal_input.setEnabled(True)
+            if hasattr(self, "_user_card"):
+                self._user_card.set_reply_enabled(True)
             self.goal_input.setFocus()
         except Exception:
             pass
@@ -4307,6 +4314,8 @@ class AgentsPage(QWidget):
         goal = self._with_workdir_hint(goal)
 
         self.goal_input.setEnabled(False)
+        if hasattr(self, "_user_card"):
+            self._user_card.set_reply_enabled(False)
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
@@ -4474,6 +4483,8 @@ class AgentsPage(QWidget):
     @Slot()
     def _set_idle(self) -> None:
         self.goal_input.setEnabled(True)
+        if hasattr(self, "_user_card"):
+            self._user_card.set_reply_enabled(True)
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         if hasattr(self, "_elapsed_timer"):
@@ -4856,6 +4867,24 @@ class AgentsPage(QWidget):
             dlg.show()
         except Exception:
             logger.exception("could not open notify settings")
+
+    def _on_user_reply(self, text: str) -> None:
+        """Quick-reply submitted from the User card. Forwards to the
+        existing goal pipeline so all run logic (team build, working-dir
+        hint, attachment snapshot, etc.) applies untouched. If a run is
+        already in flight we stage the text in the main goal input
+        instead of starting a second goal — the user can press Enter
+        when the team is ready, or use the approval buttons."""
+        text = (text or "").strip()
+        if not text:
+            return
+        if getattr(self, "_run_active", False):
+            # Stage but don't run; the disabled goal_input will accept
+            # the text and re-enable when the current run finishes.
+            self.goal_input.setText(text)
+            return
+        self.goal_input.setText(text)
+        self._run_clicked()
 
 
 # ---------------------------------------------------------------------------

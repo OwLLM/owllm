@@ -42,10 +42,12 @@ from core.fleet.config import (
     DEFAULT_PORT_LOW,
     default_audit_log,
     default_db,
+    default_outputs_db,
     default_process_index,
     default_workspaces,
 )
 from core.fleet.manifest import Claim, ClaimConflict, Manifest
+from core.fleet.outputs import Artifact, OutputRegistry
 from core.fleet.process import ProcessHandle, ProcessRegistry
 from core.fleet.runtime import Runtime, default_runtime
 from core.fleet.workspace import WorkspaceError, WorkspaceLayout
@@ -119,6 +121,8 @@ class FleetService(QObject):
             default_process_index(process_index_dir),
         )
         self._audit = AuditLog(default_audit_log(audit_log_path))
+        self._outputs = OutputRegistry(default_outputs_db())
+        self._outputs.open()
         # Keep references to running workers so they're not GC'd
         # mid-flight.
         self._workers: List[QThread] = []
@@ -138,6 +142,7 @@ class FleetService(QObject):
         for w in list(self._workers):
             w.quit()
             w.wait(2000)
+        self._outputs.close()
         self._manifest.close()
 
     # ------------------------------------------------------------------
@@ -175,6 +180,15 @@ class FleetService(QObject):
     def list_audit_events(self, n: int = 200) -> List[Dict[str, Any]]:
         """Return the most recent ``n`` audit events, oldest-first."""
         return self._audit.tail(n)
+
+    def list_outputs(self) -> List[Artifact]:
+        """Return every artifact published to the output registry."""
+        return self._outputs.list_all()
+
+    @property
+    def outputs(self) -> OutputRegistry:
+        """Direct registry access for callers that need to publish."""
+        return self._outputs
 
     def refresh(self) -> None:
         self._emit_changed()

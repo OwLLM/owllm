@@ -61,6 +61,13 @@ def default_audit_log(override: Optional[str] = None) -> Path:
     return fleet_root() / "audit.log.jsonl"
 
 
+def default_outputs_db(override: Optional[str] = None) -> Path:
+    """SQLite-backed registry of agent-published artifacts."""
+    if override:
+        return Path(override)
+    return fleet_root() / "outputs" / "registry.sqlite"
+
+
 def default_pool(
     *,
     workspace_root: Optional[str] = None,

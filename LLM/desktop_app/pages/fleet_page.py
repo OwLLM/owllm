@@ -39,6 +39,7 @@ from desktop_app.widgets.fleet_agent_card import (
 )
 from desktop_app.widgets.fleet_history_dialog import FleetHistoryDialog
 from desktop_app.widgets.fleet_log_viewer import FleetLogViewer
+from desktop_app.widgets.fleet_outputs_dialog import FleetOutputsDialog
 from desktop_app.widgets.fleet_profile_editor import FleetProfileEditor
 from desktop_app.widgets.fleet_spawn_dialog import FleetSpawnDialog
 
@@ -172,6 +173,10 @@ class FleetPage(QWidget):
         self._btn_profiles.clicked.connect(self._on_profiles_clicked)
         header.addWidget(self._btn_profiles)
 
+        self._btn_outputs = QPushButton("Outputs")
+        self._btn_outputs.clicked.connect(self._on_outputs_clicked)
+        header.addWidget(self._btn_outputs)
+
         self._btn_spawn = QPushButton("Spawn agent")
         self._btn_spawn.setObjectName("primaryButton")
         self._btn_spawn.clicked.connect(self._on_spawn_clicked)
@@ -293,6 +298,10 @@ class FleetPage(QWidget):
 
     def _on_profiles_clicked(self) -> None:
         dlg = FleetProfileEditor(ProfileStore(), parent=self)
+        dlg.show()
+
+    def _on_outputs_clicked(self) -> None:
+        dlg = FleetOutputsDialog(self._service.list_outputs, parent=self)
         dlg.show()
 
     # ------------------------------------------------------------------

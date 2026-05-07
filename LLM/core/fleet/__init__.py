@@ -32,6 +32,7 @@ from core.fleet.manifest import (
     ClaimConflict,
     Manifest,
 )
+from core.fleet.outputs import Artifact, ArtifactConflict, OutputRegistry
 from core.fleet.process import ProcessHandle, ProcessRegistry
 from core.fleet.runtime import (
     Runtime,
@@ -41,12 +42,15 @@ from core.fleet.runtime import (
 )
 
 __all__ = [
+    "Artifact",
+    "ArtifactConflict",
     "Broker",
     "Claim",
     "ClaimConflict",
     "GPU_MODE_RO",
     "GPU_MODE_RW",
     "Manifest",
+    "OutputRegistry",
     "PoolConfig",
     "PoolExhausted",
     "ProcessHandle",

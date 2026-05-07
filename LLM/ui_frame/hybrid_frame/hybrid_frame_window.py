@@ -54,7 +54,7 @@ class HybridFrameWindow(QWidget):
         *,
         corner_size: int = 96,
         border_thickness: int = 12,
-        resize_margin: int = 10,
+        resize_margin: int = 8,
         safe_padding: int = 8,
         min_size: QSize = QSize(520, 360),
         frame_color: QColor = QColor(200, 240, 255, 220),
@@ -533,22 +533,48 @@ class HybridFrameWindow(QWidget):
             event.ignore()
 
     def _hit_test_resize(self, pos) -> int:
+        # Anchor the hit zones to the *parent window's* visible edges,
+        # not the overlay's outer rect. The overlay extends well past
+        # the parent (≈19 px on the left/bottom, ≈79 px on the right
+        # for the corner_tr extension, ≈BADGE_H/2 px above for the
+        # top-centre badge), so testing against the overlay rect put
+        # the right- and top-edge resize zones far outside the visible
+        # window and the user couldn't grab them.
         m = self.resize_margin
-        r = self.rect()
+        badge_h = BADGE_H if self.top_center and not self.top_center.isNull() else 0
+        extra_top = badge_h // 2
+        extra_right = 60
+        shift_out = self.border_thickness // 2
 
-        left = pos.x() <= m
-        right = pos.x() >= r.width() - m
-        top = pos.y() <= m
-        bottom = pos.y() >= r.height() - m
+        parent_left = shift_out + CORNER_OUTSET
+        parent_top = extra_top + shift_out + CORNER_OUTSET
+        parent_right = self.width() - extra_right - shift_out - CORNER_OUTSET
+        parent_bottom = self.height() - shift_out - CORNER_OUTSET
+
+        # ``m`` px on either side of each visible edge so the user can
+        # grab from the decorative outer band or from a hair inside the
+        # parent — whichever feels natural.
+        left = abs(pos.x() - parent_left) <= m
+        right = abs(pos.x() - parent_right) <= m
+        top = abs(pos.y() - parent_top) <= m
+        bottom = abs(pos.y() - parent_bottom) <= m
+
+        # Only count edges where the cursor is actually within the
+        # parent's vertical/horizontal span (plus the same ``m`` slack)
+        # — without this, e.g. a click at (parent_left, 9999) would
+        # register as "left" because it's m px from the parent_left
+        # vertical line but it's nowhere near the window.
+        in_v_span = (parent_top - m) <= pos.y() <= (parent_bottom + m)
+        in_h_span = (parent_left - m) <= pos.x() <= (parent_right + m)
 
         d = 0
-        if left:
+        if left and in_v_span:
             d |= 1
-        if right:
+        if right and in_v_span:
             d |= 2
-        if top:
+        if top and in_h_span:
             d |= 4
-        if bottom:
+        if bottom and in_h_span:
             d |= 8
         return d
 

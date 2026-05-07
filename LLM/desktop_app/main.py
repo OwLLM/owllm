@@ -28340,10 +28340,15 @@ def main() -> int:
                 
                 # Create frame as overlay
                 frame = HybridFrameWindow(
-                    assets, 
-                    corner_size=18, 
-                    border_thickness=18, 
+                    assets,
+                    corner_size=18,
+                    border_thickness=18,
                     safe_padding=2,
+                    # 8 px on either side of the visible parent edge —
+                    # the new _hit_test_resize anchors to the parent
+                    # rect, so this directly controls how forgiving
+                    # the edge-drag feels.
+                    resize_margin=8,
                     parent_window=win  # Pass MainWindow as parent
                 )
                 

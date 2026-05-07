@@ -624,6 +624,10 @@ class _StartTile(QPushButton):
         layout.addLayout(top)
 
         self._subtitle = QLabel("")
+        # Object name lets the stylesheet's QLabel#subtitle selector
+        # apply the secondary-text alpha without affecting the bold
+        # title above.
+        self._subtitle.setObjectName("subtitle")
         sf = QFont(); sf.setPointSize(9)
         self._subtitle.setFont(sf)
         self._subtitle.setWordWrap(True)
@@ -644,39 +648,53 @@ class _StartTile(QPushButton):
     def _apply_style(self) -> None:
         accent = self.accent
         c = QColor(accent)
-        muted = QColor.fromHslF(
+        # Deeper variant for the gradient bottom and the left-edge bar —
+        # the previous "muted" was too dark and made the bright accent
+        # at the top sit on a near-black base, which read as "disabled"
+        # even when the tile was active.
+        deep = QColor.fromHslF(
             c.hslHueF(),
-            max(0.0, c.hslSaturationF() * 0.55),
-            max(0.0, c.lightnessF() * 0.45),
+            min(1.0, c.hslSaturationF() * 0.95),
+            max(0.0, c.lightnessF() * 0.55),
         ).name()
-        # Tile labels are dark on the bright gradient. The disabled
-        # state mutes everything so a "checkpoint not available" tile
-        # looks visibly out of action.
+        # Title is white for max contrast on the saturated background;
+        # subtitle a near-white at 78% alpha so it reads as secondary
+        # without disappearing into the gradient like the old dark navy
+        # subtitle did.
         self.setStyleSheet(f"""
             QPushButton {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 {accent}, stop:1 {muted});
-                color: #0b1220;
-                border: none;
+                    stop:0 {deep}, stop:1 #1f2a3d);
+                border: 1px solid {accent};
+                border-left: 4px solid {accent};
                 border-radius: 12px;
+                color: #ffffff;
                 text-align: left;
             }}
             QPushButton:hover {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #ffffff, stop:0.4 {accent}, stop:1 {muted});
+                    stop:0 {accent}, stop:1 {deep});
             }}
             QPushButton:pressed {{
-                background: {muted};
+                background: {deep};
             }}
             QPushButton:disabled {{
-                background: rgba(60, 70, 84, 0.55);
-                color: #5d6c80;
+                background: rgba(35, 44, 60, 0.85);
+                border: 1px solid #2c3a4f;
+                border-left: 4px solid #3a4a64;
+                color: #6d7b91;
             }}
             QLabel {{
                 background: transparent;
-                color: #0b1220;
+                color: #ffffff;
+            }}
+            QLabel#subtitle {{
+                color: rgba(255, 255, 255, 0.78);
             }}
             QPushButton:disabled QLabel {{
+                color: #6d7b91;
+            }}
+            QPushButton:disabled QLabel#subtitle {{
                 color: #5d6c80;
             }}
         """)
@@ -737,7 +755,12 @@ class StartTrainingPanel(QFrame):
         hint.setWordWrap(True)
         outer.addWidget(hint)
 
-        # Tiles row
+        # Tiles row — three equal-width tiles, side by side. The
+        # adapter combo previously lived stacked under the Continue
+        # tile inside the same QVBoxLayout, which let its long
+        # adapter-name items push that column wider than the other
+        # two; now the combo is its own row below so all three tiles
+        # share the same width.
         tiles = QHBoxLayout()
         tiles.setSpacing(10)
 
@@ -756,42 +779,49 @@ class StartTrainingPanel(QFrame):
         )
         tiles.addWidget(self._resume, 1)
 
-        # Continue is special — it owns a dropdown so the user can
-        # pick which adapter to continue. The DROPDOWN sits under the
-        # tile so it doesn't interrupt the row of three same-size tiles.
-        continue_col = QVBoxLayout()
-        continue_col.setSpacing(4)
         self._continue = _StartTile("📈", "Continue adapter", "#81C784")
         self._continue.set_subtitle("(no adapters in output dir)")
         self._continue.setEnabled(False)
         self._continue.clicked.connect(self._fire_continue)
-        continue_col.addWidget(self._continue, 1)
+        tiles.addWidget(self._continue, 1)
 
+        outer.addLayout(tiles)
+
+        # Adapter dropdown row — below the tiles, full panel width.
+        # Ignored width policy + minimumContentsLength(0) so the long
+        # adapter names never stretch the row beyond the panel.
         self._adapter_combo = QComboBox()
-        self._adapter_combo.setMinimumHeight(28)
+        self._adapter_combo.setMinimumHeight(30)
         self._adapter_combo.setEnabled(False)
+        self._adapter_combo.setSizeAdjustPolicy(
+            QComboBox.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._adapter_combo.setMinimumContentsLength(0)
+        self._adapter_combo.setSizePolicy(
+            QSizePolicy.Ignored, QSizePolicy.Fixed
+        )
+        self._adapter_combo.setMinimumWidth(0)
         self._adapter_combo.setStyleSheet("""
             QComboBox {
-                background: rgba(20, 28, 42, 0.7);
+                background: rgba(20, 28, 42, 0.85);
                 color: #e8eef7;
-                border: 1px solid #2c3a4f;
+                border: 1px solid #3a4a64;
                 border-radius: 6px;
-                padding: 2px 8px;
-                font-size: 9pt;
+                padding: 2px 10px;
+                font-size: 10pt;
             }
-            QComboBox::drop-down { width: 18px; }
+            QComboBox:hover { border: 1px solid #81C784; }
+            QComboBox::drop-down { width: 22px; border: none; }
             QComboBox QAbstractItemView {
                 background: #1a2332;
                 color: #e8eef7;
                 selection-background-color: #81C784;
                 selection-color: #0b1220;
+                border: 1px solid #2c3a4f;
             }
         """)
         self._adapter_combo.currentTextChanged.connect(self._on_adapter_changed)
-        continue_col.addWidget(self._adapter_combo)
-        tiles.addLayout(continue_col, 1)
-
-        outer.addLayout(tiles)
+        outer.addWidget(self._adapter_combo)
 
     # -- public API ---------------------------------------------------
 

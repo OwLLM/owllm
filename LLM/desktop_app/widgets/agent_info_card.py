@@ -102,14 +102,21 @@ def card_picker_geometry(widget_w: int, agent_card: bool) -> tuple:
 
 
 def _wrappable(text: str) -> str:
-    """Inject zero-width spaces after `_-./\\ ` so QPainter's word-wrap
-    breaks long unbroken identifiers (skill ids etc.) onto the next
-    line instead of clipping at the column edge."""
+    """Insert *hard* line breaks (``\\n``) after natural-seam
+    characters (``_-./\\``). QPainter's :data:`Qt.TextWordWrap` does
+    not always honour zero-width spaces, so we force the break
+    ourselves — guarantees long identifiers like
+    ``studying_tutor.orchestrator`` render on multiple lines instead
+    of clipping at the column edge.
+    """
+    if not text:
+        return ""
     out = []
-    for ch in text or "":
+    n = len(text)
+    for i, ch in enumerate(text):
         out.append(ch)
-        if ch in "_-./\\ ":
-            out.append("​")
+        if ch in "_-./\\" and i < n - 1:
+            out.append("\n")
     return "".join(out)
 
 
@@ -127,9 +134,18 @@ def paint_agent_card(
 ) -> None:
     """Top-left character-sheet panel for the selected agent.
 
-    Layout: 320×284 panel anchored at (14, 14). Card now -40px in width
-    (360→320) and +20px in height to host a two-line agent name when
-    the identifier is long.
+    Layout (320×284 anchored at (14,14)):
+
+    - top ribbon (full width, status badge)
+    - **AGENT NAME** — full-width row, 13pt bold, wraps to up to two
+      lines on natural ``_-./\\`` seams. This is the headline; the
+      old "centred under the picture" layout starved long ids of
+      horizontal room.
+    - portrait (100 × 100) on the left, description + skill chips on
+      the right.
+    - voice label, elided under the portrait (the model is already
+      shown in the picker overlay below — drawing it again here just
+      duplicated text and clipped mid-word).
     """
     margin = CARD_MARGIN
     card_w = min(CARD_W_MAX, rect.width() - 2 * margin)
@@ -180,9 +196,28 @@ def paint_agent_card(
         status_word,
     )
 
-    # Picture (emoji icon at large size).
+    # ---- AGENT NAME (full-width, top of card) --------------------
+    # Sized so that even after the worst-case 2-line wrap the
+    # picture/description row below still has room.
+    name_y = card.y() + 36
+    name_h = 44  # two lines at 13pt bold
+    name_rect = QRectF(card.x() + 14, name_y, card.width() - 28, name_h)
+    name_font = QFont()
+    name_font.setPointSize(13)
+    name_font.setBold(True)
+    p.setFont(name_font)
+    p.setPen(_TEXT_BRIGHT)
+    # Force-wrap on natural seams (_-./\\) via _wrappable so QPainter
+    # can't decide to print a single overflowing line.
+    p.drawText(
+        name_rect,
+        Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap,
+        _wrappable(name),
+    )
+
+    # ---- Portrait (left) -----------------------------------------
     pic_x = card.x() + 14
-    pic_y = card.y() + 38
+    pic_y = name_y + name_h + 8
     pic_size = 100.0
     pic_rect = QRectF(pic_x, pic_y, pic_size, pic_size)
 
@@ -204,48 +239,25 @@ def paint_agent_card(
     p.setPen(_TEXT_BRIGHT)
     _paint_icon(p, pic_rect, icon)
 
-    # Name under the picture. Allowed to wrap onto a second line when
-    # the identifier is too long for the 112-px portrait column —
-    # ZWSPs make ``_-./\\``-separated names break on natural seams.
-    name_font = QFont()
-    name_font.setPointSize(11)
-    name_font.setBold(True)
-    p.setFont(name_font)
-    p.setPen(_TEXT_BRIGHT)
-    name_rect = QRectF(pic_x - 6, pic_y + pic_size + 6, pic_size + 12, 40)
-    p.drawText(
-        name_rect,
-        Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap,
-        _wrappable(name),
-    )
-
-    if model_label:
-        model_font = QFont()
-        model_font.setPointSize(8)
-        p.setFont(model_font)
-        p.setPen(_TEXT_DIM)
-        model_rect = QRectF(pic_x - 6, pic_y + pic_size + 46, pic_size + 12, 16)
-        p.drawText(model_rect, Qt.AlignCenter, model_label)
-
+    # ---- Voice label (under portrait, elided) --------------------
+    # The model is already shown in the model-picker overlay at the
+    # bottom of the card, so we no longer paint ``model_label`` —
+    # that duplication was the source of the previous "le Sonnet 4.6
+    # (subscrip..." mid-word clip the user flagged.
     if voice_label:
-        # Voice line under the model line — same dim style so the eye
-        # reads them as a "metadata stack" beneath the agent's name.
         voice_font = QFont()
         voice_font.setPointSize(8)
         p.setFont(voice_font)
         p.setPen(_TEXT_DIM)
-        voice_rect = QRectF(pic_x - 6, pic_y + pic_size + 62, pic_size + 12, 16)
-        # Truncate before drawing — long Piper voice IDs blow past the
-        # 100 px column otherwise.
+        voice_rect = QRectF(pic_x - 6, pic_y + pic_size + 6, pic_size + 12, 16)
         fm = p.fontMetrics()
         label = f"🔊 {voice_label}"
-        if fm.horizontalAdvance(label) > voice_rect.width():
-            while label and fm.horizontalAdvance(label + "…") > voice_rect.width():
-                label = label[:-1]
-            label = label + "…" if label else ""
-        p.drawText(voice_rect, Qt.AlignCenter, label)
+        # Use Qt's elide so long voice ids end with "…" instead of
+        # being chopped mid-word at the rect edge.
+        elided = fm.elidedText(label, Qt.ElideRight, int(voice_rect.width()))
+        p.drawText(voice_rect, Qt.AlignCenter, elided)
 
-    # Right half: description + skills.
+    # ---- Right column: description + skills ----------------------
     info_x = pic_x + pic_size + 18
     info_y = pic_y - 4
     info_w = card.x() + card.width() - 14 - info_x
@@ -254,7 +266,7 @@ def paint_agent_card(
     desc_font.setPointSize(9)
     p.setFont(desc_font)
     p.setPen(_TEXT_BRIGHT)
-    desc_rect = QRectF(info_x, info_y, info_w, 70)
+    desc_rect = QRectF(info_x, info_y, info_w, 60)
     desc = description or "No description provided."
     if len(desc) > 220:
         desc = desc[:217] + "…"
@@ -264,7 +276,7 @@ def paint_agent_card(
         desc,
     )
 
-    skills_y = info_y + 80
+    skills_y = info_y + 70
     h_font = QFont()
     h_font.setPointSize(8)
     h_font.setBold(True)

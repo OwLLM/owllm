@@ -295,6 +295,12 @@ class CheckpointToggle(QFrame):
         super().__init__(parent)
         self.setObjectName("CheckpointToggle")
         self.setMinimumHeight(56)
+        # No content-based minimum width — the children below all
+        # have wordWrap / Ignored width policies, so the toggle row
+        # follows whatever width the parent column gives it instead
+        # of pinning the column open at the long sub-caption width.
+        self.setMinimumWidth(0)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.setStyleSheet("""
             #CheckpointToggle {
                 background: rgba(20, 28, 42, 0.55);
@@ -319,23 +325,36 @@ class CheckpointToggle(QFrame):
         tf = QFont(); tf.setPointSize(11); tf.setBold(True)
         title.setFont(tf)
         title.setStyleSheet("color: #e8eef7;")
+        # Both labels wrap and refuse to push their parent wider so
+        # they shrink with the column. Without wordWrap, the long
+        # "Required for Resume to pick up after Stop / crash."
+        # sub-caption was the dominant column-width pin.
+        title.setWordWrap(True)
+        title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        title.setMinimumWidth(0)
         sub = QLabel("Required for Resume to pick up after Stop / crash.")
         sf = QFont(); sf.setPointSize(8)
         sub.setFont(sf)
         sub.setStyleSheet("color: #8595ad;")
+        sub.setWordWrap(True)
+        sub.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        sub.setMinimumWidth(0)
         text_col.addWidget(title)
         text_col.addWidget(sub)
         layout.addLayout(text_col, 1)
 
-        # Cadence input.
+        # Cadence input. Spinbox's content width is small ("99999
+        # steps" ≈ 90px) so we drop the explicit 140-px minimum that
+        # was being inherited up to the column's width contract.
         layout.addWidget(QLabel("every"))
         self._steps = QSpinBox()
         self._steps.setRange(5, 100000)
         self._steps.setValue(default_steps)
         self._steps.setSingleStep(5)
         self._steps.setSuffix(" steps")
-        self._steps.setMinimumWidth(140)
+        self._steps.setMinimumWidth(0)
         self._steps.setMinimumHeight(36)
+        self._steps.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self._steps.valueChanged.connect(self._emit)
         layout.addWidget(self._steps)
 

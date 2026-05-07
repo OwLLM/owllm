@@ -430,18 +430,30 @@ class TeamGridView(QScrollArea):
 
 class _AgentMiniCard(QFrame):
     """Compact card representing one agent inside :class:`TeamDetailPanel`'s
-    grid. Avatar on top, agent name + base role under it, LEADER ribbon
-    in the top-right corner when ``spec.can_dispatch`` is true (or the
-    base role is ``orchestrator``).
+    grid.
+
+    Layout (top to bottom):
+      * Card-wide avatar tile (square, fills the card's content width)
+      * Agent name (centered, bold)
+      * Effective skills as wrapped chips (resolved from the spec's
+        own tool_allowlist override, falling back to the base role's
+        list, plus any mcp_allowlist filter)
+
+    A small LEADER ribbon sits absolute-positioned in the top-right
+    corner of the card when the agent is the orchestrator (the avatar
+    needs the full width, so we can't let the badge share the row).
     """
+
+    # Pixels for the icon tile's height; width adapts to the card so
+    # the icon truly looks "card-wide".
+    _ICON_HEIGHT = 110
+    _MAX_SKILL_CHIPS = 4
 
     def __init__(self, spec, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._spec = spec
         self.setObjectName("AgentMiniCard")
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setMinimumHeight(110)
-        self.setMaximumHeight(130)
         is_leader = bool(spec.can_dispatch) or spec.base == "orchestrator"
         accent = "#ffc060" if is_leader else "rgba(255,255,255,0.06)"
         self.setStyleSheet(
@@ -457,46 +469,55 @@ class _AgentMiniCard(QFrame):
         )
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(8, 10, 8, 10)
-        outer.setSpacing(4)
-        outer.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        outer.setContentsMargins(10, 10, 10, 10)
+        outer.setSpacing(8)
+        outer.setAlignment(Qt.AlignTop)
 
-        # Top row: avatar centered, LEADER ribbon as a top-right overlay
-        # within the same row.
-        top = QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
-        top.setSpacing(0)
-        top.addStretch(1)
+        # Big, card-wide icon tile. The QLabel expands horizontally
+        # with the card; ``apply_to_label`` paints the glyph / pixmap
+        # centred at the requested size, so we tell it to use the
+        # tile height so the icon visually "fills" the card.
+        icon_tile = QLabel()
+        icon_tile.setObjectName("AgentMiniIcon")
+        icon_tile.setFixedHeight(self._ICON_HEIGHT)
+        icon_tile.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        icon_tile.setAlignment(Qt.AlignCenter)
+        icon_tile.setStyleSheet(
+            "QLabel#AgentMiniIcon {"
+            "  background:rgba(255,255,255,0.03);"
+            "  border:1px solid rgba(255,255,255,0.04);"
+            "  border-radius:8px;"
+            "}"
+        )
+        # Use most of the tile height for the icon itself so the
+        # surrounding tile reads as a frame, not negative space.
+        apply_to_label(icon_tile, spec.icon or "🤖", size=int(self._ICON_HEIGHT * 0.82))
+        outer.addWidget(icon_tile)
 
-        avatar = QLabel()
-        avatar.setFixedSize(40, 40)
-        avatar.setAlignment(Qt.AlignCenter)
-        apply_to_label(avatar, spec.icon or "🤖", size=36)
-        top.addWidget(avatar)
-
-        # Right-side stretch hosts the LEADER ribbon flushed-right; the
-        # widget is omitted entirely on non-leader cards so the title
-        # stays vertically aligned with the avatar.
+        # LEADER ribbon — positioned over the icon tile's top-right
+        # corner via a separate top-aligned overlay (parented directly
+        # to ``self`` so it floats above the icon tile).
         if is_leader:
-            tag = QLabel("LEADER")
+            tag = QLabel("LEADER", self)
             tag.setStyleSheet(
-                "color:#ffc060; background:rgba(255,192,96,0.10); "
-                "border-radius:4px; padding:1px 5px; font-size:8px;"
+                "color:#ffc060; background:rgba(40,30,8,0.85); "
+                "border:1px solid rgba(255,192,96,0.6); "
+                "border-radius:4px; padding:1px 6px; font-size:8px; "
                 "letter-spacing:0.6px;"
             )
-            top.addWidget(tag, 0, Qt.AlignTop | Qt.AlignRight)
+            tag.adjustSize()
+            # Anchor to top-right with an 8px inset; recomputed on
+            # resize via showEvent below.
+            self._leader_ribbon = tag
         else:
-            top.addStretch(1)
+            self._leader_ribbon = None
 
-        outer.addLayout(top)
-
-        # Name (truncated by elision when wider than the card).
+        # Name centred below the icon.
         name_str = spec.name
-        # Trim very long prefixed names — keep readable in narrow cells.
-        display = name_str if len(name_str) <= 18 else name_str[:17] + "…"
+        display = name_str if len(name_str) <= 22 else name_str[:21] + "…"
         name_label = QLabel(display)
         nf = QFont()
-        nf.setPointSize(10)
+        nf.setPointSize(11)
         nf.setBold(True)
         name_label.setFont(nf)
         name_label.setAlignment(Qt.AlignCenter)
@@ -504,14 +525,97 @@ class _AgentMiniCard(QFrame):
         name_label.setToolTip(name_str)
         outer.addWidget(name_label)
 
-        if spec.base:
-            base = QLabel(spec.base)
-            base.setStyleSheet(
-                "color:#7888a8; background:transparent; "
-                "font-size:9px; letter-spacing:0.3px;"
-            )
-            base.setAlignment(Qt.AlignCenter)
-            outer.addWidget(base)
+        # Skills — wrapped chips. Resolved by combining the spec's own
+        # tool_allowlist override with the base role's allowlist (for
+        # the common case where a template inherits "all" or a curated
+        # list from a built-in role) and the mcp_allowlist filter.
+        skills = self._effective_skills(spec)
+        if skills:
+            chips_host = QWidget()
+            chips_host.setStyleSheet("background:transparent;")
+            chips_layout = QHBoxLayout(chips_host)
+            chips_layout.setContentsMargins(0, 0, 0, 0)
+            chips_layout.setSpacing(4)
+            chips_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+            for skill in skills[:self._MAX_SKILL_CHIPS]:
+                chips_layout.addWidget(_skill_chip(skill))
+            if len(skills) > self._MAX_SKILL_CHIPS:
+                more = QLabel(f"+{len(skills) - self._MAX_SKILL_CHIPS}")
+                more.setStyleSheet(
+                    "color:#9aa0a6; background:transparent; font-size:10px;"
+                )
+                chips_layout.addWidget(more)
+            outer.addWidget(chips_host)
+
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _effective_skills(spec) -> List[str]:
+        """Resolve the agent's effective tool list for display purposes.
+
+        Order of precedence:
+          1. ``spec.tool_allowlist`` if explicitly set.
+          2. The base role's ``tool_allowlist`` from ``builtin_roles()``.
+          3. The fallback string 'all tools' when both layers are None
+             (= the agent has access to every registered tool).
+
+        Whatever we end up with is unioned with ``spec.mcp_allowlist``.
+        Pure cosmetic — the runtime applies its own merge logic.
+        """
+        out: List[str] = []
+        base_allowlist: Optional[List[str]] = None
+        if spec.tool_allowlist is not None:
+            out.extend(spec.tool_allowlist)
+        elif spec.base:
+            try:
+                from core.agents.roles import builtin_roles
+                base_role = builtin_roles().get(spec.base)
+            except Exception:
+                base_role = None
+            if base_role is not None:
+                base_allowlist = base_role.tool_allowlist
+                if base_allowlist:
+                    out.extend(base_allowlist)
+        if spec.mcp_allowlist:
+            out.extend(spec.mcp_allowlist)
+        # If we still have nothing AND no explicit allowlist anywhere,
+        # the runtime treats this as "all tools" — surface a friendly
+        # placeholder so the card isn't empty.
+        if not out and spec.tool_allowlist is None and base_allowlist is None:
+            return ["all tools"]
+        # Dedupe while preserving order.
+        seen: set = set()
+        deduped: List[str] = []
+        for s in out:
+            if s not in seen:
+                seen.add(s)
+                deduped.append(s)
+        return deduped
+
+    def resizeEvent(self, ev) -> None:  # noqa: N802
+        super().resizeEvent(ev)
+        # Re-anchor the LEADER ribbon on resize — Qt doesn't auto-
+        # reposition free-floating child widgets.
+        if self._leader_ribbon is not None:
+            tag = self._leader_ribbon
+            tag.adjustSize()
+            tag.move(self.width() - tag.width() - 16, 16)
+            tag.raise_()
+
+
+def _skill_chip(text: str) -> QLabel:
+    """Compact pill rendering for one skill name. Strips the ``mcp.``
+    prefix so the chip stays short ('email.*' beats 'mcp.email.*')."""
+    short = text.replace("mcp.", "") if text.startswith("mcp.") else text
+    if len(short) > 14:
+        short = short[:13] + "…"
+    chip = QLabel(short)
+    chip.setStyleSheet(
+        "color:#cbd2e0; background:rgba(116,164,255,0.10); "
+        "border-radius:5px; padding:1px 6px; font-size:9px;"
+    )
+    chip.setToolTip(text)
+    return chip
 
 
 # ---------------------------------------------------------------------------
@@ -656,14 +760,13 @@ class TeamDetailPanel(QFrame):
         )
         self._layout.addWidget(h)
 
-        # Grid of compact agent cards. Uses 3 columns at the panel's
-        # default width — Qt grids reflow nothing on resize, but with
-        # the QSizePolicy.Expanding cells the cards just stretch evenly,
-        # which reads fine across the panel widths the splitter allows.
+        # 2-column grid of agent cards: card-wide icon up top, name
+        # centered below it, and a chip-list of the agent's skills
+        # (its effective tool allowlist) underneath.
         grid = QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(8)
-        cols = 3
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        cols = 2
         for c in range(cols):
             grid.setColumnStretch(c, 1)
         for i, spec in enumerate(t.agents):

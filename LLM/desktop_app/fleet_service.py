@@ -29,6 +29,7 @@ from core.fleet.config import (
     DEFAULT_PORT_HIGH,
     DEFAULT_PORT_LOW,
     default_db,
+    default_process_index,
     default_workspaces,
 )
 from core.fleet.manifest import Claim, ClaimConflict, Manifest
@@ -81,6 +82,7 @@ class FleetService(QObject):
         *,
         db_path: Optional[str] = None,
         workspace_root: Optional[str] = None,
+        process_index_dir: Optional[str] = None,
         port_low: int = DEFAULT_PORT_LOW,
         port_high: int = DEFAULT_PORT_HIGH,
         gpu_slots: Sequence[int] = (),
@@ -99,7 +101,9 @@ class FleetService(QObject):
             ),
         )
         self._runtime = runtime or default_runtime()
-        self._registry = ProcessRegistry()
+        self._registry = ProcessRegistry(
+            default_process_index(process_index_dir),
+        )
         # Keep references to running workers so they're not GC'd
         # mid-flight.
         self._workers: List[QThread] = []

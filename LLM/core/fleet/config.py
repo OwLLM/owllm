@@ -45,6 +45,15 @@ def default_workspaces(override: Optional[str] = None) -> Path:
     return fleet_root() / "workspaces"
 
 
+def default_process_index(override: Optional[str] = None) -> Path:
+    """Where the persistent ProcessRegistry stores ``<agent_id>.json``
+    records. Central rather than per-workspace so any fleet client
+    can discover every running agent in one glob."""
+    if override:
+        return Path(override)
+    return fleet_root() / ".process"
+
+
 def default_pool(
     *,
     workspace_root: Optional[str] = None,

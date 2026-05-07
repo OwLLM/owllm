@@ -384,11 +384,19 @@ class Agent:
             except Exception:  # noqa: BLE001
                 logger.exception("compaction failed for agent %s; falling back to drop-oldest", self.name)
 
-        # 3. Drop-oldest fallback. If compaction succeeded we'll
-        # usually fit; if it didn't or wasn't triggered, this still
-        # keeps us under the per-call ceiling.
-        while sum(len(c.get("content") or "") for c in capped) > budget and len(capped) > 1:
-            capped.pop(0)
+        # 3. Drop-oldest fallback. Preserve index 0 (the user's
+        # original goal) — compaction tries to keep it via summary,
+        # but when compaction is disabled or its model call fails,
+        # naive drop-oldest evicts the goal and the orchestrator
+        # forgets what it's working on across long sessions. Drop
+        # from index 1 instead, so original-ask + latest-message
+        # always survive. Slightly over-budget with the goal intact
+        # beats within-budget but goal-less.
+        while (
+            sum(len(c.get("content") or "") for c in capped) > budget
+            and len(capped) > 2
+        ):
+            capped.pop(1)
 
         return [{"role": "system", "content": system}, *capped]
 

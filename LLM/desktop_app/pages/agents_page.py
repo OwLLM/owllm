@@ -184,11 +184,13 @@ class _AgentVoiceRow(QWidget):
         agent_name: str,
         *,
         on_install_voice,
+        on_open_voice_manager=None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._agent_name = agent_name
         self._on_install_voice = on_install_voice
+        self._on_open_voice_manager = on_open_voice_manager
         self._loading = False  # guards setter callbacks during populate
 
         layout = QHBoxLayout(self)
@@ -243,6 +245,22 @@ class _AgentVoiceRow(QWidget):
         self.preview_btn.clicked.connect(self._on_preview)
         layout.addWidget(self.preview_btn)
 
+        # Tiny "+" button — opens the Piper voice manager so the user can
+        # download more voices straight from the row, instead of hunting
+        # for the engine dropdown menu. Hidden when Piper isn't the active
+        # backend (system TTS voices come pre-installed).
+        self.add_voice_btn = QPushButton("+")
+        self.add_voice_btn.setFixedSize(28, 28)
+        self.add_voice_btn.setToolTip("Download more voices…")
+        self.add_voice_btn.setStyleSheet(
+            "QPushButton { background:rgba(255,255,255,0.06); color:#dadcdf; "
+            "border:none; border-radius:6px; font-size:14px; font-weight:600; } "
+            "QPushButton:hover { background:rgba(255,255,255,0.12); }"
+        )
+        self.add_voice_btn.clicked.connect(self._on_open_manager)
+        self.add_voice_btn.setVisible(False)
+        layout.addWidget(self.add_voice_btn)
+
         self._populate_voices_and_load()
 
     # ------------------------------------------------------------------
@@ -270,6 +288,16 @@ class _AgentVoiceRow(QWidget):
             for v in tts.voices():
                 label = v.name or v.id.split("\\")[-1]
                 self.combo.addItem(label, v.id)
+            # Surface "+ download more" only when Piper is the active
+            # engine — SAPI voices come pre-installed, so the affordance
+            # would be misleading on a SAPI fallback.
+            backend = getattr(tts, "_backend", None)
+            piper_active = (
+                backend is not None
+                and getattr(backend, "name", "") == "piper"
+                and self._on_open_voice_manager is not None
+            )
+            self.add_voice_btn.setVisible(piper_active)
             # Apply persisted state.
             from core.agents.agent_definitions import get_definition
             d = get_definition(self._agent_name)
@@ -328,6 +356,14 @@ class _AgentVoiceRow(QWidget):
     # ------------------------------------------------------------------
     # Preview
     # ------------------------------------------------------------------
+
+    def _on_open_manager(self) -> None:
+        if self._on_open_voice_manager is None:
+            return
+        try:
+            self._on_open_voice_manager()
+        except Exception:
+            logger.exception("voice manager handler crashed")
 
     def _on_preview(self) -> None:
         tts = self._tts()
@@ -1295,6 +1331,7 @@ class AgentsPage(QWidget):
             row = _AgentVoiceRow(
                 d.name,
                 on_install_voice=self._install_voice_engine,
+                on_open_voice_manager=self._open_piper_voice_manager,
                 parent=self.voice_host,
             )
             row.setVisible(False)
@@ -1488,11 +1525,12 @@ class AgentsPage(QWidget):
                 QMessageBox.warning(self, "Install Piper", err)
                 return
             self._restart_voice_engine()
-            QMessageBox.information(
-                self, "Install Piper",
-                "Piper installed and the default voice is ready. Right-click "
-                "🔊 → Manage Piper voices to add more.",
-            )
+            # Drop the user straight into the voice catalog so the
+            # "I just got Piper, where are all the voices?" gap closes
+            # itself. The default Amy voice is already downloaded;
+            # pick any others from the list and the per-agent voice
+            # combos repopulate the moment the dialog closes.
+            self._open_piper_voice_manager()
 
         worker.done.connect(_finish)
         worker.start()

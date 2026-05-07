@@ -329,20 +329,48 @@ class PiperBackend:
 
     @staticmethod
     def _synthesize_to_wav(voice, text: str, rate: int) -> bytes:
-        """Render text → WAV bytes. ``rate`` (wpm) doesn't map cleanly
-        to Piper's length_scale, so we approximate: Piper's default is
-        ~175 wpm at length_scale=1.0; we invert the ratio to get a
-        rough wpm match."""
-        length_scale = None
+        """Render text → WAV bytes.
+
+        piper-tts 1.2+ split synthesis into two methods:
+
+        * ``synthesize(text, syn_config=...)`` returns an iterable of
+          ``AudioChunk`` (raw PCM only, no WAV header).
+        * ``synthesize_wav(text, wav_file, syn_config=...)`` writes a
+          full RIFF/WAV stream to a ``wave.Wave_write`` handle.
+
+        We use ``synthesize_wav`` when present (1.2+) and fall back to
+        the legacy single-arg synthesize-to-wav signature for very old
+        piper-tts builds. ``rate`` (wpm) is mapped onto
+        ``SynthesisConfig.length_scale`` — Piper's default is ~175 wpm
+        at length_scale=1.0, so we invert that ratio.
+        """
+        length_scale: Optional[float] = None
         if rate and rate > 0:
             length_scale = max(0.5, min(2.0, 175.0 / float(rate)))
+
+        # Build a config if available — only the new API consumes it.
+        cfg = None
+        if length_scale is not None:
+            try:
+                from piper import SynthesisConfig
+                cfg = SynthesisConfig(length_scale=length_scale)
+            except Exception:  # noqa: BLE001
+                cfg = None
+
+        buf = io.BytesIO()
         try:
-            buf = io.BytesIO()
             with wave.open(buf, "wb") as wav:
-                kwargs = {}
-                if length_scale is not None:
-                    kwargs["length_scale"] = length_scale
-                voice.synthesize(text, wav, **kwargs)
+                if hasattr(voice, "synthesize_wav"):
+                    if cfg is not None:
+                        voice.synthesize_wav(text, wav, syn_config=cfg)
+                    else:
+                        voice.synthesize_wav(text, wav)
+                else:
+                    # Legacy piper-tts < 1.2 wrote the WAV directly.
+                    if length_scale is not None:
+                        voice.synthesize(text, wav, length_scale=length_scale)
+                    else:
+                        voice.synthesize(text, wav)
             return buf.getvalue()
         except Exception:
             logger.exception("Piper synthesize failed")

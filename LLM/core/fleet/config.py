@@ -68,6 +68,13 @@ def default_outputs_db(override: Optional[str] = None) -> Path:
     return fleet_root() / "outputs" / "registry.sqlite"
 
 
+def default_runtime_config_path(override: Optional[str] = None) -> Path:
+    """Where the JSON-serialised RuntimeConfig lives."""
+    if override:
+        return Path(override)
+    return fleet_root() / "runtime.json"
+
+
 def default_pool(
     *,
     workspace_root: Optional[str] = None,

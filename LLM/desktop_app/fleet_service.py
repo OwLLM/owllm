@@ -44,12 +44,14 @@ from core.fleet.config import (
     default_db,
     default_outputs_db,
     default_process_index,
+    default_runtime_config_path,
     default_workspaces,
 )
 from core.fleet.manifest import Claim, ClaimConflict, Manifest
 from core.fleet.outputs import Artifact, OutputRegistry
 from core.fleet.process import ProcessHandle, ProcessRegistry
-from core.fleet.runtime import Runtime, default_runtime
+from core.fleet.runtime import Runtime, default_runtime, set_default_runtime
+from core.fleet.runtime_config import RuntimeConfig
 from core.fleet.workspace import WorkspaceError, WorkspaceLayout
 
 logger = logging.getLogger(__name__)
@@ -99,6 +101,7 @@ class FleetService(QObject):
         workspace_root: Optional[str] = None,
         process_index_dir: Optional[str] = None,
         audit_log_path: Optional[str] = None,
+        runtime_config_path: Optional[str] = None,
         port_low: int = DEFAULT_PORT_LOW,
         port_high: int = DEFAULT_PORT_HIGH,
         gpu_slots: Sequence[int] = (),
@@ -116,7 +119,18 @@ class FleetService(QObject):
                 gpu_slots=tuple(gpu_slots),
             ),
         )
-        self._runtime = runtime or default_runtime()
+        # Runtime selection: explicit constructor arg wins; otherwise
+        # load RuntimeConfig from disk and apply it. Falls back to
+        # the lazy default WorktreeRuntime when no config exists.
+        self._runtime_config_path = default_runtime_config_path(
+            runtime_config_path,
+        )
+        if runtime is not None:
+            self._runtime = runtime
+        else:
+            cfg = RuntimeConfig.load(self._runtime_config_path)
+            self._runtime = cfg.to_runtime()
+            set_default_runtime(self._runtime)
         self._registry = ProcessRegistry(
             default_process_index(process_index_dir),
         )
@@ -184,6 +198,29 @@ class FleetService(QObject):
     def list_outputs(self) -> List[Artifact]:
         """Return every artifact published to the output registry."""
         return self._outputs.list_all()
+
+    def load_runtime_config(self) -> RuntimeConfig:
+        """Read the on-disk runtime config without re-applying it.
+
+        UI uses this to pre-populate the settings dialog with
+        whatever's currently in effect.
+        """
+        return RuntimeConfig.load(self._runtime_config_path)
+
+    def apply_runtime_config(self, config: RuntimeConfig) -> None:
+        """Persist ``config`` to disk and switch the active runtime
+        so the next spawn uses it.
+
+        In-flight workers keep the old runtime they were constructed
+        with — switching mid-flight would orphan their containers.
+        """
+        config.save(self._runtime_config_path)
+        new_runtime = config.to_runtime()
+        set_default_runtime(new_runtime)
+        self._runtime = new_runtime
+        logger.info(
+            "fleet runtime switched to %s", type(new_runtime).__name__,
+        )
 
     @property
     def outputs(self) -> OutputRegistry:

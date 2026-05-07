@@ -41,6 +41,9 @@ from desktop_app.widgets.fleet_history_dialog import FleetHistoryDialog
 from desktop_app.widgets.fleet_log_viewer import FleetLogViewer
 from desktop_app.widgets.fleet_outputs_dialog import FleetOutputsDialog
 from desktop_app.widgets.fleet_profile_editor import FleetProfileEditor
+from desktop_app.widgets.fleet_runtime_settings_dialog import (
+    FleetRuntimeSettingsDialog,
+)
 from desktop_app.widgets.fleet_spawn_dialog import FleetSpawnDialog
 
 logger = logging.getLogger(__name__)
@@ -177,6 +180,10 @@ class FleetPage(QWidget):
         self._btn_outputs.clicked.connect(self._on_outputs_clicked)
         header.addWidget(self._btn_outputs)
 
+        self._btn_settings = QPushButton("Settings")
+        self._btn_settings.clicked.connect(self._on_settings_clicked)
+        header.addWidget(self._btn_settings)
+
         self._btn_spawn = QPushButton("Spawn agent")
         self._btn_spawn.setObjectName("primaryButton")
         self._btn_spawn.clicked.connect(self._on_spawn_clicked)
@@ -302,6 +309,17 @@ class FleetPage(QWidget):
 
     def _on_outputs_clicked(self) -> None:
         dlg = FleetOutputsDialog(self._service.list_outputs, parent=self)
+        dlg.show()
+
+    def _on_settings_clicked(self) -> None:
+        dlg = FleetRuntimeSettingsDialog(
+            loader=self._service.load_runtime_config,
+            apply=self._service.apply_runtime_config,
+            parent=self,
+        )
+        dlg.config_applied.connect(
+            lambda: self._show_status("runtime updated", level="ok")
+        )
         dlg.show()
 
     # ------------------------------------------------------------------

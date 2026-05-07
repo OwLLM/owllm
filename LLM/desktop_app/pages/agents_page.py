@@ -2826,6 +2826,23 @@ class AgentsPage(QWidget):
         browse_btn.clicked.connect(self._on_browse_location)
         row.addWidget(browse_btn)
 
+        # "Trust" checkbox — when on AND Location is a real folder, every
+        # Run materializes .claude/settings.local.json with a scoped allow
+        # rule for Edit/Write/Read so the Claude CLI doesn't prompt for
+        # each file. Off by default — explicit consent only.
+        self._trust_writes = QCheckBox("Trust writes")
+        self._trust_writes.setToolTip(
+            "Pre-approve Claude CLI Read/Write/Edit inside the Location "
+            "folder. Writes a scoped rule into .claude/settings.local.json "
+            "on each Run so the team isn't blocked per file."
+        )
+        self._trust_writes.setStyleSheet(
+            "QCheckBox { color:#dadcdf; background:transparent; "
+            "font-size:12px; padding:0 6px; }"
+        )
+        self._trust_writes.toggled.connect(self._on_trust_writes_toggled)
+        row.addWidget(self._trust_writes)
+
         label = QLabel("Project")
         label.setStyleSheet(
             "color:#aaa; font-size:11px; background:transparent; "
@@ -2903,6 +2920,26 @@ class AgentsPage(QWidget):
             self._active_project.location if self._active_project else ""
         )
         self._location_input.blockSignals(False)
+        if hasattr(self, "_trust_writes"):
+            self._trust_writes.blockSignals(True)
+            self._trust_writes.setChecked(
+                bool(self._active_project.trust_writes) if self._active_project else False
+            )
+            self._trust_writes.blockSignals(False)
+
+    def _on_trust_writes_toggled(self, checked: bool) -> None:
+        """Persist the checkbox state on toggle. The actual settings file
+        is materialized on Run (idempotent), not here — toggling alone
+        shouldn't write to disk in a folder that may not exist yet."""
+        if self._active_project is None:
+            return
+        if bool(self._active_project.trust_writes) == bool(checked):
+            return
+        self._active_project.trust_writes = bool(checked)
+        try:
+            self._project_store.save_project(self._active_project)
+        except Exception:
+            logger.exception("could not save trust_writes flag")
 
     def _on_location_changed(self) -> None:
         """Persist edits to the location field on focus-out / Enter."""
@@ -2936,6 +2973,50 @@ class AgentsPage(QWidget):
             return
         self._location_input.setText(picked)
         self._on_location_changed()
+
+    def _materialize_claude_trust(self) -> None:
+        """If the active project has trust_writes on AND Location is a real
+        folder, ensure ``<location>/.claude/settings.local.json`` carries
+        a scoped allow rule for Read/Write/Edit. Idempotent: if the rules
+        are already there, nothing changes. Best-effort — never raises."""
+        proj = self._active_project
+        if proj is None or not proj.trust_writes:
+            return
+        loc = (proj.location or "").strip()
+        if not loc or not os.path.isdir(loc):
+            return
+        try:
+            import json as _json
+            settings_dir = os.path.join(loc, ".claude")
+            settings_path = os.path.join(settings_dir, "settings.local.json")
+            os.makedirs(settings_dir, exist_ok=True)
+
+            # Use forward slashes inside the rule — Claude CLI matches
+            # them across platforms; backslashes have escape pitfalls.
+            scope = loc.replace("\\", "/").rstrip("/") + "/**"
+            wanted = {f"Read({scope})", f"Write({scope})", f"Edit({scope})"}
+
+            # Merge into any pre-existing settings the user may have.
+            data: dict = {}
+            if os.path.isfile(settings_path):
+                try:
+                    with open(settings_path, "r", encoding="utf-8") as fh:
+                        data = _json.load(fh) or {}
+                except Exception:
+                    data = {}
+            perms = data.setdefault("permissions", {}) or {}
+            allow = list(perms.get("allow") or [])
+            existing = set(allow)
+            added = wanted - existing
+            if not added:
+                return  # already trusted; nothing to do
+            allow.extend(sorted(added))
+            perms["allow"] = allow
+            data["permissions"] = perms
+            with open(settings_path, "w", encoding="utf-8") as fh:
+                _json.dump(data, fh, indent=2)
+        except Exception:
+            logger.exception("could not materialize Claude trust settings")
 
     def _with_workdir_hint(self, goal: str) -> str:
         """Prepend a working-directory directive on the FIRST run of a team
@@ -4207,6 +4288,10 @@ class AgentsPage(QWidget):
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.critical(self, "Agents", f"Team build failed: {exc}")
                 return
+        # If the project trusts writes inside its Location folder, drop a
+        # scoped Claude-CLI allow rule there so the team isn't blocked
+        # per-file. Best-effort; a failure here doesn't stop the run.
+        self._materialize_claude_trust()
         # Prepend working-dir directive ONCE per team instance (and again
         # only if the project's Location changes). Must run after team
         # build so the dedupe marker can be stored on the team.

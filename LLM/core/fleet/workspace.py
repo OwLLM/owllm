@@ -1,12 +1,6 @@
-"""Per-agent workspace setup and teardown.
+"""Workspace primitives — layout, helpers, and backward-compat shims.
 
-Slice 1a gave us atomic *claims* over fleet resources. This module
-gives the claim *physical form*: a directory tree with a fresh clone
-of the target repo, an agent-owned branch checked out, and an
-``AGENT_CONTEXT.md`` describing the claim's scope so the agent (or a
-human reading over its shoulder) knows the rules.
-
-Layout produced by :func:`setup_workspace`::
+The agent's physical workspace looks like::
 
     <claim.workspace_path>/
         AGENT_CONTEXT.md      ← scope, modules, resources, lifecycle hints
@@ -16,11 +10,21 @@ Layout produced by :func:`setup_workspace`::
 The context file lives at the workspace root, NOT inside ``clone/``,
 so it never lands in the target repo's git history.
 
-Container/sandbox enforcement is a later slice. Today the workspace is
-a plain directory; the agent is trusted to obey its own
-``AGENT_CONTEXT.md``. The manifest still prevents two agents from
-*claiming* the same files; this module's job is to make the claim
-runnable.
+Slice 3a moved the *lifecycle* logic (clone, branch, push, teardown)
+into :mod:`core.fleet.runtime` behind the :class:`Runtime` interface.
+This module now keeps:
+
+* the layout dataclass (:class:`WorkspaceLayout`),
+* helpers reused across runtime implementations
+  (``_run_git``, ``_rmtree_force``, ``_open_pr``, ``_render_context``,
+  the AGENT_CONTEXT template),
+* and thin :func:`setup_workspace` / :func:`teardown_workspace`
+  shims that delegate to :func:`core.fleet.runtime.default_runtime`,
+  so existing call sites (the CLI, the desktop service, tests) keep
+  working with no diff.
+
+Containers, capability mounts, and any other isolation enforcement
+live behind a custom :class:`Runtime`, not in this module.
 """
 from __future__ import annotations
 
@@ -106,40 +110,20 @@ def _run_git(*args: str, cwd: Optional[Path] = None) -> str:
     return result.stdout
 
 
-def setup_workspace(claim: Claim, *, base_branch: str = "main") -> WorkspaceLayout:
-    """Build the agent's physical workspace.
+def setup_workspace(
+    claim: Claim, *, base_branch: str = "main",
+) -> WorkspaceLayout:
+    """Backward-compat shim — delegates to the default :class:`Runtime`.
 
-    Creates ``<workspace_path>/clone/`` containing a fresh clone of
-    ``claim.target_repo`` checked out to a freshly-created
-    ``claim.branch`` based on ``origin/<base_branch>``, and writes
-    ``AGENT_CONTEXT.md`` at the workspace root.
-
-    Raises :class:`WorkspaceError` on any git or filesystem failure;
-    on failure, removes the partially-constructed workspace dir so
-    the broker isn't left with a dangling claim pointing at corrupt
-    state.
+    Existed before slice 3a as the canonical implementation; today
+    the logic lives in :class:`core.fleet.runtime.WorktreeRuntime`.
+    Call sites that want to pin a specific runtime (e.g. tests or
+    container installations) should call ``runtime.setup`` directly
+    instead of this shim.
     """
-    layout = WorkspaceLayout.for_claim(claim)
-    if layout.root.exists():
-        raise WorkspaceError(
-            f"workspace already exists: {layout.root} "
-            "(broker should have prevented this; investigate stale state)"
-        )
-    layout.root.mkdir(parents=True)
-
-    try:
-        _run_git("clone", claim.target_repo, str(layout.clone))
-        _run_git(
-            "checkout", "-b", claim.branch, f"origin/{base_branch}",
-            cwd=layout.clone,
-        )
-        layout.context_file.write_text(_render_context(claim), encoding="utf-8")
-    except Exception:
-        _rmtree_force(layout.root)
-        raise
-
-    logger.info("workspace ready for %s at %s", claim.agent_id, layout.root)
-    return layout
+    # Lazy import — avoids workspace ↔ runtime cycle at module load.
+    from core.fleet.runtime import default_runtime
+    return default_runtime().setup(claim, base_branch=base_branch)
 
 
 def teardown_workspace(
@@ -150,36 +134,15 @@ def teardown_workspace(
     pr_title: str = "",
     pr_body: str = "",
 ) -> Optional[str]:
-    """Push the branch (optionally open a PR), then remove the workspace.
-
-    Returns the PR URL when ``open_pr`` is True and ``gh pr create``
-    succeeded; ``None`` otherwise.
-
-    A missing workspace is treated as a no-op (returns ``None``) — the
-    broker may legitimately call this on an agent that already crashed
-    and got cleaned up by something else.
-
-    The workspace dir is removed in the ``finally`` clause regardless
-    of push/PR outcome — leaving stale dirs behind is a worse failure
-    mode than losing the diff (which is still in the pushed branch if
-    push succeeded).
-    """
-    layout = WorkspaceLayout.for_claim(claim)
-    if not layout.clone.exists():
-        return None
-
-    pr_url: Optional[str] = None
-    try:
-        if push:
-            _run_git(
-                "push", "-u", "origin", claim.branch, cwd=layout.clone,
-            )
-        if open_pr:
-            pr_url = _open_pr(layout.clone, claim, pr_title, pr_body)
-    finally:
-        _rmtree_force(layout.root)
-
-    return pr_url
+    """Backward-compat shim — delegates to the default :class:`Runtime`."""
+    from core.fleet.runtime import default_runtime
+    return default_runtime().teardown(
+        claim,
+        push=push,
+        open_pr=open_pr,
+        pr_title=pr_title,
+        pr_body=pr_body,
+    )
 
 
 def _open_pr(

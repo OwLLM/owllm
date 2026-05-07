@@ -461,12 +461,17 @@ class PiperBackend:
             stem = path.stem  # e.g. "en_US-amy-low"
             entry = find_catalog_entry(stem)
             display = entry.label if entry is not None else stem
+            # Piper voice ids start with the BCP-47 locale: "en_US-amy-low"
+            # → "en_US". Convert underscore to hyphen so the picker can
+            # bucket Piper and Edge voices together (Edge uses "en-US").
+            lang_code = stem.split("-", 1)[0].replace("_", "-")
             out.append(
                 VoiceInfo(
                     id=str(path),
                     name=display,
                     languages=(entry.language,) if entry is not None else (),
                     gender="",
+                    language_code=lang_code,
                 )
             )
         return out

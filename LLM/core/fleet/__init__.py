@@ -32,6 +32,12 @@ from core.fleet.manifest import (
     ClaimConflict,
     Manifest,
 )
+from core.fleet.runtime import (
+    Runtime,
+    WorktreeRuntime,
+    default_runtime,
+    set_default_runtime,
+)
 
 __all__ = [
     "Broker",
@@ -42,6 +48,10 @@ __all__ = [
     "Manifest",
     "PoolConfig",
     "PoolExhausted",
+    "Runtime",
     "STATUS_ACTIVE",
     "STATUS_RELEASED",
+    "WorktreeRuntime",
+    "default_runtime",
+    "set_default_runtime",
 ]

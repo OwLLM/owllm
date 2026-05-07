@@ -121,6 +121,7 @@ class EdgeTTSBackend:
                         name=label,
                         languages=(locale,) if locale else (),
                         gender=gender,
+                        language_code=locale,
                     )
                 )
             # Sort: locale, then speaker.

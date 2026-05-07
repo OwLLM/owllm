@@ -50,12 +50,21 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class VoiceInfo:
     """One synthesizer voice. ``id`` is what the user picks; everything else
-    is for display in the picker."""
+    is for display in the picker.
+
+    ``language_code`` is a BCP-47 (or BCP-47-ish) locale string the
+    flag-grid voice picker uses to bucket voices. Backends populate it
+    consistently so the UI can group voices by country regardless of
+    which engine they came from. Examples: ``"en-US"``, ``"de-DE"``,
+    ``"zh-CN"``. Empty when the backend can't determine the locale —
+    those voices fall under a generic "🌐 Other" tile in the picker.
+    """
 
     id: str
     name: str
     languages: tuple = ()
     gender: str = ""
+    language_code: str = ""
 
 
 class TtsBackend(Protocol):

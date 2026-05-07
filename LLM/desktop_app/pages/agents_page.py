@@ -210,18 +210,26 @@ class _AgentVoiceRow(QWidget):
         self.enabled_cb.toggled.connect(self._on_changed)
         layout.addWidget(self.enabled_cb)
 
-        self.combo = QComboBox()
-        self.combo.setMinimumHeight(28)
-        self.combo.setToolTip("Voice")
-        self.combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.combo.setStyleSheet(
-            "QComboBox { background:rgba(0,0,0,0.28); color:#e6e8eb; "
-            "border:none; border-radius:6px; padding:0 8px; font-size:12px; } "
-            "QComboBox::drop-down { border:none; }"
+        # Voice picker button — replaces the previous flat combobox.
+        # Click opens a flag-grid dialog so users can pick by country
+        # first (4-column scrollable grid of flag tiles), then by voice
+        # name. Far better UX than a 322-row dropdown.
+        # ``_voice_id`` is the source of truth between dialog opens; the
+        # button label shows the friendly voice name.
+        self._voice_id: str = ""
+        self.voice_btn = QPushButton("Auto voice")
+        self.voice_btn.setMinimumHeight(28)
+        self.voice_btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.voice_btn.setStyleSheet(
+            "QPushButton { background:rgba(0,0,0,0.28); color:#e6e8eb; "
+            "border:none; border-radius:6px; padding:0 10px; font-size:12px; "
+            "text-align:left; } "
+            "QPushButton:hover { background:rgba(0,0,0,0.40); } "
+            "QPushButton:disabled { color:#666; }"
         )
-        self.combo.addItem("Auto voice", "")
-        self.combo.currentIndexChanged.connect(self._on_changed)
-        layout.addWidget(self.combo, 1)
+        self.voice_btn.setToolTip("Pick a voice (browse by country flag)")
+        self.voice_btn.clicked.connect(self._open_voice_picker)
+        layout.addWidget(self.voice_btn, 1)
 
         self.rate_spin = QSpinBox()
         self.rate_spin.setRange(0, 400)
@@ -292,29 +300,27 @@ class _AgentVoiceRow(QWidget):
     # ------------------------------------------------------------------
 
     def _populate_voices_and_load(self) -> None:
-        """Fill the voice combo from the live TTS service, then load the
-        current agent's persisted voice config. Falls back to a disabled
-        row with an "install voice" prompt when the service is missing."""
+        """Load this agent's persisted voice config and update the
+        button label. Voice enumeration is now lazy — the dialog asks
+        the live service for voices when the user opens it, so this
+        method only needs to (a) gate the row when no engine is
+        available and (b) restore the persisted voice_id + label."""
         self._loading = True
         try:
             tts = self._tts()
             if tts is None or not tts.available:
-                self.combo.setEnabled(False)
+                self.voice_btn.setEnabled(False)
+                self.voice_btn.setText("Voice unavailable")
                 self.rate_spin.setEnabled(False)
                 self.enabled_cb.setEnabled(False)
-                self.preview_btn.setEnabled(False)
-                self.combo.setItemText(0, "Voice unavailable — click ▶ to install")
                 # Preview becomes the install entry-point.
                 self.preview_btn.setEnabled(True)
                 self.preview_btn.setToolTip("Install the voice engine")
                 self.preview_btn.setText("⤓")
                 return
-            for v in tts.voices():
-                label = v.name or v.id.split("\\")[-1]
-                self.combo.addItem(label, v.id)
+
             # Surface "+ download more" only when Piper is the active
-            # engine — SAPI voices come pre-installed, so the affordance
-            # would be misleading on a SAPI fallback.
+            # engine — Edge / SAPI voices don't need explicit downloads.
             backend = getattr(tts, "_backend", None)
             piper_active = (
                 backend is not None
@@ -322,30 +328,88 @@ class _AgentVoiceRow(QWidget):
                 and self._on_open_voice_manager is not None
             )
             self.add_voice_btn.setVisible(piper_active)
+
             # Apply persisted state.
             from core.agents.agent_definitions import get_definition
             d = get_definition(self._agent_name)
             if d is not None:
                 self.enabled_cb.setChecked(bool(d.voice_enabled))
                 self.rate_spin.setValue(int(d.voice_rate or 0))
-                idx = 0
-                for i in range(self.combo.count()):
-                    if self.combo.itemData(i) == d.voice_id:
-                        idx = i
-                        break
-                self.combo.setCurrentIndex(idx)
-                # Built-ins: lock the persisted controls (preview still
-                # works), with a hint about duplicating to edit.
+                self.set_voice_id(d.voice_id or "")
                 if d.built_in:
                     self.enabled_cb.setEnabled(False)
-                    self.combo.setEnabled(False)
+                    self.voice_btn.setEnabled(False)
                     self.rate_spin.setEnabled(False)
                     tip = "Built-in agent — duplicate it in Studio to customise"
                     self.enabled_cb.setToolTip(tip)
-                    self.combo.setToolTip(tip)
+                    self.voice_btn.setToolTip(tip)
                     self.rate_spin.setToolTip(tip)
         finally:
             self._loading = False
+
+    # ------------------------------------------------------------------
+    # Voice button + picker
+    # ------------------------------------------------------------------
+
+    def set_voice_id(self, voice_id: str) -> None:
+        """Set ``self._voice_id`` and update the button label.
+
+        Looks the friendly name up via the live service so the button
+        always shows the same text the picker dialog would. Keeps the
+        value-to-label mapping centralised in one method.
+        """
+        self._voice_id = voice_id or ""
+        self.voice_btn.setText(self._voice_label_for(self._voice_id))
+
+    def _voice_label_for(self, voice_id: str) -> str:
+        if not voice_id:
+            return "Auto voice"
+        tts = self._tts()
+        if tts is None or not tts.available:
+            return voice_id
+        # Linear scan — voices() lists are <500 entries, scanning once
+        # per repaint is cheap and avoids caching-invalidation bugs.
+        try:
+            for v in tts.voices():
+                if v.id == voice_id:
+                    return v.name or voice_id
+        except Exception:  # noqa: BLE001
+            pass
+        # Voice on disk but not in the catalog yet (e.g. SAPI registry
+        # path). Show a compact suffix so the row doesn't display the
+        # full Windows registry path.
+        suffix = voice_id.replace("\\", "/").rstrip("/")
+        return suffix.rsplit("/", 1)[-1] or voice_id
+
+    def _open_voice_picker(self) -> None:
+        """Open the flag-grid voice picker dialog. Persists the new
+        choice immediately so the change is live without an explicit
+        Save click."""
+        tts = self._tts()
+        if tts is None or not tts.available:
+            try:
+                self._on_install_voice()
+            except Exception:
+                logger.exception("install-voice handler crashed")
+            return
+        try:
+            voices = tts.voices()
+        except Exception:  # noqa: BLE001
+            logger.exception("could not load voices for picker")
+            voices = []
+        dlg = _VoicePickerDialog(
+            voices=voices,
+            current_voice_id=self._voice_id,
+            title=f"Voice — {self._agent_name}",
+            parent=self,
+        )
+        if dlg.exec_() != QDialog.Accepted:
+            return
+        new_id = dlg.selected_voice_id() or ""
+        self.set_voice_id(new_id)
+        # Re-route through _on_changed so the persistence + canvas
+        # refresh path is shared with the rate / enabled toggles.
+        self._on_changed()
 
     @staticmethod
     def _tts():
@@ -372,7 +436,7 @@ class _AgentVoiceRow(QWidget):
         try:
             d.voice_enabled = self.enabled_cb.isChecked()
             d.voice_rate = int(self.rate_spin.value())
-            d.voice_id = str(self.combo.currentData() or "")
+            d.voice_id = self._voice_id or ""
             save_custom(d)
         except Exception:
             logger.exception("could not persist voice change for %s", self._agent_name)
@@ -390,7 +454,7 @@ class _AgentVoiceRow(QWidget):
     def _on_broadcast_clicked(self) -> None:
         if self._on_broadcast is None:
             return
-        voice_id = str(self.combo.currentData() or "")
+        voice_id = self._voice_id or ""
         rate = int(self.rate_spin.value())
         enabled = self.enabled_cb.isChecked()
         try:
@@ -416,7 +480,7 @@ class _AgentVoiceRow(QWidget):
             except Exception:
                 logger.exception("install-voice handler crashed")
             return
-        voice_id = str(self.combo.currentData() or "")
+        voice_id = self._voice_id or ""
         if not voice_id:
             voice_id = tts.stable_voice_for(self._agent_name)
         rate = int(self.rate_spin.value())
@@ -430,6 +494,359 @@ class _AgentVoiceRow(QWidget):
             tts.speak(sample, voice_id=voice_id, rate=rate, agent=self._agent_name)
         finally:
             tts.set_enabled(was)
+
+
+def _country_to_flag(country_code: str) -> str:
+    """``"US"`` → ``"🇺🇸"``. Two-letter ISO codes map onto Unicode
+    regional-indicator pairs (U+1F1E6..U+1F1FF) — the OS renderer turns
+    consecutive pairs into the actual flag glyph. Returns a generic
+    globe for unknown / non-2-letter inputs."""
+    if not country_code or len(country_code) != 2 or not country_code.isalpha():
+        return "🌐"
+    cc = country_code.upper()
+    return "".join(chr(0x1F1E6 + ord(c) - ord("A")) for c in cc)
+
+
+def _split_locale(language_code: str) -> tuple:
+    """Split ``"en-US"`` / ``"en_US"`` / ``"en"`` into ``(lang, country)``.
+    Empty strings stay empty so the picker can put them under "Other"."""
+    if not language_code:
+        return "", ""
+    parts = language_code.replace("_", "-").split("-", 1)
+    lang = parts[0].lower() if parts else ""
+    country = parts[1].upper() if len(parts) > 1 else ""
+    return lang, country
+
+
+# Country-code → display name for the flag-grid tiles. We don't ship the
+# pycountry dependency just for this — the locales we actually see come
+# from the Edge + Piper catalogs and they're a small known set. Anything
+# missing falls through to the bare country code.
+_COUNTRY_NAMES = {
+    "AE": "UAE", "AF": "Afghanistan", "AR": "Argentina", "AT": "Austria",
+    "AU": "Australia", "AZ": "Azerbaijan", "BA": "Bosnia", "BD": "Bangladesh",
+    "BE": "Belgium", "BG": "Bulgaria", "BN": "Brunei", "BO": "Bolivia",
+    "BR": "Brazil", "CA": "Canada", "CD": "DRC", "CH": "Switzerland",
+    "CL": "Chile", "CN": "China", "CO": "Colombia", "CR": "Costa Rica",
+    "CU": "Cuba", "CY": "Cyprus", "CZ": "Czechia", "DE": "Germany",
+    "DJ": "Djibouti", "DK": "Denmark", "DO": "Dominican Rep.", "DZ": "Algeria",
+    "EC": "Ecuador", "EE": "Estonia", "EG": "Egypt", "ER": "Eritrea",
+    "ES": "Spain", "ET": "Ethiopia", "FI": "Finland", "FR": "France",
+    "GB": "UK", "GE": "Georgia", "GH": "Ghana", "GR": "Greece",
+    "GT": "Guatemala", "HK": "Hong Kong", "HN": "Honduras", "HR": "Croatia",
+    "HU": "Hungary", "ID": "Indonesia", "IE": "Ireland", "IL": "Israel",
+    "IN": "India", "IQ": "Iraq", "IR": "Iran", "IS": "Iceland",
+    "IT": "Italy", "JM": "Jamaica", "JO": "Jordan", "JP": "Japan",
+    "KE": "Kenya", "KG": "Kyrgyzstan", "KH": "Cambodia", "KR": "Korea",
+    "KW": "Kuwait", "KZ": "Kazakhstan", "LA": "Laos", "LB": "Lebanon",
+    "LK": "Sri Lanka", "LT": "Lithuania", "LU": "Luxembourg", "LV": "Latvia",
+    "LY": "Libya", "MA": "Morocco", "MD": "Moldova", "ME": "Montenegro",
+    "MK": "N. Macedonia", "ML": "Mali", "MM": "Myanmar", "MN": "Mongolia",
+    "MT": "Malta", "MU": "Mauritius", "MX": "Mexico", "MY": "Malaysia",
+    "NG": "Nigeria", "NI": "Nicaragua", "NL": "Netherlands", "NO": "Norway",
+    "NP": "Nepal", "NZ": "New Zealand", "OM": "Oman", "PA": "Panama",
+    "PE": "Peru", "PH": "Philippines", "PK": "Pakistan", "PL": "Poland",
+    "PR": "Puerto Rico", "PS": "Palestine", "PT": "Portugal", "PY": "Paraguay",
+    "QA": "Qatar", "RO": "Romania", "RS": "Serbia", "RU": "Russia",
+    "RW": "Rwanda", "SA": "Saudi Arabia", "SD": "Sudan", "SE": "Sweden",
+    "SG": "Singapore", "SI": "Slovenia", "SK": "Slovakia", "SN": "Senegal",
+    "SO": "Somalia", "SS": "South Sudan", "SV": "El Salvador", "SY": "Syria",
+    "TH": "Thailand", "TJ": "Tajikistan", "TM": "Turkmenistan", "TN": "Tunisia",
+    "TR": "Turkey", "TT": "Trinidad", "TW": "Taiwan", "TZ": "Tanzania",
+    "UA": "Ukraine", "UG": "Uganda", "US": "USA", "UY": "Uruguay",
+    "UZ": "Uzbekistan", "VE": "Venezuela", "VN": "Vietnam", "YE": "Yemen",
+    "ZA": "South Africa", "ZM": "Zambia", "ZW": "Zimbabwe",
+}
+
+
+class _VoicePickerDialog(QDialog):
+    """Modal flag-grid voice picker.
+
+    UX flow:
+
+    1. Top half: scrollable 4-column grid of flag tiles, one per country
+       represented in the active backend's voice list. Each tile shows
+       the flag emoji, country name, and voice count.
+    2. Click a flag → bottom half repopulates with just that country's
+       voices.
+    3. Pick a voice; click OK (or double-click the row) to commit.
+
+    Returns the chosen voice id via :meth:`selected_voice_id` after the
+    dialog is accepted.
+    """
+
+    def __init__(
+        self,
+        *,
+        voices: list,
+        current_voice_id: str = "",
+        title: str = "Pick a voice",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(640, 580)
+
+        self._voices = list(voices or [])
+        self._current_voice_id = current_voice_id
+        self._selected_voice_id = current_voice_id
+        self._active_country = ""  # "" = show all
+        self._buckets: dict = {}  # country_code → list[VoiceInfo]
+        self._tile_buttons: dict = {}  # country_code → QPushButton
+
+        self._bucket_voices()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            "Pick a country flag to filter the voice list. Auto-pick "
+            "(default voice) is also offered as the first tile."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color:#9aa0a6; background:transparent;")
+        layout.addWidget(intro)
+
+        # Scrollable flag grid.
+        from PySide6.QtWidgets import QGridLayout
+        self._flags_scroll = QScrollArea()
+        self._flags_scroll.setWidgetResizable(True)
+        self._flags_scroll.setFrameShape(QFrame.NoFrame)
+        self._flags_scroll.setStyleSheet(
+            "QScrollArea { background:transparent; border:none; }"
+        )
+        self._flags_scroll.setMinimumHeight(220)
+        flags_host = QWidget()
+        self._flags_grid = QGridLayout(flags_host)
+        self._flags_grid.setContentsMargins(0, 0, 0, 0)
+        self._flags_grid.setHorizontalSpacing(8)
+        self._flags_grid.setVerticalSpacing(8)
+        for col in range(4):
+            self._flags_grid.setColumnStretch(col, 1)
+        self._flags_host = flags_host
+        self._flags_scroll.setWidget(flags_host)
+        layout.addWidget(self._flags_scroll, 0)
+
+        # Filtered voice list.
+        self._voice_list = QListWidget()
+        self._voice_list.setStyleSheet(
+            "QListWidget { background:#14171d; color:#fff; border:none; "
+            "border-radius:8px; padding:6px; font-size:13px; } "
+            "QListWidget::item { padding:8px 10px; border-radius:6px; } "
+            "QListWidget::item:selected { background:rgba(92,240,255,0.18); "
+            "color:#5cf0ff; }"
+        )
+        self._voice_list.itemSelectionChanged.connect(self._on_voice_selected)
+        self._voice_list.itemDoubleClicked.connect(lambda *_: self.accept())
+        layout.addWidget(self._voice_list, 1)
+
+        # Bottom action bar.
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        self._preview_btn = QPushButton("▶ Preview")
+        self._preview_btn.setMinimumHeight(34)
+        self._preview_btn.setMinimumWidth(110)
+        self._preview_btn.setStyleSheet(
+            "QPushButton { background:rgba(255,255,255,0.06); color:#dadcdf; "
+            "border:none; border-radius:8px; padding:0 14px; font-size:13px; } "
+            "QPushButton:hover { background:rgba(255,255,255,0.12); } "
+            "QPushButton:disabled { color:#555; }"
+        )
+        self._preview_btn.setEnabled(False)
+        self._preview_btn.clicked.connect(self._on_preview)
+        btn_row.addWidget(self._preview_btn)
+        btn_row.addStretch(1)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setMinimumHeight(34)
+        cancel_btn.setMinimumWidth(96)
+        cancel_btn.setStyleSheet(
+            "QPushButton { background:rgba(255,255,255,0.06); color:#dadcdf; "
+            "border:none; border-radius:8px; padding:0 14px; font-size:13px; } "
+            "QPushButton:hover { background:rgba(255,255,255,0.12); }"
+        )
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+
+        self._ok_btn = QPushButton("Use this voice")
+        self._ok_btn.setMinimumHeight(34)
+        self._ok_btn.setMinimumWidth(140)
+        self._ok_btn.setStyleSheet(
+            "QPushButton { background:#4a6cff; color:white; border:none; "
+            "border-radius:8px; padding:0 18px; font-weight:600; font-size:13px; } "
+            "QPushButton:hover { background:#5a7bff; } "
+            "QPushButton:disabled { background:#2c313c; color:#777; }"
+        )
+        self._ok_btn.setEnabled(False)
+        self._ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self._ok_btn)
+        layout.addLayout(btn_row)
+
+        self._populate_flags()
+
+        # If the user already had a voice picked, jump straight to that
+        # country and preselect the row — fewer clicks to "I want to
+        # tweak my current voice".
+        if current_voice_id:
+            for cc, voices_in_cc in self._buckets.items():
+                if any(v.id == current_voice_id for v in voices_in_cc):
+                    self._select_country(cc)
+                    return
+        # Otherwise show All by default.
+        self._select_country("")
+
+    # ------------------------------------------------------------------
+    # Bucketing
+    # ------------------------------------------------------------------
+
+    def _bucket_voices(self) -> None:
+        """Group voices by country code so each flag tile can show a
+        count and the list filter can render in O(1)."""
+        from collections import defaultdict
+        buckets: dict = defaultdict(list)
+        for v in self._voices:
+            _lang, country = _split_locale(getattr(v, "language_code", ""))
+            buckets[country].append(v)
+        # Stable sort each bucket so the list looks the same on every open.
+        for cc in buckets:
+            buckets[cc].sort(key=lambda x: x.name.lower())
+        self._buckets = dict(buckets)
+
+    # ------------------------------------------------------------------
+    # Flag grid population
+    # ------------------------------------------------------------------
+
+    def _populate_flags(self) -> None:
+        # Clear any previous tiles.
+        while self._flags_grid.count():
+            it = self._flags_grid.takeAt(0)
+            w = it.widget()
+            if w is not None:
+                w.deleteLater()
+        self._tile_buttons.clear()
+
+        # Build the country list. "All" tile first, then countries
+        # sorted by voice count (descending) so the most populous
+        # languages bubble to the top of the grid.
+        tiles: list = [("", f"All ({len(self._voices)})")]
+        for cc, voices in sorted(
+            self._buckets.items(),
+            key=lambda kv: (-len(kv[1]), kv[0] or "ZZ"),
+        ):
+            if not cc:
+                # "Other" bucket — voices with no country code.
+                tiles.append(("__other__", f"Other ({len(voices)})"))
+                continue
+            name = _COUNTRY_NAMES.get(cc, cc)
+            tiles.append((cc, f"{name} ({len(voices)})"))
+
+        # Lay out 4 columns wide.
+        for i, (key, caption) in enumerate(tiles):
+            row, col = divmod(i, 4)
+            tile = self._make_flag_tile(key, caption)
+            self._flags_grid.addWidget(tile, row, col)
+            self._tile_buttons[key] = tile
+
+        # Bottom row stretch so the grid doesn't fight the scroll area
+        # for vertical space.
+        self._flags_grid.setRowStretch(self._flags_grid.rowCount(), 1)
+
+    def _make_flag_tile(self, key: str, caption: str) -> QPushButton:
+        if key == "":
+            flag = "🌍"
+        elif key == "__other__":
+            flag = "🌐"
+        else:
+            flag = _country_to_flag(key)
+        btn = QPushButton(f"{flag}\n{caption}")
+        btn.setCheckable(True)
+        btn.setMinimumHeight(76)
+        btn.setStyleSheet(
+            "QPushButton { background:rgba(255,255,255,0.05); color:#dadcdf; "
+            "border:1px solid rgba(255,255,255,0.08); border-radius:10px; "
+            "padding:8px; font-size:24px; } "
+            "QPushButton:hover { background:rgba(255,255,255,0.10); "
+            "border:1px solid rgba(108,240,255,0.30); } "
+            "QPushButton:checked { background:rgba(92,240,255,0.18); "
+            "color:#5cf0ff; border:1px solid #5cf0ff; }"
+        )
+        btn.clicked.connect(lambda _checked=False, k=key: self._select_country(k))
+        return btn
+
+    # ------------------------------------------------------------------
+    # Selection
+    # ------------------------------------------------------------------
+
+    def _select_country(self, country_key: str) -> None:
+        self._active_country = country_key
+        for k, btn in self._tile_buttons.items():
+            btn.setChecked(k == country_key)
+        self._populate_voice_list()
+
+    def _populate_voice_list(self) -> None:
+        self._voice_list.clear()
+        if self._active_country == "":
+            voices = list(self._voices)
+        elif self._active_country == "__other__":
+            voices = self._buckets.get("", [])
+        else:
+            voices = self._buckets.get(self._active_country, [])
+
+        # Stable order: by name within the bucket.
+        voices = sorted(voices, key=lambda v: v.name.lower())
+
+        restore_idx = 0
+        for i, v in enumerate(voices):
+            item = QListWidgetItem(v.name, self._voice_list)
+            item.setData(Qt.UserRole, v.id)
+            if v.id == self._current_voice_id:
+                restore_idx = i
+
+        if self._voice_list.count() > 0:
+            self._voice_list.setCurrentRow(restore_idx)
+        else:
+            self._on_voice_selected()  # disables OK / Preview
+
+    def _on_voice_selected(self) -> None:
+        cur = self._voice_list.currentItem()
+        if cur is None:
+            self._selected_voice_id = ""
+            self._ok_btn.setEnabled(False)
+            self._preview_btn.setEnabled(False)
+            return
+        self._selected_voice_id = str(cur.data(Qt.UserRole) or "")
+        self._ok_btn.setEnabled(bool(self._selected_voice_id))
+        self._preview_btn.setEnabled(bool(self._selected_voice_id))
+
+    # ------------------------------------------------------------------
+    # Preview
+    # ------------------------------------------------------------------
+
+    def _on_preview(self) -> None:
+        if not self._selected_voice_id:
+            return
+        try:
+            from core.voice import get_tts_service
+            svc = get_tts_service()
+        except Exception:  # noqa: BLE001
+            return
+        if svc is None or not svc.available:
+            return
+        sample = "Hi, this is what this voice sounds like."
+        was = svc.enabled
+        try:
+            svc.set_enabled(True)
+            svc.speak(sample, voice_id=self._selected_voice_id, rate=0)
+        finally:
+            svc.set_enabled(was)
+
+    # ------------------------------------------------------------------
+    # Result
+    # ------------------------------------------------------------------
+
+    def selected_voice_id(self) -> str:
+        return self._selected_voice_id
 
 
 class _PiperVoiceManagerDialog(QDialog):
@@ -1585,12 +2002,7 @@ class AgentsPage(QWidget):
                 try:
                     row.enabled_cb.setChecked(bool(enabled))
                     row.rate_spin.setValue(int(rate or 0))
-                    idx = 0
-                    for i in range(row.combo.count()):
-                        if row.combo.itemData(i) == voice_id:
-                            idx = i
-                            break
-                    row.combo.setCurrentIndex(idx)
+                    row.set_voice_id(voice_id)
                 finally:
                     row._loading = False  # type: ignore[attr-defined]
             # Push the new label onto the canvas node + info card.

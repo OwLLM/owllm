@@ -3518,7 +3518,13 @@ class MainWindow(QMainWindow):
         tabs.addTab(_timed_build("Home", self._build_home_tab), "🏠 Home")
         tabs.addTab(_timed_build("Models", self._build_models_tab), "Models")
         tabs.addTab(_timed_build("Train", self._build_train_tab), "Train")
-        tabs.addTab(_timed_build("Test", self._build_test_tab), "Chat")
+        # +3 pt font bump on Chat (and the Agentic-Team pages further
+        # down) on user request — applied via _bump_fonts_in_tree
+        # which walks the page after build and bumps every QFont +
+        # every stylesheet ``font-size: Xpt`` rule.
+        _chat_tab = _timed_build("Test", self._build_test_tab)
+        self._bump_fonts_in_tree(_chat_tab, 3)
+        tabs.addTab(_chat_tab, "Chat")
         tabs.addTab(_timed_build("Logs", self._build_logs_tab), "Logs")
         self.server_page = _timed_build("Server", lambda: ServerPage(self))
         tabs.addTab(self.server_page, "Server")
@@ -3822,6 +3828,7 @@ class MainWindow(QMainWindow):
             # forwards to whichever model port is currently active.
             from desktop_app import cline_proxy
             page = CodePage(parent=self, owllm_base_url=cline_proxy.PROXY_BASE_URL)
+            self._bump_fonts_in_tree(page, 3)
             self._code_page = page  # set BEFORE tab swap so any re-fire short-circuits
             tabs.removeTab(self._code_tab_index)
             self._code_tab_index = tabs.insertTab(idx, page, "Code")
@@ -3911,6 +3918,7 @@ class MainWindow(QMainWindow):
         """
         try:
             page = AgentsPage(main_window=self, parent=self)
+            self._bump_fonts_in_tree(page, 3)
             self._agents_page = page
             # Locate the loader by current tab — it might have moved if
             # other lazy tabs initialized in between.
@@ -4287,6 +4295,7 @@ class MainWindow(QMainWindow):
                 return
             self._bridges_tab_initializing = True
             page = BridgesPage(parent=self)
+            self._bump_fonts_in_tree(page, 3)
             self._bridges_page = page
             tabs.removeTab(self._bridges_tab_index)
             self._bridges_tab_index = tabs.insertTab(idx, page, "Bridges")
@@ -4313,6 +4322,7 @@ class MainWindow(QMainWindow):
                 return
             self._studio_tab_initializing = True
             page = AgentStudioPage(parent=self)
+            self._bump_fonts_in_tree(page, 3)
             self._studio_page = page
             # Studio saves should refresh the live agents page (cards,
             # graph node icons, orbital diagram) so a re-picked avatar
@@ -4560,6 +4570,56 @@ class MainWindow(QMainWindow):
     def _get_text_color(self) -> str:
         """Get appropriate text color based on theme"""
         return "#262730" if not self.dark_mode else "white"
+
+    @staticmethod
+    def _bump_fonts_in_tree(widget, delta: int = 3) -> None:
+        """Bump every font size in ``widget`` and its descendants by
+        ``delta`` points.
+
+        Applied to the Chat / Agentic-Team pages on user request:
+        bumps both QFont-based fonts (``setFont``) and stylesheet
+        ``font-size: Xpt`` rules so widgets that pick their size from
+        either source grow consistently.
+        """
+        import re
+        pat = re.compile(r"font-size\s*:\s*(\d+(?:\.\d+)?)\s*pt")
+
+        def _bump_ss(ss: str) -> str:
+            def repl(m: "re.Match[str]") -> str:
+                try:
+                    size = float(m.group(1))
+                except Exception:
+                    return m.group(0)
+                bumped = size + delta
+                if bumped == int(bumped):
+                    return f"font-size: {int(bumped)}pt"
+                return f"font-size: {bumped}pt"
+            return pat.sub(repl, ss)
+
+        def _apply(w) -> None:
+            try:
+                f = w.font()
+                if f.pointSize() > 0:
+                    f.setPointSize(f.pointSize() + delta)
+                    w.setFont(f)
+            except Exception:
+                pass
+            try:
+                ss = w.styleSheet()
+                if ss and "font-size" in ss:
+                    new_ss = _bump_ss(ss)
+                    if new_ss != ss:
+                        w.setStyleSheet(new_ss)
+            except Exception:
+                pass
+
+        _apply(widget)
+        try:
+            from PySide6.QtWidgets import QWidget as _QW
+            for child in widget.findChildren(_QW):
+                _apply(child)
+        except Exception:
+            pass
 
     @staticmethod
     def _wrap_for_label(text: str, max_chars: int = 32) -> str:

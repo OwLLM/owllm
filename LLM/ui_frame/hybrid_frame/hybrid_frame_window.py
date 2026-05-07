@@ -221,13 +221,37 @@ class HybridFrameWindow(QWidget):
                 # Parent window focused - raise frame to stay on top
                 self.raise_()
                 return False
-        
+            elif event.type() in (QEvent.WindowActivate, QEvent.Show):
+                # Same recovery as the periodic _check_and_raise but
+                # fires immediately when the parent regains activation
+                # after a resize-driven focus blip — avoids the 100 ms
+                # window where the overlay was hidden by the OS but
+                # the timer hadn't fired yet.
+                if not self.isVisible():
+                    self.show()
+                self.raise_()
+                return False
+
         return super().eventFilter(obj, event)
     
     def _check_and_raise(self) -> None:
-        """Check if parent window is active and raise frame to stay on top."""
-        if self.parent_window and self.parent_window.isActiveWindow():
-            self.raise_()
+        """Keep the overlay visible and on top of the active parent.
+
+        Qt.Tool windows on Windows can be auto-hidden by the OS when
+        the owner briefly loses/regains active state — which happens
+        during a fast edge-drag sequence because the resize loop
+        passes focus around. Without this guard the overlay vanishes
+        after a couple of resizes while the main window stays open.
+        Re-show the overlay (not just ``raise_``) when the parent is
+        active but the overlay is no longer visible.
+        """
+        if not self.parent_window:
+            return
+        if not self.parent_window.isActiveWindow():
+            return
+        if not self.isVisible():
+            self.show()
+        self.raise_()
 
     # ----------------------------
     # Painting

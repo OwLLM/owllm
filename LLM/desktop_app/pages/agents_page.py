@@ -2817,6 +2817,15 @@ class AgentsPage(QWidget):
         self._location_input.editingFinished.connect(self._on_location_changed)
         row.addWidget(self._location_input, 2)
 
+        # Browse… button — open a folder picker. Most users want a local
+        # directory; the field still accepts free-form aliases/URLs typed
+        # in directly. Picking a folder commits via _on_location_changed.
+        browse_btn = QPushButton("Browse…")
+        browse_btn.setMinimumHeight(32)
+        browse_btn.setStyleSheet(_GHOST_BTN_STYLE)
+        browse_btn.clicked.connect(self._on_browse_location)
+        row.addWidget(browse_btn)
+
         label = QLabel("Project")
         label.setStyleSheet(
             "color:#aaa; font-size:11px; background:transparent; "
@@ -2907,6 +2916,43 @@ class AgentsPage(QWidget):
             self._project_store.save_project(self._active_project)
         except Exception:
             logger.exception("could not save project location")
+
+    def _on_browse_location(self) -> None:
+        """Open a folder picker and write the result into the location
+        input. Starting directory is the current location if it's an
+        existing folder, otherwise the user's home."""
+        if self._active_project is None:
+            QMessageBox.information(
+                self, "No project",
+                "Create or select a project first.",
+            )
+            return
+        current = (self._location_input.text() or "").strip()
+        start = current if current and os.path.isdir(current) else os.path.expanduser("~")
+        picked = QFileDialog.getExistingDirectory(
+            self, "Locate project folder", start,
+        )
+        if not picked:
+            return
+        self._location_input.setText(picked)
+        self._on_location_changed()
+
+    def _with_workdir_hint(self, goal: str) -> str:
+        """Prepend a working-directory directive when the active project's
+        location is an existing folder. Skips silently for aliases, URLs,
+        and missing paths so we don't pollute the goal with bad guidance."""
+        proj = self._active_project
+        loc = (proj.location or "").strip() if proj else ""
+        if not loc or not os.path.isdir(loc):
+            return goal
+        hint = (
+            f"[Working directory: {loc}]\n"
+            "Use this absolute path as the working directory for every "
+            "shell/file operation (pass it as cwd to shell tools). Create, "
+            "read, and modify files only inside this folder unless I "
+            "explicitly say otherwise.\n\n"
+        )
+        return hint + goal if goal else hint.rstrip()
 
     def _load_active_project(self) -> None:
         """Resolve the active project from settings (or first available)
@@ -4144,6 +4190,11 @@ class AgentsPage(QWidget):
         # a voice-only message is a perfectly valid request.
         if not goal and not attachments:
             return
+        # If the active project's Location resolves to an existing folder,
+        # prepend a working-directory hint so the team's shell/file tools
+        # default to that path. Aliases / URLs / non-existent paths are
+        # left out — only real directories become a runtime hint.
+        goal = self._with_workdir_hint(goal)
         if self._team is None:
             try:
                 self._team = self._build_team()

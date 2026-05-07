@@ -288,6 +288,118 @@ def test_each_template_instantiates(template_name, tmp_path, monkeypatch):
     assert leader_count == 1, f"{template_name}: expected 1 leader, got {leader_count}"
 
 
+# ---------------------------------------------------------------------------
+# display_name / category / custom-template plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_every_template_carries_display_name_and_category():
+    """Every shipped template must declare a display_name and a
+    category — the Studio's Teams view groups by category and renders
+    display_name on the cards. A missing field would either dump the
+    card into the catch-all 'Other' section or render the snake_case
+    internal id, both of which look bad."""
+    expected_categories = {"Personal", "Knowledge", "Software", "Ops"}
+    for name, tpl in builtin_templates().items():
+        assert tpl.display_name, f"{name} missing display_name"
+        # Display name should not just be the snake_case id.
+        assert tpl.display_name != tpl.name, (
+            f"{name}: display_name should be human-cased, not the id"
+        )
+        assert tpl.category in expected_categories, (
+            f"{name}: category {tpl.category!r} not one of {expected_categories}"
+        )
+
+
+def test_humanized_name_falls_back_to_titlecase():
+    from core.agents.teams import Template
+    t = Template(name="my_custom_team")
+    assert t.humanized_name() == "My Custom Team"
+
+    t2 = Template(name="anything", display_name="Look Mom")
+    assert t2.humanized_name() == "Look Mom"
+
+
+def test_save_and_load_custom_template(tmp_path, monkeypatch):
+    from core.agents.teams import (
+        AgentSpec,
+        Template,
+        all_templates,
+        delete_custom_template,
+        save_custom_template,
+        user_templates,
+    )
+    custom_dir = tmp_path / "team_templates"
+    monkeypatch.setattr(
+        "core.agents.teams.loader._user_templates_dir", lambda: custom_dir
+    )
+    custom = Template(
+        name="my_team",
+        display_name="My Team",
+        category="Personal",
+        description="A test team.",
+        icon="🤖",
+        required_mcp=["mcp.email"],
+        agents=[
+            AgentSpec(name="orchestrator", base="orchestrator", can_dispatch=True),
+            AgentSpec(name="helper", base="researcher"),
+        ],
+        graph_edges=[("orchestrator", "helper"), ("helper", "orchestrator")],
+        built_in=False,
+    )
+    path = save_custom_template(custom)
+    assert path.exists()
+
+    # Round-trips into user_templates with built_in=False.
+    loaded = user_templates()
+    assert "my_team" in loaded
+    assert loaded["my_team"].display_name == "My Team"
+    assert loaded["my_team"].category == "Personal"
+    assert loaded["my_team"].built_in is False
+    assert loaded["my_team"].graph_edges == [
+        ("orchestrator", "helper"),
+        ("helper", "orchestrator"),
+    ]
+
+    # all_templates() merges builtin + custom; custom appears alongside.
+    merged = all_templates()
+    assert "my_team" in merged
+    assert "secretary" in merged  # built-in still present
+
+    # Delete works and is idempotent.
+    assert delete_custom_template("my_team") is True
+    assert "my_team" not in user_templates()
+    assert delete_custom_template("my_team") is False
+
+
+def test_save_custom_template_refuses_builtin_id(tmp_path, monkeypatch):
+    """A custom template can't shadow a shipped one by id — the user has
+    to pick a new name."""
+    from core.agents.teams import AgentSpec, Template, save_custom_template
+    custom_dir = tmp_path / "team_templates"
+    monkeypatch.setattr(
+        "core.agents.teams.loader._user_templates_dir", lambda: custom_dir
+    )
+    clash = Template(
+        name="secretary",
+        agents=[
+            AgentSpec(name="orchestrator", base="orchestrator", can_dispatch=True),
+            AgentSpec(name="helper", base="researcher"),
+        ],
+    )
+    with pytest.raises(ValueError, match="built-in"):
+        save_custom_template(clash)
+
+
+def test_delete_custom_template_protects_builtins():
+    """delete_custom_template must NEVER touch the package directory."""
+    from core.agents.teams import builtin_templates, delete_custom_template
+    assert "secretary" in builtin_templates()
+    assert delete_custom_template("secretary") is False
+    # Built-in still loads — proves nothing was removed from the package dir.
+    assert "secretary" in builtin_templates()
+
+
 @pytest.mark.parametrize("template_name", sorted(EXPECTED_TEMPLATES))
 def test_each_template_role_conversion(template_name, tmp_path, monkeypatch):
     """Every template's agents must convert to Role without raising.

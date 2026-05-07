@@ -4318,6 +4318,10 @@ class MainWindow(QMainWindow):
             # graph node icons, orbital diagram) so a re-picked avatar
             # shows up without a project switch.
             page.definitions_changed.connect(self._on_agent_definitions_changed)
+            # Studio's Teams view spawns projects; switch the user to
+            # the Agents tab and tell that page to pick up the new
+            # project so they land on the workspace ready to run.
+            page.project_created.connect(self._on_project_created_from_studio)
             tabs.removeTab(self._studio_tab_index)
             self._studio_tab_index = tabs.insertTab(idx, page, "Studio")
             tabs.setCurrentIndex(self._studio_tab_index)
@@ -4487,6 +4491,31 @@ class MainWindow(QMainWindow):
             try:
                 self._log_to_app_log(
                     f"[STUDIO] agents-page refresh failed:\n{traceback.format_exc()}"
+                )
+            except Exception:
+                pass
+
+    def _on_project_created_from_studio(self, project_id: str) -> None:
+        """Studio just spawned a project from a team template. Switch
+        the user to the Agents tab and select that project so they land
+        on a workspace ready to run."""
+        try:
+            tabs = getattr(self, "_main_tabs", None) or getattr(self, "tabs", None)
+            agents_idx = getattr(self, "_agents_tab_index", -1)
+            if tabs is not None and agents_idx >= 0:
+                tabs.setCurrentIndex(agents_idx)
+        except Exception:
+            pass
+        page = getattr(self, "_agents_page", None)
+        if page is None:
+            return
+        try:
+            page.select_project(project_id)
+        except Exception:
+            import traceback
+            try:
+                self._log_to_app_log(
+                    f"[STUDIO] agents-page project select failed:\n{traceback.format_exc()}"
                 )
             except Exception:
                 pass

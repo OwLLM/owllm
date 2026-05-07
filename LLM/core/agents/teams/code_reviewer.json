@@ -1,5 +1,7 @@
 {
   "name": "code_reviewer",
+  "display_name": "Code Reviewer",
+  "category": "Software",
   "description": "Multi-axis code review: security, performance, style. Read-only.",
   "icon": "owl:owl_critic",
   "required_mcp": [],

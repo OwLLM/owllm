@@ -22,10 +22,12 @@ from PySide6.QtGui import QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QFrame,
     QGraphicsDropShadowEffect,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -34,6 +36,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSpinBox,
     QSplitter,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -47,6 +50,13 @@ from core.agents.agent_definitions import (
     save_custom,
 )
 from core.agents.backends import list_all_entries
+from core.agents.projects import get_project_store
+from core.agents.teams import (
+    Template,
+    all_templates,
+    delete_custom_template,
+    instantiate_template,
+)
 from core.agents.tools import builtin_registry
 from desktop_app.widgets.agent_icons import (
     apply_to_button,
@@ -58,6 +68,8 @@ from desktop_app.widgets.agent_icons import (
 )
 from desktop_app.widgets.model_picker import ModelPickerButton
 from desktop_app.widgets.skill_library_dialog import SkillLibraryDialog
+from desktop_app.widgets.team_builder_dialog import TeamBuilderDialog
+from desktop_app.widgets.team_grid_view import TeamDetailPanel, TeamGridView
 
 logger = logging.getLogger(__name__)
 
@@ -959,13 +971,23 @@ class AgentStudioPage(QWidget):
     # without us reaching into them directly.
     definitions_changed = Signal()
 
+    # Emitted when a new project is spawned from a team template here.
+    # Payload: project id. Main wires it to switch to the Agents tab
+    # and select the freshly-created project so the user lands on the
+    # workspace with the team already loaded.
+    project_created = Signal(str)
+
     # QSettings key for the "I dismissed the first-run banner" flag.
     _ONBOARDING_DISMISSED_KEY = "studio/skill_library_onboarding_dismissed"
+    # QSettings key for which top tab (Teams / Agents) was last open.
+    _ACTIVE_VIEW_KEY = "studio/active_view"  # "teams" | "agents"
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self._settings = QSettings("LocaLLM", "agents")
         self._build_ui()
         self._reload_gallery()
+        self._reload_teams()
         self._maybe_show_onboarding()
 
     def _build_ui(self) -> None:
@@ -982,14 +1004,20 @@ class AgentStudioPage(QWidget):
         title.setStyleSheet("color:#fff; background:transparent;")
         outer.addWidget(title)
 
-        sub = QLabel(
-            "Design agents — pick an avatar, a job, the tools they get to use. "
-            "Built-ins ship with OWLLM and can't be edited; click <b>Duplicate</b> "
-            "on any built-in to make your own customizable copy."
-        )
-        sub.setWordWrap(True)
-        sub.setStyleSheet("color:#9aa0a6; font-size:12px;")
-        outer.addWidget(sub)
+        # Top view toggle: Teams | Agents. Teams is the default landing
+        # view — most users design *projects* (a kind of work), not
+        # individual agents in isolation, so the team catalogue is the
+        # right first impression. Agents stays one click away for power
+        # users who want to design custom personas.
+        outer.addLayout(self._build_view_toggle())
+
+        # Sub-label is rebuilt per view so the prose matches what's on
+        # screen (kept as an attribute so _on_view_toggle_changed can
+        # swap the text without rebuilding the layout).
+        self.sub_label = QLabel("")
+        self.sub_label.setWordWrap(True)
+        self.sub_label.setStyleSheet("color:#9aa0a6; font-size:12px;")
+        outer.addWidget(self.sub_label)
 
         # First-run onboarding banner — hidden until _maybe_show_onboarding
         # decides to surface it. Sits above the action row so it's the first
@@ -1033,6 +1061,189 @@ class AgentStudioPage(QWidget):
         ob.addWidget(dismiss_btn)
         outer.addWidget(self.onboarding_banner)
 
+        # Stacked view: Teams (index 0, default) | Agents (index 1).
+        # Both views fill the remaining vertical space; the toggle at
+        # the top of the page flips between them.
+        self._view_stack = QStackedWidget()
+        self._view_stack.addWidget(self._build_teams_view())   # 0
+        self._view_stack.addWidget(self._build_agents_view())  # 1
+        outer.addWidget(self._view_stack, 1)
+
+        # Restore the previously-active view (defaults to Teams) and
+        # sync the toggle button + sub-label text.
+        prev = str(self._settings.value(self._ACTIVE_VIEW_KEY, "teams") or "teams")
+        self._set_view(prev if prev in ("teams", "agents") else "teams")
+
+    # ------------------------------------------------------------------
+    # View toggle (Teams / Agents)
+    # ------------------------------------------------------------------
+
+    def _build_view_toggle(self) -> "QHBoxLayout":
+        row = QHBoxLayout()
+        row.setSpacing(0)
+        row.setContentsMargins(0, 4, 0, 4)
+
+        self.teams_tab_btn = QPushButton("🧩 Teams")
+        self.teams_tab_btn.setCheckable(True)
+        self.teams_tab_btn.setMinimumHeight(36)
+        self.teams_tab_btn.setStyleSheet(_VIEW_TAB_LEFT_STYLE)
+        self.teams_tab_btn.clicked.connect(lambda: self._set_view("teams"))
+        row.addWidget(self.teams_tab_btn)
+
+        self.agents_tab_btn = QPushButton("🤖 Agents")
+        self.agents_tab_btn.setCheckable(True)
+        self.agents_tab_btn.setMinimumHeight(36)
+        self.agents_tab_btn.setStyleSheet(_VIEW_TAB_RIGHT_STYLE)
+        self.agents_tab_btn.clicked.connect(lambda: self._set_view("agents"))
+        row.addWidget(self.agents_tab_btn)
+
+        row.addStretch(1)
+        return row
+
+    def _set_view(self, view: str) -> None:
+        is_teams = (view == "teams")
+        self._view_stack.setCurrentIndex(0 if is_teams else 1)
+        self.teams_tab_btn.setChecked(is_teams)
+        self.agents_tab_btn.setChecked(not is_teams)
+        if is_teams:
+            self.sub_label.setText(
+                "Pick a team template — pre-built collections of agents wired "
+                "to do a kind of work (Secretary, Bug Hunter, Research Lab, …). "
+                "One click spawns a project with the team ready to run."
+            )
+        else:
+            self.sub_label.setText(
+                "Design individual agents — pick an avatar, a job, the tools "
+                "they get to use. Built-ins ship with OWLLM and can't be edited; "
+                "click <b>Duplicate</b> on any built-in to make your own copy."
+            )
+        self._settings.setValue(self._ACTIVE_VIEW_KEY, view)
+
+    # ------------------------------------------------------------------
+    # Teams view
+    # ------------------------------------------------------------------
+
+    def _build_teams_view(self) -> QWidget:
+        wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
+        v = QVBoxLayout(wrap)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+
+        # Splitter: grid (left, 60%) | detail panel (right, 40%).
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(8)
+
+        self.team_grid = TeamGridView()
+        self.team_grid.team_selected.connect(self._on_team_selected)
+        self.team_grid.create_team_requested.connect(self._on_create_team_requested)
+        splitter.addWidget(self.team_grid)
+
+        self.team_detail = TeamDetailPanel()
+        self.team_detail.create_project_requested.connect(self._on_create_project_from_template)
+        self.team_detail.delete_template_requested.connect(self._on_delete_custom_template)
+        splitter.addWidget(self.team_detail)
+
+        splitter.setStretchFactor(0, 6)
+        splitter.setStretchFactor(1, 4)
+        splitter.setSizes([720, 480])
+        v.addWidget(splitter, 1)
+        return wrap
+
+    def _reload_teams(self, select: Optional[str] = None) -> None:
+        templates = all_templates()
+        self.team_grid.set_templates(templates)
+        if select and select in templates:
+            self.team_grid.set_selected(select)
+            self.team_detail.show_template(templates[select])
+        else:
+            # Clear the detail panel — a fresh load starts with no
+            # selection so the user reads the catalogue first.
+            self.team_grid.set_selected(None)
+            self.team_detail.show_template(None)
+
+    @Slot(str)
+    def _on_team_selected(self, name: str) -> None:
+        templates = all_templates()
+        self.team_detail.show_template(templates.get(name))
+
+    @Slot()
+    def _on_create_team_requested(self) -> None:
+        dlg = TeamBuilderDialog(self)
+        if dlg.exec() != QDialog.Accepted or dlg.saved_template is None:
+            return
+        new_name = dlg.saved_template.name
+        self._reload_teams(select=new_name)
+
+    @Slot(str)
+    def _on_create_project_from_template(self, template_name: str) -> None:
+        templates = all_templates()
+        tpl = templates.get(template_name)
+        if tpl is None:
+            return
+        suggested = tpl.humanized_name()
+        name, ok = QInputDialog.getText(
+            self,
+            "New project",
+            f"Project name (from {tpl.humanized_name()}):",
+            text=suggested,
+        )
+        if not ok or not name.strip():
+            return
+        try:
+            proj = instantiate_template(
+                tpl, project_name=name.strip(),
+                project_store=get_project_store(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("could not instantiate template %s", template_name)
+            QMessageBox.critical(
+                self, "Template failed",
+                f"Could not create a project from '{tpl.humanized_name()}'.\n\n{exc}",
+            )
+            return
+        # Persist the choice so the Agents page lands on it when the
+        # main window switches tabs (the page reads this key on init
+        # and on every refresh).
+        self._settings.setValue("agents/active_project_id", proj.id)
+        # Tell the host so it can switch tabs + refresh the agents page.
+        self.project_created.emit(proj.id)
+        # Show a soft confirmation with the MCP requirements as a hint.
+        if tpl.required_mcp:
+            QMessageBox.information(
+                self,
+                f"{tpl.humanized_name()} ready",
+                "Project created. Connect these MCP servers in the Bridges "
+                "tab for the team to be fully functional:\n\n  • "
+                + "\n  • ".join(tpl.required_mcp),
+            )
+
+    @Slot(str)
+    def _on_delete_custom_template(self, template_name: str) -> None:
+        if QMessageBox.question(
+            self,
+            "Delete team template",
+            f"Delete the custom team '{template_name}'?\n\n"
+            "Existing projects spawned from it stay intact — only the "
+            "template (so you can't re-instantiate it) is removed.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        ) != QMessageBox.Yes:
+            return
+        if delete_custom_template(template_name):
+            self._reload_teams()
+
+    # ------------------------------------------------------------------
+    # Agents view (gallery + editor — the legacy Studio surface)
+    # ------------------------------------------------------------------
+
+    def _build_agents_view(self) -> QWidget:
+        wrap = QWidget()
+        wrap.setStyleSheet("background:transparent;")
+        v = QVBoxLayout(wrap)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+
         # Action row.
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -1056,15 +1267,12 @@ class AgentStudioPage(QWidget):
         self.refresh_btn.setStyleSheet(_GHOST_BTN_STYLE)
         self.refresh_btn.clicked.connect(self._reload_gallery)
         actions.addWidget(self.refresh_btn)
-        outer.addLayout(actions)
+        v.addLayout(actions)
 
         # Splitter: gallery left (60%), editor right (40%).
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(8)
 
-        # Gallery (scroll area is fine here — list of cards can grow).
-        # Two-column grid: column 0 = built-ins, column 1 = customs.
-        # Orchestrators within each column always sit on the first row.
         gallery_host = QScrollArea()
         gallery_host.setWidgetResizable(True)
         gallery_host.setFrameShape(QFrame.NoFrame)
@@ -1079,17 +1287,16 @@ class AgentStudioPage(QWidget):
         gallery_host.setWidget(self.gallery_widget)
         splitter.addWidget(gallery_host)
 
-        # Editor.
         self.editor = _EditorPanel()
         self.editor.saved.connect(self._on_saved)
         self.editor.deleted.connect(self._on_deleted)
         splitter.addWidget(self.editor)
 
-        # 60/40 split — gallery wider so two columns of cards breathe.
         splitter.setStretchFactor(0, 6)
         splitter.setStretchFactor(1, 4)
         splitter.setSizes([600, 400])
-        outer.addWidget(splitter, 1)
+        v.addWidget(splitter, 1)
+        return wrap
 
     # ------------------------------------------------------------------
     # Gallery refresh
@@ -1319,4 +1526,38 @@ _DESTRUCTIVE_BTN_STYLE = """
     }
     QPushButton:hover { background:rgba(255,140,140,0.24); }
     QPushButton:disabled { color:#555; background:transparent; }
+"""
+
+# Top-of-page Teams / Agents toggle. Two buttons rendered as a single
+# segmented pill — left + right halves so the divider sits flush. The
+# checked half gets the accent fill; the other stays muted.
+_VIEW_TAB_LEFT_STYLE = """
+    QPushButton {
+        background:rgba(255,255,255,0.04); color:#9aa0a6;
+        border:1px solid rgba(255,255,255,0.06);
+        border-top-left-radius:9px; border-bottom-left-radius:9px;
+        border-top-right-radius:0; border-bottom-right-radius:0;
+        padding:0 22px; font-size:12px; font-weight:600;
+    }
+    QPushButton:hover { background:rgba(255,255,255,0.08); color:#fff; }
+    QPushButton:checked {
+        background:#28406b; color:#fff;
+        border-color:#3a5fa0;
+    }
+"""
+
+_VIEW_TAB_RIGHT_STYLE = """
+    QPushButton {
+        background:rgba(255,255,255,0.04); color:#9aa0a6;
+        border:1px solid rgba(255,255,255,0.06);
+        border-left:none;
+        border-top-right-radius:9px; border-bottom-right-radius:9px;
+        border-top-left-radius:0; border-bottom-left-radius:0;
+        padding:0 22px; font-size:12px; font-weight:600;
+    }
+    QPushButton:hover { background:rgba(255,255,255,0.08); color:#fff; }
+    QPushButton:checked {
+        background:#28406b; color:#fff;
+        border-color:#3a5fa0;
+    }
 """

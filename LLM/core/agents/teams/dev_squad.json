@@ -1,5 +1,7 @@
 {
   "name": "dev_squad",
+  "display_name": "Dev Squad",
+  "category": "Software",
   "description": "Solo-dev squad: orchestrator, coder, critic, devops, docs. The canonical software-build team.",
   "icon": "owl:owl_coder",
   "required_mcp": [],

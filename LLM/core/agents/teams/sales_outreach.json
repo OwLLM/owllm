@@ -1,5 +1,7 @@
 {
   "name": "sales_outreach",
+  "display_name": "Sales Outreach",
+  "category": "Ops",
   "description": "Researches prospects, writes openers, schedules follow-ups, logs to CRM.",
   "icon": "owl:owl_documentation",
   "required_mcp": [

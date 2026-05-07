@@ -1,5 +1,7 @@
 {
   "name": "writers_room",
+  "display_name": "Writers' Room",
+  "category": "Knowledge",
   "description": "Outlines, drafts, edits, SEO-checks, and publishes long-form content.",
   "icon": "owl:owl_documentation",
   "required_mcp": [

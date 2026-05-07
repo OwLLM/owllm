@@ -1,5 +1,7 @@
 {
   "name": "concierge",
+  "display_name": "Concierge",
+  "category": "Personal",
   "description": "Books, orders, reserves. Compares options, fills out forms, files the receipts.",
   "icon": "owl:owl_operator",
   "required_mcp": [

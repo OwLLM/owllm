@@ -1,5 +1,7 @@
 {
   "name": "health_coach",
+  "display_name": "Health & Habits",
+  "category": "Personal",
   "description": "Logs habits, plans the week, critiques nutrition, runs the weekly review.",
   "icon": "owl:owl_documentation",
   "required_mcp": [

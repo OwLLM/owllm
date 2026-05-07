@@ -1,5 +1,7 @@
 {
   "name": "finance",
+  "display_name": "Finance Steward",
+  "category": "Personal",
   "description": "Classifies transactions, watches the budget, tracks tax lots, drafts invoices.",
   "icon": "owl:owl_documentation",
   "required_mcp": [

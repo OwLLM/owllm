@@ -1,5 +1,7 @@
 {
   "name": "bug_hunter",
+  "display_name": "Bug Hunter",
+  "category": "Software",
   "description": "Reproduce, bisect, root-cause, patch, and add a regression test.",
   "icon": "owl:owl_critic",
   "required_mcp": [],

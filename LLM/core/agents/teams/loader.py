@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -87,11 +88,26 @@ class AgentSpec:
     default_temperature: Optional[float] = None
 
 
+DEFAULT_CATEGORY = "Other"
+"""Section label used when a template ships without ``category``. Kept
+as a constant so the Studio's Teams view always has *somewhere* to put
+unknown / custom templates instead of silently dropping them."""
+
+
 @dataclass
 class Template:
     """One team template."""
 
     name: str
+    """Stable internal id — kebab/snake case, used as the agent-name
+    prefix (``secretary.responder``) and as the on-disk filename."""
+    display_name: str = ""
+    """Title-cased label shown on team cards. Falls back to the
+    title-cased :attr:`name` when blank."""
+    category: str = DEFAULT_CATEGORY
+    """Section the team belongs to in the Studio's Teams view (e.g.
+    'Personal', 'Knowledge', 'Software', 'Ops'). Free-form so a future
+    template can introduce a new section without a schema migration."""
     description: str = ""
     icon: str = "🤖"
     required_mcp: List[str] = field(default_factory=list)
@@ -99,9 +115,21 @@ class Template:
     graph_edges: List[Tuple[str, str]] = field(default_factory=list)
     """Edges as ``(source_short_name, target_short_name)``. The materialiser
     expands these to prefixed names."""
+    built_in: bool = True
+    """``False`` for user-built custom templates loaded from
+    :func:`_user_templates_dir`. The Studio uses this to mark cards
+    'BUILT-IN' vs 'CUSTOM' and to gate edit / delete affordances."""
 
     def prefixed_agent_name(self, short: str) -> str:
         return f"{self.name}.{short}"
+
+    def humanized_name(self) -> str:
+        """Return the display name, falling back to a title-cased
+        version of the internal id (``learning_tutor`` -> 'Learning
+        Tutor') when no explicit ``display_name`` was set."""
+        if self.display_name:
+            return self.display_name
+        return " ".join(p.capitalize() for p in self.name.replace("-", "_").split("_") if p)
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +143,19 @@ def load_template(path: Path) -> Template:
     return _template_from_dict(data, source=path)
 
 
-def load_templates_dir(templates_dir: Path) -> Dict[str, Template]:
-    """Load every ``*.json`` in a directory into a name -> Template map."""
+def load_templates_dir(templates_dir: Path, *, built_in: bool = True) -> Dict[str, Template]:
+    """Load every ``*.json`` in a directory into a name -> Template map.
+
+    ``built_in`` flags the source: True for the package directory
+    (``core/agents/teams``), False for user-built customs under
+    :func:`_user_templates_dir`. The Studio uses the flag to gate the
+    edit / delete affordances on each card.
+    """
     out: Dict[str, Template] = {}
     for f in sorted(Path(templates_dir).glob("*.json")):
         try:
             tpl = load_template(f)
+            tpl.built_in = built_in
         except Exception:  # noqa: BLE001
             logger.exception("could not load team template %s", f)
             continue
@@ -129,8 +164,110 @@ def load_templates_dir(templates_dir: Path) -> Dict[str, Template]:
 
 
 def builtin_templates() -> Dict[str, Template]:
-    """Templates shipped with OWLLM."""
-    return load_templates_dir(Path(__file__).parent)
+    """Templates shipped with OWLLM (read-only)."""
+    return load_templates_dir(Path(__file__).parent, built_in=True)
+
+
+def _user_templates_dir() -> Path:
+    """Where user-built custom templates live. Same data dir layout as
+    custom AgentDefinitions and the agent-state DB so the data folder
+    has one canonical home."""
+    llm_root = Path(__file__).resolve().parents[3]
+    return llm_root / "data" / "team_templates"
+
+
+def user_templates() -> Dict[str, Template]:
+    """User-built custom templates (writable). Returns an empty map if
+    the directory hasn't been created yet — saving the first custom
+    template creates it."""
+    d = _user_templates_dir()
+    if not d.exists():
+        return {}
+    return load_templates_dir(d, built_in=False)
+
+
+def all_templates() -> Dict[str, Template]:
+    """Built-ins + custom, merged. Custom wins on name collision so a
+    user can override a shipped template by saving one with the same
+    ``name``."""
+    out = dict(builtin_templates())
+    out.update(user_templates())  # user wins
+    return out
+
+
+_NAME_SAFE_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+
+
+def _sanitize_name(name: str) -> str:
+    """Map a user-supplied template name to a safe filename component.
+    Same rules as the AgentDefinition store (Latin alphanumerics +
+    dot/underscore/hyphen, everything else collapses to ``_``)."""
+    cleaned = _NAME_SAFE_RE.sub("_", (name or "").strip()) or "team"
+    return cleaned[:80]
+
+
+def save_custom_template(template: Template) -> Path:
+    """Persist a Template as a custom user template JSON. Refuses to
+    overwrite a built-in by the same ``name`` — pick a fresh id (the
+    Studio enforces this in the UI; this is the hard guard).
+    """
+    builtins = builtin_templates()
+    if template.name in builtins:
+        raise ValueError(
+            f"'{template.name}' is a built-in template id; pick a different name"
+        )
+    target_dir = _user_templates_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / f"{_sanitize_name(template.name)}.json"
+    payload = {
+        "name": template.name,
+        "display_name": template.display_name or template.humanized_name(),
+        "category": template.category or DEFAULT_CATEGORY,
+        "description": template.description,
+        "icon": template.icon,
+        "required_mcp": list(template.required_mcp),
+        "agents": [_agent_spec_to_dict(a) for a in template.agents],
+        "graph": {
+            "edges": [{"source": s, "target": t} for s, t in template.graph_edges],
+        },
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def delete_custom_template(name: str) -> bool:
+    """Remove a custom template by id. Returns True if a file was
+    deleted. Built-ins are protected — calling this on a built-in is
+    a no-op that returns False."""
+    if name in builtin_templates():
+        return False
+    path = _user_templates_dir() / f"{_sanitize_name(name)}.json"
+    if path.exists():
+        path.unlink()
+        return True
+    return False
+
+
+def _agent_spec_to_dict(spec: AgentSpec) -> dict:
+    """Inverse of :func:`_template_from_dict`'s agent decoder. Drops
+    keys whose value is ``None`` so the on-disk JSON stays compact."""
+    out: dict = {"name": spec.name}
+    for k in (
+        "base", "description", "icon", "system_prompt", "extra_prompt",
+        "default_model_id",
+    ):
+        v = getattr(spec, k)
+        if v:
+            out[k] = v
+    if spec.tool_allowlist is not None:
+        out["tool_allowlist"] = list(spec.tool_allowlist)
+    if spec.mcp_allowlist is not None:
+        out["mcp_allowlist"] = list(spec.mcp_allowlist)
+    if spec.can_dispatch is not None:
+        out["can_dispatch"] = bool(spec.can_dispatch)
+    if spec.default_temperature is not None:
+        out["default_temperature"] = float(spec.default_temperature)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -319,6 +456,8 @@ def _template_from_dict(data: dict, *, source: Path) -> Template:
 
     return Template(
         name=str(name),
+        display_name=str(data.get("display_name") or ""),
+        category=str(data.get("category") or DEFAULT_CATEGORY),
         description=str(data.get("description") or ""),
         icon=str(data.get("icon") or "🤖"),
         required_mcp=[str(x) for x in (data.get("required_mcp") or [])],

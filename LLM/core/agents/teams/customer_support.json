@@ -1,5 +1,7 @@
 {
   "name": "customer_support",
+  "display_name": "Customer Support",
+  "category": "Ops",
   "description": "Triages tickets, answers from the KB, escalates the rest, writes post-mortems.",
   "icon": "owl:owl_operator",
   "required_mcp": [

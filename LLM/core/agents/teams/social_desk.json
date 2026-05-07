@@ -1,5 +1,7 @@
 {
   "name": "social_desk",
+  "display_name": "Social Desk",
+  "category": "Knowledge",
   "description": "Trend-scout, copywriter, thumbnail briefer, scheduler, DM moderator. Multi-platform.",
   "icon": "owl:owl_operator",
   "required_mcp": [

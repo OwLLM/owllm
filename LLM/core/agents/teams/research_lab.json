@@ -1,5 +1,7 @@
 {
   "name": "research_lab",
+  "display_name": "Research Lab",
+  "category": "Knowledge",
   "description": "Deep-research team. Gathers sources, reads them carefully, synthesises, fact-checks, cites.",
   "icon": "owl:owl_researcher",
   "required_mcp": [

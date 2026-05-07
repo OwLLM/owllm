@@ -1,5 +1,7 @@
 {
   "name": "learning_tutor",
+  "display_name": "Learning Tutor",
+  "category": "Knowledge",
   "description": "Builds curricula, explains concepts, runs quizzes, schedules spaced-repetition reviews.",
   "icon": "owl:owl_documentation",
   "required_mcp": [

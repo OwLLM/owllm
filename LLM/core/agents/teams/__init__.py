@@ -18,16 +18,26 @@ the resulting :class:`Project` row.
 """
 from core.agents.teams.loader import (
     AgentSpec,
+    DEFAULT_CATEGORY,
     Template,
+    all_templates,
     builtin_templates,
+    delete_custom_template,
     instantiate_template,
     load_template,
+    save_custom_template,
+    user_templates,
 )
 
 __all__ = [
     "AgentSpec",
+    "DEFAULT_CATEGORY",
     "Template",
+    "all_templates",
     "builtin_templates",
+    "delete_custom_template",
     "instantiate_template",
     "load_template",
+    "save_custom_template",
+    "user_templates",
 ]

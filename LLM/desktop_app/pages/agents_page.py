@@ -2850,11 +2850,12 @@ class AgentsPage(QWidget):
         new_btn.clicked.connect(self._on_new_project)
         row.addWidget(new_btn)
 
-        from_template_btn = QPushButton("From template…")
-        from_template_btn.setMinimumHeight(32)
-        from_template_btn.setStyleSheet(_GHOST_BTN_STYLE)
-        from_template_btn.clicked.connect(self._on_new_project_from_template)
-        row.addWidget(from_template_btn)
+        # The "From template…" button used to live here. The team
+        # catalogue now has a dedicated home — the Studio's Teams view
+        # — where templates render as a card matrix with previews,
+        # categories, and a 'Create your own team' builder. Removing
+        # the button collapses the entry-point sprawl and avoids two
+        # places that do the same thing.
 
         rename_btn = QPushButton("Rename")
         rename_btn.setMinimumHeight(32)
@@ -2978,80 +2979,20 @@ class AgentsPage(QWidget):
         # Open the team picker so the user immediately picks members.
         self._open_team_picker()
 
-    def _on_new_project_from_template(self) -> None:
-        """Stamp out a new project from one of the shipped team templates.
+    def select_project(self, project_id: str) -> None:
+        """Make ``project_id`` the active project and re-render the workspace.
 
-        On accept the loader writes any missing per-agent definitions and
-        a new Project row, then we switch to it. The user can rename it,
-        edit the team, swap models, or open the Studio to tweak any of
-        the materialised agents — at that point it behaves like any other
-        project they built by hand.
+        Public entry point for the host (main.py) so the Studio can spawn a
+        project from a team template and tell us to switch to it. No-op if
+        the id doesn't exist (the project may have been deleted between
+        the spawn and our call). Also re-populates the project combo so a
+        freshly-created project that wasn't in the dropdown shows up.
         """
-        try:
-            from core.agents.teams import builtin_templates, instantiate_template
-        except Exception:
-            logger.exception("could not import team templates")
-            QMessageBox.warning(
-                self,
-                "Templates unavailable",
-                "Team templates failed to load. See the log for details.",
-            )
+        proj = self._project_store.get_project(project_id)
+        if proj is None:
             return
-        templates = builtin_templates()
-        if not templates:
-            QMessageBox.information(
-                self,
-                "No templates",
-                "No team templates are installed yet.",
-            )
-            return
-        dlg = _TemplatePickerDialog(templates=templates, parent=self)
-        if dlg.exec() != QDialog.Accepted:
-            return
-        chosen = dlg.selected_template()
-        if chosen is None:
-            return
-
-        # Ask for a name — default is the template's own name; the user
-        # almost always wants something more specific ("Work secretary").
-        name, ok = QInputDialog.getText(
-            self,
-            "Project name",
-            f"Name for the new {chosen.name} project:",
-            text=chosen.name,
-        )
-        if not ok or not name.strip():
-            return
-
-        try:
-            proj = instantiate_template(
-                chosen, project_name=name.strip(), project_store=self._project_store
-            )
-        except Exception:
-            logger.exception("could not instantiate template %s", chosen.name)
-            QMessageBox.critical(
-                self,
-                "Template failed",
-                f"Could not instantiate '{chosen.name}'. See the log for details.",
-            )
-            return
-
-        self._active_project = proj
-        self._settings.setValue(self._SETTINGS_ACTIVE_PROJECT, proj.id)
+        self._switch_project(project_id)
         self._populate_project_combo()
-        self._render_team()
-
-        # Surface the MCP servers the template expects so the user knows
-        # what to connect before kicking off a goal. Pure hint — we don't
-        # block the project from running.
-        if chosen.required_mcp:
-            QMessageBox.information(
-                self,
-                f"{chosen.name} ready",
-                "Connect these MCP servers in the Bridges tab for the team "
-                "to be fully functional:\n\n  • "
-                + "\n  • ".join(chosen.required_mcp),
-            )
 
     def _on_rename_project(self) -> None:
         if self._active_project is None:
@@ -5025,104 +4966,6 @@ class _TeamPickerDialog(QDialog):
 
     def selected_names(self) -> List[str]:
         return [name for name, cb in self._checks.items() if cb.isChecked()]
-
-
-class _TemplatePickerDialog(QDialog):
-    """Modal: pick one of the shipped team templates to instantiate.
-
-    A radio-style picker (one selection at a time) over
-    :class:`core.agents.teams.Template`. Each row shows the template's
-    icon, name, description, and the list of MCP servers it expects.
-    """
-
-    def __init__(self, *, templates: Dict[str, "object"], parent=None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("New project from template")
-        self.setModal(True)
-        self.setMinimumWidth(620)
-
-        self._templates = dict(templates)
-        self._selected: Optional[str] = None
-        self._buttons: Dict[str, "QPushButton"] = {}
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(12)
-
-        prose = QLabel(
-            "Pick a team template. The agents it needs will be created "
-            "(prefixed with the template name, e.g. <tt>secretary.responder</tt>) "
-            "and a new project will be set up using the template's routing graph."
-        )
-        prose.setWordWrap(True)
-        prose.setStyleSheet("color:#bbb; font-size:11px;")
-        layout.addWidget(prose)
-
-        from desktop_app.widgets.agent_icons import apply_to_label
-
-        # Sort templates by name; one row per template, single-select via
-        # checkable buttons that act like a radio group.
-        ordered = sorted(self._templates.values(), key=lambda t: t.name.lower())
-        for tpl in ordered:
-            row_btn = QPushButton()
-            row_btn.setCheckable(True)
-            row_btn.setMinimumHeight(72)
-            row_btn.setStyleSheet(
-                "QPushButton { text-align:left; padding:10px 14px; "
-                "background:rgba(255,255,255,0.04); color:#dadcdf; "
-                "border:1px solid rgba(255,255,255,0.05); border-radius:8px; }"
-                "QPushButton:hover { background:rgba(255,255,255,0.08); }"
-                "QPushButton:checked { background:#28406b; color:#fff; "
-                "border-color:#3a5fa0; }"
-            )
-            row_btn.clicked.connect(
-                lambda _checked, n=tpl.name: self._on_pick(n)
-            )
-            self._buttons[tpl.name] = row_btn
-
-            inner = QHBoxLayout(row_btn)
-            inner.setContentsMargins(4, 4, 4, 4)
-            inner.setSpacing(12)
-
-            avatar = QLabel()
-            avatar.setFixedSize(48, 48)
-            avatar.setAlignment(Qt.AlignCenter)
-            apply_to_label(avatar, tpl.icon or "🤖", size=44)
-            inner.addWidget(avatar)
-
-            text = QVBoxLayout()
-            text.setSpacing(2)
-            name_label = QLabel(f"<b>{tpl.name}</b>  <span style='color:#9aa0a6;'>· {len(tpl.agents)} agents</span>")
-            name_label.setStyleSheet("color:#fff; font-size:13px;")
-            text.addWidget(name_label)
-            desc_label = QLabel(tpl.description)
-            desc_label.setStyleSheet("color:#bbb; font-size:11px;")
-            desc_label.setWordWrap(True)
-            text.addWidget(desc_label)
-            if tpl.required_mcp:
-                mcp_label = QLabel("MCP: " + ", ".join(tpl.required_mcp))
-                mcp_label.setStyleSheet("color:#7a8b9e; font-size:10px;")
-                text.addWidget(mcp_label)
-            inner.addLayout(text, 1)
-            layout.addWidget(row_btn)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self._ok_btn = buttons.button(QDialogButtonBox.Ok)
-        self._ok_btn.setEnabled(False)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-
-    def _on_pick(self, name: str) -> None:
-        self._selected = name
-        for n, b in self._buttons.items():
-            b.setChecked(n == name)
-        self._ok_btn.setEnabled(True)
-
-    def selected_template(self):
-        if self._selected is None:
-            return None
-        return self._templates.get(self._selected)
 
 
 # ---------------------------------------------------------------------------

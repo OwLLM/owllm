@@ -1,5 +1,7 @@
 {
   "name": "data_analyst",
+  "display_name": "Data Analyst",
+  "category": "Software",
   "description": "SQL writer, notebook runner, visualizer, narrator. Turns a question into a chart + a paragraph.",
   "icon": "owl:owl_coder",
   "required_mcp": [

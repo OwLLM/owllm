@@ -120,6 +120,21 @@ def _list_builtin_tool_names() -> List[str]:
     return sorted(builtin_registry().names())
 
 
+def _wrappable(text: str) -> str:
+    """Inject zero-width spaces after `_ - . / \\ ` so QLabel wraps even
+    unbroken identifiers. Without this a name like
+    ``anthropic-deep-research-agent`` is treated as one word and pushes
+    the card wider than its grid column → horizontal scrollbar in the
+    gallery / editor scroll area.
+    """
+    out = []
+    for ch in text or "":
+        out.append(ch)
+        if ch in "_-./\\ ":
+            out.append("​")
+    return "".join(out)
+
+
 # ---------------------------------------------------------------------------
 # Gallery card
 # ---------------------------------------------------------------------------
@@ -142,13 +157,14 @@ class _GalleryCard(QFrame):
         self.is_skill = is_skill
 
         self.setObjectName("GalleryCard")
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         # FIXED height so cards in the same row are guaranteed equal —
         # without this, a card whose description wraps to 4 lines drags
         # its left/right neighbour up and produces uneven gaps between
         # rows (the gripe in the screenshot). Long descriptions are
-        # elided below.
-        self.setFixedHeight(118)
+        # elided below. Height bumped from 118 → 140 so wrapped agent
+        # names (long skill ids) get a second line without clipping.
+        self.setFixedHeight(140)
         self.setCursor(Qt.PointingHandCursor)
 
         # Built-ins and installed skills share the blue left accent so
@@ -193,13 +209,20 @@ class _GalleryCard(QFrame):
 
         name_row = QHBoxLayout()
         name_row.setSpacing(8)
-        name_label = QLabel(definition.name.capitalize())
+        name_label = QLabel(_wrappable(definition.name.capitalize()))
         nf = QFont()
         nf.setPointSize(14)
         nf.setBold(True)
         name_label.setFont(nf)
         name_label.setStyleSheet("color:#fff; background:transparent;")
-        name_row.addWidget(name_label)
+        # Wrap long unbroken names (skill ids etc.) onto a second line
+        # instead of pushing the card past its grid column. ``Ignored``
+        # width policy lets the label shrink to whatever space the row
+        # gives it without forcing the gallery host wider.
+        name_label.setWordWrap(True)
+        name_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        name_label.setMaximumHeight(50)
+        name_row.addWidget(name_label, 1)
 
         if definition.built_in:
             badge = QLabel("BUILT-IN")
@@ -407,6 +430,11 @@ class _EditorPanel(QFrame):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        # Never paint a horizontal scrollbar — the editor column is wide
+        # enough; any horizontal overflow comes from non-shrinkable
+        # children (model picker, voice combo) and we'd rather elide them
+        # than make the user scroll left/right.
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setStyleSheet("QScrollArea { background:transparent; border:none; }")
         host = QWidget()
         outer = QVBoxLayout(host)
@@ -460,6 +488,12 @@ class _EditorPanel(QFrame):
         lbl_m.setStyleSheet("color:#9aa0a6; background:transparent; font-size:13px;")
         name_box.addWidget(lbl_m)
         self.model_picker = ModelPickerButton()
+        # Long composite labels (e.g. "Local: meta-llama/Meta-Llama-3-8B
+        # -Instruct") would otherwise force the QPushButton's sizeHint to
+        # exceed the column width and push the QScrollArea host wider →
+        # horizontal scrollbar. Ignored width policy lets it shrink to
+        # whatever the column allows.
+        self.model_picker.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.model_picker.refresh_entries()
         # Real-time persist: when the user picks a new model the
         # selection is written to the definition and saved immediately,
@@ -483,6 +517,10 @@ class _EditorPanel(QFrame):
         v_row.setSpacing(8)
         self.voice_combo = QComboBox()
         self.voice_combo.setMinimumHeight(32)
+        # Same shrink-don't-push policy as the model picker — long voice
+        # ids ("Microsoft Zira Desktop - English (United States)") must
+        # not widen the editor column.
+        self.voice_combo.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.voice_combo.setStyleSheet(
             "QComboBox { background:palette(base); color:#fff; border:none; "
             "border-radius:8px; padding:0 10px; font-size:13px; } "
@@ -552,6 +590,7 @@ class _EditorPanel(QFrame):
         for i, tool_name in enumerate(_list_builtin_tool_names()):
             cb = QCheckBox(tool_name)
             cb.setStyleSheet("color:#dadcdf; font-size:14px;")
+            cb.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
             self._builtin_tool_checks[tool_name] = cb
             bt_layout.addWidget(cb, i // bt_cols, i % bt_cols)
         outer.addWidget(self._builtin_tools_box)
@@ -568,6 +607,7 @@ class _EditorPanel(QFrame):
             for tool_name in mcp_names:
                 cb = QCheckBox(tool_name)
                 cb.setStyleSheet("color:#dadcdf; font-size:14px;")
+                cb.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
                 self._mcp_tool_checks[tool_name] = cb
                 mt_layout.addWidget(cb)
         else:

@@ -2701,6 +2701,8 @@ class _WrapLineEdit(QPlainTextEdit):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setTabChangesFocus(True)
+        # ContentsChanged fires on every text edit; resizeEvent is
+        # overridden below to also catch column-width changes.
         self.document().contentsChanged.connect(self._adjust_height)
         self._adjust_height()
 
@@ -2714,19 +2716,39 @@ class _WrapLineEdit(QPlainTextEdit):
             cursor = self.textCursor()
             cursor.movePosition(cursor.MoveOperation.End)
             self.setTextCursor(cursor)
+        # Schedule another height pass after the layout has had a
+        # chance to wrap the new text — without this, ``setText``
+        # called before the widget has been laid out reports a
+        # documentSize() of 0 and the widget collapses to one line.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._adjust_height)
 
     def clear(self) -> None:  # noqa: D401 — match QLineEdit
         self.setPlainText("")
 
     def _adjust_height(self) -> None:
-        # Use the document's laid-out size so the height tracks the
-        # actual wrapped line count, not just the character count.
-        doc_h = self.document().size().height()
-        line_h = self.fontMetrics().lineSpacing()
-        # Always at least one line tall.
-        content_h = max(line_h, int(doc_h))
-        # Padding to roughly match the QLineEdit visual height.
-        self.setFixedHeight(int(content_h + 12))
+        doc = self.document()
+        # Force the document to lay out at the current viewport width
+        # so wrapped-line count is correct *now*, not after the next
+        # paint. setTextWidth(<= 0) is a no-op so the initial call
+        # before the widget has a width still works.
+        view_w = self.viewport().width()
+        if view_w > 0:
+            doc.setTextWidth(view_w)
+        layout = doc.documentLayout()
+        doc_h = layout.documentSize().height() if layout is not None else 0
+        fm = self.fontMetrics()
+        line_h = fm.lineSpacing()
+        # documentSize() may report 0 before the first layout pass —
+        # fall back to (line_count × line_height) so we still grow
+        # for newly-set multi-line content.
+        line_count = max(1, doc.lineCount())
+        content_h = max(int(doc_h), line_count * line_h)
+        # Match the QLineEdit visual: add frame + a small padding.
+        frame = self.frameWidth() * 2
+        margins = self.contentsMargins()
+        total = content_h + frame + margins.top() + margins.bottom() + 10
+        self.setFixedHeight(int(total))
 
     def keyPressEvent(self, event):  # noqa: N802 — Qt API
         if event.key() in (Qt.Key_Return, Qt.Key_Enter):
@@ -2740,6 +2762,13 @@ class _WrapLineEdit(QPlainTextEdit):
         # Document layout depends on widget width — height needs to
         # be recomputed when the column is resized.
         self._adjust_height()
+
+    def showEvent(self, event):  # noqa: N802
+        super().showEvent(event)
+        # First time the widget is actually shown the viewport now has
+        # a real width — recompute so any pre-set text wraps correctly.
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._adjust_height)
 
 
 class MainWindow(QMainWindow):

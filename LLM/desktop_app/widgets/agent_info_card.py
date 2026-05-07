@@ -70,10 +70,17 @@ CARD_PICKER_RESERVE = 44
 this band so the picker doesn't sit on top of them."""
 
 CARD_MARGIN = 14
-CARD_W_MAX = 360
+CARD_W_MAX = 320
 """Card width matches both painters in this module — kept as a constant
 so the canvas can compute the overlay picker's geometry without
-duplicating the painter's local layout numbers."""
+duplicating the painter's local layout numbers. Trimmed 360→320 (-40)
+to leave more room on the canvas for the diagram itself."""
+
+# Card heights are bumped 20px from the previous (264 / 244) so the
+# agent name beneath the portrait can wrap to two lines without
+# crowding the model / voice rows above the picker reserve.
+CARD_H_AGENT = 284
+CARD_H_TEAM = 264
 
 _PICKER_INSET_X = 12
 _PICKER_INSET_Y = 6
@@ -83,15 +90,27 @@ _PICKER_HEIGHT = 32
 def card_picker_geometry(widget_w: int, agent_card: bool) -> tuple:
     """Return ``(x, y, w, h)`` (widget pixel coords) for the overlay
     :class:`ModelPickerButton` that sits inside the bottom of the painted
-    card. ``agent_card`` toggles between agent (264h) and team (244h)
-    card heights since the two have different chip / stats areas above."""
+    card. ``agent_card`` toggles between agent and team card heights
+    since the two have different chip / stats areas above."""
     card_w = min(CARD_W_MAX, max(0, widget_w - 2 * CARD_MARGIN))
-    card_h = 264 if agent_card else 244
+    card_h = CARD_H_AGENT if agent_card else CARD_H_TEAM
     x = CARD_MARGIN + _PICKER_INSET_X
     y = CARD_MARGIN + card_h - CARD_PICKER_RESERVE + _PICKER_INSET_Y
     w = max(0, card_w - 2 * _PICKER_INSET_X)
     h = _PICKER_HEIGHT
     return x, y, w, h
+
+
+def _wrappable(text: str) -> str:
+    """Inject zero-width spaces after `_-./\\ ` so QPainter's word-wrap
+    breaks long unbroken identifiers (skill ids etc.) onto the next
+    line instead of clipping at the column edge."""
+    out = []
+    for ch in text or "":
+        out.append(ch)
+        if ch in "_-./\\ ":
+            out.append("​")
+    return "".join(out)
 
 
 def paint_agent_card(
@@ -108,13 +127,13 @@ def paint_agent_card(
 ) -> None:
     """Top-left character-sheet panel for the selected agent.
 
-    Layout: 360×264 panel anchored at (14, 14). Width was trimmed by 20px
-    (was 380) and height grew by 44px to host the model picker overlay
-    that the canvas widget positions inside this same rectangle.
+    Layout: 320×284 panel anchored at (14, 14). Card now -40px in width
+    (360→320) and +20px in height to host a two-line agent name when
+    the identifier is long.
     """
-    margin = 14
-    card_w = min(360, rect.width() - 2 * margin)
-    card_h = 264
+    margin = CARD_MARGIN
+    card_w = min(CARD_W_MAX, rect.width() - 2 * margin)
+    card_h = CARD_H_AGENT
     card = QRectF(margin, margin, card_w, card_h)
 
     bg = QLinearGradient(card.topLeft(), card.bottomRight())
@@ -185,21 +204,27 @@ def paint_agent_card(
     p.setPen(_TEXT_BRIGHT)
     _paint_icon(p, pic_rect, icon)
 
-    # Name under the picture.
+    # Name under the picture. Allowed to wrap onto a second line when
+    # the identifier is too long for the 112-px portrait column —
+    # ZWSPs make ``_-./\\``-separated names break on natural seams.
     name_font = QFont()
     name_font.setPointSize(11)
     name_font.setBold(True)
     p.setFont(name_font)
     p.setPen(_TEXT_BRIGHT)
-    name_rect = QRectF(pic_x - 6, pic_y + pic_size + 6, pic_size + 12, 20)
-    p.drawText(name_rect, Qt.AlignCenter, name)
+    name_rect = QRectF(pic_x - 6, pic_y + pic_size + 6, pic_size + 12, 40)
+    p.drawText(
+        name_rect,
+        Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap,
+        _wrappable(name),
+    )
 
     if model_label:
         model_font = QFont()
         model_font.setPointSize(8)
         p.setFont(model_font)
         p.setPen(_TEXT_DIM)
-        model_rect = QRectF(pic_x - 6, pic_y + pic_size + 26, pic_size + 12, 16)
+        model_rect = QRectF(pic_x - 6, pic_y + pic_size + 46, pic_size + 12, 16)
         p.drawText(model_rect, Qt.AlignCenter, model_label)
 
     if voice_label:
@@ -209,7 +234,7 @@ def paint_agent_card(
         voice_font.setPointSize(8)
         p.setFont(voice_font)
         p.setPen(_TEXT_DIM)
-        voice_rect = QRectF(pic_x - 6, pic_y + pic_size + 42, pic_size + 12, 16)
+        voice_rect = QRectF(pic_x - 6, pic_y + pic_size + 62, pic_size + 12, 16)
         # Truncate before drawing — long Piper voice IDs blow past the
         # 100 px column otherwise.
         fm = p.fontMetrics()
@@ -322,9 +347,9 @@ def paint_team_card(
     Width / height match :func:`paint_agent_card` (minus the chips area)
     so the overlay model picker sits in the same rectangle regardless of
     which card is currently showing."""
-    margin = 14
-    card_w = min(360, rect.width() - 2 * margin)
-    card_h = 244
+    margin = CARD_MARGIN
+    card_w = min(CARD_W_MAX, rect.width() - 2 * margin)
+    card_h = CARD_H_TEAM
     card = QRectF(margin, margin, card_w, card_h)
 
     bg = QLinearGradient(card.topLeft(), card.bottomRight())

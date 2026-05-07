@@ -6919,55 +6919,27 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(40, 30, 40, 30)
         layout.setSpacing(20)
 
-        # ---- New: launcher cards -------------------------------------
-        # Two big clickable cards group the rest of the app into themed
-        # sections. Clicking one activates the corresponding navbar group
-        # and lands on its primary tab. The existing Welcome/Status block
-        # below stays — it's still useful, just no longer the dominant
-        # visual element.
-        layout.addLayout(self._build_home_launcher_cards())
+        # ---- 2x2 quadrant grid -------------------------------------
+        # Top row holds the Fine Tuning + Agentic Team launcher cards;
+        # bottom row holds System Status + Software Requirements. The
+        # "Welcome to OWLLM" circle floats centred over the four-cell
+        # intersection. Cards and containers are built here as locals;
+        # the grid is assembled at the end of this method once the
+        # inline left/right column content has been populated.
+        finetune_card = self._build_launcher_card(self._LAUNCHER_CARDS[0])
+        agentic_card = self._build_launcher_card(self._LAUNCHER_CARDS[1])
 
-        # Welcome title in a styled container
-        title_frame = QFrame()
-        title_frame.setFrameShape(QFrame.StyledPanel)
-        title_frame.setObjectName("titleFrame")
-        colors = self._get_theme_colors()
-        title_frame.setStyleSheet(f"""
-            QFrame#titleFrame {{
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                    stop:0 rgba(60, 60, 80, 0.4), stop:1 rgba(40, 40, 60, 0.4));
-                {self._get_frame_border_style(colors["primary"])}
-                border-radius: 12px;
-                padding: 15px;
-            }}
-        """)
-        self.themed_widgets["frames"].append(title_frame)
-        title_layout = QVBoxLayout(title_frame)
-        title_layout.setContentsMargins(0, 12, 0, 12)
-        title = QLabel("Welcome to OWLLM")
-        title.setObjectName("homeWelcomeTitle")
-        title.setAlignment(Qt.AlignCenter)
-        text_color = self._get_text_color()
-        title.setStyleSheet(f"color: {text_color}; background: transparent; border: none; padding: 0; font-size: 24pt; font-weight: bold; text-decoration: none;")
-        self.themed_widgets["labels"].append(title)
-        title_layout.addWidget(title)
-        
-        # Add status summary for environment issues
+        # Status summary (env-issues banner) used to live inside the
+        # welcome title frame. We still keep the QLabel so external
+        # update sites don't NPE, but it now sits as a thin banner
+        # above the grid because the welcome moved into the circle.
         self.home_status_summary = QLabel()
         self.home_status_summary.setAlignment(Qt.AlignCenter)
         self.home_status_summary.setWordWrap(True)
         self.home_status_summary.setCursor(Qt.PointingHandCursor)
-        # Clicking the warning takes you to the Requirements tab
         self.home_status_summary.mousePressEvent = lambda e: self._open_requirements_tab()
         self.home_status_summary.hide()
-        title_layout.addWidget(self.home_status_summary)
-        
-        layout.addWidget(title_frame)
-        
-        # Create 2-column layout with FIXED 40/60 ratio (not resizable)
-        columns_layout = QHBoxLayout()
-        columns_layout.setSpacing(20)
-        columns_layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.home_status_summary)
         
         # LEFT COLUMN: Features + Quick Start Guide (40% width)
         left_container = QFrame()
@@ -6995,10 +6967,9 @@ class MainWindow(QMainWindow):
         # down inside the same _build_home_tab method; their addWidget
         # calls target ``left_layout`` so the section lands here.
 
-        # Add left container with 50% stretch — System Status now lives
-        # here and the right column carries Software Requirements only.
-        columns_layout.addWidget(left_container, 1)
-        
+        # left_container is parked into the bottom-left quadrant of the
+        # grid built at the end of this method.
+
         # RIGHT COLUMN: System Status + Software Requirements (60% width)
         right_container = QFrame()
         right_container.setFrameShape(QFrame.StyledPanel)
@@ -7382,13 +7353,76 @@ class MainWindow(QMainWindow):
         
         right_layout.addWidget(setup_frame)
         right_layout.addStretch(1)
-        
-        # Add right container with 60% stretch (3 parts out of 5 total = 60%)
-        columns_layout.addWidget(right_container, 1)
-        
-        # Add columns to main layout
-        layout.addLayout(columns_layout)
-        
+
+        # ---- 2x2 grid + centred "Welcome to OWLLM" circle ----------
+        # Container subclass keeps the circular overlay anchored in the
+        # geometric centre of the grid as the home tab resizes.
+        class _HomeGrid(QWidget):
+            def __init__(s, parent=None):
+                super().__init__(parent)
+                s._circle = None
+                s._diameter = 220
+            def set_overlay(s, c, d=220):
+                s._circle = c
+                s._diameter = d
+                s._reposition()
+            def resizeEvent(s, e):
+                super().resizeEvent(e)
+                s._reposition()
+            def _reposition(s):
+                if s._circle is None:
+                    return
+                d = s._diameter
+                s._circle.setGeometry(
+                    (s.width() - d) // 2,
+                    (s.height() - d) // 2,
+                    d, d,
+                )
+
+        grid_widget = _HomeGrid()
+        grid_widget.setObjectName("HomeGrid")
+        grid_widget.setStyleSheet("QWidget#HomeGrid { background: transparent; }")
+        grid = QGridLayout(grid_widget)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(28)
+        grid.setVerticalSpacing(28)
+        grid.addWidget(finetune_card, 0, 0)
+        grid.addWidget(agentic_card, 0, 1)
+        grid.addWidget(left_container, 1, 0)
+        grid.addWidget(right_container, 1, 1)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setRowStretch(0, 1)
+        grid.setRowStretch(1, 1)
+
+        # Welcome circle — child of the grid widget so it floats on
+        # top of the four-cell intersection. Size is fixed; position
+        # is recomputed by ``_HomeGrid.resizeEvent``.
+        circle_d = 240
+        welcome_circle = QLabel("Welcome\nto\nOWLLM", grid_widget)
+        welcome_circle.setObjectName("homeWelcomeCircle")
+        welcome_circle.setAlignment(Qt.AlignCenter)
+        c_colors = self._get_theme_colors()
+        welcome_circle.setStyleSheet(f"""
+            QLabel#homeWelcomeCircle {{
+                background: qradialgradient(cx:0.5, cy:0.5, radius:0.85,
+                    stop:0 rgba(74,108,255,0.95),
+                    stop:0.7 rgba(28,38,72,0.96),
+                    stop:1 rgba(10,14,28,0.98));
+                border: 3px solid {c_colors["accent"]};
+                border-radius: {circle_d // 2}px;
+                color: #ffffff;
+                font-size: 22pt;
+                font-weight: bold;
+                letter-spacing: 1px;
+            }}
+        """)
+        self.themed_widgets["labels"].append(welcome_circle)
+        grid_widget.set_overlay(welcome_circle, circle_d)
+        welcome_circle.raise_()
+
+        layout.addWidget(grid_widget, 1)
+
         return w
     
     # ---------------- Models (Download) tab ----------------

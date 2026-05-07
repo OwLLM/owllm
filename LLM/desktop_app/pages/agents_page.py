@@ -185,12 +185,14 @@ class _AgentVoiceRow(QWidget):
         *,
         on_install_voice,
         on_open_voice_manager=None,
+        on_changed=None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
         self._agent_name = agent_name
         self._on_install_voice = on_install_voice
         self._on_open_voice_manager = on_open_voice_manager
+        self._on_changed_external = on_changed
         self._loading = False  # guards setter callbacks during populate
 
         layout = QHBoxLayout(self)
@@ -352,6 +354,12 @@ class _AgentVoiceRow(QWidget):
             save_custom(d)
         except Exception:
             logger.exception("could not persist voice change for %s", self._agent_name)
+        # Notify the page so it can refresh the canvas voice line.
+        if self._on_changed_external is not None:
+            try:
+                self._on_changed_external(self._agent_name)
+            except Exception:
+                logger.exception("voice on_changed callback crashed")
 
     # ------------------------------------------------------------------
     # Preview
@@ -414,21 +422,54 @@ class _PiperVoiceManagerDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Piper voices")
-        self.resize(560, 460)
+        self.resize(620, 540)
+
+        # Full catalog (170+ entries from voices.json) cached at first
+        # construction. The dialog filters this in-memory on every
+        # search keystroke without re-fetching.
+        self._catalog: tuple = ()
+        self._filter_text: str = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(10)
 
         intro = QLabel(
-            "Piper neural voices sound noticeably more natural than the "
-            "system TTS. Pick a voice below; click <b>Download</b> to add "
-            "it (or <b>Delete</b> to remove an installed one). Once "
-            "downloaded, voices appear in each agent's Voice picker."
+            "Piper has 170+ neural voices across 35+ languages. Pick one "
+            "below; click <b>Download</b> to add it (or <b>Delete</b> to "
+            "remove an installed one). Downloaded voices appear in each "
+            "agent's Voice picker."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#9aa0a6; background:transparent;")
         layout.addWidget(intro)
+
+        # Search box + Refresh — top of the dialog, always visible.
+        search_row = QHBoxLayout()
+        search_row.setSpacing(8)
+        self._search = QLineEdit()
+        self._search.setPlaceholderText(
+            "Search by language, country, or speaker name…"
+        )
+        self._search.setMinimumHeight(32)
+        self._search.setStyleSheet(
+            "QLineEdit { background:#14171d; color:#fff; border:none; "
+            "border-radius:8px; padding:0 12px; font-size:13px; }"
+        )
+        self._search.textChanged.connect(self._on_search_changed)
+        search_row.addWidget(self._search, 1)
+
+        self._refresh_btn = QPushButton("⟳")
+        self._refresh_btn.setFixedSize(32, 32)
+        self._refresh_btn.setToolTip("Refresh catalog from HuggingFace")
+        self._refresh_btn.setStyleSheet(
+            "QPushButton { background:rgba(255,255,255,0.06); color:#dadcdf; "
+            "border:none; border-radius:6px; font-size:14px; } "
+            "QPushButton:hover { background:rgba(255,255,255,0.12); }"
+        )
+        self._refresh_btn.clicked.connect(lambda: self._reload_catalog(force=True))
+        search_row.addWidget(self._refresh_btn)
+        layout.addLayout(search_row)
 
         self._list = QListWidget()
         self._list.setStyleSheet(
@@ -480,19 +521,74 @@ class _PiperVoiceManagerDialog(QDialog):
         layout.addLayout(btn_row)
 
         self._active_worker = None
-        self._populate()
-        # Auto-select the first row so the action button is live the
-        # moment the dialog opens — saves the user one click.
-        if self._list.count() > 0:
-            self._list.setCurrentRow(0)
+        # Initial load uses the cache (or the curated fallback) for
+        # instant open. The user can hit ⟳ to fetch the live manifest.
+        self._reload_catalog(force=False)
 
     # ------------------------------------------------------------------
     # Population
     # ------------------------------------------------------------------
 
+    def _reload_catalog(self, *, force: bool) -> None:
+        """Fetch (or re-fetch) the voices manifest, then refilter the list.
+
+        First open uses the cache so the dialog appears instantly even
+        offline; the ⟳ button forces a re-download from HuggingFace.
+        Network calls run on a worker thread so the GUI stays alive.
+        """
+        from PySide6.QtCore import QThread, Signal as _Signal
+
+        self._search.setEnabled(False)
+        self._refresh_btn.setEnabled(False)
+        self._status.setText("Loading catalog…")
+
+        class _Worker(QThread):
+            done = _Signal(object)  # tuple of catalog entries
+
+            def run(self_w) -> None:  # noqa: N805
+                from core.voice import fetch_piper_catalog
+                try:
+                    cat = fetch_piper_catalog(force_refresh=force)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception("piper catalog fetch crashed: %s", exc)
+                    cat = ()
+                self_w.done.emit(cat)
+
+        w = _Worker(self)
+
+        def _finish(cat) -> None:
+            self._search.setEnabled(True)
+            self._refresh_btn.setEnabled(True)
+            self._catalog = tuple(cat) if cat else ()
+            from core.voice import PIPER_CATALOG
+            if self._catalog and self._catalog is not PIPER_CATALOG and len(self._catalog) > 1:
+                self._status.setText(
+                    f"{len(self._catalog)} voices in catalog."
+                )
+            elif self._catalog:
+                self._status.setText(
+                    "Using offline catalog — click ⟳ to fetch the full "
+                    "list from HuggingFace."
+                )
+            else:
+                self._status.setText(
+                    "Catalog unavailable. Check internet and retry ⟳."
+                )
+            self._populate()
+            if self._list.count() > 0 and self._list.currentRow() < 0:
+                self._list.setCurrentRow(0)
+
+        w.done.connect(_finish)
+        w.start()
+        # Hold a reference so the worker isn't GC'd mid-run.
+        self._catalog_worker = w
+
+    def _on_search_changed(self, text: str) -> None:
+        self._filter_text = (text or "").strip().lower()
+        self._populate()
+
     def _populate(self) -> None:
-        # Preserve the current selection across a repopulate (e.g. after
-        # download finishes) so the user's eye doesn't lose its place.
+        """Render whichever catalog entries match the active search."""
         prev_voice_id = ""
         cur = self._list.currentItem()
         if cur is not None:
@@ -501,10 +597,16 @@ class _PiperVoiceManagerDialog(QDialog):
                 prev_voice_id = entry.voice_id
 
         self._list.clear()
-        from core.voice import PIPER_CATALOG, piper_voices_dir
+        from core.voice import piper_voices_dir
         installed_dir = piper_voices_dir()
+
+        q = self._filter_text
         restore_idx = 0
-        for i, entry in enumerate(PIPER_CATALOG):
+        shown = 0
+        for entry in self._catalog:
+            if q and q not in entry.label.lower() and q not in entry.language.lower() \
+                    and q not in entry.voice_id.lower():
+                continue
             installed = (installed_dir / f"{entry.voice_id}.onnx").exists()
             badge = "  ✓ Installed" if installed else ""
             text = (
@@ -516,10 +618,13 @@ class _PiperVoiceManagerDialog(QDialog):
             item.setData(self._ROLE_ENTRY, entry)
             item.setData(self._ROLE_INSTALLED, installed)
             if entry.voice_id == prev_voice_id:
-                restore_idx = i
+                restore_idx = shown
+            shown += 1
 
         if self._list.count() > 0:
             self._list.setCurrentRow(restore_idx)
+        else:
+            self._on_selection_changed()  # disable the action button
 
     # ------------------------------------------------------------------
     # Selection / button state
@@ -1405,6 +1510,7 @@ class AgentsPage(QWidget):
                 d.name,
                 on_install_voice=self._install_voice_engine,
                 on_open_voice_manager=self._open_piper_voice_manager,
+                on_changed=self._update_canvas_voice_label,
                 parent=self.voice_host,
             )
             row.setVisible(False)
@@ -2654,6 +2760,10 @@ class AgentsPage(QWidget):
                 self._update_canvas_model_label(role_name)
             except Exception:
                 pass
+            try:
+                self._update_canvas_voice_label(role_name)
+            except Exception:
+                pass
 
         # If the leader exists, default-select it so the right pane shows
         # something the moment the user lands on the page.
@@ -3426,6 +3536,41 @@ class AgentsPage(QWidget):
             if hasattr(self, "team_canvas") and self.team_canvas is not None:
                 self.team_canvas.set_node_model_label(role_name, label)
         except Exception:
+            pass
+
+    def _update_canvas_voice_label(self, role_name: str) -> None:
+        """Mirror the agent's current voice (or "Auto") under the model
+        line on the canvas node and the painted info-card overlay. Called
+        after a render and whenever the per-agent voice row commits a
+        change."""
+        label = ""
+        try:
+            from core.agents.agent_definitions import get_definition
+            d = get_definition(role_name)
+        except Exception:  # noqa: BLE001
+            d = None
+        if d is not None:
+            if not d.voice_enabled:
+                label = "muted"
+            elif d.voice_id:
+                # voice_id is either a SAPI registry path (long) or the
+                # absolute path of a Piper ONNX file. Reduce both to a
+                # human-readable stem.
+                stem = d.voice_id.replace("\\", "/").rstrip("/")
+                stem = stem.rsplit("/", 1)[-1]
+                if stem.endswith(".onnx"):
+                    stem = stem[: -len(".onnx")]
+                label = stem
+            else:
+                label = "auto"
+        try:
+            self.canvas.set_node_voice_label(role_name, label)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if hasattr(self, "team_canvas") and self.team_canvas is not None:
+                self.team_canvas.set_node_voice_label(role_name, label)
+        except Exception:  # noqa: BLE001
             pass
 
     # ------------------------------------------------------------------

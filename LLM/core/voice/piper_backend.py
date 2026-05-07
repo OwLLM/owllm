@@ -121,6 +121,185 @@ links — users can download bigger / different voices afterwards."""
 
 
 # ---------------------------------------------------------------------------
+# Dynamic catalog (HuggingFace voices.json)
+# ---------------------------------------------------------------------------
+
+
+_VOICES_MANIFEST_URL = (
+    "https://huggingface.co/rhasspy/piper-voices/resolve/main/voices.json"
+)
+
+
+def _manifest_cache_path() -> Path:
+    """Where the parsed voices.json gets cached. Same dir as the voice
+    files so the data dir stays self-contained."""
+    return piper_voices_dir() / "_voices_manifest.json"
+
+
+def _entry_from_manifest_record(voice_id: str, record: dict) -> Optional[PiperVoiceCatalogEntry]:
+    """Convert one ``voices.json`` record into a catalog entry.
+
+    voices.json shape (excerpt)::
+
+        "en_US-amy-low": {
+            "key": "en_US-amy-low",
+            "language": {"name_native": "English",
+                         "country_english": "United States",
+                         "code": "en_US"},
+            "quality": "low",
+            "files": {
+                "en/en_US/amy/low/en_US-amy-low.onnx": {"size_bytes": 12345},
+                "en/en_US/amy/low/en_US-amy-low.onnx.json": {"size_bytes": 4321}
+            }
+        }
+
+    Returns ``None`` if the record is missing the required onnx + json
+    file pair — Piper voices that don't ship those two are unusable
+    here regardless of what else they advertise.
+    """
+    files = record.get("files") or {}
+    onnx_path = next(
+        (p for p in files if p.endswith(f"/{voice_id}.onnx")),
+        None,
+    )
+    json_path = next(
+        (p for p in files if p.endswith(f"/{voice_id}.onnx.json")),
+        None,
+    )
+    if onnx_path is None or json_path is None:
+        return None
+
+    quality = str(record.get("quality") or "")
+    lang = record.get("language") or {}
+    # Prefer the English language name so users searching "spanish",
+    # "german" etc. find the right voices. Fall back to native spelling
+    # only if english isn't available.
+    lang_english = str(lang.get("name_english") or "")
+    lang_native = str(lang.get("name_native") or "")
+    country = str(lang.get("country_english") or "")
+    primary = lang_english or lang_native
+    if primary and country and country.lower() not in primary.lower():
+        language_label = f"{primary} ({country})"
+    else:
+        language_label = primary or country or "?"
+    # Native spelling is appended in parentheses when it differs from
+    # english — visible to users who recognise their own language better
+    # in its native form, and still searchable against either spelling.
+    if lang_native and lang_english and lang_native.lower() != lang_english.lower():
+        language_label = f"{language_label} · {lang_native}"
+
+    # Derive a friendly speaker name from the voice_id ("en_US-amy-low" → "Amy").
+    parts = voice_id.split("-")
+    speaker = parts[1] if len(parts) >= 2 else voice_id
+    label = f"{speaker.replace('_', ' ').title()} — {language_label} ({quality})"
+
+    onnx_size = int((files.get(onnx_path) or {}).get("size_bytes") or 0)
+    json_size = int((files.get(json_path) or {}).get("size_bytes") or 0)
+    size_mb = max(1, (onnx_size + json_size) // (1024 * 1024))
+
+    base = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
+    return PiperVoiceCatalogEntry(
+        voice_id=voice_id,
+        label=label,
+        language=language_label,
+        quality=quality,
+        size_mb=size_mb,
+        url_onnx=f"{base}/{onnx_path}",
+        url_json=f"{base}/{json_path}",
+    )
+
+
+def _parse_manifest(data: dict) -> Tuple[PiperVoiceCatalogEntry, ...]:
+    """Turn the raw voices.json dict into an ordered tuple of entries.
+
+    Sort: language label, then quality (low → medium → high → x_low …),
+    then voice_id. That keeps voices for the same language grouped in
+    the dialog list — much easier to skim than a random hash order.
+    """
+    quality_rank = {"x_low": 0, "low": 1, "medium": 2, "high": 3}
+    out: List[PiperVoiceCatalogEntry] = []
+    for voice_id, rec in data.items():
+        if not isinstance(rec, dict):
+            continue
+        entry = _entry_from_manifest_record(voice_id, rec)
+        if entry is not None:
+            out.append(entry)
+
+    out.sort(
+        key=lambda e: (
+            e.language.lower(),
+            quality_rank.get(e.quality, 99),
+            e.voice_id,
+        )
+    )
+    return tuple(out)
+
+
+def _load_cached_manifest() -> Optional[Tuple[PiperVoiceCatalogEntry, ...]]:
+    """Read + parse the on-disk cache if present."""
+    path = _manifest_cache_path()
+    if not path.exists():
+        return None
+    try:
+        import json
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and data:
+            return _parse_manifest(data)
+    except Exception:  # noqa: BLE001
+        logger.exception("could not read cached voices manifest at %s", path)
+    return None
+
+
+def fetch_piper_catalog(
+    *,
+    force_refresh: bool = False,
+    timeout: float = 15.0,
+) -> Tuple[PiperVoiceCatalogEntry, ...]:
+    """Return the live Piper voices catalog.
+
+    Order of preference:
+
+    1. On-disk cache (instant) unless ``force_refresh=True``.
+    2. HuggingFace voices.json (~200 KB). On success the response is
+       written to the cache so subsequent opens are instant.
+    3. Hard-coded :data:`PIPER_CATALOG` — the curated subset shipped
+       with OWLLM, used when the network is unavailable.
+
+    Network failures NEVER raise — the manager dialog must always open,
+    even offline. The caller can detect "fell back to static" by
+    comparing identity with ``PIPER_CATALOG``.
+    """
+    if not force_refresh:
+        cached = _load_cached_manifest()
+        if cached is not None:
+            return cached
+
+    try:
+        import json
+        import requests
+        r = requests.get(_VOICES_MANIFEST_URL, timeout=timeout)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict) or not data:
+            raise ValueError("voices.json is empty or wrong shape")
+        # Persist the raw dict — re-parsing on next open is cheap and
+        # lets us evolve the parser without a re-fetch.
+        cache = _manifest_cache_path()
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8"
+        )
+        return _parse_manifest(data)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "could not fetch piper voices manifest; falling back to "
+            "the curated catalog",
+            exc_info=True,
+        )
+        return PIPER_CATALOG
+
+
+# ---------------------------------------------------------------------------
 # Filesystem helpers
 # ---------------------------------------------------------------------------
 
@@ -140,9 +319,17 @@ def list_installed_piper_voice_files() -> List[Path]:
 
 
 def find_catalog_entry(voice_id: str) -> Optional[PiperVoiceCatalogEntry]:
+    """Look up a voice in the static catalog, falling back to the cached
+    dynamic catalog if the static set doesn't have it. The default-voice
+    install path uses this to find the URL for ``DEFAULT_VOICE_ID``."""
     for entry in PIPER_CATALOG:
         if entry.voice_id == voice_id:
             return entry
+    cached = _load_cached_manifest()
+    if cached is not None:
+        for entry in cached:
+            if entry.voice_id == voice_id:
+                return entry
     return None
 
 

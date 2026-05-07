@@ -138,6 +138,7 @@ class _Agent:
     description: str = ""
     skills: List[str] = field(default_factory=list)
     model_label: str = ""
+    voice_label: str = ""
     is_orchestrator: bool = False
     status: str = STATUS_IDLE
     pos: QPointF = field(default_factory=QPointF)
@@ -403,6 +404,16 @@ class AgentTeamCanvas(QWidget):
         if a is None:
             return
         a.model_label = label or ""
+        self.update()
+
+    def set_node_voice_label(self, name: str, label: str) -> None:
+        """Mirror of :meth:`set_node_model_label` for the voice line. The
+        agents page calls this whenever the per-agent voice changes so
+        the painted character sheet reflects the active voice."""
+        a = self._agents.get(name)
+        if a is None:
+            return
+        a.voice_label = label or ""
         self.update()
 
     def reset_all_status(self) -> None:
@@ -1248,6 +1259,21 @@ class AgentTeamCanvas(QWidget):
             p.setPen(_TEXT_DIM)
             model_rect = QRectF(pic_x - 6, pic_y + pic_size + 26, pic_size + 12, 16)
             p.drawText(model_rect, Qt.AlignCenter, agent.model_label)
+
+        # Voice label below the model line — same dim style.
+        if agent.voice_label:
+            voice_font = QFont()
+            voice_font.setPointSize(8)
+            p.setFont(voice_font)
+            p.setPen(_TEXT_DIM)
+            voice_rect = QRectF(pic_x - 6, pic_y + pic_size + 42, pic_size + 12, 16)
+            fm = p.fontMetrics()
+            v_label = f"🔊 {agent.voice_label}"
+            if fm.horizontalAdvance(v_label) > voice_rect.width():
+                while v_label and fm.horizontalAdvance(v_label + "…") > voice_rect.width():
+                    v_label = v_label[:-1]
+                v_label = v_label + "…" if v_label else ""
+            p.drawText(voice_rect, Qt.AlignCenter, v_label)
 
         # ----- Right half: description + skills -----
         info_x = pic_x + pic_size + 18

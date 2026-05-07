@@ -239,6 +239,7 @@ class _AgentNode(QGraphicsItem):
         self._canvas = canvas
         self._status = STATUS_IDLE
         self._model_label = ""
+        self._voice_label = ""
         self._selected_visual = False
         self._layer = 0 if is_orchestrator else 1
         # Default icon: crown for the orchestrator, generic robot for
@@ -451,6 +452,11 @@ class _AgentNode(QGraphicsItem):
     def set_model_label(self, label: str) -> None:
         if label != self._model_label:
             self._model_label = label
+            self.update()
+
+    def set_voice_label(self, label: str) -> None:
+        if label != self._voice_label:
+            self._voice_label = label
             self.update()
 
     def set_selected_visual(self, on: bool) -> None:
@@ -1167,6 +1173,11 @@ class AgentCanvas(QGraphicsView):
         if node is not None:
             node.set_model_label(label)
 
+    def set_node_voice_label(self, name: str, label: str) -> None:
+        node = self._nodes.get(name)
+        if node is not None:
+            node.set_voice_label(label)
+
     def set_node_icon(self, name: str, icon: str) -> None:
         node = self._nodes.get(name)
         if node is not None:
@@ -1243,6 +1254,7 @@ class AgentCanvas(QGraphicsView):
                     skills=node._skills,
                     status=status_map.get(node._status, _CARD_IDLE),
                     model_label=node._model_label,
+                    voice_label=node._voice_label,
                 )
                 agent_card_visible = True
             elif self._team_name:

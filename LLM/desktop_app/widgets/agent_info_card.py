@@ -104,6 +104,7 @@ def paint_agent_card(
     skills: Iterable[str],
     status: str = STATUS_IDLE,
     model_label: str = "",
+    voice_label: str = "",
 ) -> None:
     """Top-left character-sheet panel for the selected agent.
 
@@ -200,6 +201,24 @@ def paint_agent_card(
         p.setPen(_TEXT_DIM)
         model_rect = QRectF(pic_x - 6, pic_y + pic_size + 26, pic_size + 12, 16)
         p.drawText(model_rect, Qt.AlignCenter, model_label)
+
+    if voice_label:
+        # Voice line under the model line — same dim style so the eye
+        # reads them as a "metadata stack" beneath the agent's name.
+        voice_font = QFont()
+        voice_font.setPointSize(8)
+        p.setFont(voice_font)
+        p.setPen(_TEXT_DIM)
+        voice_rect = QRectF(pic_x - 6, pic_y + pic_size + 42, pic_size + 12, 16)
+        # Truncate before drawing — long Piper voice IDs blow past the
+        # 100 px column otherwise.
+        fm = p.fontMetrics()
+        label = f"🔊 {voice_label}"
+        if fm.horizontalAdvance(label) > voice_rect.width():
+            while label and fm.horizontalAdvance(label + "…") > voice_rect.width():
+                label = label[:-1]
+            label = label + "…" if label else ""
+        p.drawText(voice_rect, Qt.AlignCenter, label)
 
     # Right half: description + skills.
     info_x = pic_x + pic_size + 18

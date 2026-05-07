@@ -3031,10 +3031,10 @@ class AgentsPage(QWidget):
             logger.exception("could not materialize Claude trust settings")
 
     def _with_workdir_hint(self, goal: str) -> str:
-        """Prepend a working-directory directive on the FIRST run of a team
-        (and again only if Location changes). The orchestrator already has
-        the cwd in its context after message 1 — repeating it on every Run
-        is noise and risks being mis-read as a new directive.
+        """Prepend a working-directory directive once per project + Location
+        pair. Persisted on the Project record so the hint doesn't re-fire
+        on app restart, project switch, or team rebuild — only when the
+        user picks a different Location does it send again.
 
         Skips silently for aliases, URLs, and missing paths so we don't
         pollute the goal with bad guidance."""
@@ -3042,13 +3042,16 @@ class AgentsPage(QWidget):
         loc = (proj.location or "").strip() if proj else ""
         if not loc or not os.path.isdir(loc):
             return goal
-        # Per-team-instance dedupe. self._team is dropped on project switch
-        # / team rebuild, so a fresh team always gets the hint once.
-        last_sent = getattr(self._team, "_workdir_hint_loc", None) if self._team else None
-        if last_sent == loc:
+        # Persistent dedupe: skip if we've already sent the hint for this
+        # exact Location on this project. Survives restarts because the
+        # marker lives on the Project row.
+        if (proj.workdir_hint_sent_for or "") == loc:
             return goal
-        if self._team is not None:
-            self._team._workdir_hint_loc = loc
+        proj.workdir_hint_sent_for = loc
+        try:
+            self._project_store.save_project(proj)
+        except Exception:
+            logger.exception("could not persist workdir_hint_sent_for")
         hint = (
             f"[Working directory: {loc}]\n"
             "Use this absolute path as the working directory for every "
@@ -4477,13 +4480,71 @@ class AgentsPage(QWidget):
         def _model_fn_with_cwd(messages, composite_id, _cwd=proj_loc):
             return dispatch_model_fn(messages, composite_id, cwd=_cwd or None)
 
-        return build_team(
+        team = build_team(
             self._bus,
             roles=roles,
             model_id_for=self._model_id_for,
             model_fn=_model_fn_with_cwd,
             base_registry=self._registry,
             graph_resolver=graph_resolver,
+        )
+        # Seed the orchestrator's chat_history with prior user/orchestrator
+        # exchanges on this project so a fresh app session resumes the
+        # earlier conversation instead of starting blank. Without this,
+        # the bus DB has the messages (the chat panel shows them) but the
+        # orchestrator agent's in-memory _chat_history is empty until the
+        # next user message — so it appears to have forgotten the goal.
+        # Cap at 30 most-recent exchanges to avoid blowing the budget;
+        # the agent's own drop-oldest-from-index-1 fix protects the
+        # original goal once it's in the history.
+        try:
+            self._seed_orchestrator_history(team, limit=30)
+        except Exception:
+            logger.exception("could not seed orchestrator history; continuing")
+        return team
+
+    def _seed_orchestrator_history(self, team, *, limit: int = 30) -> None:
+        """Replay USER ↔ orchestrator REPLY pairs from prior goals on this
+        project into the freshly-built orchestrator's chat_history.
+
+        Only the user-facing dialogue is replayed (USER messages addressed
+        to the orchestrator + the orchestrator's REPLY messages back to
+        the user). Specialist chatter, tool events, etc. are skipped to
+        keep the rebuilt context focused on what the user said and what
+        the orchestrator promised — that's enough to resume."""
+        if self._active_project is None or team is None or team.orchestrator is None:
+            return
+        orch_name = team.orchestrator.name
+        try:
+            goal_ids = self._project_store.list_goal_ids(self._active_project.id)
+        except Exception:
+            logger.exception("could not list goal ids for history replay")
+            return
+        if not goal_ids:
+            return
+        # Walk goals oldest-first so the resulting chat_history reads
+        # chronologically; list_goal_ids returns newest-first.
+        seeded: list = []
+        for gid in reversed(goal_ids):
+            try:
+                msgs = self._bus.replay(goal_id=gid)
+            except Exception:
+                continue
+            for m in msgs:
+                kind = getattr(m.kind, "value", None) or str(m.kind)
+                if (kind == "user" or kind == "USER") and m.to_agent == orch_name:
+                    seeded.append({"role": "user", "content": m.body or ""})
+                elif (kind == "reply" or kind == "REPLY") and m.from_agent == orch_name and m.to_agent == "user":
+                    seeded.append({"role": "assistant", "content": m.body or ""})
+        if not seeded:
+            return
+        # Cap to most-recent ``limit`` pairs (keep tail).
+        if len(seeded) > limit:
+            seeded = seeded[-limit:]
+        team.orchestrator._chat_history.extend(seeded)
+        logger.info(
+            "seeded %d prior messages into orchestrator '%s' chat_history",
+            len(seeded), orch_name,
         )
 
     def _cancel_clicked(self) -> None:

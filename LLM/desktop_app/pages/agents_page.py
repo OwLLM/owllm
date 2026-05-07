@@ -392,18 +392,29 @@ class _AgentVoiceRow(QWidget):
 
 
 class _PiperVoiceManagerDialog(QDialog):
-    """List + download / delete dialog for Piper neural voices.
+    """Selectable list + bottom action bar for Piper neural voices.
 
-    The catalog comes from :data:`core.voice.piper_backend.PIPER_CATALOG`.
-    Each row shows: voice label, language, size, status (installed /
-    not), action button (Download / Delete). Downloads run on a worker
-    thread so the GUI keeps redrawing during the request.
+    Each row shows the voice label, language tag, size, and an installed
+    badge. The row itself is the selection target (no per-row buttons —
+    the previous design hid the Download button off-screen on narrow
+    dialogs). The bottom bar has a single action button that flips
+    between **Download** and **Delete** based on the selected voice's
+    install state, plus a Close button.
+
+    Downloads run on a worker thread so the GUI keeps redrawing during
+    the HTTP request; the status line updates as bytes land.
     """
+
+    # Embed the install status into each item via Qt.UserRole + 1 so
+    # _on_selection_changed can flip the action button label without
+    # re-querying the filesystem.
+    _ROLE_ENTRY = Qt.UserRole
+    _ROLE_INSTALLED = Qt.UserRole + 1
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Piper voices")
-        self.resize(560, 440)
+        self.resize(560, 460)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
@@ -411,8 +422,9 @@ class _PiperVoiceManagerDialog(QDialog):
 
         intro = QLabel(
             "Piper neural voices sound noticeably more natural than the "
-            "system TTS. Download voices once, then pick them per agent "
-            "in the Voice row under Default model."
+            "system TTS. Pick a voice below; click <b>Download</b> to add "
+            "it (or <b>Delete</b> to remove an installed one). Once "
+            "downloaded, voices appear in each agent's Voice picker."
         )
         intro.setWordWrap(True)
         intro.setStyleSheet("color:#9aa0a6; background:transparent;")
@@ -421,84 +433,139 @@ class _PiperVoiceManagerDialog(QDialog):
         self._list = QListWidget()
         self._list.setStyleSheet(
             "QListWidget { background:#14171d; color:#fff; border:none; "
-            "border-radius:8px; padding:6px; font-size:13px; }"
+            "border-radius:8px; padding:6px; font-size:13px; } "
+            "QListWidget::item { padding:8px 10px; border-radius:6px; } "
+            "QListWidget::item:selected { background:rgba(92,240,255,0.18); "
+            "color:#5cf0ff; }"
         )
+        # Single-row selection — the bottom action button targets the
+        # current selection, so multi-select would be ambiguous.
+        self._list.itemSelectionChanged.connect(self._on_selection_changed)
         layout.addWidget(self._list, 1)
 
-        # Status line — last download progress / error.
+        # Status line — last download progress / error / "ready" message.
         self._status = QLabel("")
         self._status.setStyleSheet("color:#aaa; background:transparent; font-size:12px;")
         layout.addWidget(self._status)
 
+        # Bottom action bar: [Download/Delete]  [Close]
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         btn_row.addStretch(1)
+
+        self.action_btn = QPushButton("Download")
+        self.action_btn.setMinimumHeight(36)
+        self.action_btn.setMinimumWidth(140)
+        self.action_btn.setStyleSheet(
+            "QPushButton { background:#4a6cff; color:white; border:none; "
+            "border-radius:8px; padding:0 18px; font-weight:600; font-size:13px; } "
+            "QPushButton:hover { background:#5a7bff; } "
+            "QPushButton:disabled { background:#2c313c; color:#777; }"
+        )
+        self.action_btn.clicked.connect(self._on_action_clicked)
+        self.action_btn.setEnabled(False)  # nothing selected yet
+        btn_row.addWidget(self.action_btn)
+
         close_btn = QPushButton("Close")
+        close_btn.setMinimumHeight(36)
+        close_btn.setMinimumWidth(96)
+        close_btn.setStyleSheet(
+            "QPushButton { background:rgba(255,255,255,0.06); color:#dadcdf; "
+            "border:none; border-radius:8px; padding:0 18px; font-size:13px; } "
+            "QPushButton:hover { background:rgba(255,255,255,0.12); }"
+        )
         close_btn.clicked.connect(self.accept)
-        close_btn.setMinimumHeight(34)
         btn_row.addWidget(close_btn)
+
         layout.addLayout(btn_row)
 
+        self._active_worker = None
         self._populate()
+        # Auto-select the first row so the action button is live the
+        # moment the dialog opens — saves the user one click.
+        if self._list.count() > 0:
+            self._list.setCurrentRow(0)
 
     # ------------------------------------------------------------------
     # Population
     # ------------------------------------------------------------------
 
     def _populate(self) -> None:
+        # Preserve the current selection across a repopulate (e.g. after
+        # download finishes) so the user's eye doesn't lose its place.
+        prev_voice_id = ""
+        cur = self._list.currentItem()
+        if cur is not None:
+            entry = cur.data(self._ROLE_ENTRY)
+            if entry is not None:
+                prev_voice_id = entry.voice_id
+
         self._list.clear()
-        from core.voice import (
-            PIPER_CATALOG,
-            piper_voices_dir,
-        )
+        from core.voice import PIPER_CATALOG, piper_voices_dir
         installed_dir = piper_voices_dir()
-        for entry in PIPER_CATALOG:
+        restore_idx = 0
+        for i, entry in enumerate(PIPER_CATALOG):
             installed = (installed_dir / f"{entry.voice_id}.onnx").exists()
-            row = QWidget()
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(8, 6, 8, 6)
-            rl.setSpacing(10)
-
-            txt = QLabel(
-                f"<b>{entry.label}</b><br>"
-                f"<span style='color:#9aa0a6'>{entry.language} · "
-                f"{entry.quality} · ~{entry.size_mb} MB</span>"
+            badge = "  ✓ Installed" if installed else ""
+            text = (
+                f"{entry.label}\n"
+                f"    {entry.language} · {entry.quality} · ~{entry.size_mb} MB"
+                f"{badge}"
             )
-            txt.setStyleSheet("background:transparent;")
-            rl.addWidget(txt, 1)
+            item = QListWidgetItem(text, self._list)
+            item.setData(self._ROLE_ENTRY, entry)
+            item.setData(self._ROLE_INSTALLED, installed)
+            if entry.voice_id == prev_voice_id:
+                restore_idx = i
 
-            tag = QLabel("✓ Installed" if installed else "Not installed")
-            tag.setStyleSheet(
-                f"color:{'#7ad3a8' if installed else '#9aa0a6'}; "
-                f"background:transparent; font-size:12px;"
+        if self._list.count() > 0:
+            self._list.setCurrentRow(restore_idx)
+
+    # ------------------------------------------------------------------
+    # Selection / button state
+    # ------------------------------------------------------------------
+
+    def _on_selection_changed(self) -> None:
+        cur = self._list.currentItem()
+        if cur is None:
+            self.action_btn.setEnabled(False)
+            self.action_btn.setText("Download")
+            return
+        installed = bool(cur.data(self._ROLE_INSTALLED))
+        self.action_btn.setEnabled(True)
+        if installed:
+            self.action_btn.setText("Delete")
+            self.action_btn.setStyleSheet(
+                "QPushButton { background:#5a2d2d; color:#ffb0b0; border:none; "
+                "border-radius:8px; padding:0 18px; font-weight:600; font-size:13px; } "
+                "QPushButton:hover { background:#7a3838; }"
             )
-            rl.addWidget(tag)
-
-            action = QPushButton("Delete" if installed else "Download")
-            action.setFixedWidth(96)
-            action.setMinimumHeight(28)
-            action.setStyleSheet(
-                "QPushButton { background:rgba(255,255,255,0.06); color:#dadcdf; "
-                "border:none; border-radius:6px; font-size:12px; } "
-                "QPushButton:hover { background:rgba(255,255,255,0.12); }"
+        else:
+            self.action_btn.setText("Download")
+            self.action_btn.setStyleSheet(
+                "QPushButton { background:#4a6cff; color:white; border:none; "
+                "border-radius:8px; padding:0 18px; font-weight:600; font-size:13px; } "
+                "QPushButton:hover { background:#5a7bff; } "
+                "QPushButton:disabled { background:#2c313c; color:#777; }"
             )
-            if installed:
-                action.clicked.connect(
-                    lambda _checked=False, e=entry: self._delete(e)
-                )
-            else:
-                action.clicked.connect(
-                    lambda _checked=False, e=entry: self._download(e)
-                )
-            rl.addWidget(action)
-
-            item = QListWidgetItem(self._list)
-            item.setSizeHint(row.sizeHint())
-            self._list.addItem(item)
-            self._list.setItemWidget(item, row)
 
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
+
+    def _selected_entry(self):
+        cur = self._list.currentItem()
+        return cur.data(self._ROLE_ENTRY) if cur is not None else None
+
+    def _on_action_clicked(self) -> None:
+        entry = self._selected_entry()
+        if entry is None:
+            return
+        cur = self._list.currentItem()
+        if cur is not None and bool(cur.data(self._ROLE_INSTALLED)):
+            self._delete(entry)
+        else:
+            self._download(entry)
 
     def _delete(self, entry) -> None:
         from core.voice import delete_piper_voice
@@ -512,11 +579,16 @@ class _PiperVoiceManagerDialog(QDialog):
         else:
             self._status.setText(f"Could not delete {entry.voice_id}.")
         self._populate()
+        self._on_selection_changed()
 
     def _download(self, entry) -> None:
         from PySide6.QtCore import QThread, Signal as _Signal
         from core.voice import download_piper_voice
 
+        # Disable the action button while a download is in flight so the
+        # user can't queue a second one before this finishes.
+        self.action_btn.setEnabled(False)
+        self.action_btn.setText("Downloading…")
         self._status.setText(f"Downloading {entry.label}…")
 
         class _Worker(QThread):
@@ -541,6 +613,7 @@ class _PiperVoiceManagerDialog(QDialog):
             else:
                 self._status.setText(f"{entry.label} ready.")
             self._populate()
+            self._on_selection_changed()
 
         w.done.connect(_finish)
         w.start()

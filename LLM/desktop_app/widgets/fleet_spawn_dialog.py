@@ -177,6 +177,12 @@ class FleetSpawnDialog(QDialog):
             "ttl_seconds": int(self._ttl.value()),
             "base_branch": (self._base_branch.text().strip() or "main"),
         }
+        # Profile-driven launch_command is the only way to set this in
+        # slice 3b — there's no UI override. Pull it from whatever
+        # profile is currently selected.
+        profile = self._profile_picker.currentData()
+        if profile is not None and profile.launch_command:
+            kwargs["launch_command"] = tuple(profile.launch_command)
         agent_id = self._agent_id.text().strip()
         if agent_id:
             kwargs["agent_id"] = agent_id

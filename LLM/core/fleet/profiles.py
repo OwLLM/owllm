@@ -37,6 +37,12 @@ class Profile:
     default_reason: str = ""
     ttl_seconds: int = 3600
     base_branch: str = "main"
+    launch_command: Tuple[str, ...] = ()
+    """argv to execute inside the workspace clone after setup. Empty
+    means the fleet only provisions the workspace and the user opens
+    a terminal themselves (today's behaviour). Slice 3b runs this
+    via the active :class:`Runtime`'s ``start`` method, so the
+    container backend can pick the same template up for free later."""
     built_in: bool = True
 
     def to_dict(self) -> dict:
@@ -49,6 +55,7 @@ class Profile:
             "default_reason": self.default_reason,
             "ttl_seconds": self.ttl_seconds,
             "base_branch": self.base_branch,
+            "launch_command": list(self.launch_command),
             "built_in": self.built_in,
         }
 
@@ -63,6 +70,9 @@ class Profile:
             default_reason=str(data.get("default_reason", "")),
             ttl_seconds=int(data.get("ttl_seconds", 3600)),
             base_branch=str(data.get("base_branch", "main")),
+            launch_command=tuple(
+                str(x) for x in (data.get("launch_command", []) or [])
+            ),
             # Anything loaded from disk is by definition not a built-in,
             # regardless of what the JSON says.
             built_in=False,

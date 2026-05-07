@@ -32,6 +32,7 @@ from core.fleet.manifest import (
     ClaimConflict,
     Manifest,
 )
+from core.fleet.process import ProcessHandle, ProcessRegistry
 from core.fleet.runtime import (
     Runtime,
     WorktreeRuntime,
@@ -48,6 +49,8 @@ __all__ = [
     "Manifest",
     "PoolConfig",
     "PoolExhausted",
+    "ProcessHandle",
+    "ProcessRegistry",
     "Runtime",
     "STATUS_ACTIVE",
     "STATUS_RELEASED",

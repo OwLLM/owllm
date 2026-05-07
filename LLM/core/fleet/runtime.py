@@ -26,11 +26,15 @@ don't have to migrate it later.
 from __future__ import annotations
 
 import logging
+import subprocess
 import threading
+import time
 from abc import ABC, abstractmethod
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Sequence
 
 from core.fleet.manifest import Claim
+from core.fleet.process import ProcessHandle, _utcnow_iso
 from core.fleet.workspace import (
     AGENT_CONTEXT_TEMPLATE,
     WorkspaceError,
@@ -44,6 +48,13 @@ from core.fleet.workspace import (
 logger = logging.getLogger(__name__)
 
 
+LOG_FILE_NAME = "agent.log"
+"""Filename of the combined stdout+stderr log produced by a launched
+agent process. Lives at the workspace root, alongside
+``AGENT_CONTEXT.md`` — outside the ``clone/`` subdir so it never
+lands in the target repo."""
+
+
 class Runtime(ABC):
     """Abstract isolation backend.
 
@@ -52,6 +63,14 @@ class Runtime(ABC):
     * :class:`WorktreeRuntime` — today's plain-directory model.
     * (future) ``ContainerRuntime`` — Docker container with declared
       mount table; the container *is* the boundary.
+
+    Lifecycle methods are split into two pairs:
+
+    * ``setup`` / ``teardown`` — workspace provisioning (clone, branch,
+      push, cleanup). Slice 1b shipped this.
+    * ``start`` / ``stop`` — agent process launch and termination.
+      Slice 3b adds this; runtimes that don't support process launch
+      can still satisfy the contract by raising or no-op'ing.
     """
 
     @abstractmethod
@@ -74,6 +93,34 @@ class Runtime(ABC):
         pr_body: str = "",
     ) -> Optional[str]:
         """Tear down the workspace; return PR URL on success or ``None``."""
+
+    @abstractmethod
+    def start(
+        self,
+        claim: Claim,
+        layout: WorkspaceLayout,
+        argv: Sequence[str],
+    ) -> ProcessHandle:
+        """Launch ``argv`` inside the agent's workspace.
+
+        The process's combined stdout+stderr stream into a log file
+        at the workspace root (see :data:`LOG_FILE_NAME`). Returns a
+        :class:`ProcessHandle` the caller registers with a
+        :class:`ProcessRegistry`.
+        """
+
+    @abstractmethod
+    def stop(
+        self,
+        handle: ProcessHandle,
+        *,
+        timeout: float = 5.0,
+    ) -> Optional[int]:
+        """Terminate the process; return its exit code (``None`` if no Popen).
+
+        SIGTERM first, SIGKILL after ``timeout`` if it's still alive.
+        Closes the log file handle either way.
+        """
 
 
 class WorktreeRuntime(Runtime):
@@ -152,6 +199,89 @@ class WorktreeRuntime(Runtime):
             _rmtree_force(layout.root)
 
         return pr_url
+
+    def start(
+        self,
+        claim: Claim,
+        layout: WorkspaceLayout,
+        argv: Sequence[str],
+    ) -> ProcessHandle:
+        """Launch ``argv`` as a subprocess inside ``layout.clone``.
+
+        Stdout + stderr are merged into a single log file at the
+        workspace root (kept out of the clone so it doesn't pollute
+        the target repo's history).
+        """
+        if not argv:
+            raise ValueError("argv must be non-empty")
+        log_path = layout.root / LOG_FILE_NAME
+        log_handle = log_path.open("a", encoding="utf-8", buffering=1)
+        log_handle.write(
+            f"--- agent {claim.agent_id} launched at {_utcnow_iso()} ---\n"
+            f"argv: {list(argv)}\n"
+            f"cwd: {layout.clone}\n\n"
+        )
+        log_handle.flush()
+        try:
+            popen = subprocess.Popen(
+                list(argv),
+                cwd=str(layout.clone),
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+            )
+        except OSError:
+            # subprocess failure (e.g. command not found) — close the
+            # log so we don't leak the file handle.
+            try:
+                log_handle.close()
+            except Exception:
+                pass
+            raise
+        handle = ProcessHandle(
+            agent_id=claim.agent_id,
+            pid=popen.pid,
+            argv=tuple(argv),
+            log_path=log_path,
+            _popen=popen,
+            _log_handle=log_handle,
+        )
+        logger.info(
+            "agent %s launched pid %d: %s", claim.agent_id, popen.pid, argv,
+        )
+        return handle
+
+    def stop(
+        self,
+        handle: ProcessHandle,
+        *,
+        timeout: float = 5.0,
+    ) -> Optional[int]:
+        popen = handle._popen
+        if popen is None:
+            handle.close_log()
+            return None
+        if popen.poll() is None:
+            popen.terminate()
+            try:
+                popen.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "agent %s did not exit after SIGTERM; sending SIGKILL",
+                    handle.agent_id,
+                )
+                popen.kill()
+                try:
+                    popen.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    logger.error(
+                        "agent %s ignored SIGKILL — leaving handle in place",
+                        handle.agent_id,
+                    )
+        rc = popen.returncode
+        handle.mark_exited()
+        handle.close_log()
+        return rc
 
 
 # ---------------------------------------------------------------------------

@@ -65,6 +65,21 @@ def test_to_dict_from_dict_roundtrip() -> None:
     assert out.reads_modules == TEST_WRITER.reads_modules
 
 
+def test_launch_command_roundtrip() -> None:
+    p = Profile(
+        name="x", description="",
+        launch_command=("python", "-c", "print('hi')"),
+    )
+    out = Profile.from_dict(p.to_dict())
+    # tuples ↔ lists in JSON; from_dict re-tuples.
+    assert out.launch_command == ("python", "-c", "print('hi')")
+
+
+def test_launch_command_defaults_to_empty_when_missing() -> None:
+    p = Profile.from_dict({"name": "minimal"})
+    assert p.launch_command == ()
+
+
 def test_from_dict_supplies_defaults() -> None:
     p = Profile.from_dict({"name": "minimal"})
     assert p.name == "minimal"

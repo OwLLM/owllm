@@ -11,7 +11,12 @@ Buttons emit signals; the parent :class:`FleetPage` wires them to
 """
 from __future__ import annotations
 
+import logging
+import os
+import subprocess
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
@@ -26,6 +31,23 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _open_in_default_app(path: str) -> bool:
+    """Open ``path`` in the OS-default app. Returns True on success."""
+    try:
+        if sys.platform == "win32":
+            os.startfile(path)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+        return True
+    except Exception:
+        logger.warning("could not open %s", path, exc_info=True)
+        return False
 
 
 _STATUS_COLOR = {
@@ -68,6 +90,21 @@ QLabel#bodyText {{
 }}
 QLabel#monoText {{
     color: #c4d0e8;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+}}
+QLabel#procRunning {{
+    color: #3cf26b;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+}}
+QLabel#procExitedOk {{
+    color: #74a4ff;
+    font-family: Consolas, "Courier New", monospace;
+    font-size: 11px;
+}}
+QLabel#procExitedFail {{
+    color: #ffc060;
     font-family: Consolas, "Courier New", monospace;
     font-size: 11px;
 }}
@@ -194,6 +231,7 @@ class FleetAgentCard(QFrame):
         )
         self._lbl_resources.setText(f"{port_txt}  ·  {gpu_txt}")
         self._refresh_ttl_label()
+        self._refresh_process_row(claim.get("process"))
 
         is_active = status == "active"
         self._btn_finish.setEnabled(is_active)
@@ -251,9 +289,20 @@ class FleetAgentCard(QFrame):
         self._lbl_ttl.setObjectName("monoText")
         outer.addWidget(self._lbl_ttl)
 
+        # Process — section + status line. Hidden when the agent has
+        # no launched process (claim["process"] is None).
+        self._proc_section_label = _section_label("PROCESS")
+        outer.addWidget(self._proc_section_label)
+        self._lbl_proc_status = QLabel("")
+        self._lbl_proc_status.setObjectName("monoText")
+        outer.addWidget(self._lbl_proc_status)
+
         # Footer buttons
         footer = QHBoxLayout()
         footer.setSpacing(6)
+        self._btn_view_log = QPushButton("View log")
+        self._btn_view_log.clicked.connect(self._on_view_log)
+        footer.addWidget(self._btn_view_log)
         self._btn_heartbeat = QPushButton("Heartbeat")
         self._btn_heartbeat.clicked.connect(
             lambda: self.heartbeat_requested.emit(self.agent_id)
@@ -295,6 +344,45 @@ class FleetAgentCard(QFrame):
             self._lbl_ttl.setText(_format_ttl(self._claim))
         else:
             self._lbl_ttl.setText("released")
+
+    def _refresh_process_row(self, proc: Optional[Dict[str, Any]]) -> None:
+        if not proc:
+            self._proc_section_label.setVisible(False)
+            self._lbl_proc_status.setVisible(False)
+            self._btn_view_log.setVisible(False)
+            return
+
+        self._proc_section_label.setVisible(True)
+        self._lbl_proc_status.setVisible(True)
+        self._btn_view_log.setVisible(True)
+
+        if proc.get("is_running"):
+            text = f"● running (pid {proc.get('pid', '?')})"
+            obj_name = "procRunning"
+        else:
+            rc = proc.get("returncode")
+            if rc is None or rc == 0:
+                text = f"● exited (rc={rc if rc is not None else '?'})"
+                obj_name = "procExitedOk"
+            else:
+                text = f"● exited (rc={rc})"
+                obj_name = "procExitedFail"
+        self._lbl_proc_status.setText(text)
+        # Apply the colour class via objectName + re-polish.
+        self._lbl_proc_status.setObjectName(obj_name)
+        self._lbl_proc_status.style().unpolish(self._lbl_proc_status)
+        self._lbl_proc_status.style().polish(self._lbl_proc_status)
+
+        log_path = str(proc.get("log_path") or "")
+        self._btn_view_log.setEnabled(
+            bool(log_path) and Path(log_path).exists()
+        )
+
+    def _on_view_log(self) -> None:
+        proc = (self._claim.get("process") or {})
+        log_path = str(proc.get("log_path") or "")
+        if log_path:
+            _open_in_default_app(log_path)
 
 
 def _section_label(text: str) -> QLabel:

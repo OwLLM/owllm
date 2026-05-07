@@ -16,6 +16,7 @@ from typing import List, Optional
 import pytest
 
 from core.fleet.manifest import Claim
+from core.fleet.process import ProcessHandle
 from core.fleet.runtime import (
     Runtime,
     WorktreeRuntime,
@@ -89,11 +90,13 @@ def test_set_default_runtime_none_resets_to_lazy_worktree() -> None:
 
 
 class _RecordingRuntime(Runtime):
-    """Stub that records calls and returns a synthetic layout."""
+    """Stub that records calls and returns synthetic results."""
 
     def __init__(self):
         self.setup_calls: List[tuple[Claim, str]] = []
         self.teardown_calls: List[tuple[Claim, bool, bool]] = []
+        self.start_calls: List[tuple[Claim, tuple]] = []
+        self.stop_calls: List[ProcessHandle] = []
         self.next_pr_url: Optional[str] = None
 
     def setup(self, claim: Claim, *, base_branch: str = "main") -> WorkspaceLayout:
@@ -111,6 +114,20 @@ class _RecordingRuntime(Runtime):
     ) -> Optional[str]:
         self.teardown_calls.append((claim, push, open_pr))
         return self.next_pr_url
+
+    def start(self, claim, layout, argv):
+        self.start_calls.append((claim, tuple(argv)))
+        from pathlib import Path as _P
+        return ProcessHandle(
+            agent_id=claim.agent_id,
+            pid=0,
+            argv=tuple(argv),
+            log_path=_P(claim.workspace_path) / "agent.log",
+        )
+
+    def stop(self, handle, *, timeout: float = 5.0):
+        self.stop_calls.append(handle)
+        return 0
 
 
 def _make_claim(workspace_path: Path) -> Claim:

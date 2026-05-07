@@ -2938,13 +2938,24 @@ class AgentsPage(QWidget):
         self._on_location_changed()
 
     def _with_workdir_hint(self, goal: str) -> str:
-        """Prepend a working-directory directive when the active project's
-        location is an existing folder. Skips silently for aliases, URLs,
-        and missing paths so we don't pollute the goal with bad guidance."""
+        """Prepend a working-directory directive on the FIRST run of a team
+        (and again only if Location changes). The orchestrator already has
+        the cwd in its context after message 1 — repeating it on every Run
+        is noise and risks being mis-read as a new directive.
+
+        Skips silently for aliases, URLs, and missing paths so we don't
+        pollute the goal with bad guidance."""
         proj = self._active_project
         loc = (proj.location or "").strip() if proj else ""
         if not loc or not os.path.isdir(loc):
             return goal
+        # Per-team-instance dedupe. self._team is dropped on project switch
+        # / team rebuild, so a fresh team always gets the hint once.
+        last_sent = getattr(self._team, "_workdir_hint_loc", None) if self._team else None
+        if last_sent == loc:
+            return goal
+        if self._team is not None:
+            self._team._workdir_hint_loc = loc
         hint = (
             f"[Working directory: {loc}]\n"
             "Use this absolute path as the working directory for every "
@@ -4190,17 +4201,16 @@ class AgentsPage(QWidget):
         # a voice-only message is a perfectly valid request.
         if not goal and not attachments:
             return
-        # If the active project's Location resolves to an existing folder,
-        # prepend a working-directory hint so the team's shell/file tools
-        # default to that path. Aliases / URLs / non-existent paths are
-        # left out — only real directories become a runtime hint.
-        goal = self._with_workdir_hint(goal)
         if self._team is None:
             try:
                 self._team = self._build_team()
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.critical(self, "Agents", f"Team build failed: {exc}")
                 return
+        # Prepend working-dir directive ONCE per team instance (and again
+        # only if the project's Location changes). Must run after team
+        # build so the dedupe marker can be stored on the team.
+        goal = self._with_workdir_hint(goal)
 
         self.goal_input.setEnabled(False)
         self.run_btn.setEnabled(False)

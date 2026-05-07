@@ -173,6 +173,9 @@ class FleetAgentCard(QFrame):
 
     finish_requested = Signal(str)
     heartbeat_requested = Signal(str)
+    log_view_requested = Signal(str, str)
+    """``(agent_id, log_path)`` — let the page decide how to render
+    the log (in-app dialog, OS-default app, both)."""
 
     def __init__(self, claim: Dict[str, Any], parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -382,7 +385,7 @@ class FleetAgentCard(QFrame):
         proc = (self._claim.get("process") or {})
         log_path = str(proc.get("log_path") or "")
         if log_path:
-            _open_in_default_app(log_path)
+            self.log_view_requested.emit(self.agent_id, log_path)
 
 
 def _section_label(text: str) -> QLabel:

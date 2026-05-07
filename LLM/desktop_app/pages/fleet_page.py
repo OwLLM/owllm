@@ -32,7 +32,11 @@ from PySide6.QtWidgets import (
 )
 
 from desktop_app.fleet_service import FleetService
-from desktop_app.widgets.fleet_agent_card import FleetAgentCard
+from desktop_app.widgets.fleet_agent_card import (
+    FleetAgentCard,
+    _open_in_default_app,
+)
+from desktop_app.widgets.fleet_log_viewer import FleetLogViewer
 from desktop_app.widgets.fleet_spawn_dialog import FleetSpawnDialog
 
 logger = logging.getLogger(__name__)
@@ -225,6 +229,7 @@ class FleetPage(QWidget):
                 card = FleetAgentCard(claim, self._scroll_inner)
                 card.finish_requested.connect(self._on_card_finish)
                 card.heartbeat_requested.connect(self._on_card_heartbeat)
+                card.log_view_requested.connect(self._on_card_log_view)
                 # Insert before the trailing stretch so cards stack at top.
                 self._cards_layout.insertWidget(
                     self._cards_layout.count() - 1, card,
@@ -283,6 +288,11 @@ class FleetPage(QWidget):
             self._show_status(
                 f"{agent_id}: no active claim to heartbeat", level="error",
             )
+
+    def _on_card_log_view(self, agent_id: str, log_path: str) -> None:
+        viewer = FleetLogViewer(agent_id, log_path, parent=self)
+        viewer.open_in_editor_requested.connect(_open_in_default_app)
+        viewer.show()
 
     def _on_card_finish(self, agent_id: str) -> None:
         confirm = QMessageBox.question(

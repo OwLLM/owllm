@@ -119,6 +119,7 @@ class ContainerRuntime(Runtime):
         auth_mounts: Optional[Sequence[Mount]] = None,
         network: Optional[str] = None,
         gpu_runtime: Optional[str] = None,
+        enforce_module_mounts: bool = False,
     ):
         """Configure the container runtime.
 
@@ -134,12 +135,20 @@ class ContainerRuntime(Runtime):
         :param gpu_runtime:  Override Docker's GPU runtime label. Most
                              setups don't need this — when ``claim.gpu_slot``
                              is set we just pass ``--gpus device=N``.
+        :param enforce_module_mounts:
+                             When True, the workspace is mounted **ro**
+                             and each path in ``claim.owns_modules`` is
+                             bind-mounted **rw** on top. The agent
+                             physically cannot write outside its declared
+                             modules. When False (default), the whole
+                             workspace is rw — owns/reads stay advisory.
         """
         self._image = image
         self._docker = docker_bin
         self._auth_mounts: List[Mount] = list(auth_mounts or [])
         self._network = network
         self._gpu_runtime = gpu_runtime
+        self._enforce_module_mounts = enforce_module_mounts
         # Composition: workspace lifecycle is identical to plain
         # WorktreeRuntime — only the process launch differs.
         self._inner = WorktreeRuntime()
@@ -321,9 +330,13 @@ class ContainerRuntime(Runtime):
             self._docker, "run",
             "--rm",                 # auto-cleanup container metadata
             "--name", container_name,
-            "-v", f"{layout.clone}:{WORKDIR_INSIDE_CONTAINER}",
-            "-w", WORKDIR_INSIDE_CONTAINER,
         ]
+        # Workspace mount(s). Either:
+        # - whole clone rw (default), or
+        # - whole clone ro + each owned module rw on top
+        for v in self._workspace_mounts(claim, layout):
+            cmd.extend(["-v", v])
+        cmd.extend(["-w", WORKDIR_INSIDE_CONTAINER])
         # Auth + ad-hoc bind mounts.
         for m in self._auth_mounts:
             cmd.extend(["-v", m.to_docker_v()])
@@ -340,6 +353,78 @@ class ContainerRuntime(Runtime):
         cmd.append(self._image)
         cmd.extend(argv)
         return cmd
+
+
+    def _workspace_mounts(
+        self,
+        claim: Claim,
+        layout: WorkspaceLayout,
+    ) -> List[str]:
+        """Return the list of ``-v`` mount specs for workspace + modules.
+
+        Default (``enforce_module_mounts=False``): one rw mount of
+        the whole clone. Same as 4-c-a.
+
+        Strict (``enforce_module_mounts=True``): the whole clone ro,
+        plus one rw bind-mount per translatable owned module on top.
+        Docker resolves nested mounts longest-path-wins, so the
+        per-module rw mounts shadow the outer ro for their subpaths.
+
+        For owned modules whose directory doesn't yet exist on disk,
+        we ``mkdir`` it so the bind-mount has a target. The agent's
+        files land there directly via the bind, and a finished
+        clone's git ``status`` shows them as untracked.
+        """
+        if not self._enforce_module_mounts:
+            return [f"{layout.clone}:{WORKDIR_INSIDE_CONTAINER}:rw"]
+
+        mounts: List[str] = [
+            f"{layout.clone}:{WORKDIR_INSIDE_CONTAINER}:ro",
+        ]
+        for pattern in claim.owns_modules:
+            rel = _module_to_path(pattern)
+            if rel is None:
+                logger.warning(
+                    "agent %s: owns_modules pattern %r is too dynamic "
+                    "to bind-mount; falling back to whole-clone ro for it",
+                    claim.agent_id, pattern,
+                )
+                continue
+            host = layout.clone / rel
+            try:
+                host.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                logger.warning(
+                    "agent %s: could not pre-create %s for bind-mount: %s",
+                    claim.agent_id, host, e,
+                )
+                continue
+            container = f"{WORKDIR_INSIDE_CONTAINER}/{rel}"
+            mounts.append(f"{host}:{container}:rw")
+        return mounts
+
+
+def _module_to_path(pattern: str) -> Optional[str]:
+    """Translate an owns-module glob into a relative path under the clone.
+
+    Returns None for patterns that aren't a single deterministic
+    path (e.g. ``**/*.py``, ``src/*/util.py``). The caller must
+    then decide how to handle them — today we skip with a warning.
+
+    Examples accepted::
+
+        src/billing/**     → src/billing
+        src/billing/*      → src/billing
+        src/billing        → src/billing
+        src/billing/api.py → src/billing/api.py
+    """
+    p = pattern.replace("\\", "/").rstrip("/")
+    for suffix in ("/**", "/*"):
+        if p.endswith(suffix):
+            p = p[: -len(suffix)]
+    if any(ch in p for ch in "*?["):
+        return None
+    return p.strip("/")
 
 
 def container_name_for(agent_id: str) -> str:

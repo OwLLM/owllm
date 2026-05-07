@@ -54,6 +54,12 @@ def _make_claim(workspace: Path, agent_id: str = "a1") -> Claim:
     )
 
 
+docker_required = pytest.mark.skipif(
+    not ContainerRuntime.is_available(),
+    reason="docker not available on this host",
+)
+
+
 # ---------------------------------------------------------------------------
 # Container name sanitisation
 # ---------------------------------------------------------------------------
@@ -92,9 +98,9 @@ def test_run_cmd_includes_workspace_mount(tmp_path: Path) -> None:
     assert "-w" in cmd
     assert WORKDIR_INSIDE_CONTAINER in cmd
     assert "alpine:3.20" in cmd
-    # The mount spec joins clone path → /workspace.
+    # The mount spec joins clone path → /workspace, with explicit mode.
     mount_arg = cmd[cmd.index("-v") + 1]
-    assert mount_arg.endswith(f":{WORKDIR_INSIDE_CONTAINER}")
+    assert mount_arg.endswith(f":{WORKDIR_INSIDE_CONTAINER}:rw")
     assert str(layout.clone) in mount_arg
     # User argv comes last, in order.
     assert cmd[-2:] == ["echo", "hi"]
@@ -216,6 +222,164 @@ def test_no_gpu_in_claim_omits_gpus_flag(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-module mount table (4-c-b)
+# ---------------------------------------------------------------------------
+
+
+def test_default_mode_keeps_workspace_rw(tmp_path: Path) -> None:
+    """4-c-a default — one rw mount of the whole clone, no per-module."""
+    rt = ContainerRuntime()
+    cmd = rt._build_run_cmd(
+        container_name_for("a1"), _make_claim(tmp_path / "ws-a1"),
+        _make_layout(tmp_path / "ws-a1"), ["true"],
+    )
+    v_args = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+    workspace_mounts = [v for v in v_args if WORKDIR_INSIDE_CONTAINER in v]
+    assert len(workspace_mounts) == 1
+    assert workspace_mounts[0].endswith(":rw")
+
+
+def test_enforce_mounts_clone_ro_then_modules_rw(tmp_path: Path) -> None:
+    """Strict mode — whole clone ro + each owned module rw on top."""
+    layout = _make_layout(tmp_path / "ws-a1")
+    claim = Claim(
+        agent_id="a1", target_repo="alpha", branch="b",
+        workspace_path=str(tmp_path / "ws-a1"),
+        owns_modules=["src/billing/**", "tests/billing/**"],
+    )
+    rt = ContainerRuntime(enforce_module_mounts=True)
+    cmd = rt._build_run_cmd(
+        container_name_for("a1"), claim, layout, ["true"],
+    )
+    v_args = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+    workspace_mounts = [v for v in v_args if WORKDIR_INSIDE_CONTAINER in v]
+    # 1 ro outer + 2 rw module mounts = 3 workspace-related.
+    assert len(workspace_mounts) == 3
+    # Outer is the whole clone, ro.
+    assert workspace_mounts[0].endswith(f":{WORKDIR_INSIDE_CONTAINER}:ro")
+    # Per-module rw mounts target subpaths inside /workspace.
+    rw_module_targets = [
+        v.split(":")[-2] for v in workspace_mounts[1:]
+    ]
+    assert f"{WORKDIR_INSIDE_CONTAINER}/src/billing" in rw_module_targets
+    assert f"{WORKDIR_INSIDE_CONTAINER}/tests/billing" in rw_module_targets
+    for v in workspace_mounts[1:]:
+        assert v.endswith(":rw")
+
+
+def test_enforce_mounts_creates_missing_module_dirs(tmp_path: Path) -> None:
+    """An owned-module dir that doesn't exist on disk yet gets
+    pre-created so the bind-mount has a target."""
+    layout = _make_layout(tmp_path / "ws-a1")
+    # `src/new_feature` doesn't exist yet.
+    assert not (layout.clone / "src" / "new_feature").exists()
+
+    claim = Claim(
+        agent_id="a1", target_repo="alpha", branch="b",
+        workspace_path=str(tmp_path / "ws-a1"),
+        owns_modules=["src/new_feature/**"],
+    )
+    rt = ContainerRuntime(enforce_module_mounts=True)
+    rt._build_run_cmd(container_name_for("a1"), claim, layout, ["true"])
+
+    # Pre-created so docker run won't error on a missing source.
+    assert (layout.clone / "src" / "new_feature").is_dir()
+
+
+def test_enforce_mounts_skips_dynamic_globs(tmp_path: Path, caplog) -> None:
+    """Patterns we can't translate to a single path are skipped with
+    a warning; the outer ro mount still covers the agent's view."""
+    import logging
+    caplog.set_level(logging.WARNING)
+    layout = _make_layout(tmp_path / "ws-a1")
+    claim = Claim(
+        agent_id="a1", target_repo="alpha", branch="b",
+        workspace_path=str(tmp_path / "ws-a1"),
+        owns_modules=["**/*.py", "src/*/util.py", "src/billing/**"],
+    )
+    rt = ContainerRuntime(enforce_module_mounts=True)
+    cmd = rt._build_run_cmd(
+        container_name_for("a1"), claim, layout, ["true"],
+    )
+    v_args = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-v"]
+    workspace_mounts = [v for v in v_args if WORKDIR_INSIDE_CONTAINER in v]
+    # Only the ro outer + the one translatable module = 2.
+    assert len(workspace_mounts) == 2
+    # And we logged about the skipped ones.
+    assert any("**/*.py" in r.message for r in caplog.records)
+
+
+def test_module_to_path_translates_common_globs() -> None:
+    from core.fleet.container_runtime import _module_to_path
+    assert _module_to_path("src/billing/**") == "src/billing"
+    assert _module_to_path("src/billing/*") == "src/billing"
+    assert _module_to_path("src/billing") == "src/billing"
+    assert _module_to_path("src/billing/api.py") == "src/billing/api.py"
+    # Strips trailing slashes.
+    assert _module_to_path("src/billing/") == "src/billing"
+    # Cross-pattern globs return None — caller must handle.
+    assert _module_to_path("**/*.py") is None
+    assert _module_to_path("src/*/util.py") is None
+
+
+# ---------------------------------------------------------------------------
+# Integration — strict-mounts actually prevents writes outside owned
+# ---------------------------------------------------------------------------
+
+
+@docker_required
+def test_strict_mounts_block_writes_outside_owned_modules(
+    tmp_path: Path,
+) -> None:
+    """The headline property: agent inside the container can write
+    to its owned modules but NOT to the rest of the clone."""
+    layout = _make_layout(tmp_path / "ws-a1")
+    # Pre-existing file outside the owned module.
+    (layout.clone / "outside.txt").write_text("don't touch", encoding="utf-8")
+
+    claim = Claim(
+        agent_id="a1", target_repo="alpha", branch="b",
+        workspace_path=str(tmp_path / "ws-a1"),
+        owns_modules=["src/billing/**"],
+    )
+    rt = ContainerRuntime(
+        image="alpine:3.20",
+        enforce_module_mounts=True,
+    )
+
+    # Sanity 1: writing inside the owned module succeeds.
+    inside_handle = rt.start(
+        claim, layout,
+        ["sh", "-c", "echo hello > src/billing/x.txt && cat src/billing/x.txt"],
+    )
+    try:
+        rc = inside_handle._popen.wait(timeout=120)
+    finally:
+        inside_handle.close_log()
+    assert rc == 0, inside_handle.log_path.read_text(encoding="utf-8")
+    assert (layout.clone / "src" / "billing" / "x.txt").read_text(
+        encoding="utf-8",
+    ).strip() == "hello"
+
+    # Sanity 2: writing outside fails (read-only filesystem).
+    outside_handle = rt.start(
+        claim, layout,
+        ["sh", "-c", "echo nope > outside.txt"],
+    )
+    try:
+        rc = outside_handle._popen.wait(timeout=120)
+    finally:
+        outside_handle.close_log()
+    assert rc != 0, "writing to a non-owned path must fail"
+    log = outside_handle.log_path.read_text(encoding="utf-8")
+    assert "read-only" in log.lower() or "permission" in log.lower(), log
+    # And the file on disk is untouched.
+    assert (layout.clone / "outside.txt").read_text(
+        encoding="utf-8",
+    ) == "don't touch"
+
+
+# ---------------------------------------------------------------------------
 # is_available
 # ---------------------------------------------------------------------------
 
@@ -278,12 +442,6 @@ def test_start_rejects_empty_argv(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Integration — actually launch a tiny container (gated on Docker)
 # ---------------------------------------------------------------------------
-
-
-docker_required = pytest.mark.skipif(
-    not ContainerRuntime.is_available(),
-    reason="docker not available on this host",
-)
 
 
 @docker_required

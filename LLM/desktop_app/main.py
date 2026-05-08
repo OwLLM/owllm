@@ -17962,22 +17962,48 @@ class MainWindow(QMainWindow):
         title_row.addWidget(test_title)
         title_row.addStretch(1)
         
-        # Model count selector (two round checkboxes)
-        title_row.addWidget(QLabel("Number of models:"))
-        
-        # Checkbox for 2 models
+        # Chat-count selector (mutually-exclusive checkboxes 1 / 2 / 3).
+        # Re-labelled from "Number of models" to "Number of chats" on
+        # user request — 1 reduces this surface to a single-column
+        # chat (the old "Test" page split into 1/2/3 was confusing).
+        title_row.addWidget(QLabel("Number of chats:"))
+
+        self.test_model_count_1 = QCheckBox("1")
+        self.test_model_count_1.setChecked(False)  # Default still 2
+        self.test_model_count_1.setTristate(False)
+        self.test_model_count_1.toggled.connect(self._on_model_count_1_toggled)
+        title_row.addWidget(self.test_model_count_1)
+
         self.test_model_count_2 = QCheckBox("2")
-        self.test_model_count_2.setChecked(True)  # Default to 2 models
+        self.test_model_count_2.setChecked(True)  # Default to 2 chats
         self.test_model_count_2.setTristate(False)
         self.test_model_count_2.toggled.connect(self._on_model_count_2_toggled)
         title_row.addWidget(self.test_model_count_2)
-        
-        # Checkbox for 3 models
+
         self.test_model_count_3 = QCheckBox("3")
-        self.test_model_count_3.setChecked(False)  # Default to 2 models
+        self.test_model_count_3.setChecked(False)
         self.test_model_count_3.setTristate(False)
         self.test_model_count_3.toggled.connect(self._on_model_count_3_toggled)
         title_row.addWidget(self.test_model_count_3)
+
+        # 'Models talk to each other' — when on, the chats run in
+        # model-to-model mode (each reply becomes the next model's
+        # prompt). Hidden when only 1 chat is active because there's
+        # nobody to talk to. Click routes to the dedicated Model To
+        # Model sub-tab where the runner is implemented.
+        title_row.addSpacing(12)
+        self.test_models_converse = QCheckBox("🔄 Models talk to each other")
+        self.test_models_converse.setChecked(False)
+        self.test_models_converse.setToolTip(
+            "When enabled, the chats run model-to-model: each reply "
+            "feeds the next model as its prompt. Open the 'Model To "
+            "Model' sub-tab to start a session."
+        )
+        self.test_models_converse.toggled.connect(
+            self._on_test_models_converse_toggled
+        )
+        title_row.addWidget(self.test_models_converse)
+
         left_layout.addLayout(title_row)
 
         # Hardware Settings and Tool Calling side by side
@@ -18056,8 +18082,11 @@ class MainWindow(QMainWindow):
         model_a_header_layout.addWidget(self.test_model_a)
         headers_layout.addWidget(model_a_header_widget, 1)
         
-        # MODEL B Header and selector
+        # MODEL B Header and selector. Stored on self.* so the
+        # 1/2/3-chat selector can hide the entire Model B column when
+        # the user picks single-chat mode.
         model_b_header_widget = QWidget()
+        self.test_model_b_header_widget = model_b_header_widget
         model_b_header_widget.setContentsMargins(0, 0, 0, 0)  # No margins for alignment
         model_b_header_layout = QVBoxLayout(model_b_header_widget)
         model_b_header_layout.setContentsMargins(0, 0, 0, 0)  # No margins
@@ -22177,131 +22206,147 @@ class MainWindow(QMainWindow):
             self.test_model_c_btn.setChecked(True)
             self.test_model_settings_stack.setCurrentIndex(2)
     
+    def _select_model_count(self, target: str) -> None:
+        """Coordinate the three mutually-exclusive count checkboxes
+        (``"1"`` / ``"2"`` / ``"3"``) so exactly one stays checked,
+        then trigger the visual rebuild via ``_on_model_count_changed``.
+        """
+        boxes = {
+            "1": getattr(self, "test_model_count_1", None),
+            "2": getattr(self, "test_model_count_2", None),
+            "3": getattr(self, "test_model_count_3", None),
+        }
+        for key, cb in boxes.items():
+            if cb is None:
+                continue
+            cb.blockSignals(True)
+            cb.setChecked(key == target)
+            cb.blockSignals(False)
+        self._on_model_count_changed(target)
+
+    def _on_model_count_1_toggled(self, checked: bool) -> None:
+        """Handle 1 chat checkbox toggle (single-chat mode)."""
+        if checked:
+            self._select_model_count("1")
+        else:
+            # At least one must be on — fall back to 2.
+            if not self.test_model_count_2.isChecked() and not self.test_model_count_3.isChecked():
+                self._select_model_count("2")
+
     def _on_model_count_2_toggled(self, checked: bool) -> None:
-        """Handle 2 models checkbox toggle"""
-        print(f"DEBUG: _on_model_count_2_toggled called with checked={checked}")
+        """Handle 2 chats checkbox toggle."""
         if checked:
-            # Block signals to prevent feedback loop
-            self.test_model_count_3.blockSignals(True)
-            self.test_model_count_3.setChecked(False)
-            self.test_model_count_3.blockSignals(False)
-            self._on_model_count_changed("2")
+            self._select_model_count("2")
         else:
-            # If unchecking 2, ensure 3 is checked (at least one must be checked)
-            if not self.test_model_count_3.isChecked():
-                self.test_model_count_3.blockSignals(True)
-                self.test_model_count_3.setChecked(True)
-                self.test_model_count_3.blockSignals(False)
-                self._on_model_count_changed("3")
-    
+            if not (
+                getattr(self, "test_model_count_1", None) and self.test_model_count_1.isChecked()
+            ) and not self.test_model_count_3.isChecked():
+                self._select_model_count("3")
+
     def _on_model_count_3_toggled(self, checked: bool) -> None:
-        """Handle 3 models checkbox toggle"""
-        print(f"DEBUG: _on_model_count_3_toggled called with checked={checked}")
+        """Handle 3 chats checkbox toggle."""
         if checked:
-            # Block signals to prevent feedback loop
-            self.test_model_count_2.blockSignals(True)
-            self.test_model_count_2.setChecked(False)
-            self.test_model_count_2.blockSignals(False)
-            self._on_model_count_changed("3")
+            self._select_model_count("3")
         else:
-            # If unchecking 3, ensure 2 is checked (at least one must be checked)
-            if not self.test_model_count_2.isChecked():
-                self.test_model_count_2.blockSignals(True)
-                self.test_model_count_2.setChecked(True)
-                self.test_model_count_2.blockSignals(False)
-                self._on_model_count_changed("2")
+            if not self.test_model_count_2.isChecked() and not (
+                getattr(self, "test_model_count_1", None) and self.test_model_count_1.isChecked()
+            ):
+                self._select_model_count("2")
+
+    def _on_test_models_converse_toggled(self, checked: bool) -> None:
+        """When enabled, route the user to the Model-to-Model sub-tab
+        (the dedicated runner for back-and-forth conversations between
+        the loaded models). Clearing the checkbox brings the user back
+        to the regular Test sub-tab."""
+        try:
+            sub_tabs = getattr(self, "test_sub_tabs", None)
+            if sub_tabs is None:
+                return
+            if checked:
+                # Sub-tab order: 0 = Test, 1 = Tool Chat, 2 = Model To Model.
+                sub_tabs.setCurrentIndex(2)
+            else:
+                sub_tabs.setCurrentIndex(0)
+        except Exception:
+            pass
     
     def _on_model_count_changed(self, count_str: str) -> None:
-        """Handle model count change (2 or 3 models)"""
-        print(f"DEBUG: _on_model_count_changed called with count_str={count_str}")
-        count = int(count_str)
-        if count == 3:
-            print("DEBUG: Setting up for 3 models")
-            # Show Model C
-            print("DEBUG: Showing Model C widgets")
-            print(f"DEBUG: test_model_c_header_widget exists: {hasattr(self, 'test_model_c_header_widget')}")
-            print(f"DEBUG: test_model_c_btn exists: {hasattr(self, 'test_model_c_btn')}")
-            self.test_model_c_header_widget.setVisible(True)
-            self.test_model_c_btn.setVisible(True)
-            # Update button text to short form (A, B, C)
-            self.test_model_a_btn.setText("🔵 A")
-            self.test_model_b_btn.setText("🟢 B")
-            self.test_model_c_btn.setText("🟣 C")
-            # Update chat display to 3 columns
-            print("DEBUG: Replacing chat display with 3-column version")
-            from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
-            old_display = self.chat_display
-            # Use stored layout reference
-            if hasattr(self, 'test_left_layout'):
-                # Find index of old display in layout
-                index = self.test_left_layout.indexOf(old_display)
-                print(f"DEBUG: Old display index in layout: {index}")
-                if index == -1:
-                    print("DEBUG: WARNING: indexOf returned -1, using addWidget instead")
-                    # Remove old display
-                    self.test_left_layout.removeWidget(old_display)
-                    old_display.setParent(None)
-                    old_display.deleteLater()
-                    # Create and add new display
-                    self.chat_display = SynchronizedChatDisplay(num_models=3, colorize_model_replies=True)
-                    self.chat_display.set_theme(self.dark_mode)
-                    self.test_left_layout.addWidget(self.chat_display, 1)
-                else:
-                    # Remove old display
-                    self.test_left_layout.removeWidget(old_display)
-                    old_display.setParent(None)
-                    old_display.deleteLater()
-                    # Create and add new display at same position
-                    self.chat_display = SynchronizedChatDisplay(num_models=3, colorize_model_replies=True)
-                    self.chat_display.set_theme(self.dark_mode)
-                    self.test_left_layout.insertWidget(index, self.chat_display, 1)
-                self.chat_display_widget = self.chat_display
-                print("DEBUG: Chat display replaced successfully")
-            else:
-                print("DEBUG: ERROR: test_left_layout not found!")
-        else:
-            # Hide Model C
-            print("DEBUG: Hiding Model C widgets")
-            self.test_model_c_header_widget.setVisible(False)
-            # Switch to Model A if Model C was selected
-            if self.test_model_c_btn.isChecked():
+        """Handle chat count change (1 / 2 / 3).
+
+        Single source of truth for showing/hiding the Model B + Model
+        C columns and rebuilding the chat display with the matching
+        ``num_models`` value. Gates the 'Models talk to each other'
+        checkbox to be visible only for ≥ 2 chats.
+        """
+        try:
+            count = int(count_str)
+        except Exception:
+            count = 2
+        if count not in (1, 2, 3):
+            count = 2
+
+        # ---- Header widget visibility ----------------------------
+        if hasattr(self, "test_model_b_header_widget"):
+            self.test_model_b_header_widget.setVisible(count >= 2)
+        if hasattr(self, "test_model_c_header_widget"):
+            self.test_model_c_header_widget.setVisible(count >= 3)
+
+        # ---- Settings-stack selector buttons ---------------------
+        if hasattr(self, "test_model_b_btn"):
+            self.test_model_b_btn.setVisible(count >= 2)
+            if count < 2 and self.test_model_b_btn.isChecked():
                 self._switch_model_settings(0)
-            self.test_model_c_btn.setVisible(False)
-            # Update button text to full form (Model A, Model B)
-            self.test_model_a_btn.setText("🔵 Model A")
-            self.test_model_b_btn.setText("🟢 Model B")
-            # Update chat display to 2 columns
-            print("DEBUG: Replacing chat display with 2-column version")
-            from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
-            old_display = self.chat_display
-            # Use stored layout reference
-            if hasattr(self, 'test_left_layout'):
-                # Find index of old display in layout
-                index = self.test_left_layout.indexOf(old_display)
-                print(f"DEBUG: Old display index in layout: {index}")
-                if index == -1:
-                    print("DEBUG: WARNING: indexOf returned -1, using addWidget instead")
-                    # Remove old display
-                    self.test_left_layout.removeWidget(old_display)
-                    old_display.setParent(None)
-                    old_display.deleteLater()
-                    # Create and add new display
-                    self.chat_display = SynchronizedChatDisplay(num_models=2, colorize_model_replies=True)
-                    self.chat_display.set_theme(self.dark_mode)
-                    self.test_left_layout.addWidget(self.chat_display, 1)
-                else:
-                    # Remove old display
-                    self.test_left_layout.removeWidget(old_display)
-                    old_display.setParent(None)
-                    old_display.deleteLater()
-                    # Create and add new display at same position
-                    self.chat_display = SynchronizedChatDisplay(num_models=2, colorize_model_replies=True)
-                    self.chat_display.set_theme(self.dark_mode)
-                    self.test_left_layout.insertWidget(index, self.chat_display, 1)
-                self.chat_display_widget = self.chat_display
-                print("DEBUG: Chat display replaced successfully")
+        if hasattr(self, "test_model_c_btn"):
+            self.test_model_c_btn.setVisible(count >= 3)
+            if count < 3 and self.test_model_c_btn.isChecked():
+                self._switch_model_settings(0)
+
+        # ---- Selector button labels ------------------------------
+        # 3-chat layout uses tight 'A / B / C' to fit the row; 1- and
+        # 2-chat layouts have room for full 'Model A / Model B'.
+        if count >= 3:
+            if hasattr(self, "test_model_a_btn"):
+                self.test_model_a_btn.setText("🔵 A")
+            if hasattr(self, "test_model_b_btn"):
+                self.test_model_b_btn.setText("🟢 B")
+            if hasattr(self, "test_model_c_btn"):
+                self.test_model_c_btn.setText("🟣 C")
+        else:
+            if hasattr(self, "test_model_a_btn"):
+                self.test_model_a_btn.setText("🔵 Model A")
+            if hasattr(self, "test_model_b_btn"):
+                self.test_model_b_btn.setText("🟢 Model B")
+
+        # ---- Rebuild the synchronized chat display ---------------
+        from desktop_app.synchronized_chat_display import SynchronizedChatDisplay
+        old_display = getattr(self, "chat_display", None)
+        if old_display is not None and hasattr(self, "test_left_layout"):
+            index = self.test_left_layout.indexOf(old_display)
+            self.test_left_layout.removeWidget(old_display)
+            old_display.setParent(None)
+            old_display.deleteLater()
+            self.chat_display = SynchronizedChatDisplay(
+                num_models=count, colorize_model_replies=True
+            )
+            self.chat_display.set_theme(self.dark_mode)
+            if index >= 0:
+                self.test_left_layout.insertWidget(index, self.chat_display, 1)
             else:
-                print("DEBUG: ERROR: test_left_layout not found!")
+                self.test_left_layout.addWidget(self.chat_display, 1)
+            self.chat_display_widget = self.chat_display
+
+        # ---- 'Models talk to each other' visibility --------------
+        # Only meaningful when there's >1 chat to bounce a reply to.
+        # Untick + hide the toggle in single-chat mode so the user
+        # doesn't end up on the M2M sub-tab unexpectedly.
+        if hasattr(self, "test_models_converse"):
+            single = (count == 1)
+            self.test_models_converse.setVisible(not single)
+            if single and self.test_models_converse.isChecked():
+                self.test_models_converse.blockSignals(True)
+                self.test_models_converse.setChecked(False)
+                self.test_models_converse.blockSignals(False)
+
         self._update_token_count()
     
     def _update_token_count(self) -> None:

@@ -3079,40 +3079,35 @@ class AgentsPage(QWidget):
 
     def _refresh_bridge_badge(self) -> None:
         """Recompute the 📱 Bridge pill from the Telegram bridge's status
-        and the active project. Cheap; safe to call from a QTimer."""
+        and the active project. Cheap; safe to call from a QTimer.
+
+        Always visible, three states:
+          🟢 Bridge: ON                — running and bound to THIS project
+          🟡 Bridge: ON (other project) — running, bound elsewhere
+          ⚫ Bridge: OFF                — not running (click to configure)
+        """
         if not hasattr(self, "_bridge_badge"):
             return
-        try:
-            from desktop_app.messaging import get_telegram_bridge
-        except Exception:
-            self._bridge_badge.setVisible(False)
-            return
-        try:
-            bridge = get_telegram_bridge()
-            running = bool(bridge.status().running)
-        except Exception:
-            self._bridge_badge.setVisible(False)
-            return
 
-        if not running:
-            # Hide entirely when the bridge isn't running — the Bridges
-            # tab is the primary surface, this pill is for "is it on"
-            # at-a-glance during work, not a 'go set me up' nudge.
-            self._bridge_badge.setVisible(False)
-            return
-
-        # Compare bound project to the agents-page active project.
+        running = False
         bound_pid = ""
         try:
+            from desktop_app.messaging import get_telegram_bridge
+            bridge = get_telegram_bridge()
+            running = bool(bridge.status().running)
             cfg = getattr(bridge, "_config", None)
             bound_pid = str(getattr(cfg, "project_id", "") or "")
         except Exception:
-            bound_pid = ""
+            # Bridge module unimportable / status threw — show OFF
+            # rather than hiding, so the user still sees the click
+            # affordance to go fix it.
+            running = False
+
         active_pid = ""
         if self._active_project and self._active_project.id is not None:
             active_pid = str(self._active_project.id)
 
-        if bound_pid and bound_pid == active_pid:
+        if running and bound_pid and bound_pid == active_pid:
             text = "📱 Bridge: ON"
             color, bg, border = "#5af09c", "#0e2418", "#2c5a3c"
             tip = (
@@ -3120,13 +3115,22 @@ class AgentsPage(QWidget):
                 "Messages from your bot run as goals on this team. "
                 "Click to open the Bridges tab."
             )
-        else:
+        elif running:
             text = "📱 Bridge: ON (other project)"
             color, bg, border = "#f0c060", "#2a1f0a", "#5a4520"
             tip = (
                 "Telegram bridge is running but bound to a different "
                 "project. Messages won't run on the active team. "
                 "Click to open the Bridges tab and rebind."
+            )
+        else:
+            text = "📱 Bridge: OFF"
+            color, bg, border = "#7d8595", "#1a1f2a", "#2a3148"
+            tip = (
+                "Telegram bridge is not running. Click to open the "
+                "Bridges tab and configure / start it. When on, every "
+                "Telegram message from your phone runs as a goal on "
+                "this team."
             )
         self._bridge_badge.setText(text)
         self._bridge_badge.setStyleSheet(

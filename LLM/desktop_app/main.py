@@ -17993,23 +17993,37 @@ class MainWindow(QMainWindow):
         # Side-by-Side Chat" header was redundant.
         title_row = QHBoxLayout()
 
-        title_row.addWidget(QLabel("Number of chats:"))
+        # Font for this row dialled back -1pt from the +3pt page
+        # bump (so 11pt, not 12pt) on user request — same treatment
+        # applied to the 'Type your message:' row below.
+        _ROW_FONT_QSS = "font-size: 11pt;"
+
+        chats_label = QLabel("Number of chats:")
+        chats_label.setProperty("_no_font_bump", True)
+        chats_label.setStyleSheet(_ROW_FONT_QSS)
+        title_row.addWidget(chats_label)
 
         self.test_model_count_1 = QCheckBox("1")
         self.test_model_count_1.setChecked(False)
         self.test_model_count_1.setTristate(False)
+        self.test_model_count_1.setProperty("_no_font_bump", True)
+        self.test_model_count_1.setStyleSheet(_ROW_FONT_QSS)
         self.test_model_count_1.toggled.connect(self._on_model_count_1_toggled)
         title_row.addWidget(self.test_model_count_1)
 
         self.test_model_count_2 = QCheckBox("2")
         self.test_model_count_2.setChecked(True)  # Default 2 chats
         self.test_model_count_2.setTristate(False)
+        self.test_model_count_2.setProperty("_no_font_bump", True)
+        self.test_model_count_2.setStyleSheet(_ROW_FONT_QSS)
         self.test_model_count_2.toggled.connect(self._on_model_count_2_toggled)
         title_row.addWidget(self.test_model_count_2)
 
         self.test_model_count_3 = QCheckBox("3")
         self.test_model_count_3.setChecked(False)
         self.test_model_count_3.setTristate(False)
+        self.test_model_count_3.setProperty("_no_font_bump", True)
+        self.test_model_count_3.setStyleSheet(_ROW_FONT_QSS)
         self.test_model_count_3.toggled.connect(self._on_model_count_3_toggled)
         title_row.addWidget(self.test_model_count_3)
 
@@ -18022,6 +18036,8 @@ class MainWindow(QMainWindow):
         # isn't wired yet; toggling currently just records intent.
         self.test_models_converse = QCheckBox("🔄 Models talk to each other")
         self.test_models_converse.setChecked(False)
+        self.test_models_converse.setProperty("_no_font_bump", True)
+        self.test_models_converse.setStyleSheet(_ROW_FONT_QSS)
         self.test_models_converse.toggled.connect(
             self._on_test_models_converse_toggled
         )
@@ -18134,17 +18150,25 @@ class MainWindow(QMainWindow):
         self.chat_display = SynchronizedChatDisplay(num_models=2, colorize_model_replies=True)  # Start with 2 models (default)
         left_layout.addWidget(self.chat_display, 1)
 
-        # Shared prompt input area (BOTTOM)
+        # Shared prompt input area (BOTTOM).
+        # Both the label and the QTextEdit are dialled back -1pt
+        # from the +3pt page bump (so 11pt, not 12pt) to match the
+        # 'Number of chats' row at the top.
         prompt_layout = QVBoxLayout()
-        prompt_layout.addWidget(QLabel("<b>💬 Type your message:</b>"))
+        prompt_label = QLabel("<b>💬 Type your message:</b>")
+        prompt_label.setProperty("_no_font_bump", True)
+        prompt_label.setStyleSheet("font-size: 11pt;")
+        prompt_layout.addWidget(prompt_label)
 
         # Input box and buttons in horizontal layout
         input_row = QHBoxLayout()
-        
+
         self.test_prompt = QTextEdit()
         self.test_prompt.setPlaceholderText("Type your message here...")
         self.test_prompt.setMinimumHeight(90)  # 3 lines height
         self.test_prompt.setMaximumHeight(90)
+        self.test_prompt.setProperty("_no_font_bump", True)
+        self.test_prompt.setStyleSheet("QTextEdit { font-size: 11pt; }")
         self.test_prompt.textChanged.connect(self._update_token_count)
         input_row.addWidget(self.test_prompt, 1)
         

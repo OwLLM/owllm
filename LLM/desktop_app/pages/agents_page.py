@@ -2886,6 +2886,28 @@ class AgentsPage(QWidget):
         row.addWidget(self._sandbox_badge)
         self._refresh_sandbox_badge()
 
+        # Bridge-status pill. Shows whether the Telegram bridge is
+        # currently long-polling AND bound to the active project. Click
+        # to jump to the 📱 Bridges tab where it's configured. Off when
+        # the bridge isn't running so it stays out of the way; the
+        # bridges tab is the primary surface, this is just a glance.
+        self._bridge_badge = QLabel()
+        self._bridge_badge.setObjectName("BridgeBadge")
+        self._bridge_badge.setMinimumHeight(24)
+        self._bridge_badge.setCursor(Qt.PointingHandCursor)
+        self._bridge_badge.mousePressEvent = (
+            lambda _ev: self._switch_to_bridges_tab()
+        )
+        row.addWidget(self._bridge_badge)
+        self._refresh_bridge_badge()
+        # Light periodic refresh — bridge state can change without any
+        # action on the agents page (start/stop on the Bridges tab,
+        # token error). 5s is invisible to humans, cheap on CPU.
+        self._bridge_badge_timer = QTimer(self)
+        self._bridge_badge_timer.setInterval(5000)
+        self._bridge_badge_timer.timeout.connect(self._refresh_bridge_badge)
+        self._bridge_badge_timer.start()
+
         label = QLabel("Project")
         label.setStyleSheet(
             "color:#aaa; font-size:11px; background:transparent; "
@@ -2980,6 +3002,13 @@ class AgentsPage(QWidget):
             # leftover messages from the previous project would be
             # misleading in the new one.
             self._super_user_card.clear_chat()
+        # Bridge pill is project-relative ("bound to THIS project?") —
+        # repaint immediately on project switch instead of waiting for
+        # the 5s timer tick.
+        try:
+            self._refresh_bridge_badge()
+        except Exception:
+            logger.exception("could not refresh bridge badge")
 
     def _on_trust_writes_toggled(self, checked: bool) -> None:
         """Persist the checkbox state on toggle. The actual settings file
@@ -3047,6 +3076,79 @@ class AgentsPage(QWidget):
         )
         self._sandbox_badge.setToolTip(tip)
         self._sandbox_badge.setVisible(True)
+
+    def _refresh_bridge_badge(self) -> None:
+        """Recompute the 📱 Bridge pill from the Telegram bridge's status
+        and the active project. Cheap; safe to call from a QTimer."""
+        if not hasattr(self, "_bridge_badge"):
+            return
+        try:
+            from desktop_app.messaging import get_telegram_bridge
+        except Exception:
+            self._bridge_badge.setVisible(False)
+            return
+        try:
+            bridge = get_telegram_bridge()
+            running = bool(bridge.status().running)
+        except Exception:
+            self._bridge_badge.setVisible(False)
+            return
+
+        if not running:
+            # Hide entirely when the bridge isn't running — the Bridges
+            # tab is the primary surface, this pill is for "is it on"
+            # at-a-glance during work, not a 'go set me up' nudge.
+            self._bridge_badge.setVisible(False)
+            return
+
+        # Compare bound project to the agents-page active project.
+        bound_pid = ""
+        try:
+            cfg = getattr(bridge, "_config", None)
+            bound_pid = str(getattr(cfg, "project_id", "") or "")
+        except Exception:
+            bound_pid = ""
+        active_pid = ""
+        if self._active_project and self._active_project.id is not None:
+            active_pid = str(self._active_project.id)
+
+        if bound_pid and bound_pid == active_pid:
+            text = "📱 Bridge: ON"
+            color, bg, border = "#5af09c", "#0e2418", "#2c5a3c"
+            tip = (
+                "Telegram bridge is running and bound to this project. "
+                "Messages from your bot run as goals on this team. "
+                "Click to open the Bridges tab."
+            )
+        else:
+            text = "📱 Bridge: ON (other project)"
+            color, bg, border = "#f0c060", "#2a1f0a", "#5a4520"
+            tip = (
+                "Telegram bridge is running but bound to a different "
+                "project. Messages won't run on the active team. "
+                "Click to open the Bridges tab and rebind."
+            )
+        self._bridge_badge.setText(text)
+        self._bridge_badge.setStyleSheet(
+            f"QLabel#BridgeBadge {{ "
+            f"color:{color}; background:{bg}; "
+            f"border:1px solid {border}; border-radius:6px; "
+            f"padding:2px 8px; font-size:11px; font-weight:600; }}"
+        )
+        self._bridge_badge.setToolTip(tip)
+        self._bridge_badge.setVisible(True)
+
+    def _switch_to_bridges_tab(self) -> None:
+        """Jump to the 📱 Bridges tab."""
+        if self.main_window is None:
+            return
+        try:
+            switcher = getattr(self.main_window, "_switch_tab", None)
+            tabs = getattr(self.main_window, "tabs", None)
+            if switcher and tabs:
+                switcher(tabs, "bridges")
+        except Exception:
+            logger.exception("could not switch to Bridges tab")
 
     def _open_runtime_settings(self) -> None:
         """Open the fleet's runtime settings dialog so the user can flip

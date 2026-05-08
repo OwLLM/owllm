@@ -2608,6 +2608,18 @@ class AgentsPage(QWidget):
         finally:
             self._suspend_overlay_signal = False
         self.team_canvas.attach_card_picker(self._overlay_picker_team)
+
+        # Super User card — single chat-style overlay that sits directly
+        # below the painted info card on the canvas. Combines presence,
+        # mini chat log, reply input, auto-approve toggle, and notify
+        # settings access into one widget so the user-side controls live
+        # alongside the agent's info card on the canvas itself.
+        from desktop_app.widgets.super_user_card import SuperUserCard
+        self._super_user_card = SuperUserCard(self.team_canvas)
+        self._super_user_card.reply_submitted.connect(self._on_user_reply)
+        self._super_user_card.supervisor_toggled.connect(self._on_supervisor_toggled)
+        self._super_user_card.settings_clicked.connect(self._open_notify_settings)
+        self.team_canvas.attach_super_user_card(self._super_user_card)
         self.team_canvas.selection_mode_changed.connect(
             self._on_overlay_selection_mode_changed
         )
@@ -2730,17 +2742,6 @@ class AgentsPage(QWidget):
         # self.log_view.clear(); the alias keeps them working but writes
         # only to the Reply tab. Thought clearing is handled explicitly.
         self.log_view = self._chat_view
-
-        # Super User card — single chat-style card that sits under the
-        # agent's log surface. Rolls up presence indicator, mini chat
-        # log, reply input, auto-approve toggle, and notify settings
-        # access. One card, not three lines of stacked controls.
-        from desktop_app.widgets.super_user_card import SuperUserCard
-        self._super_user_card = SuperUserCard(self)
-        self._super_user_card.reply_submitted.connect(self._on_user_reply)
-        self._super_user_card.supervisor_toggled.connect(self._on_supervisor_toggled)
-        self._super_user_card.settings_clicked.connect(self._open_notify_settings)
-        rv.addWidget(self._super_user_card)
 
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 2)

@@ -101,6 +101,36 @@ def card_picker_geometry(widget_w: int, agent_card: bool) -> tuple:
     return x, y, w, h
 
 
+# Gap between the painted info card and the Super User card that sits
+# directly below it. 8px reads as "related, but distinct."
+_SUPER_USER_GAP = 8
+
+
+def super_user_card_geometry(widget_w: int, widget_h: int,
+                             agent_card: bool, team_card: bool) -> tuple:
+    """Return ``(x, y, w, h)`` for the Super User card overlay that sits
+    directly below the painted info / team card on the canvas. Same x
+    and width as the info card so they read as one stacked block.
+
+    Height adapts to the canvas: short canvas → card shrinks; very short
+    canvas → ``h == 0`` (caller should hide the card)."""
+    card_w = min(CARD_W_MAX, max(0, widget_w - 2 * CARD_MARGIN))
+    if agent_card:
+        info_h = CARD_H_AGENT
+    elif team_card:
+        info_h = CARD_H_TEAM
+    else:
+        # No info card painted — pretend one is there so the Super User
+        # card doesn't jump position when an agent is (de)selected.
+        info_h = CARD_H_TEAM
+    x = CARD_MARGIN
+    y = CARD_MARGIN + info_h + _SUPER_USER_GAP
+    avail = widget_h - y - CARD_MARGIN
+    # Cap the card so it never dominates very tall canvases.
+    h = max(0, min(280, avail))
+    return x, y, card_w, h
+
+
 def _wrappable(text: str) -> str:
     """Insert *hard* line breaks (``\\n``) after natural-seam
     characters (``_-./\\``). QPainter's :data:`Qt.TextWordWrap` does

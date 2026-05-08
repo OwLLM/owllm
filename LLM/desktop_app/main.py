@@ -4603,6 +4603,15 @@ class MainWindow(QMainWindow):
             return pat.sub(repl, ss)
 
         def _apply(w) -> None:
+            # Opt-out flag: widgets that have explicitly sized their
+            # font (e.g. the Test-tab model dropdowns the user wants
+            # smaller, not bigger) can set property('_no_font_bump',
+            # True) and we leave them alone.
+            try:
+                if w.property("_no_font_bump"):
+                    return
+            except Exception:
+                pass
             try:
                 f = w.font()
                 if f.pointSize() > 0:
@@ -17929,27 +17938,22 @@ class MainWindow(QMainWindow):
         # Store reference to layout for chat display replacement
         self.test_left_layout = left_layout
 
-        # Title and model count selector
+        # Top control row — chat-count selector left, 'Models talk
+        # to each other' right, no separate page title (the Chat tab
+        # itself is the title). The previous "🧪 Test Models -
+        # Side-by-Side Chat" header was redundant.
         title_row = QHBoxLayout()
-        test_title = QLabel("🧪 Test Models - Side-by-Side Chat")
-        test_title.setStyleSheet("font-size: 18pt; font-weight: bold; text-decoration: none;")
-        title_row.addWidget(test_title)
-        title_row.addStretch(1)
-        
-        # Chat-count selector (mutually-exclusive checkboxes 1 / 2 / 3).
-        # Re-labelled from "Number of models" to "Number of chats" on
-        # user request — 1 reduces this surface to a single-column
-        # chat (the old "Test" page split into 1/2/3 was confusing).
+
         title_row.addWidget(QLabel("Number of chats:"))
 
         self.test_model_count_1 = QCheckBox("1")
-        self.test_model_count_1.setChecked(False)  # Default still 2
+        self.test_model_count_1.setChecked(False)
         self.test_model_count_1.setTristate(False)
         self.test_model_count_1.toggled.connect(self._on_model_count_1_toggled)
         title_row.addWidget(self.test_model_count_1)
 
         self.test_model_count_2 = QCheckBox("2")
-        self.test_model_count_2.setChecked(True)  # Default to 2 chats
+        self.test_model_count_2.setChecked(True)  # Default 2 chats
         self.test_model_count_2.setTristate(False)
         self.test_model_count_2.toggled.connect(self._on_model_count_2_toggled)
         title_row.addWidget(self.test_model_count_2)
@@ -17960,18 +17964,18 @@ class MainWindow(QMainWindow):
         self.test_model_count_3.toggled.connect(self._on_model_count_3_toggled)
         title_row.addWidget(self.test_model_count_3)
 
-        # 'Models talk to each other' — placeholder for the inline
-        # M2M mode. The dedicated Model To Model sub-tab was removed
-        # in this same change; the inline runner is not wired up yet,
-        # so the toggle is built (so other code that may reference it
-        # doesn't NPE) but hidden. Re-enable + implement once the M2M
-        # runner is inlined into the Test surface.
+        title_row.addStretch(1)
+
+        # 'Models talk to each other' — anchored to the right of the
+        # row and ALWAYS VISIBLE. Disabled (ghosted) when only 1 chat
+        # is active (nobody to talk to) instead of being hidden, so
+        # the user always sees the option exists. The inline runner
+        # isn't wired yet; toggling currently just records intent.
         self.test_models_converse = QCheckBox("🔄 Models talk to each other")
         self.test_models_converse.setChecked(False)
         self.test_models_converse.toggled.connect(
             self._on_test_models_converse_toggled
         )
-        self.test_models_converse.hide()
         title_row.addWidget(self.test_models_converse)
 
         left_layout.addLayout(title_row)
@@ -18021,6 +18025,12 @@ class MainWindow(QMainWindow):
         model_a_header_layout.addWidget(self.test_model_a_header)
         self.test_model_a = QComboBox()
         self.test_model_a.setEditable(False)  # Selection-only: READY models from Models tab
+        # Smaller-than-default model dropdown text (the +3pt page bump
+        # made it oversized; user wants ~4pt smaller). Opt out of the
+        # _bump_fonts_in_tree pass via the _no_font_bump property so
+        # the explicit 10pt sticks instead of being bumped to 13pt.
+        self.test_model_a.setProperty("_no_font_bump", True)
+        self.test_model_a.setStyleSheet("QComboBox { font-size: 10pt; }")
         self.test_model_a.currentTextChanged.connect(self._update_model_header_ports)
         model_a_header_layout.addWidget(self.test_model_a)
         headers_layout.addWidget(model_a_header_widget, 1)
@@ -18041,6 +18051,8 @@ class MainWindow(QMainWindow):
         model_b_header_layout.addWidget(self.test_model_b_header)
         self.test_model_b = QComboBox()
         self.test_model_b.setEditable(False)  # Selection-only: READY models from Models tab
+        self.test_model_b.setProperty("_no_font_bump", True)
+        self.test_model_b.setStyleSheet("QComboBox { font-size: 10pt; }")
         self.test_model_b.currentTextChanged.connect(self._update_model_header_ports)
         model_b_header_layout.addWidget(self.test_model_b)
         headers_layout.addWidget(model_b_header_widget, 1)
@@ -18058,6 +18070,8 @@ class MainWindow(QMainWindow):
         model_c_header_layout.addWidget(self.test_model_c_header)
         self.test_model_c = QComboBox()
         self.test_model_c.setEditable(False)  # Selection-only: READY models from Models tab
+        self.test_model_c.setProperty("_no_font_bump", True)
+        self.test_model_c.setStyleSheet("QComboBox { font-size: 10pt; }")
         self.test_model_c.currentTextChanged.connect(self._update_model_header_ports)
         model_c_header_layout.addWidget(self.test_model_c)
         headers_layout.addWidget(model_c_header_widget, 1)
@@ -18152,15 +18166,51 @@ class MainWindow(QMainWindow):
             page = QWidget()
             # Set object name first, then apply background color based on model (60% transparency)
             page.setObjectName("modelSettingsPage")
+            # Group-box styling shared across all three model pages.
+            # The default Qt style cuts the box border behind the
+            # title text — at +3pt with emoji-prefixed titles the
+            # cutout no longer matches the title width and the frame
+            # looks misaligned. Forcing subcontrol-origin: margin +
+            # padding keeps the title above the border on a clean
+            # transparent strip, with the border closing cleanly on
+            # both sides.
+            _GROUP_QSS = """
+                QGroupBox {
+                    border: 1px solid rgba(255, 255, 255, 0.18);
+                    border-radius: 8px;
+                    margin-top: 18px;
+                    padding: 12px 8px 8px 8px;
+                    background: rgba(0, 0, 0, 0.18);
+                    color: white;
+                    font-weight: 700;
+                }
+                QGroupBox::title {
+                    subcontrol-origin: margin;
+                    subcontrol-position: top left;
+                    padding: 0 8px;
+                    left: 10px;
+                    background: transparent;
+                    color: white;
+                }
+            """
             if model_name == "A":
                 # Blue for Model A: rgba(0, 100, 200, 0.6)
-                page.setStyleSheet("QWidget#modelSettingsPage { background-color: rgba(0, 100, 200, 0.6); }")
+                page.setStyleSheet(
+                    "QWidget#modelSettingsPage { background-color: rgba(0, 100, 200, 0.6); }"
+                    + _GROUP_QSS
+                )
             elif model_name == "B":
                 # Green for Model B: rgba(0, 200, 100, 0.6)
-                page.setStyleSheet("QWidget#modelSettingsPage { background-color: rgba(0, 200, 100, 0.6); }")
+                page.setStyleSheet(
+                    "QWidget#modelSettingsPage { background-color: rgba(0, 200, 100, 0.6); }"
+                    + _GROUP_QSS
+                )
             else:
                 # Purple for Model C: rgba(155, 89, 182, 0.6)
-                page.setStyleSheet("QWidget#modelSettingsPage { background-color: rgba(155, 89, 182, 0.6); }")
+                page.setStyleSheet(
+                    "QWidget#modelSettingsPage { background-color: rgba(155, 89, 182, 0.6); }"
+                    + _GROUP_QSS
+                )
             
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
@@ -22274,13 +22324,15 @@ class MainWindow(QMainWindow):
                 self.test_left_layout.addWidget(self.chat_display, 1)
             self.chat_display_widget = self.chat_display
 
-        # ---- 'Models talk to each other' visibility --------------
-        # Only meaningful when there's >1 chat to bounce a reply to.
-        # Untick + hide the toggle in single-chat mode so the user
-        # doesn't end up on the M2M sub-tab unexpectedly.
+        # ---- 'Models talk to each other' enabled state -----------
+        # Always VISIBLE so the option is discoverable; only
+        # *disabled* (ghosted) in single-chat mode where there's
+        # nobody to bounce a reply to. Untick on the way down so the
+        # state doesn't silently linger when the user adds a chat
+        # back.
         if hasattr(self, "test_models_converse"):
             single = (count == 1)
-            self.test_models_converse.setVisible(not single)
+            self.test_models_converse.setEnabled(not single)
             if single and self.test_models_converse.isChecked():
                 self.test_models_converse.blockSignals(True)
                 self.test_models_converse.setChecked(False)

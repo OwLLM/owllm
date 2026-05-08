@@ -14,6 +14,7 @@ import shutil
 import subprocess
 from typing import List, Mapping, Optional
 
+from core.agents.backends._container_wrap import wrap_cli_for_container
 from core.agents.backends.base import (
     ModelEntry,
     register_backend,
@@ -83,6 +84,14 @@ class CodexCLIBackend:
         # subprocess in that directory so codex reads its own ~/.codex
         # session AND the working tree the user actually wants edited.
         run_cwd = cwd if cwd and os.path.isdir(cwd) else None
+
+        # Optionally containerize — same plumbing as claude_cli. With
+        # kind=container in runtime.json, codex exec runs inside Docker
+        # with /workspace = project location and ~/.config/codex mounted
+        # RO for auth. Keeps autonomous shelling sandboxed.
+        cmd, run_cwd, _container_info = wrap_cli_for_container(
+            cmd, host_cwd=run_cwd,
+        )
 
         try:
             proc = subprocess.run(

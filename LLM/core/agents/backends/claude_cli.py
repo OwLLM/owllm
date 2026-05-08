@@ -15,6 +15,7 @@ import shutil
 import subprocess
 from typing import List, Mapping, Optional
 
+from core.agents.backends._container_wrap import wrap_cli_for_container
 from core.agents.backends.base import ModelEntry, register_backend
 
 logger = logging.getLogger(__name__)
@@ -103,6 +104,17 @@ class ClaudeCLIBackend:
         # this the trust file (materialized into <Location>/.claude/) is
         # never consulted by the agent.
         run_cwd = cwd if cwd and os.path.isdir(cwd) else None
+
+        # Optionally containerize: when the user enabled kind=container in
+        # ``<fleet_root>/runtime.json`` and Docker is available, the CLI
+        # subprocess is wrapped in ``docker run``. Project location becomes
+        # the container's ``/workspace`` mount, ``~/.claude`` is mounted RO
+        # for auth. Anything claude --print's autonomous Bash decides to
+        # run is then confined to that workspace instead of touching the
+        # whole host filesystem.
+        cmd, run_cwd, _container_info = wrap_cli_for_container(
+            cmd, host_cwd=run_cwd,
+        )
 
         try:
             proc = subprocess.run(

@@ -8533,12 +8533,12 @@ class MainWindow(QMainWindow):
         # ~1 year stale; the dynamic fetch keeps this surface fresh.
         try:
             from core.models import fetch_recent_popular_models
-            # Strict popularity floor (50k) to keep niche fine-tunes
-            # out of the Recommended panel. The fetcher auto-relaxes
-            # to 10k / 1k / 100 / 0 if nothing meets it, so a quiet
-            # day on the Hub still populates instead of falling back
-            # to the offline list.
-            curated_hits = fetch_recent_popular_models(min_downloads=50_000, limit=20)
+            # Use the fetcher's defaults (5k floor, 540-day recency
+            # cutoff). Trending hits flow with no download floor so
+            # brand-new flagship releases ('gemma-4', 'GLM-4.6') can
+            # surface before they accumulate downloads; the floor
+            # only gates the downloads/likes/recency back-fill.
+            curated_hits = fetch_recent_popular_models(limit=20)
             if curated_hits:
                 self._log_models(
                     f"✓ Fetched {len(curated_hits)} recommended models from Hugging Face."

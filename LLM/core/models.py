@@ -97,7 +97,8 @@ _DERIV_TOKENS: tuple = (
     "-awq", "_awq", "/awq",
     "-gptq", "_gptq", "/gptq",
     "-bnb-4bit", "-bnb-8bit", "_bnb_4bit", "_bnb_8bit",
-    "-int4", "-int8", "-fp8", "-w4a16", "-w8a16",
+    "-int4", "-int8", "-fp8", "-fp4", "-w4a16", "-w8a16",
+    "-nvfp4", "_nvfp4", "/nvfp4", "-mxfp4",
     "-1.25bit", "-1bit", "-2bit", "-3bit",
     # Safety / classifier / scorer / embedding / tokenizer style
     # uploads — the panel is for chat/instruct base models.
@@ -142,10 +143,34 @@ def _is_preferred_org(model_id: str) -> bool:
     return org in _PREFERRED_ORGS
 
 
+def _is_recent(last_modified: str, max_age_days: int = 540) -> bool:
+    """True if ``last_modified`` (HF ISO-8601 timestamp) is within
+    ``max_age_days`` of now. Used by the Recommended panel to keep
+    ancient classics (gpt2, distilgpt2, bert-base) out of the list
+    even when their lifetime download counts dwarf newer flagship
+    releases. Permissive: anything we can't parse is treated as
+    recent (so a malformed timestamp doesn't drop a real release).
+    """
+    if not last_modified:
+        return True
+    try:
+        from datetime import datetime, timezone, timedelta
+        # HF returns "2024-12-15T10:32:11.000Z" or similar; strip the
+        # trailing Z so fromisoformat works on Python <3.11.
+        s = last_modified.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt) <= timedelta(days=max_age_days)
+    except Exception:
+        return True
+
+
 def fetch_recent_popular_models(
-    min_downloads: int = 50_000,
+    min_downloads: int = 5_000,
     limit: int = 20,
     pipeline_tag: str = "text-generation",
+    max_age_days: int = 540,
 ) -> List[HFModelHit]:
     """Fetch up to N text-gen base models for the Recommended panel.
 
@@ -239,18 +264,24 @@ def fetch_recent_popular_models(
     by_recency = [_to_hit(m) for m in _try_calls(*_variants_for("lastModified", fetch_cap))]
 
     def _quality(h: HFModelHit) -> bool:
-        return bool(h.model_id) and not _looks_like_derivative(h.model_id)
+        return (
+            bool(h.model_id)
+            and not _looks_like_derivative(h.model_id)
+            and _is_recent(h.last_modified or "", max_age_days)
+        )
 
     def _merge(min_dl: int) -> List[HFModelHit]:
         out: List[HFModelHit] = []
         seen: set[str] = set()
-        # Trending first (matches the HF website's Trending tab),
-        # then downloads + likes for breadth, then recency to catch
-        # very fresh releases that haven't accumulated downloads yet.
+        # Trending first (matches the HF website's Trending tab) with
+        # NO download floor — brand-new flagship releases ('gemma-4-…
+        # ', 'GLM-4.6') trend before they accumulate 5k downloads.
+        # Then likes + downloads + recency for breadth, all with the
+        # popularity floor so we don't drown in week-old fine-tunes.
         ordered = (
             [h for h in by_trending if _quality(h)] +
-            [h for h in by_downloads if _quality(h) and (h.downloads or 0) >= min_dl] +
             [h for h in by_likes if _quality(h) and (h.downloads or 0) >= min_dl] +
+            [h for h in by_downloads if _quality(h) and (h.downloads or 0) >= min_dl] +
             [h for h in by_recency if _quality(h) and (h.downloads or 0) >= min_dl]
         )
         # Stable sort: preferred orgs first within the merged stream
@@ -267,9 +298,9 @@ def fetch_recent_popular_models(
         return out
 
     # Try the strict floor first, then progressively relax it.
-    for floor in (min_downloads, 10_000, 1000, 100, 0):
+    for floor in (min_downloads, 1000, 100, 0):
         hits = _merge(floor)
-        if hits:
+        if hits and len(hits) >= max(3, limit // 4):
             if floor != min_downloads:
                 fetch_recent_popular_models.last_errors.append(  # type: ignore[attr-defined]
                     f"info: relaxed download floor {min_downloads} -> {floor} "
@@ -277,7 +308,32 @@ def fetch_recent_popular_models(
                 )
             return hits
 
-    return []
+    # Last resort: drop the recency filter too — better to show
+    # popular older models than only 1-2 hits.
+    fetch_recent_popular_models.last_errors.append(  # type: ignore[attr-defined]
+        f"info: dropped recency filter (max_age_days={max_age_days}) "
+        "to populate panel"
+    )
+
+    def _quality_no_recency(h: HFModelHit) -> bool:
+        return bool(h.model_id) and not _looks_like_derivative(h.model_id)
+
+    out: List[HFModelHit] = []
+    seen: set[str] = set()
+    fallback_ordered = (
+        [h for h in by_trending if _quality_no_recency(h)] +
+        [h for h in by_likes if _quality_no_recency(h) and (h.downloads or 0) >= 1000] +
+        [h for h in by_downloads if _quality_no_recency(h) and (h.downloads or 0) >= 1000]
+    )
+    fallback_ordered.sort(key=lambda h: 0 if _is_preferred_org(h.model_id) else 1)
+    for h in fallback_ordered:
+        if h.model_id in seen:
+            continue
+        seen.add(h.model_id)
+        out.append(h)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def download_hf_model(model_id: str, target_dir: Path) -> Path:

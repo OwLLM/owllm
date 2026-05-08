@@ -1045,19 +1045,38 @@ class _AgentEdge(QGraphicsPathItem):
     def paint(self, painter, option, widget=None) -> None:  # noqa: N802
         painter.setRenderHint(painter.RenderHint.Antialiasing, True)
         col = self._palette()
+        # Edges from the orchestrator are implicit (it can dispatch to
+        # anyone). Render those dashed + faded with the arrowhead
+        # hidden, so the user can tell at a glance which edges are the
+        # strict specialist chain (solid + arrow) and which are just
+        # echoing the orchestrator's free-dispatch capability.
+        is_implicit = bool(getattr(self.source, "is_orchestrator", False))
         pen = QPen(col)
         pen.setWidthF(self._current_width())
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
+        if is_implicit:
+            from PySide6.QtGui import QColor as _QC
+            faded = _QC(col)
+            faded.setAlpha(110)
+            pen.setColor(faded)
+            pen.setStyle(Qt.DashLine)
+            pen.setWidthF(max(1.0, self._current_width() * 0.7))
         painter.setPen(pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(self.path())
         # The arrowhead is a separate scene item (`self._head`) painted at
         # z=4.0 so it renders on top of node body / port dots while the
         # curve we just drew sits below the body. Keep its colour in sync
-        # with whatever palette the curve resolved to.
+        # with whatever palette the curve resolved to. For implicit
+        # edges we hide the arrowhead — the dashed style alone says
+        # "this is a capability, not a strict route".
         if self._head is not None:
-            self._head.apply_color(col)
+            if is_implicit:
+                self._head.setVisible(False)
+            else:
+                self._head.setVisible(True)
+                self._head.apply_color(col)
 
 
 # ---------------------------------------------------------------------------

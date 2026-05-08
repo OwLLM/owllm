@@ -2527,9 +2527,14 @@ class AgentsPage(QWidget):
         title.setFont(tf)
         title.setStyleSheet("color:#fff; background:transparent;")
         canvas_header.addWidget(title)
-        hint = QLabel("· Drag from the cyan dot on a node to another node to connect them. Right-click a node for settings.")
+        hint = QLabel(
+            "· Solid arrows = strict specialist chain (enforced). "
+            "Dashed = orchestrator's free dispatch (always available). "
+            "Drag from the cyan dot on a node to connect; right-click for settings."
+        )
         hint.setStyleSheet("color:#7888a8; font-size:10pt; background:transparent;")
-        canvas_header.addWidget(hint)
+        hint.setWordWrap(True)
+        canvas_header.addWidget(hint, 1)
         canvas_header.addStretch(1)
 
         delete_edge_btn = QPushButton("✕ Edge")

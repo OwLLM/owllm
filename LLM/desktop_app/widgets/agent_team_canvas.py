@@ -869,7 +869,14 @@ class AgentTeamCanvas(QWidget):
         positions: List[Tuple[str, QPointF]],
     ) -> None:
         """Render every (src, dst) from set_edges as a directed
-        line + arrowhead between the two agents' current positions."""
+        line + arrowhead between the two agents' current positions.
+
+        Edges from the orchestrator are styled DIFFERENTLY from
+        edges between specialists — the orchestrator can dispatch
+        to anyone (free), so its edges read as implicit (dashed,
+        no arrowhead, faded). Specialist → specialist edges are
+        the strict chain enforced by graph_resolver and render as
+        solid arrows."""
         pos_by_name: Dict[str, QPointF] = {n: pos for n, pos in positions}
         if self._orchestrator_name and self._orchestrator_name in self._agents:
             pos_by_name[self._orchestrator_name] = self._agents[self._orchestrator_name].pos
@@ -898,12 +905,23 @@ class AgentTeamCanvas(QWidget):
             # blue-layer agent reads blue, etc.
             dst_layer = self._depth.get(dst, 0)
             edge_col = _layer_color(dst_layer)
-            edge_alpha = 240 if both_active else 210
-            pen_w = 2.2 if both_active else 1.6
-            pen = QPen(_alpha(edge_col, edge_alpha), pen_w)
+            implicit = (src == self._orchestrator_name)
+            if implicit:
+                # Orchestrator can dispatch to anyone — render this as
+                # a faded dashed line with no arrowhead so it doesn't
+                # imply enforcement.
+                pen = QPen(_alpha(edge_col, 110), 1.2)
+                pen.setStyle(Qt.DashLine)
+            else:
+                edge_alpha = 240 if both_active else 210
+                pen_w = 2.2 if both_active else 1.6
+                pen = QPen(_alpha(edge_col, edge_alpha), pen_w)
             pen.setCapStyle(Qt.RoundCap)
             p.setPen(pen)
             p.drawLine(start, end)
+
+            if implicit:
+                continue  # no arrowhead on implicit edges
 
             zoom = max(self._zoom_min, min(self._zoom_max, self._zoom))
             head_len = 9.0 * zoom

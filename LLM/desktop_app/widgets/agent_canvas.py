@@ -261,7 +261,9 @@ class _AgentNode(QGraphicsItem):
         self.setZValue(2.0)
         self.setCursor(Qt.OpenHandCursor)
 
-        # Children: input port on the left, output on the right.
+        # Children: input port on the TOP, output on the BOTTOM. Flow
+        # reads top→down so the orchestrator-up, specialists-down layout
+        # is visually intuitive without rotating cards.
         self._port_in = _NodePort(self, PORT_KIND_INPUT)
         self._port_in.setPos(self._input_port_local())
         self._port_out = _NodePort(self, PORT_KIND_OUTPUT)
@@ -280,10 +282,12 @@ class _AgentNode(QGraphicsItem):
         return path
 
     def _input_port_local(self) -> QPointF:
-        return QPointF(-_PORT_RADIUS - _PORT_OFFSET, _NODE_H / 2)
+        # Top-center: incoming arrows arrive from above.
+        return QPointF(_NODE_W / 2, -_PORT_RADIUS - _PORT_OFFSET)
 
     def _output_port_local(self) -> QPointF:
-        return QPointF(_NODE_W + _PORT_RADIUS + _PORT_OFFSET, _NODE_H / 2)
+        # Bottom-center: outgoing arrows leave downward.
+        return QPointF(_NODE_W / 2, _NODE_H + _PORT_RADIUS + _PORT_OFFSET)
 
     def input_port_scene_pos(self) -> QPointF:
         return self.scenePos() + self._input_port_local()
@@ -872,44 +876,45 @@ class _AgentEdge(QGraphicsPathItem):
         #   1. NEVER intersect a box.
         #   2. SHORTEST path that satisfies #1.
         #
-        # In practice that means:
-        #   * If the target's input port sits to the RIGHT of the
-        #     source's right edge → direct horizontal-tangent bezier.
-        #     The curve never re-enters the source body (handles
-        #     point outward) and the repulsion field steers it
-        #     around any third-party boxes in between.
-        #   * Otherwise the target is BEHIND the source — a direct
-        #     curve would slice through the source body. Detour
-        #     around the source on the SHORTER side: over when the
-        #     target sits above the source's mid-line, under when
-        #     it sits below. The detour distance is just enough to
-        #     clear the source body plus a small breathing margin.
+        # Top-down flow: source's OUTPUT port is bottom-center, target's
+        # INPUT port is top-center. So:
+        #   * If the target's input port sits BELOW the source's bottom
+        #     edge → direct vertical-tangent bezier. The curve never
+        #     re-enters the source body and the repulsion field steers
+        #     it around any third-party boxes in between.
+        #   * Otherwise the target is BEHIND the source (above or beside
+        #     it) — a direct curve would slice through the source body.
+        #     Detour around the source on the SHORTER side: left when
+        #     the target sits left of the source's mid-x, right when
+        #     right. Detour distance is just enough to clear the source
+        #     body plus a small breathing margin.
         try:
             src_pos = self.source.scenePos()
         except (RuntimeError, AttributeError):
-            src_pos = QPointF(start.x() - _NODE_W - _PORT_RADIUS - _PORT_OFFSET,
-                              start.y() - _NODE_H / 2)
+            # Best-effort fallback: assume start is the bottom port.
+            src_pos = QPointF(start.x() - _NODE_W / 2,
+                              start.y() - _NODE_H - _PORT_RADIUS - _PORT_OFFSET)
         src_left = src_pos.x()
         src_right = src_pos.x() + _NODE_W
         src_top = src_pos.y()
         src_bottom = src_pos.y() + _NODE_H
-        src_mid_y = src_pos.y() + _NODE_H / 2
-        # "Behind" means the target's input port is at or to the left
-        # of the source's right edge — i.e., the source body is in
-        # the way of the shortest line from output→input.
-        direct_route = end.x() > src_right + _PORT_RADIUS
+        src_mid_x = src_pos.x() + _NODE_W / 2
+        # "Behind" means the target's input port is at or above the
+        # source's bottom edge — i.e., the source body is in the way
+        # of the shortest line from output (bottom) → input (top).
+        direct_route = end.y() > src_bottom + _PORT_RADIUS
 
         # Build a SINGLE cubic from start (source output port) to end
         # (target input port). One segment = no junctions = no kinks.
-        # Initial control-point placement is what enforces the
-        # "shortest path that doesn't cross a box" rule:
+        # Control-point placement enforces the "shortest path that
+        # doesn't cross a box" rule:
         #
-        #   * direct: horizontal tangents at both ends, c1 right of
-        #     start, c2 left of end. Standard horizontal-S curve.
-        #   * loop:   c1 lifted above / below the source body so the
-        #     curve arcs around the shorter side; c2 still left of
-        #     end so the arrival tangent into the target's left port
-        #     stays rightward (clean horizontal entry).
+        #   * direct: vertical tangents at both ends, c1 below start,
+        #     c2 above end. Standard vertical-S curve.
+        #   * loop:   c1 swung left/right of the source body so the
+        #     curve arcs around the shorter side; c2 still above end
+        #     so the arrival tangent into the target's top port stays
+        #     downward (clean vertical entry).
         #
         # Repulsion (`_route_cubic`) then fine-tunes both control
         # points to clear any third-party obstacles in the way.
@@ -917,28 +922,31 @@ class _AgentEdge(QGraphicsPathItem):
         dy = end.y() - start.y()
         # Handle baseline scales with the node geometry — a 360×440 box
         # needs much beefier control-point handles than a 200×84 one
-        # to produce a smooth curve.
-        handle_base = max(60.0, _NODE_W * 0.35, _NODE_H * 0.25)
-        handle = max(handle_base, abs(dx) * 0.5, abs(dy) * 0.6)
+        # to produce a smooth curve. Vertical-flow puts the dominant
+        # axis on Y, so weight that direction more.
+        handle_base = max(60.0, _NODE_H * 0.35, _NODE_W * 0.25)
+        handle = max(handle_base, abs(dy) * 0.5, abs(dx) * 0.6)
 
         if direct_route:
-            c1 = QPointF(start.x() + handle, start.y())
-            c2 = QPointF(end.x() - handle, end.y())
+            c1 = QPointF(start.x(), start.y() + handle)
+            c2 = QPointF(end.x(), end.y() - handle)
 
             # Sibling fan-out: when multiple direct edges leave the
             # same source they share the start point. Without a
             # perpendicular offset on c1 they all lie on top of each
             # other near the source. Centre the fan around 0 — the
-            # middle sibling stays straight, others bow up / down.
+            # middle sibling stays straight, others bow left / right.
+            # In top-down flow the perpendicular axis is X.
             sib_idx, sib_total = self._direct_sibling_index()
             if sib_total > 1:
                 offset = (sib_idx - (sib_total - 1) / 2.0) * _FANOUT_SPACING
-                c1 = QPointF(c1.x(), c1.y() + offset)
+                c1 = QPointF(c1.x() + offset, c1.y())
         else:
-            # Target is BEHIND source. Lift the curve above / below
-            # the source body via c1; keep c2 horizontal at end's y
-            # for a clean rightward arrival tangent. Single cubic.
-            loop_above = end.y() < src_mid_y
+            # Target is BEHIND source (above it or alongside). Swing
+            # the curve left or right of the source body via c1; keep
+            # c2 vertical at end's x for a clean downward arrival
+            # tangent. Single cubic.
+            loop_left = end.x() < src_mid_x
 
             # Stagger looping siblings so two arrows from the same
             # source don't overlap. Sibling order is deterministic.
@@ -950,7 +958,7 @@ class _AgentEdge(QGraphicsPathItem):
                     try:
                         sp = e.source.scenePos()
                         ep = e.target.input_port_scene_pos()
-                        return ep.x() <= sp.x() + _NODE_W + _PORT_RADIUS
+                        return ep.y() <= sp.y() + _NODE_H + _PORT_RADIUS
                     except Exception:
                         return False
 
@@ -962,7 +970,10 @@ class _AgentEdge(QGraphicsPathItem):
                 def _sib_key(e: "_AgentEdge") -> tuple:
                     try:
                         tp = e.target.scenePos()
-                        return (tp.y(), tp.x(), e.target.name)
+                        # In top-down flow we sort siblings primarily
+                        # by their x-position so left-loop and right-
+                        # loop arrows don't trade lanes erratically.
+                        return (tp.x(), tp.y(), e.target.name)
                     except Exception:
                         return (0.0, 0.0, "")
 
@@ -971,44 +982,44 @@ class _AgentEdge(QGraphicsPathItem):
             except Exception:
                 sibling_index = 0
 
-            # Loop clearance scales with node size. With 360×440 boxes
-            # the previous flat 28 px wasn't enough to clear the source
-            # body — the curves sliced through neighbouring nodes.
+            # Loop clearance scales with node size. Top-down flow puts
+            # the sideways detour against the node's WIDTH, so scale
+            # off _NODE_W rather than _NODE_H.
             base_pad = max(28.0, _NODE_W * 0.12)
             lane_spacing = max(18.0, _NODE_W * 0.06)
             loop_pad = base_pad + sibling_index * lane_spacing
 
-            # c1 just past the source's right edge, lifted above /
-            # below the source body — pulls the curve up/down right
-            # after it leaves the right port.
-            if loop_above:
-                c1_y = src_top - loop_pad
+            # c1 just past the source's bottom edge, swung to the
+            # left / right of the source body — pulls the curve out
+            # sideways right after it leaves the bottom port.
+            if loop_left:
+                c1_x = src_left - loop_pad
             else:
-                c1_y = src_bottom + loop_pad
-            c1 = QPointF(src_right + loop_pad, c1_y)
+                c1_x = src_right + loop_pad
+            c1 = QPointF(c1_x, src_bottom + loop_pad)
 
-            # c2 left of target's left port at target's y — keeps
-            # the arrival tangent horizontal. Force the handle big
-            # enough that c2.x is also LEFT of the source's left
-            # edge so the curve sweeps clear of the source body
-            # rather than re-entering it on the way to end.
-            min_handle_for_clearance = (src_right - end.x()) + loop_pad + 20.0
+            # c2 above target's top port at target's x — keeps the
+            # arrival tangent vertical. Force the handle big enough
+            # that c2.y is also ABOVE the source's top edge so the
+            # curve sweeps clear of the source body rather than
+            # re-entering it on the way to end.
+            min_handle_for_clearance = (src_bottom - end.y()) + loop_pad + 20.0
             handle = max(handle, min_handle_for_clearance)
-            c2 = QPointF(end.x() - handle, end.y())
+            c2 = QPointF(end.x(), end.y() - handle)
 
         # Magnet repulsion against every OTHER box keeps the curve
         # clear when the path passes near a third-party node.
         c1, c2 = self._route_cubic(start, c1, c2, end, obstacles)
 
         # Tangent-direction guard: relaxation may push c1 past start
-        # or c2 past end, which would flip the natural rightward
+        # or c2 past end, which would flip the natural downward
         # entry/exit tangent and produce a hook just before the
-        # arrowhead. Clamp.
+        # arrowhead. Clamp on the Y axis (the dominant flow axis).
         min_clearance = 12.0
-        if c1.x() < start.x() + min_clearance:
-            c1 = QPointF(start.x() + min_clearance, c1.y())
-        if c2.x() > end.x() - min_clearance:
-            c2 = QPointF(end.x() - min_clearance, c2.y())
+        if c1.y() < start.y() + min_clearance:
+            c1 = QPointF(c1.x(), start.y() + min_clearance)
+        if c2.y() > end.y() - min_clearance:
+            c2 = QPointF(c2.x(), end.y() - min_clearance)
 
         path = QPainterPath(start)
         path.cubicTo(c1, c2, end)
@@ -1574,6 +1585,42 @@ class AgentCanvas(QGraphicsView):
             return
         self.resetTransform()
         self._zoom_factor = 1.0
+
+    def fit_view_right_aligned(self, margin: int = 40) -> None:
+        """Zoom out so the whole graph fits in the viewport, then push
+        it against the right edge with empty space on the left.
+
+        Different from QGraphicsView.fitInView (which always centers
+        the target rect): users wanted the orchestrator + descendants
+        clustered on the right with the team info-card overlay at the
+        top-left having room to breathe.
+        """
+        if not self._nodes:
+            return
+        target = self._scene.itemsBoundingRect()
+        if target.isEmpty() or target.isNull():
+            return
+        target = target.adjusted(-margin, -margin, margin, margin)
+
+        vp = self.viewport().rect()
+        if vp.width() <= 0 or vp.height() <= 0 or target.width() <= 0 or target.height() <= 0:
+            return
+
+        scale = min(vp.width() / target.width(), vp.height() / target.height())
+        # Honour the same clamp as Ctrl+wheel so the user can zoom from
+        # this state without hitting an immediate boundary.
+        scale = max(self._ZOOM_MIN, min(self._ZOOM_MAX, scale))
+
+        self.resetTransform()
+        self.scale(scale, scale)
+        self._zoom_factor = scale
+
+        # Right-align: place the target's right edge at the viewport's
+        # right edge by centering on (target.right - half_vp_w_in_scene).
+        half_vp_w_scene = (vp.width() / 2.0) / scale
+        cx = target.right() - half_vp_w_scene
+        cy = target.center().y()
+        self.centerOn(cx, cy)
 
     # ------------------------------------------------------------------
     # Internals

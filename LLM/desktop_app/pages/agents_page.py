@@ -4682,6 +4682,19 @@ class AgentsPage(QWidget):
         # should be hidden).
         self.team_canvas.setVisible(idx == 0)
         self.canvas.setVisible(idx == 1)
+        # Reparent the SuperUserCard onto whichever canvas is now on
+        # top. A widget can only have one parent at a time, so we
+        # detach from the off-screen canvas first, then attach to the
+        # visible one. Without this the card stays parented to the
+        # orbital diagram and disappears when the user flips to graph
+        # view.
+        if hasattr(self, "_super_user_card"):
+            if idx == 0:
+                self.canvas.attach_super_user_card(None)
+                self.team_canvas.attach_super_user_card(self._super_user_card)
+            else:
+                self.team_canvas.attach_super_user_card(None)
+                self.canvas.attach_super_user_card(self._super_user_card)
         # Update the label so the user knows what tapping does next.
         if idx == 0:
             self._view_toggle_btn.setText("◐ Graph view")

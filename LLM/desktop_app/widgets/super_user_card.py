@@ -147,7 +147,7 @@ class SuperUserCard(QFrame):
 
         name_block = QVBoxLayout()
         name_block.setSpacing(0)
-        self._name = QLabel("You")
+        self._name = QLabel("Super User (YOU)")
         self._name.setObjectName("suName")
         nf = QFont()
         nf.setPointSize(11)

@@ -517,12 +517,13 @@ class AgentTeamCanvas(QWidget):
         except Exception:
             card.setVisible(False)
             return
-        # Hide the card if there's no room for it (very short canvas) or
-        # if the user has not yet loaded a team — the user shouldn't see
-        # an empty Super User card floating in space when there are no
-        # agents in play.
-        has_agents = bool(getattr(self, "_agents", None))
-        if h < 80 or not has_agents:
+        # Hide only if the canvas is so short there's literally no
+        # room. The previous threshold (h < 80) silently hid the card
+        # whenever the user clicked an agent (taller info card pushed
+        # available space below the threshold), and the card never
+        # came back. Showing a clipped card is strictly better than
+        # silently disappearing.
+        if h <= 0:
             card.setVisible(False)
             return
         card.setGeometry(int(x), int(y), int(w), int(h))

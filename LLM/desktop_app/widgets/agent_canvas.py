@@ -1282,6 +1282,8 @@ class AgentCanvas(QGraphicsView):
             mode = ""
         self._position_card_picker(agent_card=agent_card_visible,
                                    team_card=team_card_visible)
+        self._position_super_user_card(agent_card=agent_card_visible,
+                                       team_card=team_card_visible)
         if mode != self._last_card_mode:
             self._last_card_mode = mode
             try:
@@ -1312,6 +1314,25 @@ class AgentCanvas(QGraphicsView):
             except Exception:
                 pass
 
+    def attach_super_user_card(self, card: Optional[QWidget]) -> None:
+        """Mount the SuperUserCard as an overlay on the graph view's
+        viewport, mirroring what AgentTeamCanvas does for the orbital
+        diagram. Pass ``None`` to detach."""
+        existing = getattr(self, "_super_user_card", None)
+        if existing is not None and existing is not card:
+            try:
+                existing.setParent(None)
+            except Exception:
+                pass
+        self._super_user_card = card
+        if card is not None:
+            try:
+                card.setParent(self.viewport())
+                card.setVisible(False)
+                card.raise_()
+            except Exception:
+                pass
+
     def _position_card_picker(self, *, agent_card: bool, team_card: bool) -> None:
         """Pin the overlay picker to the bottom of the painted card.
         Hidden when no card is on screen."""
@@ -1331,6 +1352,33 @@ class AgentCanvas(QGraphicsView):
         picker.setGeometry(int(x), int(y), int(w), int(h))
         picker.setVisible(True)
         picker.raise_()
+
+    def _position_super_user_card(self, *, agent_card: bool,
+                                  team_card: bool) -> None:
+        """Place the SuperUserCard directly below the painted info /
+        team card. Always-on when there are agents — better to clip the
+        bottom of the card than to disappear when room is tight."""
+        card = getattr(self, "_super_user_card", None)
+        if card is None:
+            return
+        try:
+            from desktop_app.widgets.agent_info_card import super_user_card_geometry
+            vp = self.viewport()
+            x, y, w, h = super_user_card_geometry(
+                vp.width(), vp.height(),
+                agent_card=agent_card, team_card=team_card,
+            )
+        except Exception:
+            card.setVisible(False)
+            return
+        # Hide only when there's literally no room or no agents.
+        # Anything else: show the card, even if it has to clip.
+        if h <= 0:
+            card.setVisible(False)
+            return
+        card.setGeometry(int(x), int(y), int(w), int(h))
+        card.setVisible(True)
+        card.raise_()
 
     def _make_edge(self, src: _AgentNode, dst: _AgentNode) -> _AgentEdge:
         """Create an edge AND its sibling arrowhead and add both to the scene."""

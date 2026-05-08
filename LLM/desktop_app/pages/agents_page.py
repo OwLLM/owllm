@@ -1673,6 +1673,15 @@ class AgentsPage(QWidget):
         self._user_card.reply_submitted.connect(self._on_user_reply)
         outer.addWidget(self._user_card)
 
+        # Supervisor card — per-project permissions controller.
+        # Default: ask the user for every tool approval (safer).
+        # When checked: register a wildcard auto-approve rule on the
+        # team's ApprovalGate so the team runs unattended.
+        from desktop_app.widgets.supervisor_card import SupervisorCard
+        self._supervisor_card = SupervisorCard(self)
+        self._supervisor_card.toggled.connect(self._on_supervisor_toggled)
+        outer.addWidget(self._supervisor_card)
+
         # Goal row + (initially-hidden) attachment chip strip beneath it.
         outer.addLayout(self._build_goal_row())
         outer.addWidget(self._build_attachment_strip())
@@ -2938,6 +2947,13 @@ class AgentsPage(QWidget):
                 bool(self._active_project.trust_writes) if self._active_project else False
             )
             self._trust_writes.blockSignals(False)
+        # Mirror the per-project auto-approve toggle and apply the gate
+        # rule. Project switch implicitly hands a different "trust me"
+        # answer for the new project.
+        if hasattr(self, "_supervisor_card"):
+            on = bool(self._active_project.auto_approve_all) if self._active_project else False
+            self._supervisor_card.set_state(on)
+            self._apply_supervisor_state(on)
 
     def _on_trust_writes_toggled(self, checked: bool) -> None:
         """Persist the checkbox state on toggle. The actual settings file
@@ -4942,6 +4958,56 @@ class AgentsPage(QWidget):
             dlg.show()
         except Exception:
             logger.exception("could not open notify settings")
+
+    # ------------------------------------------------------------------
+    # Supervisor (auto-approve) wiring
+    # ------------------------------------------------------------------
+
+    _AUTO_APPROVE_RULE = "supervisor_card_auto_approve_all"
+
+    def _on_supervisor_toggled(self, checked: bool) -> None:
+        """Persist the per-project auto-approve flag and register/remove
+        the wildcard rule on the team's ApprovalGate. Idempotent — safe
+        to call repeatedly."""
+        if self._active_project is None:
+            # No project to persist on — silently revert.
+            self._supervisor_card.set_state(False)
+            return
+        self._active_project.auto_approve_all = bool(checked)
+        try:
+            self._project_store.save_project(self._active_project)
+        except Exception:
+            logger.exception("could not save auto_approve_all")
+        self._apply_supervisor_state(bool(checked))
+
+    def _apply_supervisor_state(self, on: bool) -> None:
+        """Install or remove the wildcard auto-approve rule on the
+        gate. Called from the toggle handler and from project-switch /
+        team-build sync paths."""
+        try:
+            from core.agents.tools.base import (
+                ApprovalDecision, AutoApproveRule,
+            )
+            gate = self._registry.gate
+        except Exception:
+            logger.exception("could not access approval gate")
+            return
+        if on:
+            rule = AutoApproveRule(
+                name=self._AUTO_APPROVE_RULE,
+                predicate=lambda req: True,
+                decision=ApprovalDecision.APPROVE,
+                reason="supervisor_card auto-approve-all",
+            )
+            try:
+                gate.add_rule(rule)
+            except Exception:
+                logger.exception("could not add auto-approve rule")
+        else:
+            try:
+                gate.remove_rule(self._AUTO_APPROVE_RULE)
+            except Exception:
+                logger.exception("could not remove auto-approve rule")
 
     def _on_user_reply(self, text: str) -> None:
         """Quick-reply submitted from the User card. Forwards to the

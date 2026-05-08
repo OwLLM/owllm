@@ -59,6 +59,11 @@ class Project:
     a project is run against a given Location, not on every restart /
     team rebuild. Reset implicitly when the user picks a different
     Location (the equality check below fails)."""
+    auto_approve_all: bool = False
+    """When True, the agents page registers a wildcard auto-approve rule
+    on the team's ApprovalGate so every tool request resolves APPROVE
+    without surfacing to the user. Per-project, off by default —
+    explicit consent only. Surfaced via the SupervisorCard checkbox."""
     team: List[str] = field(default_factory=list)
     """Ordered list of agent definition names on this project's team."""
     model_overrides: Dict[str, str] = field(default_factory=dict)
@@ -84,6 +89,7 @@ class Project:
             self.location,
             int(bool(self.trust_writes)),
             self.workdir_hint_sent_for or "",
+            int(bool(self.auto_approve_all)),
             json.dumps(self.team, ensure_ascii=False),
             json.dumps(self.model_overrides, ensure_ascii=False),
             self.graph_json or "",
@@ -99,6 +105,7 @@ class Project:
         loc = row["location"] if "location" in row.keys() else ""
         trust = bool(row["trust_writes"]) if "trust_writes" in row.keys() and row["trust_writes"] is not None else False
         hint_for = (row["workdir_hint_sent_for"] if "workdir_hint_sent_for" in row.keys() else "") or ""
+        auto_approve = bool(row["auto_approve_all"]) if "auto_approve_all" in row.keys() and row["auto_approve_all"] is not None else False
         graph_raw = ""
         try:
             graph_raw = row["graph_json"] if "graph_json" in row.keys() else ""
@@ -111,6 +118,7 @@ class Project:
             location=loc or "",
             trust_writes=trust,
             workdir_hint_sent_for=hint_for,
+            auto_approve_all=auto_approve,
             team=team,
             model_overrides=overrides,
             graph_json=graph_raw or "",
@@ -153,6 +161,7 @@ class ProjectStore:
                     location TEXT,
                     trust_writes INTEGER DEFAULT 0,
                     workdir_hint_sent_for TEXT DEFAULT '',
+                    auto_approve_all INTEGER DEFAULT 0,
                     team_json TEXT NOT NULL,
                     model_overrides_json TEXT,
                     graph_json TEXT,
@@ -186,6 +195,14 @@ class ProjectStore:
             if proj_cols and "workdir_hint_sent_for" not in proj_cols:
                 conn.execute(
                     "ALTER TABLE agent_projects ADD COLUMN workdir_hint_sent_for TEXT DEFAULT ''"
+                )
+            # Auto-approve-all flag — toggled by the SupervisorCard
+            # checkbox. When on, the agents page registers a wildcard
+            # rule on the team's ApprovalGate so every tool request
+            # resolves APPROVE without surfacing to the user.
+            if proj_cols and "auto_approve_all" not in proj_cols:
+                conn.execute(
+                    "ALTER TABLE agent_projects ADD COLUMN auto_approve_all INTEGER DEFAULT 0"
                 )
             # Best-effort: add project_id column to agent_goals if missing.
             cols = {r[1] for r in conn.execute("PRAGMA table_info(agent_goals)")}
@@ -234,14 +251,16 @@ class ProjectStore:
             if existing:
                 conn.execute(
                     "UPDATE agent_projects SET name=?, description=?, location=?, "
-                    "trust_writes=?, workdir_hint_sent_for=?, team_json=?, "
-                    "model_overrides_json=?, graph_json=?, updated_at=? WHERE id=?",
+                    "trust_writes=?, workdir_hint_sent_for=?, auto_approve_all=?, "
+                    "team_json=?, model_overrides_json=?, graph_json=?, "
+                    "updated_at=? WHERE id=?",
                     (
                         project.name,
                         project.description,
                         project.location,
                         int(bool(project.trust_writes)),
                         project.workdir_hint_sent_for or "",
+                        int(bool(project.auto_approve_all)),
                         json.dumps(project.team, ensure_ascii=False),
                         json.dumps(project.model_overrides, ensure_ascii=False),
                         project.graph_json or "",
@@ -253,9 +272,9 @@ class ProjectStore:
                 conn.execute(
                     "INSERT INTO agent_projects "
                     "(id, name, description, location, trust_writes, "
-                    "workdir_hint_sent_for, team_json, model_overrides_json, "
-                    "graph_json, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "workdir_hint_sent_for, auto_approve_all, team_json, "
+                    "model_overrides_json, graph_json, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     project.to_row(),
                 )
             conn.commit()

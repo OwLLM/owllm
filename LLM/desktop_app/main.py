@@ -17827,72 +17827,46 @@ class MainWindow(QMainWindow):
             "└──────────────────────────────────────────────────────────\n"
         )
 
-    # ---------------- Test tab ----------------
+    # ---------------- Test (Chat) tab ----------------
     def _build_test_tab(self) -> QWidget:
-        """
-        Build test page with sub-tabs for:
-        - 🧪 Test (regular side-by-side inference)
-        - 🔧 Tool Chat (tool-enabled side-by-side inference)
-        
-        NOTE: These sub-pages are created eagerly (not lazy-loaded) to ensure
-        any startup refresh routines (e.g. `_refresh_locals`) can safely access
-        widgets like `test_model_a` without crashing the launcher.
-        """
-        from PySide6.QtWidgets import QTabWidget
-        
-        w = QWidget()
-        layout = QVBoxLayout(w)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        
-        # Sub-tabs
-        sub_tabs = QTabWidget()
-        sub_tabs.setStyleSheet("""
-            QTabWidget::pane {
-                border: none;
-                background: transparent;
-            }
-            QTabBar::tab {
-                background: rgba(30, 30, 40, 0.8);
-                color: white;
-                padding: 10px 20px;
-                border: none;
-                border-top-left-radius: 6px;
-                border-top-right-radius: 6px;
-                font-size: 12pt;
-                font-weight: 600;
-                min-height: 22px;
-            }
-            QTabBar::tab:selected {
-                background: rgba(102, 126, 234, 0.8);
-            }
-            QTabBar::tab:hover {
-                background: rgba(102, 126, 234, 0.6);
-            }
-        """)
-        
-        # Store reference so other code can navigate sub-tabs
-        self.test_sub_tabs = sub_tabs
-        self._test_sub_pages_created = {}  # kept for backward-compat, not used for eager pages
-        
-        # Eagerly create all test sub-pages to avoid startup crashes
-        test_page = self._build_test_sub_tab()
-        tool_chat_page = self._build_tool_chat_sub_tab()
-        model_to_model_page = self._build_model_to_model_sub_tab()
-        arena_page = self._build_arena_sub_tab()
-        sub_tabs.addTab(test_page, "🧪 Test")
-        sub_tabs.addTab(tool_chat_page, "🔧 Tool Chat")
-        sub_tabs.addTab(model_to_model_page, "Model To Model")
-        # Arena was built above so all its widget references still
-        # resolve, but the sub-tab is reachable only via the Gamify
-        # header group's "Arena" navbar button. Stash the widget so
-        # the top-level Arena tab can adopt it on first open.
-        self._arena_built_widget = arena_page
-        sub_tabs.currentChanged.connect(self._on_test_sub_tab_changed)
+        """Build the unified Chat tab.
 
-        layout.addWidget(sub_tabs)
+        Tool calling is always on, so the dedicated 'Tool Chat' sub-tab
+        is gone. Model-to-model conversation is merged into the Test
+        surface via the 'Models talk to each other' checkbox in the
+        title row, so the 'Model To Model' sub-tab is gone too. The
+        Test surface returns directly — no QTabWidget wrapper, no
+        sub-tab buttons. Arena is still built (off-screen) so its
+        widget references resolve at startup; the Gamify navbar later
+        adopts the stashed widget into a top-level tab.
+        """
+        # Build off-screen pages first so their .test_model_* /
+        # .tool_chat_* / .m2m_* / .arena_* widget references exist —
+        # _refresh_locals and other startup refresh routines walk
+        # those at boot. The widgets stay parented to throwaway hosts
+        # and never get added to a visible layout.
+        try:
+            tool_chat_page = self._build_tool_chat_sub_tab()
+            tool_chat_page.setParent(None)
+            tool_chat_page.hide()
+            self._tool_chat_built_widget = tool_chat_page
+        except Exception:
+            self._tool_chat_built_widget = None
+        try:
+            m2m_page = self._build_model_to_model_sub_tab()
+            m2m_page.setParent(None)
+            m2m_page.hide()
+            self._m2m_built_widget = m2m_page
+        except Exception:
+            self._m2m_built_widget = None
+        try:
+            arena_page = self._build_arena_sub_tab()
+            self._arena_built_widget = arena_page
+        except Exception:
+            self._arena_built_widget = None
 
-        return w
+        # The Test surface IS the Chat tab now — return it directly.
+        return self._build_test_sub_tab()
 
     def _on_test_sub_tab_changed(self, index: int) -> None:
         """Ensure settings stacks are built when opening advanced test sub-tabs."""
@@ -17986,43 +17960,33 @@ class MainWindow(QMainWindow):
         self.test_model_count_3.toggled.connect(self._on_model_count_3_toggled)
         title_row.addWidget(self.test_model_count_3)
 
-        # 'Models talk to each other' — when on, the chats run in
-        # model-to-model mode (each reply becomes the next model's
-        # prompt). Hidden when only 1 chat is active because there's
-        # nobody to talk to. Click routes to the dedicated Model To
-        # Model sub-tab where the runner is implemented.
-        title_row.addSpacing(12)
+        # 'Models talk to each other' — placeholder for the inline
+        # M2M mode. The dedicated Model To Model sub-tab was removed
+        # in this same change; the inline runner is not wired up yet,
+        # so the toggle is built (so other code that may reference it
+        # doesn't NPE) but hidden. Re-enable + implement once the M2M
+        # runner is inlined into the Test surface.
         self.test_models_converse = QCheckBox("🔄 Models talk to each other")
         self.test_models_converse.setChecked(False)
-        self.test_models_converse.setToolTip(
-            "When enabled, the chats run model-to-model: each reply "
-            "feeds the next model as its prompt. Open the 'Model To "
-            "Model' sub-tab to start a session."
-        )
         self.test_models_converse.toggled.connect(
             self._on_test_models_converse_toggled
         )
+        self.test_models_converse.hide()
         title_row.addWidget(self.test_models_converse)
 
         left_layout.addLayout(title_row)
 
-        # Hardware Settings and Tool Calling side by side
-        settings_row = QHBoxLayout()
-        settings_row.setSpacing(15)
-
-        # GPU selection for inference
-        gpu_frame = QGroupBox("⚙️ Hardware Settings")
-        gpu_layout = QVBoxLayout(gpu_frame)
-        
-        # GPU selection dropdown for test tab (filtered by selection)
+        # Hardware Settings and Tool Calling group-boxes used to live
+        # here — both removed on user request. Tool calling is always
+        # on (no toggle needed) and the GPU picker is redundant with
+        # the global VRAM detection in the header. Build the offscreen
+        # ``test_gpu_select`` / ``test_gpu_info`` widgets anyway so the
+        # rest of the codebase that calls ``.currentText()`` /
+        # ``.setText()`` on them keeps working.
         gpus = self._get_filtered_gpus()
         gpus = self._sort_gpus_by_memory(gpus)
-        
-        gpu_row = QHBoxLayout()
-        gpu_row.addWidget(QLabel("GPU for Inference:"))
         self.test_gpu_select = QComboBox()
         self.test_gpu_index_map = []
-        
         if gpus:
             for idx, gpu in enumerate(gpus):
                 gpu_name = gpu.get("name", f"GPU {idx}")
@@ -18030,33 +17994,12 @@ class MainWindow(QMainWindow):
                 orig_idx = gpu.get("_orig_index", idx)
                 self.test_gpu_select.addItem(f"GPU {orig_idx}: {gpu_name} ({vram})")
                 self.test_gpu_index_map.append(orig_idx)
-            info_text = f"✅ {len(gpus)} GPU(s) detected - select one for inference"
         else:
             self.test_gpu_select.addItem("No GPUs available - CPU mode")
             self.test_gpu_select.setEnabled(False)
-            info_text = "⚠️ No GPUs detected (CPU mode)"
-        
-        gpu_row.addWidget(self.test_gpu_select, 1)
-        gpu_layout.addLayout(gpu_row)
-        
-        self.test_gpu_info = QLabel(info_text)
-        self.test_gpu_info.setStyleSheet("color: #888; padding: 5px; font-size: 10pt;")
-        self.test_gpu_info.setWordWrap(True)
-        gpu_layout.addWidget(self.test_gpu_info)
-        
-        settings_row.addWidget(gpu_frame, 2)  # 2/3 of space
-        
-        # Tool calling is enabled in Test chat (always on).
-        # Use the "🔧 Tool Chat" sub-tab for a dedicated tool-log view.
-        tool_frame = QGroupBox("🔧 Tool Calling")
-        tool_layout = QVBoxLayout(tool_frame)
-        tool_info = QLabel("Tool calling is enabled in this chat. For a dedicated tool log, open the '🔧 Tool Chat' sub-tab above.")
-        tool_info.setStyleSheet("color: #888; padding: 5px; font-size: 9pt;")
-        tool_info.setWordWrap(True)
-        tool_layout.addWidget(tool_info)
-        settings_row.addWidget(tool_frame, 1)  # 1/3 of space
-        
-        left_layout.addLayout(settings_row)
+        self.test_gpu_select.hide()
+        self.test_gpu_info = QLabel("")
+        self.test_gpu_info.hide()
 
         # Side-by-side model comparison (TOP - Chat)
         # Headers and model selectors (outside scroll)
@@ -18171,10 +18114,12 @@ class MainWindow(QMainWindow):
         prompt_layout.addLayout(input_row)
         left_layout.addLayout(prompt_layout)
 
-        # RIGHT COLUMN (1/4 width) - Instruction adjustment tools
+        # RIGHT COLUMN - Instruction adjustment tools.
+        # Min width bumped 360 -> 420 to fit the +3pt font bump applied
+        # to the Chat tab; previously labels and inputs in the system-
+        # prompt / sampling rows wrapped or clipped at 360.
         right_widget = QWidget()
-        # Set minimum width to ensure content is visible, but allow expansion
-        right_widget.setMinimumWidth(360)  # Minimum to show content
+        right_widget.setMinimumWidth(420)
         right_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -18407,7 +18352,11 @@ class MainWindow(QMainWindow):
         self.test_model_b_settings = model_b_page
         self.test_model_c_settings = model_c_page
         
-        right_layout.addWidget(self.test_model_settings_stack, 0)
+        # Stretch 1 (was 0) so the model settings get the bulk of the
+        # right column's vertical space — at stretch 0 the stack
+        # collapsed to its minimum and the user had to scroll the
+        # internal QScrollArea to see anything past 'Temperature'.
+        right_layout.addWidget(self.test_model_settings_stack, 3)
 
         # Right panel tabs: Logs + Unfiltered raw model output.
         right_title = QLabel("Right Panel")
@@ -22254,21 +22203,11 @@ class MainWindow(QMainWindow):
                 self._select_model_count("2")
 
     def _on_test_models_converse_toggled(self, checked: bool) -> None:
-        """When enabled, route the user to the Model-to-Model sub-tab
-        (the dedicated runner for back-and-forth conversations between
-        the loaded models). Clearing the checkbox brings the user back
-        to the regular Test sub-tab."""
-        try:
-            sub_tabs = getattr(self, "test_sub_tabs", None)
-            if sub_tabs is None:
-                return
-            if checked:
-                # Sub-tab order: 0 = Test, 1 = Tool Chat, 2 = Model To Model.
-                sub_tabs.setCurrentIndex(2)
-            else:
-                sub_tabs.setCurrentIndex(0)
-        except Exception:
-            pass
+        """Placeholder — the dedicated Model To Model sub-tab is gone
+        and the inline runner isn't wired into the Test surface yet,
+        so this just records the desired state. Hooked to ``checked``
+        so the (currently-hidden) checkbox doesn't crash if shown."""
+        self._models_converse_enabled = bool(checked)
     
     def _on_model_count_changed(self, count_str: str) -> None:
         """Handle chat count change (1 / 2 / 3).

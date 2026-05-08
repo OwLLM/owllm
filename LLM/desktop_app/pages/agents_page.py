@@ -4667,6 +4667,25 @@ class AgentsPage(QWidget):
             if target:
                 _set_status_both(target, CANVAS_STATUS_ERROR)
 
+        # ---- Super User card: surface orchestrator → user messages ----
+        # The orchestrator's REPLY (or question) used to land only in its
+        # own per-agent log buffer, hidden until the user clicked the
+        # orchestrator node. Mirror it onto the Super User card so the
+        # user sees it where they're already looking, the chat log
+        # records it, and the card blinks for attention. set_attention
+        # appends the body to the mini chat log internally, so don't
+        # double-append.
+        if (
+            msg.to_agent == "user"
+            and msg.kind in (MessageKind.REPLY, MessageKind.EVENT)
+            and (msg.body or "").strip()
+            and hasattr(self, "_super_user_card")
+        ):
+            try:
+                self._super_user_card.set_attention(True, msg.body)
+            except Exception:
+                logger.exception("could not surface orchestrator message on Super User card")
+
     # ------------------------------------------------------------------
     # Canvas / log helpers
     # ------------------------------------------------------------------
@@ -5034,6 +5053,12 @@ class AgentsPage(QWidget):
         text = (text or "").strip()
         if not text:
             return
+        # User has acknowledged the team's last message — clear the
+        # blinking attention state so the card returns to idle.
+        try:
+            self._super_user_card.set_attention(False)
+        except Exception:
+            pass
         if getattr(self, "_run_active", False):
             # Stage but don't run; the disabled goal_input will accept
             # the text and re-enable when the current run finishes.

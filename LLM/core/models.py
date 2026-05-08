@@ -86,32 +86,101 @@ def search_hf_models(
     return hits
 
 
+# Substrings that mark a repo as a *derivative* (quantization /
+# pre-baked adapter / classifier / safety filter / embedding model)
+# rather than a base model the user would pick from a "Recommended
+# Models" panel. Matched against the lowercased model_id.
+_DERIV_TOKENS: tuple = (
+    # Quantization formats — we want the BASE repo, not the GGUF/AWQ
+    # mirror. The user can quantize themselves at download time.
+    "-gguf", "_gguf", "/gguf", ".gguf",
+    "-awq", "_awq", "/awq",
+    "-gptq", "_gptq", "/gptq",
+    "-bnb-4bit", "-bnb-8bit", "_bnb_4bit", "_bnb_8bit",
+    "-int4", "-int8", "-fp8", "-w4a16", "-w8a16",
+    "-1.25bit", "-1bit", "-2bit", "-3bit",
+    # Safety / classifier / scorer / embedding / tokenizer style
+    # uploads — the panel is for chat/instruct base models.
+    "guard", "moderation", "classifier", "scorer", "reward-model",
+    "embedding", "embeddings", "-embed", "tokenizer-only",
+    "privacy-filter", "/safety-",
+    # Diffusion / TTS / image / video — list_models with
+    # pipeline_tag=text-generation usually keeps these out, but some
+    # leak through on the lastModified path because authors mistag.
+    "stable-diffusion", "/sdxl", "/flux", "/wan2", "/ltx",
+    "tts-", "-tts", "/whisper", "/parler",
+)
+
+
+def _looks_like_derivative(model_id: str) -> bool:
+    """Heuristic: is this repo a quantization / classifier / non-LLM?"""
+    if not model_id:
+        return True
+    mid = model_id.lower()
+    return any(tok in mid for tok in _DERIV_TOKENS)
+
+
+# Orgs whose recent base-model releases are typically what the
+# Recommended panel should surface. Membership boosts ranking; it
+# is NOT a hard filter (so e.g. a popular community fine-tune still
+# qualifies if it has the downloads).
+_PREFERRED_ORGS: frozenset = frozenset({
+    "google", "meta-llama", "mistralai", "Qwen", "qwen",
+    "deepseek-ai", "microsoft", "openai", "openai-community",
+    "anthropic", "zai-org", "ai21labs", "01-ai", "01ai",
+    "nvidia", "cohereforai", "CohereForAI", "stabilityai",
+    "EleutherAI", "tiiuae", "databricks", "internlm", "x-ai",
+    "moonshotai", "ibm-granite", "huggingfaceh4", "HuggingFaceH4",
+    "smollm", "huggingfacem4", "HuggingFaceTB", "openchat",
+    "allenai", "BAAI", "cognitivecomputations", "google-bert",
+    "yi-research", "facebook", "bigcode", "WizardLM", "01.AI",
+})
+
+
+def _is_preferred_org(model_id: str) -> bool:
+    org = (model_id or "").split("/", 1)[0]
+    return org in _PREFERRED_ORGS
+
+
 def fetch_recent_popular_models(
-    min_downloads: int = 10000,
+    min_downloads: int = 50_000,
     limit: int = 20,
     pipeline_tag: str = "text-generation",
 ) -> List[HFModelHit]:
-    """Fetch up to N text-gen models that combine "recent" with "popular".
+    """Fetch up to N text-gen base models for the Recommended panel.
 
-    Two strategies merged:
-      1. Most-downloaded text-gen models (sort=downloads).
-      2. Most-recently-updated text-gen models (sort=lastModified)
-         post-filtered to >= ``min_downloads``.
+    Strategy (in order — first non-empty wins for the seed list, then
+    we merge in the others for breadth):
 
-    Resilience:
-      - ``huggingface_hub.list_models`` has had its kwargs renamed across
-        versions (``pipeline_tag`` vs. ``filter``, ``direction`` quirks
-        on older releases). We try the modern call first, then fall
-        back to a parameter set that works on older hub versions, and
-        finally to the kwarg-free call. Anything that returns non-empty
-        hits wins.
-      - The download floor is auto-relaxed to 1000 / 100 / 0 if the
-        strict floor produces nothing, so a deserted Hub day or a
-        very fresh release wave still populates the panel instead of
-        triggering the hardcoded offline fallback.
-      - Underlying exceptions are stashed on this function as
-        ``fetch_recent_popular_models.last_errors`` so the caller can
-        surface them in the Models log instead of failing silently.
+      0. ``sort=trending_score`` if the installed huggingface_hub
+         supports it. This is what the HF website's Trending tab uses
+         and matches user expectation ("Gemma 4 / GLM 4.6 / etc. that
+         everyone is talking about *right now*").
+      1. ``sort=downloads`` — top base models by lifetime downloads.
+      2. ``sort=likes`` — top by community endorsement (filters out
+         download-bot inflation that's common on quantized mirrors).
+      3. ``sort=lastModified`` filtered to ``>= min_downloads``.
+
+    Quality filters applied to every strategy:
+
+      * ``_looks_like_derivative`` drops obvious quantization mirrors
+        (-GGUF, -AWQ, -GPTQ, -bnb-4bit, -1.25bit, …), classifier /
+        safety / embedding repos, and non-LLM pipelines (TTS, SDXL,
+        Whisper) that leak through when authors mistag.
+      * Models from ``_PREFERRED_ORGS`` (google, meta-llama,
+        deepseek-ai, Qwen, mistralai, microsoft, …) get a ranking
+        boost so flagship recent releases surface ahead of niche
+        community uploads with similar download counts.
+
+    Resilience: ``list_models`` kwargs have shifted across
+    huggingface_hub versions (``pipeline_tag`` vs. ``filter``,
+    ``trending_score`` only on newer releases). Each strategy is
+    tried with multiple kwarg variants; the first that returns hits
+    wins. The download floor auto-relaxes to 10k / 1k / 100 / 0 if
+    the strict ``min_downloads`` produces nothing, so a quiet day on
+    the Hub still populates the panel instead of dropping to the
+    offline fallback. Underlying exceptions are stashed on
+    ``fetch_recent_popular_models.last_errors``.
     """
     fetch_recent_popular_models.last_errors = []  # type: ignore[attr-defined]
 
@@ -133,12 +202,6 @@ def fetch_recent_popular_models(
         )
 
     def _try_calls(*kw_variants: dict):
-        """Yield hits from the first kwargs combo that returns >0 items.
-
-        Each variant is tried in turn; the first one that returns hits
-        wins. Exceptions are recorded but not raised so the next
-        variant gets a chance.
-        """
         for variant in kw_variants:
             try:
                 items = list(list_models(**variant))
@@ -152,40 +215,50 @@ def fetch_recent_popular_models(
                 return items
         return []
 
-    # --- strategy 1: top by downloads ---
-    pop_limit = max(limit * 4, 80)
-    pop_variants: List[dict] = []
-    if pipeline_tag:
-        pop_variants.append({"sort": "downloads", "direction": -1,
-                             "limit": pop_limit, "pipeline_tag": pipeline_tag})
-        # Older huggingface_hub used ``filter`` for pipeline tags.
-        pop_variants.append({"sort": "downloads", "direction": -1,
-                             "limit": pop_limit, "filter": pipeline_tag})
-    pop_variants.append({"sort": "downloads", "direction": -1,
-                         "limit": pop_limit})
-    pop_variants.append({"limit": pop_limit})
-    pop_items = _try_calls(*pop_variants)
-    by_downloads = [_to_hit(m) for m in pop_items]
+    def _variants_for(sort_key: Optional[str], cap: int) -> List[dict]:
+        out: List[dict] = []
+        base: dict = {"limit": cap}
+        if sort_key:
+            base["sort"] = sort_key
+            base["direction"] = -1
+        if pipeline_tag:
+            out.append({**base, "pipeline_tag": pipeline_tag})
+            out.append({**base, "filter": pipeline_tag})
+        out.append(base)
+        return out
 
-    # --- strategy 2: recency, filtered to popular ones ---
-    rec_variants: List[dict] = []
-    if pipeline_tag:
-        rec_variants.append({"sort": "lastModified", "direction": -1,
-                             "limit": 250, "pipeline_tag": pipeline_tag})
-        rec_variants.append({"sort": "lastModified", "direction": -1,
-                             "limit": 250, "filter": pipeline_tag})
-    rec_variants.append({"sort": "lastModified", "direction": -1, "limit": 250})
-    rec_items = _try_calls(*rec_variants)
-    by_recency = [_to_hit(m) for m in rec_items]
+    fetch_cap = max(limit * 12, 240)
+
+    # Strategy 0: trending_score (newest huggingface_hub only).
+    by_trending = [_to_hit(m) for m in _try_calls(*_variants_for("trending_score", fetch_cap))]
+    # Strategy 1: lifetime downloads.
+    by_downloads = [_to_hit(m) for m in _try_calls(*_variants_for("downloads", fetch_cap))]
+    # Strategy 2: community likes.
+    by_likes = [_to_hit(m) for m in _try_calls(*_variants_for("likes", fetch_cap))]
+    # Strategy 3: lastModified (post-filtered to popular).
+    by_recency = [_to_hit(m) for m in _try_calls(*_variants_for("lastModified", fetch_cap))]
+
+    def _quality(h: HFModelHit) -> bool:
+        return bool(h.model_id) and not _looks_like_derivative(h.model_id)
 
     def _merge(min_dl: int) -> List[HFModelHit]:
         out: List[HFModelHit] = []
         seen: set[str] = set()
-        # Recency first (fresh + popular), then downloads for breadth.
-        rec_filtered = [h for h in by_recency if (h.downloads or 0) >= min_dl]
-        pop_filtered = [h for h in by_downloads if (h.downloads or 0) >= min_dl]
-        for h in rec_filtered + pop_filtered:
-            if not h.model_id or h.model_id in seen:
+        # Trending first (matches the HF website's Trending tab),
+        # then downloads + likes for breadth, then recency to catch
+        # very fresh releases that haven't accumulated downloads yet.
+        ordered = (
+            [h for h in by_trending if _quality(h)] +
+            [h for h in by_downloads if _quality(h) and (h.downloads or 0) >= min_dl] +
+            [h for h in by_likes if _quality(h) and (h.downloads or 0) >= min_dl] +
+            [h for h in by_recency if _quality(h) and (h.downloads or 0) >= min_dl]
+        )
+        # Stable sort: preferred orgs first within the merged stream
+        # so flagship releases (Google Gemma, Meta Llama, DeepSeek,
+        # Qwen, …) win ties against niche community uploads.
+        ordered.sort(key=lambda h: 0 if _is_preferred_org(h.model_id) else 1)
+        for h in ordered:
+            if h.model_id in seen:
                 continue
             seen.add(h.model_id)
             out.append(h)
@@ -193,9 +266,8 @@ def fetch_recent_popular_models(
                 break
         return out
 
-    # Try the strict floor first, then progressively relax it so a
-    # quiet day on the Hub doesn't drop us to the offline fallback.
-    for floor in (min_downloads, 1000, 100, 0):
+    # Try the strict floor first, then progressively relax it.
+    for floor in (min_downloads, 10_000, 1000, 100, 0):
         hits = _merge(floor)
         if hits:
             if floor != min_downloads:

@@ -7915,17 +7915,20 @@ class MainWindow(QMainWindow):
         curated_title = QLabel("📚 Recommended Models")
         curated_title.setStyleSheet("font-size: 16pt; font-weight: bold; color: #667eea;")
         curated_header.addWidget(curated_title)
-        curated_header.addStretch(1)
-        # Legend: explains the green/orange dot on each card. Lives on
-        # the same line as the title so the meaning is glance-able.
-        # Red is intentionally absent here — recommended hides cards
-        # that don't fit; red items only appear in search results.
+        # Legend sits IMMEDIATELY after the title (no stretch in
+        # between) so the colour key reads as part of the headline.
+        # All three colours are documented even though the Recommended
+        # grid filters red out — red cards still appear in Search
+        # results and the user wants the legend to explain every dot
+        # they could ever see on a card.
         legend_specs = (
             ("#22c55e", "Fits comfortably (inference + fine-tuning)"),
             ("#f59e0b", "Tight fit (inference; fine-tuning may struggle)"),
+            ("#ef4444", "Too large for your GPU (search only)"),
         )
         legend_row = QHBoxLayout()
         legend_row.setSpacing(14)
+        legend_row.setContentsMargins(16, 0, 0, 0)
         for hex_col, label_text in legend_specs:
             chip = QLabel("●")
             chip.setStyleSheet(
@@ -7939,6 +7942,7 @@ class MainWindow(QMainWindow):
             )
             legend_row.addWidget(txt)
         curated_header.addLayout(legend_row)
+        curated_header.addStretch(1)
         curated_v_layout.addLayout(curated_header)
         
         # 3-column layout: Cards (2/3) + Details (1/3)

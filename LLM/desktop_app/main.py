@@ -16176,19 +16176,23 @@ class MainWindow(QMainWindow):
                 pass
 
     def _preflight_gpu_for_training(self) -> bool:
-        """Check the GPU is clean enough to start a training run.
+        """Check the SELECTED GPU has enough free VRAM for THIS model.
 
-        Why: every training run we've watched fail with Windows
-        ``0xC0000409`` / ``0xC0000005`` 30-90 minutes in had the same
-        signature — sustained step-time inflation (33s -> 80s+) caused
-        by VRAM swap pressure once the trainer's working set spilled
-        through unified memory. The fix is to refuse to start until
-        VRAM is actually free, not to chase the abort post-mortem.
+        Three things this used to get wrong:
 
-        Returns False ONLY if the user explicitly cancels at the
-        warning dialog. Returns True (proceed) when the environment
-        looks clean OR when nvidia-smi can't report (e.g. no NVIDIA
-        driver — let the trainer's own fallback handle it).
+        1. Hardcoded ``-i 0`` query — reported the wrong GPU when the
+           user picked anything but cuda:0.
+        2. Hardcoded 18 GB threshold — fires for a 1B run that needs
+           ~4 GB, looks like a fake mock when the warning is the same
+           text every time.
+        3. ``[N/A]`` consumer rows — every Windows desktop has DWM,
+           Explorer, browsers, Office showing N/A. The list looked
+           identical every run because it largely was. They get
+           filtered out now; we only list processes with a real,
+           measurable VRAM number.
+
+        Now: target the selected GPU, scale the threshold to the
+        actual model size on disk, only flag consumers we can quantify.
         """
         try:
             import subprocess as _sp
@@ -16196,174 +16200,166 @@ class MainWindow(QMainWindow):
 
             sub_flags = getattr(self, "subprocess_flags", {})
 
-            # Direct measure: how much VRAM is actually free? This is
-            # the metric that matters for 'will the trainer swap'. An
-            # 8B model in bf16 needs ~18 GB for forward + activations
-            # + optimizer; below that the trainer pages and Windows
-            # eventually corrupts memory.
+            # 1. Resolve the GPU the user actually picked. The dropdown
+            # was built from torch's view, so gpu_index_map[i] is the
+            # cuda index. Use that against nvidia-smi.
+            target_idx = 0
+            try:
+                if hasattr(self, "gpu_select") and self.gpu_select.isEnabled():
+                    sel = int(self.gpu_select.currentIndex())
+                    if hasattr(self, "gpu_index_map") and sel < len(self.gpu_index_map):
+                        target_idx = int(self.gpu_index_map[sel])
+                    else:
+                        target_idx = sel
+            except Exception:
+                target_idx = 0
+
+            # 2. Real free / total VRAM for THAT GPU.
             free_mb = total_mb_gpu = -1
+            gpu_name = ""
             try:
                 gpu_proc = _sp.run(
                     [
                         "nvidia-smi",
-                        "--query-gpu=memory.free,memory.total",
+                        "--query-gpu=memory.free,memory.total,name",
                         "--format=csv,noheader,nounits",
-                        "-i", "0",
+                        "-i", str(target_idx),
                     ],
-                    capture_output=True,
-                    text=True,
-                    timeout=8,
-                    **sub_flags,
+                    capture_output=True, text=True, timeout=8, **sub_flags,
                 )
                 if gpu_proc.returncode == 0 and gpu_proc.stdout:
                     parts = [p.strip() for p in gpu_proc.stdout.splitlines()[0].split(",")]
                     if len(parts) >= 2:
                         free_mb = int(parts[0])
                         total_mb_gpu = int(parts[1])
+                    if len(parts) >= 3:
+                        gpu_name = parts[2]
             except Exception:
                 pass
 
-            # Per-process compute-app list — pid + name + used_memory.
-            # On Windows many GPU consumers (Chrome, Edge WebView, the
-            # Windows shell, EXCEL) show ``[N/A]`` for memory because
-            # the user-mode driver doesn't expose per-process memory.
-            # We still flag them — they DO consume VRAM, we just don't
-            # know how much. Combined with free_mb, that's enough.
-            proc = _sp.run(
-                [
-                    "nvidia-smi",
-                    "--query-compute-apps=pid,process_name,used_memory",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=8,
-                **sub_flags,
-            )
-            consumers: List[Tuple[int, str, Optional[int]]] = []
-            if proc.returncode == 0:
-                for line in (proc.stdout or "").splitlines():
-                    parts = [p.strip() for p in line.split(",")]
-                    if len(parts) < 3:
-                        continue
-                    try:
-                        pid = int(parts[0])
-                    except ValueError:
-                        continue
-                    pname = parts[1]
-                    raw_mb = parts[2]
-                    used_mb: Optional[int]
-                    try:
-                        used_mb = int(raw_mb)
-                    except ValueError:
-                        used_mb = None
-                    consumers.append((pid, pname, used_mb))
+            # 3. Estimate VRAM the active model + LoRA + AdamW will need.
+            # Best signal: total bytes of weight files (.safetensors / .bin)
+            # in the resolved local model directory. bf16 inference ≈ that
+            # number; training ≈ 2-2.5× (forward activations + optimizer
+            # state + gradients). Fallback to 6 GB if we can't measure.
+            needed_mb = self._estimate_training_vram_mb()
 
+            # 4. Per-process compute-apps. Drop N/A rows entirely — they
+            # are Windows shell / DWM / Office spam and there is nothing
+            # the user can usefully act on. Only show measurable usage.
             our_pid = os.getpid()
-            # Real consumers = non-trainer entries with any non-zero
-            # known usage OR unknown usage (N/A). The N/A rows are the
-            # Windows shell / browser / desktop apps that DO use VRAM;
-            # we flag them when free_mb is below the safety threshold.
-            real: List[Tuple[int, str, Optional[int]]] = []
-            for pid, pname, mb in consumers:
-                if pid == our_pid:
-                    continue
-                if mb is None or mb >= 200:
-                    real.append((pid, pname, mb))
+            consumers: List[Tuple[int, str, int]] = []
+            try:
+                proc = _sp.run(
+                    [
+                        "nvidia-smi",
+                        "--query-compute-apps=pid,process_name,used_memory",
+                        "--format=csv,noheader,nounits",
+                        "-i", str(target_idx),
+                    ],
+                    capture_output=True, text=True, timeout=8, **sub_flags,
+                )
+                if proc.returncode == 0:
+                    for line in (proc.stdout or "").splitlines():
+                        parts = [p.strip() for p in line.split(",")]
+                        if len(parts) < 3:
+                            continue
+                        try:
+                            pid = int(parts[0])
+                        except ValueError:
+                            continue
+                        pname = parts[1]
+                        try:
+                            mb = int(parts[2])
+                        except ValueError:
+                            continue  # skip N/A
+                        if pid == our_pid or mb < 100:
+                            continue
+                        consumers.append((pid, pname, mb))
+            except Exception:
+                pass
 
-            # Decide whether to warn. Two triggers:
-            #   1. free_mb < 18000 — empirical floor for 8B bf16 training
-            #      with batch=2 + max_seq=2048 + gradient checkpointing.
-            #   2. real consumers exist with combined known usage >= 1 GB.
-            known_total = sum(mb for _, _, mb in real if mb is not None)
-            low_free = (free_mb >= 0) and (free_mb < 18000)
-            heavy_consumers = known_total >= 1024
-            many_consumers = len(real) >= 4  # 4+ N/A rows on a desktop
-            if not (low_free or heavy_consumers or many_consumers):
+            # 5. Decide. Warn ONLY if free VRAM < estimated need + 1 GB
+            # safety margin. Don't warn on "many processes exist" anymore;
+            # that triggered constantly on a normal Windows desktop.
+            safety_mb = 1024
+            need_with_margin = needed_mb + safety_mb
+            insufficient = (free_mb >= 0) and (free_mb < need_with_margin)
+            if not insufficient:
+                self._log_to_app_log(
+                    f"[TRAIN-PREFLIGHT] OK: gpu={target_idx} free={free_mb}MB "
+                    f"need={needed_mb}MB (+{safety_mb}MB margin)"
+                )
                 return True
 
-            # Categorise process names so the user knows exactly what
-            # to close.
+            # 6. Build the dialog. Show what we measured, what we need,
+            # and only the consumers we can quantify.
             def _category(name: str) -> str:
                 low = name.lower()
                 if "llama-server" in low or "llama_server" in low:
-                    return "llama-server (running chat / inference)"
+                    return "llama-server (Server tab → Stop)"
                 if "python" in low:
-                    return "python (chat / agent / earlier training)"
+                    return "python (older training / chat)"
                 if "ollama" in low:
                     return "ollama"
                 if "lmstudio" in low or "lm-studio" in low:
                     return "LM Studio"
                 if any(b in low for b in ("chrome", "msedge", "firefox", "brave")):
-                    return "browser (close GPU-heavy tabs)"
-                if "explorer" in low:
-                    return "Windows Explorer (DWM)"
-                if "shellexperiencehost" in low or "textinputhost" in low:
-                    return "Windows shell"
-                if "excel" in low or "winword" in low or "powerpnt" in low:
-                    return "Office (close it)"
-                if "msedgewebview" in low:
-                    return "Edge WebView (often spawned by Office / Teams / Outlook)"
-                if "bambu" in low:
-                    return "Bambu Studio"
+                    return "browser"
                 return name
 
-            # Sort by known usage desc, unknowns last.
-            def _sort_key(t):
-                _, _, mb = t
-                return (-mb if mb is not None else 1, 0)
-            lines = []
-            for pid, pname, mb in sorted(real, key=_sort_key):
-                mb_str = f"{mb:>6} MB" if mb is not None else "    N/A"
-                lines.append(f"  PID {pid:>6}  {mb_str}  {_category(pname)}")
-            body = "\n".join(lines)
-
-            free_str = (
-                f"{free_mb / 1024:.1f} GB free / {total_mb_gpu / 1024:.1f} GB total"
-                if free_mb >= 0 else "free VRAM unavailable"
-            )
+            consumers.sort(key=lambda t: -t[2])
+            if consumers:
+                lines = [
+                    f"  PID {pid:>6}  {mb:>6} MB  {_category(pname)}"
+                    for pid, pname, mb in consumers
+                ]
+                body = "\n".join(lines)
+            else:
+                body = (
+                    "  (No process is reporting measurable VRAM use on "
+                    f"GPU {target_idx}. The {(total_mb_gpu - free_mb) / 1024:.1f} GB "
+                    "shown as 'used' is probably the Windows desktop / driver "
+                    "overhead — not freeable from the GUI. You may need to "
+                    "pick a smaller base model.)"
+                )
 
             msg = _QMB(self)
-            msg.setWindowTitle("GPU not clean — training may swap and crash")
+            msg.setWindowTitle("Not enough free VRAM for this model")
             msg.setIcon(_QMB.Warning)
             msg.setTextFormat(Qt.RichText)
-            headline = []
-            if low_free:
-                headline.append(
-                    f"<b>Only {free_str.split(' / ')[0]} of VRAM is free.</b> "
-                    "An 8B bf16 training run needs ~18 GB of headroom; below "
-                    "that the trainer pages weights and Windows eventually "
-                    "kills the process with a <code>0xC0000409</code> / "
-                    "<code>0xC0000005</code> abort."
-                )
-            else:
-                headline.append(
-                    f"<b>{len(real)} other process(es) are using the GPU.</b> "
-                    f"({free_str})"
-                )
-            msg.setText(headline[0])
+            gpu_label = f"cuda:{target_idx}" + (f" ({gpu_name})" if gpu_name else "")
+            msg.setText(
+                f"<b>{gpu_label}: {free_mb / 1024:.1f} GB free of "
+                f"{total_mb_gpu / 1024:.1f} GB total.</b><br><br>"
+                f"This training needs about <b>{needed_mb / 1024:.1f} GB</b> "
+                f"(model + LoRA + optimizer state + activations), plus a "
+                f"{safety_mb / 1024:.1f} GB safety margin. You're "
+                f"<b>{(need_with_margin - free_mb) / 1024:.1f} GB short</b>."
+            )
             msg.setInformativeText(
-                "<p><b>VRAM consumers right now:</b></p>"
+                "<p><b>Measurable VRAM consumers on this GPU:</b></p>"
                 f"<pre style='font-family: Consolas, monospace; font-size: 10pt; "
                 f"background: #1a1a1a; color: #f5f5f5; padding: 8px; "
                 f"border-radius: 4px;'>{body}</pre>"
-                "<p>Stop the LoRA-related ones (Server tab → Stop, close chat "
-                "windows). Browsers / Office / Bambu Studio also hold VRAM — "
-                "close them or accept a slower / riskier run.</p>"
+                "<p>If you proceed below the threshold, the trainer will "
+                "spill to system RAM and step times balloon to 10×; Windows "
+                "may eventually kill the process with a <code>0xC0000005</code> "
+                "abort. Pick a smaller base or close the listed processes.</p>"
             )
-            btn_cancel = msg.addButton("Cancel — I'll free VRAM first", _QMB.RejectRole)
+            btn_cancel = msg.addButton("Cancel — pick a smaller model", _QMB.RejectRole)
             btn_proceed = msg.addButton("Proceed anyway", _QMB.AcceptRole)
             msg.setDefaultButton(btn_cancel)
             msg.exec()
             if msg.clickedButton() is btn_cancel:
                 self._log_to_app_log(
-                    f"[TRAIN-PREFLIGHT] cancelled; free={free_mb}MB known_used={known_total}MB "
-                    f"unknown_consumers={sum(1 for _, _, mb in real if mb is None)}"
+                    f"[TRAIN-PREFLIGHT] cancelled; gpu={target_idx} free={free_mb}MB "
+                    f"need={needed_mb}MB consumers={len(consumers)}"
                 )
                 return False
             self._log_to_app_log(
-                f"[TRAIN-PREFLIGHT] user proceeded with contention; free={free_mb}MB "
-                f"known_used={known_total}MB"
+                f"[TRAIN-PREFLIGHT] user proceeded under threshold; gpu={target_idx} "
+                f"free={free_mb}MB need={needed_mb}MB"
             )
             return True
         except Exception as exc:
@@ -16373,6 +16369,73 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             return True
+
+    def _estimate_training_vram_mb(self) -> int:
+        """Estimate VRAM needed to train the currently-selected base.
+
+        Heuristic: sum the byte size of weight files (.safetensors /
+        .bin / .pt) in the resolved local model directory. bf16
+        inference roughly equals that number; training is 2-2.5× that
+        (forward activations + AdamW optimizer state + gradients), so
+        we multiply by 2.2. Returns MB.
+
+        Fallback when we can't resolve a local dir: 6 GB. That's a
+        conservative 'small model' estimate that won't false-warn on
+        a 1-2B run.
+        """
+        try:
+            sel = ""
+            try:
+                sel = self.train_base_model.currentText().strip()
+            except Exception:
+                pass
+            if not sel:
+                return 6 * 1024
+
+            candidates = []
+            try:
+                # Local-first: LLM/models/<slug>/
+                slug = sel.replace("/", "__")
+                candidates.append(self.root / "models" / slug)
+                candidates.append(self.root / "models" / sel)
+            except Exception:
+                pass
+            # If the user picked a hub id, try the HF cache.
+            if "/" in sel:
+                try:
+                    from huggingface_hub import try_to_load_from_cache
+                    cfg_path = try_to_load_from_cache(repo_id=sel, filename="config.json")
+                    if cfg_path:
+                        candidates.append(Path(cfg_path).parent)
+                except Exception:
+                    pass
+
+            model_dir = None
+            for c in candidates:
+                try:
+                    if c and Path(c).is_dir():
+                        model_dir = Path(c)
+                        break
+                except Exception:
+                    continue
+            if model_dir is None:
+                return 6 * 1024
+
+            weights_bytes = 0
+            for ext in ("*.safetensors", "*.bin", "*.pt"):
+                for f in model_dir.glob(ext):
+                    try:
+                        weights_bytes += f.stat().st_size
+                    except Exception:
+                        pass
+            if weights_bytes <= 0:
+                return 6 * 1024
+
+            # Training peak ~ 2.2× weights bytes. Convert to MB.
+            est_mb = int((weights_bytes * 2.2) / (1024 * 1024))
+            return max(2048, est_mb)
+        except Exception:
+            return 6 * 1024
 
     def _start_training_impl(self) -> None:
         if self.train_proc is not None:

@@ -200,6 +200,7 @@ def dispatch_model_fn(
     composite_id: str,
     *,
     cwd: Optional[str] = None,
+    skip_permissions: bool = False,
 ) -> str:
     """``ModelFn`` that routes by composite id.
 
@@ -213,7 +214,12 @@ def dispatch_model_fn(
     The ``cwd`` kwarg is forwarded to backends whose ``generate`` accepts it
     (CLI backends), so the agent subprocess inherits the project's Location
     as its working directory rather than the desktop app's launch dir.
-    Backends that don't accept the kwarg are called without it.
+
+    The ``skip_permissions`` kwarg is similarly forwarded to opt-in CLI
+    backends — when the user has set the project's auto-approve toggle,
+    Claude CLI runs with ``--dangerously-skip-permissions`` so its own
+    sandbox doesn't gate every Write/Edit. Backends that don't accept
+    the kwarg are called without it.
     """
     # Empty/missing composite id is the #1 silent-failure mode in the
     # Agents page: the picker hasn't been populated yet, the role has no
@@ -245,29 +251,39 @@ def dispatch_model_fn(
             f"backend '{backend_name}' got an empty model key — the model "
             "picker probably dropped its selection. Re-pick the model."
         )
-    return _call_with_optional_cwd(backend, list(messages), model_key, cwd)
+    return _call_with_optional_kwargs(
+        backend, list(messages), model_key,
+        cwd=cwd, skip_permissions=skip_permissions,
+    )
 
 
-def _call_with_optional_cwd(
+def _call_with_optional_kwargs(
     backend: "Backend",
     messages: List[ChatMessage],
     model_key: str,
+    *,
     cwd: Optional[str],
+    skip_permissions: bool,
 ) -> str:
-    """Forward ``cwd`` only to backends whose ``generate`` accepts it.
+    """Forward optional kwargs (``cwd``, ``skip_permissions``) only to
+    backends whose ``generate`` accepts them.
 
-    Avoids requiring every backend (local, API) to declare a parameter it
-    doesn't use. CLI backends opt in by adding ``cwd`` to their
+    Avoids requiring every backend (local, API) to declare parameters
+    it doesn't use. CLI backends opt in by adding kwargs to their
     ``generate`` signature."""
-    if cwd:
-        try:
-            sig = inspect.signature(backend.generate)
-            if "cwd" in sig.parameters:
-                return backend.generate(messages, model_key, cwd=cwd)
-        except (TypeError, ValueError):
-            # Some C-implemented callables don't expose a signature; fall
-            # back to the no-cwd call rather than raising.
-            pass
+    try:
+        params = set(inspect.signature(backend.generate).parameters)
+    except (TypeError, ValueError):
+        # Some C-implemented callables don't expose a signature; fall
+        # back to the no-kwarg call rather than raising.
+        return backend.generate(messages, model_key)
+    extras: dict = {}
+    if cwd and "cwd" in params:
+        extras["cwd"] = cwd
+    if skip_permissions and "skip_permissions" in params:
+        extras["skip_permissions"] = True
+    if extras:
+        return backend.generate(messages, model_key, **extras)
     return backend.generate(messages, model_key)
 
 

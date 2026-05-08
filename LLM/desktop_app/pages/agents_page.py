@@ -4495,8 +4495,21 @@ class AgentsPage(QWidget):
             if cand and os.path.isdir(cand):
                 proj_loc = cand
 
-        def _model_fn_with_cwd(messages, composite_id, _cwd=proj_loc):
-            return dispatch_model_fn(messages, composite_id, cwd=_cwd or None)
+        # Auto-approve toggled on the Super User card means the user has
+        # explicitly told us to stop asking — push that trust through to
+        # the Claude CLI subprocess too via --dangerously-skip-permissions
+        # so its own sandbox doesn't keep prompting for paths the user
+        # has already cleared at the OWLLM level.
+        skip_perms = bool(
+            self._active_project and self._active_project.auto_approve_all
+        )
+
+        def _model_fn_with_cwd(messages, composite_id,
+                               _cwd=proj_loc, _skip=skip_perms):
+            return dispatch_model_fn(
+                messages, composite_id,
+                cwd=_cwd or None, skip_permissions=_skip,
+            )
 
         team = build_team(
             self._bus,

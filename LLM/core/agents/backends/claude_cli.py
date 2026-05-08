@@ -64,6 +64,7 @@ class ClaudeCLIBackend:
         model_key: str,
         *,
         cwd: Optional[str] = None,
+        skip_permissions: bool = False,
     ) -> str:
         # Resolve the CLI to its absolute path (with extension on Windows —
         # 'claude' is a .cmd shim, and subprocess on Windows without shell=True
@@ -85,6 +86,16 @@ class ClaudeCLIBackend:
         combined_prompt = _combine_for_stdin(messages)
 
         cmd = [exe, "--print", "--model", model_key]
+        # When the user has explicitly toggled the Super User card's
+        # auto-approve, skip the Claude CLI's permission gate too. Without
+        # this, OWLLM's internal gate is open but the CLI subprocess
+        # still surfaces per-file/per-tool prompts inside its own model
+        # session — the user sees the team "ask for permission" via the
+        # orchestrator's text and can't actually grant it from the OWLLM
+        # UI. The flag pushes the trust the user already gave through to
+        # the CLI's sandbox.
+        if skip_permissions:
+            cmd.append("--dangerously-skip-permissions")
 
         # Use the project's Location as the subprocess cwd when provided.
         # This is what makes ``trust_writes`` actually work: the Claude CLI

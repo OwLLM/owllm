@@ -2550,7 +2550,11 @@ class AgentsPage(QWidget):
         canvas_header.addWidget(reverse_edge_btn)
 
         layout_btn = QPushButton("⟲ Layout")
-        layout_btn.setToolTip("Auto-arrange agents in a grid")
+        layout_btn.setToolTip(
+            "Top-down hierarchical layout — orchestrator on top, then "
+            "specialists in rows by dispatch distance from the orchestrator. "
+            "Siblings within a row spread horizontally."
+        )
         layout_btn.setStyleSheet(_GHOST_BTN_STYLE_SMALL)
         layout_btn.clicked.connect(self._on_reset_layout)
         canvas_header.addWidget(layout_btn)
@@ -4981,6 +4985,16 @@ class AgentsPage(QWidget):
             self._view_toggle_btn.setToolTip(
                 "Switch back to the live orbital diagram"
             )
+            # Default the graph view to a fit-and-right-aligned layout
+            # so the whole graph is visible and the empty space lands
+            # on the LEFT (the orchestrator + descendants cluster on
+            # the right next to the info-card overlay). Deferred via
+            # singleShot(0) because the canvas was just made visible
+            # and the viewport size isn't valid until layout settles.
+            try:
+                QTimer.singleShot(0, self.canvas.fit_view_right_aligned)
+            except Exception:
+                logger.exception("could not fit graph view to canvas")
 
     def _on_canvas_node_selected(self, agent_name: str) -> None:
         """User clicked a node — re-point the right pane at that agent's log."""

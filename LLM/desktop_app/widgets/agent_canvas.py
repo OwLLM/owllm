@@ -998,14 +998,25 @@ class _AgentEdge(QGraphicsPathItem):
                 c1_x = src_right + loop_pad
             c1 = QPointF(c1_x, src_bottom + loop_pad)
 
-            # c2 above target's top port at target's x — keeps the
-            # arrival tangent vertical. Force the handle big enough
-            # that c2.y is also ABOVE the source's top edge so the
-            # curve sweeps clear of the source body rather than
-            # re-entering it on the way to end.
-            min_handle_for_clearance = (src_bottom - end.y()) + loop_pad + 20.0
-            handle = max(handle, min_handle_for_clearance)
+            # c2 just above target's top port at target's x — keeps
+            # the arrival tangent vertical. Use a modest clearance
+            # rather than the full chain-length: the curve only needs
+            # enough handle for a smooth approach into the target,
+            # not enough to vault entirely past every intermediate
+            # node. The earlier `(src_bottom - end.y()) + loop_pad`
+            # version produced giant sweeps for long back-edges
+            # (critic→orchestrator across a 5-node chain) because
+            # it treated the whole vertical distance as the handle.
+            handle = min(
+                max(handle, _NODE_H * 0.5),
+                _NODE_H + loop_pad,  # one node-height + breathing room
+            )
             c2 = QPointF(end.x(), end.y() - handle)
+            # Clearance: if c2 still falls inside the source body's
+            # y-range, the curve would re-enter the source on the way
+            # to end. Bump c2 above the source's top edge in that case.
+            if c2.y() > src_top - loop_pad:
+                c2 = QPointF(end.x(), src_top - loop_pad)
 
         # Magnet repulsion against every OTHER box keeps the curve
         # clear when the path passes near a third-party node.

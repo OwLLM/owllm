@@ -16200,22 +16200,25 @@ class MainWindow(QMainWindow):
 
             sub_flags = getattr(self, "subprocess_flags", {})
 
-            # 1. Resolve the GPU the user actually picked, BY NAME.
+            # 1. Resolve the GPU by UUID — the only stable identity.
             #
-            # torch.cuda uses CUDA_DEVICE_ORDER=FASTEST_FIRST by default
-            # (4090 = index 0 on a 4090+A2000 box). nvidia-smi uses
-            # PCI_BUS_ID (A2000 = index 0 on the same box). Passing
-            # torch's index to nvidia-smi targets the WRONG GPU. The
-            # only reliable cross-tool key is the device NAME (or UUID,
-            # but name is what the user picked from the dropdown).
+            # torch.cuda (FASTEST_FIRST) and nvidia-smi (PCI_BUS_ID)
+            # number GPUs differently. Names collide on dual-identical-
+            # GPU boxes. UUIDs don't. The user's home-page GPU selector
+            # already persists `selected_gpu_uuids` to gpu_config.json,
+            # and `core.gpu_config.get_chosen_gpu_index()` resolves
+            # that UUID → current nvidia-smi index using PCI_BUS_ID
+            # ordering. We use that as the source of truth.
             #
-            # Pull the name straight from the dropdown text — that's
-            # what torch reported and what the user clicked.
+            # Force CUDA_DEVICE_ORDER=PCI_BUS_ID for our own nvidia-smi
+            # calls below so the index returned by the resolver matches
+            # the index our --query-gpu / --query-compute-apps calls
+            # see — otherwise we'd repeat the same FASTEST_FIRST vs
+            # PCI_BUS_ID mismatch we just fixed.
             picked_name = ""
             try:
                 if hasattr(self, "gpu_select") and self.gpu_select.isEnabled():
                     raw = self.gpu_select.currentText() or ""
-                    # Format: "cuda:0 — NVIDIA GeForce RTX 4090 (24.0 GB)"
                     if "—" in raw:
                         after = raw.split("—", 1)[1].strip()
                     elif "-" in raw:
@@ -16228,10 +16231,23 @@ class MainWindow(QMainWindow):
             except Exception:
                 picked_name = ""
 
-            # 2. Query ALL GPUs and find the row whose name matches.
+            nvsmi_idx = -1
+            try:
+                from core.gpu_config import get_chosen_gpu_index
+                resolved = get_chosen_gpu_index(self.root, sub_flags)
+                if resolved is not None and resolved >= 0:
+                    nvsmi_idx = int(resolved)
+            except Exception:
+                nvsmi_idx = -1
+
+            # Force PCI_BUS_ID for our own queries so they agree with
+            # the resolver above.
+            env = dict(os.environ)
+            env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
             free_mb = total_mb_gpu = -1
             gpu_name = ""
-            nvsmi_idx = -1
+            rows: List[Tuple[int, str, int, int]] = []
             try:
                 gpu_proc = _sp.run(
                     [
@@ -16239,43 +16255,51 @@ class MainWindow(QMainWindow):
                         "--query-gpu=index,name,memory.free,memory.total",
                         "--format=csv,noheader,nounits",
                     ],
-                    capture_output=True, text=True, timeout=8, **sub_flags,
+                    capture_output=True, text=True, timeout=8, env=env, **sub_flags,
                 )
-                rows = []
                 if gpu_proc.returncode == 0 and gpu_proc.stdout:
                     for line in gpu_proc.stdout.splitlines():
                         parts = [p.strip() for p in line.split(",")]
                         if len(parts) < 4:
                             continue
                         try:
-                            r_idx = int(parts[0])
-                            r_name = parts[1]
-                            r_free = int(parts[2])
-                            r_total = int(parts[3])
-                            rows.append((r_idx, r_name, r_free, r_total))
+                            rows.append((
+                                int(parts[0]), parts[1], int(parts[2]), int(parts[3])
+                            ))
                         except ValueError:
                             continue
-                # Match: prefer exact name equality; fall back to
-                # case-insensitive substring; final fallback to first row.
-                if rows:
-                    pn = picked_name.strip()
-                    matched = None
-                    if pn:
-                        for r in rows:
-                            if r[1].strip() == pn:
-                                matched = r
-                                break
-                        if matched is None:
-                            pn_low = pn.lower()
-                            for r in rows:
-                                if pn_low in r[1].lower() or r[1].lower() in pn_low:
-                                    matched = r
-                                    break
-                    if matched is None:
-                        matched = rows[0]
-                    nvsmi_idx, gpu_name, free_mb, total_mb_gpu = matched
             except Exception:
                 pass
+
+            # Matching priority:
+            #   (a) UUID-resolved nvidia-smi index from gpu_config.json.
+            #   (b) Name match against the user's training-tab dropdown
+            #       (handles "user picked a different GPU than the home
+            #        page selection" — they override per-run).
+            #   (c) First row.
+            matched = None
+            if nvsmi_idx >= 0:
+                for r in rows:
+                    if r[0] == nvsmi_idx:
+                        matched = r
+                        break
+            if matched is None and picked_name:
+                pn = picked_name.strip()
+                for r in rows:
+                    if r[1].strip() == pn:
+                        matched = r
+                        break
+                if matched is None:
+                    pn_low = pn.lower()
+                    for r in rows:
+                        if pn_low in r[1].lower() or r[1].lower() in pn_low:
+                            matched = r
+                            break
+            if matched is None and rows:
+                matched = rows[0]
+
+            if matched is not None:
+                nvsmi_idx, gpu_name, free_mb, total_mb_gpu = matched
 
             target_idx = nvsmi_idx if nvsmi_idx >= 0 else 0
 
@@ -16299,7 +16323,7 @@ class MainWindow(QMainWindow):
                         "--format=csv,noheader,nounits",
                         "-i", str(target_idx),
                     ],
-                    capture_output=True, text=True, timeout=8, **sub_flags,
+                    capture_output=True, text=True, timeout=8, env=env, **sub_flags,
                 )
                 if proc.returncode == 0:
                     for line in (proc.stdout or "").splitlines():

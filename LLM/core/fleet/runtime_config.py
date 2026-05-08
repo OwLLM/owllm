@@ -56,9 +56,16 @@ stays portable across machines."""
 
 @dataclass
 class RuntimeConfig:
-    """Serialised view of a Runtime's construction kwargs."""
+    """Serialised view of a Runtime's construction kwargs.
 
-    kind: str = KIND_WORKTREE
+    Default is :data:`KIND_CONTAINER` — sandboxing is the safer default
+    for agent runs that may execute autonomous shell commands. When
+    Docker isn't installed, :meth:`to_runtime` falls back to
+    :class:`WorktreeRuntime` with a logged warning, so this default
+    never breaks installs that don't have Docker.
+    """
+
+    kind: str = KIND_CONTAINER
     # Container-only (ignored when kind == worktree)
     image: str = DEFAULT_IMAGE
     network: Optional[str] = None

@@ -1,8 +1,14 @@
 """Tests for ``backends._container_wrap.wrap_cli_for_container``.
 
-Covers the no-op paths (missing cwd, no runtime.json, kind=worktree,
-docker absent) and the active path (kind=container + docker available
-+ valid cwd → ``docker run`` argv with workspace + auth mounts).
+The wrap's logic — given the new ``kind=container`` default — boils down to:
+
+* No project cwd          → no-op (host fallback).
+* ``kind=worktree``       → no-op (user explicitly opted out).
+* Docker daemon down      → no-op (logged warning; degraded > broken).
+* Otherwise               → ``docker run …`` with workspace + auth mounts.
+
+Docker availability is mocked across the suite — these tests must run on
+hosts without Docker installed and must NEVER trigger ``docker build``.
 """
 import json
 import os
@@ -41,11 +47,21 @@ def _write_runtime_json(fleet_root: Path, payload: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# No-op paths
+# Default-disabled paths (no Docker / no project / explicit worktree)
 # ---------------------------------------------------------------------------
 
 
 class TestNoOpPaths:
+    @pytest.fixture(autouse=True)
+    def _docker_unavailable(self):
+        """Pretend Docker isn't installed so missing-config + default
+        kind=container falls back to host instead of trying to build."""
+        with patch(
+            "core.fleet.container_runtime.ContainerRuntime.is_available",
+            return_value=False,
+        ):
+            yield
+
     def test_no_cwd_returns_unchanged(self, fleet_root_env):
         argv = ["claude", "--print"]
         out_argv, out_cwd, info = wrap_cli_for_container(argv, host_cwd=None)
@@ -61,7 +77,9 @@ class TestNoOpPaths:
         assert out_cwd == bogus
         assert info is None
 
-    def test_no_runtime_json_returns_unchanged(self, fleet_root_env, project_dir):
+    def test_docker_unavailable_returns_unchanged(self, fleet_root_env, project_dir):
+        # No runtime.json on disk → defaults apply (kind=container) → but
+        # Docker is mocked unavailable → host fallback.
         argv = ["claude", "--print"]
         out_argv, out_cwd, info = wrap_cli_for_container(
             argv, host_cwd=str(project_dir),
@@ -71,29 +89,15 @@ class TestNoOpPaths:
         assert info is None
 
     def test_kind_worktree_returns_unchanged(self, fleet_root_env, project_dir):
+        # Explicit worktree opts out even if Docker is up — but we already
+        # have Docker mocked off, so this test really proves that
+        # kind=worktree short-circuits *before* checking is_available.
         _write_runtime_json(fleet_root_env, {"kind": "worktree"})
         argv = ["claude", "--print"]
         out_argv, out_cwd, info = wrap_cli_for_container(
             argv, host_cwd=str(project_dir),
         )
         assert out_argv == argv
-        assert info is None
-
-    def test_kind_container_but_docker_unavailable_falls_back(
-        self, fleet_root_env, project_dir,
-    ):
-        _write_runtime_json(fleet_root_env, {"kind": "container"})
-        argv = ["claude", "--print"]
-        # Force is_available() to False — simulates Docker not installed.
-        with patch(
-            "core.fleet.container_runtime.ContainerRuntime.is_available",
-            return_value=False,
-        ):
-            out_argv, out_cwd, info = wrap_cli_for_container(
-                argv, host_cwd=str(project_dir),
-            )
-        assert out_argv == argv
-        assert out_cwd == str(project_dir)
         assert info is None
 
 
@@ -118,6 +122,7 @@ class TestActiveWrap:
             yield
 
     def test_basic_wrap(self, fleet_root_env, project_dir):
+        # Pin a custom image so we don't trigger the auto-build code path.
         _write_runtime_json(
             fleet_root_env,
             {
@@ -150,6 +155,41 @@ class TestActiveWrap:
         assert info is not None
         assert info["image"] == "owllm/agent-runtime:test"
         assert info["workspace"] == str(project_dir)
+
+    def test_default_image_triggers_auto_build(self, fleet_root_env, project_dir):
+        # No runtime.json → defaults apply → image == DEFAULT_IMAGE →
+        # wrap calls ensure_agent_image(). Mock the helper so the test
+        # stays fast and offline.
+        with patch(
+            "core.agents.agent_image.ensure_agent_image",
+            return_value="owllm/agent:abc1234",
+        ) as ensure:
+            out_argv, out_cwd, info = wrap_cli_for_container(
+                ["claude", "--print"], host_cwd=str(project_dir),
+            )
+        ensure.assert_called_once()
+        assert "owllm/agent:abc1234" in out_argv
+        assert info["image"] == "owllm/agent:abc1234"
+        assert out_cwd is None
+
+    def test_auto_build_failure_falls_back_to_host(
+        self, fleet_root_env, project_dir,
+    ):
+        # When the auto-build helper raises (no Docker, build error,
+        # network down for npm install, …), the wrap must NOT freeze
+        # the team — it falls back to host execution with a warning.
+        from core.agents.agent_image import AgentImageError
+        with patch(
+            "core.agents.agent_image.ensure_agent_image",
+            side_effect=AgentImageError("simulated"),
+        ):
+            argv = ["claude", "--print"]
+            out_argv, out_cwd, info = wrap_cli_for_container(
+                argv, host_cwd=str(project_dir),
+            )
+        assert out_argv == argv
+        assert out_cwd == str(project_dir)
+        assert info is None
 
     def test_network_passed_through(self, fleet_root_env, project_dir):
         _write_runtime_json(

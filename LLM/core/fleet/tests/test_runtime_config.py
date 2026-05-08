@@ -24,9 +24,11 @@ from core.fleet.runtime_config import (
 # ---------------------------------------------------------------------------
 
 
-def test_default_is_worktree() -> None:
+def test_default_is_container() -> None:
+    # Sandboxing is the safer default. Falls back to worktree at
+    # to_runtime() when Docker isn't actually available.
     cfg = RuntimeConfig()
-    assert cfg.kind == KIND_WORKTREE
+    assert cfg.kind == KIND_CONTAINER
     assert cfg.use_default_auth_mounts is True
     assert cfg.enforce_module_mounts is False
 

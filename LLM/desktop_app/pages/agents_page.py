@@ -2866,6 +2866,26 @@ class AgentsPage(QWidget):
         self._trust_writes.toggled.connect(self._on_trust_writes_toggled)
         row.addWidget(self._trust_writes)
 
+        # Sandbox-status pill. Green = the next Run will execute the CLI
+        # subprocess inside Docker with the project mounted at /workspace.
+        # Yellow = host fallback (Docker not installed, or kind=worktree
+        # in <fleet_root>/runtime.json). Click to open the runtime
+        # settings dialog so the user can flip mode without leaving the
+        # agents page.
+        self._sandbox_badge = QLabel()
+        self._sandbox_badge.setObjectName("SandboxBadge")
+        self._sandbox_badge.setMinimumHeight(24)
+        self._sandbox_badge.setCursor(Qt.PointingHandCursor)
+        self._sandbox_badge.setToolTip(
+            "Click to open runtime settings (Docker isolation mode)"
+        )
+        # Plain QLabel doesn't emit clicks; intercept via mouse-press event.
+        self._sandbox_badge.mousePressEvent = (
+            lambda _ev: self._open_runtime_settings()
+        )
+        row.addWidget(self._sandbox_badge)
+        self._refresh_sandbox_badge()
+
         label = QLabel("Project")
         label.setStyleSheet(
             "color:#aaa; font-size:11px; background:transparent; "
@@ -2974,6 +2994,79 @@ class AgentsPage(QWidget):
             self._project_store.save_project(self._active_project)
         except Exception:
             logger.exception("could not save trust_writes flag")
+
+    def _refresh_sandbox_badge(self) -> None:
+        """Recompute the green/yellow sandbox pill from the current fleet
+        runtime config + Docker availability. Cheap to call — runs on
+        project switch and team build. Never raises into the UI."""
+        if not hasattr(self, "_sandbox_badge"):
+            return
+        try:
+            from core.fleet.config import default_runtime_config_path
+            from core.fleet.container_runtime import ContainerRuntime
+            from core.fleet.runtime_config import KIND_CONTAINER, RuntimeConfig
+        except Exception:
+            self._sandbox_badge.setVisible(False)
+            return
+
+        try:
+            rc = RuntimeConfig.load(default_runtime_config_path())
+            wants_container = rc.kind == KIND_CONTAINER
+            docker_up = ContainerRuntime.is_available()
+        except Exception:
+            self._sandbox_badge.setVisible(False)
+            return
+
+        if wants_container and docker_up:
+            text = "🟢 Sandboxed"
+            color, bg, border = "#5af09c", "#0e2418", "#2c5a3c"
+            tip = (
+                "CLI subprocess runs inside Docker with this project's "
+                "Location mounted at /workspace. Click to change."
+            )
+        elif wants_container and not docker_up:
+            text = "🟡 Unsandboxed (install Docker)"
+            color, bg, border = "#f0c060", "#2a1f0a", "#5a4520"
+            tip = (
+                "Container mode is on but Docker isn't running. The team "
+                "will fall back to host execution. Click to change settings."
+            )
+        else:
+            text = "🟡 Unsandboxed"
+            color, bg, border = "#f0c060", "#2a1f0a", "#5a4520"
+            tip = (
+                "Worktree mode — CLI runs directly on the host. Click to "
+                "switch to container mode for isolation."
+            )
+        self._sandbox_badge.setText(text)
+        self._sandbox_badge.setStyleSheet(
+            f"QLabel#SandboxBadge {{ "
+            f"color:{color}; background:{bg}; "
+            f"border:1px solid {border}; border-radius:6px; "
+            f"padding:2px 8px; font-size:11px; font-weight:600; }}"
+        )
+        self._sandbox_badge.setToolTip(tip)
+        self._sandbox_badge.setVisible(True)
+
+    def _open_runtime_settings(self) -> None:
+        """Open the fleet's runtime settings dialog so the user can flip
+        between worktree and container without leaving the agents page."""
+        try:
+            from desktop_app.widgets.fleet_runtime_settings_dialog import (
+                FleetRuntimeSettingsDialog,
+            )
+        except Exception:
+            logger.exception("could not import FleetRuntimeSettingsDialog")
+            return
+        try:
+            dlg = FleetRuntimeSettingsDialog(self)
+        except Exception:
+            logger.exception("could not open runtime settings dialog")
+            return
+        # Refresh the badge whenever the dialog accepts/rejects so the
+        # user sees the new state immediately.
+        dlg.finished.connect(lambda *_: self._refresh_sandbox_badge())
+        dlg.show()
 
     def _on_location_changed(self) -> None:
         """Persist edits to the location field on focus-out / Enter."""

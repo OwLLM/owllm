@@ -241,15 +241,25 @@ def fetch_recent_popular_models(
         return []
 
     def _variants_for(sort_key: Optional[str], cap: int) -> List[dict]:
+        # huggingface_hub dropped the ``direction`` keyword in newer
+        # releases (descending is now the default for numeric sort
+        # keys). Older releases still accept it. Emit both shapes so
+        # whichever version is installed gets a working call:
+        #   * variant WITH ``direction=-1`` first (covers old versions
+        #     where omitting it would sort ascending).
+        #   * variant WITHOUT ``direction`` second (covers new versions
+        #     where the kwarg raises TypeError).
         out: List[dict] = []
-        base: dict = {"limit": cap}
+        base_no_dir: dict = {"limit": cap}
         if sort_key:
-            base["sort"] = sort_key
-            base["direction"] = -1
-        if pipeline_tag:
-            out.append({**base, "pipeline_tag": pipeline_tag})
-            out.append({**base, "filter": pipeline_tag})
-        out.append(base)
+            base_no_dir["sort"] = sort_key
+        base_with_dir = {**base_no_dir, "direction": -1} if sort_key else dict(base_no_dir)
+
+        for base in (base_with_dir, base_no_dir):
+            if pipeline_tag:
+                out.append({**base, "pipeline_tag": pipeline_tag})
+                out.append({**base, "filter": pipeline_tag})
+            out.append(dict(base))
         return out
 
     fetch_cap = max(limit * 12, 240)

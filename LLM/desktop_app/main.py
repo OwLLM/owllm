@@ -7916,6 +7916,29 @@ class MainWindow(QMainWindow):
         curated_title.setStyleSheet("font-size: 16pt; font-weight: bold; color: #667eea;")
         curated_header.addWidget(curated_title)
         curated_header.addStretch(1)
+        # Legend: explains the green/orange dot on each card. Lives on
+        # the same line as the title so the meaning is glance-able.
+        # Red is intentionally absent here — recommended hides cards
+        # that don't fit; red items only appear in search results.
+        legend_specs = (
+            ("#22c55e", "Fits comfortably (inference + fine-tuning)"),
+            ("#f59e0b", "Tight fit (inference; fine-tuning may struggle)"),
+        )
+        legend_row = QHBoxLayout()
+        legend_row.setSpacing(14)
+        for hex_col, label_text in legend_specs:
+            chip = QLabel("●")
+            chip.setStyleSheet(
+                f"color: {hex_col}; font-size: 14pt; "
+                f"background: transparent; padding: 0; margin: 0;"
+            )
+            legend_row.addWidget(chip)
+            txt = QLabel(label_text)
+            txt.setStyleSheet(
+                "color: #9aa0a6; font-size: 10pt; background: transparent;"
+            )
+            legend_row.addWidget(txt)
+        curated_header.addLayout(legend_row)
         curated_v_layout.addLayout(curated_header)
         
         # 3-column layout: Cards (2/3) + Details (1/3)
@@ -8568,13 +8591,26 @@ class MainWindow(QMainWindow):
                 ("Llama 3.2 3B Instruct (4-bit)", "unsloth/llama-3.2-3b-instruct-unsloth-bnb-4bit", "Llama 3.2 3B (offline fallback)", "~2.5 GB", True),
             ]
 
-        # Sort by compatibility: green → orange → red → unknown. Within a
-        # bucket we keep HF's recency order (fetch_recent_popular_models
-        # already returned newest-first).
-        _color_rank = {"green": 0, "orange": 1, "yellow": 1, "red": 2}
+        # Sort by compatibility: green → orange → unknown. Red models
+        # (too large to fit the user's GPU) are FILTERED OUT of the
+        # Recommended view on user request — they still appear in
+        # search results, but recommending something the user can't
+        # run is just noise. Within a bucket we keep HF's recency
+        # order (fetch_recent_popular_models already returned
+        # newest-first).
+        _color_rank = {"green": 0, "orange": 1, "yellow": 1}
         def _rank(entry):
             badge = get_model_compatibility_badge(entry[1], entry[0], self.user_vram_gb)
-            return _color_rank.get((badge or {}).get("color"), 3)
+            color = (badge or {}).get("color")
+            return _color_rank.get(color, 3)
+        # Drop red cards before sorting so the loop below never
+        # constructs a ModelCard for a model that wouldn't fit.
+        all_models = [
+            entry for entry in all_models
+            if (get_model_compatibility_badge(
+                    entry[1], entry[0], self.user_vram_gb) or {}
+                ).get("color") != "red"
+        ]
         all_models.sort(key=_rank)
         
         row, col = 0, 0

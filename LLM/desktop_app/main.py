@@ -3079,7 +3079,13 @@ class MainWindow(QMainWindow):
         # signal/slot mechanism, which is unaffected by parent event filters
         # or child label propagation, so it just works.
         advanced_btn = QPushButton()
-        advanced_btn.setFixedSize(70, 50)
+        # Match the group toggles next to it (Fine Tuning / Agentic
+        # Team / Gamify): height 50 fixed, width auto-fits the label
+        # via padding 0 14px instead of a fixed 70-px square. The
+        # earlier setFixedSize(70, 50) + padding: 0 cramped the
+        # ⚙ + 'Advanced' text against the border while the neighbour
+        # toggles breathed.
+        advanced_btn.setFixedHeight(50)
         advanced_btn.setCursor(QCursor(Qt.PointingHandCursor))
         advanced_btn.setCheckable(True)
         # Two-line label inside the button via rich Unicode (Qt renders
@@ -3095,7 +3101,7 @@ class MainWindow(QMainWindow):
                 color: white;
                 font-size: 11pt;
                 font-weight: bold;
-                padding: 0;
+                padding: 0 14px;
                 text-align: center;
             }
             QPushButton:hover {

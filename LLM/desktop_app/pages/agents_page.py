@@ -1661,26 +1661,11 @@ class AgentsPage(QWidget):
         # here was redundant noise.
         outer.addWidget(self._build_project_strip())
 
-        # User card — persistent presence indicator. Idle gray border;
-        # blinks amber/cyan when the team requests user input (an
-        # approval, a NEEDS_INPUT-style event). Optionally fires an
-        # external Telegram/etc. notification — see notify_settings.
-        # Has a built-in reply field that pipes through the main goal
-        # input so existing run logic applies untouched.
-        from desktop_app.widgets.user_card import UserCard
-        self._user_card = UserCard(self)
-        self._user_card.settings_clicked.connect(self._open_notify_settings)
-        self._user_card.reply_submitted.connect(self._on_user_reply)
-        outer.addWidget(self._user_card)
-
-        # Supervisor card — per-project permissions controller.
-        # Default: ask the user for every tool approval (safer).
-        # When checked: register a wildcard auto-approve rule on the
-        # team's ApprovalGate so the team runs unattended.
-        from desktop_app.widgets.supervisor_card import SupervisorCard
-        self._supervisor_card = SupervisorCard(self)
-        self._supervisor_card.toggled.connect(self._on_supervisor_toggled)
-        outer.addWidget(self._supervisor_card)
+        # The user-side controls (presence, reply, auto-approve, notify
+        # settings) used to live in two cards above the goal row. They've
+        # been consolidated into a single chat-style SuperUserCard that
+        # mounts inside the right pane (under the agent log) — see
+        # _build_roster.
 
         # Goal row + (initially-hidden) attachment chip strip beneath it.
         outer.addLayout(self._build_goal_row())
@@ -2746,6 +2731,17 @@ class AgentsPage(QWidget):
         # only to the Reply tab. Thought clearing is handled explicitly.
         self.log_view = self._chat_view
 
+        # Super User card — single chat-style card that sits under the
+        # agent's log surface. Rolls up presence indicator, mini chat
+        # log, reply input, auto-approve toggle, and notify settings
+        # access. One card, not three lines of stacked controls.
+        from desktop_app.widgets.super_user_card import SuperUserCard
+        self._super_user_card = SuperUserCard(self)
+        self._super_user_card.reply_submitted.connect(self._on_user_reply)
+        self._super_user_card.supervisor_toggled.connect(self._on_supervisor_toggled)
+        self._super_user_card.settings_clicked.connect(self._open_notify_settings)
+        rv.addWidget(self._super_user_card)
+
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 2)
         splitter.setStretchFactor(1, 1)
@@ -2950,10 +2946,14 @@ class AgentsPage(QWidget):
         # Mirror the per-project auto-approve toggle and apply the gate
         # rule. Project switch implicitly hands a different "trust me"
         # answer for the new project.
-        if hasattr(self, "_supervisor_card"):
+        if hasattr(self, "_super_user_card"):
             on = bool(self._active_project.auto_approve_all) if self._active_project else False
-            self._supervisor_card.set_state(on)
+            self._super_user_card.set_supervisor_state(on)
             self._apply_supervisor_state(on)
+            # Project switch also resets the mini chat log on the card —
+            # leftover messages from the previous project would be
+            # misleading in the new one.
+            self._super_user_card.clear_chat()
 
     def _on_trust_writes_toggled(self, checked: bool) -> None:
         """Persist the checkbox state on toggle. The actual settings file
@@ -3120,8 +3120,8 @@ class AgentsPage(QWidget):
         self._run_started_at = None
         self._current_goal_id = None
         self.goal_input.setEnabled(True)
-        if hasattr(self, "_user_card"):
-            self._user_card.set_reply_enabled(True)
+        if hasattr(self, "_super_user_card"):
+            self._super_user_card.set_reply_enabled(True)
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.status_label.setText("Idle.")
@@ -3779,8 +3779,8 @@ class AgentsPage(QWidget):
             logger.exception("could not reset to idle on workspace reveal")
         try:
             self.goal_input.setEnabled(True)
-            if hasattr(self, "_user_card"):
-                self._user_card.set_reply_enabled(True)
+            if hasattr(self, "_super_user_card"):
+                self._super_user_card.set_reply_enabled(True)
             self.goal_input.setFocus()
         except Exception:
             pass
@@ -4333,8 +4333,9 @@ class AgentsPage(QWidget):
         goal = self._with_workdir_hint(goal)
 
         self.goal_input.setEnabled(False)
-        if hasattr(self, "_user_card"):
-            self._user_card.set_reply_enabled(False)
+        if hasattr(self, "_super_user_card"):
+            self._super_user_card.set_reply_enabled(False)
+            self._super_user_card.append_user_message(goal)
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
 
@@ -4574,8 +4575,8 @@ class AgentsPage(QWidget):
     @Slot()
     def _set_idle(self) -> None:
         self.goal_input.setEnabled(True)
-        if hasattr(self, "_user_card"):
-            self._user_card.set_reply_enabled(True)
+        if hasattr(self, "_super_user_card"):
+            self._super_user_card.set_reply_enabled(True)
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         if hasattr(self, "_elapsed_timer"):
@@ -4921,14 +4922,14 @@ class AgentsPage(QWidget):
         self._approval_cards[req.id] = card
         self._approvals_layout.addWidget(card)
         self.approvals_frame.setVisible(True)
-        # Light up the User card so the user sees something to act on
-        # even if the approvals frame is below the fold, and ping the
+        # Light up the Super User card so the user sees something to act
+        # on even if the approvals frame is below the fold, and ping the
         # configured external channel (Telegram, …) if one is set.
         body = f"{req.agent} wants to run {req.tool_name}"
         try:
-            self._user_card.set_attention(True, body)
+            self._super_user_card.set_attention(True, body)
         except Exception:
-            logger.exception("could not set User-card attention")
+            logger.exception("could not set Super-User-card attention")
         try:
             from core.notify import notify_async
             notify_async("OWLLM — input needed", body)
@@ -4944,9 +4945,9 @@ class AgentsPage(QWidget):
         if not self._approval_cards:
             self.approvals_frame.setVisible(False)
             try:
-                self._user_card.set_attention(False)
+                self._super_user_card.set_attention(False)
             except Exception:
-                logger.exception("could not clear User-card attention")
+                logger.exception("could not clear Super-User-card attention")
 
     def _open_notify_settings(self) -> None:
         """Open the notify-settings dialog (Telegram bot token, chat id)."""
@@ -4971,7 +4972,7 @@ class AgentsPage(QWidget):
         to call repeatedly."""
         if self._active_project is None:
             # No project to persist on — silently revert.
-            self._supervisor_card.set_state(False)
+            self._super_user_card.set_supervisor_state(False)
             return
         self._active_project.auto_approve_all = bool(checked)
         try:

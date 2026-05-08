@@ -3092,6 +3092,9 @@ class MainWindow(QMainWindow):
         # text on QPushButton in one line, but a vertical look comes
         # through fine with a tall font + a tiny gap).
         advanced_btn.setText("⚙\nAdvanced")
+        # 13pt to match the 'Servers:' header label on the right side
+        # of the title bar — user wants every header / page button at
+        # the same size and weight as that label.
         advanced_btn.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -3099,7 +3102,7 @@ class MainWindow(QMainWindow):
                 border: 1px solid rgba(255, 255, 255, 0.2);
                 border-radius: 6px;
                 color: white;
-                font-size: 11pt;
+                font-size: 13pt;
                 font-weight: bold;
                 padding: 0 14px;
                 text-align: center;
@@ -3134,6 +3137,7 @@ class MainWindow(QMainWindow):
             btn.setFixedHeight(50)
             btn.setCursor(QCursor(Qt.PointingHandCursor))
             btn.setCheckable(True)
+            # 13pt — matches Advanced and the 'Servers:' header label.
             btn.setStyleSheet("""
                 QPushButton {
                     background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -3141,7 +3145,7 @@ class MainWindow(QMainWindow):
                     border: 1px solid rgba(255, 255, 255, 0.2);
                     border-radius: 6px;
                     color: white;
-                    font-size: 11pt;
+                    font-size: 13pt;
                     font-weight: bold;
                     padding: 0 14px;
                     text-align: center;
@@ -3532,8 +3536,12 @@ class MainWindow(QMainWindow):
         self._bump_fonts_in_tree(_chat_tab, 3)
         tabs.addTab(_chat_tab, "Chat")
         tabs.addTab(_timed_build("Logs", self._build_logs_tab), "Logs")
+        # Server is no longer a tab — it's opened as a top-level popup
+        # window via _open_server_dialog() (wired below to server_btn).
+        # Build the page once and keep it alive so request_stop() during
+        # shutdown still works exactly as before.
         self.server_page = _timed_build("Server", lambda: ServerPage(self))
-        tabs.addTab(self.server_page, "Server")
+        self._server_dialog: Optional[QDialog] = None
         tabs.addTab(_timed_build("MCP", lambda: MCPPage(self)), "MCP")
         tabs.addTab(_timed_build("GitHub Import", lambda: GitHubImportPage(self)), "GitHub Import")
         
@@ -3690,7 +3698,7 @@ class MainWindow(QMainWindow):
         self.train_btn.clicked.connect(lambda: self._switch_tab(tabs, "train"))
         self.test_btn.clicked.connect(lambda: self._switch_tab(tabs, "test"))
         self.logs_btn.clicked.connect(lambda: self._switch_tab(tabs, "logs"))
-        self.server_btn.clicked.connect(lambda: self._switch_tab(tabs, "server"))
+        self.server_btn.clicked.connect(self._open_server_dialog)
         self.mcp_btn.clicked.connect(lambda: self._switch_tab(tabs, "mcp"))
         self.characters_btn.clicked.connect(lambda: self._switch_tab(tabs, "characters"))
         self.envs_btn.clicked.connect(lambda: self._switch_tab(tabs, "environment"))
@@ -6535,6 +6543,46 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log_to_app_log(f"[STARTUP] failed lazy init of Environment Manager: {e}")
 
+    def _open_server_dialog(self) -> None:
+        """Show the server page as a non-modal top-level popup window.
+
+        The page widget itself (``self.server_page``) is built once at
+        startup and re-parented into a dialog the first time the user
+        clicks the navbar's Server button. Subsequent clicks raise/show
+        the existing dialog instead of rebuilding it, so the running
+        server thread, log buffers, and form state all survive across
+        open/close cycles.
+        """
+        page = getattr(self, "server_page", None)
+        if page is None:
+            return
+
+        if self._server_dialog is None:
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Server")
+            # Resizable, normal frame with min/max/close. Stays on its
+            # own — non-modal — so the user can keep using the rest of
+            # the app while the server runs.
+            dlg.setWindowFlags(
+                Qt.Window
+                | Qt.WindowSystemMenuHint
+                | Qt.WindowMinMaxButtonsHint
+                | Qt.WindowCloseButtonHint
+            )
+            dlg.setModal(False)
+            dlg.resize(1100, 720)
+
+            v = QVBoxLayout(dlg)
+            v.setContentsMargins(0, 0, 0, 0)
+            v.setSpacing(0)
+            v.addWidget(page)
+            self._server_dialog = dlg
+
+        # Show as a regular top-level window each time.
+        self._server_dialog.show()
+        self._server_dialog.raise_()
+        self._server_dialog.activateWindow()
+
     def _switch_tab(self, tab_widget: QTabWidget, page_identifier):
         """
         Switch to a tab by page name or index.
@@ -6684,16 +6732,17 @@ class MainWindow(QMainWindow):
         
         # Map tab indices to corner_br image names
         # All corner images are sized to 150px width (height adaptable) by hybrid_frame system
+        # Server is no longer a tab (opened as a popup), so the
+        # mapping below skips it and indices 5+ shift up by one.
         tab_to_image = {
             0: "corner_br_owl_coding",      # Home
             1: "corner_br_owl_models",       # Models
             2: "corner_br_owl_training",     # Train
             3: "corner_br_owl_chat",        # Test
             4: "corner_br_owl_logs",         # Logs
-            5: "corner_br_owl_server",       # Server
-            6: "corner_br_owl_MCP",          # MCP
-            7: "corner_br_owl_tools",        # Requirements (using tools as fallback)
-            8: "corner_br_owl_info",         # Info (changed from corner_br_owl_thanks)
+            5: "corner_br_owl_MCP",          # MCP
+            6: "corner_br_owl_tools",        # Requirements (using tools as fallback)
+            7: "corner_br_owl_info",         # Info
         }
         
         # No fallback to a generic "corner_br" — that asset was deleted.
@@ -18030,7 +18079,7 @@ class MainWindow(QMainWindow):
         # _bump_fonts_in_tree pass via the _no_font_bump property so
         # the explicit 10pt sticks instead of being bumped to 13pt.
         self.test_model_a.setProperty("_no_font_bump", True)
-        self.test_model_a.setStyleSheet("QComboBox { font-size: 10pt; }")
+        self.test_model_a.setStyleSheet("QComboBox { font-size: 12pt; }")
         self.test_model_a.currentTextChanged.connect(self._update_model_header_ports)
         model_a_header_layout.addWidget(self.test_model_a)
         headers_layout.addWidget(model_a_header_widget, 1)
@@ -18052,7 +18101,7 @@ class MainWindow(QMainWindow):
         self.test_model_b = QComboBox()
         self.test_model_b.setEditable(False)  # Selection-only: READY models from Models tab
         self.test_model_b.setProperty("_no_font_bump", True)
-        self.test_model_b.setStyleSheet("QComboBox { font-size: 10pt; }")
+        self.test_model_b.setStyleSheet("QComboBox { font-size: 12pt; }")
         self.test_model_b.currentTextChanged.connect(self._update_model_header_ports)
         model_b_header_layout.addWidget(self.test_model_b)
         headers_layout.addWidget(model_b_header_widget, 1)
@@ -18071,7 +18120,7 @@ class MainWindow(QMainWindow):
         self.test_model_c = QComboBox()
         self.test_model_c.setEditable(False)  # Selection-only: READY models from Models tab
         self.test_model_c.setProperty("_no_font_bump", True)
-        self.test_model_c.setStyleSheet("QComboBox { font-size: 10pt; }")
+        self.test_model_c.setStyleSheet("QComboBox { font-size: 12pt; }")
         self.test_model_c.currentTextChanged.connect(self._update_model_header_ports)
         model_c_header_layout.addWidget(self.test_model_c)
         headers_layout.addWidget(model_c_header_widget, 1)
@@ -18129,11 +18178,12 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(prompt_layout)
 
         # RIGHT COLUMN - Instruction adjustment tools.
-        # Min width bumped 360 -> 420 to fit the +3pt font bump applied
-        # to the Chat tab; previously labels and inputs in the system-
-        # prompt / sampling rows wrapped or clipped at 360.
+        # Min width bumped to 540 so the +3pt-bumped settings fit in
+        # full width without needing the inner QScrollArea to show a
+        # vertical scrollbar (the user explicitly does not want a
+        # 'dragbar' here — they want the whole settings panel visible).
         right_widget = QWidget()
-        right_widget.setMinimumWidth(420)
+        right_widget.setMinimumWidth(540)
         right_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -18217,6 +18267,12 @@ class MainWindow(QMainWindow):
             scroll.setFrameShape(QFrame.NoFrame)
             # Ensure scroll area can expand properly
             scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            # No dragbar — user wants the whole settings panel visible
+            # at full width without scrollbars eating horizontal space
+            # or showing a vertical thumb. Right column min-width was
+            # bumped to 540 to give the content enough room to fit.
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             scroll_content = QWidget()
             scroll_layout = QVBoxLayout(scroll_content)
             scroll_layout.setContentsMargins(10, 10, 10, 10)

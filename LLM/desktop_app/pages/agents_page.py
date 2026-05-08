@@ -4593,6 +4593,23 @@ class AgentsPage(QWidget):
             if cand and os.path.isdir(cand):
                 proj_loc = cand
 
+        # Pin the project Location as the default cwd for tool calls that
+        # don't pass one (currently: ``shell``). Without this, container
+        # wrapping for those tools would silently no-op — defeating the
+        # isolation. Threading.local on the tool side keeps multi-team
+        # workers separated. Also refresh the sandbox-status badge here:
+        # team build is the natural time to confirm the user can see what
+        # mode the next Run will use.
+        try:
+            from core.agents.tools import set_default_cwd
+            set_default_cwd(proj_loc or None)
+        except Exception:
+            logger.exception("could not pin default cwd for tool layer")
+        try:
+            self._refresh_sandbox_badge()
+        except Exception:
+            logger.exception("could not refresh sandbox badge")
+
         # Auto-approve toggled on the Super User card means the user has
         # explicitly told us to stop asking — push that trust through to
         # the Claude CLI subprocess too via --dangerously-skip-permissions

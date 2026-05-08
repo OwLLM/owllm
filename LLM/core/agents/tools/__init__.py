@@ -23,7 +23,12 @@ from core.agents.tools.base import (
     ToolStat,
     ToolTelemetry,
 )
-from core.agents.tools.builtin import builtin_registry, get_todos, set_todo_context
+from core.agents.tools.builtin import (
+    builtin_registry,
+    get_todos,
+    set_default_cwd,
+    set_todo_context,
+)
 from core.agents.tools.mcp_adapter import register_mcp_tools
 from core.agents.tools.parser import format_for_prompt, parse_tool_calls
 from core.agents.tools.verify import VerifyConfig, find_verify_config, run_verify
@@ -44,6 +49,7 @@ __all__ = [
     "PendingApproval",
     "builtin_registry",
     "get_todos",
+    "set_default_cwd",
     "set_todo_context",
     "register_mcp_tools",
     "parse_tool_calls",

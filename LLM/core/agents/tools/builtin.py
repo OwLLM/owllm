@@ -61,6 +61,31 @@ _MAX_READ_BYTES = 200 * 1024
 _MAX_OUTPUT_CHARS = 32_000
 
 
+# Project Location threaded through from the agents page so the ``shell``
+# tool has a workspace to mount when the agent doesn't pass an explicit
+# cwd. Without this, container wrapping would silently no-op for shell
+# tool calls — defeating the isolation the user opted into. Set via
+# :func:`set_default_cwd`; threading.local so cross-thread agent workers
+# don't trample each other.
+_DEFAULT_CWD_CONTEXT = threading.local()
+
+
+def set_default_cwd(path: Optional[str]) -> None:
+    """Pin the calling thread's default cwd for tools that don't receive
+    one explicitly (currently: ``shell``).
+
+    Agents page calls this with ``project.location`` after building a
+    team. ``None`` clears it. Idempotent."""
+    if path:
+        _DEFAULT_CWD_CONTEXT.path = str(path)
+    else:
+        _DEFAULT_CWD_CONTEXT.path = None
+
+
+def _default_cwd() -> Optional[str]:
+    return getattr(_DEFAULT_CWD_CONTEXT, "path", None)
+
+
 def _truncate(text: str) -> str:
     if len(text) <= _MAX_OUTPUT_CHARS:
         return text
@@ -243,7 +268,7 @@ list_dir = Tool(
 
 def _shell(args: Mapping[str, Any]) -> str:
     cmd = str(args["cmd"])
-    cwd = args.get("cwd")
+    cwd = args.get("cwd") or _default_cwd()
     if cwd:
         cwd_path = Path(str(cwd)).expanduser()
         if not cwd_path.is_dir():
@@ -258,11 +283,22 @@ def _shell(args: Mapping[str, Any]) -> str:
         raise ToolError("timeout must be an integer (seconds)")
     timeout = max(1, min(timeout, 600))
 
+    # Optionally containerize: when the user enabled kind=container in
+    # <fleet_root>/runtime.json and Docker is up, run the command inside
+    # the OWLLM agent image with cwd_str mounted at /workspace. Auth
+    # dirs (~/.claude, ~/.config/codex, …) are mounted RO so commands
+    # like `git push` keep working. Falls back to host execution
+    # transparently when any gate fails.
+    from core.agents.backends._container_wrap import wrap_shell_for_container
+    final_cmd, final_cwd, use_shell, _info = wrap_shell_for_container(
+        cmd, host_cwd=cwd_str,
+    )
+
     try:
         proc = subprocess.run(
-            cmd,
-            shell=True,
-            cwd=cwd_str,
+            final_cmd,
+            shell=use_shell,
+            cwd=final_cwd,
             capture_output=True,
             text=True,
             timeout=timeout,

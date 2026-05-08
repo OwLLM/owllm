@@ -1,71 +1,67 @@
-"""Container-isolation wrap for CLI agent backends.
+"""Container-isolation wrap for agent subprocess calls.
 
-The agents-tab team historically shelled ``claude --print`` (and
-``codex exec``) directly on the host. With ``--dangerously-skip-permissions``
-the CLI then runs autonomous ``Bash`` against the user's whole filesystem.
-This module wraps that subprocess in ``docker run`` when the user has
-opted in via ``<fleet_root>/runtime.json`` (the same config the fleet
-already uses), so the dangerous tool calls are confined to ``/workspace``.
+The agents-tab team runs three kinds of host subprocess that can touch
+the user's filesystem and network:
 
-Scope of this slice
-===================
+* ``claude --print …`` (claude_cli backend)
+* ``codex exec …``     (codex_cli backend)
+* the OWLLM ``shell`` tool (e.g. ``pytest -x``, ``git status``)
 
-We only wrap the **CLI subprocess** — the one piece that runs the model's
-autonomous shell. The OWLLM tool layer (``shell``, ``edit_file``,
-``write_file_with_diff``) still executes on the host, gated by OWLLM's
-own approval system. Putting *those* in a container is a separate slice
-that needs the agent loop itself to move into the container.
+When the user has opted in via ``<fleet_root>/runtime.json`` (the same
+config the fleet uses), all three are wrapped in ``docker run`` here.
+Project Location bind-mounts at ``/workspace``; ``~/.claude`` and the
+other auth dirs mount RO so the in-container CLIs reuse the host login.
+The dangerous tool calls then can't escape ``/workspace``.
 
-Opt-in
-======
+Public API
+==========
 
-The function is a no-op unless ALL of these are true:
+* :func:`wrap_cli_for_container`   — wraps an argv list (Claude/Codex CLI).
+* :func:`wrap_shell_for_container` — wraps a shell-string command (the
+  OWLLM ``shell`` tool, which calls ``subprocess.run(cmd, shell=True)``).
 
-* ``<fleet_root>/runtime.json`` exists and has ``kind == "container"``
-* Docker CLI is installed and the daemon is up
-  (``ContainerRuntime.is_available()``)
-* The caller passed a real ``host_cwd`` (the project's Location) — without
-  a workspace to mount, container isolation has nothing to isolate.
+Both share the same opt-in gates and the same internal docker argv
+builder. Either falls back to host execution when:
 
-Otherwise the original argv + cwd are returned unchanged.
+* the caller passed no usable ``host_cwd`` (no project Location to mount)
+* ``runtime.json`` selects ``kind=worktree`` (user explicitly opted out)
+* Docker isn't installed / daemon is down
+* the agent image can't be built
+
+Falling back beats freezing the team.
 """
 from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
 
-def wrap_cli_for_container(
-    argv: List[str],
-    *,
+# ---------------------------------------------------------------------------
+# Internal: opt-in gate + docker argv builder
+# ---------------------------------------------------------------------------
+
+
+def _resolve_container_request(
     host_cwd: Optional[str],
-) -> Tuple[List[str], Optional[str], Optional[dict]]:
-    """Optionally wrap a CLI argv in ``docker run``.
+) -> Optional[Tuple[Path, "RuntimeConfigT", str, list, dict]]:  # type: ignore[name-defined]
+    """Decide whether to wrap. Returns the inputs the wrap needs, or
+    ``None`` if any gate fails (caller should fall back to host).
 
-    :param argv:     The host argv (e.g. ``[claude.exe, --print, ...]``).
-    :param host_cwd: The host cwd where the CLI would run — becomes the
-                     ``/workspace`` mount inside the container. ``None``
-                     or missing dir disables wrapping.
-
-    :returns: ``(final_argv, final_cwd, info)``. When wrapping is active,
-              ``final_argv`` is a ``docker run …`` command, ``final_cwd``
-              is ``None`` (Docker handles the workspace mount), and
-              ``info`` describes the chosen image/network for log lines.
-              When wrapping is not active, returns ``argv`` unchanged,
-              ``host_cwd`` unchanged, and ``info=None``.
+    Tuple shape on success: ``(workspace_path, runtime_config,
+    image_tag, auth_mounts, info_seed)``.
     """
     if not host_cwd:
-        return argv, host_cwd, None
+        return None
     cwd_path = Path(host_cwd)
     if not cwd_path.is_dir():
-        return argv, host_cwd, None
+        return None
 
-    # Read the user's runtime config. Imports are local so that
-    # importing this module never drags PySide6 / fleet config into
-    # backends that don't need them.
+    # Imports are local so that importing this module never drags
+    # PySide6/fleet/agent-image dependencies into backends that don't
+    # need them.
     try:
         from core.fleet.config import default_runtime_config_path
         from core.fleet.runtime_config import (
@@ -78,41 +74,37 @@ def wrap_cli_for_container(
             default_auth_mounts,
         )
         from core.agents.agent_image import (
-            AGENT_IMAGE_REPO,
             AgentImageError,
             ensure_agent_image,
         )
-    except Exception:  # noqa: BLE001 — fleet optional at import time
+    except Exception:  # noqa: BLE001
         logger.debug("container wrap: fleet module unavailable, host fallback")
-        return argv, host_cwd, None
+        return None
 
     try:
         rc = RuntimeConfig.load(default_runtime_config_path())
     except Exception:  # noqa: BLE001
         logger.exception("container wrap: could not load runtime.json")
-        return argv, host_cwd, None
+        return None
 
     if rc.kind != KIND_CONTAINER:
-        return argv, host_cwd, None
+        return None
     if not ContainerRuntime.is_available():
-        # Match RuntimeConfig.to_runtime()'s policy: warn and fall back
-        # rather than refusing to spawn. Better degraded than broken.
         logger.warning(
             "container wrap: kind=container but Docker isn't available — "
-            "running CLI on host (unsandboxed)"
+            "running on host (unsandboxed)"
         )
-        return argv, host_cwd, None
+        return None
 
     auth_mounts = []
     if rc.use_default_auth_mounts:
         auth_mounts.extend(default_auth_mounts())
     auth_mounts.extend(rc.extra_auth_mounts)
 
-    # Pick the image. The default in RuntimeConfig is the fleet's
-    # generic ``python:3.12-slim``, which doesn't have ``claude``/``codex``
-    # — so when the user hasn't pinned a custom image, build (or reuse)
-    # OWLLM's agent image with the CLIs preinstalled. A pinned image
-    # (anything other than the fleet default) is honored as-is.
+    # Pick the image. The fleet's generic default (``python:3.12-slim``)
+    # has neither claude nor codex, so when the user hasn't pinned a
+    # specific image we auto-build OWLLM's agent image. Custom images
+    # are honored as-is.
     image = rc.image
     if image == DEFAULT_IMAGE:
         try:
@@ -120,15 +112,32 @@ def wrap_cli_for_container(
         except AgentImageError as exc:
             logger.warning(
                 "container wrap: could not build agent image (%s) — "
-                "running CLI on host (unsandboxed)",
+                "running on host (unsandboxed)",
                 exc,
             )
-            return argv, host_cwd, None
+            return None
 
+    info = {
+        "image": image,
+        "network": rc.network or "(docker default)",
+        "workspace": str(cwd_path),
+        "auth_mounts": [m.to_docker_v() for m in auth_mounts],
+    }
+    return cwd_path, rc, image, auth_mounts, info
+
+
+def _build_docker_argv(
+    cwd_path: Path,
+    rc,
+    image: str,
+    auth_mounts: list,
+    inner_argv: List[str],
+) -> List[str]:
+    """Compose ``docker run … <image> <inner_argv>``."""
     docker_argv: List[str] = [
         "docker", "run",
-        "--rm",            # auto-cleanup; we don't track the container by name
-        "-i",              # keep stdin open — the prompt is piped in
+        "--rm",            # auto-cleanup; container name is ephemeral
+        "-i",              # keep stdin open for prompt-piped CLI calls
         "-v", f"{cwd_path}:/workspace:rw",
         "-w", "/workspace",
     ]
@@ -137,22 +146,85 @@ def wrap_cli_for_container(
     if rc.network:
         docker_argv.extend(["--network", rc.network])
     if rc.user:
-        # Treated literally — the "host" sentinel resolution happens in
-        # RuntimeConfig.to_runtime; we don't reuse that path here, so the
-        # wrap simply passes whatever string the user wrote. None means
-        # default (root inside container).
+        # Treated literally; the "host" sentinel resolution happens in
+        # RuntimeConfig.to_runtime() (which we don't go through here).
         docker_argv.extend(["--user", str(rc.user)])
     docker_argv.append(image)
-    docker_argv.extend(argv)
+    docker_argv.extend(inner_argv)
+    return docker_argv
 
-    info = {
-        "image": image,
-        "network": rc.network or "(docker default)",
-        "workspace": str(cwd_path),
-        "auth_mounts": [m.to_docker_v() for m in auth_mounts],
-    }
+
+# ---------------------------------------------------------------------------
+# Public wrap functions
+# ---------------------------------------------------------------------------
+
+
+def wrap_cli_for_container(
+    argv: List[str],
+    *,
+    host_cwd: Optional[str],
+) -> Tuple[List[str], Optional[str], Optional[dict]]:
+    """Optionally wrap a CLI argv in ``docker run``.
+
+    :param argv:     The host argv (e.g. ``[claude.exe, --print, ...]``).
+    :param host_cwd: The host cwd where the CLI would run — becomes the
+                     ``/workspace`` mount inside the container.
+
+    :returns: ``(final_argv, final_cwd, info)``. When wrapping is active
+              the argv is ``docker run …`` and ``final_cwd=None``. When
+              wrapping is inactive the argv and cwd are returned
+              unchanged.
+    """
+    resolved = _resolve_container_request(host_cwd)
+    if resolved is None:
+        return argv, host_cwd, None
+    cwd_path, rc, image, auth_mounts, info = resolved
+
+    docker_argv = _build_docker_argv(cwd_path, rc, image, auth_mounts, argv)
     logger.info(
-        "container wrap: image=%s network=%s workspace=%s",
-        info["image"], info["network"], info["workspace"],
+        "container wrap (cli): image=%s workspace=%s",
+        info["image"], info["workspace"],
     )
     return docker_argv, None, info
+
+
+def wrap_shell_for_container(
+    cmd: str,
+    *,
+    host_cwd: Optional[str],
+) -> Tuple[Union[str, List[str]], Optional[str], bool, Optional[dict]]:
+    """Optionally wrap a shell-string command in ``docker run … sh -c``.
+
+    Mirrors :func:`wrap_cli_for_container` for the OWLLM ``shell`` tool,
+    which historically calls ``subprocess.run(cmd, shell=True, cwd=…)``.
+
+    :param cmd:      The shell command line (e.g. ``"pytest -x"``).
+    :param host_cwd: The host cwd the shell tool would run in — becomes
+                     ``/workspace`` inside the container.
+
+    :returns: ``(final_cmd, final_cwd, use_shell, info)``.
+
+              * Container active: ``final_cmd`` is a docker-run argv list
+                ending in ``["sh", "-c", cmd]``, ``final_cwd=None``,
+                ``use_shell=False`` (subprocess takes a list, not a
+                shell-interpreted string).
+              * Container inactive: ``final_cmd`` is the original
+                ``cmd`` string, ``final_cwd`` is ``host_cwd``,
+                ``use_shell=True`` (preserves the host's previous
+                behavior of letting the OS shell parse the line).
+    """
+    resolved = _resolve_container_request(host_cwd)
+    if resolved is None:
+        return cmd, host_cwd, True, None
+    cwd_path, rc, image, auth_mounts, info = resolved
+
+    inner_argv = ["sh", "-c", cmd]
+    docker_argv = _build_docker_argv(
+        cwd_path, rc, image, auth_mounts, inner_argv,
+    )
+    logger.info(
+        "container wrap (shell): image=%s workspace=%s cmd=%s",
+        info["image"], info["workspace"],
+        cmd if len(cmd) <= 80 else cmd[:77] + "…",
+    )
+    return docker_argv, None, False, info

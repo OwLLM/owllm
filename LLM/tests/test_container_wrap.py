@@ -21,7 +21,10 @@ import pytest
 llm_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(llm_dir))
 
-from core.agents.backends._container_wrap import wrap_cli_for_container
+from core.agents.backends._container_wrap import (
+    wrap_cli_for_container,
+    wrap_shell_for_container,
+)
 from core.fleet.container_runtime import Mount
 
 
@@ -250,3 +253,76 @@ class TestActiveWrap:
         assert "--user" in out_argv
         u_idx = out_argv.index("--user")
         assert out_argv[u_idx + 1] == "1000:1000"
+
+
+# ---------------------------------------------------------------------------
+# wrap_shell_for_container — host fallback shape + container shape
+# ---------------------------------------------------------------------------
+
+
+class TestShellWrap:
+    def test_no_cwd_returns_unchanged_string_with_shell_true(self, fleet_root_env):
+        # Shell tool's host path is ``subprocess.run(cmd, shell=True, …)``.
+        # The wrap must preserve that contract when not containerizing.
+        with patch(
+            "core.fleet.container_runtime.ContainerRuntime.is_available",
+            return_value=False,
+        ):
+            cmd, cwd, use_shell, info = wrap_shell_for_container(
+                "pytest -x", host_cwd=None,
+            )
+        assert cmd == "pytest -x"
+        assert cwd is None
+        assert use_shell is True
+        assert info is None
+
+    def test_docker_unavailable_returns_string_with_shell_true(
+        self, fleet_root_env, project_dir,
+    ):
+        with patch(
+            "core.fleet.container_runtime.ContainerRuntime.is_available",
+            return_value=False,
+        ):
+            cmd, cwd, use_shell, info = wrap_shell_for_container(
+                "ls -la", host_cwd=str(project_dir),
+            )
+        assert cmd == "ls -la"
+        assert cwd == str(project_dir)
+        assert use_shell is True
+        assert info is None
+
+    def test_active_wrap_returns_argv_with_shell_false(
+        self, fleet_root_env, project_dir,
+    ):
+        # When containerized, the shell command is passed as
+        # ``["sh", "-c", cmd]`` to ``docker run``, and subprocess.run
+        # must NOT use shell=True (the OS shell already lives inside
+        # the container).
+        _write_runtime_json(
+            fleet_root_env,
+            {
+                "kind": "container",
+                "image": "test:latest",
+                "use_default_auth_mounts": False,
+            },
+        )
+        with patch(
+            "core.fleet.container_runtime.ContainerRuntime.is_available",
+            return_value=True,
+        ), patch(
+            "core.fleet.container_runtime.default_auth_mounts", return_value=[],
+        ):
+            cmd, cwd, use_shell, info = wrap_shell_for_container(
+                "pytest -x", host_cwd=str(project_dir),
+            )
+        # Should be a docker run … sh -c "pytest -x" argv
+        assert isinstance(cmd, list)
+        assert cmd[0] == "docker"
+        assert cmd[1] == "run"
+        assert "sh" in cmd
+        sh_idx = cmd.index("sh")
+        assert cmd[sh_idx : sh_idx + 3] == ["sh", "-c", "pytest -x"]
+        assert cwd is None
+        assert use_shell is False
+        assert info is not None
+        assert info["image"] == "test:latest"

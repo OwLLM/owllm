@@ -86,6 +86,25 @@ def _default_cwd() -> Optional[str]:
     return getattr(_DEFAULT_CWD_CONTEXT, "path", None)
 
 
+# Project id for memory scoping. Set via :func:`set_memory_context` from
+# the agents page on team build; the ``remember`` and ``recall`` tools
+# read this so each project keeps its own memory namespace. Without it,
+# the tools no-op (returning "(memory not configured)") rather than
+# silently writing to project_id=0.
+_MEMORY_CONTEXT = threading.local()
+
+
+def set_memory_context(project_id: Optional[int]) -> None:
+    """Pin the calling thread's project_id for the memory tools."""
+    _MEMORY_CONTEXT.project_id = (
+        int(project_id) if project_id is not None else None
+    )
+
+
+def _memory_project_id() -> Optional[int]:
+    return getattr(_MEMORY_CONTEXT, "project_id", None)
+
+
 def _truncate(text: str) -> str:
     if len(text) <= _MAX_OUTPUT_CHARS:
         return text
@@ -1029,6 +1048,91 @@ todo_write = Tool(
 
 
 # ---------------------------------------------------------------------------
+# remember / recall — persistent cross-session memory
+# ---------------------------------------------------------------------------
+
+
+def _remember(args: Mapping[str, Any]) -> str:
+    pid = _memory_project_id()
+    if pid is None:
+        return "(memory not configured for this run — no project active)"
+    body = str(args.get("content") or "").strip()
+    if not body:
+        raise ToolError("content is required and must be non-empty")
+    kind = str(args.get("kind") or "note").strip() or "note"
+    from core.agents.memory import get_memory_store
+    rid = get_memory_store().remember(pid, body, kind=kind)
+    if rid == 0:
+        return "(empty body, nothing stored)"
+    return f"remembered #{rid} ({kind}, {len(body)} chars)"
+
+
+def _recall(args: Mapping[str, Any]) -> str:
+    pid = _memory_project_id()
+    if pid is None:
+        return "(memory not configured for this run — no project active)"
+    query = str(args.get("query") or "").strip()
+    if not query:
+        raise ToolError("query is required")
+    try:
+        limit = int(args.get("limit", 5))
+    except (TypeError, ValueError):
+        raise ToolError("limit must be an integer")
+    limit = max(1, min(limit, 20))
+    from core.agents.memory import get_memory_store
+    hits = get_memory_store().recall(pid, query, limit=limit)
+    if not hits:
+        return f"(no memories match {query!r})"
+    lines = [f"{len(hits)} memory match(es) for {query!r}:"]
+    for m in hits:
+        # Truncate per-row so a single huge memory can't blow the budget.
+        body = m.body if len(m.body) <= 600 else m.body[:600] + "…"
+        lines.append(f"#{m.id} [{m.kind} {m.created_at}]\n{body}")
+    return _truncate("\n\n".join(lines))
+
+
+remember = Tool(
+    name="remember",
+    description=(
+        "Save a fact, decision, preference, or solved-problem note into "
+        "this project's persistent memory. Survives across goals and app "
+        "restarts. Use sparingly — only for content the next session "
+        "would want to retrieve. Examples: a key constraint the user "
+        "stated, the resolution of a tricky bug, a tool invocation "
+        "that worked when an obvious one didn't."
+    ),
+    args=[
+        ArgSpec("content", "string", "What to remember (one self-contained note)."),
+        ArgSpec(
+            "kind", "string",
+            "Optional category — e.g. 'note', 'decision', 'skill'. Free-form.",
+            required=False,
+        ),
+    ],
+    func=_remember,
+    requires_approval=False,
+)
+
+
+recall = Tool(
+    name="recall",
+    description=(
+        "Search this project's persistent memory for past notes that match "
+        "a free-text query. Returns up to ``limit`` matches ranked by "
+        "relevance (FTS5 BM25). Use at the START of work on a goal to "
+        "surface what's already known about the problem before re-doing "
+        "research."
+    ),
+    args=[
+        ArgSpec("query", "string", "Free-text query — keywords or short phrase."),
+        ArgSpec("limit", "integer", "Max matches to return (1-20). Default 5.", required=False),
+    ],
+    func=_recall,
+    requires_approval=False,
+)
+
+
+# ---------------------------------------------------------------------------
 # Default registry
 # ---------------------------------------------------------------------------
 
@@ -1051,6 +1155,8 @@ def builtin_registry() -> ToolRegistry:
     reg.register(glob_files)
     reg.register(grep)
     reg.register(todo_write)
+    reg.register(remember)
+    reg.register(recall)
     reg.register(verify)
     reg.register(shell)
     reg.register(http_get)

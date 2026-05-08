@@ -4505,6 +4505,23 @@ class AgentsPage(QWidget):
                         self._project_store.tag_goal(reply.goal_id, run_project_id)
                     except Exception:
                         logger.exception("could not tag goal with project_id")
+                # Auto-record into persistent memory: goal + final reply.
+                # This is the "Hermes-style" learning surface — next session's
+                # recall() can find what we did. Skipped for empty replies
+                # (cancelled/budget-exceeded runs already log their own
+                # events; saving a useless 'goal failed' note is noise).
+                if run_project_id and reply.body and reply.body.strip():
+                    try:
+                        from core.agents.memory import (
+                            KIND_COMPLETED_GOAL, get_memory_store,
+                        )
+                        get_memory_store().remember(
+                            run_project_id,
+                            f"GOAL: {goal}\n\nRESULT: {reply.body}",
+                            kind=KIND_COMPLETED_GOAL,
+                        )
+                    except Exception:
+                        logger.exception("could not auto-record completed goal")
             except Exception as exc:  # noqa: BLE001
                 logger.exception("agent run failed")
                 # Surface the failure on the orchestrator's card too — the
@@ -4601,10 +4618,15 @@ class AgentsPage(QWidget):
         # team build is the natural time to confirm the user can see what
         # mode the next Run will use.
         try:
-            from core.agents.tools import set_default_cwd
+            from core.agents.tools import set_default_cwd, set_memory_context
             set_default_cwd(proj_loc or None)
+            set_memory_context(
+                int(self._active_project.id)
+                if self._active_project and self._active_project.id is not None
+                else None
+            )
         except Exception:
-            logger.exception("could not pin default cwd for tool layer")
+            logger.exception("could not pin default cwd / memory for tool layer")
         try:
             self._refresh_sandbox_badge()
         except Exception:

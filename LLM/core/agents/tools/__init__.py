@@ -27,6 +27,7 @@ from core.agents.tools.builtin import (
     builtin_registry,
     get_todos,
     set_default_cwd,
+    set_memory_context,
     set_todo_context,
 )
 from core.agents.tools.mcp_adapter import register_mcp_tools
@@ -50,6 +51,7 @@ __all__ = [
     "builtin_registry",
     "get_todos",
     "set_default_cwd",
+    "set_memory_context",
     "set_todo_context",
     "register_mcp_tools",
     "parse_tool_calls",

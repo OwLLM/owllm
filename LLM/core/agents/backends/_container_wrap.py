@@ -73,8 +73,14 @@ def wrap_cli_for_container(
             RuntimeConfig,
         )
         from core.fleet.container_runtime import (
+            DEFAULT_IMAGE,
             ContainerRuntime,
             default_auth_mounts,
+        )
+        from core.agents.agent_image import (
+            AGENT_IMAGE_REPO,
+            AgentImageError,
+            ensure_agent_image,
         )
     except Exception:  # noqa: BLE001 — fleet optional at import time
         logger.debug("container wrap: fleet module unavailable, host fallback")
@@ -102,6 +108,23 @@ def wrap_cli_for_container(
         auth_mounts.extend(default_auth_mounts())
     auth_mounts.extend(rc.extra_auth_mounts)
 
+    # Pick the image. The default in RuntimeConfig is the fleet's
+    # generic ``python:3.12-slim``, which doesn't have ``claude``/``codex``
+    # — so when the user hasn't pinned a custom image, build (or reuse)
+    # OWLLM's agent image with the CLIs preinstalled. A pinned image
+    # (anything other than the fleet default) is honored as-is.
+    image = rc.image
+    if image == DEFAULT_IMAGE:
+        try:
+            image = ensure_agent_image()
+        except AgentImageError as exc:
+            logger.warning(
+                "container wrap: could not build agent image (%s) — "
+                "running CLI on host (unsandboxed)",
+                exc,
+            )
+            return argv, host_cwd, None
+
     docker_argv: List[str] = [
         "docker", "run",
         "--rm",            # auto-cleanup; we don't track the container by name
@@ -119,11 +142,11 @@ def wrap_cli_for_container(
         # wrap simply passes whatever string the user wrote. None means
         # default (root inside container).
         docker_argv.extend(["--user", str(rc.user)])
-    docker_argv.append(rc.image)
+    docker_argv.append(image)
     docker_argv.extend(argv)
 
     info = {
-        "image": rc.image,
+        "image": image,
         "network": rc.network or "(docker default)",
         "workspace": str(cwd_path),
         "auth_mounts": [m.to_docker_v() for m in auth_mounts],

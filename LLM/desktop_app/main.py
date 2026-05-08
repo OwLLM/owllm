@@ -16200,42 +16200,84 @@ class MainWindow(QMainWindow):
 
             sub_flags = getattr(self, "subprocess_flags", {})
 
-            # 1. Resolve the GPU the user actually picked. The dropdown
-            # was built from torch's view, so gpu_index_map[i] is the
-            # cuda index. Use that against nvidia-smi.
-            target_idx = 0
+            # 1. Resolve the GPU the user actually picked, BY NAME.
+            #
+            # torch.cuda uses CUDA_DEVICE_ORDER=FASTEST_FIRST by default
+            # (4090 = index 0 on a 4090+A2000 box). nvidia-smi uses
+            # PCI_BUS_ID (A2000 = index 0 on the same box). Passing
+            # torch's index to nvidia-smi targets the WRONG GPU. The
+            # only reliable cross-tool key is the device NAME (or UUID,
+            # but name is what the user picked from the dropdown).
+            #
+            # Pull the name straight from the dropdown text — that's
+            # what torch reported and what the user clicked.
+            picked_name = ""
             try:
                 if hasattr(self, "gpu_select") and self.gpu_select.isEnabled():
-                    sel = int(self.gpu_select.currentIndex())
-                    if hasattr(self, "gpu_index_map") and sel < len(self.gpu_index_map):
-                        target_idx = int(self.gpu_index_map[sel])
+                    raw = self.gpu_select.currentText() or ""
+                    # Format: "cuda:0 — NVIDIA GeForce RTX 4090 (24.0 GB)"
+                    if "—" in raw:
+                        after = raw.split("—", 1)[1].strip()
+                    elif "-" in raw:
+                        after = raw.split("-", 1)[1].strip()
                     else:
-                        target_idx = sel
+                        after = raw.strip()
+                    if "(" in after:
+                        after = after.split("(", 1)[0].strip()
+                    picked_name = after
             except Exception:
-                target_idx = 0
+                picked_name = ""
 
-            # 2. Real free / total VRAM for THAT GPU.
+            # 2. Query ALL GPUs and find the row whose name matches.
             free_mb = total_mb_gpu = -1
             gpu_name = ""
+            nvsmi_idx = -1
             try:
                 gpu_proc = _sp.run(
                     [
                         "nvidia-smi",
-                        "--query-gpu=memory.free,memory.total,name",
+                        "--query-gpu=index,name,memory.free,memory.total",
                         "--format=csv,noheader,nounits",
-                        "-i", str(target_idx),
                     ],
                     capture_output=True, text=True, timeout=8, **sub_flags,
                 )
+                rows = []
                 if gpu_proc.returncode == 0 and gpu_proc.stdout:
-                    parts = [p.strip() for p in gpu_proc.stdout.splitlines()[0].split(",")]
-                    if len(parts) >= 2:
-                        free_mb = int(parts[0])
-                        total_mb_gpu = int(parts[1])
-                    if len(parts) >= 3:
-                        gpu_name = parts[2]
+                    for line in gpu_proc.stdout.splitlines():
+                        parts = [p.strip() for p in line.split(",")]
+                        if len(parts) < 4:
+                            continue
+                        try:
+                            r_idx = int(parts[0])
+                            r_name = parts[1]
+                            r_free = int(parts[2])
+                            r_total = int(parts[3])
+                            rows.append((r_idx, r_name, r_free, r_total))
+                        except ValueError:
+                            continue
+                # Match: prefer exact name equality; fall back to
+                # case-insensitive substring; final fallback to first row.
+                if rows:
+                    pn = picked_name.strip()
+                    matched = None
+                    if pn:
+                        for r in rows:
+                            if r[1].strip() == pn:
+                                matched = r
+                                break
+                        if matched is None:
+                            pn_low = pn.lower()
+                            for r in rows:
+                                if pn_low in r[1].lower() or r[1].lower() in pn_low:
+                                    matched = r
+                                    break
+                    if matched is None:
+                        matched = rows[0]
+                    nvsmi_idx, gpu_name, free_mb, total_mb_gpu = matched
             except Exception:
                 pass
+
+            target_idx = nvsmi_idx if nvsmi_idx >= 0 else 0
 
             # 3. Estimate VRAM the active model + LoRA + AdamW will need.
             # Best signal: total bytes of weight files (.safetensors / .bin)
@@ -16318,17 +16360,30 @@ class MainWindow(QMainWindow):
             else:
                 body = (
                     "  (No process is reporting measurable VRAM use on "
-                    f"GPU {target_idx}. The {(total_mb_gpu - free_mb) / 1024:.1f} GB "
-                    "shown as 'used' is probably the Windows desktop / driver "
-                    "overhead — not freeable from the GUI. You may need to "
-                    "pick a smaller base model.)"
+                    f"{gpu_name or 'this GPU'}. The "
+                    f"{(total_mb_gpu - free_mb) / 1024:.1f} GB shown as 'used' "
+                    "is probably the Windows desktop / driver overhead — "
+                    "not freeable from the GUI. You may need to pick a "
+                    "smaller base model.)"
                 )
 
             msg = _QMB(self)
             msg.setWindowTitle("Not enough free VRAM for this model")
             msg.setIcon(_QMB.Warning)
             msg.setTextFormat(Qt.RichText)
-            gpu_label = f"cuda:{target_idx}" + (f" ({gpu_name})" if gpu_name else "")
+            # Label by NAME, not index. Index numbers from torch and
+            # nvidia-smi disagree on multi-GPU boxes (FASTEST_FIRST vs
+            # PCI_BUS_ID), so the only number worth showing the user
+            # is the cuda-index they picked plus the actual GPU name.
+            cuda_idx_label = ""
+            try:
+                if hasattr(self, "gpu_select") and self.gpu_select.isEnabled():
+                    sel = int(self.gpu_select.currentIndex())
+                    if hasattr(self, "gpu_index_map") and sel < len(self.gpu_index_map):
+                        cuda_idx_label = f"cuda:{int(self.gpu_index_map[sel])} — "
+            except Exception:
+                cuda_idx_label = ""
+            gpu_label = cuda_idx_label + (gpu_name if gpu_name else "selected GPU")
             msg.setText(
                 f"<b>{gpu_label}: {free_mb / 1024:.1f} GB free of "
                 f"{total_mb_gpu / 1024:.1f} GB total.</b><br><br>"

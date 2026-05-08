@@ -705,13 +705,39 @@ class AgentTeamCanvas(QWidget):
         # Otherwise → simple bottom hint.
         agent_card_visible = False
         team_card_visible = False
+        # Use the SHARED renderers in agent_info_card so this canvas
+        # and the editable graph view paint identical cards. Anything
+        # canvas-specific (orbital ring, beams, nodes) stays here; the
+        # info / team card visuals live in one place.
+        try:
+            from desktop_app.widgets.agent_info_card import (
+                paint_agent_card, paint_team_card,
+            )
+        except Exception:
+            paint_agent_card = paint_team_card = None  # type: ignore
         if self._selected is not None:
             agent = self._agents.get(self._selected)
-            if agent is not None:
-                self._paint_info_card(p, rect, agent)
+            if agent is not None and paint_agent_card is not None:
+                paint_agent_card(
+                    p, rect,
+                    name=agent.name,
+                    icon=agent.icon or "🤖",
+                    description=agent.description,
+                    skills=list(agent.skills),
+                    status=agent.status,
+                    model_label=agent.model_label,
+                    voice_label=agent.voice_label,
+                )
                 agent_card_visible = True
-        elif self._team_name and self._agents:
-            self._paint_team_card(p, rect)
+        elif self._team_name and self._agents and paint_team_card is not None:
+            paint_team_card(
+                p, rect,
+                team_name=self._team_name,
+                team_description=self._team_description,
+                agent_count=len(self._agents),
+                edge_count=len(self._edges),
+                owl_pixmap=self._owl_pixmap,
+            )
             team_card_visible = True
         elif self._agents:
             self._paint_hint(p, rect)
@@ -1082,339 +1108,6 @@ class AgentTeamCanvas(QWidget):
         p.setPen(_TEXT_DIM)
         hint_rect = QRectF(0, rect.height() - 28, rect.width(), 24)
         p.drawText(hint_rect, Qt.AlignCenter, "Click an agent to see its skills")
-
-    def _paint_team_card(self, p: QPainter, rect) -> None:
-        """Top-left card describing the team itself, shown when no
-        agent is selected. Same gamey character-sheet look as the
-        per-agent card so the visual language stays consistent.
-
-        Width was trimmed by 20px and height grew by 44px to host the
-        team-wide model picker overlay that the canvas positions inside
-        this same rectangle (see :meth:`_position_card_picker`).
-        """
-        margin = 14
-        card_w = min(360, rect.width() - 2 * margin)
-        card_h = 244
-        card = QRectF(margin, margin, card_w, card_h)
-
-        bg = QLinearGradient(card.topLeft(), card.bottomRight())
-        bg.setColorAt(0.0, QColor(18, 22, 34, 230))
-        bg.setColorAt(1.0, QColor(8, 11, 18, 230))
-        p.setBrush(QBrush(bg))
-        border_grad = QLinearGradient(card.topLeft(), card.bottomRight())
-        border_grad.setColorAt(0.0, _alpha(_NEON_CYAN, 220))
-        border_grad.setColorAt(1.0, _alpha(_NEON_VIOLET, 220))
-        p.setPen(QPen(QBrush(border_grad), 1.6))
-        p.drawRoundedRect(card, 12, 12)
-
-        ribbon = QRectF(card.x() + 8, card.y() + 8, card.width() - 16, 22)
-        rg = QLinearGradient(ribbon.topLeft(), ribbon.topRight())
-        rg.setColorAt(0.0, _alpha(_NEON_CYAN, 60))
-        rg.setColorAt(1.0, _alpha(_NEON_VIOLET, 10))
-        p.setBrush(QBrush(rg))
-        p.setPen(QPen(_alpha(_NEON_CYAN, 120), 1))
-        p.drawRoundedRect(ribbon, 6, 6)
-        rib_font = QFont()
-        rib_font.setPointSize(9)
-        rib_font.setBold(True)
-        p.setFont(rib_font)
-        p.setPen(_TEXT_BRIGHT)
-        p.drawText(
-            ribbon.adjusted(10, 0, -10, 0),
-            Qt.AlignVCenter | Qt.AlignLeft,
-            "● TEAM",
-        )
-
-        # Picture on the left — owl crest if present, else a generic glyph.
-        pic_x = card.x() + 14
-        pic_y = card.y() + 38
-        pic_size = 100.0
-        pic_rect = QRectF(pic_x, pic_y, pic_size, pic_size)
-        ring = QRadialGradient(pic_rect.center(), pic_size * 0.7)
-        ring.setColorAt(0.0, _alpha(_NEON_CYAN, 110))
-        ring.setColorAt(1.0, _alpha(_NEON_CYAN, 0))
-        p.setBrush(QBrush(ring))
-        p.setPen(Qt.NoPen)
-        p.drawEllipse(pic_rect.adjusted(-6, -6, 6, 6))
-        p.setBrush(QBrush(QColor(30, 36, 52)))
-        p.setPen(QPen(_alpha(_TEXT_BRIGHT, 200), 1.4))
-        p.drawEllipse(pic_rect)
-
-        if self._owl_pixmap is not None and not self._owl_pixmap.isNull():
-            target = pic_size * 0.85
-            scaled = self._owl_pixmap.scaled(
-                int(target), int(target),
-                Qt.KeepAspectRatio, Qt.SmoothTransformation,
-            )
-            p.drawPixmap(
-                QPointF(
-                    pic_rect.center().x() - scaled.width() / 2,
-                    pic_rect.center().y() - scaled.height() / 2,
-                ),
-                scaled,
-            )
-        else:
-            icon_font = QFont()
-            icon_font.setPointSizeF(pic_size * 0.65)
-            p.setFont(icon_font)
-            p.setPen(_TEXT_BRIGHT)
-            p.drawText(pic_rect, Qt.AlignCenter, "🧠")
-
-        name_font = QFont()
-        name_font.setPointSize(11)
-        name_font.setBold(True)
-        p.setFont(name_font)
-        p.setPen(_TEXT_BRIGHT)
-        name_rect = QRectF(pic_x - 6, pic_y + pic_size + 6, pic_size + 12, 20)
-        p.drawText(name_rect, Qt.AlignCenter, self._team_name)
-
-        # Right side: description + agent / connection counts.
-        info_x = pic_x + pic_size + 18
-        info_y = pic_y - 4
-        info_w = card.x() + card.width() - 14 - info_x
-
-        desc_font = QFont()
-        desc_font.setPointSize(9)
-        p.setFont(desc_font)
-        p.setPen(_TEXT_BRIGHT)
-        desc_rect = QRectF(info_x, info_y, info_w, 96)
-        desc = self._team_description or "No team description provided."
-        if len(desc) > 240:
-            desc = desc[:237] + "…"
-        p.drawText(
-            desc_rect,
-            Qt.AlignTop | Qt.AlignLeft | Qt.TextWordWrap,
-            desc,
-        )
-
-        # Bottom stats row — pushed above the picker reserve area so the
-        # overlay model picker has clear room at the bottom of the card.
-        stat_y = card.y() + card.height() - 38 - 44
-        h_font = QFont()
-        h_font.setPointSize(8)
-        h_font.setBold(True)
-        p.setFont(h_font)
-        p.setPen(_TEXT_DIM)
-        p.drawText(QRectF(info_x, stat_y, info_w, 14), Qt.AlignLeft, "AGENTS")
-        p.drawText(QRectF(info_x + 90, stat_y, info_w, 14), Qt.AlignLeft, "CONNECTIONS")
-
-        v_font = QFont()
-        v_font.setPointSize(11)
-        v_font.setBold(True)
-        p.setFont(v_font)
-        p.setPen(_TEXT_BRIGHT)
-        p.drawText(QRectF(info_x, stat_y + 14, info_w, 18), Qt.AlignLeft, str(len(self._agents)))
-        p.drawText(QRectF(info_x + 90, stat_y + 14, info_w, 18), Qt.AlignLeft, str(len(self._edges)))
-
-    def _paint_info_card(self, p: QPainter, rect, agent: _Agent) -> None:
-        """Top-left gamey character-sheet panel for the selected agent.
-
-        Layout: 360 × 264 panel (was 380 × 220 before the model picker
-        overlay landed). Picture (100×100) on the left with the agent
-        name beneath it, info on the right (description, model, status,
-        skills). The bottom 44px is reserved for the agent-specific
-        model picker overlay positioned by :meth:`_position_card_picker`.
-        """
-        margin = 14
-        card_w = min(360, rect.width() - 2 * margin)
-        card_h = 264
-        card_x = margin
-        card_y = margin
-
-        card = QRectF(card_x, card_y, card_w, card_h)
-
-        # Card background — semi-transparent dark with a violet→cyan border.
-        bg = QLinearGradient(card.topLeft(), card.bottomRight())
-        bg.setColorAt(0.0, QColor(18, 22, 34, 230))
-        bg.setColorAt(1.0, QColor(8, 11, 18, 230))
-        p.setBrush(QBrush(bg))
-
-        border_grad = QLinearGradient(card.topLeft(), card.bottomRight())
-        border_grad.setColorAt(0.0, _alpha(_NEON_CYAN, 220))
-        border_grad.setColorAt(1.0, _alpha(_NEON_VIOLET, 220))
-        p.setPen(QPen(QBrush(border_grad), 1.6))
-        p.drawRoundedRect(card, 12, 12)
-
-        # Inner accent ribbon along the top.
-        ribbon = QRectF(card.x() + 8, card.y() + 8, card.width() - 16, 22)
-        rg = QLinearGradient(ribbon.topLeft(), ribbon.topRight())
-        status_col = {
-            STATUS_IDLE: _NEON_BLUE,
-            STATUS_ACTIVE: _NEON_GREEN,
-            STATUS_PENDING: _NEON_AMBER,
-            STATUS_ERROR: _NEON_RED,
-        }[agent.status]
-        rg.setColorAt(0.0, _alpha(status_col, 60))
-        rg.setColorAt(1.0, _alpha(status_col, 10))
-        p.setBrush(QBrush(rg))
-        p.setPen(QPen(_alpha(status_col, 120), 1))
-        p.drawRoundedRect(ribbon, 6, 6)
-
-        # Status word in the ribbon.
-        rib_font = QFont()
-        rib_font.setPointSize(9)
-        rib_font.setBold(True)
-        p.setFont(rib_font)
-        p.setPen(_TEXT_BRIGHT)
-        status_word = {
-            STATUS_IDLE: "STANDBY",
-            STATUS_ACTIVE: "● ACTIVE",
-            STATUS_PENDING: "● PENDING",
-            STATUS_ERROR: "● ERROR",
-        }[agent.status]
-        p.drawText(
-            ribbon.adjusted(10, 0, -10, 0),
-            Qt.AlignVCenter | Qt.AlignLeft,
-            status_word,
-        )
-
-        # ----- Left half: picture + name -----
-        pic_x = card.x() + 14
-        pic_y = card.y() + 38
-        pic_size = 100.0
-        pic_rect = QRectF(pic_x, pic_y, pic_size, pic_size)
-
-        # Frame for the picture — neon ring.
-        ring = QRadialGradient(pic_rect.center(), pic_size * 0.7)
-        ring.setColorAt(0.0, _alpha(status_col, 90))
-        ring.setColorAt(1.0, _alpha(status_col, 0))
-        p.setBrush(QBrush(ring))
-        p.setPen(Qt.NoPen)
-        p.drawEllipse(pic_rect.adjusted(-6, -6, 6, 6))
-
-        p.setBrush(QBrush(QColor(30, 36, 52)))
-        p.setPen(QPen(_alpha(_TEXT_BRIGHT, 200), 1.4))
-        p.drawEllipse(pic_rect)
-
-        # The "picture" is the agent's icon — emoji glyph or owl PNG.
-        from desktop_app.widgets.agent_icons import paint_icon as _paint_icon
-        icon_font = QFont()
-        icon_font.setPointSizeF(pic_size * 0.65)
-        p.setFont(icon_font)
-        p.setPen(_TEXT_BRIGHT)
-        _paint_icon(p, pic_rect, agent.icon)
-
-        # Name under the picture.
-        name_font = QFont()
-        name_font.setPointSize(11)
-        name_font.setBold(True)
-        p.setFont(name_font)
-        p.setPen(_TEXT_BRIGHT)
-        name_rect = QRectF(pic_x - 6, pic_y + pic_size + 6, pic_size + 12, 20)
-        p.drawText(name_rect, Qt.AlignCenter, agent.name)
-
-        # Model label below the name (smaller, dim).
-        if agent.model_label:
-            model_font = QFont()
-            model_font.setPointSize(8)
-            p.setFont(model_font)
-            p.setPen(_TEXT_DIM)
-            model_rect = QRectF(pic_x - 6, pic_y + pic_size + 26, pic_size + 12, 16)
-            p.drawText(model_rect, Qt.AlignCenter, agent.model_label)
-
-        # Voice label below the model line — same dim style.
-        if agent.voice_label:
-            voice_font = QFont()
-            voice_font.setPointSize(8)
-            p.setFont(voice_font)
-            p.setPen(_TEXT_DIM)
-            voice_rect = QRectF(pic_x - 6, pic_y + pic_size + 42, pic_size + 12, 16)
-            fm = p.fontMetrics()
-            v_label = f"🔊 {agent.voice_label}"
-            if fm.horizontalAdvance(v_label) > voice_rect.width():
-                while v_label and fm.horizontalAdvance(v_label + "…") > voice_rect.width():
-                    v_label = v_label[:-1]
-                v_label = v_label + "…" if v_label else ""
-            p.drawText(voice_rect, Qt.AlignCenter, v_label)
-
-        # ----- Right half: description + skills -----
-        info_x = pic_x + pic_size + 18
-        info_y = pic_y - 4
-        info_w = card.x() + card.width() - 14 - info_x
-
-        # Description.
-        desc_font = QFont()
-        desc_font.setPointSize(9)
-        p.setFont(desc_font)
-        p.setPen(_TEXT_BRIGHT)
-        desc_rect = QRectF(info_x, info_y, info_w, 70)
-        desc = agent.description or "No description provided."
-        # Manually trim to keep the card compact.
-        if len(desc) > 220:
-            desc = desc[:217] + "…"
-        p.drawText(
-            desc_rect,
-            Qt.AlignTop | Qt.AlignLeft | Qt.TextWordWrap,
-            desc,
-        )
-
-        # SKILLS heading.
-        skills_y = info_y + 80
-        h_font = QFont()
-        h_font.setPointSize(8)
-        h_font.setBold(True)
-        p.setFont(h_font)
-        p.setPen(_TEXT_DIM)
-        h_rect = QRectF(info_x, skills_y, info_w, 14)
-        p.drawText(h_rect, Qt.AlignLeft, "SKILLS")
-
-        # Skill chips (up to 5, the rest go into "+N more").
-        skills = agent.skills[:]
-        chip_y = skills_y + 16
-        chip_x = info_x
-        chip_h = 18.0
-        chip_pad_x = 10
-        chip_gap = 6
-        chip_font = QFont()
-        chip_font.setPointSize(8)
-        p.setFont(chip_font)
-
-        shown = 0
-        max_shown = 5
-        chip_floor = card.y() + card.height() - 12 - 44
-        for skill in skills:
-            label = skill if len(skill) <= 24 else skill[:23] + "…"
-            metrics = p.fontMetrics()
-            w = metrics.horizontalAdvance(label) + 2 * chip_pad_x
-            # Wrap to a new line if we'd overflow the card.
-            if chip_x + w > info_x + info_w:
-                if shown >= max_shown:
-                    break
-                chip_x = info_x
-                chip_y += chip_h + chip_gap
-                if chip_y + chip_h > chip_floor:
-                    break
-            chip_rect = QRectF(chip_x, chip_y, w, chip_h)
-
-            chip_bg = QLinearGradient(chip_rect.topLeft(), chip_rect.topRight())
-            chip_bg.setColorAt(0.0, _alpha(_NEON_CYAN, 60))
-            chip_bg.setColorAt(1.0, _alpha(_NEON_VIOLET, 60))
-            p.setBrush(QBrush(chip_bg))
-            p.setPen(QPen(_alpha(_NEON_CYAN, 160), 1))
-            p.drawRoundedRect(chip_rect, 9, 9)
-            p.setPen(_TEXT_BRIGHT)
-            p.drawText(chip_rect, Qt.AlignCenter, label)
-
-            chip_x += w + chip_gap
-            shown += 1
-            if shown >= max_shown:
-                break
-
-        remaining = max(0, len(skills) - shown)
-        if remaining > 0:
-            extra = f"+{remaining} more"
-            metrics = p.fontMetrics()
-            w = metrics.horizontalAdvance(extra) + 2 * chip_pad_x
-            if chip_x + w > info_x + info_w:
-                chip_x = info_x
-                chip_y += chip_h + chip_gap
-            if chip_y + chip_h <= chip_floor:
-                more_rect = QRectF(chip_x, chip_y, w, chip_h)
-                p.setBrush(QBrush(QColor(40, 46, 64, 200)))
-                p.setPen(QPen(_alpha(_TEXT_DIM, 160), 1))
-                p.drawRoundedRect(more_rect, 9, 9)
-                p.setPen(_TEXT_DIM)
-                p.drawText(more_rect, Qt.AlignCenter, extra)
 
     # ------------------------------------------------------------------
     # Mouse interaction

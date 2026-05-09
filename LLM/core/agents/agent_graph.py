@@ -181,14 +181,27 @@ class AgentGraph:
 
     def autolayout_layered(self, orchestrator: Optional[str], *,
                            x0: float = 360.0, y0: float = 60.0,
-                           col_w: float = 300.0, row_h: float = 380.0) -> None:
-        """Arrange nodes in horizontal rows by graph distance from the orchestrator.
+                           col_w: float = 300.0, row_h: float = 380.0,
+                           diag_step: float = 110.0) -> None:
+        """Arrange nodes in rows by graph distance from the orchestrator.
 
         Row 0 (top) holds the orchestrator. Row k holds nodes whose
         shortest directed path from the orchestrator (following outbound
         edges) has length k. Nodes unreachable from the orchestrator are
-        appended to the bottom row. Within a row, nodes are spread
-        horizontally and centred around ``x0``.
+        appended to the bottom row.
+
+        Within a row:
+
+        * **Multiple siblings** spread horizontally, centred around
+          ``x0`` (offsets ``-(count-1)/2 .. +(count-1)/2`` × ``col_w``).
+        * **Single-node rows** (chain continuations) cascade diagonally
+          rather than dead-stacking under the previous row — each
+          successive chain link shifts by ``diag_step`` from where the
+          chain last sat. This produces a flowing top-down layout that
+          matches typical mental models of "the work moves *along* the
+          chain" instead of a tight vertical column. When the cascade
+          would push past a soft canvas-width limit, direction reverses
+          so the chain serpentines instead of running off the page.
         """
         if not self.nodes:
             return
@@ -229,11 +242,38 @@ class AgentGraph:
             groups.setdefault(layer[n], []).append(n)
 
         by_name = {n.name: n for n in self.nodes}
+
+        # Diagonal-cascade tracking for single-node rows. ``chain_x`` is
+        # where the chain last sat horizontally; each new single-node row
+        # shifts by ``diag_step * direction`` from there. ``direction``
+        # flips when the cascade hits the soft horizontal bound so long
+        # chains serpentine instead of flying off the canvas.
+        chain_x = x0
+        direction = 1
+        soft_bound = col_w * 1.6  # absolute max drift from x0 before flipping
+
         for row, members in sorted(groups.items()):
             count = len(members)
-            # Centre horizontally around x0: offsets -(count-1)/2 .. +(count-1)/2.
-            for i, name in enumerate(members):
-                offset = i - (count - 1) / 2.0
-                node = by_name[name]
-                node.pos_x = x0 + offset * col_w
+            if count == 1 and row > 0:
+                # Single-node continuation row → cascade diagonally.
+                next_x = chain_x + diag_step * direction
+                if abs(next_x - x0) > soft_bound:
+                    direction *= -1
+                    next_x = chain_x + diag_step * direction
+                node = by_name[members[0]]
+                node.pos_x = next_x
                 node.pos_y = y0 + row * row_h
+                chain_x = next_x
+            else:
+                # Multi-node row (siblings) OR row 0 (orchestrator) →
+                # centre horizontally around x0. Reset the cascade to
+                # the row's centroid so the next chain step continues
+                # naturally from where the eye lands.
+                for i, name in enumerate(members):
+                    offset = i - (count - 1) / 2.0
+                    node = by_name[name]
+                    node.pos_x = x0 + offset * col_w
+                    node.pos_y = y0 + row * row_h
+                # Mean of placed sibling x's = x0 (centred), so reset.
+                chain_x = x0
+                direction = 1

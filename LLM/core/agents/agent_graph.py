@@ -324,7 +324,10 @@ class AgentGraph:
                     _bump(row, node.pos_x)
 
         # Phase 3 — recentre the root horizontally over the bounding box
-        # of all descendants, half a card-height above the first row.
+        # of all descendants, three quarters of a card-height above the
+        # first row (half + an extra quarter — the user noticed half was
+        # not enough breathing room for the dashed dispatch arrows to
+        # read cleanly without crowding the row-1 cards).
         descendants = [n for n in self.nodes if n.name != root]
         if descendants:
             min_x = min(n.pos_x for n in descendants)
@@ -332,7 +335,7 @@ class AgentGraph:
             center_x = (min_x + max_x) / 2.0
             min_y_descendants = min(n.pos_y for n in descendants)
             root_node.pos_x = center_x
-            root_node.pos_y = min_y_descendants - chain_dy
+            root_node.pos_y = min_y_descendants - chain_dy - (card_h / 4.0)
 
         # Phase 4 — translate the whole layout so the leftmost / topmost
         # card sits at the canvas anchor (x0, y0). Keeps every position

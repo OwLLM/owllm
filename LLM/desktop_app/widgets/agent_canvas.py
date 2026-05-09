@@ -1597,14 +1597,22 @@ class AgentCanvas(QGraphicsView):
         self.resetTransform()
         self._zoom_factor = 1.0
 
-    def fit_view_right_aligned(self, margin: int = 40) -> None:
-        """Zoom out so the whole graph fits in the viewport, then push
-        it against the right edge with empty space on the left.
+    # Minimum zoom for the auto-fit. Below this the cards become
+    # unreadable. Users can still ctrl+wheel down to ``_ZOOM_MIN``
+    # manually if they want to see the whole graph at a glance, but the
+    # default fit prefers readable cards over guaranteed full visibility.
+    _FIT_ZOOM_MIN = 0.6
 
-        Different from QGraphicsView.fitInView (which always centers
-        the target rect): users wanted the orchestrator + descendants
-        clustered on the right with the team info-card overlay at the
-        top-left having room to breathe.
+    def fit_view_right_aligned(self, margin: int = 40) -> None:
+        """Zoom so the whole graph fits in the viewport (subject to the
+        readable-cards floor), then push it against the right edge so
+        the team's info-card overlay at the top-left has room to breathe.
+
+        Different from QGraphicsView.fitInView (which always centers the
+        target rect): users wanted the orchestrator + descendants
+        clustered on the right of the canvas. The right-align is *also*
+        why the floor matters — at the floor the layout may not fit
+        horizontally, which is fine because the user can scroll.
         """
         if not self._nodes:
             return
@@ -1617,10 +1625,12 @@ class AgentCanvas(QGraphicsView):
         if vp.width() <= 0 or vp.height() <= 0 or target.width() <= 0 or target.height() <= 0:
             return
 
+        # Pick the largest scale that fits both dimensions, then floor
+        # at _FIT_ZOOM_MIN so cards stay readable on wide layouts. The
+        # user can still ctrl+wheel down to _ZOOM_MIN if they want to
+        # see the whole graph at once at the cost of card legibility.
         scale = min(vp.width() / target.width(), vp.height() / target.height())
-        # Honour the same clamp as Ctrl+wheel so the user can zoom from
-        # this state without hitting an immediate boundary.
-        scale = max(self._ZOOM_MIN, min(self._ZOOM_MAX, scale))
+        scale = max(self._FIT_ZOOM_MIN, min(self._ZOOM_MAX, scale))
 
         self.resetTransform()
         self.scale(scale, scale)

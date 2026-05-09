@@ -69,7 +69,7 @@ class TestStripHostBinaryPath:
 class TestDefaultAuthMounts:
     """Verify the auth-mount audit picks up the FILES (.claude.json,
     .gitconfig) plus all per-CLI directory variants. The 'Claude config
-    not found at /root/.claude.json' bug was caused by mounting the
+    not found at /home/node/.claude.json' bug was caused by mounting the
     dir but not the file — these tests guard against regressing."""
 
     def test_claude_json_file_is_mounted_when_present(
@@ -87,7 +87,7 @@ class TestDefaultAuthMounts:
         from core.fleet.container_runtime import default_auth_mounts
         mounts = default_auth_mounts()
         dests = [m.container_path for m in mounts]
-        assert "/root/.claude.json" in dests
+        assert "/home/node/.claude.json" in dests
         # Mode is ro for all auth mounts
         for m in mounts:
             assert m.mode == "ro"
@@ -103,12 +103,12 @@ class TestDefaultAuthMounts:
         )
         from core.fleet.container_runtime import default_auth_mounts
         dests = [m.container_path for m in default_auth_mounts()]
-        assert "/root/.gitconfig" in dests
+        assert "/home/node/.gitconfig" in dests
 
     def test_codex_cross_platform_first_match_wins(self, tmp_path, monkeypatch):
         # Both ~/.config/codex AND ~/.codex exist (rare but possible).
         # First matching candidate (POSIX path) should win to avoid
-        # double-mounting /root/.config/codex etc.
+        # double-mounting /home/node/.config/codex etc.
         fake_home = tmp_path / "home"
         (fake_home / ".config" / "codex").mkdir(parents=True)
         (fake_home / ".codex").mkdir()
@@ -121,11 +121,11 @@ class TestDefaultAuthMounts:
         mounts = default_auth_mounts()
         # Both candidates have DIFFERENT container paths, so both should mount.
         dests = [m.container_path for m in mounts]
-        assert "/root/.config/codex" in dests
-        assert "/root/.codex" in dests
+        assert "/home/node/.config/codex" in dests
+        assert "/home/node/.codex" in dests
 
     def test_gh_dedup_when_both_paths_exist(self, tmp_path, monkeypatch):
-        # POSIX gh AND Windows gh both pointing at /root/.config/gh —
+        # POSIX gh AND Windows gh both pointing at /home/node/.config/gh —
         # only the first should be mounted.
         fake_home = tmp_path / "home"
         (fake_home / ".config" / "gh").mkdir(parents=True)
@@ -136,10 +136,10 @@ class TestDefaultAuthMounts:
             staticmethod(lambda: fake_home),
         )
         from core.fleet.container_runtime import default_auth_mounts
-        # Only one mount per /root/.config/gh — first-match wins.
+        # Only one mount per /home/node/.config/gh — first-match wins.
         gh_mounts = [
             m for m in default_auth_mounts()
-            if m.container_path == "/root/.config/gh"
+            if m.container_path == "/home/node/.config/gh"
         ]
         assert len(gh_mounts) == 1
 

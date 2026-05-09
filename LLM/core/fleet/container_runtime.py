@@ -114,27 +114,30 @@ def default_auth_mounts() -> List[Mount]:
     * gh CLI: ``~/.config/gh/`` on Linux/macOS,
       ``~/AppData/Roaming/GitHub CLI/`` on Windows.
 
-    The container destination uses ``/root/<basename>`` because
-    Docker's default user is root unless you pass ``--user``.
+    The container destination uses ``/home/node/<basename>`` because
+    the OWLLM agent image runs as the non-root ``node`` user (UID 1000,
+    home ``/home/node``). claude-code refuses
+    ``--dangerously-skip-permissions`` under root, so we cannot run as
+    root and the auth mounts must target the actual user's home.
     """
     home = Path.home()
     candidates = [
-        # (host path relative to ~, container path)
+        # (host path relative to ~, container path under /home/node)
         # Claude Code — DIR state + FILE config
-        (".claude",                          "/root/.claude"),
-        (".claude.json",                     "/root/.claude.json"),
+        (".claude",                          "/home/node/.claude"),
+        (".claude.json",                     "/home/node/.claude.json"),
         # Codex — Linux XDG path AND home-dot path (Windows / macOS variant)
-        (".config/codex",                    "/root/.config/codex"),
-        (".codex",                           "/root/.codex"),
+        (".config/codex",                    "/home/node/.config/codex"),
+        (".codex",                           "/home/node/.codex"),
         # API-key style auth dirs (rare but cheap to include)
-        (".anthropic",                       "/root/.anthropic"),
-        (".openai",                          "/root/.openai"),
+        (".anthropic",                       "/home/node/.anthropic"),
+        (".openai",                          "/home/node/.openai"),
         # gh CLI — POSIX path AND Windows path
-        (".config/gh",                       "/root/.config/gh"),
-        ("AppData/Roaming/GitHub CLI",       "/root/.config/gh"),
+        (".config/gh",                       "/home/node/.config/gh"),
+        ("AppData/Roaming/GitHub CLI",       "/home/node/.config/gh"),
         # Git — without this, in-container ``git commit`` complains
         # about missing user.name / user.email.
-        (".gitconfig",                       "/root/.gitconfig"),
+        (".gitconfig",                       "/home/node/.gitconfig"),
     ]
     mounts: List[Mount] = []
     seen_dests: set = set()

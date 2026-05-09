@@ -182,31 +182,34 @@ class AgentGraph:
     def autolayout_layered(self, orchestrator: Optional[str], *,
                            x0: float = 360.0, y0: float = 60.0,
                            col_w: float = 300.0, row_h: float = 380.0,
-                           diag_step: float = 110.0) -> None:
-        """Arrange nodes in rows by graph distance from the orchestrator.
+                           card_w: float = 220.0, card_h: float = 340.0) -> None:
+        """Arrange nodes in a staircase cascade from the orchestrator.
 
         Row 0 (top) holds the orchestrator. Row k holds nodes whose
         shortest directed path from the orchestrator (following outbound
-        edges) has length k. Nodes unreachable from the orchestrator are
-        appended to the bottom row.
+        edges) has length k.
 
-        Horizontal placement is **parent-relative**: each non-root node
-        is positioned with respect to the node that dispatched to it
-        (the source of the BFS edge that gave it its layer), not the
-        global centroid. That way:
+        Placement rules (matching how users hand-arrange workflow
+        graphs):
 
-        * **Multiple children of one parent** spread horizontally,
-          centred around the parent's x.
-        * **A single child** of a parent cascades diagonally — its x
-          is the parent's x plus ``diag_step``. Long single-child
-          chains thus flow as a diagonal cascade originating from the
-          chain's actual entry point (e.g. ``architect`` for
-          code_artisan, not ``x0``), which matches how users mentally
-          arrange branching workflows.
+        * **Siblings of one parent** sit at the same y, spread
+          horizontally around the parent's x with ``col_w`` spacing.
+        * **Chain step** (single child of a parent) sits at
+          ``(rightmost_x_at_parent_level + col_w,
+            parent.y + card_h / 2)`` —
+          one column-gap to the right of everything already placed
+          at the parent's row, and **down by half a card height**.
+          Anchoring against the row's rightmost x (not just the
+          parent's x) prevents a chain emerging from a left-side
+          sibling from sliding underneath a right-side sibling.
+        * **Orchestrator** is placed last, horizontally centred over
+          the bounding box of all descendants and **half a card
+          height above** row 1. So however wide the layout grows,
+          the root sits over the geometric centre of its work.
 
-        Cascade direction reverses when it would push past a soft
-        bound (1.6 × ``col_w`` from ``x0``) so very long chains
-        serpentine instead of running off the page.
+        The whole layout is then translated so its top-left corner
+        sits at ``(x0, y0)`` — every position is positive and the
+        canvas anchor is consistent across teams.
         """
         if not self.nodes:
             return
@@ -252,53 +255,95 @@ class AgentGraph:
             groups.setdefault(layer[n], []).append(n)
 
         by_name = {n.name: n for n in self.nodes}
+        chain_dy = card_h / 2.0  # vertical step for a chain link
 
-        # Place root at the canvas anchor.
+        # Phase 1 — place root at a working origin (0, 0). We'll re-center
+        # it horizontally after all descendants are positioned, so that
+        # however wide the cascade grows, the root sits dead-centre over
+        # the bounding box.
         root_node = by_name[root]
-        root_node.pos_x = x0
-        root_node.pos_y = y0
+        root_node.pos_x = 0.0
+        root_node.pos_y = 0.0
 
-        # Cascade direction tracking — flipped when the chain would push
-        # past the soft bound. Shared across all chains so the overall
-        # picture has a single visual flow direction.
-        direction = 1
-        soft_bound = col_w * 1.6
+        # Track the rightmost x already used at each row so chain steps
+        # never slide underneath a parallel sibling that's been placed
+        # to the right of the chain's parent (e.g. ``docs`` next to the
+        # chain start ``architect``).
+        level_max_x: Dict[int, float] = {0: 0.0}
 
+        def _bump(level: int, x: float) -> None:
+            level_max_x[level] = max(level_max_x.get(level, x), x)
+
+        # Phase 2 — walk rows top-down, placing each parent's children
+        # relative to the parent.
         for row in sorted(groups.keys()):
             if row == 0:
                 continue
             members = groups[row]
-            # Group children by their parent so we know which siblings
-            # share an anchor x.
+            # Group children by their parent so siblings of the same
+            # parent get spread around that parent specifically.
             by_parent: Dict[Optional[str], List[str]] = {}
             for m in members:
                 by_parent.setdefault(parent.get(m), []).append(m)
 
+            parent_level = row - 1
+
             for p_name, children in by_parent.items():
                 if p_name and p_name in by_name:
-                    parent_x = by_name[p_name].pos_x
+                    parent_node = by_name[p_name]
+                    parent_x = parent_node.pos_x
+                    parent_y = parent_node.pos_y
                 else:
-                    # Disconnected / unreached — anchor to canvas centre.
-                    parent_x = x0
+                    # Disconnected — anchor to (0, parent_level rough y).
+                    parent_x = 0.0
+                    parent_y = parent_level * chain_dy
 
                 if len(children) > 1:
-                    # Multiple children of this parent → spread around
-                    # the parent's x (not the global centroid). This
-                    # keeps each subtree visually attached to its root.
+                    # Siblings: same y, spread around parent.x with
+                    # ``col_w`` spacing. y is half-card-height below
+                    # the parent so siblings sit at a clean row offset.
                     for i, name in enumerate(children):
                         offset = i - (len(children) - 1) / 2.0
                         node = by_name[name]
                         node.pos_x = parent_x + offset * col_w
-                        node.pos_y = y0 + row * row_h
+                        node.pos_y = parent_y + chain_dy
+                        _bump(row, node.pos_x)
                 else:
-                    # Single child → diagonal cascade from parent's x.
+                    # Chain step: one column to the right of the
+                    # rightmost card already placed at the parent's
+                    # row (so we clear any parallel siblings), and
+                    # half a card-height down from the parent.
                     name = children[0]
-                    new_x = parent_x + diag_step * direction
-                    # Bounds check: if cascade would drift past the soft
-                    # bound, flip direction and recompute.
-                    if abs(new_x - x0) > soft_bound:
-                        direction *= -1
-                        new_x = parent_x + diag_step * direction
+                    anchor_x = max(
+                        parent_x,
+                        level_max_x.get(parent_level, parent_x),
+                    )
                     node = by_name[name]
-                    node.pos_x = new_x
-                    node.pos_y = y0 + row * row_h
+                    node.pos_x = anchor_x + col_w
+                    node.pos_y = parent_y + chain_dy
+                    _bump(row, node.pos_x)
+
+        # Phase 3 — recentre the root horizontally over the bounding box
+        # of all descendants, half a card-height above the first row.
+        descendants = [n for n in self.nodes if n.name != root]
+        if descendants:
+            min_x = min(n.pos_x for n in descendants)
+            max_x = max(n.pos_x for n in descendants)
+            center_x = (min_x + max_x) / 2.0
+            min_y_descendants = min(n.pos_y for n in descendants)
+            root_node.pos_x = center_x
+            root_node.pos_y = min_y_descendants - chain_dy
+
+        # Phase 4 — translate the whole layout so the leftmost / topmost
+        # card sits at the canvas anchor (x0, y0). Keeps every position
+        # positive and the layout consistent regardless of which side
+        # the chain happened to lean.
+        all_nodes = self.nodes
+        if all_nodes:
+            min_x_overall = min(n.pos_x for n in all_nodes)
+            min_y_overall = min(n.pos_y for n in all_nodes)
+            dx = x0 - min_x_overall
+            dy = y0 - min_y_overall
+            for n in all_nodes:
+                n.pos_x += dx
+                n.pos_y += dy

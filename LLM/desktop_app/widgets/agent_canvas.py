@@ -1605,34 +1605,66 @@ class AgentCanvas(QGraphicsView):
         Different from QGraphicsView.fitInView (which always centers the
         target rect): users wanted the orchestrator + descendants
         clustered on the right of the canvas.
+
+        The earlier ``centerOn`` approach got clamped when the
+        viewport-in-scene-units exceeded the scene rect's width — Qt
+        refused to scroll past the scene boundary, so the layout ended
+        up centered instead of right-aligned. We now explicitly expand
+        the scene rect to include a "left runway" of empty space, then
+        scroll the horizontal bar to its maximum so the items pin to
+        the right viewport edge.
         """
         if not self._nodes:
             return
         target = self._scene.itemsBoundingRect()
         if target.isEmpty() or target.isNull():
             return
-        target = target.adjusted(-margin, -margin, margin, margin)
+        target_padded = target.adjusted(-margin, -margin, margin, margin)
 
         vp = self.viewport().rect()
-        if vp.width() <= 0 or vp.height() <= 0 or target.width() <= 0 or target.height() <= 0:
+        if vp.width() <= 0 or vp.height() <= 0 or target_padded.width() <= 0 or target_padded.height() <= 0:
             return
 
         # Pick the largest scale that fits both dimensions. Honour the
         # same clamp as Ctrl+wheel so the user can zoom from this state
         # without hitting an immediate boundary.
-        scale = min(vp.width() / target.width(), vp.height() / target.height())
+        scale = min(vp.width() / target_padded.width(),
+                    vp.height() / target_padded.height())
         scale = max(self._ZOOM_MIN, min(self._ZOOM_MAX, scale))
 
         self.resetTransform()
         self.scale(scale, scale)
         self._zoom_factor = scale
 
-        # Right-align: place the target's right edge at the viewport's
-        # right edge by centering on (target.right - half_vp_w_in_scene).
-        half_vp_w_scene = (vp.width() / 2.0) / scale
-        cx = target.right() - half_vp_w_scene
-        cy = target.center().y()
-        self.centerOn(cx, cy)
+        # Expand the scene rect with a LEFT runway: enough empty scene
+        # space on the left of the items that scrolling to the right
+        # makes the items hit the viewport's right edge with empty space
+        # to their left. Without this the existing tight scene rect
+        # clamps the scroll.
+        vp_w_in_scene = vp.width() / scale
+        existing = self._scene.sceneRect()
+        runway = max(0.0, vp_w_in_scene - target.width()) + margin * 2
+        new_left = min(existing.left(), target.left() - runway)
+        # Keep top/bottom from existing (don't shrink the vertical
+        # scrollable area). Width grows by however much we extended left.
+        new_rect = QRectF(
+            new_left,
+            existing.top(),
+            existing.right() - new_left,
+            existing.height(),
+        )
+        if new_rect != existing:
+            self._scene.setSceneRect(new_rect)
+
+        # Pin items to the right viewport edge by maxing the horizontal
+        # scrollbar. Vertical: top-anchor so the orchestrator stays at
+        # the top of the visible area.
+        h_bar = self.horizontalScrollBar()
+        if h_bar is not None:
+            h_bar.setValue(h_bar.maximum())
+        v_bar = self.verticalScrollBar()
+        if v_bar is not None:
+            v_bar.setValue(v_bar.minimum())
 
     # ------------------------------------------------------------------
     # Internals

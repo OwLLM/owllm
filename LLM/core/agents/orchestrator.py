@@ -345,7 +345,16 @@ class Team:
             if reply is None:
                 final = self.bus.get_goal(goal.id)
                 status = final.status.value if final else "unknown"
-                raise RuntimeError(f"orchestrator returned no reply (goal status: {status})")
+                # Surface the goal's summary when present — this is where
+                # the real cause of failure lives (e.g. "model error: claude
+                # CLI exited 1: …"). Without it the user just saw "no reply
+                # (status: running)" which is unhelpful and, when the goal
+                # got stuck in RUNNING after a model error, also misleading.
+                summary = (final.summary or "").strip() if final else ""
+                msg = f"orchestrator returned no reply (goal status: {status})"
+                if summary:
+                    msg = f"{msg}: {summary}"
+                raise RuntimeError(msg)
             self.bus.end_goal(goal.id, GoalStatus.DONE, summary=reply.body[:200])
             return reply
         finally:

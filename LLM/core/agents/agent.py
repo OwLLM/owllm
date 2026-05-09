@@ -191,17 +191,34 @@ class Agent:
                 response = self.model_fn(messages, self.model_id)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("agent %s model call failed", self.name)
+                err_text = f"model error: {exc}"
                 self.bus.publish(
                     Message(
                         from_agent=self.name,
                         to_agent=inbox.from_agent,
                         kind=MessageKind.EVENT,
-                        body=f"model error: {exc}",
+                        body=err_text,
                         goal_id=goal_id,
                         parent_id=inbox.id,
                         meta={"error": str(exc)},
                     )
                 )
+                # End the goal with FAILED + error summary. Without
+                # this, the goal stays in RUNNING forever and Team's
+                # ``no reply`` error reads "(goal status: running)" —
+                # which makes it look like the run is still in flight
+                # when it's actually dead. Carrying the error onto the
+                # goal's summary also lets Team.run_goal surface the
+                # real failure cause to the user.
+                try:
+                    self.bus.end_goal(
+                        goal_id, GoalStatus.FAILED, err_text[:200],
+                    )
+                except Exception:
+                    logger.exception(
+                        "could not mark goal %s as FAILED after model error",
+                        goal_id,
+                    )
                 return None
 
             # Cost accounting. Best-effort: a tracking failure must never

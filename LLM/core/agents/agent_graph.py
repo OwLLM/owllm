@@ -190,18 +190,23 @@ class AgentGraph:
         edges) has length k. Nodes unreachable from the orchestrator are
         appended to the bottom row.
 
-        Within a row:
+        Horizontal placement is **parent-relative**: each non-root node
+        is positioned with respect to the node that dispatched to it
+        (the source of the BFS edge that gave it its layer), not the
+        global centroid. That way:
 
-        * **Multiple siblings** spread horizontally, centred around
-          ``x0`` (offsets ``-(count-1)/2 .. +(count-1)/2`` × ``col_w``).
-        * **Single-node rows** (chain continuations) cascade diagonally
-          rather than dead-stacking under the previous row — each
-          successive chain link shifts by ``diag_step`` from where the
-          chain last sat. This produces a flowing top-down layout that
-          matches typical mental models of "the work moves *along* the
-          chain" instead of a tight vertical column. When the cascade
-          would push past a soft canvas-width limit, direction reverses
-          so the chain serpentines instead of running off the page.
+        * **Multiple children of one parent** spread horizontally,
+          centred around the parent's x.
+        * **A single child** of a parent cascades diagonally — its x
+          is the parent's x plus ``diag_step``. Long single-child
+          chains thus flow as a diagonal cascade originating from the
+          chain's actual entry point (e.g. ``architect`` for
+          code_artisan, not ``x0``), which matches how users mentally
+          arrange branching workflows.
+
+        Cascade direction reverses when it would push past a soft
+        bound (1.6 × ``col_w`` from ``x0``) so very long chains
+        serpentine instead of running off the page.
         """
         if not self.nodes:
             return
@@ -216,8 +221,11 @@ class AgentGraph:
             if e.source in adj and e.target in names:
                 adj[e.source].append(e.target)
 
-        # BFS over the directed graph to assign layers.
+        # BFS — assigns each node a layer AND its primary parent (the
+        # source of the BFS edge that first reached it). Parent-relative
+        # placement is what produces the correct diagonal flow.
         layer: Dict[str, int] = {root: 0}
+        parent: Dict[str, Optional[str]] = {root: None}
         frontier = [root]
         while frontier:
             nxt: List[str] = []
@@ -227,6 +235,7 @@ class AgentGraph:
                         continue  # back-edge to orchestrator doesn't add a layer
                     if dst not in layer:
                         layer[dst] = layer[src] + 1
+                        parent[dst] = src
                         nxt.append(dst)
             frontier = nxt
 
@@ -235,45 +244,61 @@ class AgentGraph:
             tail = (max(layer.values()) + 1) if layer else 0
             for n in unreached:
                 layer[n] = tail
+                parent[n] = None  # disconnected — will fall back to x0
 
-        # Group by layer, preserve original node order within a layer.
+        # Group by layer for ordered placement (top-down).
         groups: Dict[int, List[str]] = {}
         for n in names:
             groups.setdefault(layer[n], []).append(n)
 
         by_name = {n.name: n for n in self.nodes}
 
-        # Diagonal-cascade tracking for single-node rows. ``chain_x`` is
-        # where the chain last sat horizontally; each new single-node row
-        # shifts by ``diag_step * direction`` from there. ``direction``
-        # flips when the cascade hits the soft horizontal bound so long
-        # chains serpentine instead of flying off the canvas.
-        chain_x = x0
-        direction = 1
-        soft_bound = col_w * 1.6  # absolute max drift from x0 before flipping
+        # Place root at the canvas anchor.
+        root_node = by_name[root]
+        root_node.pos_x = x0
+        root_node.pos_y = y0
 
-        for row, members in sorted(groups.items()):
-            count = len(members)
-            if count == 1 and row > 0:
-                # Single-node continuation row → cascade diagonally.
-                next_x = chain_x + diag_step * direction
-                if abs(next_x - x0) > soft_bound:
-                    direction *= -1
-                    next_x = chain_x + diag_step * direction
-                node = by_name[members[0]]
-                node.pos_x = next_x
-                node.pos_y = y0 + row * row_h
-                chain_x = next_x
-            else:
-                # Multi-node row (siblings) OR row 0 (orchestrator) →
-                # centre horizontally around x0. Reset the cascade to
-                # the row's centroid so the next chain step continues
-                # naturally from where the eye lands.
-                for i, name in enumerate(members):
-                    offset = i - (count - 1) / 2.0
+        # Cascade direction tracking — flipped when the chain would push
+        # past the soft bound. Shared across all chains so the overall
+        # picture has a single visual flow direction.
+        direction = 1
+        soft_bound = col_w * 1.6
+
+        for row in sorted(groups.keys()):
+            if row == 0:
+                continue
+            members = groups[row]
+            # Group children by their parent so we know which siblings
+            # share an anchor x.
+            by_parent: Dict[Optional[str], List[str]] = {}
+            for m in members:
+                by_parent.setdefault(parent.get(m), []).append(m)
+
+            for p_name, children in by_parent.items():
+                if p_name and p_name in by_name:
+                    parent_x = by_name[p_name].pos_x
+                else:
+                    # Disconnected / unreached — anchor to canvas centre.
+                    parent_x = x0
+
+                if len(children) > 1:
+                    # Multiple children of this parent → spread around
+                    # the parent's x (not the global centroid). This
+                    # keeps each subtree visually attached to its root.
+                    for i, name in enumerate(children):
+                        offset = i - (len(children) - 1) / 2.0
+                        node = by_name[name]
+                        node.pos_x = parent_x + offset * col_w
+                        node.pos_y = y0 + row * row_h
+                else:
+                    # Single child → diagonal cascade from parent's x.
+                    name = children[0]
+                    new_x = parent_x + diag_step * direction
+                    # Bounds check: if cascade would drift past the soft
+                    # bound, flip direction and recompute.
+                    if abs(new_x - x0) > soft_bound:
+                        direction *= -1
+                        new_x = parent_x + diag_step * direction
                     node = by_name[name]
-                    node.pos_x = x0 + offset * col_w
+                    node.pos_x = new_x
                     node.pos_y = y0 + row * row_h
-                # Mean of placed sibling x's = x0 (centred), so reset.
-                chain_x = x0
-                direction = 1

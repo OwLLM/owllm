@@ -94,32 +94,67 @@ def default_user_id() -> Optional[str]:
 def default_auth_mounts() -> List[Mount]:
     """Best-effort common-CLI auth mounts.
 
-    Walks the host's home directory for the auth dirs the major
-    agent CLIs use (claude, codex, gh, anthropic, openai) and
-    returns ``ro`` mounts for the ones that exist. Missing dirs are
+    Walks the host's home directory for the auth files+dirs the major
+    agent CLIs use (claude, codex, gh, anthropic, openai, git) and
+    returns ``ro`` mounts for the ones that exist. Missing entries are
     skipped silently — the user might not have every CLI installed.
+
+    Both files and directories are supported (Docker bind-mount
+    handles both transparently). Specifically:
+
+    * Claude Code stores login state in ``~/.claude.json`` (a FILE)
+      AND additional project state in ``~/.claude/`` (a DIR). Both
+      are required — without ``.claude.json`` the in-container CLI
+      reports "Claude configuration file not found at: /root/.claude.json".
+
+    * Codex CLI varies by platform: Linux uses ``~/.config/codex/``,
+      Windows/macOS often use ``~/.codex/``. We list both candidates
+      and mount whichever exists.
+
+    * gh CLI: ``~/.config/gh/`` on Linux/macOS,
+      ``~/AppData/Roaming/GitHub CLI/`` on Windows.
 
     The container destination uses ``/root/<basename>`` because
     Docker's default user is root unless you pass ``--user``.
     """
     home = Path.home()
     candidates = [
-        # (host basename relative to ~, container path)
-        (".claude",        "/root/.claude"),
-        (".config/codex",  "/root/.config/codex"),
-        (".anthropic",     "/root/.anthropic"),
-        (".openai",        "/root/.openai"),
-        (".config/gh",     "/root/.config/gh"),
+        # (host path relative to ~, container path)
+        # Claude Code — DIR state + FILE config
+        (".claude",                          "/root/.claude"),
+        (".claude.json",                     "/root/.claude.json"),
+        # Codex — Linux XDG path AND home-dot path (Windows / macOS variant)
+        (".config/codex",                    "/root/.config/codex"),
+        (".codex",                           "/root/.codex"),
+        # API-key style auth dirs (rare but cheap to include)
+        (".anthropic",                       "/root/.anthropic"),
+        (".openai",                          "/root/.openai"),
+        # gh CLI — POSIX path AND Windows path
+        (".config/gh",                       "/root/.config/gh"),
+        ("AppData/Roaming/GitHub CLI",       "/root/.config/gh"),
+        # Git — without this, in-container ``git commit`` complains
+        # about missing user.name / user.email.
+        (".gitconfig",                       "/root/.gitconfig"),
     ]
     mounts: List[Mount] = []
+    seen_dests: set = set()
     for rel, dest in candidates:
         host = home / rel
-        if host.exists():
-            mounts.append(Mount(
-                host_path=str(host),
-                container_path=dest,
-                mode="ro",
-            ))
+        # Skip entries that don't exist on the host.
+        if not host.exists():
+            continue
+        # Don't double-mount the same container path (e.g., both
+        # ``.config/gh`` and ``AppData/Roaming/GitHub CLI`` map to
+        # ``/root/.config/gh``). First match wins, which is the
+        # platform-native one given the order above.
+        if dest in seen_dests:
+            continue
+        seen_dests.add(dest)
+        mounts.append(Mount(
+            host_path=str(host),
+            container_path=dest,
+            mode="ro",
+        ))
     return mounts
 
 

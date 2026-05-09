@@ -61,6 +61,100 @@ class TestStripHostBinaryPath:
         assert _strip_host_binary_path([]) == []
 
 
+# ---------------------------------------------------------------------------
+# default_auth_mounts — file + directory + cross-platform variants
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultAuthMounts:
+    """Verify the auth-mount audit picks up the FILES (.claude.json,
+    .gitconfig) plus all per-CLI directory variants. The 'Claude config
+    not found at /root/.claude.json' bug was caused by mounting the
+    dir but not the file — these tests guard against regressing."""
+
+    def test_claude_json_file_is_mounted_when_present(
+        self, tmp_path, monkeypatch,
+    ):
+        # Simulate a fake home with .claude.json present.
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        (fake_home / ".claude.json").write_text("{}", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "core.fleet.container_runtime.Path.home",
+            staticmethod(lambda: fake_home),
+        )
+        from core.fleet.container_runtime import default_auth_mounts
+        mounts = default_auth_mounts()
+        dests = [m.container_path for m in mounts]
+        assert "/root/.claude.json" in dests
+        # Mode is ro for all auth mounts
+        for m in mounts:
+            assert m.mode == "ro"
+
+    def test_gitconfig_mounted_when_present(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        (fake_home / ".gitconfig").write_text("[user]\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "core.fleet.container_runtime.Path.home",
+            staticmethod(lambda: fake_home),
+        )
+        from core.fleet.container_runtime import default_auth_mounts
+        dests = [m.container_path for m in default_auth_mounts()]
+        assert "/root/.gitconfig" in dests
+
+    def test_codex_cross_platform_first_match_wins(self, tmp_path, monkeypatch):
+        # Both ~/.config/codex AND ~/.codex exist (rare but possible).
+        # First matching candidate (POSIX path) should win to avoid
+        # double-mounting /root/.config/codex etc.
+        fake_home = tmp_path / "home"
+        (fake_home / ".config" / "codex").mkdir(parents=True)
+        (fake_home / ".codex").mkdir()
+
+        monkeypatch.setattr(
+            "core.fleet.container_runtime.Path.home",
+            staticmethod(lambda: fake_home),
+        )
+        from core.fleet.container_runtime import default_auth_mounts
+        mounts = default_auth_mounts()
+        # Both candidates have DIFFERENT container paths, so both should mount.
+        dests = [m.container_path for m in mounts]
+        assert "/root/.config/codex" in dests
+        assert "/root/.codex" in dests
+
+    def test_gh_dedup_when_both_paths_exist(self, tmp_path, monkeypatch):
+        # POSIX gh AND Windows gh both pointing at /root/.config/gh —
+        # only the first should be mounted.
+        fake_home = tmp_path / "home"
+        (fake_home / ".config" / "gh").mkdir(parents=True)
+        (fake_home / "AppData" / "Roaming" / "GitHub CLI").mkdir(parents=True)
+
+        monkeypatch.setattr(
+            "core.fleet.container_runtime.Path.home",
+            staticmethod(lambda: fake_home),
+        )
+        from core.fleet.container_runtime import default_auth_mounts
+        # Only one mount per /root/.config/gh — first-match wins.
+        gh_mounts = [
+            m for m in default_auth_mounts()
+            if m.container_path == "/root/.config/gh"
+        ]
+        assert len(gh_mounts) == 1
+
+    def test_missing_files_skipped(self, tmp_path, monkeypatch):
+        # Empty home — nothing to mount.
+        fake_home = tmp_path / "empty_home"
+        fake_home.mkdir()
+        monkeypatch.setattr(
+            "core.fleet.container_runtime.Path.home",
+            staticmethod(lambda: fake_home),
+        )
+        from core.fleet.container_runtime import default_auth_mounts
+        assert default_auth_mounts() == []
+
+
 @pytest.fixture
 def fleet_root_env(tmp_path, monkeypatch):
     """Point the fleet config at a fresh tmp dir for each test."""

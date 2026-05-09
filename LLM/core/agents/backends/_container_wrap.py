@@ -126,6 +126,34 @@ def _resolve_container_request(
     return cwd_path, rc, image, auth_mounts, info
 
 
+def _strip_host_binary_path(argv: List[str]) -> List[str]:
+    """Replace argv[0] with its basename (without extension) when it's
+    a host-resolved absolute path.
+
+    The CLI backends call ``shutil.which("claude")`` to locate the
+    binary, which on Windows returns something like
+    ``C:\\Users\\mc\\AppData\\Roaming\\npm\\claude.cmd`` and on Linux
+    returns ``/usr/local/bin/claude``. Either of those is **wrong**
+    inside the container — the container's PATH has its own
+    ``claude`` (installed by the Dockerfile's ``npm install -g``).
+    Passing the host path made Node try to load a module at
+    ``/workspace/C:\\Users\\mc\\…``, which produced the cryptic
+    "Cannot find module" error.
+
+    We strip the path and any extension so the container's ``claude``
+    / ``codex`` resolves via PATH like any other shell command.
+    """
+    if not argv:
+        return argv
+    head = argv[0]
+    is_windows_abs = len(head) > 1 and head[1] == ":"
+    is_posix_abs = head.startswith("/")
+    if not (is_windows_abs or is_posix_abs):
+        return argv  # already a bare command name
+    bare = Path(head).stem  # 'claude.cmd' / 'claude.exe' / 'claude' → 'claude'
+    return [bare, *argv[1:]]
+
+
 def _build_docker_argv(
     cwd_path: Path,
     rc,
@@ -134,6 +162,7 @@ def _build_docker_argv(
     inner_argv: List[str],
 ) -> List[str]:
     """Compose ``docker run … <image> <inner_argv>``."""
+    inner_argv = _strip_host_binary_path(inner_argv)
     docker_argv: List[str] = [
         "docker", "run",
         "--rm",            # auto-cleanup; container name is ephemeral

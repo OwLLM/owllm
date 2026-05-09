@@ -22,10 +22,43 @@ llm_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(llm_dir))
 
 from core.agents.backends._container_wrap import (
+    _strip_host_binary_path,
     wrap_cli_for_container,
     wrap_shell_for_container,
 )
 from core.fleet.container_runtime import Mount
+
+
+# ---------------------------------------------------------------------------
+# Host-binary path stripping
+# ---------------------------------------------------------------------------
+
+
+class TestStripHostBinaryPath:
+    """Inner argv must use the container's ``claude`` / ``codex`` from
+    PATH, not the host-resolved absolute path. Otherwise Node tries to
+    load a module at ``/workspace/C:\\Users\\…`` and fails."""
+
+    def test_windows_cmd_path_stripped(self):
+        argv = [r"C:\Users\mc\AppData\Roaming\npm\claude.cmd", "--print", "--model", "x"]
+        out = _strip_host_binary_path(argv)
+        assert out[0] == "claude"
+        assert out[1:] == ["--print", "--model", "x"]
+
+    def test_windows_exe_path_stripped(self):
+        argv = [r"C:\Program Files\Node\codex.exe", "exec"]
+        assert _strip_host_binary_path(argv)[0] == "codex"
+
+    def test_posix_abs_path_stripped(self):
+        argv = ["/usr/local/bin/claude", "--print"]
+        assert _strip_host_binary_path(argv)[0] == "claude"
+
+    def test_bare_command_unchanged(self):
+        argv = ["claude", "--print"]
+        assert _strip_host_binary_path(argv) == argv
+
+    def test_empty_argv_unchanged(self):
+        assert _strip_host_binary_path([]) == []
 
 
 @pytest.fixture

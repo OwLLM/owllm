@@ -2876,8 +2876,15 @@ class AgentsPage(QWidget):
             "Click to open runtime settings (Docker isolation mode)"
         )
         # Plain QLabel doesn't emit clicks; intercept via mouse-press event.
+        # Click behaviour: when prerequisites are missing, show a
+        # diagnostic dialog with paste-ready fix-it commands. When the
+        # sandbox is READY (or the user has explicitly chosen worktree
+        # mode), open the runtime-settings dialog so they can change
+        # the mode. Decided dynamically at click-time so the same pill
+        # smartly disambiguates "what's wrong?" from "let me change
+        # the mode".
         self._sandbox_badge.mousePressEvent = (
-            lambda _ev: self._open_runtime_settings()
+            lambda _ev: self._sandbox_badge_clicked()
         )
         row.addWidget(self._sandbox_badge)
         self._refresh_sandbox_badge()
@@ -3021,15 +3028,16 @@ class AgentsPage(QWidget):
             logger.exception("could not save trust_writes flag")
 
     def _refresh_sandbox_badge(self) -> None:
-        """Recompute the green/yellow sandbox pill from the current fleet
-        runtime config + Docker availability. Cheap to call — runs on
-        project switch and team build. Never raises into the UI."""
+        """Recompute the sandbox pill from the current fleet runtime
+        config + Docker availability + host CLI login state. Cheap to
+        call — runs on project switch, team build, and a 5s timer.
+        Never raises into the UI."""
         if not hasattr(self, "_sandbox_badge"):
             return
         try:
             from core.fleet.config import default_runtime_config_path
-            from core.fleet.container_runtime import ContainerRuntime
             from core.fleet.runtime_config import KIND_CONTAINER, RuntimeConfig
+            from core.agents.setup import SetupState, check_agent_setup
         except Exception:
             self._sandbox_badge.setVisible(False)
             return
@@ -3037,31 +3045,55 @@ class AgentsPage(QWidget):
         try:
             rc = RuntimeConfig.load(default_runtime_config_path())
             wants_container = rc.kind == KIND_CONTAINER
-            docker_up = ContainerRuntime.is_available()
+            status = check_agent_setup()
         except Exception:
             self._sandbox_badge.setVisible(False)
             return
 
-        if wants_container and docker_up:
-            text = "🟢 Sandboxed"
-            color, bg, border = "#5af09c", "#0e2418", "#2c5a3c"
-            tip = (
-                "CLI subprocess runs inside Docker with this project's "
-                "Location mounted at /workspace. Click to change."
-            )
-        elif wants_container and not docker_up:
-            text = "🟡 Unsandboxed (install Docker)"
-            color, bg, border = "#f0c060", "#2a1f0a", "#5a4520"
-            tip = (
-                "Container mode is on but Docker isn't running. The team "
-                "will fall back to host execution. Click to change settings."
-            )
-        else:
+        if not wants_container:
+            # User explicitly opted out — running on host, not a problem.
             text = "🟡 Unsandboxed"
             color, bg, border = "#f0c060", "#2a1f0a", "#5a4520"
             tip = (
                 "Worktree mode — CLI runs directly on the host. Click to "
                 "switch to container mode for isolation."
+            )
+        elif status.state == SetupState.READY:
+            text = "🟢 Sandboxed"
+            color, bg, border = "#5af09c", "#0e2418", "#2c5a3c"
+            tip = (
+                "CLI subprocess runs inside Docker with this project's "
+                "Location mounted at /workspace. Click for details."
+            )
+        elif status.state == SetupState.NOT_LOGGED_IN:
+            text = "🟠 Sandboxed — not logged in"
+            color, bg, border = "#ffa040", "#2a1810", "#5a3818"
+            tip = (
+                "Docker is up but no CLI is logged in. Run "
+                "``claude /login`` (or ``codex login``) on the host. "
+                "Click for details."
+            )
+        elif status.state == SetupState.DOCKER_DOWN:
+            text = "🟠 Docker not running"
+            color, bg, border = "#ffa040", "#2a1810", "#5a3818"
+            tip = (
+                "Docker is installed but the daemon isn't responding. "
+                "Start Docker Desktop. Click for details."
+            )
+        elif status.state == SetupState.DOCKER_MISSING:
+            text = "🔴 Docker missing"
+            color, bg, border = "#ff5555", "#2a1010", "#5a2020"
+            tip = (
+                "Container mode is on but Docker isn't installed. "
+                "The team will fall back to host (unsandboxed). "
+                "Click for the install link."
+            )
+        else:  # HOST_FALLBACK or anything unexpected
+            text = "🟡 Host fallback"
+            color, bg, border = "#f0c060", "#2a1f0a", "#5a4520"
+            tip = (
+                "Container prerequisites not fully met — running on host. "
+                "Click for details."
             )
         self._sandbox_badge.setText(text)
         self._sandbox_badge.setStyleSheet(
@@ -3149,6 +3181,78 @@ class AgentsPage(QWidget):
                 switcher(tabs, "bridges")
         except Exception:
             logger.exception("could not switch to Bridges tab")
+
+    def _sandbox_badge_clicked(self) -> None:
+        """Decide whether to show the diagnostic dialog or the runtime
+        settings, based on current setup state.
+
+        * Prerequisites missing (Docker missing / down, no login) →
+          diagnostic dialog with paste-ready fix-it commands. The user
+          mostly wants to know "what do I need to install/run".
+        * Prerequisites OK (READY) or user opted into worktree mode →
+          runtime-settings dialog. The user mostly wants to change
+          modes or tweak image/network.
+        """
+        try:
+            from core.agents.setup import SetupState, check_agent_setup
+        except Exception:
+            self._open_runtime_settings()
+            return
+        try:
+            status = check_agent_setup()
+        except Exception:
+            self._open_runtime_settings()
+            return
+        # READY → user can change settings. Anything else has actionable
+        # recommendations — show those.
+        if status.state == SetupState.READY:
+            self._open_runtime_settings()
+            return
+        self._show_setup_diagnostic(status)
+
+    def _show_setup_diagnostic(self, status) -> None:
+        """Surface ``status.recommendations`` in a QMessageBox so the
+        user sees the exact commands to run / installers to download."""
+        try:
+            from core.agents.setup import SetupState
+        except Exception:
+            return
+        title = {
+            SetupState.DOCKER_MISSING:  "Docker not installed",
+            SetupState.DOCKER_DOWN:     "Docker not running",
+            SetupState.NOT_LOGGED_IN:   "Sign in to a CLI",
+            SetupState.HOST_FALLBACK:   "Container prerequisites not met",
+        }.get(status.state, "Agent setup")
+        if status.recommendations:
+            body = "\n\n".join(f"• {r}" for r in status.recommendations)
+        else:
+            body = "Everything looks fine."
+        # Append a footer pointing the user at the runtime-settings
+        # dialog if they want to opt out of container mode entirely.
+        body += (
+            "\n\n(You can also switch to worktree mode in Runtime "
+            "Settings if you don't want sandboxed runs.)"
+        )
+        try:
+            box = QMessageBox(self)
+            box.setWindowTitle(title)
+            box.setIcon(QMessageBox.Information)
+            box.setText(body)
+            box.setStandardButtons(QMessageBox.Ok)
+            settings_btn = box.addButton(
+                "Runtime Settings…", QMessageBox.ActionRole,
+            )
+            recheck_btn = box.addButton(
+                "Recheck", QMessageBox.ActionRole,
+            )
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is settings_btn:
+                self._open_runtime_settings()
+            elif clicked is recheck_btn:
+                self._refresh_sandbox_badge()
+        except Exception:
+            logger.exception("could not show setup diagnostic")
 
     def _open_runtime_settings(self) -> None:
         """Open the fleet's runtime settings dialog so the user can flip

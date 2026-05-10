@@ -11,16 +11,8 @@ from datetime import datetime
 
 import subprocess
 
-# Windows subprocess flags to prevent CMD window flashing
+# Do not hide child console windows.
 SUBPROCESS_FLAGS = {}
-if sys.platform == 'win32':
-    startupinfo = subprocess.STARTUPINFO()
-    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    startupinfo.wShowWindow = subprocess.SW_HIDE
-    SUBPROCESS_FLAGS = {
-        'startupinfo': startupinfo,
-        'creationflags': subprocess.CREATE_NO_WINDOW
-    }
 
 def print_section(title):
     """Print section header"""
@@ -248,6 +240,53 @@ def check_markers():
             print(f"❌ {marker_name} - NOT FOUND")
             print(f"    Description: {description}")
 
+def check_agent_runtime():
+    """Check optional agent-runtime prerequisites (Docker + claude/codex CLIs).
+
+    These are OPTIONAL — only needed for the Agents tab's sandboxed runs.
+    The base app is fully usable without any of them. Surfacing the state
+    here turns later "why doesn't agent Run work?" surprises into one clear
+    list of paste-ready commands the user can act on now.
+    """
+    print_section("Agent Runtime (optional — sandboxed agents)")
+
+    llm_dir = Path(__file__).parent
+    sys.path.insert(0, str(llm_dir))
+    try:
+        from core.agents.setup import SetupState, check_agent_setup
+    except Exception as exc:
+        print(f"⚠ Cannot import core.agents.setup: {exc}")
+        return
+
+    s = check_agent_setup()
+
+    def fmt(label, ok, detail=""):
+        mark = "✓" if ok else "✗"
+        suffix = f" — {detail}" if detail else ""
+        print(f"  {mark} {label}{suffix}")
+
+    fmt("Docker CLI on PATH", s.docker_installed)
+    fmt("Docker daemon running", s.docker_running)
+    fmt("Claude Code CLI on PATH", s.claude_cli_on_host)
+    fmt("Claude Code logged in (~/.claude.json)", s.claude_logged_in)
+    fmt("Codex CLI on PATH", s.codex_cli_on_host)
+    fmt("Codex logged in (~/.codex or ~/.config/codex)", s.codex_logged_in)
+
+    summary_map = {
+        SetupState.READY: "✅ Agent sandbox READY — containerised runs available",
+        SetupState.NOT_LOGGED_IN: "⚠ Docker fine, but no CLI session — see suggestions below",
+        SetupState.DOCKER_DOWN: "⚠ Docker installed but daemon not responding",
+        SetupState.DOCKER_MISSING: "ℹ Docker not installed — host-mode fallback will be used",
+        SetupState.HOST_FALLBACK: "ℹ Host-mode fallback (no Docker)",
+    }
+    print(f"\n  Summary: {summary_map.get(s.state, s.state.value)}")
+
+    if s.recommendations:
+        print("\n  Suggested actions (most blocking first):")
+        for i, rec in enumerate(s.recommendations, 1):
+            print(f"    {i}. {rec}")
+
+
 def check_packages():
     """Check if key packages are installed in venv"""
     print_section("Installed Packages (Sample)")
@@ -307,7 +346,10 @@ def main():
     
     if venv_ok:
         check_packages()
-    
+
+    # Agent runtime is optional and independent of the venv — always show.
+    check_agent_runtime()
+
     # Summary
     print_section("Summary")
     

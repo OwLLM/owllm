@@ -57,17 +57,70 @@ class SmartInstaller:
         self.min_disk_space_gb = 5  # Minimum 5 GB required
         self.install_plan = {}  # Frozen install plan dict (hardware/platform-driven)
         
-        # Windows subprocess flags to prevent CMD window flashing
+        # Do not hide child console windows.
         self.subprocess_flags = {}
-        if sys.platform == 'win32':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            startupinfo.wShowWindow = subprocess.SW_HIDE
-            self.subprocess_flags = {
-                'startupinfo': startupinfo,
-                'creationflags': subprocess.CREATE_NO_WINDOW
-            }
-    
+
+    def _is_same_python(self, candidate: str) -> bool:
+        try:
+            return Path(candidate).resolve() == Path(sys.executable).resolve()
+        except Exception:
+            return False
+
+    def _probe_module_version(self, check_python: str, module_name: str) -> Optional[str]:
+        # In-process when probing the running interpreter — avoids spawning
+        # one ``python -c "import X"`` per package, which used to flash a
+        # console window per probe during the requirements scan.
+        if self._is_same_python(check_python):
+            try:
+                import importlib.metadata as _md
+                try:
+                    return _md.version(module_name)
+                except _md.PackageNotFoundError:
+                    pass
+            except Exception:
+                pass
+            try:
+                import importlib
+                mod = importlib.import_module(module_name)
+                return getattr(mod, "__version__", None) or "installed"
+            except Exception:
+                return None
+
+        try:
+            result = subprocess.run(
+                [check_python, "-c",
+                 f"import {module_name} as _m; print(getattr(_m, '__version__', 'installed'))"],
+                capture_output=True, text=True, timeout=10, **self.subprocess_flags
+            )
+            if result.returncode == 0:
+                return (result.stdout.strip() or "installed")
+        except Exception:
+            pass
+        return None
+
+    def _probe_module_importable(self, check_python: str, module_name: str) -> bool:
+        if self._is_same_python(check_python):
+            try:
+                import importlib.util
+                if importlib.util.find_spec(module_name) is not None:
+                    return True
+            except Exception:
+                pass
+            try:
+                import importlib
+                importlib.import_module(module_name)
+                return True
+            except Exception:
+                return False
+        try:
+            result = subprocess.run(
+                [check_python, "-c", f"import {module_name}"],
+                capture_output=True, text=True, timeout=10, **self.subprocess_flags
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
     def log(self, message: str):
         """Log installation message"""
         msg = f"[INSTALL] {message}"
@@ -2424,29 +2477,34 @@ if errorlevel 1 (
         """
         checklist = []
         
-        # Determine which Python to use for checking packages
-        if not python_executable:
+        # Determine which Python to use for checking packages.
+        #
+        # The caller (installer GUI) resolves the active profile env via
+        # ``_get_active_env_python()`` and passes it explicitly. Honour that
+        # — it points at ``LLM/.envs/<env_key>/.venv`` where the install
+        # actually landed. The previous version hardcoded ``LLM/.venv``
+        # (legacy path) and overrode the caller, which is why a successful
+        # profile-env install showed up as "Not Installed" in the checklist.
+        if python_executable:
+            check_python = python_executable
+            self.log(f"Using caller-supplied Python: {check_python}")
+        else:
+            # Fallback chain: detection result → legacy .venv → bootstrap.
             python_info = self.detection_results.get("python", {}) if self.detection_results else {}
-            python_executable = python_info.get("executable") or sys.executable
-        
-        # CRITICAL: Always use the TARGET venv Python, not bootstrap Python
-        # The target venv is where packages are actually installed
-        script_dir = Path(__file__).parent
-        target_venv = script_dir / ".venv"
-        
-        if sys.platform == "win32":
-            target_venv_python = target_venv / "Scripts" / "python.exe"
-        else:
-            target_venv_python = target_venv / "bin" / "python"
-        
-        # If target venv exists, ALWAYS use it (ignore python_executable parameter)
-        if target_venv_python.exists():
-            check_python = str(target_venv_python)
-            self.log(f"Using target venv Python: {check_python}")
-        else:
-            # Fallback to provided Python or current Python
-            check_python = python_executable or sys.executable
-            self.log(f"Target venv not found, using: {check_python}")
+            check_python = python_info.get("executable") or sys.executable
+
+            script_dir = Path(__file__).parent
+            legacy_venv = script_dir / ".venv"
+            legacy_python = (
+                legacy_venv / "Scripts" / "python.exe"
+                if sys.platform == "win32"
+                else legacy_venv / "bin" / "python"
+            )
+            if legacy_python.exists():
+                check_python = str(legacy_python)
+                self.log(f"No caller Python; falling back to legacy .venv: {check_python}")
+            else:
+                self.log(f"No caller Python and no legacy .venv; using: {check_python}")
         
         # Run detection if not already done
         if not self.detection_results:
@@ -2469,16 +2527,9 @@ if errorlevel 1 (
                 "status_text": "✗ Not Installed"
             })
         
-        # PyTorch packages - use _verify_torch with target Python ONLY
-        # Determine target venv Python path
-        target_python = check_python
-        if python_executable:
-            target_python = python_executable
-        elif check_python:
-            target_python = check_python
-        
-        # Verify torch using target Python
-        torch_ok, torch_ver, torch_cuda, torch_error = self._verify_torch(target_python)
+        # Verify torch using the resolved check_python (already prefers the
+        # caller-supplied profile env above).
+        torch_ok, torch_ver, torch_cuda, torch_error = self._verify_torch(check_python)
         if torch_ok:
             if torch_cuda and torch_ver and "2.5" in torch_ver:
                 checklist.append({
@@ -2511,24 +2562,10 @@ if errorlevel 1 (
         
         # PyTorch Vision and Audio (verify using import only)
         def check_import_version(module_name):
-            """Check package version using import (no metadata)"""
-            try:
-                result = subprocess.run(
-                    [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,  # Increased from 3s to 10s for more reliable checks
-                    **self.subprocess_flags
-                )
-                if result.returncode == 0:
-                    return result.stdout.strip()
-                else:
-                    # Log why import failed
-                    self.log(f"⚠ {module_name} import failed (exit {result.returncode}): {result.stderr[:200]}")
-                return None
-            except Exception as e:
-                self.log(f"⚠ {module_name} import error: {str(e)[:200]}")
-                return None
+            ver = self._probe_module_version(check_python, module_name)
+            if ver in (None, "installed"):
+                return ver if ver else None
+            return ver
         
         torchvision_ver = check_import_version("torchvision")
         if torchvision_ver:
@@ -2568,20 +2605,8 @@ if errorlevel 1 (
         
         # Triton (Windows) - verify using SIMPLE import (don't import triton.language - it requires compilation)
         def check_triton_installed():
-            """Check if triton is installed by importing it (SIMPLE check - don't test compilation)"""
-            try:
-                result = subprocess.run(
-                    [check_python, "-c", "import triton; print(triton.__version__)"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,  # Increased from 3s to 10s for more reliable checks
-                    **self.subprocess_flags
-                )
-                if result.returncode == 0:
-                    return result.stdout.strip()
-                return None
-            except:
-                return None
+            ver = self._probe_module_version(check_python, "triton")
+            return None if ver is None else ver
 
         triton_ver = check_triton_installed()
         if triton_ver:
@@ -2601,33 +2626,7 @@ if errorlevel 1 (
         
         # PySide6 packages (verify using import only)
         def check_pyside6_import(module_name):
-            """Check PySide6 using import"""
-            try:
-                result = subprocess.run(
-                    [check_python, "-c", f"import {module_name}; print('OK')"],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,  # Increased from 3s to 10s for more reliable checks
-                    **self.subprocess_flags
-                )
-                if result.returncode == 0:
-                    # Try to get version if available
-                    try:
-                        ver_result = subprocess.run(
-                            [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
-                            capture_output=True,
-                            text=True,
-                            timeout=10,  # Increased from 3s to 10s for more reliable checks
-                            **self.subprocess_flags
-                        )
-                        if ver_result.returncode == 0:
-                            return ver_result.stdout.strip()
-                    except:
-                        pass
-                    return "installed"  # Import works but no version
-                return None
-            except:
-                return None
+            return self._probe_module_version(check_python, module_name)
         
         pyside_components = ["PySide6", "PySide6-Essentials", "PySide6-Addons", "shiboken6"]
         for component in pyside_components:
@@ -2694,84 +2693,114 @@ if errorlevel 1 (
                 if 'pyside6' in pkg_name.lower() or 'shiboken6' in pkg_name.lower():
                     continue
                 
-                # Check if installed using correct Python
-                # Use import test for transformers, datasets, huggingface_hub (GUI status rule)
-                if pkg_name.lower() in ["transformers", "datasets", "huggingface-hub", "huggingface_hub"]:
-                    # Use import verification (no metadata inspection)
-                    installed_ver = None
-                    if self._verify_import(check_python, pkg_name):
-                        # Get version via import
-                        try:
-                            result = subprocess.run(
-                                [check_python, "-c", f"import {pkg_name.replace('-', '_')}; print({pkg_name.replace('-', '_')}.__version__)"],
-                                capture_output=True,
-                                text=True,
-                                timeout=10,
-                                **self.subprocess_flags
-                            )
-                            if result.returncode == 0:
-                                installed_ver = result.stdout.strip()
-                        except:
-                            pass
-                        
-                        status = "installed"
-                        status_text = f"✓ Installed ({installed_ver})" if installed_ver else "✓ Installed"
-                        checklist.append({
-                            "component": pkg_name,
-                            "version": version_spec,
-                            "installed_version": installed_ver,
-                            "status": status,
-                            "status_text": status_text
-                        })
-                    else:
-                        checklist.append({
-                            "component": pkg_name,
-                            "version": version_spec,
-                            "installed_version": None,
-                            "status": "missing",
-                            "status_text": "✗ Not Installed"
-                        })
+                module_name = pkg_name.replace("-", "_")
+                ver = self._probe_module_version(check_python, module_name)
+                if ver is None:
+                    # Some dist names don't match module names (e.g. huggingface-hub).
+                    # Fall back to importlib.metadata via the pip name directly.
+                    ver = self._probe_module_version(check_python, pkg_name)
+                if ver:
+                    installed_ver = None if ver == "installed" else ver
+                    status_text = f"✓ Installed ({installed_ver})" if installed_ver else "✓ Installed"
+                    checklist.append({
+                        "component": pkg_name,
+                        "version": version_spec,
+                        "installed_version": installed_ver,
+                        "status": "installed",
+                        "status_text": status_text,
+                    })
                 else:
-                    # Use import-based verification for all other packages
-                    module_name = pkg_name.replace("-", "_")
-                    installed_ver = None
-                    if self._verify_import(check_python, pkg_name):
-                        # Get version via import
-                        try:
-                            result = subprocess.run(
-                                [check_python, "-c", f"import {module_name}; print({module_name}.__version__)"],
-                                capture_output=True,
-                                text=True,
-                                timeout=10,
-                                **self.subprocess_flags
-                            )
-                            if result.returncode == 0:
-                                installed_ver = result.stdout.strip()
-                        except:
-                            pass
-                        
-                        status = "installed"
-                        status_text = f"✓ Installed ({installed_ver})" if installed_ver else "✓ Installed"
-                        checklist.append({
-                            "component": pkg_name,
-                            "version": version_spec,
-                            "installed_version": installed_ver,
-                            "status": status,
-                            "status_text": status_text
-                        })
-                    else:
-                        checklist.append({
-                            "component": pkg_name,
-                            "version": version_spec,
-                            "installed_version": None,
-                            "status": "missing",
-                            "status_text": "✗ Not Installed"
-                        })
+                    checklist.append({
+                        "component": pkg_name,
+                        "version": version_spec,
+                        "installed_version": None,
+                        "status": "missing",
+                        "status_text": "✗ Not Installed",
+                    })
         except Exception as e:
             self.log(f"ERROR: Failed to load packages from profile: {e}")
             # Cannot proceed without profile - this is an error
             raise RuntimeError(f"Profile-based checklist generation failed. Profiles are the ONLY source of truth. Error: {e}")
-        
+
+        # ------------------------------------------------------------------
+        # Agent-runtime prerequisites (optional — only needed for the Agents
+        # tab's sandboxed runs). Surfaced here so a fresh installer shows the
+        # user what they'll need to set up themselves; the rows are tagged so
+        # missing items don't render red ("not installed" red is reserved for
+        # base-app dependencies).
+        # ------------------------------------------------------------------
+        try:
+            from core.agents.setup import check_agent_setup  # local import — keeps base install path independent
+            agent_status = check_agent_setup()
+
+            def _opt_row(component: str, ok: bool, ok_detail: str, missing_hint: str):
+                if ok:
+                    return {
+                        "component": component,
+                        "version": "optional",
+                        "status": "installed",
+                        "status_text": f"✓ {ok_detail}",
+                    }
+                # ℹ marker → no marker scan in installer_gui matches → renders default colour.
+                return {
+                    "component": component,
+                    "version": "optional",
+                    "status": "optional_missing",
+                    "status_text": f"ℹ {missing_hint}",
+                }
+
+            # Docker — single row whose text reflects the worst issue.
+            if agent_status.docker_running:
+                docker_row = _opt_row("Docker (Agent Sandbox)", True, "Running", "")
+            elif agent_status.docker_installed:
+                docker_row = {
+                    "component": "Docker (Agent Sandbox)",
+                    "version": "optional",
+                    "status": "wrong_version",
+                    "status_text": "⚠ Installed — daemon not running (start Docker Desktop)",
+                }
+            else:
+                docker_row = _opt_row(
+                    "Docker (Agent Sandbox)", False, "",
+                    "Not installed — agents will run unsandboxed on host (still works)",
+                )
+            checklist.append(docker_row)
+
+            # Claude Code CLI.
+            if agent_status.claude_logged_in:
+                checklist.append(_opt_row("Claude Code CLI", True, "Logged in", ""))
+            elif agent_status.claude_cli_on_host:
+                checklist.append({
+                    "component": "Claude Code CLI",
+                    "version": "optional",
+                    "status": "wrong_version",
+                    "status_text": "⚠ Installed — run on host: claude /login",
+                })
+            else:
+                checklist.append(_opt_row(
+                    "Claude Code CLI", False, "",
+                    "Not installed — npm install -g @anthropic-ai/claude-code",
+                ))
+
+            # Codex CLI.
+            if agent_status.codex_logged_in:
+                checklist.append(_opt_row("Codex CLI", True, "Logged in", ""))
+            elif agent_status.codex_cli_on_host:
+                checklist.append({
+                    "component": "Codex CLI",
+                    "version": "optional",
+                    "status": "wrong_version",
+                    "status_text": "⚠ Installed — run on host: codex login",
+                })
+            else:
+                checklist.append(_opt_row(
+                    "Codex CLI", False, "",
+                    "Not installed — npm install -g @openai/codex",
+                ))
+        except Exception as exc:
+            # Probes are optional — never let them break the base checklist.
+            self.log(f"Agent-runtime probes skipped: {exc}")
+
         return checklist
     
     def check_component_status(self, component_name: str) -> dict:
@@ -3245,7 +3274,14 @@ def check_cuda_pip_headers_only(nvidia_base_path):
         target_python_path = Path(target_python).resolve()
         if not target_python_path.exists():
             return False, None, None, f"Target Python not found: {target_python}"
-        
+
+        if self._is_same_python(str(target_python_path)):
+            try:
+                import torch  # noqa: F401  (loaded in-process — no flashing console window)
+                return True, torch.__version__, bool(torch.cuda.is_available()), None
+            except Exception as e:
+                return False, None, None, f"torch import failed: {e}"
+
         # Run verification command (no logging to avoid spam during periodic GUI updates)
         verify_cmd = [
             str(target_python_path), "-c",
@@ -3452,7 +3488,7 @@ def check_cuda_pip_headers_only(nvidia_base_path):
         target_python_path = Path(target_python).resolve()
         if not target_python_path.exists():
             return False
-        
+
         # Map package names to import names (package name may differ from import name)
         import_map = {
             "transformers": "transformers",
@@ -3464,24 +3500,8 @@ def check_cuda_pip_headers_only(nvidia_base_path):
             "numpy": "numpy",
         }
         import_name = import_map.get(package_name, package_name)
-        
-        # Run import test
-        verify_cmd = [
-            str(target_python_path), "-c",
-            f"import {import_name}"
-        ]
-        
-        try:
-            verify_result = subprocess.run(
-                verify_cmd,
-                capture_output=True,
-                text=True,
-                timeout=3,  # Reduced from 30s to 3s for faster failure detection
-                **self.subprocess_flags
-            )
-            return verify_result.returncode == 0
-        except Exception:
-            return False
+
+        return self._probe_module_importable(str(target_python_path), import_name)
     
     def _verify_package_version(self, python_executable: Optional[str], package_name: str, version_spec: str) -> Tuple[bool, Optional[str], Optional[str]]:
         """

@@ -71,6 +71,17 @@ class Project:
     agent's Studio default. Keep separate from the definition default so
     one user can have e.g. orchestrator on Claude in Project A and on
     GPT-5 in Project B without switching the Studio default."""
+    team_default_model_id: str = ""
+    """Project-wide model default. When the user picks a model in the
+    canvas overlay's "team mode" picker, it lands here AND is propagated
+    to every current member's ``model_overrides`` (real-time apply).
+    Future agents joining the team (e.g. when the user instantiates a
+    different template, or adds a member via the Team picker dialog)
+    inherit this value via the ``_model_id_for`` fallback chain — no
+    silent auto-pick to "whatever model happens to be first in the
+    list", which used to produce the "GUI shows Claude but dispatch says
+    no model" bug. Per-agent ``model_overrides`` still win when set, so
+    the user can fine-tune individuals after the team default lands."""
     graph_json: str = ""
     """Serialized :class:`core.agents.agent_graph.AgentGraph` — the routing
     pipeline + canvas positions. Empty means "no custom graph; use the
@@ -95,6 +106,7 @@ class Project:
             self.graph_json or "",
             self.created_at,
             self.updated_at,
+            self.team_default_model_id or "",
         )
 
     @classmethod
@@ -111,6 +123,12 @@ class Project:
             graph_raw = row["graph_json"] if "graph_json" in row.keys() else ""
         except Exception:
             graph_raw = ""
+        team_default = ""
+        try:
+            if "team_default_model_id" in row.keys():
+                team_default = row["team_default_model_id"] or ""
+        except Exception:
+            team_default = ""
         return cls(
             id=row["id"],
             name=row["name"],
@@ -121,6 +139,7 @@ class Project:
             auto_approve_all=auto_approve,
             team=team,
             model_overrides=overrides,
+            team_default_model_id=team_default,
             graph_json=graph_raw or "",
             created_at=row["created_at"],
             updated_at=row["updated_at"],
@@ -204,6 +223,16 @@ class ProjectStore:
                 conn.execute(
                     "ALTER TABLE agent_projects ADD COLUMN auto_approve_all INTEGER DEFAULT 0"
                 )
+            # Team-wide default model. Forward-only migration: existing
+            # projects get '' and continue to behave as before; the user
+            # can opt in by picking a model in the canvas overlay's
+            # team-mode picker. Powers the "set one model from the info
+            # card, all agents follow real-time AND future agents
+            # inherit" UX the user asked for. See Project.team_default_model_id.
+            if proj_cols and "team_default_model_id" not in proj_cols:
+                conn.execute(
+                    "ALTER TABLE agent_projects ADD COLUMN team_default_model_id TEXT DEFAULT ''"
+                )
             # Best-effort: add project_id column to agent_goals if missing.
             cols = {r[1] for r in conn.execute("PRAGMA table_info(agent_goals)")}
             if cols and "project_id" not in cols:
@@ -253,7 +282,7 @@ class ProjectStore:
                     "UPDATE agent_projects SET name=?, description=?, location=?, "
                     "trust_writes=?, workdir_hint_sent_for=?, auto_approve_all=?, "
                     "team_json=?, model_overrides_json=?, graph_json=?, "
-                    "updated_at=? WHERE id=?",
+                    "updated_at=?, team_default_model_id=? WHERE id=?",
                     (
                         project.name,
                         project.description,
@@ -265,6 +294,7 @@ class ProjectStore:
                         json.dumps(project.model_overrides, ensure_ascii=False),
                         project.graph_json or "",
                         project.updated_at,
+                        project.team_default_model_id or "",
                         project.id,
                     ),
                 )
@@ -273,8 +303,9 @@ class ProjectStore:
                     "INSERT INTO agent_projects "
                     "(id, name, description, location, trust_writes, "
                     "workdir_hint_sent_for, auto_approve_all, team_json, "
-                    "model_overrides_json, graph_json, created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "model_overrides_json, graph_json, created_at, updated_at, "
+                    "team_default_model_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     project.to_row(),
                 )
             conn.commit()

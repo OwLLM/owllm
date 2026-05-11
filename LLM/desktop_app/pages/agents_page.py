@@ -4284,12 +4284,18 @@ class AgentsPage(QWidget):
         Resolution order, first non-empty wins:
 
           1. The agents-page picker the user can see — what they
-             explicitly chose for this agent on the canvas.
-          2. The agent definition's ``default_model_id`` — what the
-             team template shipped with (e.g. product_studio's
+             explicitly chose for this agent on the canvas (per-agent
+             override; backed by ``Project.model_overrides[role_name]``).
+          2. ``Project.team_default_model_id`` — the team master set
+             from the canvas overlay's team-mode picker. Inherited
+             automatically by new agents (template re-instantiation,
+             Team-picker dialog additions) so a fresh member isn't
+             silently auto-picked to "whatever happens to be first".
+          3. The agent definition's ``default_model_id`` — what the
+             template shipped with (e.g. product_studio's
              ``auto|cheapest_local`` for synthesis roles, ``auto|balanced``
              for everything else).
-          3. Last-resort hardcoded ``auto|cheapest_local`` — guarantees
+          4. Last-resort hardcoded ``auto|cheapest_local`` — guarantees
              the team never hits "No model is selected" at runtime;
              at worst it routes to a local model the user has installed.
 
@@ -4303,26 +4309,35 @@ class AgentsPage(QWidget):
             if picked:
                 logger.info("model_id_for(%s) = %r [from picker]", role_name, picked)
                 return picked
-        # Fallback (2): the AgentDefinition's shipped default.
+        # Fallback (2): project-level team default — applies to all
+        # current AND future members until the user overrides per-agent.
+        if self._active_project is not None and self._active_project.team_default_model_id:
+            tdm = self._active_project.team_default_model_id
+            logger.info(
+                "model_id_for(%s) = %r [from Project.team_default_model_id; picker %s]",
+                role_name, tdm,
+                "missing" if picker is None else "empty",
+            )
+            return tdm
+        # Fallback (3): the AgentDefinition's shipped default.
         try:
             from core.agents.agent_definitions import get_definition
             d = get_definition(role_name)
             if d is not None and d.default_model_id:
                 logger.info(
-                    "model_id_for(%s) = %r [from AgentDefinition.default_model_id; picker %s]",
+                    "model_id_for(%s) = %r [from AgentDefinition.default_model_id]",
                     role_name, d.default_model_id,
-                    "missing" if picker is None else "empty",
                 )
                 return d.default_model_id
         except Exception:
             logger.exception("could not read default_model_id for %s", role_name)
-        # Fallback (3): last-resort so the team always has SOMETHING to
+        # Fallback (4): last-resort so the team always has SOMETHING to
         # dispatch with. cheapest_local routes to whatever local model
         # the user has running.
         fallback = "auto|cheapest_local"
         logger.warning(
-            "model_id_for(%s) = %r [LAST-RESORT FALLBACK — neither picker "
-            "nor AgentDefinition.default_model_id had a value]",
+            "model_id_for(%s) = %r [LAST-RESORT FALLBACK — neither picker, "
+            "team_default_model_id, nor AgentDefinition.default_model_id had a value]",
             role_name, fallback,
         )
         return fallback
@@ -4354,9 +4369,16 @@ class AgentsPage(QWidget):
             if self._active_project is not None
             else {}
         )
+        team_default = (
+            self._active_project.team_default_model_id
+            if self._active_project is not None
+            else ""
+        )
         for role_name, picker in self._model_picker_buttons.items():
-            saved = overrides.get(role_name) or self._settings.value(
-                self._settings_key(role_name), ""
+            saved = (
+                overrides.get(role_name)
+                or team_default
+                or self._settings.value(self._settings_key(role_name), "")
             )
             if isinstance(saved, str) and saved:
                 picker.set_current_id(saved)
@@ -4515,13 +4537,22 @@ class AgentsPage(QWidget):
     def _apply_model_to_all_agents(self, composite_id: str) -> None:
         """Set the same model id for every agent on the active team.
 
-        Writes ``Project.model_overrides`` for each member, mirrors the
-        change to the legacy QSettings keys, invalidates the cached team
-        once at the end (instead of N times), and pushes the new label
-        onto every canvas node so the diagram updates immediately.
+        Writes ``Project.team_default_model_id`` AND
+        ``Project.model_overrides`` for each member, mirrors the change
+        to the legacy QSettings keys, invalidates the cached team once
+        at the end (instead of N times), and pushes the new label onto
+        every canvas node so the diagram updates immediately.
+
+        ``team_default_model_id`` is the key bit: it survives team
+        edits (adding / removing members, re-instantiating a template)
+        so newly-joining agents inherit the team default automatically
+        via ``_model_id_for``'s fallback chain — no more "GUI shows
+        Claude but dispatch says no model" surprises on a fresh team.
         """
         if self._active_project is None or not self._active_project.team:
             return
+        # Project-level master first — so even agents added LATER inherit.
+        self._active_project.team_default_model_id = composite_id
         for role_name in list(self._active_project.team):
             try:
                 self._settings.setValue(self._settings_key(role_name), composite_id)

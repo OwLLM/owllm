@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, QPoint, Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -73,14 +73,17 @@ QPushButton#suSend:hover {{ background-color: #7df3ff; }}
 QPushButton#suSend:disabled {{
     color:#5a6478; background-color:#1a2030; border-color:#2a3148;
 }}
-QPushButton#suGear {{
-    background:#1a2030; color:#cbd2e0;
+QPushButton#suIconBtn {{
+    background:#1a2030; color:#e6f0ff;
     border:1px solid #2a3148; border-radius:6px;
-    font-size:14px;
+    font-family: "Segoe UI Symbol", "Segoe UI", sans-serif;
+    font-size:16px; font-weight:700;
+    padding:0;
 }}
-QPushButton#suGear:hover {{
+QPushButton#suIconBtn:hover {{
     background:#22293c; color:#5cf0ff; border-color:#5cf0ff;
 }}
+QPushButton#suIconBtn:pressed {{ background:#0f1320; }}
 QCheckBox#suTrust {{ color: #7888a8; background:transparent; font-size:13px; }}
 QCheckBox#suTrust::indicator {{
     width:12px; height:12px;
@@ -190,18 +193,23 @@ class SuperUserCard(QFrame):
         name_block.addWidget(self._hint)
         row.addLayout(name_block, 1)
 
-        self._enlarge = QPushButton("⛶")
-        self._enlarge.setObjectName("suGear")  # reuse gear stylesheet
-        self._enlarge.setFixedSize(24, 24)
+        # Enlarge — use a 3-char ASCII glyph because the BMP-arrow code
+        # points (⤢ / ⛶ / 🗗) fall back to dotted-square or empty boxes
+        # on many Windows fonts at 14 px, which is what produced the
+        # "two blank squares" the user saw.
+        self._enlarge = QPushButton("⇱⇲")
+        self._enlarge.setObjectName("suIconBtn")
+        self._enlarge.setFixedSize(30, 26)
         self._enlarge.setToolTip(
             "Open chat in a side panel (4:5, full window height, docked right)"
         )
         self._enlarge.clicked.connect(self.enlarge_clicked)
         row.addWidget(self._enlarge)
 
+        # Gear — single ⚙ renders reliably in Segoe UI Symbol at 16 px.
         self._gear = QPushButton("⚙")
-        self._gear.setObjectName("suGear")
-        self._gear.setFixedSize(24, 24)
+        self._gear.setObjectName("suIconBtn")
+        self._gear.setFixedSize(26, 26)
         self._gear.setToolTip("Notification settings (Telegram, etc.)")
         self._gear.clicked.connect(self.settings_clicked)
         row.addWidget(self._gear)
@@ -440,11 +448,38 @@ class SuperUserCard(QFrame):
 
 _DIALOG_QSS = """
 QDialog#SuperUserDialog {
-    background-color: #11151e;
+    background-color: #0a0d14;
+    border: 1px solid #2a3148;
+    border-radius: 12px;
 }
+QWidget#sudTitleBar {
+    background: qlineargradient(
+        x1:0, y1:0, x2:0, y2:1,
+        stop:0 #1a2030, stop:1 #11151e
+    );
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
+    border-bottom: 1px solid #1d2434;
+}
+QLabel#sudTitleText {
+    color: #e6f0ff; font-weight: 700; font-size: 13px;
+    background: transparent; letter-spacing: 0.5px;
+}
+QLabel#sudTitleDot { color: #5cf0ff; background: transparent; font-size: 18px; }
+QPushButton#sudTitleBtn {
+    background: transparent; color: #8694b3;
+    border: none; font-size: 16px;
+    font-family: "Segoe UI Symbol", "Segoe UI", sans-serif;
+}
+QPushButton#sudTitleBtn:hover { color: #e6f0ff; background: #22293c; }
+QPushButton#sudCloseBtn {
+    background: transparent; color: #8694b3;
+    border: none; font-size: 16px; font-weight: 700;
+}
+QPushButton#sudCloseBtn:hover { color: #ffffff; background: #c03030; }
 QLabel#sudHint { color: #6b7794; font-size: 13px; background: transparent; }
 QTextEdit#sudChat {
-    background: #0a0d14;
+    background: #11151e;
     color: #cbd2e0;
     border: 1px solid #1d2434;
     border-radius: 8px;
@@ -452,7 +487,7 @@ QTextEdit#sudChat {
     font-size: 16px;
 }
 QLineEdit#sudReply {
-    background-color: #0a0d14; color: #e6f0ff;
+    background-color: #11151e; color: #e6f0ff;
     border: 1px solid #2a3148; border-radius: 8px;
     padding: 8px 12px; font-size: 16px;
 }
@@ -484,34 +519,41 @@ class SuperUserDialog(QDialog):
         self.setObjectName("SuperUserDialog")
         self.setStyleSheet(_DIALOG_QSS)
         self.setWindowTitle("Super User — chat")
-        # Use the standard window frame (minimize / maximize / close + resize
-        # handles on all four edges). Qt.Tool used to give a slim title bar
-        # but on Windows it also disabled the visible resize cursors at the
-        # edges, so the dialog *looked* fixed even though it technically
-        # could resize.
-        self.setWindowFlags(
-            Qt.Window
-            | Qt.WindowTitleHint
-            | Qt.WindowSystemMenuHint
-            | Qt.WindowMinMaxButtonsHint
-            | Qt.WindowCloseButtonHint
-        )
+        # Frameless so the popup wears the same dark chrome as the main
+        # OWLLM window (which also uses FramelessWindowHint and paints
+        # its own title bar). The native Windows title bar would have
+        # forced a white / OS-themed strip at the top, breaking the app
+        # look. Custom title bar + manual resize edges below cover the
+        # missing native chrome behavior.
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setModal(False)
-        self.setSizeGripEnabled(True)  # corner grip for unambiguous resizing
         self.setMinimumSize(360, 320)
+        # 8 px hit zone on every edge for resize cursors.
+        self._resize_margin = 8
+        self._resize_edge: Optional[str] = None
+        self._resize_start_pos = None
+        self._resize_start_geom = None
+        self.setMouseTracking(True)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(14, 14, 14, 14)
-        outer.setSpacing(10)
+        outer.setContentsMargins(1, 1, 1, 1)  # leave room for the 1 px border
+        outer.setSpacing(0)
+        outer.addWidget(self._build_title_bar())
+
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(14, 12, 14, 14)
+        body_layout.setSpacing(10)
 
         self._hint = QLabel("Side panel — mirrors the Super User card, full conversation visible.")
         self._hint.setObjectName("sudHint")
-        outer.addWidget(self._hint)
+        body_layout.addWidget(self._hint)
 
         self._chat = QTextEdit()
         self._chat.setObjectName("sudChat")
         self._chat.setReadOnly(True)
-        outer.addWidget(self._chat, 1)
+        body_layout.addWidget(self._chat, 1)
 
         input_row = QHBoxLayout()
         input_row.setSpacing(8)
@@ -525,11 +567,82 @@ class SuperUserDialog(QDialog):
         self._send.setObjectName("sudSend")
         self._send.clicked.connect(self._on_submit)
         input_row.addWidget(self._send)
-        outer.addLayout(input_row)
+        body_layout.addLayout(input_row)
+
+        outer.addWidget(body, 1)
 
         # Wire up card -> dialog refresh + cleanup.
         card.messages_changed.connect(self._refresh)
         self._refresh()
+
+    def _build_title_bar(self) -> QWidget:
+        """Custom dark title bar matching the OWLLM main-window chrome.
+
+        Drag the bar to move the dialog; the × button closes it. The
+        cyan dot mirrors the accent used throughout the app."""
+        bar = QWidget()
+        bar.setObjectName("sudTitleBar")
+        bar.setFixedHeight(34)
+        bar.setMouseTracking(True)
+        bar._is_title_bar = True  # type: ignore[attr-defined]
+
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(12, 0, 6, 0)
+        row.setSpacing(8)
+
+        dot = QLabel("●")
+        dot.setObjectName("sudTitleDot")
+        row.addWidget(dot)
+
+        title = QLabel("Super User — chat")
+        title.setObjectName("sudTitleText")
+        row.addWidget(title)
+        row.addStretch(1)
+
+        # Re-dock button: snap back to the right edge of the main window
+        # in case the user dragged the popup somewhere else.
+        self._dock_btn = QPushButton("⇲")
+        self._dock_btn.setObjectName("sudTitleBtn")
+        self._dock_btn.setFixedSize(28, 24)
+        self._dock_btn.setToolTip("Re-dock against the main window")
+        self._dock_btn.clicked.connect(self._on_redock_clicked)
+        row.addWidget(self._dock_btn)
+
+        close_btn = QPushButton("✕")
+        close_btn.setObjectName("sudCloseBtn")
+        close_btn.setFixedSize(28, 24)
+        close_btn.setToolTip("Close")
+        close_btn.clicked.connect(self.close)
+        row.addWidget(close_btn)
+
+        # Title-bar drag — wire to the dialog's move logic.
+        bar.mousePressEvent = self._title_mouse_press      # type: ignore[assignment]
+        bar.mouseMoveEvent = self._title_mouse_move        # type: ignore[assignment]
+        bar.mouseReleaseEvent = self._title_mouse_release  # type: ignore[assignment]
+
+        self._title_drag_offset: Optional[QPoint] = None
+        return bar
+
+    def _on_redock_clicked(self) -> None:
+        if self._anchor is not None:
+            self._user_resized = False
+            self._reposition_against_anchor()
+
+    # ------- title-bar drag handlers ----------
+    def _title_mouse_press(self, ev) -> None:
+        if ev.button() == Qt.LeftButton:
+            self._title_drag_offset = ev.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            ev.accept()
+
+    def _title_mouse_move(self, ev) -> None:
+        if self._title_drag_offset is not None and (ev.buttons() & Qt.LeftButton):
+            self.move(ev.globalPosition().toPoint() - self._title_drag_offset)
+            self._user_resized = True  # they moved it; stop auto-tracking
+            ev.accept()
+
+    def _title_mouse_release(self, ev) -> None:
+        self._title_drag_offset = None
+        ev.accept()
 
     # ------------------------------------------------------------------
     # Sizing / positioning
@@ -599,6 +712,94 @@ class SuperUserDialog(QDialog):
         # duration of its setGeometry call.
         if not getattr(self, "_suppress_resize_flag", False):
             self._user_resized = True
+
+    # ------------------------------------------------------------------
+    # Manual edge-resize (frameless windows lose the OS-provided resize
+    # behavior, so we re-implement it ourselves — same pattern as the
+    # OWLLM MainWindow).
+    # ------------------------------------------------------------------
+
+    def _hit_test_edge(self, pos: QPoint) -> Optional[str]:
+        m = self._resize_margin
+        w, h = self.width(), self.height()
+        left = pos.x() <= m
+        right = pos.x() >= w - m
+        top = pos.y() <= m
+        bottom = pos.y() >= h - m
+        if top and left:
+            return "tl"
+        if top and right:
+            return "tr"
+        if bottom and left:
+            return "bl"
+        if bottom and right:
+            return "br"
+        if left:
+            return "l"
+        if right:
+            return "r"
+        if top:
+            return "t"
+        if bottom:
+            return "b"
+        return None
+
+    def _cursor_for_edge(self, edge: Optional[str]) -> Qt.CursorShape:
+        return {
+            "tl": Qt.SizeFDiagCursor, "br": Qt.SizeFDiagCursor,
+            "tr": Qt.SizeBDiagCursor, "bl": Qt.SizeBDiagCursor,
+            "l":  Qt.SizeHorCursor,  "r":  Qt.SizeHorCursor,
+            "t":  Qt.SizeVerCursor,  "b":  Qt.SizeVerCursor,
+        }.get(edge or "", Qt.ArrowCursor)
+
+    def mousePressEvent(self, ev) -> None:
+        if ev.button() == Qt.LeftButton:
+            edge = self._hit_test_edge(ev.position().toPoint())
+            if edge is not None:
+                self._resize_edge = edge
+                self._resize_start_pos = ev.globalPosition().toPoint()
+                self._resize_start_geom = self.geometry()
+                self._user_resized = True
+                ev.accept()
+                return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev) -> None:
+        if self._resize_edge is not None and (ev.buttons() & Qt.LeftButton):
+            dx = ev.globalPosition().toPoint().x() - self._resize_start_pos.x()
+            dy = ev.globalPosition().toPoint().y() - self._resize_start_pos.y()
+            g = self._resize_start_geom
+            x, y, w, h = g.x(), g.y(), g.width(), g.height()
+            min_w, min_h = self.minimumWidth(), self.minimumHeight()
+            if "l" in self._resize_edge:
+                new_w = max(min_w, w - dx)
+                x = x + (w - new_w)
+                w = new_w
+            if "r" in self._resize_edge:
+                w = max(min_w, w + dx)
+            if "t" in self._resize_edge:
+                new_h = max(min_h, h - dy)
+                y = y + (h - new_h)
+                h = new_h
+            if "b" in self._resize_edge:
+                h = max(min_h, h + dy)
+            self.setGeometry(x, y, w, h)
+            ev.accept()
+            return
+        # Hover-only: update cursor based on which edge is under the mouse.
+        edge = self._hit_test_edge(ev.position().toPoint())
+        self.setCursor(self._cursor_for_edge(edge))
+        super().mouseMoveEvent(ev)
+
+    def mouseReleaseEvent(self, ev) -> None:
+        if self._resize_edge is not None:
+            self._resize_edge = None
+            self._resize_start_pos = None
+            self._resize_start_geom = None
+            self.unsetCursor()
+            ev.accept()
+            return
+        super().mouseReleaseEvent(ev)
 
     def _reposition_against_anchor(self) -> None:
         anchor = self._anchor

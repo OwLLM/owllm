@@ -2620,6 +2620,8 @@ class AgentsPage(QWidget):
         self._super_user_card.reply_submitted.connect(self._on_user_reply)
         self._super_user_card.supervisor_toggled.connect(self._on_supervisor_toggled)
         self._super_user_card.settings_clicked.connect(self._open_notify_settings)
+        self._super_user_card.enlarge_clicked.connect(self._open_super_user_dialog)
+        self._super_user_dialog = None  # lazy — created on first enlarge
         self.team_canvas.attach_super_user_card(self._super_user_card)
         self.team_canvas.selection_mode_changed.connect(
             self._on_overlay_selection_mode_changed
@@ -5540,6 +5542,27 @@ class AgentsPage(QWidget):
                 self._super_user_card.set_attention(False)
             except Exception:
                 logger.exception("could not clear Super-User-card attention")
+
+    def _open_super_user_dialog(self) -> None:
+        """Toggle the popout side-panel that mirrors the SuperUserCard.
+
+        Lazy-created on first click + re-shown thereafter so the chat
+        history survives close/reopen. Sized to 4:5 (width = height *
+        4/5) at the full height of the main window, docked to its right.
+        """
+        try:
+            from desktop_app.widgets.super_user_card import SuperUserDialog
+            if self._super_user_dialog is None:
+                self._super_user_dialog = SuperUserDialog(
+                    self._super_user_card, parent=self
+                )
+            anchor = self.window()
+            self._super_user_dialog.place_against(anchor)
+            self._super_user_dialog.show()
+            self._super_user_dialog.raise_()
+            self._super_user_dialog.activateWindow()
+        except Exception:
+            logger.exception("could not open SuperUserDialog")
 
     def _open_notify_settings(self) -> None:
         """Open the notify-settings dialog (Telegram bot token, chat id)."""

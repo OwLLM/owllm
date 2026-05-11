@@ -135,6 +135,33 @@ LAYER_COLORS = [
 ]
 
 
+_ACRONYMS = {"ux", "ui", "api", "mcp", "gpu", "be", "fe", "qa", "cli", "sql", "db"}
+
+
+def _display_label(full_name: str) -> str:
+    """Short, humanized form of a (possibly prefixed) agent name.
+
+    Templates materialise agents as ``<team>.<short_name>`` so the
+    AgentDefinition rows stay unique across teams, but
+    ``product_studio.product_owner`` is too long to fit on a card.
+    Display surfaces (canvas card, info-card title) should use this
+    helper to render ``Product Owner`` instead.
+
+    Common technical acronyms (UX, UI, API, MCP, GPU, …) stay all-caps
+    so ``ux_designer`` reads as ``UX Designer``, not ``Ux Designer``.
+    """
+    short = (full_name or "").rsplit(".", 1)[-1]
+    if not short:
+        return full_name
+    words = []
+    for w in short.replace("-", "_").split("_"):
+        w = w.strip()
+        if not w:
+            continue
+        words.append(w.upper() if w.lower() in _ACRONYMS else w.capitalize())
+    return " ".join(words) or full_name
+
+
 def _layer_color(layer: int) -> QColor:
     if layer < 0:
         layer = 0
@@ -397,7 +424,7 @@ class _AgentNode(QGraphicsItem):
         painter.drawText(
             name_rect,
             Qt.AlignCenter | Qt.TextWordWrap,
-            self.name,
+            _display_label(self.name),
         )
 
         # Model row.

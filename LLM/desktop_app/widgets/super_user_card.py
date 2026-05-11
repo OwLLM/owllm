@@ -13,10 +13,11 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -112,6 +113,14 @@ class SuperUserCard(QFrame):
     reply_submitted = Signal(str)
     supervisor_toggled = Signal(bool)
     settings_clicked = Signal()
+    enlarge_clicked = Signal()
+    """User clicked the enlarge icon — page opens a side-panel dialog
+    that mirrors the chat. Two-way: the dialog's reply input emits
+    back through ``reply_submitted`` so the goal pipeline doesn't
+    care which surface the user typed into."""
+    messages_changed = Signal()
+    """Fires after every ``_append_message`` so the open dialog (if any)
+    can re-render. Cheap signal — no payload."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -181,6 +190,15 @@ class SuperUserCard(QFrame):
         )
         self._trust.toggled.connect(self.supervisor_toggled)
         row.addWidget(self._trust)
+
+        self._enlarge = QPushButton("⛶")
+        self._enlarge.setObjectName("suGear")  # reuse gear stylesheet
+        self._enlarge.setFixedSize(26, 26)
+        self._enlarge.setToolTip(
+            "Open chat in a side panel (4:5, full window height, docked right)"
+        )
+        self._enlarge.clicked.connect(self.enlarge_clicked)
+        row.addWidget(self._enlarge)
 
         self._gear = QPushButton("⚙")
         self._gear.setObjectName("suGear")
@@ -318,6 +336,11 @@ class SuperUserCard(QFrame):
     def clear_chat(self) -> None:
         self._messages.clear()
         self._refresh_chat()
+        self.messages_changed.emit()
+
+    def messages_snapshot(self) -> List[tuple]:
+        """Return a copy of the current message log (for SuperUserDialog)."""
+        return list(self._messages)
 
     # ------------------------------------------------------------------
     # Internal
@@ -361,6 +384,9 @@ class SuperUserCard(QFrame):
         if len(self._messages) > 20:
             self._messages = self._messages[-20:]
         self._refresh_chat()
+        # Notify any open SuperUserDialog so it re-renders with the
+        # new message. Cheap no-op if nobody's listening.
+        self.messages_changed.emit()
 
     def _refresh_chat(self) -> None:
         if not self._messages:
@@ -389,3 +415,160 @@ class SuperUserCard(QFrame):
         # Scroll to bottom.
         sb = self._chat.verticalScrollBar()
         sb.setValue(sb.maximum())
+
+
+# ---------------------------------------------------------------------------
+# Side-panel popout — opened by the card's enlarge button
+# ---------------------------------------------------------------------------
+
+
+_DIALOG_QSS = """
+QDialog#SuperUserDialog {
+    background-color: #11151e;
+}
+QLabel#sudHint { color: #6b7794; font-size: 13px; background: transparent; }
+QTextEdit#sudChat {
+    background: #0a0d14;
+    color: #cbd2e0;
+    border: 1px solid #1d2434;
+    border-radius: 8px;
+    padding: 10px 12px;
+    font-size: 16px;
+}
+QLineEdit#sudReply {
+    background-color: #0a0d14; color: #e6f0ff;
+    border: 1px solid #2a3148; border-radius: 8px;
+    padding: 8px 12px; font-size: 16px;
+}
+QLineEdit#sudReply:focus { border-color: #5cf0ff; }
+QPushButton#sudSend {
+    color: #0a0d14; background-color: #5cf0ff;
+    border: 1px solid #5cf0ff; border-radius: 8px;
+    padding: 8px 18px; font-size: 14px; font-weight: 700;
+}
+QPushButton#sudSend:hover { background-color: #7df3ff; }
+"""
+
+
+class SuperUserDialog(QDialog):
+    """Larger side-panel view of the SuperUserCard's chat.
+
+    Layout: same chat log + reply input as the card, but full-window-
+    height on the right, with a 4:5 aspect ratio (width = height * 4/5).
+    Stays in sync with the card via the card's ``messages_changed``
+    signal; reply submissions route back through the card so the goal
+    pipeline doesn't have a second code path to maintain.
+
+    Non-modal — the user can keep it open while looking at the canvas.
+    """
+
+    def __init__(self, card: "SuperUserCard", parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._card = card
+        self.setObjectName("SuperUserDialog")
+        self.setStyleSheet(_DIALOG_QSS)
+        self.setWindowTitle("Super User — chat")
+        self.setWindowFlag(Qt.Tool, True)  # stays above main but doesn't steal focus
+        self.setModal(False)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(14, 14, 14, 14)
+        outer.setSpacing(10)
+
+        self._hint = QLabel("Side panel — mirrors the Super User card, full conversation visible.")
+        self._hint.setObjectName("sudHint")
+        outer.addWidget(self._hint)
+
+        self._chat = QTextEdit()
+        self._chat.setObjectName("sudChat")
+        self._chat.setReadOnly(True)
+        outer.addWidget(self._chat, 1)
+
+        input_row = QHBoxLayout()
+        input_row.setSpacing(8)
+        self._reply = QLineEdit()
+        self._reply.setObjectName("sudReply")
+        self._reply.setPlaceholderText("Reply to the team — Enter to send")
+        self._reply.returnPressed.connect(self._on_submit)
+        input_row.addWidget(self._reply, 1)
+
+        self._send = QPushButton("Send")
+        self._send.setObjectName("sudSend")
+        self._send.clicked.connect(self._on_submit)
+        input_row.addWidget(self._send)
+        outer.addLayout(input_row)
+
+        # Wire up card -> dialog refresh + cleanup.
+        card.messages_changed.connect(self._refresh)
+        self._refresh()
+
+    # ------------------------------------------------------------------
+    # Sizing / positioning
+    # ------------------------------------------------------------------
+
+    def place_against(self, anchor: QWidget) -> None:
+        """Position the dialog flush to the right of ``anchor`` (typically
+        the main window), same top Y, same height. Width = height * 4/5
+        per the user's 4:5 aspect-ratio spec.
+        """
+        if anchor is None:
+            return
+        ag = anchor.frameGeometry()
+        height = ag.height()
+        width = int(height * 4 / 5)
+        # Available screen width caps the right edge so the dialog
+        # stays on-screen even when the main window is near the
+        # right edge.
+        screen = self.screen() or anchor.screen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            max_x = avail.right() - width
+            x = min(ag.right(), max_x)
+            y = max(avail.top(), ag.top())
+        else:
+            x = ag.right()
+            y = ag.top()
+        self.setGeometry(x, y, width, height)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    def _refresh(self) -> None:
+        messages = self._card.messages_snapshot()
+        if not messages:
+            self._chat.setHtml(
+                '<div style="color:#5a6478; font-size:16px;">'
+                "no messages yet — type below to start, or wait for the team to ping"
+                "</div>"
+            )
+            return
+        lines = []
+        for role, text in messages:
+            color = "#5cf0ff" if role == "user" else "#ffc060"
+            label = "You" if role == "user" else "Team"
+            safe = (
+                text.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+                .replace("\n", "<br>")
+            )
+            lines.append(
+                f'<div style="margin:0 0 12px 0; font-size:16px; line-height:1.5;">'
+                f'<span style="color:{color}; font-weight:700;">{label}:</span> '
+                f'<span style="color:#cbd2e0;">{safe}</span>'
+                f"</div>"
+            )
+        self._chat.setHtml("".join(lines))
+        sb = self._chat.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+    def _on_submit(self) -> None:
+        text = (self._reply.text() or "").strip()
+        if not text:
+            return
+        self._reply.clear()
+        # Route through the card so the goal pipeline + dedupe + bus
+        # plumbing all behave the same as the inline reply.
+        self._card._append_message("user", text)
+        self._card.reply_submitted.emit(text)

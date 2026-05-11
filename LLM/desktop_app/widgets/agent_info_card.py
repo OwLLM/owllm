@@ -46,6 +46,25 @@ def _alpha(c: QColor, a: int) -> QColor:
     return QColor(c.red(), c.green(), c.blue(), max(0, min(255, a)))
 
 
+_ACRONYMS = {"ux", "ui", "api", "mcp", "gpu", "be", "fe", "qa", "cli", "sql", "db"}
+
+
+def _display_label(full_name: str) -> str:
+    """Humanize an agent name for the info-card title. Mirrors
+    ``agent_canvas._display_label`` — kept duplicated to avoid a cross-
+    widget import for a 6-line helper."""
+    short = (full_name or "").rsplit(".", 1)[-1]
+    if not short:
+        return full_name
+    words = []
+    for w in short.replace("-", "_").split("_"):
+        w = w.strip()
+        if not w:
+            continue
+        words.append(w.upper() if w.lower() in _ACRONYMS else w.capitalize())
+    return " ".join(words) or full_name
+
+
 def load_owl_pixmap() -> Optional[QPixmap]:
     """Best-effort load of the owl crest used as the team avatar."""
     try:
@@ -237,12 +256,12 @@ def paint_agent_card(
     name_font.setBold(True)
     p.setFont(name_font)
     p.setPen(_TEXT_BRIGHT)
-    # Force-wrap on natural seams (_-./\\) via _wrappable so QPainter
-    # can't decide to print a single overflowing line.
+    # Humanize first (strip team prefix, Title Case), then force-wrap
+    # on natural seams so QPainter can't decide to overflow on long names.
     p.drawText(
         name_rect,
         Qt.AlignHCenter | Qt.AlignTop | Qt.TextWordWrap,
-        _wrappable(name),
+        _wrappable(_display_label(name)),
     )
 
     # ---- Portrait (left) -----------------------------------------

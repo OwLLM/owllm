@@ -46,7 +46,7 @@ QLabel#suAvatar {{
     qproperty-alignment: AlignCenter;
 }}
 QLabel#suName  {{ color: #e6f0ff; font-weight:700; background:transparent; }}
-QLabel#suHint  {{ color: #6b7794; font-size:10px; background:transparent;
+QLabel#suHint  {{ color: #6b7794; font-size:12px; background:transparent;
                   letter-spacing:0.4px; text-transform:uppercase; }}
 QTextEdit#suChat {{
     background:#0a0d14;
@@ -54,19 +54,19 @@ QTextEdit#suChat {{
     border:1px solid #1d2434;
     border-radius:8px;
     padding:8px 10px;
-    font-size:11px;
+    font-size:13px;
 }}
 QLineEdit#suReply {{
     background-color: #0a0d14; color: #e6f0ff;
     border: 1px solid #2a3148; border-radius: 8px;
-    padding: 6px 10px; font-size: 12px;
+    padding: 6px 10px; font-size: 14px;
 }}
 QLineEdit#suReply:focus {{ border-color: #5cf0ff; }}
 QLineEdit#suReply:disabled {{ color: #5a6478; }}
 QPushButton#suSend {{
     color: #0a0d14; background-color: #5cf0ff;
     border: 1px solid #5cf0ff; border-radius: 8px;
-    padding: 6px 14px; font-size: 11px; font-weight: 700;
+    padding: 6px 14px; font-size: 13px; font-weight: 700;
 }}
 QPushButton#suSend:hover {{ background-color: #7df3ff; }}
 QPushButton#suSend:disabled {{
@@ -74,10 +74,10 @@ QPushButton#suSend:disabled {{
 }}
 QPushButton#suGear {{
     background:transparent; color:#7888a8;
-    border:none; font-size:14px;
+    border:none; font-size:15px;
 }}
 QPushButton#suGear:hover {{ color:#5cf0ff; }}
-QCheckBox#suTrust {{ color: #7888a8; background:transparent; font-size:11px; }}
+QCheckBox#suTrust {{ color: #7888a8; background:transparent; font-size:13px; }}
 QCheckBox#suTrust::indicator {{
     width:12px; height:12px;
     border-radius:3px; border:1px solid #5a6478;
@@ -150,7 +150,7 @@ class SuperUserCard(QFrame):
         self._name = QLabel("Super User (YOU)")
         self._name.setObjectName("suName")
         nf = QFont()
-        nf.setPointSize(11)
+        nf.setPointSize(13)
         nf.setBold(True)
         self._name.setFont(nf)
         name_block.addWidget(self._name)
@@ -270,7 +270,23 @@ class SuperUserCard(QFrame):
 
     def _append_message(self, role: str, text: str) -> None:
         # Cap history at 20 entries so the mini log stays small.
-        self._messages.append((role, text.strip()))
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        # Dedupe consecutive duplicates. Two paths can call us with the
+        # same message in quick succession:
+        #   - User types a reply in this card: _on_submit appends locally
+        #     AND emits reply_submitted, whose handler routes through the
+        #     goal pipeline which calls append_user_message → second
+        #     append of the same text.
+        #   - The team prompts the user via set_attention(True, body=msg);
+        #     if the same prompt fires twice (e.g. timer + bus re-publish)
+        #     we'd otherwise see "Orchestrator: …" twice.
+        # Defensive single check beats coordinating which path is the
+        # "authoritative" one.
+        if self._messages and self._messages[-1] == (role, cleaned):
+            return
+        self._messages.append((role, cleaned))
         if len(self._messages) > 20:
             self._messages = self._messages[-20:]
         self._refresh_chat()
@@ -278,7 +294,7 @@ class SuperUserCard(QFrame):
     def _refresh_chat(self) -> None:
         if not self._messages:
             self._chat.setHtml(
-                '<div style="color:#5a6478; font-size:10px;">'
+                '<div style="color:#5a6478; font-size:12px;">'
                 'no messages yet — type below to start, or wait for the team to ping</div>'
             )
             return

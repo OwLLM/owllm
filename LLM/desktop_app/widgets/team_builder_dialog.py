@@ -48,6 +48,7 @@ from core.agents.teams import (
     save_custom_template,
     user_templates,
 )
+from desktop_app.widgets.agent_canvas import _display_label as _agent_display_label
 from desktop_app.widgets.agent_icons import apply_to_label
 
 
@@ -250,7 +251,7 @@ class TeamBuilderDialog(QDialog):
 
         info = QVBoxLayout()
         info.setSpacing(0)
-        name_label = QLabel(f"<b>{d.name}</b>")
+        name_label = QLabel(f"<b>{_agent_display_label(d.name)}</b>")
         name_label.setStyleSheet("color:#dde3ff; background:transparent;")
         info.addWidget(name_label)
         desc_label = QLabel(d.description or "")

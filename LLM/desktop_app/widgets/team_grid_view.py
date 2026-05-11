@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.agents.teams import Template
+from desktop_app.widgets.agent_canvas import _display_label as _agent_display_label
 from desktop_app.widgets.agent_icons import apply_to_label
 
 
@@ -512,9 +513,14 @@ class _AgentMiniCard(QFrame):
         else:
             self._leader_ribbon = None
 
-        # Name centred below the icon.
+        # Name centred below the icon. Humanize so the long
+        # "product_studio.product_owner" identifier reads as "Product
+        # Owner"; keep the raw id in the tooltip so power users can
+        # still find the underlying record.
         name_str = spec.name
-        display = name_str if len(name_str) <= 22 else name_str[:21] + "…"
+        display = _agent_display_label(name_str)
+        if len(display) > 22:
+            display = display[:21] + "…"
         name_label = QLabel(display)
         nf = QFont()
         nf.setPointSize(11)

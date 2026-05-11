@@ -147,6 +147,23 @@ def _wrappable(text: str) -> str:
     return "".join(out)
 
 
+_ACRONYMS = {"ux", "ui", "api", "mcp", "gpu", "be", "fe", "qa", "cli", "sql", "db"}
+
+
+def _display_label(full_name: str) -> str:
+    """Humanize an agent definition name (mirrors agent_canvas._display_label)."""
+    short = (full_name or "").rsplit(".", 1)[-1]
+    if not short:
+        return full_name
+    words = []
+    for w in short.replace("-", "_").split("_"):
+        w = w.strip()
+        if not w:
+            continue
+        words.append(w.upper() if w.lower() in _ACRONYMS else w.capitalize())
+    return " ".join(words) or full_name
+
+
 # ---------------------------------------------------------------------------
 # Gallery card
 # ---------------------------------------------------------------------------
@@ -221,7 +238,7 @@ class _GalleryCard(QFrame):
 
         name_row = QHBoxLayout()
         name_row.setSpacing(8)
-        name_label = QLabel(_wrappable(definition.name.capitalize()))
+        name_label = QLabel(_wrappable(_display_label(definition.name)))
         nf = QFont()
         nf.setPointSize(14)
         nf.setBold(True)
@@ -904,7 +921,7 @@ class _EditorPanel(QFrame):
             # "Auto" — show the user what the auto-assignment lands on.
             voice_id = svc.stable_voice_for(self._current.name)
         rate = int(self.voice_rate_spin.value())
-        name = (self._current.name if self._current else "Agent").capitalize()
+        name = _display_label(self._current.name) if self._current else "Agent"
         sample = f"Hi, I'm {name}. This is what my voice sounds like."
         # Bypass the page-level mute: the user explicitly asked to preview.
         was_enabled = svc.enabled
@@ -934,7 +951,7 @@ class _EditorPanel(QFrame):
         if QMessageBox.question(
             self,
             "Delete",
-            f"Delete custom agent '{self._current.name}'? This cannot be undone.",
+            f"Delete custom agent '{_display_label(self._current.name)}'? This cannot be undone.",
         ) != QMessageBox.Yes:
             return
         if delete_custom(self._current.name):

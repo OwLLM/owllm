@@ -74,10 +74,13 @@ QPushButton#suSend:disabled {{
     color:#5a6478; background-color:#1a2030; border-color:#2a3148;
 }}
 QPushButton#suGear {{
-    background:transparent; color:#7888a8;
-    border:none; font-size:15px;
+    background:#1a2030; color:#cbd2e0;
+    border:1px solid #2a3148; border-radius:6px;
+    font-size:14px;
 }}
-QPushButton#suGear:hover {{ color:#5cf0ff; }}
+QPushButton#suGear:hover {{
+    background:#22293c; color:#5cf0ff; border-color:#5cf0ff;
+}}
 QCheckBox#suTrust {{ color: #7888a8; background:transparent; font-size:13px; }}
 QCheckBox#suTrust::indicator {{
     width:12px; height:12px;
@@ -174,7 +177,7 @@ class SuperUserCard(QFrame):
 
         name_block = QVBoxLayout()
         name_block.setSpacing(0)
-        self._name = QLabel("You")
+        self._name = QLabel("Super User")
         self._name.setObjectName("suName")
         nf = QFont()
         nf.setPointSize(12)

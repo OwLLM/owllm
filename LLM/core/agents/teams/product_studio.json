@@ -80,18 +80,21 @@
   "graph": {
     "edges": [
       { "source": "orchestrator", "target": "product_owner" },
-      { "source": "product_owner", "target": "ux_designer" },
-      { "source": "product_owner", "target": "backend_arch" },
-      { "source": "ux_designer", "target": "whitepaper_writer" },
-      { "source": "backend_arch", "target": "whitepaper_writer" },
+      { "source": "product_owner", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "ux_designer" },
+      { "source": "ux_designer", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "backend_arch" },
+      { "source": "backend_arch", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "whitepaper_writer" },
       { "source": "whitepaper_writer", "target": "design_critic" },
       { "source": "design_critic", "target": "orchestrator" },
       { "source": "orchestrator", "target": "frontend_coder" },
-      { "source": "orchestrator", "target": "backend_coder" },
       { "source": "frontend_coder", "target": "code_critic" },
+      { "source": "orchestrator", "target": "backend_coder" },
       { "source": "backend_coder", "target": "code_critic" },
       { "source": "code_critic", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "docs_writer" }
+      { "source": "orchestrator", "target": "docs_writer" },
+      { "source": "docs_writer", "target": "orchestrator" }
     ]
   }
 }

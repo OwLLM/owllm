@@ -33,7 +33,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QObject, QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
     QBrush,
     QColor,
@@ -329,8 +329,23 @@ class _AgentNode(QGraphicsItem):
 
         glow = _STATUS_GLOW.get(self._status, QColor(0, 0, 0, 0))
         if glow.alpha() > 0:
+            # Pulse the halo when the node is actively working so the
+            # graph view has the same "alive" feel as the orbital
+            # diagram. Cheap: just modulate alpha by sin(phase).
+            base_alpha = glow.alpha()
+            if self._status == STATUS_ACTIVE and self._canvas is not None:
+                import math
+                phase = self._canvas._anim_phase
+                # Distinct phase per node so the team breathes as a
+                # constellation, not in lockstep.
+                offset = (hash(self.name) % 1000) / 1000.0 * 2 * math.pi
+                pulse = 0.5 + 0.5 * math.sin(phase * 2.2 + offset)
+                a = int(base_alpha * (0.55 + 0.45 * pulse))
+            else:
+                a = base_alpha
+            pulsing_glow = QColor(glow.red(), glow.green(), glow.blue(), a)
             grad = QRadialGradient(rect.center(), _NODE_W / 1.2)
-            grad.setColorAt(0.0, glow)
+            grad.setColorAt(0.0, pulsing_glow)
             grad.setColorAt(1.0, QColor(glow.red(), glow.green(), glow.blue(), 0))
             painter.fillRect(self.boundingRect(), grad)
 
@@ -1191,6 +1206,16 @@ class AgentCanvas(QGraphicsView):
         self._card_picker: Optional[QWidget] = None
         self._last_card_mode: str = ""
 
+        # Animation phase — drives the active-state pulse on node halos
+        # so the graph view feels as alive as AgentTeamCanvas's orbital
+        # diagram when an agent is working. Only ticks while at least
+        # one node is in a non-idle state so we don't burn CPU on idle
+        # canvases.
+        self._anim_phase: float = 0.0
+        self._anim_timer = QTimer(self)
+        self._anim_timer.setInterval(50)  # ~20 fps, smooth enough for a halo pulse
+        self._anim_timer.timeout.connect(self._tick_animation)
+
     # ------------------------------------------------------------------
     # Public API used by AgentsPage
     # ------------------------------------------------------------------
@@ -1235,6 +1260,32 @@ class AgentCanvas(QGraphicsView):
         node = self._nodes.get(name)
         if node is not None:
             node.set_status(status)
+            self._update_animation_state()
+
+    def _any_node_active(self) -> bool:
+        """True iff any node is in a non-idle status — drives the
+        pulse-timer on/off so we don't repaint forever on idle canvases."""
+        return any(n._status != STATUS_IDLE for n in self._nodes.values())
+
+    def _update_animation_state(self) -> None:
+        if self._any_node_active():
+            if not self._anim_timer.isActive():
+                self._anim_timer.start()
+        else:
+            if self._anim_timer.isActive():
+                self._anim_timer.stop()
+                # One last paint so any lingering halo pulse settles
+                # to a clean steady-state look.
+                self.viewport().update()
+
+    def _tick_animation(self) -> None:
+        # 2π per ~3 s so the pulse breathes at roughly heartbeat speed.
+        import math
+        self._anim_phase = (self._anim_phase + 0.1) % (2 * math.pi)
+        # Only the active nodes' rects need repainting, but a viewport
+        # update is cheap for a typical 6-12 node team and keeps the
+        # halo + edge highlights in sync.
+        self.viewport().update()
 
     def set_node_model_label(self, name: str, label: str) -> None:
         node = self._nodes.get(name)
@@ -1269,6 +1320,7 @@ class AgentCanvas(QGraphicsView):
     def reset_all_status(self) -> None:
         for n in self._nodes.values():
             n.set_status(STATUS_IDLE)
+        self._update_animation_state()
 
     def select_agent(self, name: Optional[str]) -> None:
         self._selected_name = name

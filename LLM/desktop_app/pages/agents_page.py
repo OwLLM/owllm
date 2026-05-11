@@ -4842,6 +4842,9 @@ class AgentsPage(QWidget):
         # 30-60s per turn (Claude CLI subscription is slow on first call).
         import time
         self._run_started_at = time.monotonic()
+        # Reset heartbeat so the stuck-run heuristic measures THIS run,
+        # not the previous one.
+        self._last_bus_msg_at = self._run_started_at
         self.status_label.setText("Running… 0s elapsed")
         if not hasattr(self, "_elapsed_timer"):
             self._elapsed_timer = QTimer(self)
@@ -5170,6 +5173,12 @@ class AgentsPage(QWidget):
           * REPLY from X → X turns IDLE.
           * EVENT containing "error" → that agent turns red.
         """
+        # Heartbeat: anything on the bus counts as "team is alive". The
+        # quick-reply path uses this to decide whether a run is healthy
+        # or stuck (Claude CLI hang, model unreachable, etc.).
+        import time
+        self._last_bus_msg_at = time.monotonic()
+
         # ---- log buffers ----
         if msg.from_agent in self._agent_logs:
             self._agent_logs[msg.from_agent].append(msg)
@@ -5633,10 +5642,14 @@ class AgentsPage(QWidget):
     def _on_user_reply(self, text: str) -> None:
         """Quick-reply submitted from the User card. Forwards to the
         existing goal pipeline so all run logic (team build, working-dir
-        hint, attachment snapshot, etc.) applies untouched. If a run is
-        already in flight we stage the text in the main goal input
-        instead of starting a second goal — the user can press Enter
-        when the team is ready, or use the approval buttons."""
+        hint, attachment snapshot, etc.) applies untouched.
+
+        If a run is already in flight we stage the text instead of
+        starting a second goal — BUT we now surface that clearly so
+        the user isn't left wondering why nothing happens. Previously
+        a stuck _run_active (e.g. Claude CLI hang) silently swallowed
+        every subsequent reply with no visible feedback at all.
+        """
         text = (text or "").strip()
         if not text:
             return
@@ -5646,11 +5659,46 @@ class AgentsPage(QWidget):
             self._super_user_card.set_attention(False)
         except Exception:
             pass
+
         if getattr(self, "_run_active", False):
-            # Stage but don't run; the disabled goal_input will accept
-            # the text and re-enable when the current run finishes.
+            # Heuristic: if the runner thread has been silent for >45s
+            # (no bus messages, no goal-id assigned), treat the run as
+            # stuck and offer to reset instead of silently staging.
+            import time
+            now = time.monotonic()
+            last_bus = getattr(self, "_last_bus_msg_at", None)
+            run_started = getattr(self, "_run_started_at", None)
+            silent_for = None
+            if last_bus is not None:
+                silent_for = now - last_bus
+            elif run_started is not None:
+                silent_for = now - run_started
+
+            if silent_for is not None and silent_for > 45.0:
+                # Tell the user + offer the cancel handle.
+                self._super_user_card.append_user_message(text)
+                self._super_user_card.set_working(
+                    True,
+                    f"run appears stuck ({int(silent_for)}s silent) — "
+                    "press Cancel to abort, then resend",
+                )
+                self.goal_input.setText(text)
+                return
+
+            # Healthy run in flight — stage with explicit feedback so
+            # the user knows the message was received and will be
+            # picked up after the current turn.
             self.goal_input.setText(text)
+            try:
+                self._super_user_card.set_working(
+                    True,
+                    "team working… your reply is queued for the next turn",
+                )
+            except Exception:
+                pass
             return
+
+        # Fresh run.
         self.goal_input.setText(text)
         self._run_clicked()
 

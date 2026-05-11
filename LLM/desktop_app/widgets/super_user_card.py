@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -484,8 +484,21 @@ class SuperUserDialog(QDialog):
         self.setObjectName("SuperUserDialog")
         self.setStyleSheet(_DIALOG_QSS)
         self.setWindowTitle("Super User — chat")
-        self.setWindowFlag(Qt.Tool, True)  # stays above main but doesn't steal focus
+        # Use the standard window frame (minimize / maximize / close + resize
+        # handles on all four edges). Qt.Tool used to give a slim title bar
+        # but on Windows it also disabled the visible resize cursors at the
+        # edges, so the dialog *looked* fixed even though it technically
+        # could resize.
+        self.setWindowFlags(
+            Qt.Window
+            | Qt.WindowTitleHint
+            | Qt.WindowSystemMenuHint
+            | Qt.WindowMinMaxButtonsHint
+            | Qt.WindowCloseButtonHint
+        )
         self.setModal(False)
+        self.setSizeGripEnabled(True)  # corner grip for unambiguous resizing
+        self.setMinimumSize(360, 320)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(14, 14, 14, 14)
@@ -526,6 +539,12 @@ class SuperUserDialog(QDialog):
         """Position the dialog flush to the right of ``anchor`` (typically
         the main window), same top Y, same height. Width = height * 4/5
         per the user's 4:5 aspect-ratio spec.
+
+        Also installs an event filter on ``anchor`` so the dialog tracks
+        the main window when it's moved or resized — the popout stays
+        glued to the right edge instead of being orphaned mid-screen.
+        After the user resizes the dialog manually, auto-tracking turns
+        off (we don't fight their explicit sizing choice).
         """
         if anchor is None:
             return
@@ -545,6 +564,63 @@ class SuperUserDialog(QDialog):
             x = ag.right()
             y = ag.top()
         self.setGeometry(x, y, width, height)
+
+        # Re-arm follow-anchor mode: every fresh place_against() call
+        # (i.e. user clicking ⛶ again) restores the docked behavior.
+        self._user_resized = False
+        if self._anchor is not anchor:
+            if self._anchor is not None:
+                try:
+                    self._anchor.removeEventFilter(self)
+                except Exception:
+                    pass
+            self._anchor = anchor
+            anchor.installEventFilter(self)
+
+    # ------------------------------------------------------------------
+    # Anchor-follow + manual-resize state
+    # ------------------------------------------------------------------
+
+    _anchor: Optional[QWidget] = None
+    _user_resized: bool = False
+
+    def eventFilter(self, obj: QObject, ev: QEvent) -> bool:
+        if obj is self._anchor and ev.type() in (QEvent.Resize, QEvent.Move):
+            if not self._user_resized and self.isVisible():
+                self._reposition_against_anchor()
+        return super().eventFilter(obj, ev)
+
+    def resizeEvent(self, ev) -> None:  # noqa: D401
+        """User dragged a corner — stop auto-following the main window
+        so we don't overwrite their size on the next anchor move."""
+        super().resizeEvent(ev)
+        # Distinguish "we set the geometry" from "user dragged a corner":
+        # _reposition_against_anchor sets _suppress_resize_flag for the
+        # duration of its setGeometry call.
+        if not getattr(self, "_suppress_resize_flag", False):
+            self._user_resized = True
+
+    def _reposition_against_anchor(self) -> None:
+        anchor = self._anchor
+        if anchor is None:
+            return
+        ag = anchor.frameGeometry()
+        height = ag.height()
+        width = int(height * 4 / 5)
+        screen = self.screen() or anchor.screen()
+        if screen is not None:
+            avail = screen.availableGeometry()
+            max_x = avail.right() - width
+            x = min(ag.right(), max_x)
+            y = max(avail.top(), ag.top())
+        else:
+            x = ag.right()
+            y = ag.top()
+        self._suppress_resize_flag = True
+        try:
+            self.setGeometry(x, y, width, height)
+        finally:
+            self._suppress_resize_flag = False
 
     # ------------------------------------------------------------------
     # Internal

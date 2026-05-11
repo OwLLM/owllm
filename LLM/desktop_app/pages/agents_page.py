@@ -94,6 +94,7 @@ from desktop_app.widgets.agent_canvas import (
     STATUS_ERROR as CANVAS_STATUS_ERROR,
     STATUS_IDLE as CANVAS_STATUS_IDLE,
     STATUS_PENDING as CANVAS_STATUS_PENDING,
+    _display_label as _agent_display_label,
 )
 from desktop_app.widgets.agent_canvas_loader import AgentCanvasLoader
 from desktop_app.widgets.agent_team_canvas import AgentTeamCanvas
@@ -5282,7 +5283,7 @@ class AgentsPage(QWidget):
     def _on_canvas_node_selected(self, agent_name: str) -> None:
         """User clicked a node — re-point the right pane at that agent's log."""
         self._selected_agent = agent_name
-        self.log_header.setText(f"📜 {agent_name}")
+        self.log_header.setText(f"📜 {_agent_display_label(agent_name)}")
         # Show the picker for the selected agent only.
         for name, picker in self._model_picker_buttons.items():
             picker.setVisible(name == agent_name)
@@ -5347,7 +5348,11 @@ class AgentsPage(QWidget):
             "tool_result": "#a0c8e0",
             "event":       "#e8e8e8",
         }.get(kind.lower(), "#cccccc")
-        sub = f"<span style='color:#888;'> · {msg.from_agent} → {msg.to_agent}</span>"
+        sub = (
+            f"<span style='color:#888;'> · "
+            f"{_agent_display_label(msg.from_agent)} → "
+            f"{_agent_display_label(msg.to_agent)}</span>"
+        )
 
         # Mechanical / internal traffic — THOUGHT, TOOL_CALL, TOOL_RESULT,
         # plus EVENT — always go to the Thought tab. The clean Reply tab
@@ -5378,13 +5383,13 @@ class AgentsPage(QWidget):
             if kl == "user":
                 speaker = "You"
             else:
-                speaker = msg.from_agent or kind.upper()
+                speaker = _agent_display_label(msg.from_agent) if msg.from_agent else kind.upper()
             speaker_html = (
                 f"<span style='color:{prefix_color}; font-weight:bold;'>{_escape_html(speaker)}:</span>"
             )
             target_note = ""
             if kl == "request" and msg.to_agent and msg.to_agent != msg.from_agent:
-                target_note = f" <span style='color:#888;'>→ {_escape_html(msg.to_agent)}</span>"
+                target_note = f" <span style='color:#888;'>→ {_escape_html(_agent_display_label(msg.to_agent))}</span>"
             self._chat_view.append(f"{speaker_html}{target_note} {c_html}<br/>")
 
     def _on_graph_changed(self) -> None:
@@ -5442,7 +5447,7 @@ class AgentsPage(QWidget):
             return
         if QMessageBox.question(
             self, "Remove agent",
-            f"Remove '{agent_name}' from the project team?\n"
+            f"Remove '{_agent_display_label(agent_name)}' from the project team?\n"
             "(This only edits the team list — the agent definition is preserved.)",
         ) != QMessageBox.Yes:
             return

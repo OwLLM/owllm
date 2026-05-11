@@ -65,6 +65,22 @@ def _alpha(c: QColor, a: int) -> QColor:
     return QColor(c.red(), c.green(), c.blue(), max(0, min(255, a)))
 
 
+_ACRONYMS = {"ux", "ui", "api", "mcp", "gpu", "be", "fe", "qa", "cli", "sql", "db"}
+
+
+def _display_label(full_name: str) -> str:
+    short = (full_name or "").rsplit(".", 1)[-1]
+    if not short:
+        return full_name
+    words = []
+    for w in short.replace("-", "_").split("_"):
+        w = w.strip()
+        if not w:
+            continue
+        words.append(w.upper() if w.lower() in _ACRONYMS else w.capitalize())
+    return " ".join(words) or full_name
+
+
 class AgentCanvasLoader(QWidget):
     """Animated loading splash for the Agents page.
 
@@ -364,7 +380,7 @@ class AgentCanvasLoader(QWidget):
             font.setBold(True)
             p.setFont(font)
             label_rect = QRectF(pos.x() - 80, pos.y() + r + 4, 160, 18)
-            p.drawText(label_rect, Qt.AlignCenter, name)
+            p.drawText(label_rect, Qt.AlignCenter, _display_label(name))
 
     def _paint_status_text(self, p: QPainter, rect: QRectF, y: float) -> None:
         # Main status — bigger, brighter.

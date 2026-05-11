@@ -663,8 +663,8 @@ class ToolInferenceWorker(QThread):
                         _ = resp.read()
                 except Exception as e:
                     raise RuntimeError(
-                        f"Tool Server is not reachable at {tool_server_url}.\n"
-                        f"Open the Servers tab and start 'Tool Server (MCP)'.\n"
+                        f"OWLLM MCP is not reachable at {tool_server_url}.\n"
+                        f"Open the Servers tab and start 'OWLLM MCP'.\n"
                         f"Details: {e}"
                     )
             
@@ -2054,6 +2054,17 @@ QMainWindow {{
     border: 2px solid {primary};
     border-radius: 12px;
 }}
+/* Tooltips — match the window background instead of Qt's default
+   white-on-white. The user spotted that the system tooltip palette on
+   Windows renders white text over a near-white background, which made
+   every hover hint unreadable on this dark theme. */
+QToolTip {{
+    background-color: #0e1117;
+    color: #fafafa;
+    border: 1px solid {primary};
+    padding: 6px 8px;
+    border-radius: 4px;
+}}
 /* Remove all underlines from HTML content in QLabel - comprehensive rules */
 QLabel {{
     text-decoration: none !important;
@@ -2276,6 +2287,15 @@ QMainWindow {{
     color: #262730;
     border: 2px solid {primary};
     border-radius: 12px;
+}}
+/* Tooltips — match the window background so the hint reads against the
+   light theme. Same fix as the dark-mode branch. */
+QToolTip {{
+    background-color: #ffffff;
+    color: #262730;
+    border: 1px solid {primary};
+    padding: 6px 8px;
+    border-radius: 4px;
 }}
 /* Remove all underlines from HTML content in QLabel - comprehensive rules */
 QLabel {{
@@ -2783,7 +2803,7 @@ class MainWindow(QMainWindow):
         # Remove native Windows title bar but keep window resizable
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window | Qt.WindowMinMaxButtonsHint)
         self.setWindowTitle(APP_TITLE)
-        self.resize(1400, 900)
+        self.resize(1480, 960)
         self.setMinimumSize(800, 600)  # Allow resizing with reasonable minimum
 
         self.root = get_app_root()
@@ -4126,8 +4146,8 @@ class MainWindow(QMainWindow):
         column was reclaimed for System Status)."""
         card = QFrame()
         card.setObjectName("LauncherCard")
-        # Min height bumped to fit the larger 360-px PNG icons.
-        card.setMinimumHeight(380)
+        # Min height sized to fit the 270-px PNG icons.
+        card.setMinimumHeight(290)
         card.setCursor(QCursor(Qt.PointingHandCursor))
         card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         card.setStyleSheet(f"""
@@ -4169,14 +4189,12 @@ class MainWindow(QMainWindow):
             from PySide6.QtGui import QPixmap as _QPixmap
             pm = _QPixmap(str(png_path))
             if not pm.isNull():
-                # Scale to 360×360 — bigger than the previous 220 px so
-                # the owl artwork really dominates the card. Card's
-                # min height was bumped to 380 to fit.
-                scaled = pm.scaled(
-                    360, 360,
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation,
-                )
+                # Scale to 270 px tall, width follows aspect ratio.
+                # ``scaledToHeight`` (not ``scaled(..., KeepAspectRatio)``
+                # which fits inside a square) is what guarantees BOTH
+                # owl crests render at the same height even when their
+                # source PNGs have different aspect ratios.
+                scaled = pm.scaledToHeight(270, Qt.SmoothTransformation)
                 icon_lbl.setPixmap(scaled)
                 icon_lbl.setFixedSize(scaled.width(), scaled.height())
             else:
@@ -6552,6 +6570,11 @@ class MainWindow(QMainWindow):
         the existing dialog instead of rebuilding it, so the running
         server thread, log buffers, and form state all survive across
         open/close cycles.
+
+        The popup is frameless and inherits the main window's theme
+        stylesheet so it visually matches the rest of the app — a
+        compact custom title bar (drag to move, ❌ to close) replaces
+        the OS chrome.
         """
         page = getattr(self, "server_page", None)
         if page is None:
@@ -6560,22 +6583,202 @@ class MainWindow(QMainWindow):
         if self._server_dialog is None:
             dlg = QDialog(self)
             dlg.setWindowTitle("Server")
-            # Resizable, normal frame with min/max/close. Stays on its
-            # own — non-modal — so the user can keep using the rest of
-            # the app while the server runs.
-            dlg.setWindowFlags(
-                Qt.Window
-                | Qt.WindowSystemMenuHint
-                | Qt.WindowMinMaxButtonsHint
-                | Qt.WindowCloseButtonHint
-            )
+            # Frameless + Window so the popup picks up the main app's
+            # dark theme. Non-modal — the user can keep using the rest
+            # of the app while the server runs.
+            dlg.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
             dlg.setModal(False)
             dlg.resize(1100, 720)
+            dlg.setMinimumSize(640, 460)
+            dlg.setMouseTracking(True)
+            # Inherit the main window's theme so the popup matches.
+            try:
+                dlg.setStyleSheet(self.styleSheet())
+            except Exception:
+                pass
 
-            v = QVBoxLayout(dlg)
+            # Edge margin reserved for resize hit zones — outer layout
+            # leaves an EDGE_M-px gutter all around so mouse events on
+            # the edges reach the dialog (not its children) and we can
+            # implement frameless edge-drag resize.
+            EDGE_M = 6
+            outer = QVBoxLayout(dlg)
+            outer.setContentsMargins(EDGE_M, EDGE_M, EDGE_M, EDGE_M)
+            outer.setSpacing(0)
+
+            inner = QWidget(dlg)
+            inner.setObjectName("serverDlgInner")
+            v = QVBoxLayout(inner)
             v.setContentsMargins(0, 0, 0, 0)
             v.setSpacing(0)
-            v.addWidget(page)
+            outer.addWidget(inner)
+
+            # ---- Custom title bar (drag-to-move + close) ------------
+            title_bar = QWidget(inner)
+            title_bar.setObjectName("serverDlgTitleBar")
+            title_bar.setFixedHeight(36)
+            title_bar.setStyleSheet(
+                "QWidget#serverDlgTitleBar {"
+                "  background: qlineargradient(x1:0, y1:0, x2:1, y2:0,"
+                "    stop:0 rgba(60, 60, 80, 0.85),"
+                "    stop:0.5 rgba(40, 40, 60, 0.85),"
+                "    stop:1 rgba(60, 60, 80, 0.85));"
+                "  border-bottom: 1px solid rgba(255, 255, 255, 0.08);"
+                "}"
+            )
+            tb_layout = QHBoxLayout(title_bar)
+            tb_layout.setContentsMargins(12, 0, 6, 0)
+            tb_layout.setSpacing(8)
+
+            tb_title = QLabel("🖧 Server", title_bar)
+            tb_title.setStyleSheet(
+                "color: #ffffff; font-size: 13pt; font-weight: bold; background: transparent;"
+            )
+            tb_layout.addWidget(tb_title)
+            tb_layout.addStretch(1)
+
+            tb_close = QPushButton("❌", title_bar)
+            tb_close.setFixedSize(30, 30)
+            tb_close.setCursor(Qt.PointingHandCursor)
+            tb_close.setStyleSheet("""
+                QPushButton {
+                    background: transparent;
+                    color: #f44336;
+                    border: none;
+                    font-size: 16pt;
+                    font-weight: bold;
+                    padding: 0px;
+                }
+                QPushButton:hover {
+                    background: rgba(244, 67, 54, 0.2);
+                    border-radius: 4px;
+                }
+                QPushButton:pressed {
+                    background: rgba(244, 67, 54, 0.3);
+                }
+            """)
+            tb_close.clicked.connect(dlg.close)
+            tb_layout.addWidget(tb_close)
+
+            # Drag-to-move: capture press on the title bar, then track
+            # mouse-move at the dialog level so the cursor doesn't lose
+            # the drag if it strays off the title bar mid-drag.
+            dlg._drag_offset = None  # type: ignore[attr-defined]
+
+            def _tb_mouse_press(ev):
+                if ev.button() == Qt.LeftButton:
+                    dlg._drag_offset = ev.globalPosition().toPoint() - dlg.frameGeometry().topLeft()
+                    ev.accept()
+
+            def _tb_mouse_move(ev):
+                if dlg._drag_offset is not None and (ev.buttons() & Qt.LeftButton):
+                    dlg.move(ev.globalPosition().toPoint() - dlg._drag_offset)
+                    ev.accept()
+
+            def _tb_mouse_release(ev):
+                dlg._drag_offset = None
+                ev.accept()
+
+            title_bar.mousePressEvent = _tb_mouse_press
+            title_bar.mouseMoveEvent = _tb_mouse_move
+            title_bar.mouseReleaseEvent = _tb_mouse_release
+
+            v.addWidget(title_bar)
+            v.addWidget(page, 1)
+
+            # Hide the page's own '🖧 Servers' header — the custom
+            # title bar above already shows it. Two titles felt
+            # redundant.
+            try:
+                from PySide6.QtWidgets import QLabel as _QL
+                for lbl in page.findChildren(_QL):
+                    if lbl.property("class") == "page_title":
+                        lbl.hide()
+                        break
+            except Exception:
+                pass
+
+            # ---- Edge-drag resize -----------------------------------
+            # Standard 8-direction hit test on the EDGE_M gutter.
+            dlg._resize_dir = 0  # type: ignore[attr-defined]
+            dlg._resize_press_global = None  # type: ignore[attr-defined]
+            dlg._resize_press_geom = None  # type: ignore[attr-defined]
+
+            cursor_map = {
+                1 | 4: Qt.SizeFDiagCursor,
+                2 | 8: Qt.SizeFDiagCursor,
+                2 | 4: Qt.SizeBDiagCursor,
+                1 | 8: Qt.SizeBDiagCursor,
+                1: Qt.SizeHorCursor,
+                2: Qt.SizeHorCursor,
+                4: Qt.SizeVerCursor,
+                8: Qt.SizeVerCursor,
+            }
+
+            def _hit_dir(pos):
+                m = EDGE_M + 2  # grow hit zone slightly past the gutter
+                r = dlg.rect()
+                d = 0
+                if pos.x() <= m:
+                    d |= 1
+                if pos.x() >= r.width() - m:
+                    d |= 2
+                if pos.y() <= m:
+                    d |= 4
+                if pos.y() >= r.height() - m:
+                    d |= 8
+                return d
+
+            from PySide6.QtCore import QRect as _QRect
+
+            def _dlg_press(ev):
+                if ev.button() == Qt.LeftButton:
+                    d = _hit_dir(ev.position().toPoint())
+                    if d:
+                        dlg._resize_dir = d
+                        dlg._resize_press_global = ev.globalPosition().toPoint()
+                        dlg._resize_press_geom = _QRect(dlg.geometry())
+                        ev.accept()
+                        return
+                QDialog.mousePressEvent(dlg, ev)
+
+            def _dlg_move(ev):
+                if dlg._resize_dir and (ev.buttons() & Qt.LeftButton):
+                    gp = ev.globalPosition().toPoint()
+                    dx = gp.x() - dlg._resize_press_global.x()
+                    dy = gp.y() - dlg._resize_press_global.y()
+                    g = _QRect(dlg._resize_press_geom)
+                    d = dlg._resize_dir
+                    if d & 1:
+                        g.setLeft(g.left() + dx)
+                    if d & 2:
+                        g.setRight(g.right() + dx)
+                    if d & 4:
+                        g.setTop(g.top() + dy)
+                    if d & 8:
+                        g.setBottom(g.bottom() + dy)
+                    if g.width() >= dlg.minimumWidth() and g.height() >= dlg.minimumHeight():
+                        dlg.setGeometry(g)
+                    ev.accept()
+                    return
+                if not (ev.buttons() & Qt.LeftButton):
+                    d = _hit_dir(ev.position().toPoint())
+                    dlg.setCursor(cursor_map.get(d, Qt.ArrowCursor))
+                QDialog.mouseMoveEvent(dlg, ev)
+
+            def _dlg_release(ev):
+                if dlg._resize_dir:
+                    dlg._resize_dir = 0
+                    dlg._resize_press_global = None
+                    dlg._resize_press_geom = None
+                    ev.accept()
+                    return
+                QDialog.mouseReleaseEvent(dlg, ev)
+
+            dlg.mousePressEvent = _dlg_press
+            dlg.mouseMoveEvent = _dlg_move
+            dlg.mouseReleaseEvent = _dlg_release
+
             self._server_dialog = dlg
 
         # Show as a regular top-level window each time.
@@ -6729,7 +6932,7 @@ class MainWindow(QMainWindow):
             return
         if not hasattr(self, '_get_frame_asset_path'):
             return
-        
+
         # Map tab indices to corner_br image names
         # All corner images are sized to 150px width (height adaptable) by hybrid_frame system
         # Server is no longer a tab (opened as a popup), so the
@@ -6744,11 +6947,35 @@ class MainWindow(QMainWindow):
             6: "corner_br_owl_tools",        # Requirements (using tools as fallback)
             7: "corner_br_owl_info",         # Info
         }
-        
+
         # No fallback to a generic "corner_br" — that asset was deleted.
         # If the tab isn't in the map we just clear the per-tab owl.
         image_name = tab_to_image.get(tab_index)
-        image_path = self._get_frame_asset_path(image_name) if image_name else None
+        if not image_name:
+            self._hybrid_frame.set_corner_br(None)
+            return
+
+        # Prefer the user-maintained icons/Page_icons/owl_<X>.png file —
+        # that's where the user is editing replacement art, and the
+        # legacy hybrid_frame_module/assets/corner_br_owl_*.webp set
+        # used to silently shadow those edits. Fall back to the legacy
+        # bundle only if the Page_icons file is missing.
+        image_path: str | None = None
+        try:
+            from pathlib import Path as _Path
+            assets_dir = getattr(self, "_frame_assets_dir", None)
+            if assets_dir is not None:
+                page_icons_dir = _Path(assets_dir).parent.parent / "icons" / "Page_icons"
+                short = image_name.replace("corner_br_", "", 1)  # e.g. "owl_training"
+                for ext in (".png", ".webp"):
+                    candidate = page_icons_dir / f"{short}{ext}"
+                    if candidate.exists():
+                        image_path = str(candidate)
+                        break
+        except Exception:
+            image_path = None
+        if not image_path:
+            image_path = self._get_frame_asset_path(image_name)
         self._hybrid_frame.set_corner_br(image_path)
     
     def _install_pytorch(self):
@@ -28606,18 +28833,43 @@ def main() -> int:
         except:
             pass
     
-    # Optional startup watchdog (only enabled when explicitly requested)
-    # Set environment variable LLM_STARTUP_WATCHDOG=1 to enable.
+    # ALWAYS install faulthandler so the next native crash leaves a
+    # Python traceback in logs/native_crash.log instead of just a
+    # silent WER minidump. We hit one such crash on 2026-05-12 at
+    # 02:00:21 AM (PID 82580, segfault inside python311.dll while
+    # the user was asleep) — without faulthandler the only signal was
+    # Windows Event Viewer + a 358 MB .dmp in %LOCALAPPDATA%\CrashDumps.
+    # faulthandler costs ~zero at runtime; it only writes the trace at
+    # the moment a fault actually happens.
     try:
-        import os
+        import faulthandler
+        crash_log_path = logs_dir / "native_crash.log"
+        crash_log = open(crash_log_path, "a", encoding="utf-8", errors="replace")
+        from datetime import datetime as _dt
+        crash_log.write(
+            f"\n==== faulthandler armed at {_dt.now().isoformat()} (pid={os.getpid()}) ====\n"
+        )
+        crash_log.flush()
+        # Keep a reference so the FD stays open for the lifetime of the
+        # process — faulthandler writes to it directly from the signal
+        # handler so it MUST remain valid even after our locals go out
+        # of scope.
+        globals()["_NATIVE_CRASH_LOG_FD"] = crash_log
+        faulthandler.enable(file=crash_log, all_threads=True)
+    except Exception as e:
+        write_startup_error(f"Failed to install faulthandler: {e}")
+
+    # Hang-watchdog stays opt-in (it spams traces every 30s and is
+    # only useful when actively debugging a frozen startup).
+    try:
         if os.environ.get("LLM_STARTUP_WATCHDOG") == "1":
-            import faulthandler
+            import faulthandler as _fh
             hang_log_path = logs_dir / "startup_hang.log"
             hang_log = open(hang_log_path, "a", encoding="utf-8", errors="replace")
             hang_log.write("\n==== startup_hang watchdog enabled ====\n")
             hang_log.flush()
-            faulthandler.enable(file=hang_log, all_threads=True)
-            faulthandler.dump_traceback_later(30, repeat=True, file=hang_log)
+            globals()["_STARTUP_HANG_FD"] = hang_log
+            _fh.dump_traceback_later(30, repeat=True, file=hang_log)
     except Exception as e:
         write_startup_error(f"Failed to setup watchdog: {e}")
 
@@ -28756,10 +29008,13 @@ def main() -> int:
                 win._frame_assets_dir = assets_dir
                 win._get_frame_asset_path = get_asset_path
                 
-                # Set initial corner_br image for home page (tab index 0)
-                initial_corner_br = get_asset_path("corner_br_owl_coding")
-                if initial_corner_br:
-                    frame.set_corner_br(initial_corner_br)
+                # Set initial corner_br image for the Home tab (index 0)
+                # via _update_frame_corner_br so the same Page_icons-first
+                # resolver runs at startup as on every tab change.
+                try:
+                    win._update_frame_corner_br(0)
+                except Exception:
+                    pass
                 
                 # Apply initial theme colors to frame
                 colors = win._get_theme_colors()

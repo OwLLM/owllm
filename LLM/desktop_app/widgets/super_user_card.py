@@ -135,6 +135,7 @@ class SuperUserCard(QFrame):
         outer.addLayout(self._build_header())
         outer.addWidget(self._build_chat())
         outer.addLayout(self._build_input())
+        outer.addLayout(self._build_trust_row())
 
         # Pulsing border timer for the attention state.
         self._blink = QTimer(self)
@@ -159,41 +160,36 @@ class SuperUserCard(QFrame):
     # ------------------------------------------------------------------
 
     def _build_header(self) -> QHBoxLayout:
+        # Compact header: the canvas overlay caps the card at ~320 px, so
+        # avatar + title + 3 controls quickly run out of room. Auto-approve
+        # has been moved to its own row below the chat — the header now
+        # holds only the identity + the two icon buttons (enlarge, gear).
         row = QHBoxLayout()
-        row.setSpacing(10)
+        row.setSpacing(6)
 
         avatar = QLabel("👤")
         avatar.setObjectName("suAvatar")
-        avatar.setFixedSize(32, 32)
+        avatar.setFixedSize(28, 28)
         row.addWidget(avatar)
 
         name_block = QVBoxLayout()
         name_block.setSpacing(0)
-        self._name = QLabel("Super User (YOU)")
+        self._name = QLabel("You")
         self._name.setObjectName("suName")
         nf = QFont()
-        nf.setPointSize(13)
+        nf.setPointSize(12)
         nf.setBold(True)
         self._name.setFont(nf)
         name_block.addWidget(self._name)
 
-        self._hint = QLabel("idle — the team pings you here when it needs input")
+        self._hint = QLabel("idle — team pings you here")
         self._hint.setObjectName("suHint")
         name_block.addWidget(self._hint)
         row.addLayout(name_block, 1)
 
-        self._trust = QCheckBox("auto-approve")
-        self._trust.setObjectName("suTrust")
-        self._trust.setToolTip(
-            "When on, every tool request from the team resolves APPROVE "
-            "without surfacing a prompt. Per-project; off by default."
-        )
-        self._trust.toggled.connect(self.supervisor_toggled)
-        row.addWidget(self._trust)
-
         self._enlarge = QPushButton("⛶")
         self._enlarge.setObjectName("suGear")  # reuse gear stylesheet
-        self._enlarge.setFixedSize(26, 26)
+        self._enlarge.setFixedSize(24, 24)
         self._enlarge.setToolTip(
             "Open chat in a side panel (4:5, full window height, docked right)"
         )
@@ -202,10 +198,27 @@ class SuperUserCard(QFrame):
 
         self._gear = QPushButton("⚙")
         self._gear.setObjectName("suGear")
-        self._gear.setFixedSize(26, 26)
+        self._gear.setFixedSize(24, 24)
         self._gear.setToolTip("Notification settings (Telegram, etc.)")
         self._gear.clicked.connect(self.settings_clicked)
         row.addWidget(self._gear)
+        return row
+
+    def _build_trust_row(self) -> QHBoxLayout:
+        """Auto-approve toggle moved out of the header into its own row
+        so the header can fit the title + enlarge + gear in the narrow
+        overlay card."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        self._trust = QCheckBox("auto-approve tool requests")
+        self._trust.setObjectName("suTrust")
+        self._trust.setToolTip(
+            "When on, every tool request from the team resolves APPROVE "
+            "without surfacing a prompt. Per-project; off by default."
+        )
+        self._trust.toggled.connect(self.supervisor_toggled)
+        row.addWidget(self._trust)
+        row.addStretch(1)
         return row
 
     def _build_chat(self) -> QTextEdit:

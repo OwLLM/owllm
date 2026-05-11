@@ -77,6 +77,22 @@ def _alpha(c: QColor, a: int) -> QColor:
     return QColor(c.red(), c.green(), c.blue(), max(0, min(255, a)))
 
 
+_ACRONYMS = {"ux", "ui", "api", "mcp", "gpu", "be", "fe", "qa", "cli", "sql", "db"}
+
+
+def _display_label(full_name: str) -> str:
+    short = (full_name or "").rsplit(".", 1)[-1]
+    if not short:
+        return full_name
+    words = []
+    for w in short.replace("-", "_").split("_"):
+        w = w.strip()
+        if not w:
+            continue
+        words.append(w.upper() if w.lower() in _ACRONYMS else w.capitalize())
+    return " ".join(words) or full_name
+
+
 def _mix(a: QColor, b: QColor, t: float) -> QColor:
     t = max(0.0, min(1.0, t))
     return QColor(
@@ -1021,7 +1037,7 @@ class AgentTeamCanvas(QWidget):
             p.setFont(font)
             p.setPen(_TEXT_BRIGHT)
             label_rect = QRectF(cx - 100, cy + r + 6, 200, 20)
-            p.drawText(label_rect, Qt.AlignCenter, self._orchestrator_name)
+            p.drawText(label_rect, Qt.AlignCenter, _display_label(self._orchestrator_name))
 
     def _paint_nodes(
         self, p: QPainter, positions: List[Tuple[str, QPointF]]
@@ -1098,7 +1114,7 @@ class AgentTeamCanvas(QWidget):
             p.setFont(label_font)
             p.setPen(_TEXT_BRIGHT)
             label_rect = QRectF(pos.x() - 90, pos.y() + r + 4, 180, 16)
-            p.drawText(label_rect, Qt.AlignCenter, name)
+            p.drawText(label_rect, Qt.AlignCenter, _display_label(name))
 
             if agent.status != STATUS_IDLE:
                 status_word = {

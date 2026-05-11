@@ -2723,7 +2723,7 @@ class AgentsPage(QWidget):
                 border:none; border-radius:8px;
                 padding:10px;
                 font-family: Consolas, 'JetBrains Mono', monospace;
-                font-size:12px;
+                font-size:14px;
             }
         """
         self._chat_view = QTextEdit()

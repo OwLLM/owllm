@@ -54,7 +54,7 @@ QTextEdit#suChat {{
     border:1px solid #1d2434;
     border-radius:8px;
     padding:8px 10px;
-    font-size:13px;
+    font-size:15px;
 }}
 QLineEdit#suReply {{
     background-color: #0a0d14; color: #e6f0ff;
@@ -294,7 +294,7 @@ class SuperUserCard(QFrame):
     def _refresh_chat(self) -> None:
         if not self._messages:
             self._chat.setHtml(
-                '<div style="color:#5a6478; font-size:12px;">'
+                '<div style="color:#5a6478; font-size:14px;">'
                 'no messages yet — type below to start, or wait for the team to ping</div>'
             )
             return

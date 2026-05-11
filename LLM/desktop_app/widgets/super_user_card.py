@@ -92,6 +92,11 @@ QCheckBox#suTrust::indicator:checked {{
 _IDLE = _BASE_QSS.format(border="1px solid #1d2434")
 _ATTN_A = _BASE_QSS.format(border="2px solid #ffc060")
 _ATTN_B = _BASE_QSS.format(border="2px solid #5cf0ff")
+# "Team working" pulse — calmer than the urgent ATTN alternation; the
+# user should see "yes, something is happening" without it screaming
+# for input. Slow alternation between two blue tones.
+_WORK_A = _BASE_QSS.format(border="2px solid #2a4d7a")
+_WORK_B = _BASE_QSS.format(border="2px solid #3b6fa8")
 
 
 class SuperUserCard(QFrame):
@@ -128,6 +133,14 @@ class SuperUserCard(QFrame):
         self._blink.timeout.connect(self._toggle_blink)
         self._blink_phase = False
         self._attention = False
+        # Working state runs its own slower pulse so the team-busy
+        # indication is visually distinct from "team needs you NOW".
+        self._working = False
+        self._working_blink = QTimer(self)
+        self._working_blink.setInterval(1200)
+        self._working_blink.timeout.connect(self._toggle_working_blink)
+        self._working_phase = False
+        self._working_label = ""
 
         self._messages: List[tuple] = []  # (role, text) chronological
         self._refresh_chat()
@@ -206,12 +219,19 @@ class SuperUserCard(QFrame):
 
     def set_attention(self, on: bool, body: str = "") -> None:
         """Switch between idle and pulsing-attention. Auto-focuses the
-        reply field on attention so the user can type immediately."""
+        reply field on attention so the user can type immediately.
+
+        Attention wins over the working pulse — when the team needs
+        input, that signal is urgent. The working pulse resumes when
+        attention is cleared (if the run is still in flight).
+        """
         self._attention = bool(on)
         if on:
             self._hint.setText(body or "the team is waiting for you")
             self._blink_phase = False
             self.setStyleSheet(_ATTN_A)
+            if self._working_blink.isActive():
+                self._working_blink.stop()
             if not self._blink.isActive():
                 self._blink.start()
             if self._reply.isEnabled():
@@ -221,12 +241,59 @@ class SuperUserCard(QFrame):
         else:
             if self._blink.isActive():
                 self._blink.stop()
-            self._hint.setText("idle — the team pings you here when it needs input")
-            self.setStyleSheet(_IDLE)
+            # If the team is still working, fall back to the working
+            # pulse rather than IDLE so the user keeps seeing "busy".
+            if self._working:
+                self._enter_working_visual()
+            else:
+                self._hint.setText("idle — the team pings you here when it needs input")
+                self.setStyleSheet(_IDLE)
+
+    def set_working(self, on: bool, label: str = "") -> None:
+        """Switch the card into "team busy" mode (or out of it).
+
+        While working, the reply field STAYS enabled — the user can talk
+        to the team mid-run (the goal pipeline stages or routes the
+        reply). A slow blue pulse on the card border + the hint text
+        carries the "yes, something is happening" signal without
+        screaming for input the way ``set_attention`` does.
+
+        ``label`` (optional): short status, e.g. "orchestrator → coder".
+        Falls back to a generic "team working…" when empty.
+        """
+        self._working = bool(on)
+        self._working_label = (label or "").strip()
+        if on:
+            # If attention is active, don't override its visual — just
+            # remember we're working so we resume the pulse when
+            # attention clears.
+            if not self._attention:
+                self._enter_working_visual()
+        else:
+            if self._working_blink.isActive():
+                self._working_blink.stop()
+            self._working_label = ""
+            if not self._attention:
+                self._hint.setText("idle — the team pings you here when it needs input")
+                self.setStyleSheet(_IDLE)
+
+    def _enter_working_visual(self) -> None:
+        """Paint the working state. Caller has confirmed attention isn't active."""
+        hint = self._working_label or "team working… reply anytime to nudge"
+        self._hint.setText(hint)
+        self._working_phase = False
+        self.setStyleSheet(_WORK_A)
+        if not self._working_blink.isActive():
+            self._working_blink.start()
 
     def set_reply_enabled(self, enabled: bool) -> None:
-        """Mirror the goal-input enabled state — disable while a run is
-        in flight so the user can't kick off a parallel run."""
+        """Enable/disable the reply input. The agents page used to call
+        this with ``False`` while a run was in flight, which made the
+        team's ``set_attention`` prompts unactionable (the focused
+        reply field was disabled). The reply field is now ALWAYS
+        enabled when a project is loaded; ``set_working(True)`` is the
+        right call for run-in-flight state.
+        """
         self._reply.setEnabled(enabled)
         self._send.setEnabled(enabled)
 
@@ -267,6 +334,10 @@ class SuperUserCard(QFrame):
     def _toggle_blink(self) -> None:
         self._blink_phase = not self._blink_phase
         self.setStyleSheet(_ATTN_B if self._blink_phase else _ATTN_A)
+
+    def _toggle_working_blink(self) -> None:
+        self._working_phase = not self._working_phase
+        self.setStyleSheet(_WORK_B if self._working_phase else _WORK_A)
 
     def _append_message(self, role: str, text: str) -> None:
         # Cap history at 20 entries so the mini log stays small.

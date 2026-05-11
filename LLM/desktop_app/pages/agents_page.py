@@ -3426,7 +3426,7 @@ class AgentsPage(QWidget):
         self._current_goal_id = None
         self.goal_input.setEnabled(True)
         if hasattr(self, "_super_user_card"):
-            self._super_user_card.set_reply_enabled(True)
+            self._super_user_card.set_working(False)
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self.status_label.setText("Idle.")
@@ -4085,7 +4085,7 @@ class AgentsPage(QWidget):
         try:
             self.goal_input.setEnabled(True)
             if hasattr(self, "_super_user_card"):
-                self._super_user_card.set_reply_enabled(True)
+                self._super_user_card.set_working(False)
             self.goal_input.setFocus()
         except Exception:
             pass
@@ -4817,7 +4817,7 @@ class AgentsPage(QWidget):
 
         self.goal_input.setEnabled(False)
         if hasattr(self, "_super_user_card"):
-            self._super_user_card.set_reply_enabled(False)
+            self._super_user_card.set_working(True, "team working… reply anytime to nudge")
             self._super_user_card.append_user_message(goal)
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
@@ -5118,7 +5118,7 @@ class AgentsPage(QWidget):
     def _set_idle(self) -> None:
         self.goal_input.setEnabled(True)
         if hasattr(self, "_super_user_card"):
-            self._super_user_card.set_reply_enabled(True)
+            self._super_user_card.set_working(False)
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         if hasattr(self, "_elapsed_timer"):

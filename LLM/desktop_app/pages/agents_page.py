@@ -4349,6 +4349,110 @@ class AgentsPage(QWidget):
     def _settings_key(self, role_name: str) -> str:
         return f"{self._SETTINGS_PREFIX}{role_name}"
 
+    def _warn_if_stale_graph(self, graph, project) -> None:
+        """Surface a clear warning when the project's snapshotted routing
+        graph diverges from the team template's current edges.
+
+        Background — the routing bug class
+        ===================================
+
+        When a project is instantiated from a template, the routing graph
+        (``Project.graph_json``) is SNAPSHOTTED. If the template's edges
+        are later corrected (e.g. fixing a fan-out + cascade that mis-
+        routed a chain), existing projects keep the stale graph and keep
+        failing at dispatch — silently, because dispatch IS finding an
+        agent, just not the one the user expected. The user-visible
+        symptom is "I dispatched to A but the reply came back in B's
+        voice" with no log line explaining why.
+
+        This check compares the project's graph_edges against the live
+        template's edges (when every team member is namespaced by a known
+        template prefix) and logs a clear warning + appends a
+        user-visible row to the orchestrator's log when they diverge.
+        The user can then run::
+
+            python -m core.diagnostics.refresh_team_graph --team <name>
+
+        to rewrite just the graph_json without losing model picks or
+        in-progress state.
+
+        No-op when the team is mixed (members from multiple templates,
+        or user-built customs) — we can't reliably guess which template
+        to compare against.
+        """
+        if not project or not project.team:
+            return
+        # Infer the template prefix from the team members. Every member
+        # must share the same ``<team>.`` prefix for the check to apply.
+        prefixes = set()
+        for name in project.team:
+            if isinstance(name, str) and "." in name:
+                prefixes.add(name.split(".", 1)[0])
+            else:
+                prefixes.add("")
+        if len(prefixes) != 1 or "" in prefixes:
+            return  # mixed team or non-prefixed agents — skip
+        team_prefix = prefixes.pop()
+
+        try:
+            from core.agents.teams.loader import all_templates, _build_graph
+        except Exception:
+            return  # can't import means we're in a context where this check doesn't apply
+
+        templates = all_templates()
+        tpl = templates.get(team_prefix)
+        if tpl is None:
+            return  # template not installed locally — nothing to compare to
+
+        # Build what the graph SHOULD look like from the current template.
+        try:
+            expected_graph = _build_graph(tpl, list(project.team))
+        except Exception:
+            logger.exception("could not build expected graph for stale-check")
+            return
+
+        # Compare edge sets (source, target) — ignore node positions etc.
+        def _edge_set(g) -> frozenset:
+            return frozenset((e.source, e.target) for e in g.edges)
+
+        if _edge_set(graph) == _edge_set(expected_graph):
+            return  # up to date
+
+        msg = (
+            f"⚠ stale routing graph: project '{project.name}' was instantiated "
+            f"from team '{team_prefix}' before the template's edges were corrected. "
+            f"Dispatch may auto-cascade to the wrong specialist. "
+            f"Fix: close the app, then run from LocaLLM/LLM:\n"
+            f"    python -m core.diagnostics.refresh_team_graph --team {team_prefix}\n"
+            f"This preserves every other project setting."
+        )
+        logger.warning(msg)
+        # Surface to the user via the orchestrator's log card so they see
+        # it the moment they hit Run instead of after six broken attempts.
+        try:
+            from core.agents.bus import Message
+            orch = next(
+                (n for n in project.team
+                 if n in self._role_definitions_cache
+                 and self._role_definitions_cache[n].can_dispatch),
+                None,
+            ) if hasattr(self, "_role_definitions_cache") else None
+            if orch is None:
+                # Fallback: any name ending in .orchestrator.
+                orch = next(
+                    (n for n in project.team if n.endswith(".orchestrator")),
+                    project.team[0] if project.team else "orchestrator",
+                )
+            from core.agents.message import MessageKind
+            self._bus.publish(Message(
+                from_agent="system",
+                to_agent=orch,
+                kind=MessageKind.EVENT,
+                body=msg,
+            ))
+        except Exception:
+            logger.debug("could not publish stale-graph warning to bus", exc_info=True)
+
     def _restore_saved_selections(self) -> None:
         """Apply each role's saved composite model id, if one exists.
 
@@ -4875,6 +4979,13 @@ class AgentsPage(QWidget):
                  if name in defs and defs[name].can_dispatch),
                 "",
             )
+            # Stale-graph early warning. If every team member is namespaced
+            # by a known template AND that template's current edges differ
+            # from what the project has snapshotted, the user is about to
+            # run with stale routing — exactly the bug that made
+            # product_owner cascade to design_critic for six attempts.
+            # Surface it on the goal-log row + offer a one-command fix.
+            self._warn_if_stale_graph(graph, self._active_project)
             if graph.edges and orchestrator_name:
                 def graph_resolver(from_name: str, _g=graph, _o=orchestrator_name) -> Optional[str]:
                     return _g.next_target(from_name, _o)

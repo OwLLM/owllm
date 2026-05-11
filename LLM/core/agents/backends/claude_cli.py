@@ -32,24 +32,41 @@ _MODELS = [
 ]
 
 
-# Hard cap so a hung CLI invocation doesn't pin an agent worker forever.
-# Outer goal wall-time is the real safety net; this is the inner timeout.
+# No per-call CLI timeout by default.
 #
-# Was 180s — discovered the hard way that Opus 4.7 on a long context
-# (e.g. product_studio's orchestrator with the AMBIGUITY + WORKING-DIR
-# + team-roster prompt plus accumulated chat history) legitimately
-# needs more than 3 minutes for a single turn. Bumped to 300s default
-# and made overridable via env so users hitting genuine-slow-work runs
-# can extend further. A true hang still gets caught — the goal wall-
-# time (separate budget) is the catch-all.
-def _resolve_cli_timeout() -> int:
+# Why no inner cap:
+# Real Claude Code sessions don't fail a turn because the model thought
+# for 4 minutes. Opus on long context legitimately takes many minutes
+# for a hard turn. Killing the subprocess mid-thought just throws away
+# the tokens the user already paid for and surfaces as "timed out"
+# when nothing was actually wrong.
+#
+# What catches the genuine hang:
+# - Goal-level wall_time_seconds (10 min default per goal) — checked
+#   in the agent loop between iterations.
+# - User's Cancel button — writes GoalStatus.CANCELLED to the bus.
+# - The user closing the app — kills the worker outright.
+#
+# Known limitation we are deliberately accepting:
+# subprocess.run() is uninterruptible mid-call. If claude CLI ever
+# truly hangs (corrupted auth session, network deadlock, container
+# wedge), the agent worker stays inside subprocess.run() until the
+# OS / user kills the process. The goal-level wall-time check can't
+# fire mid-subprocess. The right fix for that is to switch to Popen
+# + poll loop with a cancellation hook the agent layer can trigger —
+# tracked as future work; not patched here with a band-aid number.
+#
+# Override (for users who explicitly want a safety net):
+# Set OWLLM_AGENT_CLI_TIMEOUT_SECONDS to a positive integer to
+# restore an inner cap. 0 or unset means no inner cap.
+def _resolve_cli_timeout() -> Optional[int]:
     try:
         v = int((os.environ.get("OWLLM_AGENT_CLI_TIMEOUT_SECONDS") or "").strip() or "0")
         if v > 0:
             return v
     except (TypeError, ValueError):
         pass
-    return 300
+    return None
 
 
 _CLI_TIMEOUT_SECONDS = _resolve_cli_timeout()
@@ -143,17 +160,18 @@ class ClaudeCLIBackend:
                 cwd=run_cwd,
             )
         except subprocess.TimeoutExpired:
-            # Surface size of the input so the user can tell "hang" from
-            # "legitimately too much context for the timeout to cover".
+            # Only reachable when OWLLM_AGENT_CLI_TIMEOUT_SECONDS is set
+            # by the user. By default there is no inner cap — the goal-
+            # level wall-time is the safety net.
             chars = len(combined_prompt or "")
             roles = [m.get("role", "?") for m in messages]
             raise RuntimeError(
-                f"claude CLI timed out after {_CLI_TIMEOUT_SECONDS}s "
-                f"(sent {chars} chars across {len(messages)} messages "
-                f"[{','.join(roles[:5])}{'...' if len(roles) > 5 else ''}], "
-                f"model={model_key}). Raise OWLLM_AGENT_CLI_TIMEOUT_SECONDS "
-                f"if this was real work; investigate auth/network if the "
-                f"prompt was small."
+                f"claude CLI exceeded OWLLM_AGENT_CLI_TIMEOUT_SECONDS="
+                f"{_CLI_TIMEOUT_SECONDS}s (sent {chars} chars across "
+                f"{len(messages)} messages [{','.join(roles[:5])}"
+                f"{'...' if len(roles) > 5 else ''}], model={model_key}). "
+                f"Unset or raise the env var to remove the inner cap; "
+                f"the goal wall_time_seconds is the real safety net."
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"claude CLI not callable: {exc}")

@@ -34,18 +34,17 @@ _MODELS = [
 ]
 
 
-# Match claude_cli: per-call hard stop. The agent loop budgets the goal
-# as a whole; this is the inner per-call hard stop. Default 300s (was
-# 180s — too tight for top-tier models on long context); override via
-# the OWLLM_AGENT_CLI_TIMEOUT_SECONDS env var.
-def _resolve_cli_timeout() -> int:
+# No per-call CLI timeout by default — see claude_cli.py for the full
+# rationale. The goal-level wall_time_seconds is the real safety net.
+# Override (opt-in) via OWLLM_AGENT_CLI_TIMEOUT_SECONDS.
+def _resolve_cli_timeout() -> Optional[int]:
     try:
         v = int((os.environ.get("OWLLM_AGENT_CLI_TIMEOUT_SECONDS") or "").strip() or "0")
         if v > 0:
             return v
     except (TypeError, ValueError):
         pass
-    return 300
+    return None
 
 
 _CLI_TIMEOUT_SECONDS = _resolve_cli_timeout()
@@ -118,14 +117,15 @@ class CodexCLIBackend:
                 cwd=run_cwd,
             )
         except subprocess.TimeoutExpired:
+            # Only reachable when OWLLM_AGENT_CLI_TIMEOUT_SECONDS is set.
             chars = len(prompt or "")
             roles = [m.get("role", "?") for m in messages]
             raise RuntimeError(
-                f"codex CLI timed out after {_CLI_TIMEOUT_SECONDS}s "
-                f"(sent {chars} chars across {len(messages)} messages "
-                f"[{','.join(roles[:5])}{'...' if len(roles) > 5 else ''}], "
-                f"model={model_key}). Raise OWLLM_AGENT_CLI_TIMEOUT_SECONDS "
-                f"if this was real work; investigate auth/network otherwise."
+                f"codex CLI exceeded OWLLM_AGENT_CLI_TIMEOUT_SECONDS="
+                f"{_CLI_TIMEOUT_SECONDS}s (sent {chars} chars across "
+                f"{len(messages)} messages [{','.join(roles[:5])}"
+                f"{'...' if len(roles) > 5 else ''}], model={model_key}). "
+                f"Unset or raise the env var to remove the inner cap."
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"codex CLI not callable: {exc}")

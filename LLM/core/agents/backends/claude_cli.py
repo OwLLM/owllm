@@ -34,11 +34,25 @@ _MODELS = [
 
 # Hard cap so a hung CLI invocation doesn't pin an agent worker forever.
 # Outer goal wall-time is the real safety net; this is the inner timeout.
-# Tightened from 300s -> 180s after user feedback that 5-minute waits
-# *feel* indistinguishable from a true hang. 3 min is long enough for any
-# legitimate Claude turn (Opus on a long context) and short enough that
-# Cancel feels responsive.
-_CLI_TIMEOUT_SECONDS = 180
+#
+# Was 180s — discovered the hard way that Opus 4.7 on a long context
+# (e.g. product_studio's orchestrator with the AMBIGUITY + WORKING-DIR
+# + team-roster prompt plus accumulated chat history) legitimately
+# needs more than 3 minutes for a single turn. Bumped to 300s default
+# and made overridable via env so users hitting genuine-slow-work runs
+# can extend further. A true hang still gets caught — the goal wall-
+# time (separate budget) is the catch-all.
+def _resolve_cli_timeout() -> int:
+    try:
+        v = int((os.environ.get("OWLLM_AGENT_CLI_TIMEOUT_SECONDS") or "").strip() or "0")
+        if v > 0:
+            return v
+    except (TypeError, ValueError):
+        pass
+    return 300
+
+
+_CLI_TIMEOUT_SECONDS = _resolve_cli_timeout()
 
 
 class ClaudeCLIBackend:
@@ -129,7 +143,18 @@ class ClaudeCLIBackend:
                 cwd=run_cwd,
             )
         except subprocess.TimeoutExpired:
-            raise RuntimeError(f"claude CLI timed out after {_CLI_TIMEOUT_SECONDS}s")
+            # Surface size of the input so the user can tell "hang" from
+            # "legitimately too much context for the timeout to cover".
+            chars = len(combined_prompt or "")
+            roles = [m.get("role", "?") for m in messages]
+            raise RuntimeError(
+                f"claude CLI timed out after {_CLI_TIMEOUT_SECONDS}s "
+                f"(sent {chars} chars across {len(messages)} messages "
+                f"[{','.join(roles[:5])}{'...' if len(roles) > 5 else ''}], "
+                f"model={model_key}). Raise OWLLM_AGENT_CLI_TIMEOUT_SECONDS "
+                f"if this was real work; investigate auth/network if the "
+                f"prompt was small."
+            )
         except FileNotFoundError as exc:
             raise RuntimeError(f"claude CLI not callable: {exc}")
         except OSError as exc:

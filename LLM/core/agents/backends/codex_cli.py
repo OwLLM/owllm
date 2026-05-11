@@ -34,9 +34,21 @@ _MODELS = [
 ]
 
 
-# Match claude_cli: 3 min cap on a single CLI call. The agent loop budgets
-# the goal as a whole; this is the inner per-call hard stop.
-_CLI_TIMEOUT_SECONDS = 180
+# Match claude_cli: per-call hard stop. The agent loop budgets the goal
+# as a whole; this is the inner per-call hard stop. Default 300s (was
+# 180s — too tight for top-tier models on long context); override via
+# the OWLLM_AGENT_CLI_TIMEOUT_SECONDS env var.
+def _resolve_cli_timeout() -> int:
+    try:
+        v = int((os.environ.get("OWLLM_AGENT_CLI_TIMEOUT_SECONDS") or "").strip() or "0")
+        if v > 0:
+            return v
+    except (TypeError, ValueError):
+        pass
+    return 300
+
+
+_CLI_TIMEOUT_SECONDS = _resolve_cli_timeout()
 
 
 class CodexCLIBackend:
@@ -106,7 +118,15 @@ class CodexCLIBackend:
                 cwd=run_cwd,
             )
         except subprocess.TimeoutExpired:
-            raise RuntimeError(f"codex CLI timed out after {_CLI_TIMEOUT_SECONDS}s")
+            chars = len(prompt or "")
+            roles = [m.get("role", "?") for m in messages]
+            raise RuntimeError(
+                f"codex CLI timed out after {_CLI_TIMEOUT_SECONDS}s "
+                f"(sent {chars} chars across {len(messages)} messages "
+                f"[{','.join(roles[:5])}{'...' if len(roles) > 5 else ''}], "
+                f"model={model_key}). Raise OWLLM_AGENT_CLI_TIMEOUT_SECONDS "
+                f"if this was real work; investigate auth/network otherwise."
+            )
         except FileNotFoundError as exc:
             raise RuntimeError(f"codex CLI not callable: {exc}")
         except OSError as exc:

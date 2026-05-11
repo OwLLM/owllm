@@ -4279,10 +4279,53 @@ class AgentsPage(QWidget):
             self._suspend_overlay_signal = False
 
     def _model_id_for(self, role_name: str) -> str:
+        """Resolve the composite model id for ``role_name``.
+
+        Resolution order, first non-empty wins:
+
+          1. The agents-page picker the user can see — what they
+             explicitly chose for this agent on the canvas.
+          2. The agent definition's ``default_model_id`` — what the
+             team template shipped with (e.g. product_studio's
+             ``auto|cheapest_local`` for synthesis roles, ``auto|balanced``
+             for everything else).
+          3. Last-resort hardcoded ``auto|cheapest_local`` — guarantees
+             the team never hits "No model is selected" at runtime;
+             at worst it routes to a local model the user has installed.
+
+        Logged at INFO so we can tell from the log which path won —
+        diagnostic for the "user says every agent has a model but
+        dispatch errors anyway" failure mode.
+        """
         picker = self._model_picker_buttons.get(role_name)
-        if picker is None:
-            return ""
-        return picker.current_id()
+        if picker is not None:
+            picked = picker.current_id()
+            if picked:
+                logger.info("model_id_for(%s) = %r [from picker]", role_name, picked)
+                return picked
+        # Fallback (2): the AgentDefinition's shipped default.
+        try:
+            from core.agents.agent_definitions import get_definition
+            d = get_definition(role_name)
+            if d is not None and d.default_model_id:
+                logger.info(
+                    "model_id_for(%s) = %r [from AgentDefinition.default_model_id; picker %s]",
+                    role_name, d.default_model_id,
+                    "missing" if picker is None else "empty",
+                )
+                return d.default_model_id
+        except Exception:
+            logger.exception("could not read default_model_id for %s", role_name)
+        # Fallback (3): last-resort so the team always has SOMETHING to
+        # dispatch with. cheapest_local routes to whatever local model
+        # the user has running.
+        fallback = "auto|cheapest_local"
+        logger.warning(
+            "model_id_for(%s) = %r [LAST-RESORT FALLBACK — neither picker "
+            "nor AgentDefinition.default_model_id had a value]",
+            role_name, fallback,
+        )
+        return fallback
 
     # ------------------------------------------------------------------
     # Per-agent model persistence (across app restarts)

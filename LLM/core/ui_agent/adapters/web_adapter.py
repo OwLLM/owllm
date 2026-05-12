@@ -42,22 +42,31 @@ _DOM_WALK_JS = r"""
     return null;
   }
   function styleOf(el) {
-    // Computed style → small subset that matters for replica fidelity.
-    // Pixel-diff masks small color shifts as long as luminance lines up;
-    // we capture the canonical strings so the diff can flag mismatches
-    // that pixel comparison wouldn't catch (e.g. bg #0c0f1a vs #181c29).
+    // Computed style → properties that matter for replica fidelity.
+    // We use computed style (not inline `style` attribute) so inherited
+    // values are accurate, the way they render in the browser.
     const cs = window.getComputedStyle(el);
     const px = (v) => {
-      const m = String(v || '').match(/([\d.]+)px/);
+      const m = String(v || '').match(/(-?[\d.]+)px/);
       return m ? parseFloat(m[1]) : null;
     };
     return {
       font_size_px: px(cs.fontSize),
       font_weight: cs.fontWeight === '700' || cs.fontWeight === 'bold' ? 'bold' : 'normal',
-      font_family: cs.fontFamily.split(',')[0].replace(/['\"]/g, '').trim(),
+      font_family: cs.fontFamily.split(',')[0].replace(/['"]/g, '').trim(),
+      italic: cs.fontStyle === 'italic',
       color_fg: cs.color,
       color_bg: cs.backgroundColor,
       border_radius_px: px(cs.borderTopLeftRadius),
+      border_width_px: px(cs.borderTopWidth),
+      border_color: cs.borderTopColor,
+      padding: [px(cs.paddingLeft), px(cs.paddingTop), px(cs.paddingRight), px(cs.paddingBottom)],
+      margin:  [px(cs.marginLeft),  px(cs.marginTop),  px(cs.marginRight),  px(cs.marginBottom)],
+      text_align: cs.textAlign,
+      text_transform: cs.textTransform,
+      letter_spacing: cs.letterSpacing,
+      opacity: parseFloat(cs.opacity || '1'),
+      display: cs.display,
       stylesheet: el.getAttribute('style') || ''
     };
   }

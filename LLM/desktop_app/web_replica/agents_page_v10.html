@@ -75,15 +75,25 @@ const FRAME_ASSETS = "../../../hybrid_frame_module/assets";
      → outer = inner + (2*9+75, 2*9+29) = (1693, 989)  for 1600x960 inner
    ============================================================ */
 function HybridFrame({ children, width, height }) {
+  // Frame geometry calibrated from the Qt agent's tree dump (not from
+  // first-principles math, which got it wrong by ~78 px vertically):
+  //   Frame: 1698x1095 at (0,0)
+  //   windowBorderContainer (= inner window): 1600x960 at (19, 116)
+  // → left margin 19, top margin 116, right margin 79, bottom margin 19.
+  // The earlier math (SHIFT_OUT + EXTRA_TOP = 38) put everything 78 px
+  // higher than the real app, which the agent surfaced as a +82 pos
+  // drift on every header element.
   const CORNER = 96;            // visible corner asset render size
   const BORDER = 18;            // border thickness around the inner window
-  const SHIFT_OUT = 9;
-  const EXTRA_TOP = 29;         // badge_h//2 where badge_h=int(90*0.65)=58
-  const EXTRA_RIGHT = 75;
   const BADGE_H = 58;           // int(90*0.65)
 
-  const outerW = width + 2*SHIFT_OUT + EXTRA_RIGHT;
-  const outerH = height + EXTRA_TOP + 2*SHIFT_OUT;
+  const LEFT_MARGIN = 19;
+  const TOP_MARGIN = 116;
+  const RIGHT_MARGIN = 79;
+  const BOTTOM_MARGIN = 19;
+
+  const outerW = width + LEFT_MARGIN + RIGHT_MARGIN;
+  const outerH = height + TOP_MARGIN + BOTTOM_MARGIN;
 
   // Frame strokes — colors match win._get_theme_colors() then darker(300) for bg
   // and alpha 220/200 for fc/ac (see _app_capture_runner.py:215).
@@ -97,11 +107,11 @@ function HybridFrame({ children, width, height }) {
       height: outerH,
       background: "#06080d",
     }}>
-      {/* Inner window content offset by SHIFT_OUT,EXTRA_TOP+SHIFT_OUT */}
+      {/* Inner window content positioned at the real Qt offsets (19, 116). */}
       <div style={{
         position: "absolute",
-        left: SHIFT_OUT,
-        top: EXTRA_TOP + SHIFT_OUT,
+        left: LEFT_MARGIN,
+        top: TOP_MARGIN,
         width: width,
         height: height,
         background: "#14152a",
@@ -110,28 +120,28 @@ function HybridFrame({ children, width, height }) {
         {children}
       </div>
 
-      {/* Border edges drawn as 4 strokes between the corner crests */}
+      {/* Border edges drawn at 1/2-corner inset from the screenshot edges. */}
       <div style={{
         position: "absolute", left: CORNER/2, right: CORNER/2,
-        top: SHIFT_OUT, height: BORDER,
+        top: 10, height: BORDER,
         background: `linear-gradient(90deg, ${ac}, ${fc}, ${ac})`,
         opacity: 0.7,
       }} />
       <div style={{
         position: "absolute", left: CORNER/2, right: CORNER/2,
-        bottom: SHIFT_OUT, height: BORDER,
+        bottom: 10, height: BORDER,
         background: `linear-gradient(90deg, ${ac}, ${fc}, ${ac})`,
         opacity: 0.7,
       }} />
       <div style={{
         position: "absolute", top: CORNER/2, bottom: CORNER/2,
-        left: SHIFT_OUT, width: BORDER,
+        left: 10, width: BORDER,
         background: `linear-gradient(180deg, ${ac}, ${fc}, ${ac})`,
         opacity: 0.7,
       }} />
       <div style={{
         position: "absolute", top: CORNER/2, bottom: CORNER/2,
-        right: SHIFT_OUT, width: BORDER,
+        right: 10, width: BORDER,
         background: `linear-gradient(180deg, ${ac}, ${fc}, ${ac})`,
         opacity: 0.7,
       }} />
@@ -154,11 +164,11 @@ function HybridFrame({ children, width, height }) {
         width: CORNER, height: CORNER, pointerEvents: "none",
       }} />
 
-      {/* Top-center badge — owl_studio_square overlapping the top edge */}
+      {/* Top-center badge — owl_studio_square centered over the top edge of the inner window. */}
       <img src={`${ICONS}/owl_studio_square.png`} style={{
         position: "absolute",
         left: outerW/2 - BADGE_H/2,
-        top: -BADGE_H/2 + SHIFT_OUT + 2,
+        top: TOP_MARGIN - BADGE_H/2 - 4,
         width: BADGE_H,
         height: BADGE_H,
         pointerEvents: "none",
@@ -235,11 +245,11 @@ function ModeBar() {
           )}
         </div>
 
-        {/* Mode toggles */}
-        <button data-ui="AdvancedToggle" style={buttonStyle}><span style={{fontSize:18}}>⚙</span><span>Advanced</span></button>
-        <button data-ui="FineTuningToggle" style={buttonStyle}><span style={{fontSize:18}}>🛠</span><span>Fine Tuning</span></button>
-        <button data-ui="AgenticTeamToggle" style={activeButton}><span style={{fontSize:18}}>🎭</span><span>Agentic Team</span></button>
-        <button data-ui="GamifyToggle" style={buttonStyle}><span style={{fontSize:18}}>🎮</span><span>Gamify</span></button>
+        {/* Mode toggles — widths from agent report v11 (src widths in px) */}
+        <button data-ui="AdvancedToggle" style={{...buttonStyle, width: 114}}><span style={{fontSize:18}}>⚙</span><span>Advanced</span></button>
+        <button data-ui="FineTuningToggle" style={{...buttonStyle, width: 129}}><span style={{fontSize:18}}>🛠</span><span>Fine Tuning</span></button>
+        <button data-ui="AgenticTeamToggle" style={{...activeButton, width: 147}}><span style={{fontSize:18}}>🎭</span><span>Agentic Team</span></button>
+        <button data-ui="GamifyToggle" style={{...buttonStyle, width: 91}}><span style={{fontSize:18}}>🎮</span><span>Gamify</span></button>
       </div>
 
       {/* CENTER — OWLLM title */}
@@ -249,16 +259,17 @@ function ModeBar() {
         letterSpacing: 2,
       }}>OWLLM</div>
 
-      {/* RIGHT — system info */}
+      {/* RIGHT — system info. Source labels use MinimumExpanding sizepolicy → ~567 wide.
+          minWidth on each row so they take the full SysInfo column width. */}
       <div data-ui="SysInfoBlock" style={{
-        minWidth: 520,
-        display: "flex", flexDirection: "column", alignItems: "flex-end",
+        minWidth: 567, width: 567,
+        display: "flex", flexDirection: "column", alignItems: "stretch",
         gap: 2, fontSize: 13, fontWeight: 700,
-        color: "#fff",
+        color: "#fff", textAlign: "right",
       }}>
-        <div data-ui="HeaderServersLabel">🟢 Servers: 0</div>
-        <div data-ui="HeaderApiKeyLabel">🔑 API key: owllm-local</div>
-        <div data-ui="HeaderVramLabel">💾 VRAM: N/N</div>
+        <div data-ui="HeaderServersLabel" style={{ width: "100%" }}>🟢 Servers: 0</div>
+        <div data-ui="HeaderApiKeyLabel" style={{ width: "100%" }}>🔑 API key: owllm-local</div>
+        <div data-ui="HeaderVramLabel" style={{ width: "100%" }}>💾 VRAM: N/N</div>
       </div>
     </div>
   );
@@ -327,6 +338,8 @@ function LocationRow() {
       gap: 10,
     }}>
       <div data-ui="LocationLabel" style={{
+        display: "inline-flex", alignItems: "center",
+        height: 32, width: 58,
         fontSize: 11, color: "#aaa", textTransform: "uppercase",
         letterSpacing: 0.6, marginRight: 4,
       }}>LOCATION</div>
@@ -340,17 +353,25 @@ function LocationRow() {
         }}
       />
       <button data-ui="LocationBrowseBtn" className="ghost-btn">Browse…</button>
-      <label style={{ fontSize: 12, color: "#dadcdf", padding: "0 6px" }}>
-        <input data-ui="TrustWritesCheckbox" type="checkbox" defaultChecked style={{ marginRight: 4 }} />
+      {/* TrustWritesCheckbox in source is a QCheckBox with label "Trust writes"
+          measured at 94x16 — a label-style block, not a tiny checkbox */}
+      <label data-ui="TrustWritesCheckbox" style={{
+        display: "inline-flex", alignItems: "center",
+        width: 94, height: 16,
+        fontSize: 12, color: "#dadcdf",
+      }}>
+        <input type="checkbox" defaultChecked style={{ marginRight: 4, width: 13, height: 13 }} />
         Trust writes
       </label>
       <span data-ui="SandboxBadge" style={{
-        padding: "4px 10px", background: "rgba(60,200,120,0.18)",
+        display: "inline-flex", alignItems: "center",
+        height: 32, padding: "0 10px", background: "rgba(60,200,120,0.18)",
         color: "#69e6a1", borderRadius: 8, fontSize: 11,
         textTransform: "uppercase",
       }}>C standard</span>
       <span data-ui="BridgeBadge" style={{
-        padding: "4px 10px", background: "rgba(120,220,255,0.18)",
+        display: "inline-flex", alignItems: "center",
+        height: 32, padding: "0 10px", background: "rgba(120,220,255,0.18)",
         color: "#7fdfff", borderRadius: 8, fontSize: 11,
         textTransform: "uppercase",
       }}>C onboarded</span>
@@ -412,13 +433,14 @@ function FlowHeader() {
       padding: "6px 10px", gap: 6,
       borderBottom: "1px solid rgba(255,255,255,0.04)",
     }}>
-      <div data-ui="FlowTitle" style={{ fontSize: 16, fontWeight: 700, color: "#fff" }}>Flow</div>
+      {/* sizes match agent report v11 spec — FlowTitle 48x28, *Btn height 28 */}
+      <div data-ui="FlowTitle" style={{ fontSize: 16, fontWeight: 700, color: "#fff", width: 48, height: 28, display: "flex", alignItems: "center" }}>Flow</div>
       <div style={{ flex: 1 }} />
-      <button data-ui="FlowDeleteEdgeBtn" className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>✕ Edge</button>
-      <button data-ui="FlowReverseEdgeBtn" className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⇄ Reverse</button>
-      <button data-ui="FlowLayoutBtn" className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⟲ Layout</button>
-      <button data-ui="FlowRefreshBtn" className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⟳</button>
-      <button data-ui="FlowViewToggleBtn" className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>◐ Graph view</button>
+      <button data-ui="FlowDeleteEdgeBtn" className="ghost-btn" style={{ height: 28, width: 59, padding: "0 8px", fontSize: 11 }}>✕ Edge</button>
+      <button data-ui="FlowReverseEdgeBtn" className="ghost-btn" style={{ height: 28, width: 72, padding: "0 8px", fontSize: 11 }}>⇄ Reverse</button>
+      <button data-ui="FlowLayoutBtn" className="ghost-btn" style={{ height: 28, width: 68, padding: "0 8px", fontSize: 11 }}>⟲ Layout</button>
+      <button data-ui="FlowRefreshBtn" className="ghost-btn" style={{ height: 28, width: 30, padding: 0, fontSize: 11 }}>⟳</button>
+      <button data-ui="FlowViewToggleBtn" className="ghost-btn" style={{ height: 28, width: 90, padding: "0 8px", fontSize: 11 }}>◐ Graph view</button>
     </div>
   );
 }
@@ -471,7 +493,7 @@ function SuperUserCard() {
       borderRadius: 12,
       background: "#181c29",
       border: "1px solid rgba(120,220,255,0.10)",
-      minHeight: 180,
+      width: 320, height: 280,
       display: "flex",
       flexDirection: "column",
       gap: 8,
@@ -668,41 +690,52 @@ Afterwards, the path is
 | sBach github.composers/d-tn/myll_text-Agentic`;
 
   return (
+    /* Structure follows the Qt source: LogHeader is a thin header label
+       (height ~26), then OrchestratorLogTabs is a QTabWidget that fills the
+       remaining height — its `setCurrentIndex(0)` page is the ReplyView,
+       so OrchestratorLogTabs and OrchestratorReplyView share an x/y/w but
+       the tabs take h≈565 (full pane height) and the reply view sits
+       inside that. v10 originally split them as siblings — agent flagged
+       it ("size src=532x543 tgt=325x39"). */
     <div data-ui="RosterRight" style={{
       display: "flex", flexDirection: "column",
       height: "100%", background: "#0c0f1a",
     }}>
       <div data-ui="LogHeader" style={{
-        padding: "8px 12px",
+        height: 26, padding: "0 12px",
         display: "flex", alignItems: "center", gap: 8,
-        borderBottom: "1px solid rgba(255,255,255,0.04)",
+        color: "#fff", fontSize: 12, fontWeight: 700,
       }}>
         <span style={{
           width: 8, height: 8, borderRadius: 4,
           background: "#3cf26b",
         }} />
-        <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>Orchestrator</div>
+        Click an agent on the canvas to view its log.
       </div>
-      <div data-ui="OrchestratorLogTabs" style={{ padding: "8px 10px", display: "flex", gap: 6 }}>
-        <button style={{
-          padding: "4px 12px", borderRadius: 6, border: "none",
-          background: "rgba(120,220,255,0.18)", color: "#7fdfff",
-          fontSize: 11, fontWeight: 600,
-        }}>↩ Reply</button>
-        <button style={{
-          padding: "4px 12px", borderRadius: 6, border: "none",
-          background: "rgba(220,180,255,0.18)", color: "#dcb0ff",
-          fontSize: 11, fontWeight: 600,
-        }}>💭 Thought</button>
+      <div data-ui="OrchestratorLogTabs" style={{
+        flex: 1, padding: "8px 10px 10px",
+        display: "flex", flexDirection: "column", gap: 6,
+      }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button style={{
+            padding: "4px 12px", borderRadius: 6, border: "none",
+            background: "rgba(120,220,255,0.18)", color: "#7fdfff",
+            fontSize: 11, fontWeight: 600,
+          }}>💬 Reply</button>
+          <button style={{
+            padding: "4px 12px", borderRadius: 6, border: "none",
+            background: "rgba(220,180,255,0.18)", color: "#dcb0ff",
+            fontSize: 11, fontWeight: 600,
+          }}>🧠 Thought</button>
+        </div>
+        <div data-ui="OrchestratorReplyView" style={{
+          flex: 1, background: "#0f1218", borderRadius: 8,
+          padding: 10, overflow: "hidden",
+          fontFamily: "Consolas, 'Cascadia Mono', monospace",
+          fontSize: 14, lineHeight: 1.5, color: "#cbd2e0",
+          whiteSpace: "pre-wrap",
+        }}>{code}</div>
       </div>
-      <div data-ui="OrchestratorReplyView" style={{
-        flex: 1, margin: "0 10px 10px",
-        background: "#0f1218", borderRadius: 8,
-        padding: 10, overflow: "hidden",
-        fontFamily: "Consolas, 'Cascadia Mono', monospace",
-        fontSize: 14, lineHeight: 1.5, color: "#cbd2e0",
-        whiteSpace: "pre-wrap",
-      }}>{code}</div>
     </div>
   );
 }

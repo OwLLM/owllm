@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -76,16 +77,42 @@ def _safe_text(w) -> str:
     return ""
 
 
+_STYLE_PROPS = (
+    "font-size", "font-weight", "color", "background", "background-color",
+    "border", "border-radius", "padding", "margin", "letter-spacing",
+    "text-align", "text-transform", "opacity",
+)
+
+
+def _parse_stylesheet(sheet: str) -> dict:
+    """Pull a small set of known properties out of a Qt stylesheet string.
+
+    Qt stylesheets are CSS-ish but namespace by class/objectName selector.
+    For per-widget style introspection we mostly care about the rules that
+    actually apply to *this* widget, which (best effort) is whatever is
+    inside the top-level `{ ... }` block or matches the widget's own
+    selector. We keep it permissive — any property anywhere is fair game.
+    """
+    found: dict = {}
+    if not sheet:
+        return found
+    for prop in _STYLE_PROPS:
+        m = re.search(rf"{prop}\s*:\s*([^;\n}}]+)", sheet, re.IGNORECASE)
+        if m:
+            found[prop.replace("-", "_")] = m.group(1).strip()[:60]
+    return found
+
+
 def _safe_style(w) -> dict:
     """Best-effort style snapshot from a QWidget.
 
-    Stylesheet strings override the palette, so palette() values can lie
-    when the widget is themed via setStyleSheet. We capture both: the
-    palette colors (always available) AND the raw stylesheet string (so
-    the diff core can string-match common patterns like "font-size:13px"
-    when palette is uninformative). Cheap to compute, valuable for
-    catching color/size mismatches the pixel diff misses on uniform
-    areas.
+    Captures three layers, mirroring how Qt actually styles widgets:
+      1. Computed font (always available, cheap).
+      2. Palette colors (correct when no stylesheet overrides them).
+      3. Parsed stylesheet properties (necessary when the widget is
+         themed via setStyleSheet — Qt's palette stays at default
+         then, so this is the only way to get the actual rendered
+         colors / sizes for diffing).
     """
     out: dict = {}
     try:
@@ -98,6 +125,7 @@ def _safe_style(w) -> dict:
         out["font_size_px"] = int(ps) if ps > 0 else None
         out["font_weight"] = "bold" if f.bold() else "normal"
         out["font_family"] = str(f.family() or "")
+        out["italic"] = bool(f.italic())
     except Exception:  # noqa: BLE001
         pass
     try:
@@ -106,10 +134,21 @@ def _safe_style(w) -> dict:
         out["color_bg"] = pal.window().color().name()
     except Exception:  # noqa: BLE001
         pass
+    # contentsMargins gives the widget's own internal padding equivalent.
+    try:
+        cm = w.contentsMargins()
+        out["margins"] = [cm.left(), cm.top(), cm.right(), cm.bottom()]
+    except Exception:  # noqa: BLE001
+        pass
     try:
         sheet = w.styleSheet() or ""
         if sheet:
-            out["stylesheet"] = sheet[:300]
+            out["stylesheet"] = sheet[:400]
+            # Surface parsed values too so the diff core doesn't have to
+            # regex on its end of the pipe.
+            parsed = _parse_stylesheet(sheet)
+            if parsed:
+                out["stylesheet_parsed"] = parsed
     except Exception:  # noqa: BLE001
         pass
     return out

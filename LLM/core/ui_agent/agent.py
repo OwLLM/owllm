@@ -178,7 +178,9 @@ def _draw_region_overlay(src: CaptureResult, tgt: CaptureResult,
 
 def compare(src: CaptureResult, tgt: CaptureResult,
             report_path: str, overlay_path: str,
-            tile_grid_path: Optional[str] = None) -> Dict:
+            tile_grid_path: Optional[str] = None,
+            html_report_path: Optional[str] = None,
+            title: str = "UI Agent — Diff Report") -> Dict:
     """Run the full diff + report pipeline.
 
     Returns a dict with:
@@ -199,9 +201,17 @@ def compare(src: CaptureResult, tgt: CaptureResult,
     _draw_region_overlay(src, tgt, regions, overlay_path)
     if tile_grid_path:
         _draw_tile_grid(src, tgt, regions, tile_grid_path)
+    if html_report_path:
+        from core.ui_agent.html_report import render_html_report
+        render_html_report(
+            src, tgt, regions, overall,
+            unm_src, unm_tgt,
+            title=title, out_path=html_report_path,
+        )
     return {
         "text": text, "regions": regions,
         "overall_pct": overall, "overlay_path": overlay_path,
         "tile_grid_path": tile_grid_path,
+        "html_report_path": html_report_path,
         "unmatched_src": unm_src, "unmatched_tgt": unm_tgt,
     }

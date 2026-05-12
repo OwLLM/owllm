@@ -360,30 +360,31 @@ function LocationRow() {
         }}
       />
       <button data-ui="LocationBrowseBtn" className="ghost-btn">Browse…</button>
-      {/* TrustWritesCheckbox in source is a QCheckBox with label "Trust writes"
-          measured at 94x16 — a label-style block, not a tiny checkbox */}
+      {/* QCheckBox renders as a 13x13 indicator with text to the right.
+          Source bounds 94x16 = indicator + "Trust writes" inline. */}
       <label data-ui="TrustWritesCheckbox" style={{
         display: "inline-flex", alignItems: "center",
-        width: 94, height: 16,
-        fontSize: 12, color: "#dadcdf",
+        width: 94, height: 16, lineHeight: "16px",
+        fontSize: 12, color: "#dadcdf", padding: 0,
       }}>
-        <input type="checkbox" defaultChecked style={{ marginRight: 4, width: 13, height: 13 }} />
+        <input type="checkbox" defaultChecked style={{ marginRight: 6, width: 13, height: 13, accentColor: "#7fdfff" }} />
         Trust writes
       </label>
+      {/* Source badge text: bare "SANDBOX" / "BRIDGE: OFF" — no emoji */}
       <span data-ui="SandboxBadge" style={{
         display: "inline-flex", alignItems: "center", justifyContent: "center",
         height: 32, width: 86, padding: "0 10px",
         background: "rgba(60,200,120,0.18)",
         color: "#69e6a1", borderRadius: 8, fontSize: 11,
-        textTransform: "uppercase", fontWeight: 600,
-      }}>🟢 Sandbox</span>
+        textTransform: "uppercase", fontWeight: 700, letterSpacing: 0.6,
+      }}>SANDBOX</span>
       <span data-ui="BridgeBadge" style={{
         display: "inline-flex", alignItems: "center", justifyContent: "center",
         height: 32, width: 91, padding: "0 10px",
-        background: "rgba(120,220,255,0.18)",
-        color: "#7fdfff", borderRadius: 8, fontSize: 11,
-        textTransform: "uppercase", fontWeight: 600,
-      }}>🔌 Bridge</span>
+        background: "rgba(140,140,160,0.18)",
+        color: "#aab",  borderRadius: 8, fontSize: 11,
+        textTransform: "uppercase", fontWeight: 700, letterSpacing: 0.6,
+      }}>Bridge: OFF</span>
       {/* Real ProjectCombo lives here, NOT in the SubTabs row */}
       <span style={{
         display: "inline-flex", alignItems: "center",
@@ -601,7 +602,13 @@ function TeamCanvas({ width, height }) {  // data-ui annotation applied to outer
     <div data-ui="AgentTeamCanvas" style={{
       position: "relative",
       width: w, height: h,
-      background: "radial-gradient(ellipse at center, #1a1f33 0%, #06080d 70%)",
+      // Source bg: linear top→bottom gradient #101522 → #06080d + a
+      // radial glow over the centre. We render both as separate layers.
+      background: `
+        radial-gradient(ellipse at ${cx}px ${cy}px,
+          rgba(60, 120, 200, 0.20) 0%, rgba(0, 0, 0, 0) 60%),
+        linear-gradient(180deg, #101522 0%, #06080d 100%)
+      `,
       overflow: "hidden",
     }}>
       {/* SVG layer for spokes and ring */}

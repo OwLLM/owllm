@@ -4,13 +4,11 @@
 
 pub mod ask_user;
 pub mod create_venv;
+pub mod download_file;
+pub mod install_pkg;
 pub mod set_env;
 pub mod stubs;
+pub mod swap_wheel;
 pub mod uninstall_pkg;
-
-// pub mod install_pkg;   // R3
-// pub mod download_file; // R3
-// pub mod swap_wheel;    // R3
-// pub mod pick_profile;  // R3
 
 pub use stubs::Executor;

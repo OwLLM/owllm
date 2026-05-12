@@ -1,13 +1,16 @@
 //! bootstrap_rs — Rust port of bootstrap_go. See
 //! `LLM/docs/supervisor/RUST_MIGRATION.md` for the migration plan.
 //!
-//! Phase R2 in progress: scaffold + simple actions (set_env, ask_user,
-//! uninstall_pkg, create_venv) + executor dispatcher.
+//! Phase R3 complete: all 8 executor actions ported, hardware
+//! profile loader ported. Pending: plan parser + llama-server
+//! lifecycle (R4) and hardware probe + main orchestration (R5).
 
 pub mod args;
 pub mod exec;
+pub mod pipspec;
 pub mod pkgname;
 pub mod plan;
+pub mod profile;
 pub mod python;
 pub mod runner;
 

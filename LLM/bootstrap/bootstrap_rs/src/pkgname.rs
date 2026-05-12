@@ -10,7 +10,7 @@
 ///
 /// Examples:
 ///
-/// ```ignore
+/// ```text
 /// stripped_package_name("torch==2.5.1+cu121") == "torch"
 /// stripped_package_name("torch>=2.4")         == "torch"
 /// stripped_package_name("foo[a,b]")           == "foo"

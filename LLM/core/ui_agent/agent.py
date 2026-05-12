@@ -29,6 +29,7 @@ from core.ui_agent.diff import (
     RegionDiff, format_report, overall_diff, region_diff, unmatched_ids,
 )
 from core.ui_agent.schema import CaptureResult
+from core.ui_agent.vlm_diff import VLMDifference, default_provider, VLMProvider
 
 
 def _crop_clip(img: Image.Image, b) -> Image.Image:
@@ -180,7 +181,9 @@ def compare(src: CaptureResult, tgt: CaptureResult,
             report_path: str, overlay_path: str,
             tile_grid_path: Optional[str] = None,
             html_report_path: Optional[str] = None,
-            title: str = "UI Agent — Diff Report") -> Dict:
+            title: str = "UI Agent — Diff Report",
+            vlm: Optional[VLMProvider] = None,
+            enable_vlm: bool = True) -> Dict:
     """Run the full diff + report pipeline.
 
     Returns a dict with:
@@ -194,8 +197,34 @@ def compare(src: CaptureResult, tgt: CaptureResult,
     regions = region_diff(src, tgt)
     overall = overall_diff(src, tgt)
     unm_src, unm_tgt = unmatched_ids(src, tgt)
+
+    # VLM perception pass — the 'eyes' of the agent. Catches untagged
+    # decorative elements, paint-only widgets, and state coverage gaps
+    # that the widget-tree-based aligner cannot see.
+    vlm_differences: List[VLMDifference] = []
+    if enable_vlm:
+        provider = vlm if vlm is not None else default_provider()
+        try:
+            vlm_differences = provider.compare(
+                src.png_path, tgt.png_path, title=title,
+            )
+        except Exception as exc:  # noqa: BLE001
+            vlm_differences = [VLMDifference(
+                description=f"VLM provider crashed: {exc}",
+                severity="low",
+            )]
+
     text = format_report(regions, overall,
                          unmatched_src=unm_src, unmatched_tgt=unm_tgt)
+    if vlm_differences:
+        text += "\n\nPERCEIVED VISUAL DIFFERENCES (VLM)\n"
+        text += "-" * 70 + "\n"
+        for i, d in enumerate(vlm_differences, 1):
+            text += (
+                f"{i:>2}. [{d.severity}] {d.description}\n"
+                f"    location: {d.location}\n"
+                f"    fix:      {d.suggestion}\n"
+            )
     Path(report_path).parent.mkdir(parents=True, exist_ok=True)
     Path(report_path).write_text(text, encoding="utf-8")
     _draw_region_overlay(src, tgt, regions, overlay_path)
@@ -206,6 +235,7 @@ def compare(src: CaptureResult, tgt: CaptureResult,
         render_html_report(
             src, tgt, regions, overall,
             unm_src, unm_tgt,
+            vlm_differences=vlm_differences,
             title=title, out_path=html_report_path,
         )
     return {
@@ -214,4 +244,5 @@ def compare(src: CaptureResult, tgt: CaptureResult,
         "tile_grid_path": tile_grid_path,
         "html_report_path": html_report_path,
         "unmatched_src": unm_src, "unmatched_tgt": unm_tgt,
+        "vlm_differences": vlm_differences,
     }

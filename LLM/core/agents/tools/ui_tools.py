@@ -478,6 +478,12 @@ def _ui_render_app_page(args: Mapping[str, Any]) -> str:
     if not runner.exists():
         raise ToolError(f"runner script missing: {runner}")
 
+    # Stability params — passed through to the runner. Defaults to ON
+    # because the AgentsPage in particular kicks off async bootstrap
+    # (project load, canvas population) that isn't done at the initial
+    # wait deadline. Without stability checking, the capture is of an
+    # arbitrary moment during the load and every diff is invalid.
+    require_stable = bool(args.get("require_stable", True))
     payload = json.dumps({
         "page": page,
         "out_path": str(path),
@@ -485,6 +491,7 @@ def _ui_render_app_page(args: Mapping[str, Any]) -> str:
         "height": height,
         "wait_seconds": wait_seconds,
         "include_frame": include_frame,
+        "require_stable": require_stable,
     })
 
     try:
@@ -520,10 +527,26 @@ def _ui_render_app_page(args: Mapping[str, Any]) -> str:
         result = {"width": width, "height": height, "frame": include_frame}
 
     size = path.stat().st_size if path.exists() else 0
+    stability = ""
+    if "stable" in result:
+        if result["stable"]:
+            stability = (
+                f", stable after {result['stability_attempts']} check"
+                f"{'s' if result['stability_attempts'] != 1 else ''} "
+                f"(final drift {result['final_drift_pct']:.2f}%)"
+            )
+        else:
+            # ASCII-only marker so cp1252 stdout (default on Windows
+            # consoles) doesn't crash when the agent prints this.
+            stability = (
+                f" -- WARNING: NOT STABLE after {result['stability_attempts']} attempts "
+                f"(last drift {result['final_drift_pct']:.2f}%); page may still "
+                f"be loading and diff results are unreliable"
+            )
     return (
         f"wrote {path} (page={page}, "
         f"{result.get('width', width)}x{result.get('height', height)}, "
-        f"{size} bytes, frame={'on' if result.get('frame', include_frame) else 'off'})"
+        f"{size} bytes, frame={'on' if result.get('frame', include_frame) else 'off'}{stability})"
     )
 
 
@@ -550,6 +573,11 @@ ui_render_app_page = Tool(
         ArgSpec("height", "integer", "Window height (default 900).", required=False),
         ArgSpec("wait_seconds", "number", "Pump time for async load (default 5, max 30).", required=False),
         ArgSpec("include_frame", "boolean", "Composite the HybridFrame overlay (default true).", required=False),
+        ArgSpec("require_stable", "boolean",
+                "Auto-detect loading state by capturing twice and comparing; "
+                "retries until two consecutive captures match. Default true. "
+                "Set false only if you specifically want a snapshot mid-load.",
+                required=False),
     ],
     func=_ui_render_app_page,
     requires_approval=False,

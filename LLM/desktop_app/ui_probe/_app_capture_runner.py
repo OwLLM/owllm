@@ -70,6 +70,20 @@ def _main() -> int:
     height = int(payload.get("height", 900))
     wait_seconds = float(payload.get("wait_seconds", 5.0))
     include_frame = bool(payload.get("include_frame", True))
+    # Stability detection — capture twice, compare; if the two
+    # captures match within `stable_pct`, the page has settled.
+    # Defaults to ON because every full-app capture pre-v5 risked
+    # capturing the loading state of `AgentsPage` (which kicks off
+    # project-load + canvas-population via `QTimer.singleShot(150, ...)`
+    # and isn't done settling at the initial 5 s mark).
+    require_stable = bool(payload.get("require_stable", True))
+    # 5 % accepts the idle "breathing" animation around the owl
+    # emblem + agent canvas pulses (which never converge to 0 % on
+    # a live AgentTeamCanvas) while still catching real loading
+    # transitions where 20-100 % of pixels are mid-change.
+    stable_pct = float(payload.get("stable_pct", 5.0))
+    stable_max_attempts = int(payload.get("stable_max_attempts", 8))
+    stable_recheck_seconds = float(payload.get("stable_recheck_seconds", 1.5))
 
     # Set offscreen BEFORE the first PySide6 import. Critical — the
     # platform plugin is locked in at QGuiApplication construct time
@@ -220,18 +234,23 @@ def _main() -> int:
 
     # Pump the event loop. 50 ms granularity is small enough for
     # `QTimer.singleShot(100-300, ...)`-style deferred bootstrap.
-    deadline = time.monotonic() + max(0.5, wait_seconds)
-    while time.monotonic() < deadline:
-        app.processEvents()
-        time.sleep(0.05)
+    def _pump(seconds: float) -> None:
+        deadline = time.monotonic() + max(0.0, seconds)
+        while time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.05)
+
+    _pump(max(0.5, wait_seconds))
 
     # Grab + composite. Frame is a separate top-level widget under
     # offscreen — neither grabs the other automatically, so we draw
     # both into one QImage.
-    win_pm = win.grab()
-    if frame is None:
-        win_pm.save(out_path, "PNG")
-    else:
+    def _capture_composite() -> bytes:
+        win_pm = win.grab()
+        if frame is None:
+            ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            win_pm.save(buf, "PNG"); buf.close()
+            return bytes(ba)
         frame_pm = frame.grab()
         wg = win.geometry()
         fg = frame.geometry()
@@ -241,7 +260,69 @@ def _main() -> int:
         p.drawPixmap(wg.x() - fg.x(), wg.y() - fg.y(), win_pm)
         p.drawPixmap(0, 0, frame_pm)
         p.end()
-        canvas.save(out_path, "PNG")
+        ba = QByteArray(); buf = QBuffer(ba); buf.open(QIODevice.OpenModeFlag.WriteOnly)
+        canvas.save(buf, "PNG"); buf.close()
+        return bytes(ba)
+
+    def _bytes_diff_pct(a: bytes, b: bytes) -> float:
+        """Return % of pixels that differ between two PNG byte streams.
+
+        Always decodes both — PNG deflate includes filter-row choices
+        that aren't deterministic across grabs, so identical pixels
+        can produce different byte streams (and different lengths).
+        Comparing bytes directly would report 100% drift on a page
+        that's actually fully settled.
+
+        We decode via Pillow rather than `QImage.constBits().tobytes()`
+        because the latter returned indexable objects whose elements
+        weren't plain ints — `abs(x - y)` was being parsed as a
+        two-arg call to abs(), exploding the runner.
+        """
+        from io import BytesIO
+        from PIL import Image
+        try:
+            ia = Image.open(BytesIO(a)).convert("RGBA")
+            ib = Image.open(BytesIO(b)).convert("RGBA")
+        except Exception:  # noqa: BLE001
+            return 100.0
+        if ia.size != ib.size:
+            return 100.0
+        raw_a = ia.tobytes()
+        raw_b = ib.tobytes()
+        differing = 0
+        total = ia.width * ia.height
+        for i in range(0, len(raw_a), 4):
+            dr = abs(raw_a[i] - raw_b[i])
+            dg = abs(raw_a[i + 1] - raw_b[i + 1])
+            db = abs(raw_a[i + 2] - raw_b[i + 2])
+            if max(dr, dg, db) > 8:
+                differing += 1
+        return (100.0 * differing / total) if total else 0.0
+
+    from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+    png = _capture_composite()
+    stable = True
+    attempts = 0
+    final_pct = 0.0
+    if require_stable:
+        stable = False
+        while attempts < stable_max_attempts:
+            attempts += 1
+            _pump(stable_recheck_seconds)
+            next_png = _capture_composite()
+            pct = _bytes_diff_pct(png, next_png)
+            final_pct = pct
+            png = next_png
+            if pct <= stable_pct:
+                stable = True
+                break
+            sys.stderr.write(
+                f"[stability] attempt {attempts}: {pct:.2f}% differ, retrying\n"
+            )
+
+    # Write final stable capture to disk.
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).write_bytes(png)
 
     # Print one machine-readable line for the parent to parse.
     print(json.dumps({
@@ -251,6 +332,9 @@ def _main() -> int:
         "height": (frame.height() if frame is not None else win.height()),
         "page": page,
         "frame": frame is not None,
+        "stable": stable,
+        "stability_attempts": attempts,
+        "final_drift_pct": round(final_pct, 3),
     }), flush=True)
 
     # Do NOT close/deleteLater the widgets — the OS will clean them

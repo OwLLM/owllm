@@ -201,12 +201,47 @@ Same pattern as the supervisor itself:
 
 | Phase | State | Owner | Date |
 |---|---|---|---|
-| R1 — scaffold | started | tbd | 2026-05-12 |
-| R2 — simple actions | not started | | |
+| R1 — scaffold | ✅ complete | claude | 2026-05-12 |
+| R2 — simple actions | ✅ complete | claude | 2026-05-12 |
 | R3 — HTTP / pkg | not started | | |
 | R4 — plan + server | not started | | |
 | R5 — hardware + main | not started | | |
 | R6 — cutover | not started | | |
+
+### R2 deliverables (2026-05-12)
+
+Ported from `bootstrap_go/exec/`:
+
+- `runner.rs` — `Runner` trait + `RealRunner` (std::process::Command) +
+  `FakeRunner` (captures calls + optional canned error). Tests: 3
+- `python.rs` — `python_exe_path`, `is_existing_venv`,
+  `find_host_python` (env override → bundled → PATH). Tests: 3
+- `pkgname.rs` — `stripped_package_name`. Tests: 6
+- `args.rs` — added `arg_string_slice`. Tests: now 10 (was 5)
+- `plan.rs` — added `reason`, `fallback` fields + `Step::new(...)
+  .with_args(...).with_reason(...)` builder for ergonomic test setup.
+- `exec/set_env.rs` — unchanged from R1, tests updated to builder.
+- `exec/ask_user.rs` — new. Writes `runtime/pending_question.json`,
+  errors to halt the plan loop. Tests: 5
+- `exec/uninstall_pkg.rs` — new. Wraps `pip uninstall --yes` via
+  `Runner`. Tests: 4
+- `exec/create_venv.rs` — new. Idempotent venv build, refuses
+  non-venv clobber. Tests: 3 (idempotent, refuse-clobber, default-path
+  + side-effecting fake runner pattern)
+- `exec/stubs.rs` — new. `Executor` struct with active-venv state
+  threaded across steps; `run_plan` walks a `&[Step]` with step cap +
+  dry-run support; `dispatch` routes to ported actions and returns a
+  clear "not yet ported" error for R3-R4 actions. Tests: 4
+
+**Total**: 11 (R1) + 35 (R2) = **46 tests passing**, 0 failures.
+
+Binary size after R2:
+- `bootstrap_rs/target/release/bootstrap.exe` = **0.25 MB**
+- `bootstrap.exe` (Go, full 8-action surface) = **5.20 MB**
+
+Rust binary doesn't grow noticeably across R1→R2 because the new code
+is small relative to the serde+anyhow baseline. R3 will pull in
+`reqwest` + `sha2` which adds ~500 KB-1 MB.
 
 This doc is the source of truth for the migration. Update the table
 above as phases complete.

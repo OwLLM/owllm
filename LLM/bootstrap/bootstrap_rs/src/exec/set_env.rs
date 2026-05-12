@@ -96,10 +96,8 @@ mod tests {
     #[test]
     fn writes_session_bucket() {
         let tmp = tempdir().unwrap();
-        let step = Step {
-            action: "set_env".into(),
-            args: json!({ "name": "CUDA_HOME", "value": "/opt/cuda-12.1" }),
-        };
+        let step = Step::new("set_env")
+            .with_args(json!({ "name": "CUDA_HOME", "value": "/opt/cuda-12.1" }));
         set_env(
             &SetEnvOpts { boot_dir: tmp.path().to_path_buf() },
             &step,
@@ -116,14 +114,8 @@ mod tests {
     fn appends_to_existing_file() {
         let tmp = tempdir().unwrap();
         let opts = SetEnvOpts { boot_dir: tmp.path().to_path_buf() };
-        let first = Step {
-            action: "set_env".into(),
-            args: json!({ "name": "A", "value": "1" }),
-        };
-        let second = Step {
-            action: "set_env".into(),
-            args: json!({ "name": "B", "value": "2" }),
-        };
+        let first = Step::new("set_env").with_args(json!({ "name": "A", "value": "1" }));
+        let second = Step::new("set_env").with_args(json!({ "name": "B", "value": "2" }));
         set_env(&opts, &first).unwrap();
         set_env(&opts, &second).unwrap();
         let got = read_env_file(tmp.path());
@@ -134,10 +126,8 @@ mod tests {
     #[test]
     fn rejects_unknown_scope() {
         let tmp = tempdir().unwrap();
-        let step = Step {
-            action: "set_env".into(),
-            args: json!({ "name": "X", "value": "y", "scope": "bogus" }),
-        };
+        let step = Step::new("set_env")
+            .with_args(json!({ "name": "X", "value": "y", "scope": "bogus" }));
         let err = set_env(
             &SetEnvOpts { boot_dir: tmp.path().to_path_buf() },
             &step,
@@ -149,10 +139,7 @@ mod tests {
     #[test]
     fn missing_name_fails() {
         let tmp = tempdir().unwrap();
-        let step = Step {
-            action: "set_env".into(),
-            args: json!({ "value": "x" }),
-        };
+        let step = Step::new("set_env").with_args(json!({ "value": "x" }));
         assert!(
             set_env(
                 &SetEnvOpts { boot_dir: tmp.path().to_path_buf() },
@@ -165,10 +152,7 @@ mod tests {
     #[test]
     fn missing_value_fails() {
         let tmp = tempdir().unwrap();
-        let step = Step {
-            action: "set_env".into(),
-            args: json!({ "name": "x" }),
-        };
+        let step = Step::new("set_env").with_args(json!({ "name": "x" }));
         assert!(
             set_env(
                 &SetEnvOpts { boot_dir: tmp.path().to_path_buf() },
@@ -188,10 +172,7 @@ mod tests {
         fs::create_dir_all(&runtime).unwrap();
         fs::write(runtime.join(ENV_FILE_NAME), b"not valid json {{{").unwrap();
 
-        let step = Step {
-            action: "set_env".into(),
-            args: json!({ "name": "X", "value": "y" }),
-        };
+        let step = Step::new("set_env").with_args(json!({ "name": "X", "value": "y" }));
         set_env(
             &SetEnvOpts { boot_dir: tmp.path().to_path_buf() },
             &step,

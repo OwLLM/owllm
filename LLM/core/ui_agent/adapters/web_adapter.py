@@ -35,11 +35,22 @@ _DOM_WALK_JS = r"""
     return 'container';
   }
   function visibleText(el) {
-    if (el.children.length === 0) {
-      const t = (el.textContent || '').trim();
-      return t.slice(0, 200) || null;
-    }
-    return null;
+    // Two cases need text:
+    //   1. Leaf elements (no element children) — their textContent is
+    //      what they show.
+    //   2. <button>, <a>, <label>, <input> — even with span children
+    //      they're conceptually a single text widget on the Qt side.
+    // For OTHER parents (div / section / etc.), DON'T propagate text
+    // up: the Qt adapter doesn't either (a QWidget's parent doesn't
+    // inherit its child labels' text), so doing so would generate
+    // false 'text in target only' notes.
+    const tag = el.tagName.toLowerCase();
+    const isLeaf = el.children.length === 0;
+    const isTextLike = ['button', 'a', 'label', 'input', 'select', 'option',
+                        'h1','h2','h3','h4','h5','h6'].includes(tag);
+    if (!isLeaf && !isTextLike) return null;
+    const t = (el.textContent || el.innerText || '').replace(/\s+/g, ' ').trim();
+    return t.slice(0, 200) || null;
   }
   function styleOf(el) {
     // Computed style → properties that matter for replica fidelity.

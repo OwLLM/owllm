@@ -255,12 +255,15 @@ function ModeBar() {
         <button data-ui="GamifyToggle" style={{...buttonStyle, width: 91}}><span style={{fontSize:18}}>🎮</span><span>Gamify</span></button>
       </div>
 
-      {/* CENTER — OWLLM title */}
-      <div data-ui="AppTitle" style={{
-        textAlign: "center",
-        fontSize: 26, fontWeight: 700, color: "#fff",
-        letterSpacing: 2,
-      }}>OWLLM</div>
+      {/* CENTER — OWLLM title. Source bound 128x45 — sized tightly, not stretched */}
+      <div style={{ display: "flex", justifyContent: "center" }}>
+        <div data-ui="AppTitle" style={{
+          textAlign: "center",
+          width: 128, height: 45,
+          fontSize: 34, fontWeight: 700, color: "#fff",
+          letterSpacing: 2, lineHeight: "45px",
+        }}>OWLLM</div>
+      </div>
 
       {/* RIGHT — system info. Source labels use MinimumExpanding sizepolicy → ~567 wide.
           minWidth on each row so they take the full SysInfo column width. */}
@@ -351,7 +354,7 @@ function LocationRow() {
         data-ui="LocationInput"
         defaultValue="/path/to/repo · esp-flash · github.com/me/x"
         style={{
-          flex: 1, height: 32, borderRadius: 8, padding: "0 12px",
+          width: 346, height: 32, borderRadius: 8, padding: "0 12px",
           fontSize: 13, background: "#0f0f19", color: "#dadcdf",
           border: "1px solid rgba(255,255,255,0.06)",
         }}
@@ -418,7 +421,8 @@ function GoalRow() {
       alignItems: "center",
       gap: 10,
     }}>
-      <button data-ui="GoalAttachBtn" className="ghost-btn" style={{minHeight:38, minWidth:44}}>📎</button>
+      {/* Sizes calibrated to agent report — width matches src bounds exactly */}
+      <button data-ui="GoalAttachBtn" className="ghost-btn" style={{height: 38, width: 51, padding: 0, fontSize: 16}}>📎</button>
       <input
         data-ui="GoalInput"
         defaultValue="summarize the last commit and propose a follow-up. design image + build notes"
@@ -429,15 +433,16 @@ function GoalRow() {
         }}
       />
       <button data-ui="GoalRunBtn" style={{
-        height: 38, padding: "0 24px", borderRadius: 10, border: "none",
-        background: "#4a6cff", color: "#fff", fontWeight: 600, fontSize: 13,
+        height: 38, width: 82, padding: 0, borderRadius: 10, border: "none",
+        background: "#4a6cff", color: "#fff", fontWeight: 600, fontSize: 18,
       }}>Run</button>
       <button data-ui="GoalCancelBtn" style={{
-        height: 38, padding: "0 18px", borderRadius: 10, border: "none",
-        background: "rgba(255,140,140,0.10)", color: "#ff8c8c", fontSize: 13,
+        height: 38, width: 98, padding: 0, borderRadius: 10, border: "none",
+        background: "rgba(255,140,140,0.10)", color: "#ff8c8c", fontSize: 18,
       }}>Cancel</button>
-      <button data-ui="GoalTelemetryBtn" className="ghost-btn" style={{minHeight:38, width:44}}>📊</button>
-      <button data-ui="GoalVoiceBtn" className="ghost-btn" style={{minHeight:38, minWidth:64}}>🔊 ▾</button>
+      <button data-ui="GoalTelemetryBtn" className="ghost-btn" style={{height: 38, width: 44, padding: 0, fontSize: 16}}>📊</button>
+      {/* Source label is the speaker emoji 🔈 not 🔊 */}
+      <button data-ui="GoalVoiceBtn" className="ghost-btn" style={{height: 38, width: 64, padding: 0, fontSize: 16}}>🔈 ▾</button>
     </div>
   );
 }
@@ -791,7 +796,7 @@ function AgentsPage() {
         <SubTabs />
         <LocationRow />
         <GoalRow />
-        <div data-ui="WorkspaceStack" style={{ flex: 1, display: "flex", overflow: "hidden", background: "#06080d", padding: "0 23px" }}>
+        <div data-ui="WorkspaceStack" style={{ height: 665, display: "flex", overflow: "hidden", background: "#06080d", padding: "0 23px" }}>
           {/* LEFT — canvas + flow header */}
           <div data-ui="RosterLeft" style={{
             width: LEFT_W,

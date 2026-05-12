@@ -1,14 +1,29 @@
 {
-  "$schema_note": "Cold-start happy paths consulted before asking the model. Fields documented in LLM/docs/supervisor/BOOTSTRAP.md 'Cold-start recipe table'.",
-  "version": 1,
+  "$schema_note": "Cold-start happy paths consulted before asking the model. Fields documented in LLM/docs/supervisor/BOOTSTRAP.md 'Cold-start recipe table'. Profile order matters — the first match wins, so list newer/narrower architectures BEFORE broader fallbacks.",
+  "version": 2,
   "profiles": [
     {
+      "id": "cuda128-torch26-blackwell",
+      "description": "NVIDIA Blackwell (RTX 50-series, compute capability >= 10.0). Needs CUDA 12.8+ wheels; cu121 will silently fail at kernel launch because Blackwell's SM_100 isn't compiled into the cu121 builds.",
+      "match": {
+        "gpu.0.vendor": "nvidia",
+        "gpu.0.cuda_runtime": ">=12.4,<13.0",
+        "gpu.0.compute_capability": ">=10.0"
+      },
+      "steps": [
+        { "action": "create_venv",  "args": { "python_version": "3.11" } },
+        { "action": "install_pkg",  "args": { "name": "torch==2.6.0+cu128",
+                                              "index": "https://download.pytorch.org/whl/cu128" } },
+        { "action": "install_pkg",  "args": { "name": "bitsandbytes==0.45.0" } }
+      ]
+    },
+    {
       "id": "cuda121-torch25",
-      "description": "NVIDIA GPU with CUDA 12.1+ runtime, compute capability >= 8.0 (Ampere/Ada/Hopper).",
+      "description": "NVIDIA GPU with CUDA 12.1+ runtime, compute capability 8.0-9.x (Ampere RTX 30 / Ada RTX 40 / Hopper).",
       "match": {
         "gpu.0.vendor": "nvidia",
         "gpu.0.cuda_runtime": ">=12.1,<13.0",
-        "gpu.0.compute_capability": ">=8.0"
+        "gpu.0.compute_capability": ">=8.0,<10.0"
       },
       "steps": [
         { "action": "create_venv",  "args": { "python_version": "3.11" } },
@@ -18,16 +33,33 @@
       ]
     },
     {
-      "id": "cuda118-torch24",
-      "description": "Older NVIDIA stack — CUDA 11.8, compute capability >= 7.5 (Turing).",
+      "id": "cuda118-torch24-turing",
+      "description": "Turing (RTX 20-series, compute 7.5) — CUDA 11.8 + torch 2.4. cu121 wheels also work on Turing but 11.8 is what's been smoke-tested in production.",
       "match": {
         "gpu.0.vendor": "nvidia",
         "gpu.0.cuda_runtime": ">=11.8,<12.0",
-        "gpu.0.compute_capability": ">=7.5"
+        "gpu.0.compute_capability": ">=7.5,<8.0"
       },
       "steps": [
         { "action": "create_venv",  "args": { "python_version": "3.11" } },
         { "action": "install_pkg",  "args": { "name": "torch==2.4.1+cu118",
+                                              "index": "https://download.pytorch.org/whl/cu118" } },
+        { "action": "install_pkg",  "args": { "name": "bitsandbytes==0.43.3" } }
+      ]
+    },
+    {
+      "id": "cuda118-torch22-pascal",
+      "description": "Pascal (GTX 10-series, compute 6.1). Newer torch versions drop SM_61 from prebuilt wheels — pinning to torch 2.2 keeps inference working; training is best-effort. Ask the user before assuming this is the right path because the upgrade story is bumpy.",
+      "match": {
+        "gpu.0.vendor": "nvidia",
+        "gpu.0.cuda_runtime": ">=11.8,<12.0",
+        "gpu.0.compute_capability": ">=6.0,<7.5"
+      },
+      "steps": [
+        { "action": "ask_user",     "args": { "question": "Detected an older Pascal-generation NVIDIA GPU (GTX 10-series). Modern torch wheels have limited support for this hardware — training will be unreliable, inference works. Continue with the legacy profile?",
+                                              "options": ["continue", "abort"] } },
+        { "action": "create_venv",  "args": { "python_version": "3.11" } },
+        { "action": "install_pkg",  "args": { "name": "torch==2.2.2+cu118",
                                               "index": "https://download.pytorch.org/whl/cu118" } },
         { "action": "install_pkg",  "args": { "name": "bitsandbytes==0.43.3" } }
       ]

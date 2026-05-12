@@ -31,6 +31,11 @@ logs/
 tmp/
 temp/
 
+# Agent runtime — local-only state (DB, agent secret keys).
+LLM/data/owllm_state.db
+LLM/data/owllm_state.db-*
+LLM/data/owllm_agent_secrets.json
+
 # Model artifacts and checkpoints (large/generated files)
 outputs/
 checkpoints/
@@ -122,3 +127,11 @@ LLM/test_output/
 *.exe
 *.zip
 *.7z
+
+# Portable Go toolchain (bootstrap.exe is built from
+# LLM/bootstrap/bootstrap_go). The SDK is ~70 MB extracted; we keep
+# it on disk so build_installer.bat works without a system-wide Go
+# install, but never commit it. Same for the Go build/module caches.
+LLM/tools/go/
+LLM/tools/gocache/
+LLM/tools/gopath/

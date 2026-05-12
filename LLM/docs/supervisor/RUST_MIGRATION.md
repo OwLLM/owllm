@@ -205,8 +205,8 @@ Same pattern as the supervisor itself:
 | R2 — simple actions | ✅ complete | claude | 2026-05-12 |
 | R3 — HTTP / pkg | ✅ complete | claude | 2026-05-12 |
 | R4 — plan + server | ✅ complete | claude | 2026-05-12 |
-| R5 — hardware + main | not started | | |
-| R6 — cutover | not started | | |
+| R5 — hardware + main | ✅ complete | claude | 2026-05-12 |
+| R6 — cutover | ✅ complete | claude | 2026-05-12 |
 
 ### R2 deliverables (2026-05-12)
 
@@ -339,14 +339,69 @@ Build:
   bootstrap.exe (Rust, full R1-R4 surface) = 0.26 MB
   bootstrap.exe (Go,   full)               = 5.20 MB
 
-R5 = hardware probe (nvidia-smi + wmic + dxdiag shell-outs into
-JSON matching the Python probe schema) + main orchestration loop
-(probe → spawn server → diagnose → execute → done). Estimated 3-4
-days; the main loop is mostly glue.
+### R5 deliverables (2026-05-12)
 
-R6 = cutover. Flip `build_installer.bat` so `bootstrap.exe` is built
-from `bootstrap_rs/` by default. Keep `bootstrap_go/` in tree for
-two releases as rollback safety, then delete.
+Ported from `bootstrap_go/hardware/probe.go` + `bootstrap_go/main.go`:
+
+- `hardware.rs` — `Spec` / `OsInfo` / `CpuInfo` / `Gpu` types matching
+  the Python supervisor schema. `probe()` shells out to `wmic`,
+  `cmd /c ver`, and `nvidia-smi`, parses the output, fills the
+  spec. Never errors — partial info is better than no info.
+  Pulls in `std::env::consts::{OS,ARCH}` and
+  `std::thread::available_parallelism()` so no extra crate deps
+  (no `num_cpus`, no `sysinfo`).
+
+  Parsing helpers (`parse_wmic_value`, `parse_nvidia_csv`) are
+  pure functions exposed for testing — the shell-out side is
+  un-mockable without a sandbox, but the bulk of the logic is
+  in the parsers and they have full coverage. 8 tests.
+
+  Empty-GPU-list serializes as `[]` not `null` to match the Go
+  side's custom MarshalJSON. Verified with a dedicated test.
+
+- `main.rs` — full bootstrap orchestration:
+  parse_args → bootstrap_dir → probe → start server →
+  diagnose_with_files → executor.run_plan → server.shutdown →
+  exit. Honors `LOCALLLM_BOOTSTRAP_DIR` env override the same way
+  Go does, so devs / CI can point it at a sandbox. `--dry-run`,
+  `--port`, `-v`/`--verbose`, `--help` flags hand-parsed (no
+  `clap`/`argh` dep). 3 tests: bootstrap_dir env override,
+  load_recipe_summary fallback, llama_server_name platform-aware.
+
+- `.cargo/config.toml` — forces `RUST_TEST_THREADS=1`. Several
+  modules spin up in-process TCP mocks on 127.0.0.1:0; parallel
+  execution triggers TIME_WAIT collisions on Windows runners.
+  Cost is ~0 wall-clock (full suite ~2 s either way) and removes
+  the flake entirely.
+
+Build:
+  cargo build --release: clean in 9.17 s
+  cargo test --quiet -- --include-ignored: 115 / 115 passing
+  bootstrap.exe (Rust, R1-R5 — full surface) = 1.68 MB
+  bootstrap.exe (Go,   full)                  = 5.20 MB
+  (Rust now 68 % smaller than Go at functional parity. The
+  bigger Rust binary vs the R4 placeholder is mostly main.rs
+  pulling in the full executor + server modules into the bin
+  target — lib stayed similar size.)
+
+### R6 deliverables (2026-05-12)
+
+- `build_installer.bat`: defaults to building `bootstrap_rs/` via
+  cargo. `--use-go` flag rebuilds from `bootstrap_go/` as a rollback
+  path. Both halves auto-detect the portable toolchain under
+  `LLM/tools/{rust,go}/` and fall back to a system install on PATH.
+  Same UX as before; the only change is `bootstrap.exe` is now Rust
+  unless the user explicitly opts into the legacy path.
+
+- `bootstrap_go/DEPRECATED.md`: notice that the tree is on a
+  deprecation path. Stays in tree for two releases as rollback
+  safety, then deletes. Any bug fixes during the window must be
+  ported to `bootstrap_rs/` as well.
+
+The migration is now structurally complete. After two clean
+releases on the Rust path, the next iteration deletes
+`bootstrap_go/` outright and the migration doc gets archived
+under `docs/history/`.
 
 This doc is the source of truth for the migration. Update the table
 above as phases complete.

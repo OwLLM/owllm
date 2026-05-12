@@ -1,0 +1,13 @@
+# Force single-threaded test execution.
+#
+# Several modules (server, download_file, diagnose) spin up
+# in-process TCP mock servers on 127.0.0.1:0. Running these in
+# parallel on Windows triggers TIME_WAIT collisions on ephemeral
+# ports — connections get RST mid-stream with "An existing
+# connection was forcibly closed by the remote host". Tests
+# themselves are correct; serial execution makes them
+# deterministic on Windows runners.
+#
+# Cost is ~0 wall-clock: the whole suite runs in ~2 s either way.
+[env]
+RUST_TEST_THREADS = "1"

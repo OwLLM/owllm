@@ -1,15 +1,16 @@
 //! bootstrap_rs — Rust port of bootstrap_go. See
 //! `LLM/docs/supervisor/RUST_MIGRATION.md` for the migration plan.
 //!
-//! Phase R4 complete: all 8 executor actions ported, hardware
-//! profile loader ported, plan parser ported, llama-server lifecycle
-//! ported, diagnose orchestration ported.
-//!
-//! Pending: hardware probe + main orchestration (R5), cutover (R6).
+//! Phase R5 complete: all of bootstrap_go is now ported. The
+//! `bootstrap` binary in main.rs orchestrates probe -> spawn ->
+//! diagnose -> execute -> shutdown. R6 (cutover) is the remaining
+//! phase — flip `build_installer.bat` so bootstrap_rs is the
+//! default build target.
 
 pub mod args;
 pub mod diagnose;
 pub mod exec;
+pub mod hardware;
 pub mod pipspec;
 pub mod pkgname;
 pub mod plan;

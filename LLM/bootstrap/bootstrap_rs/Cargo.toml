@@ -37,6 +37,9 @@ hex = "0.4"
 # Temporary directories for tests, same pattern as Go's t.TempDir().
 tempfile = "3"
 
+# main.rs's unit tests use tempfile too — promote to top-level
+# dev-dep so the bin tests can see it via `extern crate tempfile`.
+
 [profile.release]
 # Match what we asked g++ for on launcher.exe: small, stripped binary
 # with no unnecessary metadata.

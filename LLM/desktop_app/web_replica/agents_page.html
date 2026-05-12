@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OWLLM — Agentic Team (React replica)</title>
+<!--
+  Self-contained React replica of the OWLLM Agents page, built from the
+  agent-captured screenshot of the live PySide6 app. Single-file HTML so
+  the agent can iterate on it without a build system; React + Tailwind
+  load from CDN at runtime.
+
+  Why a single file: this is the visual recipe, not the production
+  frontend. When the time comes for a real Tauri-side Agents page
+  the JSX patterns here (frame layout, agent canvas math, theme
+  tokens) carry over to component files unchanged.
+
+  Asset paths are RELATIVE to this file. The project layout is:
+    LLM/desktop_app/web_replica/agents_page.html  ← we are here
+    icons/Page_icons/...                          ← top crest, mode icons
+    icons/Page_icons/CornersNew/...               ← frame corners
+    hybrid_frame_module/assets/...                ← legacy fallbacks
+  …so `../../../icons/...` walks back up to the project root.
+-->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  /* The dark space background the canvas uses. CSS rather than an
+     image keeps the file standalone, and the stars below it (radial
+     gradients in canvas SVG) make a real bitmap unnecessary. */
+  :root {
+    --bg-deep: #0b1024;
+    --bg-mid: #131a36;
+    --bg-light: #1a2244;
+    --accent-cyan: #4cd3ff;
+    --accent-orange: #f7c948;
+    --accent-purple: #b481ff;
+    --accent-blue: #6db0ff;
+    --text: #d9def0;
+    --muted: #8b94b2;
+    --line: rgba(160, 178, 220, 0.18);
+  }
+  html, body { background: #050810; color: var(--text); font-family: 'Segoe UI', 'Inter', system-ui, sans-serif; }
+  .gradient-titlebar {
+    background: linear-gradient(180deg, #1c2548 0%, #131a36 100%);
+  }
+  .mode-btn {
+    transition: transform .08s ease, box-shadow .12s ease;
+  }
+  .mode-btn:hover { transform: translateY(-1px); box-shadow: 0 0 0 1px rgba(255,255,255,0.08); }
+  .mode-btn.active { background: rgba(247, 201, 72, 0.18); box-shadow: inset 0 0 0 1px rgba(247, 201, 72, 0.6); }
+  .tab-active { color: var(--accent-cyan); border-bottom: 2px solid var(--accent-cyan); }
+  .tab-idle   { color: var(--muted); border-bottom: 2px solid transparent; }
+  .pill { padding: 4px 10px; border-radius: 999px; font-size: 12px; }
+  .pill-green { background: rgba(76, 211, 132, 0.15); color: #6ee7a5; border: 1px solid rgba(76, 211, 132, 0.4); }
+  .pill-gray  { background: rgba(120, 130, 160, 0.12); color: var(--muted); border: 1px solid rgba(120, 130, 160, 0.3); }
+  .star-bg::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      radial-gradient(circle at 13% 21%, rgba(180,200,255,0.55) 0.6px, transparent 1px),
+      radial-gradient(circle at 31% 64%, rgba(180,200,255,0.45) 0.6px, transparent 1px),
+      radial-gradient(circle at 48% 12%, rgba(255,255,255,0.7) 0.7px, transparent 1.1px),
+      radial-gradient(circle at 71% 47%, rgba(180,200,255,0.6) 0.6px, transparent 1px),
+      radial-gradient(circle at 88% 82%, rgba(180,200,255,0.45) 0.6px, transparent 1px),
+      radial-gradient(circle at 6%  73%, rgba(255,255,255,0.6) 0.7px, transparent 1.1px),
+      radial-gradient(circle at 92% 18%, rgba(180,200,255,0.4) 0.6px, transparent 1px),
+      radial-gradient(circle at 54% 88%, rgba(255,255,255,0.6) 0.7px, transparent 1.1px);
+    background-size: 100% 100%;
+  }
+  /* Subtle pulse on the owl emblem mimics the running app. */
+  @keyframes pulse-soft {
+    0%, 100% { filter: drop-shadow(0 0 24px rgba(77, 200, 255, 0.45)); }
+    50%      { filter: drop-shadow(0 0 38px rgba(77, 200, 255, 0.75)); }
+  }
+  .owl-pulse { animation: pulse-soft 3.4s ease-in-out infinite; }
+</style>
+</head>
+<body class="m-0 p-0 min-h-screen flex items-center justify-center">
+
+<div id="root" class="w-[1400px]"></div>
+
+<script type="text/babel" data-presets="react">
+const ASSET = "../../../icons/Page_icons";
+const FRAME = `${ASSET}/CornersNew`;
+
+// Mode toggles in the title bar. The "active" flag mirrors what the
+// app showed when the screenshot was taken (Agentic Team is hot).
+const MODES = [
+  { id: "dark",       label: "Dark",        icon: "🌙" },
+  { id: "advanced",   label: "Advanced",    icon: "⚙" },
+  { id: "fineTuning", label: "Fine Tuning", icon: "🔧" },
+  { id: "agentic",    label: "Agentic Team", icon: `${ASSET}/owl_AgenticTeam.png`, active: true },
+  { id: "gamify",     label: "Gamify",      icon: "🎮" },
+];
+
+// Tabs along the top of the main pane.
+const TABS = [
+  { id: "home",    label: "🏠 Home" },
+  { id: "code",    label: "▦ Code" },
+  { id: "agents",  label: "👥 Agents", active: true },
+  { id: "studio",  label: "🎬 Studio" },
+  { id: "bridges", label: "🌉 Bridges" },
+  { id: "server",  label: "🖧 Server" },
+  { id: "info",    label: "ⓘ Info" },
+];
+
+// The actual team in the captured screenshot. Eight roles arranged
+// around the owl in an octagonal layout.
+const AGENTS = [
+  { name: "Orchestrator",       color: "#6db0ff" },
+  { name: "Product Owner",      color: "#6db0ff" },
+  { name: "UX Designer",        color: "#6db0ff" },
+  { name: "Backend Arch",       color: "#b481ff" },
+  { name: "Whitepaper Writer",  color: "#b481ff" },
+  { name: "Design Critic",      color: "#b481ff" },
+  { name: "Frontend Coder",     color: "#b481ff" },
+  { name: "Backend Coder",      color: "#b481ff" },
+];
+
+function ModeButton({ mode }) {
+  const isImg = mode.icon.endsWith(".png");
+  return (
+    <button className={`mode-btn flex flex-col items-center justify-center px-3 py-1.5 rounded-md ${mode.active ? "active" : ""}`}
+      style={{ minWidth: 70 }}>
+      <div className="text-lg leading-none mb-0.5">
+        {isImg
+          ? <img src={mode.icon} className="h-6 w-6 object-contain" alt="" />
+          : <span>{mode.icon}</span>}
+      </div>
+      <div className="text-[11px] tracking-wide opacity-90">{mode.label}</div>
+    </button>
+  );
+}
+
+function TitleBar() {
+  return (
+    <div className="gradient-titlebar relative flex items-center justify-between px-4 py-2.5 border-b border-white/5">
+      {/* Mode buttons clustered left. */}
+      <div className="flex items-center gap-1.5">
+        {MODES.map(m => <ModeButton key={m.id} mode={m} />)}
+      </div>
+      {/* Title + status panel center-right. The real app draws OWLLM
+          with a custom font; we approximate with a tight letter-spacing
+          treatment. */}
+      <div className="flex items-center gap-6">
+        <div className="text-[28px] font-light tracking-[0.12em] text-white/95">
+          OWLLM
+        </div>
+        <div className="text-xs leading-tight">
+          <div>🟢 <span className="text-white/80">Servers: 0</span></div>
+          <div>🔑 <span className="text-white/80">API key:</span> <span className="text-white/95">owllm-local</span></div>
+          <div>💾 <span className="text-white/80">VRAM: N/A</span></div>
+        </div>
+      </div>
+      {/* Window controls. The real app uses ⛶ + ✕; we mirror it. */}
+      <div className="flex items-center gap-3 text-white/70">
+        <button title="Maximize" className="px-2 py-0.5 hover:text-white">⛶</button>
+        <button title="Close"    className="px-2 py-0.5 hover:text-rose-400">✕</button>
+      </div>
+    </div>
+  );
+}
+
+function TabBar() {
+  return (
+    <div className="flex items-end gap-6 px-5 pt-2 pb-0 border-b border-white/5"
+         style={{ background: "var(--bg-mid)" }}>
+      {TABS.map(t => (
+        <button key={t.id}
+          className={`pb-2 text-[13px] ${t.active ? "tab-active" : "tab-idle"}`}>
+          {t.label}
+        </button>
+      ))}
+      <div className="ml-auto pb-2 text-[12px] text-cyan-400/80">ⓘ Info</div>
+    </div>
+  );
+}
+
+function LocationRow() {
+  return (
+    <div className="flex items-center gap-3 px-4 py-2 text-xs"
+         style={{ background: "#171e3c", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+      <span className="text-white/55 font-semibold tracking-wider">LOCATION</span>
+      <div className="flex-1 max-w-[420px] px-3 py-1.5 rounded bg-black/30 border border-white/10 text-white/85 font-mono">
+        /path/to/repo · esp-flash · github.com/…
+      </div>
+      <button className="px-3 py-1.5 rounded bg-white/5 border border-white/10 hover:bg-white/10">Browse…</button>
+      <label className="flex items-center gap-1.5 text-white/70">
+        <input type="checkbox" className="accent-cyan-400" /> Trust writes
+      </label>
+      <span className="pill pill-green">● Sandboxed</span>
+      <span className="pill pill-gray">📓 Bridge: OFF</span>
+      <span className="ml-2 text-white/55 font-semibold tracking-wider">PROJECT</span>
+      <select className="px-3 py-1.5 rounded bg-black/30 border border-white/10 text-white/90">
+        <option>Product Studio Test</option>
+      </select>
+      <button className="px-3 py-1.5 rounded bg-white/5 border border-white/10 hover:bg-white/10">Team…</button>
+      <button className="px-3 py-1.5 rounded bg-white/5 border border-white/10 hover:bg-white/10">+ New</button>
+      <button className="px-3 py-1.5 rounded bg-white/5 border border-white/10 hover:bg-white/10">Rename</button>
+      <button className="px-3 py-1.5 rounded bg-white/5 border border-rose-500/30 text-rose-400 hover:bg-rose-500/10">Delete</button>
+    </div>
+  );
+}
+
+function GoalBar() {
+  return (
+    <div className="flex items-center gap-2 px-4 py-2 border-b border-white/5"
+         style={{ background: "#10162e" }}>
+      <button className="text-white/60 hover:text-white px-1">📎</button>
+      <input
+        className="flex-1 bg-transparent outline-none text-[13px] text-white/85 placeholder:text-white/35 font-mono"
+        placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up'  (drop an image / audio here)"
+      />
+      <button className="px-5 py-1.5 rounded bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-semibold">Run</button>
+      <button className="px-5 py-1.5 rounded bg-white/5 border border-white/10 text-white/70 hover:bg-white/10">Cancel</button>
+      <button className="text-rose-400 px-1" title="Record">●</button>
+      <button className="text-white/60 hover:text-white px-1" title="Voice">🔊</button>
+    </div>
+  );
+}
+
+// Agent canvas. The octagonal layout matches the running app — radial
+// math centered on the canvas, agents placed at 8 equal angles.
+function AgentCanvas() {
+  const W = 1352, H = 700, cx = W / 2, cy = H / 2;
+  const R = 270;
+  const positions = AGENTS.map((a, i) => {
+    // Start the first agent at the top and walk clockwise so
+    // "Orchestrator" sits at 12 o'clock like the screenshot.
+    const angle = (-Math.PI / 2) + (i * 2 * Math.PI / AGENTS.length);
+    return { ...a, x: cx + R * Math.cos(angle), y: cy + R * Math.sin(angle) };
+  });
+  return (
+    <div className="relative star-bg overflow-hidden" style={{ width: W, height: H, background: "#0c1334" }}>
+      <svg width={W} height={H} className="absolute inset-0">
+        {/* Connection lines first so nodes overdraw their endpoints. */}
+        {positions.map((a, i) => (
+          <line key={`l${i}`}
+            x1={cx} y1={cy} x2={a.x} y2={a.y}
+            stroke="rgba(180,200,255,0.18)" strokeWidth="1"
+            strokeDasharray="4 4" />
+        ))}
+        {positions.map((a, i) => positions.slice(i + 1).map((b, j) => (
+          <line key={`p${i}-${j}`}
+            x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+            stroke="rgba(180,200,255,0.08)" strokeWidth="1"
+            strokeDasharray="2 6" />
+        )))}
+        {/* Agent nodes. The cyan glow is a double-pass: outer halo
+            with low opacity, then the solid disc. */}
+        {positions.map((a, i) => (
+          <g key={a.name}>
+            <circle cx={a.x} cy={a.y} r={26} fill={a.color} opacity="0.22" />
+            <circle cx={a.x} cy={a.y} r={18} fill={a.color} />
+            <circle cx={a.x} cy={a.y} r={14} fill="rgba(255,255,255,0.18)" />
+          </g>
+        ))}
+      </svg>
+      {/* Labels in DOM so they pick up Segoe UI / system fallback. */}
+      {positions.map(a => (
+        <div key={`t-${a.name}`}
+          className="absolute text-[12px] text-white/90"
+          style={{ left: a.x, top: a.y + 30, transform: "translateX(-50%)" }}>
+          {a.name}
+        </div>
+      ))}
+      {/* Center owl emblem. The real PNG is shipped under
+          icons/Page_icons/owl_studio_square.png — same asset the
+          HybridFrame top-crest uses, which keeps the visual story
+          consistent with the running app. */}
+      <div className="absolute owl-pulse"
+        style={{ left: cx, top: cy, transform: "translate(-50%, -50%)" }}>
+        <img src={`${ASSET}/owl_studio_square.png`}
+             className="h-[180px] w-[180px] object-contain"
+             alt="OWLLM" />
+      </div>
+      {/* Status text at the bottom, like the app's "Ready." */}
+      <div className="absolute bottom-3 left-1/2 -translate-x-1/2 text-white/70 text-[12px]">
+        Ready.
+      </div>
+    </div>
+  );
+}
+
+// The decorative HybridFrame: 4 corner PNGs absolutely positioned over
+// the content + an owl crest above the title bar. Real assets, real
+// pixel sizes.
+function Frame({ children }) {
+  return (
+    <div className="relative" style={{ padding: "44px 60px 28px 40px" }}>
+      {/* Corners. Sizes/anchors picked to visually match what the
+          PySide6 HybridFrameWindow draws. */}
+      <img src={`${FRAME}/corner_ul.png`} alt="" className="pointer-events-none select-none absolute"
+           style={{ top: 8, left: 4, height: 96 }} />
+      <img src={`${FRAME}/corner_ur.png`} alt="" className="pointer-events-none select-none absolute"
+           style={{ top: 8, right: 4, height: 110 }} />
+      <img src={`${FRAME}/corner_bl.png`} alt="" className="pointer-events-none select-none absolute"
+           style={{ bottom: 0, left: 4, height: 96 }} />
+      <img src={`${FRAME}/corner_br.png`} alt="" className="pointer-events-none select-none absolute"
+           style={{ bottom: 0, right: 4, height: 96 }} />
+      {/* Top center crest — the owl badge that sits above the title bar. */}
+      <img src={`${ASSET}/owl_studio_square.png`} alt="" className="pointer-events-none select-none absolute"
+           style={{ top: -14, left: "50%", transform: "translateX(-50%)", height: 90 }} />
+      <div className="rounded-md overflow-hidden border border-white/8 shadow-2xl"
+           style={{ background: "#0c1334" }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <Frame>
+      <TitleBar />
+      <TabBar />
+      <LocationRow />
+      <GoalBar />
+      <AgentCanvas />
+    </Frame>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

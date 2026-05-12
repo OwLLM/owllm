@@ -567,10 +567,24 @@ class BridgesPage(QWidget):
         self._load_initial_state()
 
         # Cheap status poll so the dots stay live without manual refresh.
+        # NB: only run while the Bridges tab is visible — otherwise we'd
+        # poll forever even when the user is on Home / Code / etc., which
+        # is one of the cumulative loads that correlate with the idle
+        # Qt6Core crashes.
         self._timer = QTimer(self)
         self._timer.setInterval(3000)
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if not self._timer.isActive():
+            self._tick()
+            self._timer.start()
+
+    def hideEvent(self, ev):
+        super().hideEvent(ev)
+        if self._timer.isActive():
+            self._timer.stop()
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)

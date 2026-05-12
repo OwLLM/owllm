@@ -136,9 +136,22 @@ class FleetPage(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(REFRESH_MS)
         self._refresh_timer.timeout.connect(self._tick)
-        self._refresh_timer.start()
+        # showEvent starts it — no point polling the ProcessRegistry while
+        # the Fleet tab is hidden.
 
-        self._tick()  # populate immediately
+        self._tick()  # populate immediately so the page isn't empty
+                      # the first time the user opens it
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if not self._refresh_timer.isActive():
+            self._tick()
+            self._refresh_timer.start()
+
+    def hideEvent(self, ev):
+        super().hideEvent(ev)
+        if self._refresh_timer.isActive():
+            self._refresh_timer.stop()
 
     # ------------------------------------------------------------------
     # Build

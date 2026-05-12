@@ -386,7 +386,19 @@ class AccountsPage(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(3000)
         self._timer.timeout.connect(self._refresh)
-        self._timer.start()
+        # showEvent starts it. Polling off-tab wastes CPU and risks
+        # touching widgets after the page is hidden (idle Qt crashes).
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if not self._timer.isActive():
+            self._refresh()
+            self._timer.start()
+
+    def hideEvent(self, ev):
+        super().hideEvent(ev)
+        if self._timer.isActive():
+            self._timer.stop()
 
     def _build_ui(self) -> None:
         outer = QVBoxLayout(self)

@@ -1268,7 +1268,14 @@ class AgentCanvas(QGraphicsView):
         return any(n._status != STATUS_IDLE for n in self._nodes.values())
 
     def _update_animation_state(self) -> None:
-        if self._any_node_active():
+        # Two gates on the pulse timer: visibility AND any node active.
+        # Off-tab → never tick (even if an agent is working, you can't
+        # see it). This is what 10+ Qt6Core / Qt6Gui crashes in the
+        # May event log were caused by: timers ticking on hidden
+        # widgets, allocating millions of paint events, eventually
+        # touching a destroyed pixmap.
+        should_run = self.isVisible() and self._any_node_active()
+        if should_run:
             if not self._anim_timer.isActive():
                 self._anim_timer.start()
         else:
@@ -1277,6 +1284,15 @@ class AgentCanvas(QGraphicsView):
                 # One last paint so any lingering halo pulse settles
                 # to a clean steady-state look.
                 self.viewport().update()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self._update_animation_state()
+
+    def hideEvent(self, ev):
+        super().hideEvent(ev)
+        if self._anim_timer.isActive():
+            self._anim_timer.stop()
 
     def _tick_animation(self) -> None:
         # 2π per ~3 s so the pulse breathes at roughly heartbeat speed.

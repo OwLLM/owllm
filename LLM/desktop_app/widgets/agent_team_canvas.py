@@ -265,12 +265,23 @@ class AgentTeamCanvas(QWidget):
         except Exception:
             self._owl_pixmap = None
 
-        # ~30 fps paint loop. Qt suspends paints when the widget is hidden,
-        # so the cost is zero off-screen.
+        # ~30 fps paint loop. NB: the old comment claimed "Qt suspends
+        # paints when the widget is hidden, so the cost is zero
+        # off-screen" — that is WRONG. Qt skips the paintEvent draw but
+        # the timer keeps firing _tick(), which mutates _phase and calls
+        # self.update() (which queues a paint event regardless). Over
+        # hours of idle that allocates millions of paint events and is a
+        # documented trigger for Qt6Core.dll / Qt6Gui.dll segfaults
+        # (we have ~10 of those in the May event log).
+        #
+        # Solution: only run the animation while the widget is actually
+        # visible (showEvent → start, hideEvent → stop). The agents
+        # page being on a hidden tab now costs zero CPU.
         self._timer = QTimer(self)
         self._timer.setInterval(33)
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
+        # Do NOT start here — showEvent handles that. Avoids a tick
+        # firing before the widget is on-screen.
 
     # ------------------------------------------------------------------
     # Public API — compatible with what agents_page.py already calls
@@ -560,6 +571,22 @@ class AgentTeamCanvas(QWidget):
             t = (t + 0.011 + (beam_i % 3) * 0.001) % 1.0
             self._pulses[i] = (beam_i, t)
         self.update()
+
+    def showEvent(self, ev):  # noqa: D401
+        """Start the 30 fps animation when the widget becomes visible.
+        Off-tab the canvas does no work at all."""
+        super().showEvent(ev)
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def hideEvent(self, ev):  # noqa: D401
+        """Stop the animation when the widget is hidden (tab switch,
+        window minimised, app backgrounded). Prevents the millions of
+        queued paint events that were the most likely cause of the
+        idle Qt6Core / Qt6Gui crashes in the May event log."""
+        super().hideEvent(ev)
+        if self._timer.isActive():
+            self._timer.stop()
 
     # ------------------------------------------------------------------
     # Geometry — compute every node's position once per paint

@@ -142,7 +142,10 @@ class AgentCanvasLoader(QWidget):
         self._timer = QTimer(self)
         self._timer.setInterval(33)  # ~30 fps
         self._timer.timeout.connect(self._tick)
-        self._timer.start()
+        # showEvent starts it. The loader is short-lived (replaced by
+        # the real canvas once the requirements scan finishes) but the
+        # same hidden-tab caveat applies — no point ticking while the
+        # Agents tab is off-screen.
 
     # ------------------------------------------------------------------
     # Public API
@@ -182,6 +185,16 @@ class AgentCanvasLoader(QWidget):
             t = (t + 0.011 + (beam_i % 3) * 0.001) % 1.0
             self._pulses[i] = (beam_i, t)
         self.update()
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        if not self._timer.isActive():
+            self._timer.start()
+
+    def hideEvent(self, ev):
+        super().hideEvent(ev)
+        if self._timer.isActive():
+            self._timer.stop()
 
     # ------------------------------------------------------------------
     # Painting

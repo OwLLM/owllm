@@ -78,25 +78,32 @@ const FRAME_ASSETS = "../../../hybrid_frame_module/assets";
      → outer = inner + (2*9+75, 2*9+29) = (1693, 989)  for 1600x960 inner
    ============================================================ */
 function HybridFrame({ children, width, height }) {
-  // Frame geometry calibrated from the Qt agent's tree dump (not from
-  // first-principles math, which got it wrong by ~78 px vertically):
-  //   Frame: 1698x1095 at (0,0)
-  //   windowBorderContainer (= inner window): 1600x960 at (19, 116)
-  // → left margin 19, top margin 116, right margin 79, bottom margin 19.
-  // The earlier math (SHIFT_OUT + EXTRA_TOP = 38) put everything 78 px
-  // higher than the real app, which the agent surfaced as a +82 pos
-  // drift on every header element.
+  // ARCHITECTURE FIX (user feedback 2026-05-13):
+  //   Earlier this filled the whole 1698x1095 screenshot rectangle with a
+  //   dark "frame" colour. That's wrong — in the real Qt app the frame
+  //   itself is the SAME size as the main window (1600x960). The corners
+  //   and top-centre owl badge are decorations that STICK OUT past the
+  //   frame's edges; the screenshot dimensions only exist to capture that
+  //   overhang. So now:
+  //     * Outer container 1698x1095 has a TRANSPARENT background
+  //     * The frame rectangle = main window rectangle (1600x960) sits at
+  //       (19, 116) and only paints inside its own bounds
+  //     * Corners/edges/badge are positioned to OVERHANG the frame's
+  //       outer edges, capturing the visual "frame protrudes outside the
+  //       window" the Qt frame produces
   const CORNER = 96;            // visible corner asset render size
   const BORDER = 18;            // border thickness around the inner window
   const BADGE_H = 58;           // int(90*0.65)
 
-  const LEFT_MARGIN = 19;
-  const TOP_MARGIN = 116;
-  const RIGHT_MARGIN = 79;
-  const BOTTOM_MARGIN = 19;
+  const FRAME_LEFT = 19;        // X of frame within the screenshot
+  const FRAME_TOP = 116;        // Y of frame within the screenshot
+  const RIGHT_OVERHANG = 79;    // space reserved for the right-side overhang
+  const BOTTOM_OVERHANG = 19;   // bottom-side overhang
 
-  const outerW = width + LEFT_MARGIN + RIGHT_MARGIN;
-  const outerH = height + TOP_MARGIN + BOTTOM_MARGIN;
+  const outerW = width + FRAME_LEFT + RIGHT_OVERHANG;
+  const outerH = height + FRAME_TOP + BOTTOM_OVERHANG;
+  const LEFT_MARGIN = FRAME_LEFT;
+  const TOP_MARGIN = FRAME_TOP;
 
   // Frame strokes — colors match win._get_theme_colors() then darker(300) for bg
   // and alpha 220/200 for fc/ac (see _app_capture_runner.py:215).
@@ -108,13 +115,15 @@ function HybridFrame({ children, width, height }) {
       position: "relative",
       width: outerW,
       height: outerH,
-      background: "#06080d",
+      background: "transparent",
     }}>
-      {/* Inner window content positioned at the real Qt offsets (19, 116). */}
+      {/* Main window content at (FRAME_LEFT, FRAME_TOP). The frame's own
+          rectangle is the SAME size as the main window — no extra dark
+          padding around it. */}
       <div style={{
         position: "absolute",
-        left: LEFT_MARGIN,
-        top: TOP_MARGIN,
+        left: FRAME_LEFT,
+        top: FRAME_TOP,
         width: width,
         height: height,
         background: "#14152a",
@@ -123,55 +132,78 @@ function HybridFrame({ children, width, height }) {
         {children}
       </div>
 
-      {/* Border edges drawn at 1/2-corner inset from the screenshot edges. */}
+      {/* Border edges drawn just OUTSIDE the frame's rectangle so they
+          read as the chrome "around" the window, not inside it. */}
       <div style={{
-        position: "absolute", left: CORNER/2, right: CORNER/2,
-        top: 10, height: BORDER,
+        position: "absolute",
+        left: FRAME_LEFT + CORNER/2,
+        width: width - CORNER,
+        top: FRAME_TOP - BORDER/2,
+        height: BORDER,
         background: `linear-gradient(90deg, ${ac}, ${fc}, ${ac})`,
-        opacity: 0.7,
+        opacity: 0.8,
       }} />
       <div style={{
-        position: "absolute", left: CORNER/2, right: CORNER/2,
-        bottom: 10, height: BORDER,
+        position: "absolute",
+        left: FRAME_LEFT + CORNER/2,
+        width: width - CORNER,
+        top: FRAME_TOP + height - BORDER/2,
+        height: BORDER,
         background: `linear-gradient(90deg, ${ac}, ${fc}, ${ac})`,
-        opacity: 0.7,
+        opacity: 0.8,
       }} />
       <div style={{
-        position: "absolute", top: CORNER/2, bottom: CORNER/2,
-        left: 10, width: BORDER,
+        position: "absolute",
+        top: FRAME_TOP + CORNER/2,
+        height: height - CORNER,
+        left: FRAME_LEFT - BORDER/2,
+        width: BORDER,
         background: `linear-gradient(180deg, ${ac}, ${fc}, ${ac})`,
-        opacity: 0.7,
+        opacity: 0.8,
       }} />
       <div style={{
-        position: "absolute", top: CORNER/2, bottom: CORNER/2,
-        right: 10, width: BORDER,
+        position: "absolute",
+        top: FRAME_TOP + CORNER/2,
+        height: height - CORNER,
+        left: FRAME_LEFT + width - BORDER/2,
+        width: BORDER,
         background: `linear-gradient(180deg, ${ac}, ${fc}, ${ac})`,
-        opacity: 0.7,
+        opacity: 0.8,
       }} />
 
-      {/* Corner crests */}
+      {/* Corner crests overhang the frame's 4 corners by CORNER/2 in
+          each direction — they protrude OUTSIDE the window rectangle. */}
       <img src={`${CORNERS}/corner_ul.png`} style={{
-        position:"absolute", left: 0, top: 0,
+        position: "absolute",
+        left: FRAME_LEFT - CORNER/2,
+        top: FRAME_TOP - CORNER/2,
         width: CORNER, height: CORNER, pointerEvents: "none",
       }} />
       <img src={`${CORNERS}/corner_ur.png`} style={{
-        position:"absolute", right: 0, top: 0,
+        position: "absolute",
+        left: FRAME_LEFT + width - CORNER/2,
+        top: FRAME_TOP - CORNER/2,
         width: CORNER, height: CORNER, pointerEvents: "none",
       }} />
       <img src={`${CORNERS}/corner_bl.png`} style={{
-        position:"absolute", left: 0, bottom: 0,
+        position: "absolute",
+        left: FRAME_LEFT - CORNER/2,
+        top: FRAME_TOP + height - CORNER/2,
         width: CORNER, height: CORNER, pointerEvents: "none",
       }} />
       <img src={`${CORNERS}/corner_br.png`} style={{
-        position:"absolute", right: 0, bottom: 0,
+        position: "absolute",
+        left: FRAME_LEFT + width - CORNER/2,
+        top: FRAME_TOP + height - CORNER/2,
         width: CORNER, height: CORNER, pointerEvents: "none",
       }} />
 
-      {/* Top-center badge — owl_studio_square centered over the top edge of the inner window. */}
+      {/* Top-center badge straddling the frame's top edge — sits ABOVE
+          the inner window, half outside / half overlapping. */}
       <img src={`${ICONS}/owl_studio_square.png`} style={{
         position: "absolute",
-        left: outerW/2 - BADGE_H/2,
-        top: TOP_MARGIN - BADGE_H/2 - 4,
+        left: FRAME_LEFT + width/2 - BADGE_H/2,
+        top: FRAME_TOP - BADGE_H/2 - 6,
         width: BADGE_H,
         height: BADGE_H,
         pointerEvents: "none",

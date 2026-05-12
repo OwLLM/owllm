@@ -204,7 +204,7 @@ Same pattern as the supervisor itself:
 | R1 — scaffold | ✅ complete | claude | 2026-05-12 |
 | R2 — simple actions | ✅ complete | claude | 2026-05-12 |
 | R3 — HTTP / pkg | ✅ complete | claude | 2026-05-12 |
-| R4 — plan + server | not started | | |
+| R4 — plan + server | ✅ complete | claude | 2026-05-12 |
 | R5 — hardware + main | not started | | |
 | R6 — cutover | not started | | |
 
@@ -296,12 +296,57 @@ rustls + serde compile to ~200 KB after LTO + strip + size-opt.
 The earlier projection of "1-2 MB after R3" was conservative;
 real-world result is much better.
 
-R4 = plan parser (markdown-fence-tolerant JSON parsing of LLM
-output) + llama-server lifecycle (spawn with hidden console,
-`/health` poll, graceful shutdown). Most of the JSON heavy
-lifting will already be there via serde — the actual parser code
-is small, but the GBNF-grammar work for constrained generation
-needs careful handling.
+### R4 deliverables (2026-05-12)
+
+Ported from `bootstrap_go/plan/` + `bootstrap_go/server/`:
+
+- `plan_parser.rs` — `parse_steps(&str) -> Result<Vec<Step>>`. Tries
+  four shapes in order: `{"steps": [...]}` envelope, bare array,
+  single Step object, balanced-brace recovery (for markdown-fenced
+  or prose-wrapped output). Helpers `strip_fences` and
+  `extract_first_object` exposed for direct testing. 12 tests
+  including the "leading prose" case the Go side didn't explicitly
+  test.
+
+- `server.rs` — `Server` struct + `ServerConfig`. `start()` spawns
+  llama-server with a hidden console (Windows `CREATE_NO_WINDOW`
+  via `std::os::windows::process::CommandExt::creation_flags` — no
+  `windows-sys` crate needed), then polls `/health` until ready.
+  `post()` / `healthy()` / `shutdown()` go through ureq against the
+  spawned port. `attach_to(base_url)` provides a Server stub for
+  tests that already have an HTTP endpoint to talk to. `Drop`
+  force-kills the child so a panicking test never orphans a
+  llama-server process.
+
+  Hand-rolled in-process `StubServer` (real `TcpListener`, routes
+  dictionary) replaces Go's `httptest.NewServer` for unit tests.
+  7 tests: attach_to round-trip, healthy on 200, healthy false on
+  500, healthy false when unreachable, post round-trips body, post
+  propagates non-2xx, shutdown with no child.
+
+- `diagnose.rs` — orchestrates POST to `/completion` + parse. Builds
+  the Gemma chat template prompt around the system prompt + user
+  JSON, includes `grammar` field only when supplied, calls
+  `parse_steps` on the envelope's `content` field. Convenience
+  `diagnose_with_files(srv, recipes_dir, ...)` reads
+  `system_prompt.txt` + `plan.gbnf` from disk. 6 tests including
+  a `CapturingServer` that records the on-wire request body so we
+  can assert the Gemma template + grammar passthrough are correct.
+
+Build:
+  cargo build --release: clean in 2.86 s
+  cargo test --quiet -- --include-ignored: 103 / 103 passing
+  bootstrap.exe (Rust, full R1-R4 surface) = 0.26 MB
+  bootstrap.exe (Go,   full)               = 5.20 MB
+
+R5 = hardware probe (nvidia-smi + wmic + dxdiag shell-outs into
+JSON matching the Python probe schema) + main orchestration loop
+(probe → spawn server → diagnose → execute → done). Estimated 3-4
+days; the main loop is mostly glue.
+
+R6 = cutover. Flip `build_installer.bat` so `bootstrap.exe` is built
+from `bootstrap_rs/` by default. Keep `bootstrap_go/` in tree for
+two releases as rollback safety, then delete.
 
 This doc is the source of truth for the migration. Update the table
 above as phases complete.

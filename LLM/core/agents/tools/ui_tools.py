@@ -425,21 +425,11 @@ ui_update_baseline = Tool(
 
 
 # ---------------------------------------------------------------------------
-# Aggregator — register all five in one call
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
 # ui_render_app_page — full-app screenshot, with frame + tab navigation
 # ---------------------------------------------------------------------------
 
 
 def _ui_render_app_page(args: Mapping[str, Any]) -> str:
-    try:
-        from desktop_app.ui_probe import AppHarness
-    except ImportError as exc:
-        raise ToolError(f"AppHarness unavailable (PySide6 missing?): {exc}")
-
     page = str(args.get("page", "")).strip().lower()
     out_path = str(args.get("out_path", "")).strip()
     if not page:
@@ -460,23 +450,81 @@ def _ui_render_app_page(args: Mapping[str, Any]) -> str:
     wait_seconds = max(0.0, min(wait_seconds, 30.0))
     include_frame = bool(args.get("include_frame", True))
 
-    with AppHarness(include_frame=include_frame) as h:
-        try:
-            h.navigate(page)
-        except ValueError as exc:
-            raise ToolError(str(exc))
-        png = h.capture(width=width, height=height, wait_seconds=wait_seconds)
-        # Write inside the context so the file is on disk before
-        # the harness's hide-on-exit runs — defensive against any
-        # future teardown issue swallowing the capture.
-        path = Path(out_path).expanduser()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(png)
-        result_msg = (
-            f"wrote {path} (page={page}, {width}x{height}, "
-            f"{len(png)} bytes, frame={'on' if include_frame else 'off'})"
+    path = Path(out_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Run the capture in a SUBPROCESS rather than in-process. Two
+    # reasons that fall out of MainWindow being a heavyweight singleton:
+    #
+    # 1. Reliability: in-process invocation of MainWindow's full boot
+    #    + offscreen Qt teardown produced a STATUS_STACK_BUFFER_OVERRUN
+    #    in the background-detection thread. A fresh subprocess lets
+    #    the OS clean up — no graceful Qt teardown needed.
+    # 2. Isolation: agents running concurrent tool calls don't end
+    #    up sharing one MainWindow's state.
+    #
+    # Cost: ~1 s extra spawn overhead on top of the ~6 s MainWindow
+    # boot. Fine for screenshot work; never call this on a tight loop.
+    import json
+    import subprocess
+    import sys as _sys
+
+    # __file__ = LLM/core/agents/tools/ui_tools.py
+    #   parents[3] = LLM/
+    runner = (
+        Path(__file__).resolve().parents[3]
+        / "desktop_app" / "ui_probe" / "_app_capture_runner.py"
+    )
+    if not runner.exists():
+        raise ToolError(f"runner script missing: {runner}")
+
+    payload = json.dumps({
+        "page": page,
+        "out_path": str(path),
+        "width": width,
+        "height": height,
+        "wait_seconds": wait_seconds,
+        "include_frame": include_frame,
+    })
+
+    try:
+        proc = subprocess.run(
+            [_sys.executable, str(runner)],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
         )
-    return result_msg
+    except subprocess.TimeoutExpired:
+        raise ToolError("ui_render_app_page subprocess timed out after 120s")
+    except OSError as exc:
+        raise ToolError(f"subprocess invocation failed: {exc}")
+
+    if proc.returncode != 0:
+        # Runner emits a JSON error blob on stderr; surface it directly.
+        err = proc.stderr.strip().splitlines()[-1] if proc.stderr else ""
+        try:
+            parsed = json.loads(err)
+            raise ToolError(f"runner failed: {parsed.get('error', err)}")
+        except (json.JSONDecodeError, AttributeError):
+            raise ToolError(
+                f"runner exited {proc.returncode}; "
+                f"stderr tail: {(proc.stderr or '')[-500:]}"
+            )
+
+    # Parse the runner's success line for echo-back info.
+    try:
+        result = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (json.JSONDecodeError, IndexError, AttributeError):
+        result = {"width": width, "height": height, "frame": include_frame}
+
+    size = path.stat().st_size if path.exists() else 0
+    return (
+        f"wrote {path} (page={page}, "
+        f"{result.get('width', width)}x{result.get('height', height)}, "
+        f"{size} bytes, frame={'on' if result.get('frame', include_frame) else 'off'})"
+    )
 
 
 ui_render_app_page = Tool(
@@ -508,6 +556,222 @@ ui_render_app_page = Tool(
 )
 
 
+# ---------------------------------------------------------------------------
+# ui_measure_widget — geometry + colors + fonts the agent can copy directly
+# ---------------------------------------------------------------------------
+
+
+def _ui_measure_widget(args: Mapping[str, Any]) -> str:
+    """Return detailed measurements for every named widget in a tree.
+
+    `ui_inspect_widget` returns a thin summary; this returns the
+    full set of data an agent needs to write a pixel-accurate
+    replica: geometry, palette colors, font family/size/weight,
+    and the QSS stylesheet (truncated).
+    """
+    try:
+        from desktop_app.ui_probe import WidgetHarness
+    except ImportError as exc:
+        raise ToolError(f"ui_probe unavailable: {exc}")
+
+    from PySide6.QtWidgets import QWidget
+    from PySide6.QtGui import QPalette
+
+    target = str(args.get("target", "")).strip()
+    kwargs = _parse_kwargs(args.get("kwargs"))
+    only_named = bool(args.get("only_named", True))
+    try:
+        limit = int(args.get("limit", 200))
+    except (TypeError, ValueError):
+        raise ToolError("limit must be an integer")
+    limit = max(1, min(limit, 1000))
+
+    measurements: list[dict] = []
+    with WidgetHarness() as h:
+        widget = _construct_widget(target, kwargs)
+        h.show(widget)
+
+        for w in [widget] + list(widget.findChildren(QWidget)):
+            name = w.objectName() or ""
+            if only_named and not name:
+                continue
+            g = w.geometry()
+
+            def _hex(role, palette=w.palette()):
+                c = palette.color(role)
+                return f"#{c.red():02x}{c.green():02x}{c.blue():02x}"
+
+            font = w.font()
+            ss = (w.styleSheet() or "").strip()
+            if len(ss) > 600:
+                ss = ss[:600] + "…"
+            measurements.append({
+                "object_name": name,
+                "type": type(w).__name__,
+                "geometry": {"x": g.x(), "y": g.y(), "width": g.width(), "height": g.height()},
+                "visible": bool(w.isVisible()),
+                "palette": {
+                    "window":     _hex(QPalette.ColorRole.Window),
+                    "windowText": _hex(QPalette.ColorRole.WindowText),
+                    "base":       _hex(QPalette.ColorRole.Base),
+                    "text":       _hex(QPalette.ColorRole.Text),
+                    "button":     _hex(QPalette.ColorRole.Button),
+                    "buttonText": _hex(QPalette.ColorRole.ButtonText),
+                    "highlight":  _hex(QPalette.ColorRole.Highlight),
+                },
+                "font": {
+                    "family":    font.family(),
+                    "pointSize": font.pointSize(),
+                    "pixelSize": font.pixelSize(),
+                    "weight":    int(font.weight()),
+                    "italic":    bool(font.italic()),
+                    "bold":      bool(font.bold()),
+                },
+                "stylesheet": ss,
+            })
+            if len(measurements) >= limit:
+                break
+
+    out_lines = [f"{len(measurements)} widget(s) measured in {target}:"]
+    for m in measurements:
+        out_lines.append(json.dumps(m, ensure_ascii=False))
+    return "\n".join(out_lines)
+
+
+ui_measure_widget = Tool(
+    name="ui_measure_widget",
+    description=(
+        "Return precise measurements for every named widget in a target — "
+        "geometry (x, y, w, h), palette colors (window, base, text, "
+        "button, highlight), font (family, size, weight), and the "
+        "stylesheet. Use this BEFORE writing a replica: instead of "
+        "eyeballing the screenshot, you get the exact numbers Qt is "
+        "rendering with. Defaults to named widgets only; set "
+        "only_named=false to include everything."
+    ),
+    args=[
+        ArgSpec("target", "string", "module.path:ClassName of the widget."),
+        ArgSpec("kwargs", "string", "JSON object of constructor kwargs.", required=False),
+        ArgSpec("only_named", "boolean", "Skip widgets with empty objectName (default true).", required=False),
+        ArgSpec("limit", "integer", "Max widgets to report (default 200, max 1000).", required=False),
+    ],
+    func=_ui_measure_widget,
+    requires_approval=False,
+)
+
+
+# ---------------------------------------------------------------------------
+# ui_compare_screenshots — 3-pane side-by-side diff PNG
+# ---------------------------------------------------------------------------
+
+
+def _ui_compare_screenshots(args: Mapping[str, Any]) -> str:
+    """Build a 3-pane PNG (reference | replica | diff overlay).
+
+    Diff overlay tints pixels: red where replica is brighter than
+    reference, blue where reference is brighter than replica. Same-
+    size requirement is enforced by resizing the replica to match.
+    """
+    try:
+        from PIL import Image, ImageChops, ImageDraw, ImageFont
+    except ImportError as exc:
+        raise ToolError(f"Pillow is required: pip install Pillow ({exc})")
+
+    ref_path = Path(str(args.get("reference_path", ""))).expanduser()
+    rep_path = Path(str(args.get("replica_path", ""))).expanduser()
+    out_path = Path(str(args.get("out_path", ""))).expanduser()
+    if not ref_path.exists():
+        raise ToolError(f"reference_path does not exist: {ref_path}")
+    if not rep_path.exists():
+        raise ToolError(f"replica_path does not exist: {rep_path}")
+    if not str(out_path):
+        raise ToolError("out_path is required")
+
+    ref = Image.open(ref_path).convert("RGBA")
+    rep = Image.open(rep_path).convert("RGBA")
+    if ref.size != rep.size:
+        rep = rep.resize(ref.size, Image.LANCZOS)
+
+    w, h = ref.size
+    gap = 20
+    header = 36
+    canvas_w = 3 * w + 2 * gap
+    canvas_h = h + header
+    canvas = Image.new("RGBA", (canvas_w, canvas_h), (12, 16, 30, 255))
+
+    # Pixel-wise diff with brighter-side coloring.
+    diff_overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ref_px = ref.load()
+    rep_px = rep.load()
+    diff_px = diff_overlay.load()
+    threshold = 12
+    differing = 0
+    total = w * h
+    for y in range(h):
+        for x in range(w):
+            r1, g1, b1, _ = ref_px[x, y]
+            r2, g2, b2, _ = rep_px[x, y]
+            local = max(abs(r1 - r2), abs(g1 - g2), abs(b1 - b2))
+            if local > threshold:
+                differing += 1
+                if (r2 + g2 + b2) > (r1 + g1 + b1):
+                    diff_px[x, y] = (255, 64, 64, 180)
+                else:
+                    diff_px[x, y] = (64, 128, 255, 180)
+
+    base = rep.copy()
+    base.putalpha(128)
+    diff_pane = Image.alpha_composite(Image.new("RGBA", (w, h), (24, 28, 48, 255)), base)
+    diff_pane = Image.alpha_composite(diff_pane, diff_overlay)
+
+    canvas.paste(ref,       (0,             header), ref)
+    canvas.paste(rep,       (w + gap,       header), rep)
+    canvas.paste(diff_pane, (2 * (w + gap), header), diff_pane)
+
+    draw = ImageDraw.Draw(canvas)
+    font = None
+    for candidate in ("seguisb.ttf", "arial.ttf"):
+        try:
+            font = ImageFont.truetype(candidate, 18)
+            break
+        except Exception:  # noqa: BLE001
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    pct = (100.0 * differing / total) if total else 0.0
+    draw.text((10, 8),                  "REFERENCE", fill=(220, 230, 255, 255), font=font)
+    draw.text((w + gap + 10, 8),        "REPLICA",   fill=(220, 230, 255, 255), font=font)
+    draw.text((2 * (w + gap) + 10, 8),
+              f"DIFF — {differing:,}/{total:,} px ({pct:.2f}%) — red=replica extra, blue=reference extra",
+              fill=(255, 200, 80, 255), font=font)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(out_path, "PNG")
+    return (
+        f"wrote {out_path} ({canvas.width}x{canvas.height}, "
+        f"{differing:,}/{total:,} pixels differ = {pct:.2f}%)"
+    )
+
+
+ui_compare_screenshots = Tool(
+    name="ui_compare_screenshots",
+    description=(
+        "Build a 3-pane side-by-side comparison PNG (reference | replica | "
+        "diff overlay). Diff pane tints: red = replica has color the "
+        "reference doesn't, blue = reference has color the replica "
+        "doesn't. Read the result with your vision tools to see exactly "
+        "which region is off. Different sizes get auto-resized to match."
+    ),
+    args=[
+        ArgSpec("reference_path", "string", "Path to the reference PNG."),
+        ArgSpec("replica_path",   "string", "Path to the replica PNG."),
+        ArgSpec("out_path",       "string", "Where to write the comparison PNG."),
+    ],
+    func=_ui_compare_screenshots,
+    requires_approval=False,
+)
+
+
 UI_TOOLS = (
     ui_render_widget,
     ui_inspect_widget,
@@ -515,4 +779,6 @@ UI_TOOLS = (
     ui_list_baselines,
     ui_update_baseline,
     ui_render_app_page,
+    ui_measure_widget,
+    ui_compare_screenshots,
 )

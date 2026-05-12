@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OWLLM — Agentic Team (v9, against the LOADED reference)</title>
+<!--
+  v9: rebuilt against the TRUE post-load reference rather than the
+  loading-page reference v1-v8 were chasing. The user pointed out
+  the page loads in phases; commit 8f2bdc9 added an
+  N-consecutive-match stability detector that confirmed the
+  transition (30.27 % drift between checks 2 and 3).
+
+  The actual Agents page is a 3-COLUMN layout, not a single-pane
+  agent canvas:
+
+    ┌──────────────────────────────────────────────────────────┐
+    │ Title bar / Tab bar / LOCATION row / GOAL bar (full-width)│
+    ├──────────────┬───────────────────────────┬───────────────┤
+    │  Flow panel  │                           │  Orchestrator │
+    │  Super User  │   Compact agent canvas    │  pane (chat / │
+    │  card        │   (8 agents elliptical)   │  code output) │
+    │              │                           │               │
+    └──────────────┴───────────────────────────┴───────────────┘
+
+  v9 builds that structure. Diffing against the TRUE reference, not
+  the loading-page one. Expect a much smaller initial gap because
+  the silhouettes now match — instead of v8's 65 % (vs TRUE), v9
+  should land in the 30-40 % range as a starting point.
+-->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  :root {
+    --bg-deep:    #030615;
+    --bg-mid:     #0a1128;
+    --bg-canvas:  #14152a;
+    --bg-panel:   #0f1530;
+    --bg-card:    #131a37;
+    --accent-cyan:    #4ed4ff;
+    --accent-amber:   #f1c463;
+    --accent-purple:  #b481ff;
+    --accent-blue:    #6fb2ff;
+    --text:           #dbe1f4;
+    --muted:          #8993b4;
+    --border-line:    rgba(255,255,255,0.06);
+  }
+  html, body { background: #010205; color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; }
+  .titlebar {
+    background: linear-gradient(180deg, #2a3158 0%, #1c2244 100%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.07);
+  }
+  .mode-btn {
+    transition: all .12s ease;
+    border: 1px solid transparent;
+    background: rgba(255,255,255,0.02);
+  }
+  .mode-btn:hover { background: rgba(255,255,255,0.06); }
+  .mode-btn.active {
+    background: rgba(241, 196, 99, 0.18);
+    border-color: rgba(241, 196, 99, 0.55);
+    box-shadow: 0 0 0 1px rgba(241, 196, 99, 0.3), 0 4px 12px rgba(241, 196, 99, 0.12);
+  }
+  .tab-active { color: var(--accent-cyan); border-bottom: 2px solid var(--accent-cyan); font-weight:600; }
+  .tab-idle   { color: var(--muted); border-bottom: 2px solid transparent; }
+  .pill { padding: 3px 10px; border-radius: 999px; font-size: 12px; line-height: 1; display:inline-flex; align-items:center; gap:4px; }
+  .pill-green { background: rgba(76, 211, 132, 0.10); color: #7ee7a8; border: 1px solid rgba(76, 211, 132, 0.3); }
+  .pill-gray  { background: rgba(120, 130, 160, 0.08); color: var(--muted); border: 1px solid rgba(120, 130, 160, 0.22); }
+  .panel-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border-line);
+    border-radius: 6px;
+  }
+  .canvas-bg {
+    background:
+      radial-gradient(ellipse at center, #232e46 0%, #1a2138 20%, #14152a 55%),
+      #14152a;
+  }
+  .star-bg::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image:
+      radial-gradient(0.7px 0.7px at 9% 18%,  rgba(255,255,255,0.18), transparent 1px),
+      radial-gradient(0.7px 0.7px at 24% 67%, rgba(180,200,255,0.15), transparent 1px),
+      radial-gradient(0.7px 0.7px at 41% 86%, rgba(255,255,255,0.16), transparent 1px),
+      radial-gradient(0.7px 0.7px at 60% 23%, rgba(180,200,255,0.12), transparent 1px),
+      radial-gradient(0.7px 0.7px at 76% 62%, rgba(255,255,255,0.16), transparent 1px),
+      radial-gradient(0.7px 0.7px at 87% 9%,  rgba(180,200,255,0.14), transparent 1px),
+      radial-gradient(0.7px 0.7px at 91% 76%, rgba(255,255,255,0.16), transparent 1px),
+      radial-gradient(0.7px 0.7px at 5%  52%, rgba(180,200,255,0.12), transparent 1px);
+  }
+  @keyframes owl-breathe {
+    0%, 100% { filter: drop-shadow(0 0 14px rgba(78, 212, 255, 0.55)); }
+    50%      { filter: drop-shadow(0 0 22px rgba(78, 212, 255, 0.85)); }
+  }
+  .owl-pulse { animation: owl-breathe 4s ease-in-out infinite; }
+  .content-card {
+    background: var(--bg-mid);
+    border: 1px solid rgba(78, 212, 255, 0.28);
+    box-shadow:
+      inset 0 0 0 1px rgba(255,255,255,0.04),
+      0 28px 70px rgba(0,0,0,0.55);
+  }
+  /* Monospace code block in the right pane. */
+  .code-block {
+    background: rgba(0,0,0,0.45);
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 4px;
+    font-family: 'Cascadia Code', 'Consolas', monospace;
+    font-size: 11px;
+    line-height: 1.4;
+    color: #c8d2e8;
+    padding: 8px 10px;
+    white-space: pre-wrap;
+    overflow: hidden;
+  }
+</style>
+</head>
+<body class="m-0 p-0 min-h-screen flex items-center justify-center">
+
+<div id="root" class="w-[1400px]"></div>
+
+<script type="text/babel" data-presets="react">
+const ASSET = "../../../icons/Page_icons";
+const FRAME = `${ASSET}/CornersNew`;
+
+const MODES = [
+  { id: "dark",       label: "Dark",        icon: "🌙" },
+  { id: "advanced",   label: "Advanced",    icon: "⚙" },
+  { id: "fineTuning", label: "Fine Tuning", icon: "🔧" },
+  { id: "agentic",    label: "Agentic Team", iconPath: `${ASSET}/owl_AgenticTeam.png`, active: true },
+  { id: "gamify",     label: "Gamify",      icon: "🎮" },
+];
+
+const TABS = [
+  { id: "home",    label: "🏠 Home" },
+  { id: "code",    label: "▦ Code" },
+  { id: "agents",  label: "👥 Agents", active: true },
+  { id: "studio",  label: "🎬 Studio" },
+  { id: "bridges", label: "🌉 Bridges" },
+  { id: "server",  label: "🖧 Server" },
+];
+
+// Eight agents — exactly the team in the reference.
+const AGENTS = [
+  { name: "Orchestrator",      cohort: "blue",   slot: 0 },
+  { name: "Whitepaper Writer", cohort: "purple", slot: 1 },
+  { name: "Product Owner",     cohort: "blue",   slot: 2 },
+  { name: "UX Designer",       cohort: "blue",   slot: 3 },
+  { name: "Frontend Coder",    cohort: "purple", slot: 4 },
+  { name: "Backend Arch",      cohort: "purple", slot: 5 },
+  { name: "Design Critic",     cohort: "purple", slot: 6 },
+  { name: "Backend Coder",     cohort: "purple", slot: 7 },
+];
+
+function ModeButton({ mode }) {
+  return (
+    <button className={`mode-btn flex flex-col items-center justify-center px-3 py-1.5 rounded-md ${mode.active ? "active" : ""}`}
+      style={{ minWidth: 72 }}>
+      <div className="text-lg leading-none mb-0.5">
+        {mode.iconPath ? <img src={mode.iconPath} className="h-6 w-6 object-contain" alt="" />
+                       : <span>{mode.icon}</span>}
+      </div>
+      <div className="text-[11px] tracking-wide opacity-90">{mode.label}</div>
+    </button>
+  );
+}
+
+function TitleBar() {
+  return (
+    <div className="titlebar relative flex items-center justify-between px-4 py-2.5 border-b border-white/5">
+      <div className="flex items-center gap-1.5">{MODES.map(m => <ModeButton key={m.id} mode={m} />)}</div>
+      <div className="flex items-center gap-6">
+        <div className="text-[30px] font-light tracking-[0.15em] text-white/95"
+             style={{ fontFamily: "'Segoe UI Light', 'Inter', sans-serif" }}>OWLLM</div>
+        <div className="text-[11px] leading-tight">
+          <div className="flex items-center gap-1.5"><span className="text-emerald-400">●</span> <span className="text-white/80">Servers: 0</span></div>
+          <div className="flex items-center gap-1.5"><span>🔑</span> <span className="text-white/80">API key:</span> <span className="text-white/95">owllm-local</span></div>
+          <div className="flex items-center gap-1.5"><span>💾</span> <span className="text-white/80">VRAM: N/A</span></div>
+        </div>
+      </div>
+      <div className="flex items-center gap-3 text-white/70">
+        <button title="Maximize" className="px-2 py-0.5 hover:text-white">⛶</button>
+        <button title="Close"    className="px-2 py-0.5 hover:text-rose-400">✕</button>
+      </div>
+    </div>
+  );
+}
+
+function TabBar() {
+  return (
+    <div className="flex items-end gap-6 px-5 pt-2.5 pb-0 border-b border-white/5"
+         style={{ background: "#353548" }}>
+      {TABS.map(t => (
+        <button key={t.id} className={`pb-2 text-[13px] tracking-wide ${t.active ? "tab-active" : "tab-idle"}`}>
+          {t.label}
+        </button>
+      ))}
+      <div className="ml-auto pb-2 text-[12px] text-cyan-400/80">ⓘ Info</div>
+    </div>
+  );
+}
+
+function LocationRow() {
+  return (
+    <div className="flex items-center gap-3 px-4 py-2 text-xs"
+         style={{ background: "#1f1f27", borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+      <span className="text-white/55 font-semibold tracking-wider">LOCATION</span>
+      <div className="flex-1 max-w-[420px] px-3 py-1.5 rounded bg-black/40 border border-white/10 text-white/85 font-mono text-[11px]">
+        /path/to/repo · esp-flash · github.com/…
+      </div>
+      <button className="px-3 py-1.5 rounded bg-white/5 border border-white/10 hover:bg-white/10">Browse…</button>
+      <label className="flex items-center gap-1.5 text-white/70">
+        <input type="checkbox" className="accent-cyan-400" /> Trust writes
+      </label>
+      <span className="pill pill-green">● Sandboxed</span>
+      <span className="pill pill-gray">📓 Bridge: OFF</span>
+      <span className="ml-2 text-white/55 font-semibold tracking-wider">PROJECT</span>
+      <select className="px-3 py-1.5 rounded bg-black/40 border border-white/10 text-white/90 text-xs">
+        <option>Product Studio Test</option>
+      </select>
+      <button className="px-3 py-1.5 rounded bg-white/5 border border-white/10 hover:bg-white/10">Team…</button>
+      <button className="px-3 py-1.5 rounded bg-white/5 border border-white/10 hover:bg-white/10">+ New</button>
+      <button className="px-3 py-1.5 rounded bg-white/5 border border-white/10 hover:bg-white/10">Rename</button>
+      <button className="px-3 py-1.5 rounded bg-white/5 border border-rose-500/30 text-rose-400 hover:bg-rose-500/10">Delete</button>
+    </div>
+  );
+}
+
+function GoalBar() {
+  return (
+    <div className="flex items-center gap-2 px-4 py-2 border-b border-white/5"
+         style={{ background: "#0f0f19" }}>
+      <button className="text-white/60 hover:text-white px-1">📎</button>
+      <input className="flex-1 bg-transparent outline-none text-[12px] text-white/85 placeholder:text-white/35 font-mono"
+        placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up'  (drop an image / audio here)" />
+      <button className="px-5 py-1.5 rounded text-slate-900 font-semibold"
+              style={{ background: "linear-gradient(180deg, #6db8ff 0%, #4d9dff 100%)" }}>Run</button>
+      <button className="px-5 py-1.5 rounded bg-white/5 border border-white/10 text-white/70 hover:bg-white/10">Cancel</button>
+      <button className="text-rose-400 px-1 text-lg leading-none" title="Record">●</button>
+      <button className="text-white/60 hover:text-white px-1" title="Voice">🔊</button>
+    </div>
+  );
+}
+
+// LEFT SIDEBAR — Flow panel + Super User card
+function LeftSidebar() {
+  return (
+    <div className="flex flex-col gap-3 p-3 overflow-hidden" style={{ width: 280, background: "var(--bg-panel)" }}>
+      <div className="text-[11px] uppercase tracking-widest text-white/45 font-semibold">Flow</div>
+      <div className="panel-card p-3 flex flex-col gap-2">
+        <img src={`${ASSET}/owl_studio_square.png`} className="w-full h-[120px] object-contain rounded"
+             style={{ background: "#0a0f24" }} alt="Flow preview" />
+        <div className="text-[12px] text-white/80">Design Studio</div>
+        <div className="text-[10.5px] text-white/55 leading-snug">
+          Stage 5 / 8 · agent flow loaded · idle. Drag a card from the team panel to
+          attach it to a step.
+        </div>
+        <div className="text-[10.5px] text-cyan-400">about Studio To &gt;</div>
+        <div className="flex items-center justify-between text-[10.5px] text-white/55 mt-1">
+          <span>flow ID</span><span>16</span>
+        </div>
+        <div className="flex items-center justify-between text-[10.5px] text-white/55">
+          <span>step</span><span>3</span>
+        </div>
+      </div>
+
+      <div className="text-[11px] uppercase tracking-widest text-white/45 font-semibold mt-1">Super User</div>
+      <div className="panel-card p-3 flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-full flex items-center justify-center text-sm"
+               style={{ background: "rgba(78,212,255,0.18)", border: "1px solid rgba(78,212,255,0.5)" }}>👤</div>
+          <div className="text-[12px] font-semibold text-white/90">Super User</div>
+        </div>
+        <div className="text-[10.5px] text-white/55 leading-snug">
+          Team: <span className="text-white/80">0x873b2a</span> · The studio's eight-role team —
+          orchestrator, product, design, code, critic …
+        </div>
+        <div className="flex flex-wrap gap-1.5 mt-1">
+          {AGENTS.slice(0, 8).map(a => (
+            <span key={a.name}
+                  className="text-[10px] px-1.5 py-0.5 rounded-full"
+                  style={{
+                    background: a.cohort === "blue" ? "rgba(111,178,255,0.18)" : "rgba(180,129,255,0.18)",
+                    color: a.cohort === "blue" ? "#a8d0ff" : "#d3b5ff",
+                    border: `1px solid ${a.cohort === "blue" ? "rgba(111,178,255,0.45)" : "rgba(180,129,255,0.45)"}`
+                  }}>
+              {a.name.split(" ")[0]}
+            </span>
+          ))}
+        </div>
+        <div className="mt-1 flex items-center gap-2 text-[10.5px]">
+          <span className="text-white/55">▶</span>
+          <span className="text-cyan-400/80">Add to team requests</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// RIGHT PANE — Orchestrator chat / output
+function RightPane() {
+  return (
+    <div className="flex flex-col gap-2 p-3 overflow-hidden" style={{ width: 340, background: "var(--bg-panel)" }}>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="text-cyan-400 text-base">▣</span>
+          <div className="text-[13px] font-semibold text-white/95">Orchestrator</div>
+        </div>
+        <div className="flex items-center gap-1 text-[10px] text-white/55">
+          <span>(of-Talktalla)</span>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 text-[11px]">
+        <button className="px-2 py-0.5 rounded bg-white/5 border border-white/10 text-white/85">↩ Reply</button>
+        <button className="px-2 py-0.5 rounded bg-white/5 border border-white/10 text-white/85">💭 Thought</button>
+      </div>
+      <div className="code-block">
+{`# peripheral is active.
+"TEXT": script._lg> agent name header_kn = "wkg_d * '0212 the gay
+sup".
+
+See "T'd reply – I bought :: with a
+dark kestylor.show=*).
+Apply  tab Show . user(
+"$default_path",
+fred,) "Subj=2002. ! Adent: \\
+ll_callstool_self("..messages,
+yer pad to the selected agent (lo
+hardly the 4 of an "x.").
+=======
+"esopath utilsy" – list left in
+place but rendered null.until
+ dispatch
+ dim_runs_pending = approv
+ -  flush in close + the user
+ hands_back: True
+.`}
+      </div>
+      <div className="code-block" style={{ flex: 1 }}>
+{`Orchestrator skip" – class left in place but
+rendered null.until dispatch micro pending
+approvelb - block in clean + the user hands.
+True
+
+Status of \`hb\`:
+
+If your dev server is running, OPL only is
+dispatch checked since the "ll start" boot.
+That window from you'd lest test_assignment.
+
+Otherwise, the path is:
+
+\`\`\`tip
+gitlab.com/projects/9.git/_lush ?wast=
+\`\`\``}
+      </div>
+    </div>
+  );
+}
+
+// CENTER CANVAS — agents around a compact emblem
+function AgentNode({ x, y, cohort }) {
+  const stops = cohort === "blue"
+    ? { core: "#a8d6ff", mid: "#4d9ae8", edge: "#2854b0" }
+    : { core: "#d4baff", mid: "#a070ec", edge: "#583aa5" };
+  const gradId = `g-${Math.round(x)}-${Math.round(y)}`;
+  return (
+    <g>
+      <defs>
+        <radialGradient id={gradId} cx="40%" cy="35%" r="65%">
+          <stop offset="0%"   stopColor={stops.core} />
+          <stop offset="60%"  stopColor={stops.mid} />
+          <stop offset="100%" stopColor={stops.edge} />
+        </radialGradient>
+      </defs>
+      <circle cx={x} cy={y} r={26} fill={stops.mid} opacity="0.14" />
+      <circle cx={x} cy={y} r={20} fill={stops.mid} opacity="0.22" />
+      <circle cx={x} cy={y} r={15} fill={`url(#${gradId})`} />
+      <circle cx={x} cy={y} r={15} fill="none" stroke="rgba(255,255,255,0.30)" strokeWidth="0.8" />
+    </g>
+  );
+}
+
+function CenterCanvas() {
+  // Narrower than v1-v8 — center pane shares horizontal space with
+  // the two sidebars now. Width ~720, height ~680.
+  const W = 720, H = 680, cx = W / 2, cy = H / 2;
+  const Rx = 260, Ry = 230; // Slightly elliptical, matches the reference.
+
+  const positions = AGENTS.map((a, i) => {
+    const angle = (-Math.PI / 2) + (i * 2 * Math.PI / AGENTS.length);
+    return { ...a, x: cx + Rx * Math.cos(angle), y: cy + Ry * Math.sin(angle) };
+  });
+
+  // Compact central emblem with two cyan arcs.
+  const ringR = 70;
+  const a1 = -65 * Math.PI / 180, a2 = 65 * Math.PI / 180;
+  const topArc = `M ${cx + ringR * Math.cos(a1)} ${cy + ringR * Math.sin(a1)} ` +
+                 `A ${ringR} ${ringR} 0 0 1 ${cx + ringR * Math.cos(a2)} ${cy + ringR * Math.sin(a2)}`;
+  const bottomArc = `M ${cx + ringR * Math.cos(Math.PI - a1)} ${cy + ringR * Math.sin(Math.PI - a1)} ` +
+                    `A ${ringR} ${ringR} 0 0 1 ${cx + ringR * Math.cos(Math.PI - a2)} ${cy + ringR * Math.sin(Math.PI - a2)}`;
+
+  return (
+    <div className="relative canvas-bg star-bg overflow-hidden flex-1" style={{ height: H }}>
+      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="xMidYMid meet"
+           className="absolute inset-0">
+        {positions.map((a, i) => (
+          <line key={`spoke-${i}`} x1={cx} y1={cy} x2={a.x} y2={a.y}
+            stroke="rgba(180,200,255,0.13)" strokeWidth="1" strokeDasharray="3 6" />
+        ))}
+        {positions.map((a, i) => {
+          const b = positions[(i + 1) % positions.length];
+          return (
+            <line key={`r-${i}`} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+              stroke="rgba(180,200,255,0.08)" strokeWidth="1" strokeDasharray="2 8" />
+          );
+        })}
+        <path d={topArc}    fill="none" stroke="var(--accent-cyan)" strokeWidth="2" opacity="0.55" strokeLinecap="round" />
+        <path d={bottomArc} fill="none" stroke="var(--accent-cyan)" strokeWidth="2" opacity="0.55" strokeLinecap="round" />
+        {/* Smaller central emblem — fits inside the ring arcs. */}
+        <image xlinkHref={`${ASSET}/owl_studio_square.png`}
+               x={cx - 50} y={cy - 50} width={100} height={100}
+               className="owl-pulse" />
+        {positions.map(a => <AgentNode key={a.name} {...a} />)}
+        {/* Labels inside SVG so they scale with the viewBox. */}
+        {positions.map(a => (
+          <text key={`t-${a.name}`} x={a.x} y={a.y + 28}
+                fontSize="10" fontFamily="Segoe UI, sans-serif"
+                fill="rgba(220,225,244,0.85)" textAnchor="middle">
+            {a.name}
+          </text>
+        ))}
+      </svg>
+      <div className="absolute bottom-2 left-1/2 -translate-x-1/2 text-white/60 text-[10px] font-mono">
+        Ready.
+      </div>
+    </div>
+  );
+}
+
+function Frame({ children }) {
+  return (
+    <div className="relative" style={{ padding: "32px 50px 22px 34px" }}>
+      <img src={`${FRAME}/corner_ul.png`} alt="" className="pointer-events-none select-none absolute"
+           style={{ top: 0, left: 0, height: 100 }} />
+      <img src={`${FRAME}/corner_ur.png`} alt="" className="pointer-events-none select-none absolute"
+           style={{ top: 0, right: 0, height: 100 }} />
+      <img src={`${FRAME}/corner_bl.png`} alt="" className="pointer-events-none select-none absolute"
+           style={{ bottom: 0, left: 0, height: 86 }} />
+      <img src={`${FRAME}/corner_br.png`} alt="" className="pointer-events-none select-none absolute"
+           style={{ bottom: 0, right: 0, height: 86 }} />
+      <img src={`${ASSET}/owl_studio_square.png`} alt="" className="pointer-events-none select-none absolute"
+           style={{ top: -14, left: "50%", transform: "translateX(-50%)", height: 76 }} />
+      <div className="content-card rounded-md overflow-hidden">{children}</div>
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <Frame>
+      <TitleBar />
+      <TabBar />
+      <LocationRow />
+      <GoalBar />
+      {/* Three-pane main area — the structural change v9 introduces. */}
+      <div className="flex">
+        <LeftSidebar />
+        <CenterCanvas />
+        <RightPane />
+      </div>
+    </Frame>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

@@ -1165,4 +1165,15 @@ def builtin_registry() -> ToolRegistry:
     reg.register(ssh_download)
     for t in GIT_TOOLS:
         reg.register(t)
+    # ui_tools are imported lazily so this registry construction stays
+    # cheap (and works in environments without PySide6, e.g. a CLI
+    # listing). Import error skips them rather than failing the whole
+    # registry — a desktop runtime always has Qt, a server runtime
+    # never needs it.
+    try:
+        from core.agents.tools.ui_tools import UI_TOOLS
+        for t in UI_TOOLS:
+            reg.register(t)
+    except ImportError:
+        pass
     return reg

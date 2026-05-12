@@ -64,3 +64,10 @@ pyttsx3>=2.90,<3.0
 # through the ~80 MB onnxruntime download at first launch. Listed here
 # (commented) so build_launcher / requirements snapshots see the intent.
 # piper-tts>=1.2.0,<2.0.0
+# OWLLM ui_probe — widget-granularity visual regression + agent-driven UI
+# iteration. pytest-qt provides the qtbot fixture that drives QApplication
+# inside the test loop; Pillow handles PNG decode + pixel diff. Both are
+# small, pure-Python wheels (~2 MB total) and are imported only by the
+# test path and the ui_tools agent tools, never by the user-facing app.
+pytest-qt>=4.4.0,<5.0.0
+Pillow>=10.0.0,<12.0.0

@@ -76,6 +76,45 @@ def _safe_text(w) -> str:
     return ""
 
 
+def _safe_style(w) -> dict:
+    """Best-effort style snapshot from a QWidget.
+
+    Stylesheet strings override the palette, so palette() values can lie
+    when the widget is themed via setStyleSheet. We capture both: the
+    palette colors (always available) AND the raw stylesheet string (so
+    the diff core can string-match common patterns like "font-size:13px"
+    when palette is uninformative). Cheap to compute, valuable for
+    catching color/size mismatches the pixel diff misses on uniform
+    areas.
+    """
+    out: dict = {}
+    try:
+        f = w.font()
+        ps = f.pixelSize()
+        if ps <= 0:
+            pt = f.pointSize()
+            if pt > 0:
+                ps = int(pt * 4 / 3)
+        out["font_size_px"] = int(ps) if ps > 0 else None
+        out["font_weight"] = "bold" if f.bold() else "normal"
+        out["font_family"] = str(f.family() or "")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        pal = w.palette()
+        out["color_fg"] = pal.windowText().color().name()
+        out["color_bg"] = pal.window().color().name()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        sheet = w.styleSheet() or ""
+        if sheet:
+            out["stylesheet"] = sheet[:300]
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 def _main() -> int:
     try:
         payload = json.loads(sys.stdin.read())
@@ -320,6 +359,10 @@ def _main() -> int:
             text = _safe_text(w)
         except Exception:
             text = ""
+        try:
+            style = _safe_style(w)
+        except Exception:
+            style = {}
         # id := objectName if set, else "<class>@<sx,sy>" so the node is
         # still uniquely addressable for raw-tree consumers; the diff
         # core only aligns on non-empty ids anyway.
@@ -331,7 +374,7 @@ def _main() -> int:
             "text": text or None,
             "class_name": cls,
             "children": [],
-            "raw": {"objectName": oname},
+            "raw": {"objectName": oname, "style": style},
         }
         try:
             kids = list(w.children())

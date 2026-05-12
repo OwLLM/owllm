@@ -1757,6 +1757,7 @@ class AgentsPage(QWidget):
         # 📎 attach button — opens a file picker that filters to audio
         # and image types (no video, the bridges don't accept video either).
         self.attach_btn = QPushButton("📎")
+        self.attach_btn.setObjectName("GoalAttachBtn")
         self.attach_btn.setMinimumHeight(38)
         self.attach_btn.setMinimumWidth(44)
         self.attach_btn.setToolTip("Attach an image or audio file")
@@ -1773,6 +1774,7 @@ class AgentsPage(QWidget):
         self.attach_btn.clicked.connect(self._on_attach_clicked)
 
         self.goal_input = _GoalLineEdit(on_files_dropped=self._add_attachment_paths)
+        self.goal_input.setObjectName("GoalInput")
         self.goal_input.setPlaceholderText(
             "Goal — e.g. 'summarise the last commit and propose a follow-up' "
             "(drop an image / audio here)"
@@ -1792,6 +1794,7 @@ class AgentsPage(QWidget):
         self.goal_input.returnPressed.connect(self._run_clicked)
 
         self.run_btn = QPushButton("Run")
+        self.run_btn.setObjectName("GoalRunBtn")
         self.run_btn.setMinimumHeight(38)
         self.run_btn.setStyleSheet("""
             QPushButton {
@@ -1805,6 +1808,7 @@ class AgentsPage(QWidget):
         self.run_btn.clicked.connect(self._run_clicked)
 
         self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setObjectName("GoalCancelBtn")
         self.cancel_btn.setMinimumHeight(38)
         self.cancel_btn.setStyleSheet("""
             QPushButton {
@@ -1823,6 +1827,7 @@ class AgentsPage(QWidget):
         # this page's registry so stats reflect what the team has actually
         # been doing in this session.
         self.telemetry_btn = QPushButton("📊")
+        self.telemetry_btn.setObjectName("GoalTelemetryBtn")
         self.telemetry_btn.setMinimumHeight(38)
         self.telemetry_btn.setFixedWidth(44)
         self.telemetry_btn.setToolTip("Open the tool-call telemetry panel")
@@ -1847,6 +1852,7 @@ class AgentsPage(QWidget):
         # The visible arrow is the discoverability fix — the previous
         # right-click-only menu was effectively hidden.
         self.voice_btn = QToolButton()
+        self.voice_btn.setObjectName("GoalVoiceBtn")
         self.voice_btn.setText("🔊")
         self.voice_btn.setMinimumHeight(38)
         self.voice_btn.setMinimumWidth(64)  # +20 px over the old fixed 44 to fit the arrow
@@ -2848,6 +2854,7 @@ class AgentsPage(QWidget):
         # answers "where does this project live?". Saved on the project
         # whenever the field loses focus.
         loc_label = QLabel("Location")
+        loc_label.setObjectName("LocationLabel")
         loc_label.setStyleSheet(
             "color:#aaa; font-size:11px; background:transparent; "
             "letter-spacing:0.6px; text-transform:uppercase;"
@@ -2855,6 +2862,7 @@ class AgentsPage(QWidget):
         row.addWidget(loc_label)
 
         self._location_input = QLineEdit()
+        self._location_input.setObjectName("LocationInput")
         self._location_input.setMinimumHeight(32)
         self._location_input.setPlaceholderText(
             "/path/to/repo · esp-flash · github.com/me/x"
@@ -2874,6 +2882,7 @@ class AgentsPage(QWidget):
         # directory; the field still accepts free-form aliases/URLs typed
         # in directly. Picking a folder commits via _on_location_changed.
         browse_btn = QPushButton("Browse…")
+        browse_btn.setObjectName("LocationBrowseBtn")
         browse_btn.setMinimumHeight(32)
         browse_btn.setStyleSheet(_GHOST_BTN_STYLE)
         browse_btn.clicked.connect(self._on_browse_location)
@@ -2884,6 +2893,7 @@ class AgentsPage(QWidget):
         # rule for Edit/Write/Read so the Claude CLI doesn't prompt for
         # each file. Off by default — explicit consent only.
         self._trust_writes = QCheckBox("Trust writes")
+        self._trust_writes.setObjectName("TrustWritesCheckbox")
         self._trust_writes.setToolTip(
             "Pre-approve Claude CLI Read/Write/Edit inside the Location "
             "folder. Writes a scoped rule into .claude/settings.local.json "
@@ -2953,6 +2963,7 @@ class AgentsPage(QWidget):
         row.addWidget(label)
 
         self._project_combo = QComboBox()
+        self._project_combo.setObjectName("ProjectCombo")
         self._project_combo.setMinimumHeight(32)
         self._project_combo.setMinimumWidth(200)
         self._project_combo.setStyleSheet("""

@@ -2945,6 +2945,7 @@ class MainWindow(QMainWindow):
 
         # Create a beautiful unified header
         header_widget = QFrame()
+        header_widget.setObjectName("AppHeader")
         header_widget.setFrameShape(QFrame.StyledPanel)
         header_widget.setMinimumHeight(80)
         # Header styling will be applied by theme system
@@ -2976,6 +2977,7 @@ class MainWindow(QMainWindow):
         
         # Dark/Light mode toggle button (same size as color selector, icon on top, text below)
         theme_btn_container = QWidget()
+        theme_btn_container.setObjectName("DarkModeBtn")
         theme_btn_container.setFixedSize(70, 50)
         theme_btn_container.setStyleSheet("""
             QWidget {
@@ -3029,6 +3031,7 @@ class MainWindow(QMainWindow):
         
         # Color theme selector (2 rows x 3 columns)
         color_selector = QWidget()
+        color_selector.setObjectName("ColorSelector")
         color_selector.setFixedSize(70, 50)
         color_selector.setStyleSheet("background: rgba(40, 40, 60, 0.4); border: 1px solid rgba(255, 255, 255, 0.2); border-radius: 6px;")
         color_layout = QVBoxLayout(color_selector)
@@ -3099,6 +3102,7 @@ class MainWindow(QMainWindow):
         # signal/slot mechanism, which is unaffected by parent event filters
         # or child label propagation, so it just works.
         advanced_btn = QPushButton()
+        advanced_btn.setObjectName("AdvancedToggle")
         # Match the group toggles next to it (Fine Tuning / Agentic
         # Team / Gamify): height 50 fixed, width auto-fits the label
         # via padding 0 14px instead of a fixed 70-px square. The
@@ -3184,13 +3188,16 @@ class MainWindow(QMainWindow):
         # 'Fine Tuning' — wrench glyph + label, two-line layout matching
         # the Advanced button. Height fixed (50), width auto-fits.
         self.finetuning_group_btn = _make_header_toggle("🛠\nFine Tuning")
+        self.finetuning_group_btn.setObjectName("FineTuningToggle")
         # 'Agentic Team' — masks emoji matches the legacy 🎭 used in the
         # navbar; the owl_agentic.png asset is reserved for the canvas
         # surface and intentionally NOT used here.
         self.agentic_group_btn = _make_header_toggle("🎭\nAgentic Team")
+        self.agentic_group_btn.setObjectName("AgenticTeamToggle")
         # 'Gamify' — joypad glyph. Hosts the merged 3D playground that
         # combines the legacy Arena (under Test) and Characters pages.
         self.gamify_group_btn = _make_header_toggle("🎮\nGamify")
+        self.gamify_group_btn.setObjectName("GamifyToggle")
 
         theme_layout.addSpacing(4)
         theme_layout.addWidget(self.finetuning_group_btn)
@@ -3218,6 +3225,7 @@ class MainWindow(QMainWindow):
         
         # Title text
         title_label = QLabel(APP_TITLE)
+        title_label.setObjectName("AppTitle")
         title_label.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
         title_label.setStyleSheet("""
             QLabel {
@@ -3236,6 +3244,7 @@ class MainWindow(QMainWindow):
         
         # Right: System info (compact)
         sys_info_widget = QWidget()
+        sys_info_widget.setObjectName("SysInfoBlock")
         sys_info_widget.setStyleSheet("background: transparent; border: none;")
         # The Servers line includes the prettified running-model name(s) —
         # e.g. "🟢 Servers: 1 (Gemma 4 E4B Instruct GGUF)" — which easily
@@ -3259,6 +3268,7 @@ class MainWindow(QMainWindow):
         servers_row_layout.setContentsMargins(0, 0, 0, 0)
         servers_row_layout.setSpacing(6)
         servers_label = QLabel("🟢 Servers: …", servers_row)
+        servers_label.setObjectName("HeaderServersLabel")
         servers_label.setStyleSheet("color: white; font-size: 13pt; font-weight: bold; background: transparent;")
         servers_label.setToolTip("Models with an inference server currently running.")
         servers_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
@@ -3296,6 +3306,7 @@ class MainWindow(QMainWindow):
         apikey_icon.setCursor(Qt.PointingHandCursor)
         apikey_icon.setToolTip("Click to copy API key to clipboard.")
         apikey_text = QLabel("API key: owllm-local", apikey_row)
+        apikey_text.setObjectName("HeaderApiKeyLabel")
         apikey_text.setStyleSheet("color: white; font-size: 13pt; font-weight: bold; background: transparent;")
         apikey_text.setToolTip(
             "API key clients use to talk to OWLLM's OpenAI-compatible proxy at "
@@ -3316,6 +3327,7 @@ class MainWindow(QMainWindow):
         self.header_apikey_label = apikey_text
 
         vram_label = QLabel("💾 VRAM: …", self)
+        vram_label.setObjectName("HeaderVramLabel")
         vram_label.setStyleSheet("color: white; font-size: 13pt; font-weight: bold; background: transparent;")
         vram_label.setToolTip("Total GPU VRAM in use; per-server breakdown in tooltip when servers are running.")
         vram_label.setSizePolicy(QSizePolicy.MinimumExpanding, QSizePolicy.Preferred)
@@ -3335,6 +3347,7 @@ class MainWindow(QMainWindow):
         
         # Fullscreen button (⛶) in top right
         fullscreen_btn = QPushButton("⛶")
+        fullscreen_btn.setObjectName("FullscreenBtn")
         fullscreen_btn.setFixedSize(30, 30)
         fullscreen_btn.setStyleSheet("""
             QPushButton {

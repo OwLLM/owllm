@@ -22,10 +22,69 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import re
+
 import numpy as np
 from PIL import Image
 
 from core.ui_agent.schema import Bounds, CaptureResult, UIElement
+
+
+# ----------------------------------------------------------------------
+# Style comparison helpers — adapters normalize where they can, but Qt
+# emits "#rrggbb" and CSS emits "rgb(r, g, b)" / "rgba(r, g, b, a)".
+# Parsing both into (r, g, b) lets the diff core stay format-agnostic.
+# ----------------------------------------------------------------------
+_HEX_RE = re.compile(r"^#([0-9a-fA-F]{6}|[0-9a-fA-F]{3})$")
+_RGB_RE = re.compile(r"rgba?\s*\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)")
+
+
+def _parse_color(s):
+    """Return (r, g, b) ints, or None if not parseable."""
+    if not s:
+        return None
+    s = str(s).strip()
+    m = _HEX_RE.match(s)
+    if m:
+        h = m.group(1)
+        if len(h) == 3:
+            h = "".join(c * 2 for c in h)
+        return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+    m = _RGB_RE.match(s)
+    if m:
+        return (int(float(m.group(1))), int(float(m.group(2))),
+                int(float(m.group(3))))
+    return None
+
+
+def _color_distance(a, b) -> float:
+    if a is None or b is None:
+        return 0.0
+    return float(((a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2) ** 0.5)
+
+
+def _style_notes(src_style: dict, tgt_style: dict) -> list:
+    """Generate human-readable notes when style fields disagree."""
+    notes = []
+    if not src_style or not tgt_style:
+        return notes
+    sfs = src_style.get("font_size_px")
+    tfs = tgt_style.get("font_size_px")
+    if sfs and tfs and abs(sfs - tfs) > 2:
+        notes.append(f"font_size_px {sfs} vs {tfs}")
+    sfw = src_style.get("font_weight")
+    tfw = tgt_style.get("font_weight")
+    if sfw and tfw and sfw != tfw:
+        notes.append(f"font_weight {sfw}/{tfw}")
+    src_c = _parse_color(src_style.get("color_fg"))
+    tgt_c = _parse_color(tgt_style.get("color_fg"))
+    if src_c and tgt_c and _color_distance(src_c, tgt_c) > 40:
+        notes.append(f"color_fg {src_style.get('color_fg')} vs {tgt_style.get('color_fg')}")
+    src_b = _parse_color(src_style.get("color_bg"))
+    tgt_b = _parse_color(tgt_style.get("color_bg"))
+    if src_b and tgt_b and _color_distance(src_b, tgt_b) > 40:
+        notes.append(f"color_bg {src_style.get('color_bg')} vs {tgt_style.get('color_bg')}")
+    return notes
 
 
 @dataclass
@@ -104,14 +163,25 @@ def region_diff(src: CaptureResult, tgt: CaptureResult,
 
         notes = []
         if size_mismatch:
-            notes.append(f"size mismatch src={s.bounds.w}x{s.bounds.h} "
+            notes.append(f"size src={s.bounds.w}x{s.bounds.h} "
                          f"tgt={t.bounds.w}x{t.bounds.h}")
-        if (s.text or "") and (t.text or "") and s.text != t.text:
-            notes.append(f"text differs: src={s.text!r} tgt={t.text!r}")
+        # Bounds-position drift — flag when the same id sits at very
+        # different screen coords. Useful diagnostic separate from
+        # size mismatch: tells you "the element exists but is in the
+        # wrong place" vs "the element exists at the right place but
+        # is the wrong size".
+        dx = t.bounds.x - s.bounds.x
+        dy = t.bounds.y - s.bounds.y
+        if abs(dx) > 5 or abs(dy) > 5:
+            notes.append(f"pos off by ({dx:+d}, {dy:+d})")
+        if (s.text or "") and (t.text or "") and s.text.strip() != t.text.strip():
+            notes.append(f"text src={s.text!r} tgt={t.text!r}")
         if (s.text or "") and not (t.text or ""):
             notes.append("text missing in target")
         if (t.text or "") and not (s.text or ""):
-            notes.append("text present in target only")
+            notes.append("text in target only")
+        notes.extend(_style_notes(s.raw.get("style") or {},
+                                  t.raw.get("style") or {}))
 
         results.append(RegionDiff(
             id=ident, kind=s.kind,

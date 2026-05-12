@@ -199,7 +199,7 @@ function ModeBar() {
   });
 
   return (
-    <div style={{
+    <div data-ui="AppHeader" style={{
       height: 80,
       display: "grid",
       gridTemplateColumns: "auto 1fr auto",
@@ -211,7 +211,7 @@ function ModeBar() {
       {/* LEFT — theme + mode buttons */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {/* Dark toggle */}
-        <div style={{
+        <div data-ui="DarkModeBtn" style={{
           width: 70, height: 50, borderRadius: 6,
           background: "linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))",
           display: "flex", flexDirection: "column", alignItems: "center",
@@ -221,7 +221,7 @@ function ModeBar() {
           <div style={{ fontSize: 11, fontWeight: 700, color: "#fff" }}>Dark</div>
         </div>
         {/* 6 color buttons in 2x3 grid (70x50) */}
-        <div style={{
+        <div data-ui="ColorSelector" style={{
           width: 70, height: 50, padding: 4,
           display: "grid",
           gridTemplateColumns: "repeat(3, 18px)",
@@ -236,29 +236,29 @@ function ModeBar() {
         </div>
 
         {/* Mode toggles */}
-        <button style={buttonStyle}><span style={{fontSize:18}}>⚙</span><span>Advanced</span></button>
-        <button style={buttonStyle}><span style={{fontSize:18}}>🛠</span><span>Fine Tuning</span></button>
-        <button style={activeButton}><span style={{fontSize:18}}>🎭</span><span>Agentic Team</span></button>
-        <button style={buttonStyle}><span style={{fontSize:18}}>🎮</span><span>Gamify</span></button>
+        <button data-ui="AdvancedToggle" style={buttonStyle}><span style={{fontSize:18}}>⚙</span><span>Advanced</span></button>
+        <button data-ui="FineTuningToggle" style={buttonStyle}><span style={{fontSize:18}}>🛠</span><span>Fine Tuning</span></button>
+        <button data-ui="AgenticTeamToggle" style={activeButton}><span style={{fontSize:18}}>🎭</span><span>Agentic Team</span></button>
+        <button data-ui="GamifyToggle" style={buttonStyle}><span style={{fontSize:18}}>🎮</span><span>Gamify</span></button>
       </div>
 
       {/* CENTER — OWLLM title */}
-      <div style={{
+      <div data-ui="AppTitle" style={{
         textAlign: "center",
         fontSize: 26, fontWeight: 700, color: "#fff",
         letterSpacing: 2,
       }}>OWLLM</div>
 
       {/* RIGHT — system info */}
-      <div style={{
+      <div data-ui="SysInfoBlock" style={{
         minWidth: 520,
         display: "flex", flexDirection: "column", alignItems: "flex-end",
         gap: 2, fontSize: 13, fontWeight: 700,
         color: "#fff",
       }}>
-        <div>🟢 Servers: 0</div>
-        <div>🔑 API key: owllm-local</div>
-        <div>💾 VRAM: N/N</div>
+        <div data-ui="HeaderServersLabel">🟢 Servers: 0</div>
+        <div data-ui="HeaderApiKeyLabel">🔑 API key: owllm-local</div>
+        <div data-ui="HeaderVramLabel">💾 VRAM: N/N</div>
       </div>
     </div>
   );
@@ -301,7 +301,7 @@ function SubTabs() {
         }}>{t.label}</div>
       ))}
       <div style={{ flex: 1 }} />
-      <div style={{ color: "#888", fontSize: 11 }}>Product Studio Test ▾</div>
+      <div data-ui="ProjectCombo" style={{ color: "#888", fontSize: 11 }}>Product Studio Test ▾</div>
       <button className="ghost-btn">Team</button>
       <button className="ghost-btn">+ New</button>
       <button className="ghost-btn">Rename</button>
@@ -326,11 +326,12 @@ function LocationRow() {
       alignItems: "center",
       gap: 10,
     }}>
-      <div style={{
+      <div data-ui="LocationLabel" style={{
         fontSize: 11, color: "#aaa", textTransform: "uppercase",
         letterSpacing: 0.6, marginRight: 4,
       }}>LOCATION</div>
       <input
+        data-ui="LocationInput"
         defaultValue="/path/to/repo · esp-flash · github.com/me/x"
         style={{
           flex: 1, height: 32, borderRadius: 8, padding: "0 12px",
@@ -338,9 +339,9 @@ function LocationRow() {
           border: "1px solid rgba(255,255,255,0.06)",
         }}
       />
-      <button className="ghost-btn">Browse…</button>
+      <button data-ui="LocationBrowseBtn" className="ghost-btn">Browse…</button>
       <label style={{ fontSize: 12, color: "#dadcdf", padding: "0 6px" }}>
-        <input type="checkbox" defaultChecked style={{ marginRight: 4 }} />
+        <input data-ui="TrustWritesCheckbox" type="checkbox" defaultChecked style={{ marginRight: 4 }} />
         Trust writes
       </label>
       <span data-ui="SandboxBadge" style={{
@@ -375,25 +376,26 @@ function GoalRow() {
       alignItems: "center",
       gap: 8,
     }}>
-      <div style={{ color: "#888", fontSize: 11, textTransform: "uppercase" }}>Goal</div>
+      <button data-ui="GoalAttachBtn" className="ghost-btn" style={{minHeight:38, minWidth:44}}>📎</button>
       <input
+        data-ui="GoalInput"
         defaultValue="summarize the last commit and propose a follow-up. design image + build notes"
         style={{
-          flex: 1, height: 32, borderRadius: 8, padding: "0 12px",
-          fontSize: 13, background: "#161623", color: "#dadcdf",
-          border: "1px solid rgba(255,255,255,0.06)",
+          flex: 1, height: 38, borderRadius: 10, padding: "0 14px",
+          fontSize: 13, background: "#161623", color: "#fff",
+          border: "none",
         }}
       />
-      <button className="ghost-btn">📎</button>
-      <button className="ghost-btn">🎤 Speak</button>
-      <button className="ghost-btn">↩ Use</button>
-      <button className="ghost-btn">⤓ Restore</button>
-      <button className="ghost-btn">🔄 Approval</button>
-      <button style={{
-        height: 32, padding: "0 18px", borderRadius: 8, border: "none",
-        background: "#4f46e5", color: "#fff", fontWeight: 600, fontSize: 12,
-      }}>▶ Run</button>
-      <button className="ghost-btn">Cancel</button>
+      <button data-ui="GoalRunBtn" style={{
+        height: 38, padding: "0 24px", borderRadius: 10, border: "none",
+        background: "#4a6cff", color: "#fff", fontWeight: 600, fontSize: 13,
+      }}>Run</button>
+      <button data-ui="GoalCancelBtn" style={{
+        height: 38, padding: "0 18px", borderRadius: 10, border: "none",
+        background: "rgba(255,140,140,0.10)", color: "#ff8c8c", fontSize: 13,
+      }}>Cancel</button>
+      <button data-ui="GoalTelemetryBtn" className="ghost-btn" style={{minHeight:38, width:44}}>📊</button>
+      <button data-ui="GoalVoiceBtn" className="ghost-btn" style={{minHeight:38, minWidth:64}}>🔊 ▾</button>
     </div>
   );
 }
@@ -410,13 +412,13 @@ function FlowHeader() {
       padding: "6px 10px", gap: 6,
       borderBottom: "1px solid rgba(255,255,255,0.04)",
     }}>
-      <div style={{ fontSize: 16, fontWeight: 700, color: "#fff" }}>Flow</div>
+      <div data-ui="FlowTitle" style={{ fontSize: 16, fontWeight: 700, color: "#fff" }}>Flow</div>
       <div style={{ flex: 1 }} />
-      <button className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>✕ Edge</button>
-      <button className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⇄ Reverse</button>
-      <button className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⟲ Layout</button>
-      <button className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⟳</button>
-      <button className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>◐ Graph view</button>
+      <button data-ui="FlowDeleteEdgeBtn" className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>✕ Edge</button>
+      <button data-ui="FlowReverseEdgeBtn" className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⇄ Reverse</button>
+      <button data-ui="FlowLayoutBtn" className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⟲ Layout</button>
+      <button data-ui="FlowRefreshBtn" className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⟳</button>
+      <button data-ui="FlowViewToggleBtn" className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>◐ Graph view</button>
     </div>
   );
 }
@@ -516,7 +518,7 @@ function SuperUserCard() {
    Node: r = 22+4*pulse, halo radius r*2.4
    Orchestrator crest: owl_agentic.png scaled to r*1.4*0.8
    ============================================================ */
-function TeamCanvas({ width, height }) {
+function TeamCanvas({ width, height }) {  // data-ui annotation applied to outer div below
   // Match _layout exactly. The canvas WIDTH passed in is the actual canvas pixel
   // width (after splitter assignment) — production sees ~520-600 px because the
   // left and right panes eat 280+340 of the inner 1600px.
@@ -548,7 +550,7 @@ function TeamCanvas({ width, height }) {
   const orchestrator_r = 28;
 
   return (
-    <div style={{
+    <div data-ui="AgentTeamCanvas" style={{
       position: "relative",
       width: w, height: h,
       background: "radial-gradient(ellipse at center, #1a1f33 0%, #06080d 70%)",
@@ -630,7 +632,7 @@ function TeamCanvas({ width, height }) {
    OrchestratorPane   //SOURCE: pages/agents_page.py:_build_roster (right pane)
    Header + Reply/Thought toggle + scrollable code block
    ============================================================ */
-function OrchestratorPane() {
+function OrchestratorPane() {  // matches Qt LogHeader / OrchestratorLogTabs / OrchestratorReplyView
   const code = `* peripheral is active.
 "TEXT" — selected agent "Sg" agent name header.
 def __name__ == "TEAM": team is given a default
@@ -666,11 +668,11 @@ Afterwards, the path is
 | sBach github.composers/d-tn/myll_text-Agentic`;
 
   return (
-    <div style={{
+    <div data-ui="RosterRight" style={{
       display: "flex", flexDirection: "column",
       height: "100%", background: "#0c0f1a",
     }}>
-      <div style={{
+      <div data-ui="LogHeader" style={{
         padding: "8px 12px",
         display: "flex", alignItems: "center", gap: 8,
         borderBottom: "1px solid rgba(255,255,255,0.04)",
@@ -681,7 +683,7 @@ Afterwards, the path is
         }} />
         <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>Orchestrator</div>
       </div>
-      <div style={{ padding: "8px 10px", display: "flex", gap: 6 }}>
+      <div data-ui="OrchestratorLogTabs" style={{ padding: "8px 10px", display: "flex", gap: 6 }}>
         <button style={{
           padding: "4px 12px", borderRadius: 6, border: "none",
           background: "rgba(120,220,255,0.18)", color: "#7fdfff",
@@ -693,12 +695,12 @@ Afterwards, the path is
           fontSize: 11, fontWeight: 600,
         }}>💭 Thought</button>
       </div>
-      <div style={{
+      <div data-ui="OrchestratorReplyView" style={{
         flex: 1, margin: "0 10px 10px",
-        background: "rgba(0,0,0,0.35)", borderRadius: 8,
-        padding: "10px 12px", overflow: "hidden",
+        background: "#0f1218", borderRadius: 8,
+        padding: 10, overflow: "hidden",
         fontFamily: "Consolas, 'Cascadia Mono', monospace",
-        fontSize: 10.5, lineHeight: 1.5, color: "#e6e8eb",
+        fontSize: 14, lineHeight: 1.5, color: "#cbd2e0",
         whiteSpace: "pre-wrap",
       }}>{code}</div>
     </div>
@@ -728,17 +730,17 @@ function AgentsPage() {
         <SubTabs />
         <LocationRow />
         <GoalRow />
-        <div style={{ flex: 1, display: "flex", overflow: "hidden", background: "#06080d" }}>
+        <div data-ui="WorkspaceStack" style={{ flex: 1, display: "flex", overflow: "hidden", background: "#06080d" }}>
           {/* Left pane (Flow + SuperUser) */}
-          <div style={{ width: FLOW_W, display: "flex", flexDirection: "column",
+          <div data-ui="RosterLeft" style={{ width: FLOW_W, display: "flex", flexDirection: "column",
                         background: "#0c0f1a" }}>
             <FlowHeader />
             <DesignStudioCard />
-            <div style={{ flex: 1 }} />
+            <div data-ui="CanvasStack" style={{ flex: 1 }} />
             <SuperUserCard />
           </div>
           {/* Splitter line */}
-          <div style={{ width: 8, background: "#1a1f2c" }} />
+          <div data-ui="RosterSplitter" style={{ width: 8, background: "#1a1f2c" }} />
           {/* Canvas */}
           <div style={{ flex: 1 }}>
             <TeamCanvas width={CANVAS_W} height={CANVAS_H} />

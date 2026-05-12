@@ -41,6 +41,26 @@ _DOM_WALK_JS = r"""
     }
     return null;
   }
+  function styleOf(el) {
+    // Computed style → small subset that matters for replica fidelity.
+    // Pixel-diff masks small color shifts as long as luminance lines up;
+    // we capture the canonical strings so the diff can flag mismatches
+    // that pixel comparison wouldn't catch (e.g. bg #0c0f1a vs #181c29).
+    const cs = window.getComputedStyle(el);
+    const px = (v) => {
+      const m = String(v || '').match(/([\d.]+)px/);
+      return m ? parseFloat(m[1]) : null;
+    };
+    return {
+      font_size_px: px(cs.fontSize),
+      font_weight: cs.fontWeight === '700' || cs.fontWeight === 'bold' ? 'bold' : 'normal',
+      font_family: cs.fontFamily.split(',')[0].replace(/['\"]/g, '').trim(),
+      color_fg: cs.color,
+      color_bg: cs.backgroundColor,
+      border_radius_px: px(cs.borderTopLeftRadius),
+      stylesheet: el.getAttribute('style') || ''
+    };
+  }
   function walk(el) {
     const r = el.getBoundingClientRect();
     const id = el.getAttribute('data-ui') || '';
@@ -53,7 +73,7 @@ _DOM_WALK_JS = r"""
       text: visibleText(el),
       class_name: el.tagName.toLowerCase(),
       children: [],
-      raw: { className: el.className || '' }
+      raw: { className: el.className || '', style: styleOf(el) }
     };
     for (const c of el.children) {
       const child = walk(c);

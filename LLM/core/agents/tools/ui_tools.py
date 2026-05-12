@@ -429,10 +429,90 @@ ui_update_baseline = Tool(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# ui_render_app_page — full-app screenshot, with frame + tab navigation
+# ---------------------------------------------------------------------------
+
+
+def _ui_render_app_page(args: Mapping[str, Any]) -> str:
+    try:
+        from desktop_app.ui_probe import AppHarness
+    except ImportError as exc:
+        raise ToolError(f"AppHarness unavailable (PySide6 missing?): {exc}")
+
+    page = str(args.get("page", "")).strip().lower()
+    out_path = str(args.get("out_path", "")).strip()
+    if not page:
+        raise ToolError(
+            "page is required (e.g. 'agents', 'studio', 'code', "
+            "'bridges', 'server', 'home')"
+        )
+    if not out_path:
+        raise ToolError("out_path is required (where to write the PNG)")
+
+    width = _parse_optional_int(args.get("width"), "width") or 1400
+    height = _parse_optional_int(args.get("height"), "height") or 900
+    wait_seconds = args.get("wait_seconds", 5)
+    try:
+        wait_seconds = float(wait_seconds)
+    except (TypeError, ValueError):
+        raise ToolError("wait_seconds must be a number")
+    wait_seconds = max(0.0, min(wait_seconds, 30.0))
+    include_frame = bool(args.get("include_frame", True))
+
+    with AppHarness(include_frame=include_frame) as h:
+        try:
+            h.navigate(page)
+        except ValueError as exc:
+            raise ToolError(str(exc))
+        png = h.capture(width=width, height=height, wait_seconds=wait_seconds)
+        # Write inside the context so the file is on disk before
+        # the harness's hide-on-exit runs — defensive against any
+        # future teardown issue swallowing the capture.
+        path = Path(out_path).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(png)
+        result_msg = (
+            f"wrote {path} (page={page}, {width}x{height}, "
+            f"{len(png)} bytes, frame={'on' if include_frame else 'off'})"
+        )
+    return result_msg
+
+
+ui_render_app_page = Tool(
+    name="ui_render_app_page",
+    description=(
+        "Render a full OWLLM app page to PNG — `MainWindow` + decorative "
+        "`HybridFrame` overlay + the requested tab, with chrome, toolbar, "
+        "project picker, status panel, everything. Use this when "
+        "`ui_render_widget` (which only captures a single widget in "
+        "isolation) isn't enough — i.e. when you need to see what the "
+        "user sees. Pages: 'agents' (the team graph), 'studio', 'code', "
+        "'bridges', 'server', 'home', 'mcp'. The harness boots MainWindow "
+        "offscreen, switches to the page, waits `wait_seconds` for "
+        "deferred bootstrap (project load, agent canvas population), then "
+        "composite-grabs window+frame. Cost: ~6-8 s per call — not for "
+        "tight inner loops. Set `include_frame=false` to skip the "
+        "decorative overlay if you only need the central widget chrome."
+    ),
+    args=[
+        ArgSpec("page", "string", "Page name — 'agents', 'studio', 'code', 'bridges', 'server', 'home', 'mcp'."),
+        ArgSpec("out_path", "string", "Where to write the PNG (absolute path)."),
+        ArgSpec("width", "integer", "Window width (default 1400).", required=False),
+        ArgSpec("height", "integer", "Window height (default 900).", required=False),
+        ArgSpec("wait_seconds", "number", "Pump time for async load (default 5, max 30).", required=False),
+        ArgSpec("include_frame", "boolean", "Composite the HybridFrame overlay (default true).", required=False),
+    ],
+    func=_ui_render_app_page,
+    requires_approval=False,
+)
+
+
 UI_TOOLS = (
     ui_render_widget,
     ui_inspect_widget,
     ui_diff_baseline,
     ui_list_baselines,
     ui_update_baseline,
+    ui_render_app_page,
 )

@@ -28,6 +28,7 @@ paths so the layering can change without callers noticing.
 """
 from __future__ import annotations
 
+from desktop_app.ui_probe.app_harness import AppHarness
 from desktop_app.ui_probe.baseline import (
     Baseline,
     BaselineMissing,
@@ -42,6 +43,7 @@ from desktop_app.ui_probe.harness import WidgetHarness
 from desktop_app.ui_probe.headless import configure_offscreen, is_offscreen
 
 __all__ = [
+    "AppHarness",
     "Baseline",
     "BaselineMissing",
     "DiffResult",

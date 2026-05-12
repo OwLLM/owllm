@@ -101,6 +101,12 @@ def _main() -> int:
     os.environ.setdefault("QT_SCALE_FACTOR", "1")
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "0")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
+    # Skip the AgentsPage 4 s loader minimum so the workspace_stack
+    # flips to the real splitter within ~500 ms of show(). Critical
+    # for the tree walk: at 5 s pump the splitter must already be
+    # visible, otherwise its children (Flow*, AgentTeamCanvas,
+    # Orchestrator*) are filtered out by the isVisible() check.
+    os.environ["OWLLM_UI_AGENT_FAST_LOAD"] = "1"
 
     llm_root = Path(__file__).resolve().parents[3]
     if str(llm_root) not in sys.path:

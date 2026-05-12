@@ -2505,6 +2505,7 @@ class AgentsPage(QWidget):
         self._suspend_overlay_signal: bool = False
 
         splitter = QSplitter(Qt.Horizontal)
+        splitter.setObjectName("RosterSplitter")
         splitter.setHandleWidth(8)
         splitter.setStyleSheet("""
             QSplitter::handle {
@@ -2515,6 +2516,7 @@ class AgentsPage(QWidget):
 
         # ---------------------------- LEFT: canvas ----------------------------
         left = QFrame()
+        left.setObjectName("RosterLeft")
         left.setFrameShape(QFrame.NoFrame)
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
@@ -2522,6 +2524,7 @@ class AgentsPage(QWidget):
 
         canvas_header = QHBoxLayout()
         title = QLabel("Flow")
+        title.setObjectName("FlowTitle")
         tf = QFont()
         tf.setPointSize(12)
         tf.setBold(True)
@@ -2531,18 +2534,21 @@ class AgentsPage(QWidget):
         canvas_header.addStretch(1)
 
         delete_edge_btn = QPushButton("✕ Edge")
+        delete_edge_btn.setObjectName("FlowDeleteEdgeBtn")
         delete_edge_btn.setToolTip("Delete the selected edge (or press Delete)")
         delete_edge_btn.setStyleSheet(_GHOST_BTN_STYLE_SMALL)
         delete_edge_btn.clicked.connect(self._on_delete_selected_edge)
         canvas_header.addWidget(delete_edge_btn)
 
         reverse_edge_btn = QPushButton("⇄ Reverse")
+        reverse_edge_btn.setObjectName("FlowReverseEdgeBtn")
         reverse_edge_btn.setToolTip("Reverse the direction of the selected edge")
         reverse_edge_btn.setStyleSheet(_GHOST_BTN_STYLE_SMALL)
         reverse_edge_btn.clicked.connect(self._on_reverse_selected_edge)
         canvas_header.addWidget(reverse_edge_btn)
 
         layout_btn = QPushButton("⟲ Layout")
+        layout_btn.setObjectName("FlowLayoutBtn")
         layout_btn.setToolTip(
             "Top-down hierarchical layout — orchestrator on top, then "
             "specialists in rows by dispatch distance from the orchestrator. "
@@ -2553,6 +2559,7 @@ class AgentsPage(QWidget):
         canvas_header.addWidget(layout_btn)
 
         refresh = QPushButton("⟳")
+        refresh.setObjectName("FlowRefreshBtn")
         refresh.setFixedSize(30, 28)
         refresh.setToolTip("Refresh model lists in every picker")
         refresh.setStyleSheet(_GHOST_BTN_STYLE_SMALL)
@@ -2565,6 +2572,7 @@ class AgentsPage(QWidget):
         # editor stays one click away for users who want to rewire
         # edges manually.
         self._view_toggle_btn = QPushButton("◐ Graph view")
+        self._view_toggle_btn.setObjectName("FlowViewToggleBtn")
         self._view_toggle_btn.setToolTip("Switch between the live diagram and the editable graph")
         self._view_toggle_btn.setStyleSheet(_GHOST_BTN_STYLE_SMALL)
         self._view_toggle_btn.setCheckable(True)
@@ -2574,6 +2582,7 @@ class AgentsPage(QWidget):
 
         # Live orbital diagram — the new default visual.
         self.team_canvas = AgentTeamCanvas()
+        self.team_canvas.setObjectName("AgentTeamCanvas")
         self.team_canvas.node_selected.connect(self._on_canvas_node_selected)
 
         # Editable graph canvas — kept for power-user workflows.
@@ -2589,6 +2598,7 @@ class AgentsPage(QWidget):
         # through on some Qt versions, leaving the user staring at an
         # almost-empty graph editor instead of the orbital diagram.
         self._canvas_stack = QStackedWidget()
+        self._canvas_stack.setObjectName("CanvasStack")
         self._canvas_stack.addWidget(self.team_canvas)  # 0
         self._canvas_stack.addWidget(self.canvas)        # 1
         self._canvas_stack.setCurrentIndex(0)
@@ -2657,6 +2667,7 @@ class AgentsPage(QWidget):
 
         # ---------------------------- RIGHT: log ----------------------------
         right = QFrame()
+        right.setObjectName("RosterRight")
         right.setFrameShape(QFrame.NoFrame)
         rv = QVBoxLayout(right)
         rv.setContentsMargins(0, 0, 0, 0)
@@ -2664,6 +2675,7 @@ class AgentsPage(QWidget):
 
         # Header that names the currently-selected agent.
         self.log_header = QLabel("Click an agent on the canvas to view its log.")
+        self.log_header.setObjectName("LogHeader")
         lf = QFont()
         lf.setPointSize(12)
         lf.setBold(True)
@@ -2737,7 +2749,10 @@ class AgentsPage(QWidget):
         self._thought_view.setReadOnly(True)
         self._thought_view.setStyleSheet(log_view_css)
 
+        self._chat_view.setObjectName("OrchestratorReplyView")
+        self._thought_view.setObjectName("OrchestratorThoughtView")
         self._log_tabs = QTabWidget()
+        self._log_tabs.setObjectName("OrchestratorLogTabs")
         self._log_tabs.addTab(self._chat_view, "💬 Reply")
         self._log_tabs.addTab(self._thought_view, "🧠 Thought")
         self._log_tabs.setCurrentIndex(0)
@@ -2758,6 +2773,7 @@ class AgentsPage(QWidget):
         # both are done we flip to the splitter and the user sees the
         # canvas + log workspace.
         self._workspace_stack = QStackedWidget()
+        self._workspace_stack.setObjectName("WorkspaceStack")
         # IMPORTANT: add the loader FIRST so it becomes the default visible
         # page — Qt's QStackedWidget shows the first inserted widget when
         # ``setCurrentIndex`` hasn't yet had a layout pass. The earlier
@@ -2768,7 +2784,15 @@ class AgentsPage(QWidget):
         self._canvas_loader = AgentCanvasLoader()
         self._workspace_stack.addWidget(self._canvas_loader)  # index 0 — loader
         self._workspace_stack.addWidget(splitter)             # index 1 — real workspace
-        self._workspace_stack.setCurrentIndex(0)
+        # FAST_LOAD: skip the loader entirely so the UI agent's tree walk
+        # (at ~5 s after show) sees the real splitter and its named
+        # children. Production boots show the loader for 4 s + bootstrap.
+        import os as _os_init
+        if _os_init.environ.get("OWLLM_UI_AGENT_FAST_LOAD") == "1":
+            self._workspace_stack.setCurrentIndex(1)
+            self._loading_done = True
+        else:
+            self._workspace_stack.setCurrentIndex(0)
         self._loading_done = False
         self._loading_finish_timer: Optional[QTimer] = None
         # When the loader was constructed — used to enforce a MINIMUM
@@ -2779,8 +2803,15 @@ class AgentsPage(QWidget):
         import time as _time_module
         self._loader_started_at = _time_module.monotonic()
         # Minimum 4 s. Long enough to read the status text, short enough
-        # not to feel like a chore on a healthy install.
-        self._loader_min_seconds = 4.0
+        # not to feel like a chore on a healthy install. The UI agent's
+        # capture runner sets OWLLM_UI_AGENT_FAST_LOAD=1 to short-circuit
+        # this — it needs to walk the widget tree while the workspace
+        # is visible but before the background-detection thread has had
+        # time to start invalidating Qt objects (~10 s under offscreen).
+        import os as _os
+        self._loader_min_seconds = (
+            0.2 if _os.environ.get("OWLLM_UI_AGENT_FAST_LOAD") == "1" else 4.0
+        )
 
         # Periodically poll the main window's requirements thread state.
         # When that thread reports done AND the agent runtime bootstrap is

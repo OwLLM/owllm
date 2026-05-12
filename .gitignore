@@ -135,3 +135,13 @@ LLM/test_output/
 LLM/tools/go/
 LLM/tools/gocache/
 LLM/tools/gopath/
+
+# Portable Rust toolchain (bootstrap.exe future-state — see
+# LLM/docs/supervisor/RUST_MIGRATION.md). SDK is ~600 MB extracted.
+# Same isolation-from-system principle as Go: never commit it,
+# downloaded on demand via LLM/tools/download_rust.ps1.
+LLM/tools/rust/
+
+# Cargo build output for bootstrap_rs — gigabytes once full deps
+# are downloaded, but trivially rebuildable from Cargo.toml + Cargo.lock.
+LLM/bootstrap/bootstrap_rs/target/

@@ -1,0 +1,9 @@
+# Pin the toolchain so the portable Rust at LLM/tools/rust/ stays in
+# lockstep with what CI / contributors use. The GNU triple matches the
+# MinGW link toolchain that already builds launcher.exe — no MSVC /
+# Visual Studio dependency.
+[toolchain]
+channel = "1.78.0"
+components = ["rustc", "cargo", "rust-std"]
+targets = ["x86_64-pc-windows-gnu"]
+profile = "minimal"

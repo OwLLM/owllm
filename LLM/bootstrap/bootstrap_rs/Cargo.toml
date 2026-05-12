@@ -1,0 +1,39 @@
+[package]
+name = "bootstrap_rs"
+version = "0.1.0"
+edition = "2021"
+description = "OWLLM Supervisor bootstrap — Rust port of bootstrap_go"
+publish = false
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+# JSON in/out for the plan + bootstrap_env.json file
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# anyhow gives us ergonomic error propagation for app code; thiserror
+# is reserved for the few library-style error enums we'll need later.
+anyhow = "1"
+thiserror = "1"
+
+[dev-dependencies]
+# Temporary directories for tests, same pattern as Go's t.TempDir().
+# Pinned to 3.10 — tempfile 3.20+ transitively requires Rust
+# edition 2024 (Rust 1.85+), which is past what our portable
+# toolchain ships (1.78.0).
+tempfile = "=3.10.1"
+
+# Same edition-2024 hazard from fastrand transitively. Lock it.
+[dev-dependencies.fastrand]
+version = "=2.1.1"
+
+[profile.release]
+# Match what we asked g++ for on launcher.exe: small, stripped binary
+# with no unnecessary metadata.
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

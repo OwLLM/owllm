@@ -35,9 +35,62 @@ import sys
 from typing import Optional
 
 from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import QApplication, QWidget
 
 from desktop_app.ui_probe.headless import configure_offscreen
+
+
+# Sentinel — fonts only need to be loaded once per QApplication
+# lifetime. Loading C:\Windows\Fonts twice would double-register
+# every face and waste a few hundred ms per harness construction.
+_SYSTEM_FONTS_LOADED = False
+
+
+def _load_system_fonts_once() -> None:
+    """Register OS system fonts with QFontDatabase.
+
+    The offscreen Qt platform plugin on Windows ships with an empty
+    font database — `QFontDatabase.families()` returns `[]` and every
+    label renders as `▢▢▢` missing-glyph boxes. Production Qt picks
+    up fonts via the platform-native integration (Windows GDI / DWrite,
+    macOS Core Text, fontconfig on Linux); the offscreen plugin skips
+    that integration entirely.
+
+    Fix: enumerate the OS font directory ourselves and call
+    `QFontDatabase.addApplicationFont` on each face. Cheap (~300 ms
+    on a typical Windows box) and one-shot per process.
+
+    No-ops on platforms where the font dir doesn't exist.
+    """
+    global _SYSTEM_FONTS_LOADED
+    if _SYSTEM_FONTS_LOADED:
+        return
+    _SYSTEM_FONTS_LOADED = True
+
+    candidates: list[str] = []
+    if sys.platform.startswith("win"):
+        candidates.append(r"C:\Windows\Fonts")
+    elif sys.platform == "darwin":
+        candidates.extend([
+            "/System/Library/Fonts",
+            "/Library/Fonts",
+        ])
+    else:  # linux / *bsd
+        candidates.extend([
+            "/usr/share/fonts",
+            "/usr/local/share/fonts",
+        ])
+
+    import os
+    for root in candidates:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                lower = name.lower()
+                if lower.endswith((".ttf", ".ttc", ".otf")):
+                    QFontDatabase.addApplicationFont(os.path.join(dirpath, name))
 
 
 class WidgetHarness:
@@ -73,6 +126,12 @@ class WidgetHarness:
         # QApplication is a singleton per-process. Re-using whatever
         # already exists is mandatory — Qt asserts on a second construct.
         self._app = QApplication.instance() or QApplication(sys.argv[:1])
+        # System fonts must be loaded AFTER the QApplication exists
+        # (QFontDatabase requires it) but BEFORE the widget under test
+        # is constructed — otherwise the widget's first paint happens
+        # with the empty font db and labels get measured against
+        # nothing, producing wrong layout.
+        _load_system_fonts_once()
         self._shell = QWidget()
         self._shell.setWindowTitle("ui_probe harness")
         # `WA_DontShowOnScreen` keeps the shell off the compositor

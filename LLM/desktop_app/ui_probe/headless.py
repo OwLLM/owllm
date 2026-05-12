@@ -44,10 +44,15 @@ def configure_offscreen() -> None:
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "0")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "0")
 
-    # Pin font hinting / antialiasing. FreeType is shipped with Qt
-    # on every platform; using it everywhere kills the Windows/Linux
-    # font-rendering drift that breaks visual diffs.
-    os.environ.setdefault("QT_QPA_FONTDIR", "")
+    # HarfBuzz "old" is more deterministic across platforms — kills
+    # the sub-pixel font-shaping drift that otherwise breaks visual
+    # diffs between Windows and Linux CI runners.
+    #
+    # We do NOT set `QT_QPA_FONTDIR=""` — that would tell Qt to load
+    # zero fonts, and every label in the captured page would render
+    # as `▢▢▢` missing-glyph boxes. Qt's default font directory
+    # discovery (system fonts on Windows/macOS, fontconfig on Linux)
+    # is correct.
     os.environ.setdefault("QT_HARFBUZZ", "old")
 
     _CONFIGURED = True

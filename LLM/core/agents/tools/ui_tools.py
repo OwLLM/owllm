@@ -65,6 +65,20 @@ def _parse_target(target: str) -> tuple[str, str]:
     return module_path, class_name
 
 
+def _parse_optional_int(raw: Any, name: str) -> int | None:
+    """Parse a numeric arg that may be absent, empty, or a string.
+
+    LLMs often emit "1400" rather than 1400 because the tool-call
+    schema serializes numbers as strings in some backends.
+    """
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        raise ToolError(f"{name} must be an integer, got {raw!r}")
+
+
 def _parse_kwargs(raw: Any) -> dict:
     """Normalize the `kwargs` arg to a dict.
 
@@ -116,7 +130,13 @@ def _construct_widget(target: str, kwargs: dict):
         raise ToolError(f"{class_name}.__init__ raised {type(exc).__name__}: {exc}")
 
 
-def _render(target: str, kwargs: dict) -> bytes:
+def _render(
+    target: str,
+    kwargs: dict,
+    *,
+    width: int | None = None,
+    height: int | None = None,
+) -> bytes:
     """Render the widget to PNG bytes via the harness.
 
     Imports `ui_probe` lazily so importing this module from a
@@ -127,15 +147,30 @@ def _render(target: str, kwargs: dict) -> bytes:
     `_construct_widget` runs, because creating a `QWidget` without
     a live `QApplication` hangs on Windows. The harness's
     `__enter__` is what guarantees the QApplication exists.
+
+    `width`/`height` override the widget's natural `sizeHint`.
+    Required for full-page widgets like `AgentsPage` whose default
+    sizeHint is the layout's minimum, far smaller than the real
+    app window.
     """
     try:
         from desktop_app.ui_probe import WidgetHarness, capture_widget
+        from PySide6.QtCore import QSize
     except ImportError as exc:
         raise ToolError(f"ui_probe unavailable (PySide6 missing?): {exc}")
 
+    size = None
+    if width is not None and height is not None:
+        size = QSize(int(width), int(height))
+
     with WidgetHarness() as h:
         widget = _construct_widget(target, kwargs)
-        h.show(widget)
+        h.show(widget, size=size)
+        # Let any deferred `QTimer.singleShot(...)` from the widget's
+        # __init__ run before we capture — pages often defer their
+        # heavy bootstrap (project load, font scan) to the next
+        # event-loop turn so the first paint is cheap.
+        h.processed()
         return capture_widget(widget)
 
 
@@ -148,11 +183,15 @@ def _ui_render_widget(args: Mapping[str, Any]) -> str:
     target = str(args.get("target", "")).strip()
     out_path = str(args.get("out_path", "")).strip()
     kwargs = _parse_kwargs(args.get("kwargs"))
+    width = _parse_optional_int(args.get("width"), "width")
+    height = _parse_optional_int(args.get("height"), "height")
 
     if not out_path:
         raise ToolError("out_path is required (where to write the PNG)")
+    if (width is None) != (height is None):
+        raise ToolError("width and height must be set together (or both omitted)")
 
-    png = _render(target, kwargs)
+    png = _render(target, kwargs, width=width, height=height)
     path = Path(out_path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(png)
@@ -178,12 +217,17 @@ ui_render_widget = Tool(
         "render, read the PNG with your vision tools to see what it looks "
         "like. Target format: 'module.path:ClassName' "
         "(e.g. 'desktop_app.widgets.super_user_card:SuperUserCard'). "
-        "Pass constructor kwargs as a JSON object."
+        "Pass constructor kwargs as a JSON object. Pass width+height "
+        "together to override the widget's natural sizeHint — required "
+        "for full-page widgets that should render at app size "
+        "(e.g. width=1400, height=900 for the Agents page)."
     ),
     args=[
         ArgSpec("target", "string", "module.path:ClassName of the widget."),
         ArgSpec("out_path", "string", "Where to write the PNG (absolute path)."),
         ArgSpec("kwargs", "string", "JSON object of constructor kwargs.", required=False),
+        ArgSpec("width", "integer", "Render width in pixels (paired with height).", required=False),
+        ArgSpec("height", "integer", "Render height in pixels (paired with width).", required=False),
     ],
     func=_ui_render_widget,
     requires_approval=False,

@@ -230,6 +230,11 @@ class HybridFrameWindow(QWidget):
                 if not self.isVisible():
                     self.show()
                 self.raise_()
+                # Restart the 10 Hz raise timer if we stopped it on
+                # the previous Hide (idle-CPU mitigation in
+                # _check_and_raise).
+                if hasattr(self, "_raise_timer") and not self._raise_timer.isActive():
+                    self._raise_timer.start(100)
                 return False
 
         return super().eventFilter(obj, event)
@@ -244,8 +249,24 @@ class HybridFrameWindow(QWidget):
         after a couple of resizes while the main window stays open.
         Re-show the overlay (not just ``raise_``) when the parent is
         active but the overlay is no longer visible.
+
+        Auto-stop the 10 Hz timer when the parent isn't visible
+        (minimised, hidden, or destroyed). Over an 8-hour idle session
+        this saves ~290k timer firings — they didn't crash the app
+        directly, but every wakeup keeps the C extensions resident
+        in memory and gives AV scanners more entry points.
         """
         if not self.parent_window:
+            return
+        try:
+            parent_visible = self.parent_window.isVisible()
+        except RuntimeError:
+            # Parent Qt object was destroyed — stop ticking forever.
+            self._raise_timer.stop()
+            return
+        if not parent_visible:
+            self._raise_timer.stop()
+            self.hide()
             return
         if not self.parent_window.isActiveWindow():
             return

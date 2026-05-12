@@ -5785,18 +5785,33 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._sync_header_side_widths()
-        # Keep tuned-model cards at ~25 % of the window width.
+        # Re-entrancy guard: _sync_header_side_widths /
+        # _resize_tuned_cards / _size_arena_right_tabs all call
+        # setMinimumWidth/Height or setMaximumWidth/Height on child
+        # widgets, which trigger a layout recompute. Qt's layout pass
+        # can fire resizeEvent again on this window — potentially
+        # recursing forever. We had four Qt6Core.dll stack-overflow
+        # crashes (exception 0xc0000409 at offset 0x267a8) in the
+        # May event log; that's exactly the signature of unbounded
+        # widget-recursion in Qt6Core's geometry engine.
+        if getattr(self, "_in_resize_event", False):
+            return
+        self._in_resize_event = True
         try:
-            self._resize_tuned_cards()
-        except Exception:
-            pass
-        # Keep the Arena Logs / Unfiltered Answer tab area at ~10 %
-        # of the window height.
-        try:
-            self._size_arena_right_tabs()
-        except Exception:
-            pass
+            self._sync_header_side_widths()
+            # Keep tuned-model cards at ~25 % of the window width.
+            try:
+                self._resize_tuned_cards()
+            except Exception:
+                pass
+            # Keep the Arena Logs / Unfiltered Answer tab area at ~10 %
+            # of the window height.
+            try:
+                self._size_arena_right_tabs()
+            except Exception:
+                pass
+        finally:
+            self._in_resize_event = False
 
     def _size_arena_right_tabs(self) -> None:
         """Pin Arena's Logs / Unfiltered Answer tabs to 10 % of the

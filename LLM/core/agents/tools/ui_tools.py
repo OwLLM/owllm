@@ -484,6 +484,9 @@ def _ui_render_app_page(args: Mapping[str, Any]) -> str:
     # wait deadline. Without stability checking, the capture is of an
     # arbitrary moment during the load and every diff is invalid.
     require_stable = bool(args.get("require_stable", True))
+    stable_pct = float(args.get("stable_pct", 5.0))
+    stable_recheck_seconds = float(args.get("stable_recheck_seconds", 0.6))
+    stable_consecutive_needed = int(args.get("stable_consecutive_needed", 3))
     payload = json.dumps({
         "page": page,
         "out_path": str(path),
@@ -492,6 +495,9 @@ def _ui_render_app_page(args: Mapping[str, Any]) -> str:
         "wait_seconds": wait_seconds,
         "include_frame": include_frame,
         "require_stable": require_stable,
+        "stable_pct": stable_pct,
+        "stable_recheck_seconds": stable_recheck_seconds,
+        "stable_consecutive_needed": stable_consecutive_needed,
     })
 
     try:
@@ -529,19 +535,20 @@ def _ui_render_app_page(args: Mapping[str, Any]) -> str:
     size = path.stat().st_size if path.exists() else 0
     stability = ""
     if "stable" in result:
+        drift_str = ""
+        if "drift_history" in result and result["drift_history"]:
+            drift_str = f" history={result['drift_history']}"
         if result["stable"]:
             stability = (
                 f", stable after {result['stability_attempts']} check"
                 f"{'s' if result['stability_attempts'] != 1 else ''} "
-                f"(final drift {result['final_drift_pct']:.2f}%)"
+                f"(final drift {result['final_drift_pct']:.2f}%{drift_str})"
             )
         else:
-            # ASCII-only marker so cp1252 stdout (default on Windows
-            # consoles) doesn't crash when the agent prints this.
             stability = (
                 f" -- WARNING: NOT STABLE after {result['stability_attempts']} attempts "
-                f"(last drift {result['final_drift_pct']:.2f}%); page may still "
-                f"be loading and diff results are unreliable"
+                f"(last drift {result['final_drift_pct']:.2f}%{drift_str}); "
+                f"page may still be loading and diff results are unreliable"
             )
     return (
         f"wrote {path} (page={page}, "

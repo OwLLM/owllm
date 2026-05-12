@@ -300,29 +300,57 @@ def _main() -> int:
         return (100.0 * differing / total) if total else 0.0
 
     from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+    # Stability strategy: require N consecutive captures to all
+    # match within tolerance. A single match isn't enough — if the
+    # page changes in distinct phases (initial paint, project load,
+    # canvas population at ~6 s), each phase can show a small
+    # enough delta to pass a single-match tolerance even though the
+    # page is mid-load.
+    stable_consecutive_needed = int(payload.get("stable_consecutive_needed", 3))
     png = _capture_composite()
+    # Write the FIRST capture immediately so a crash mid-loop still
+    # leaves a usable PNG on disk for the parent to fall back to.
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).write_bytes(png)
+
     stable = True
     attempts = 0
     final_pct = 0.0
+    drift_history: list = []
     if require_stable:
         stable = False
+        consecutive_matches = 0
         while attempts < stable_max_attempts:
             attempts += 1
             _pump(stable_recheck_seconds)
             next_png = _capture_composite()
             pct = _bytes_diff_pct(png, next_png)
             final_pct = pct
+            drift_history.append(round(pct, 2))
             png = next_png
+            # Persist EACH new capture as we go. If MainWindow's
+            # background-detection thread eventually crashes the
+            # subprocess (~7-8 s of pumping total under offscreen
+            # Qt), the parent at least gets the freshest pre-crash
+            # frame instead of a stale early-load snapshot.
+            Path(out_path).write_bytes(png)
             if pct <= stable_pct:
-                stable = True
-                break
-            sys.stderr.write(
-                f"[stability] attempt {attempts}: {pct:.2f}% differ, retrying\n"
-            )
+                consecutive_matches += 1
+                sys.stderr.write(
+                    f"[stability] attempt {attempts}: {pct:.2f}% differ "
+                    f"(consecutive match {consecutive_matches}/{stable_consecutive_needed})\n"
+                )
+                if consecutive_matches >= stable_consecutive_needed:
+                    stable = True
+                    break
+            else:
+                consecutive_matches = 0
+                sys.stderr.write(
+                    f"[stability] attempt {attempts}: {pct:.2f}% differ, "
+                    f"retrying (consecutive reset)\n"
+                )
 
-    # Write final stable capture to disk.
-    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(out_path).write_bytes(png)
+    # (File was already written on each iteration above.)
 
     # Print one machine-readable line for the parent to parse.
     print(json.dumps({
@@ -335,6 +363,7 @@ def _main() -> int:
         "stable": stable,
         "stability_attempts": attempts,
         "final_drift_pct": round(final_pct, 3),
+        "drift_history": drift_history,
     }), flush=True)
 
     # Do NOT close/deleteLater the widgets — the OS will clean them

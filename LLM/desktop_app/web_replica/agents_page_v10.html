@@ -1,0 +1,761 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OWLLM — Agentic Team (v10, systematic component copy)</title>
+<!--
+  v10 — built component-by-component from the real PySide6 source, not eyeballed
+  from screenshots. Each section below has a (//SOURCE: path:line) marker pointing
+  at the authoritative Python widget the JSX mirrors.
+
+  Critical corrections vs v9:
+   * Central crest uses owl_agentic.png (not owl_studio_square.png).
+     SOURCE: widgets/agent_team_canvas.py:259
+   * Canvas centre is OFFSET to the right (cx = card_reserve + (w-card_reserve)/2)
+     because the left band holds the Flow/SuperUser cards.
+     SOURCE: widgets/agent_team_canvas.py:_layout
+   * Top mode bar is 80px tall with 3 columns; mode buttons are 2-LINE
+     (emoji over label). SOURCE: desktop_app/main.py:2947-3330
+   * Frame uses corner_size=18 / border_thickness=18 (matches production main.py:29007).
+   * AgentCard min 320x280, border-radius 14, avatar 52x52, name 15pt bold.
+     SOURCE: pages/agents_page.py:1208
+   * SuperUserCard min height 180, 28x28 avatar, trust row checkbox.
+     SOURCE: widgets/super_user_card.py:109
+-->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #06080d;
+    font-family: "Segoe UI", "Inter", system-ui, sans-serif;
+    color: #e6e8eb;
+    overflow: hidden;
+  }
+  * { box-sizing: border-box; }
+  button { font-family: inherit; cursor: pointer; }
+
+  /* Reusable ghost button (_GHOST_BTN_STYLE from agents_page.py:6004) */
+  .ghost-btn {
+    background: rgba(255,255,255,0.04);
+    color: #dadcdf;
+    border: none;
+    border-radius: 8px;
+    padding: 0 14px;
+    font-size: 12px;
+    height: 32px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .ghost-btn:hover { background: rgba(255,255,255,0.10); color: #fff; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+
+const ICONS = "../../../icons/Page_icons";
+const CORNERS = `${ICONS}/CornersNew`;
+const FRAME_ASSETS = "../../../hybrid_frame_module/assets";
+
+/* ============================================================
+   HybridFrame   //SOURCE: ui_frame/hybrid_frame/hybrid_frame_window.py
+                 //SOURCE: desktop_app/main.py:29007 (production caller)
+                 //SOURCE: ui_probe/_app_capture_runner.py:199 (screenshot caller)
+
+   Production uses corner_size=18, border_thickness=18, safe_padding=2.
+   The frame inflates the inner window by:
+     extra_top   = badge_h//2  where badge_h = int(90*0.65) = 58 → 29
+     extra_right = 75
+     shift_out   = 9
+     → outer = inner + (2*9+75, 2*9+29) = (1693, 989)  for 1600x960 inner
+   ============================================================ */
+function HybridFrame({ children, width, height }) {
+  const CORNER = 96;            // visible corner asset render size
+  const BORDER = 18;            // border thickness around the inner window
+  const SHIFT_OUT = 9;
+  const EXTRA_TOP = 29;         // badge_h//2 where badge_h=int(90*0.65)=58
+  const EXTRA_RIGHT = 75;
+  const BADGE_H = 58;           // int(90*0.65)
+
+  const outerW = width + 2*SHIFT_OUT + EXTRA_RIGHT;
+  const outerH = height + EXTRA_TOP + 2*SHIFT_OUT;
+
+  // Frame strokes — colors match win._get_theme_colors() then darker(300) for bg
+  // and alpha 220/200 for fc/ac (see _app_capture_runner.py:215).
+  const fc = "rgba(120, 220, 255, 0.86)";   // primary edge
+  const ac = "rgba(120, 220, 255, 0.78)";   // accent edge
+
+  return (
+    <div style={{
+      position: "relative",
+      width: outerW,
+      height: outerH,
+      background: "#06080d",
+    }}>
+      {/* Inner window content offset by SHIFT_OUT,EXTRA_TOP+SHIFT_OUT */}
+      <div style={{
+        position: "absolute",
+        left: SHIFT_OUT,
+        top: EXTRA_TOP + SHIFT_OUT,
+        width: width,
+        height: height,
+        background: "#14152a",
+        overflow: "hidden",
+      }}>
+        {children}
+      </div>
+
+      {/* Border edges drawn as 4 strokes between the corner crests */}
+      <div style={{
+        position: "absolute", left: CORNER/2, right: CORNER/2,
+        top: SHIFT_OUT, height: BORDER,
+        background: `linear-gradient(90deg, ${ac}, ${fc}, ${ac})`,
+        opacity: 0.7,
+      }} />
+      <div style={{
+        position: "absolute", left: CORNER/2, right: CORNER/2,
+        bottom: SHIFT_OUT, height: BORDER,
+        background: `linear-gradient(90deg, ${ac}, ${fc}, ${ac})`,
+        opacity: 0.7,
+      }} />
+      <div style={{
+        position: "absolute", top: CORNER/2, bottom: CORNER/2,
+        left: SHIFT_OUT, width: BORDER,
+        background: `linear-gradient(180deg, ${ac}, ${fc}, ${ac})`,
+        opacity: 0.7,
+      }} />
+      <div style={{
+        position: "absolute", top: CORNER/2, bottom: CORNER/2,
+        right: SHIFT_OUT, width: BORDER,
+        background: `linear-gradient(180deg, ${ac}, ${fc}, ${ac})`,
+        opacity: 0.7,
+      }} />
+
+      {/* Corner crests */}
+      <img src={`${CORNERS}/corner_ul.png`} style={{
+        position:"absolute", left: 0, top: 0,
+        width: CORNER, height: CORNER, pointerEvents: "none",
+      }} />
+      <img src={`${CORNERS}/corner_ur.png`} style={{
+        position:"absolute", right: 0, top: 0,
+        width: CORNER, height: CORNER, pointerEvents: "none",
+      }} />
+      <img src={`${CORNERS}/corner_bl.png`} style={{
+        position:"absolute", left: 0, bottom: 0,
+        width: CORNER, height: CORNER, pointerEvents: "none",
+      }} />
+      <img src={`${CORNERS}/corner_br.png`} style={{
+        position:"absolute", right: 0, bottom: 0,
+        width: CORNER, height: CORNER, pointerEvents: "none",
+      }} />
+
+      {/* Top-center badge — owl_studio_square overlapping the top edge */}
+      <img src={`${ICONS}/owl_studio_square.png`} style={{
+        position: "absolute",
+        left: outerW/2 - BADGE_H/2,
+        top: -BADGE_H/2 + SHIFT_OUT + 2,
+        width: BADGE_H,
+        height: BADGE_H,
+        pointerEvents: "none",
+      }} />
+    </div>
+  );
+}
+
+/* ============================================================
+   ModeBar       //SOURCE: desktop_app/main.py:2947-3330
+   80px tall, 3-column grid: theme controls | OWLLM title | system info
+   ============================================================ */
+function ModeBar() {
+  const buttonStyle = {
+    height: 50,
+    padding: "0 14px",
+    background: "linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))",
+    color: "#fff",
+    border: "1px solid rgba(120,220,255,0.0)",
+    borderRadius: 6,
+    fontSize: 13,
+    fontWeight: 700,
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    lineHeight: 1.05,
+    gap: 2,
+  };
+  const activeButton = {
+    ...buttonStyle,
+    border: "1px solid #d4af37",
+    background: "linear-gradient(180deg, rgba(80,80,110,0.9), rgba(50,50,80,0.9))",
+  };
+  const colorBtn = (c) => ({
+    width: 18, height: 18, borderRadius: 3, background: c,
+    border: "none", padding: 0,
+  });
+
+  return (
+    <div style={{
+      height: 80,
+      display: "grid",
+      gridTemplateColumns: "auto 1fr auto",
+      alignItems: "center",
+      padding: "10px 50px 10px 20px",
+      gap: 16,
+      background: "#1c2244",
+    }}>
+      {/* LEFT — theme + mode buttons */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {/* Dark toggle */}
+        <div style={{
+          width: 70, height: 50, borderRadius: 6,
+          background: "linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))",
+          display: "flex", flexDirection: "column", alignItems: "center",
+          justifyContent: "center", lineHeight: 1.0,
+        }}>
+          <div style={{ fontSize: 22 }}>🌙</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#fff" }}>Dark</div>
+        </div>
+        {/* 6 color buttons in 2x3 grid (70x50) */}
+        <div style={{
+          width: 70, height: 50, padding: 4,
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 18px)",
+          gridTemplateRows: "repeat(2, 18px)",
+          gap: 3,
+          background: "rgba(60,60,80,0.4)",
+          borderRadius: 6,
+        }}>
+          {["#667eea","#fbbf24","#ef4444","#3b82f6","#10b981","#6b7280"].map(c =>
+            <button key={c} style={colorBtn(c)} />
+          )}
+        </div>
+
+        {/* Mode toggles */}
+        <button style={buttonStyle}><span style={{fontSize:18}}>⚙</span><span>Advanced</span></button>
+        <button style={buttonStyle}><span style={{fontSize:18}}>🛠</span><span>Fine Tuning</span></button>
+        <button style={activeButton}><span style={{fontSize:18}}>🎭</span><span>Agentic Team</span></button>
+        <button style={buttonStyle}><span style={{fontSize:18}}>🎮</span><span>Gamify</span></button>
+      </div>
+
+      {/* CENTER — OWLLM title */}
+      <div style={{
+        textAlign: "center",
+        fontSize: 26, fontWeight: 700, color: "#fff",
+        letterSpacing: 2,
+      }}>OWLLM</div>
+
+      {/* RIGHT — system info */}
+      <div style={{
+        minWidth: 520,
+        display: "flex", flexDirection: "column", alignItems: "flex-end",
+        gap: 2, fontSize: 13, fontWeight: 700,
+        color: "#fff",
+      }}>
+        <div>🟢 Servers: 0</div>
+        <div>🔑 API key: owllm-local</div>
+        <div>💾 VRAM: N/N</div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   SubTabs — Studio / Bridges / Server / Agents / Code / Accounts / etc.
+   Inferred from the running app capture (tab bar under the header).
+   ============================================================ */
+function SubTabs() {
+  const tabs = [
+    { label: "LOCATION", icon: null },
+    { label: "Quick Actions", icon: null },
+    { label: "Agents", active: true },
+    { label: "Browse", icon: null },
+    { label: "Trust writes", icon: null },
+    { label: "C standard", icon: null },
+    { label: "C onboarded" },
+    { label: "MP no-key" },
+  ];
+  return (
+    <div style={{
+      height: 38,
+      background: "#353548",
+      display: "flex",
+      alignItems: "center",
+      padding: "0 12px",
+      gap: 6,
+      fontSize: 11,
+      color: "#dadcdf",
+      letterSpacing: 0.5,
+    }}>
+      {tabs.map(t => (
+        <div key={t.label} style={{
+          padding: "4px 10px",
+          background: t.active ? "rgba(120,220,255,0.15)" : "transparent",
+          color: t.active ? "#7fdfff" : "#9aa0a6",
+          borderRadius: 6,
+          textTransform: "uppercase",
+        }}>{t.label}</div>
+      ))}
+      <div style={{ flex: 1 }} />
+      <div style={{ color: "#888", fontSize: 11 }}>Product Studio Test ▾</div>
+      <button className="ghost-btn">Team</button>
+      <button className="ghost-btn">+ New</button>
+      <button className="ghost-btn">Rename</button>
+      <button className="ghost-btn">Delete</button>
+    </div>
+  );
+}
+
+/* ============================================================
+   ProjectStrip   //SOURCE: pages/agents_page.py:2799-2966
+   Margins 14,10,14,10  spacing 10
+   LOCATION label uppercase 11px #aaa
+   Input 32h placeholder "/path/to/repo · …"
+   Browse / Trust writes / Sandbox / Bridge badges / Project combo
+   ============================================================ */
+function LocationRow() {
+  return (
+    <div style={{
+      padding: "10px 14px",
+      background: "#1f1f27",
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+    }}>
+      <div style={{
+        fontSize: 11, color: "#aaa", textTransform: "uppercase",
+        letterSpacing: 0.6, marginRight: 4,
+      }}>LOCATION</div>
+      <input
+        defaultValue="/path/to/repo · esp-flash · github.com/me/x"
+        style={{
+          flex: 1, height: 32, borderRadius: 8, padding: "0 12px",
+          fontSize: 13, background: "#0f0f19", color: "#dadcdf",
+          border: "1px solid rgba(255,255,255,0.06)",
+        }}
+      />
+      <button className="ghost-btn">Browse…</button>
+      <label style={{ fontSize: 12, color: "#dadcdf", padding: "0 6px" }}>
+        <input type="checkbox" defaultChecked style={{ marginRight: 4 }} />
+        Trust writes
+      </label>
+      <span data-ui="SandboxBadge" style={{
+        padding: "4px 10px", background: "rgba(60,200,120,0.18)",
+        color: "#69e6a1", borderRadius: 8, fontSize: 11,
+        textTransform: "uppercase",
+      }}>C standard</span>
+      <span data-ui="BridgeBadge" style={{
+        padding: "4px 10px", background: "rgba(120,220,255,0.18)",
+        color: "#7fdfff", borderRadius: 8, fontSize: 11,
+        textTransform: "uppercase",
+      }}>C onboarded</span>
+      <span style={{
+        padding: "4px 10px", background: "rgba(255,160,80,0.18)",
+        color: "#ffb87a", borderRadius: 8, fontSize: 11,
+        textTransform: "uppercase",
+      }}>MP no-key</span>
+    </div>
+  );
+}
+
+/* ============================================================
+   GoalRow   //SOURCE: pages/agents_page.py:_build_goal_row (line ~1748)
+   Goal: input + Run + Cancel + status row
+   ============================================================ */
+function GoalRow() {
+  return (
+    <div style={{
+      padding: "8px 14px",
+      background: "#0f0f19",
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+    }}>
+      <div style={{ color: "#888", fontSize: 11, textTransform: "uppercase" }}>Goal</div>
+      <input
+        defaultValue="summarize the last commit and propose a follow-up. design image + build notes"
+        style={{
+          flex: 1, height: 32, borderRadius: 8, padding: "0 12px",
+          fontSize: 13, background: "#161623", color: "#dadcdf",
+          border: "1px solid rgba(255,255,255,0.06)",
+        }}
+      />
+      <button className="ghost-btn">📎</button>
+      <button className="ghost-btn">🎤 Speak</button>
+      <button className="ghost-btn">↩ Use</button>
+      <button className="ghost-btn">⤓ Restore</button>
+      <button className="ghost-btn">🔄 Approval</button>
+      <button style={{
+        height: 32, padding: "0 18px", borderRadius: 8, border: "none",
+        background: "#4f46e5", color: "#fff", fontWeight: 600, fontSize: 12,
+      }}>▶ Run</button>
+      <button className="ghost-btn">Cancel</button>
+    </div>
+  );
+}
+
+/* ============================================================
+   FlowPane   //SOURCE: pages/agents_page.py:_build_roster (line 2517)
+   Header: "Flow" 12pt bold + buttons (✕ Edge, ⇄ Reverse, ⟲ Layout, ⟳, ◐)
+   Below: design-studio description card and Super User card
+   ============================================================ */
+function FlowHeader() {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center",
+      padding: "6px 10px", gap: 6,
+      borderBottom: "1px solid rgba(255,255,255,0.04)",
+    }}>
+      <div style={{ fontSize: 16, fontWeight: 700, color: "#fff" }}>Flow</div>
+      <div style={{ flex: 1 }} />
+      <button className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>✕ Edge</button>
+      <button className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⇄ Reverse</button>
+      <button className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⟲ Layout</button>
+      <button className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>⟳</button>
+      <button className="ghost-btn" style={{ height: 26, padding: "0 8px", fontSize: 11 }}>◐ Graph view</button>
+    </div>
+  );
+}
+
+function DesignStudioCard() {
+  return (
+    <div style={{
+      margin: "8px 10px",
+      padding: 12,
+      borderRadius: 12,
+      background: "linear-gradient(180deg, #1d2336, #131726)",
+      border: "1px solid rgba(120,220,255,0.18)",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+        <img src={`${ICONS}/owl_studio_square.png`} style={{ width: 28, height: 28 }} />
+        <div style={{ fontSize: 11, color: "#aaa", textTransform: "uppercase" }}>
+          Design Studio Team
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: "#9aa0a6", lineHeight: 1.4 }}>
+        Stage 1 / 3 — sketch the brief, iterate
+        interview and design board, then ship.
+      </div>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#fff", marginTop: 6 }}>
+        sBach Studio Tr
+      </div>
+      <div style={{
+        marginTop: 6, display: "flex", gap: 12,
+        fontSize: 10, color: "#7888a8", textTransform: "uppercase",
+      }}>
+        <div>I<br /><span style={{ color: "#fff", fontSize: 18 }}>16</span></div>
+        <div>—<br /><span style={{ color: "#fff", fontSize: 18 }}>—</span></div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   SuperUserCard   //SOURCE: widgets/super_user_card.py:109
+   Min height 180, margins 12,10,12,10, spacing 8
+   Header: 28x28 avatar ("👤"), name "Super User" 12pt bold,
+           enlarge ⇱⇲ 30x26, gear ⚙ 26x26
+   Trust row: "auto-approve tool requests" checkbox
+   ============================================================ */
+function SuperUserCard() {
+  return (
+    <div data-ui="SuperUserCard" style={{
+      margin: "8px 10px",
+      padding: "10px 12px",
+      borderRadius: 12,
+      background: "#181c29",
+      border: "1px solid rgba(120,220,255,0.10)",
+      minHeight: 180,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+    }}>
+      {/* header */}
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <div data-ui="suAvatar" style={{
+          width: 28, height: 28, borderRadius: 14,
+          background: "rgba(255,255,255,0.08)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 16,
+        }}>👤</div>
+        <div style={{ flex: 1 }}>
+          <div data-ui="suName" style={{ fontSize: 12, fontWeight: 700, color: "#fff" }}>Super User</div>
+          <div data-ui="suHint" style={{ fontSize: 10, color: "#7888a8" }}>idle — team pings you here</div>
+        </div>
+        <button data-ui="suIconBtn" className="ghost-btn" style={{ width: 30, height: 26, padding: 0, fontSize: 12 }}>⇱⇲</button>
+        <button data-ui="suIconBtn" className="ghost-btn" style={{ width: 26, height: 26, padding: 0, fontSize: 14 }}>⚙</button>
+      </div>
+      {/* chat area placeholder */}
+      <div style={{
+        flex: 1, minHeight: 60,
+        background: "rgba(0,0,0,0.28)",
+        borderRadius: 8, padding: "8px 10px",
+        fontSize: 11, color: "#9aa0a6", lineHeight: 1.5,
+      }}>
+        <span style={{ color: "#aaaaaa" }}>You:</span> sBach Studio Tr — agent team auger in Bach is here +1 detailed lan ok desktop_app pages dev mu1
+      </div>
+      {/* trust row */}
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#dadcdf" }}>
+        <input type="checkbox" />
+        <span>auto-approve tool requests</span>
+      </label>
+    </div>
+  );
+}
+
+/* ============================================================
+   TeamCanvas   //SOURCE: widgets/agent_team_canvas.py:164-1100
+   Background: linear gradient #101522 → #06080d + radial glow
+   Ring radii: card_reserve = min(410, w*0.35); cx = card_reserve + (w-card_reserve)/2
+              radius = max(120, min(w,h*1.5)*0.30)
+   Orbit: 340° arc (not 360°)
+   Node: r = 22+4*pulse, halo radius r*2.4
+   Orchestrator crest: owl_agentic.png scaled to r*1.4*0.8
+   ============================================================ */
+function TeamCanvas({ width, height }) {
+  // Match _layout exactly. The canvas WIDTH passed in is the actual canvas pixel
+  // width (after splitter assignment) — production sees ~520-600 px because the
+  // left and right panes eat 280+340 of the inner 1600px.
+  const w = width, h = height;
+  const card_reserve = Math.min(410, w * 0.35);
+  const cx = card_reserve + (w - card_reserve) / 2;
+  const cy = h / 2;
+  const max_radius = Math.max(120, Math.min(w, h * 1.5) * 0.30);
+  const inner_offset = 130;
+  const max_depth = 1;
+  const step = (max_radius - inner_offset) / Math.max(1, max_depth);
+  const ring_radius = inner_offset + step; // single ring for now
+
+  // 8 specialists on a 340° arc starting at -170° from the top
+  const N = 8;
+  const arc_span = (Math.PI * 2) * (340 / 360);
+  const start_angle = -Math.PI / 2 - arc_span / 2;
+  const nodes = [];
+  for (let i = 0; i < N; i++) {
+    const a = start_angle + (i + 0.5) * arc_span / N;
+    nodes.push({
+      x: cx + ring_radius * Math.cos(a),
+      y: cy + ring_radius * Math.sin(a),
+      label: ["Workshop Writer", "Onboarded Coder", "Backend Server", "UI Designer",
+              "Backend Hub", "Design Critic", "Frontend Coder", "Workshop Owl"][i],
+    });
+  }
+
+  const orchestrator_r = 28;
+
+  return (
+    <div style={{
+      position: "relative",
+      width: w, height: h,
+      background: "radial-gradient(ellipse at center, #1a1f33 0%, #06080d 70%)",
+      overflow: "hidden",
+    }}>
+      {/* SVG layer for spokes and ring */}
+      <svg width={w} height={h} style={{ position:"absolute", left:0, top:0 }}>
+        <defs>
+          <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="rgba(120,180,255,0.6)" />
+            <stop offset="60%" stopColor="rgba(120,180,255,0.18)" />
+            <stop offset="100%" stopColor="rgba(120,180,255,0)" />
+          </radialGradient>
+          <radialGradient id="orchHalo" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="rgba(255,200,100,0.6)" />
+            <stop offset="100%" stopColor="rgba(255,200,100,0)" />
+          </radialGradient>
+        </defs>
+
+        {/* ring outline */}
+        <circle cx={cx} cy={cy} r={ring_radius}
+          fill="none" stroke="rgba(120,220,255,0.18)" strokeWidth="1.6" />
+
+        {/* spokes from orchestrator → each node */}
+        {nodes.map((n,i) => (
+          <line key={i} x1={cx} y1={cy} x2={n.x} y2={n.y}
+            stroke="rgba(120,220,255,0.12)" strokeWidth="1.2" />
+        ))}
+
+        {/* node halos */}
+        {nodes.map((n,i) => (
+          <circle key={"h"+i} cx={n.x} cy={n.y} r={28*2.4*0.5}
+            fill="url(#halo)" />
+        ))}
+
+        {/* node discs */}
+        {nodes.map((n,i) => (
+          <circle key={"d"+i} cx={n.x} cy={n.y} r={22}
+            fill="#3b4a7a" stroke="rgba(120,220,255,0.6)" strokeWidth="1.6" />
+        ))}
+
+        {/* orchestrator halo */}
+        <circle cx={cx} cy={cy} r={orchestrator_r * 2.4}
+          fill="url(#orchHalo)" />
+        {/* orchestrator backing disc */}
+        <circle cx={cx} cy={cy} r={orchestrator_r * 0.78}
+          fill="#1c2244" stroke="rgba(255,200,100,0.5)" strokeWidth="2" />
+      </svg>
+
+      {/* Central crest image — owl_agentic.png, scaled to r*1.4*0.8 */}
+      <img
+        src={`${ICONS}/owl_agentic.png`}
+        style={{
+          position: "absolute",
+          left: cx - orchestrator_r * 1.4 * 0.8,
+          top:  cy - orchestrator_r * 1.4 * 0.8,
+          width: orchestrator_r * 1.4 * 0.8 * 2,
+          height: orchestrator_r * 1.4 * 0.8 * 2,
+          pointerEvents: "none",
+        }}
+      />
+
+      {/* Node labels — small text below each disc */}
+      {nodes.map((n,i) => (
+        <div key={"l"+i} style={{
+          position: "absolute",
+          left: n.x - 50, top: n.y + 26,
+          width: 100, textAlign: "center",
+          fontSize: 9, color: "#9aa0a6",
+          textTransform: "uppercase", letterSpacing: 0.4,
+          pointerEvents: "none",
+        }}>{n.label}</div>
+      ))}
+    </div>
+  );
+}
+
+/* ============================================================
+   OrchestratorPane   //SOURCE: pages/agents_page.py:_build_roster (right pane)
+   Header + Reply/Thought toggle + scrollable code block
+   ============================================================ */
+function OrchestratorPane() {
+  const code = `* peripheral is active.
+"TEXT" — selected agent "Sg" agent name header.
+def __name__ == "TEAM": team is given a default
+config; each task starts with stalecaching agents
+that aren't named so OK to make a default
+"" stage.
+"TEAM" — selected agent "Sg" agent name header.
+"selected_path" — list left in place hue
+rendered well until 2025 mirrors pending agent
+to renew current 25.0 + every "ms" — pretty
+much "wow" then 7.
+
+if we
+to make the goal in running, all only is
+oriented should think the "I shall not
+fail-call.thought_method". because given by the
+last action from m,h is left protected.
+
+*Approvals strip* — slot left in place but
+rendered null until 2025 mirrors pending
+approvals to renew current 25.0 + every "ms" .
+Plant of "TEAM" in money there ${"`"}aux${"`"}.
+
+## "in use, fans of an
+If you doc surreal is running, OK only is
+mut. Of the team to do "I shall not
+fail-action then per pre fail and provided as
+"orchestrator-out.thought_method" called by
+fast token in m,h is left protected.
+
+Afterwards, the path is
+| start
+| sBach github.composers/d-tn/myll_text-Agentic`;
+
+  return (
+    <div style={{
+      display: "flex", flexDirection: "column",
+      height: "100%", background: "#0c0f1a",
+    }}>
+      <div style={{
+        padding: "8px 12px",
+        display: "flex", alignItems: "center", gap: 8,
+        borderBottom: "1px solid rgba(255,255,255,0.04)",
+      }}>
+        <span style={{
+          width: 8, height: 8, borderRadius: 4,
+          background: "#3cf26b",
+        }} />
+        <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>Orchestrator</div>
+      </div>
+      <div style={{ padding: "8px 10px", display: "flex", gap: 6 }}>
+        <button style={{
+          padding: "4px 12px", borderRadius: 6, border: "none",
+          background: "rgba(120,220,255,0.18)", color: "#7fdfff",
+          fontSize: 11, fontWeight: 600,
+        }}>↩ Reply</button>
+        <button style={{
+          padding: "4px 12px", borderRadius: 6, border: "none",
+          background: "rgba(220,180,255,0.18)", color: "#dcb0ff",
+          fontSize: 11, fontWeight: 600,
+        }}>💭 Thought</button>
+      </div>
+      <div style={{
+        flex: 1, margin: "0 10px 10px",
+        background: "rgba(0,0,0,0.35)", borderRadius: 8,
+        padding: "10px 12px", overflow: "hidden",
+        fontFamily: "Consolas, 'Cascadia Mono', monospace",
+        fontSize: 10.5, lineHeight: 1.5, color: "#e6e8eb",
+        whiteSpace: "pre-wrap",
+      }}>{code}</div>
+    </div>
+  );
+}
+
+/* ============================================================
+   AgentsPage — composes everything
+   Inner 1600x960 window:
+     ┌─ ModeBar (80h)
+     ├─ SubTabs (38h)
+     ├─ LocationRow (~52h)
+     ├─ GoalRow (~48h)
+     └─ Roster (fills) — splitter [Flow 280 | Canvas | Orchestrator 340]
+   ============================================================ */
+function AgentsPage() {
+  const INNER_W = 1600, INNER_H = 960;
+  const FLOW_W = 280, ORCH_W = 340;
+  const HEADER_H = 80 + 38 + 52 + 48; // 218
+  const CANVAS_W = INNER_W - FLOW_W - ORCH_W; // 980
+  const CANVAS_H = INNER_H - HEADER_H;        // 742
+
+  return (
+    <HybridFrame width={INNER_W} height={INNER_H}>
+      <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+        <ModeBar />
+        <SubTabs />
+        <LocationRow />
+        <GoalRow />
+        <div style={{ flex: 1, display: "flex", overflow: "hidden", background: "#06080d" }}>
+          {/* Left pane (Flow + SuperUser) */}
+          <div style={{ width: FLOW_W, display: "flex", flexDirection: "column",
+                        background: "#0c0f1a" }}>
+            <FlowHeader />
+            <DesignStudioCard />
+            <div style={{ flex: 1 }} />
+            <SuperUserCard />
+          </div>
+          {/* Splitter line */}
+          <div style={{ width: 8, background: "#1a1f2c" }} />
+          {/* Canvas */}
+          <div style={{ flex: 1 }}>
+            <TeamCanvas width={CANVAS_W} height={CANVAS_H} />
+          </div>
+          <div style={{ width: 8, background: "#1a1f2c" }} />
+          {/* Orchestrator pane */}
+          <div style={{ width: ORCH_W }}>
+            <OrchestratorPane />
+          </div>
+        </div>
+      </div>
+    </HybridFrame>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<AgentsPage />);
+</script>
+</body>
+</html>

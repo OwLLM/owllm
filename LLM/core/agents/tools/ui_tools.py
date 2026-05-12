@@ -699,25 +699,36 @@ def _ui_compare_screenshots(args: Mapping[str, Any]) -> str:
     canvas_h = h + header
     canvas = Image.new("RGBA", (canvas_w, canvas_h), (12, 16, 30, 255))
 
-    # Pixel-wise diff with brighter-side coloring.
-    diff_overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    ref_px = ref.load()
-    rep_px = rep.load()
-    diff_px = diff_overlay.load()
+    # Pixel-wise diff with brighter-side coloring. Step through raw
+    # bytes rather than `load()[x,y]` because some Pillow versions
+    # return a packed int for palette/CMYK source images even after
+    # `convert("RGBA")` — building the overlay byte-by-byte is both
+    # faster and side-steps that ambiguity.
     threshold = 12
     differing = 0
     total = w * h
-    for y in range(h):
-        for x in range(w):
-            r1, g1, b1, _ = ref_px[x, y]
-            r2, g2, b2, _ = rep_px[x, y]
-            local = max(abs(r1 - r2), abs(g1 - g2), abs(b1 - b2))
-            if local > threshold:
-                differing += 1
-                if (r2 + g2 + b2) > (r1 + g1 + b1):
-                    diff_px[x, y] = (255, 64, 64, 180)
-                else:
-                    diff_px[x, y] = (64, 128, 255, 180)
+    raw_a = ref.tobytes()  # RGBA, 4 bytes per pixel
+    raw_b = rep.tobytes()
+    overlay = bytearray(total * 4)  # initialized to all zeros = transparent
+    for i in range(0, len(raw_a), 4):
+        dr = abs(raw_a[i]     - raw_b[i])
+        dg = abs(raw_a[i + 1] - raw_b[i + 1])
+        db = abs(raw_a[i + 2] - raw_b[i + 2])
+        if max(dr, dg, db) > threshold:
+            differing += 1
+            sum_a = raw_a[i] + raw_a[i + 1] + raw_a[i + 2]
+            sum_b = raw_b[i] + raw_b[i + 1] + raw_b[i + 2]
+            if sum_b > sum_a:
+                overlay[i]     = 255
+                overlay[i + 1] = 64
+                overlay[i + 2] = 64
+                overlay[i + 3] = 180
+            else:
+                overlay[i]     = 64
+                overlay[i + 1] = 128
+                overlay[i + 2] = 255
+                overlay[i + 3] = 180
+    diff_overlay = Image.frombytes("RGBA", (w, h), bytes(overlay))
 
     base = rep.copy()
     base.putalpha(128)

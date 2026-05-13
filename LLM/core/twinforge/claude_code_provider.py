@@ -78,9 +78,13 @@ def _run_claude_cli(prompt: str, model: str,
             f"claude CLI exceeded timeout={timeout}s"
         )
     if proc.returncode != 0:
+        # Claude CLI sometimes prints its error to stdout (e.g. auth /
+        # quota / refusal messages) and exits 1 with empty stderr.
+        # Surface both so failures are diagnosable.
         raise RuntimeError(
             f"claude CLI exited {proc.returncode}. "
-            f"stderr: {(proc.stderr or '').strip()[:400]}"
+            f"stderr: {(proc.stderr or '').strip()[:400]} | "
+            f"stdout: {(proc.stdout or '').strip()[:400]}"
         )
     return (proc.stdout or "").strip()
 
@@ -374,17 +378,24 @@ class ClaudeCodeCoder:
             vlm_summary=vlm_summary or "(none)",
             source_context_section=source_context or "",
         )
+        # CLI cwd = repo root (find the nearest ancestor containing a
+        # `.git/` dir). Deep working directories like
+        # apps/owllm-desktop/ui/src/pages/ caused Claude CLI to exit 1
+        # with empty stderr on 2026-05-13 — rooting at the repo top
+        # both fixes that and gives Read/Edit/grep their natural anchor.
+        cli_cwd: Path = target_path.parent
+        for p in [target_path.parent, *target_path.parent.parents]:
+            if (p / ".git").exists():
+                cli_cwd = p
+                break
         try:
             stdout = _run_claude_cli(
                 prompt, model=self.model, timeout=self.timeout,
-                # CLI cwd = the replica's dir, so relative asset URLs in
-                # the HTML (../../../icons/…) resolve to real files when
-                # the model wants to peek at them.
-                cwd=str(target_path.parent),
+                cwd=str(cli_cwd),
             )
         except Exception as exc:  # noqa: BLE001
             return [CodeFix(
-                description=f"claude-code CLI failed: {exc}",
+                description=f"claude-code CLI failed: {exc} (cwd={cli_cwd})",
                 file_path=str(working), patch="",
                 is_full_file=False, confidence="low",
             )]

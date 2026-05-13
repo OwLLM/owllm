@@ -174,10 +174,19 @@ function TeamCanvas({ width, height }: CanvasProps) {
             <stop offset="45%" stopColor="rgba(255,180,80,0.40)" />
             <stop offset="100%" stopColor="rgba(255,180,80,0)" />
           </radialGradient>
+          {/* Spoke gradient — cyan(α=110) → blue(α=30), mirrors the
+              QLinearGradient(_NEON_CYAN→_NEON_BLUE) at
+              agent_team_canvas.py:853-857. */}
+          {nodes.map((n,i) => (
+            <linearGradient key={"spg"+i} id={`spokeGrad${i}`} gradientUnits="userSpaceOnUse" x1={cx} y1={cy} x2={n.x} y2={n.y}>
+              <stop offset="0%" stopColor="rgba(92,240,255,0.43)" />
+              <stop offset="100%" stopColor="rgba(116,164,255,0.12)" />
+            </linearGradient>
+          ))}
         </defs>
         <circle cx={cx} cy={cy} r={ring_radius} fill="none" stroke="rgba(120,220,255,0.25)" strokeWidth="1.6" strokeDasharray="4 4" />
         {nodes.map((n,i) => (
-          <line key={"sp"+i} x1={cx} y1={cy} x2={n.x} y2={n.y} stroke={n.active?"rgba(120,220,255,0.55)":"rgba(120,220,255,0.12)"} strokeWidth={n.active?1.6:1.2} />
+          <line key={"sp"+i} x1={cx} y1={cy} x2={n.x} y2={n.y} stroke={n.active?"rgba(120,220,255,0.55)":`url(#spokeGrad${i})`} strokeWidth={n.active?1.6:1.3} />
         ))}
         {nodes.map((n,i) => (
           <circle key={"h"+i} cx={n.x} cy={n.y} r={n.active?52:38} fill={n.active?"url(#haloActive)":"url(#halo)"} />
@@ -259,9 +268,9 @@ last action from m,h is left protected.`;
         {messages.map((m, i) => (
           <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
             <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d" }}>{m.role[0]}</div>
-            <div style={{ flex:1, background:"rgba(255,255,255,0.04)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"6px 10px" }}>
+            <div style={{ flex:1, background:"rgba(255,255,255,0.04)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"4px 10px" }}>
               <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:2 }}>{m.role}</div>
-              <div style={{ fontSize:12, color:"#dadcdf", lineHeight:1.4 }}>{m.text}</div>
+              <div style={{ fontSize:12, color:"#dadcdf", lineHeight:1.3 }}>{m.text}</div>
             </div>
           </div>
         ))}

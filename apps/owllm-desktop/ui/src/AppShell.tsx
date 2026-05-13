@@ -70,7 +70,7 @@ function HybridFrame({ children, width, height }: {
 
 function ModeBar() {
   const buttonStyle: React.CSSProperties = { height:50, padding:"0 14px", background:"linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))", color:"#fff", border:"1px solid rgba(120,220,255,0.0)", borderRadius:6, fontSize:13, fontWeight:700, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", lineHeight:1.05, gap:2 };
-  const activeButton: React.CSSProperties = { ...buttonStyle, border:"1px solid #d4af37", background:"linear-gradient(180deg, rgba(80,80,110,0.9), rgba(50,50,80,0.9))" };
+  const activeButton: React.CSSProperties = { ...buttonStyle, border:"1px solid #ffd080", background:"linear-gradient(180deg, rgba(80,70,50,0.85), rgba(60,50,30,0.85))" };
   const colorBtn = (c: string): React.CSSProperties => ({ width:18, height:18, borderRadius:3, background:c, border:"none", padding:0 });
   return (
     <div data-ui="AppHeader" style={{ height:80, display:"grid", gridTemplateColumns:"auto 1fr auto", alignItems:"center", padding:"10px 50px 10px 20px", gap:16, background:"#1c2244" }}>

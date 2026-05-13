@@ -8,6 +8,7 @@
 // header + tabs come from here.
 import React, { useState } from "react";
 import AgentsPage from "./pages/AgentsPage";
+import HomePage from "./pages/HomePage";
 import ServerPage from "./pages/ServerPage";
 import StubPage from "./pages/StubPage";
 
@@ -135,7 +136,7 @@ export default function AppShell() {
   switch (tab) {
     case "agents":   body = <AgentsPage />; break;
     case "server":   body = <ServerPage />; break;
-    case "home":     body = <StubPage label="Home"     hint="Project dashboard + quick actions." />; break;
+    case "home":     body = <HomePage />; break;
     case "bridges":  body = <StubPage label="Bridges"  hint="LLM Studio / external runtime bridges." />; break;
     case "studio":   body = <StubPage label="Studio"   hint="Model picker, fine-tuning, gamification." />; break;
     case "code":     body = <StubPage label="Code"     hint="File browser + diff + multi-file edit." />; break;

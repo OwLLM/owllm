@@ -1,4 +1,4 @@
-html, body { margin: 0; padding: 0; background: #06080d; font-family: "Segoe UI", "Inter", system-ui, sans-serif; color: #e6e8eb; overflow: hidden; }
+html, body { margin: 0; padding: 0; background: #06080d; font-family: "Segoe UI", "Inter", system-ui, sans-serif; color: #e6e8eb; overflow: auto; }
 * { box-sizing: border-box; }
 button { font-family: inherit; cursor: pointer; font-weight: bold; }
 

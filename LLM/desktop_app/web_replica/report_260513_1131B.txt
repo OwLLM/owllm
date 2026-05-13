@@ -1,0 +1,96 @@
+OVERALL pixel diff: 45.36%
+Per-element regions matched: 43
+
+ #  id                           kind        qual     pix   SSIM    ΔE  notes
+--------------------------------------------------------------------------------------------------------------
+ 1  FlowTitle                    text        3.9   96.9%  0.06  35.2  pos off by (+10, +2)
+ 2  HeaderApiKeyLabel            text        6.1   97.6%  0.06  26.8  size src=551x17 tgt=280x17; pos off by (
+ 3  suAvatar                     text        8.5   87.5%  0.09  60.5  size src=28x28 tgt=32x32; pos off by (+3
+ 4  AgenticTeamToggle            button     14.7   99.9%  0.29  38.1  size src=147x50 tgt=137x38; pos off by (
+ 5  GoalRunBtn                   button     19.1   97.8%  0.37  77.8  pos off by (+16, -4); text src='Run' tgt
+ 6  FlowViewToggleBtn            button     23.2   99.0%  0.34  21.3  pos off by (-10, +2)
+ 7  FineTuningToggle             button     23.4   97.3%  0.33  21.0  size src=129x50 tgt=124x38; pos off by (
+ 8  FlowLayoutBtn                button     23.7   99.6%  0.34  19.8  pos off by (-6, +2)
+ 9  AdvancedToggle               button     23.9   97.3%  0.34  21.1  size src=114x50 tgt=112x38; pos off by (
+10  DarkModeBtn                  container  24.0   97.3%  0.35  21.8  size src=70x50 tgt=89x38; text in target
+11  FlowDeleteEdgeBtn            button     24.5   99.6%  0.34  18.6  
+12  SandboxBadge                 text       24.6   98.5%  0.37  21.6  size src=86x32 tgt=77x32; pos off by (+1
+13  GamifyToggle                 button     24.8   95.6%  0.34  20.4  size src=91x50 tgt=103x38; pos off by (-
+14  FlowReverseEdgeBtn           button     24.8   99.3%  0.36  19.7  
+15  HeaderVramLabel              text       25.7   92.8%  0.35  21.1  size src=567x17 tgt=280x17; pos off by (
+16  FlowRefreshBtn               button     25.9  100.0%  0.35  17.8  pos off by (-8, +2)
+17  SysInfoBlock                 container  25.9   94.3%  0.36  20.8  size src=567x60 tgt=280x57; pos off by (
+18  TrustWritesCheckbox          other      26.4   41.5%  0.13  26.3  size src=94x16 tgt=83x16; pos off by (+1
+19  AppTitle                     text       27.2   40.1%  0.18  33.7  pos off by (+136, -3)
+20  AppHeader                    container  30.7   83.6%  0.41  22.2  size src=1592x80 tgt=1600x80; font_size_
+21  HeaderServersLabel           text       30.8   96.5%  0.44  18.2  size src=567x18 tgt=280x17; pos off by (
+22  suHint                       text       36.4   30.6%  0.10  14.1  size src=190x74 tgt=220x14; pos off by (
+23  BridgeBadge                  text       44.8   57.6%  0.42  13.1  size src=91x32 tgt=92x32; pos off by (+9
+24  SuperUserCard                other      50.0   36.8%  0.42  15.2  size src=320x280 tgt=320x154; pos off by
+25  suName                       text       54.5   24.0%  0.50  20.3  size src=190x26 tgt=220x17; pos off by (
+26  LocationLabel                text       54.5   21.8%  0.39  12.5  pos off by (+9, -4); text src='Location'
+27  RosterLeft                   container  57.0   36.1%  0.54  13.9  
+28  WorkspaceStack               container  57.2   31.9%  0.51  13.4  size src=1554x665 tgt=1600x665; pos off 
+29  AgentTeamCanvas              canvas     58.9   30.3%  0.54  13.8  
+30  CanvasStack                  container  58.9   30.3%  0.54  13.8  size src=1014x607 tgt=1014x624
+31  OrchestratorLogTabs          container  59.0   20.3%  0.46  12.0  size src=532x543 tgt=532x605; pos off by
+32  RosterRight                  container  59.3   22.7%  0.48  11.5  
+33  OrchestratorReplyView        input      60.7   16.0%  0.44   9.4  size src=530x495 tgt=512x427; pos off by
+34  GoalTelemetryBtn             button     61.3   18.8%  0.56  16.5  
+35  LocationInput                input      61.4   16.5%  0.53  14.8  pos off by (+13, -4); text missing in ta
+36  LogHeader                    text       62.8   20.7%  0.57  14.0  size src=532x26 tgt=532x60; text missing
+37  GoalCancelBtn                button     64.0   21.1%  0.54   9.6  size src=98x38 tgt=82x38; pos off by (+1
+38  GoalVoiceBtn                 button     65.3   35.2%  0.66  10.3  text src='🔈' tgt='🔈 ▾'; font_weight norm
+39  ProjectCombo                 list       69.7   11.8%  0.66  14.4  size src=346x32 tgt=240x32; pos off by (
+40  RosterSplitter               container  73.4   30.8%  0.76   8.3  size src=1554x665 tgt=8x665; pos off by 
+41  LocationBrowseBtn            button     74.2   12.5%  0.69   9.9  size src=79x32 tgt=80x32; pos off by (+1
+42  GoalAttachBtn                button     74.6    9.1%  0.70  11.2  
+43  GoalInput                    input      79.6    8.1%  0.77   9.7  size src=1165x38 tgt=1181x38; text missi
+
+Unmatched in source (10): ColorSelector, Frame, FullscreenBtn, ProjectStrip, suChat, suIconBtn, suReply, suSend, suTrust, windowBorderContainer
+Unmatched in target (2): StudioFxThumbnail, UnsyncedBadge
+
+PROVIDERS
+  perception · configured: claude-code · claude-opus-4-7
+  perception · status:     ran via claude-code · claude-opus-4-7
+  generation · configured: claude-code · claude-opus-4-7
+  generation · status:     disabled (enable_coder=False)
+
+PERCEIVED VISUAL DIFFERENCES (VLM)
+----------------------------------------------------------------------
+ 1. [high] Agent node icons are missing — SOURCE shows distinct character/avatar artwork inside each node, TARGET shows blank/empty circles
+    location: central agent graph (all peripheral nodes)
+    fix:      Render the per-agent avatar/character image inside each AgentNode circle instead of an empty fill
+ 2. [high] Central Orchestrator node has wrong visual — SOURCE shows a distinctive crowned/armored owl character, TARGET shows a generic blue glowing globe/network sphere
+    location: centre of agent graph
+    fix:      Swap the central node art to the Orchestrator character asset used in the Qt app
+ 3. [med] Top tab bar is missing the small coloured icon glyphs next to each tab label (Dash, Advanced, Fine Tuning, Agents Team, Gamify)
+    location: top navigation tabs
+    fix:      Add the per-tab icon images to the left of each tab label
+ 4. [med] Left rail layout differs — SOURCE has an 'Active Studio Team' card with three small avatars + Studio Team / Chained badges, TARGET shows only a small 'Studio Team' tag with a single avatar
+    location: left pane, top card
+    fix:      Render full team-roster card with member avatar row and the 'Studio Team' + 'Chained' chips
+ 5. [med] Right pane chat is missing the assistant's code block — SOURCE shows a syntax-highlighted Python code snippet, TARGET shows only plain text/markdown
+    location: right chat pane, assistant message
+    fix:      Render fenced ```python blocks with the syntax-highlighter component (dark code background, coloured tokens)
+ 6. [med] Header status pills differ — SOURCE shows three pills (Servers, RPI key, VRAM) with coloured dots, TARGET shows the same labels but layout/spacing/icons read differently and 'wllm-local' tag is missing
+    location: top-right header
+    fix:      Match the three-pill header layout including the 'wllm-local' provider chip and coloured status dots
+ 7. [med] Toolbar row above the graph is missing several controls — SOURCE shows Cost/action, Confirmed, Browse, Trust areas, JSON/MD toggle, etc.; TARGET omits or relabels them
+    location: row directly above graph canvas
+    fix:      Add the full toolbar set: cost/usage badge, Trust toggle, Browse, JSON/MD format selector
+ 8. [low] User message bubble in right pane has different styling — SOURCE shows a dark card with 'Super User' header and avatar block, TARGET shows a flatter speech-bubble row
+    location: right chat pane, user message
+    fix:      Use the same dark card component with header row (avatar + name + timestamp) as the Qt version
+ 9. [low] Chat composer area below the user card is missing — SOURCE shows a 'Reply to the team…' input with attach/send buttons, TARGET shows no composer in the left pane
+    location: bottom of left pane
+    fix:      Add the message composer input + 'auto-approve tool requests' checkbox under the user card
+10. [low] Node labels read differently — SOURCE has labels like 'Frontend Coder', 'Workshop One', 'Workshop Writer' with subtitles; TARGET uses simplified single-word labels and is missing the subtitle line
+    location: around each agent node
+    fix:      Render two-line node captions (role + provider/model subtitle) instead of single label
+11. [low] Graph edges look thinner/duller in TARGET — SOURCE has bright cyan connection lines with subtle glow; TARGET edges are dim grey
+    location: graph canvas connections
+    fix:      Increase edge stroke width and apply the cyan glow filter used in the Qt SVG
+12. [low] Run/Cancel button group on the right has different proportions — SOURCE shows a wider green Run pill with chevron, TARGET shows a smaller flat 'Run' button
+    location: top-right of graph canvas
+    fix:      Match button width/height and the rounded-pill style with leading icon

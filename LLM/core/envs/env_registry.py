@@ -793,6 +793,16 @@ class EnvRegistry:
         # Escape paths for Python string
         model_path_escaped = str(model_path).replace("\\", "\\\\").replace('"', '\\"')
         adapter_dir_escaped = str(adapter_dir).replace("\\", "\\\\").replace('"', '\\"') if adapter_dir else None
+        # Path to the bundled llama-tokenize.exe (fresh in-tree binary that
+        # knows newer archs like gemma3/gemma4 that older llama-cpp-python
+        # wheels reject). Used as the primary GGUF probe — falls back to
+        # the python wheel backends only if the binary isn't bundled.
+        try:
+            _llm_root = Path(__file__).resolve().parent.parent.parent  # .../LLM/
+            _bundled_tokenize_path = str(_llm_root / "runtime" / "llama.cpp" / "llama-tokenize.exe")
+        except Exception:
+            _bundled_tokenize_path = ""
+        bundled_tokenize_escaped = _bundled_tokenize_path.replace("\\", "\\\\").replace('"', '\\"')
         
         probe_code = f"""
 import sys
@@ -837,26 +847,58 @@ try:
             or os.environ.get("LLM_GGUF_DEEP_PROBE", "0").strip().lower() in ("1", "true", "yes")
         )
 
-        # 1) llama-cpp-python backend
+        # 0) Bundled llama-tokenize.exe — PREFERRED probe.
+        # Why first: the python wheel `llama-cpp-python` ships its OWN
+        # llama.dll, which lags upstream llama.cpp by months. On 2026-05-13
+        # the bundled binary (build 8648) knows arch ``gemma4`` while the
+        # wheel (0.3.2) only knows ``gemma``/``gemma2`` — wheel returns
+        # "Failed to load model from file" for any newer arch, and the
+        # probe falsely flags the GGUF as corrupt. The bundled binary
+        # is what `llama-server.exe` (the actual chat runtime) is built
+        # from, so if the binary can load the file, chat will work.
+        # ``llama-tokenize`` is the cheapest load-test: parses metadata,
+        # builds tokenizer, exits — no inference, no KV cache. Sub-second
+        # for a 5 GB Q4 model.
         try:
-            from llama_cpp import Llama
-            if deep_probe:
-                # Full constructor probe (no vocab_only shortcut) to catch
-                # metadata incompatibilities like missing rope/yarn keys.
-                _ = Llama(
-                    model_path=str(gguf_path),
-                    n_ctx=64,
-                    n_threads=1,
-                    n_gpu_layers=0,
-                    verbose=False,
+            _bundled_tokenize = r"{bundled_tokenize_escaped}"
+            if _bundled_tokenize and Path(_bundled_tokenize).exists():
+                import subprocess as _bt_sp
+                _bt_proc = _bt_sp.run(
+                    [_bundled_tokenize, "-m", str(gguf_path), "-p", "probe", "--ids"],
+                    capture_output=True, text=True, timeout=60,
                 )
-                print("GGUF_BACKEND: llama-cpp-python(deep)")
-                backend_ready = True
+                if _bt_proc.returncode == 0:
+                    print("GGUF_BACKEND: bundled-llama-tokenize")
+                    backend_ready = True
+                else:
+                    _bt_err = ((_bt_proc.stderr or "") + " " + (_bt_proc.stdout or ""))[:400].strip()
+                    backend_errors.append("bundled-llama-tokenize: exit " + str(_bt_proc.returncode) + " " + _bt_err)
             else:
-                print("GGUF_BACKEND: llama-cpp-python(import)")
-                backend_ready = True
+                backend_errors.append("bundled-llama-tokenize: binary not bundled at " + _bundled_tokenize)
         except Exception as e:
-            backend_errors.append("llama-cpp-python: " + str(e))
+            backend_errors.append("bundled-llama-tokenize: " + str(e))
+
+        # 1) llama-cpp-python backend (fallback when bundled binary isn't available)
+        if not backend_ready:
+            try:
+                from llama_cpp import Llama
+                if deep_probe:
+                    # Full constructor probe (no vocab_only shortcut) to catch
+                    # metadata incompatibilities like missing rope/yarn keys.
+                    _ = Llama(
+                        model_path=str(gguf_path),
+                        n_ctx=64,
+                        n_threads=1,
+                        n_gpu_layers=0,
+                        verbose=False,
+                    )
+                    print("GGUF_BACKEND: llama-cpp-python(deep)")
+                    backend_ready = True
+                else:
+                    print("GGUF_BACKEND: llama-cpp-python(import)")
+                    backend_ready = True
+            except Exception as e:
+                backend_errors.append("llama-cpp-python: " + str(e))
 
         # 2) ctransformers backend
         # Explicitly turn off ctransformers by default if it's causing missing arch issues to bubble up poorly
@@ -2656,16 +2698,62 @@ sys.exit(0)
         
         errors = []
         for pkg in packages:
-            log(f"Installing missing package: {pkg}...")
             try:
                 pkg_norm = (pkg or "").strip().lower()
-                # Prefer calling the venv pip directly (more reliable and avoids PATH issues)
-                pip_exe = self._get_env_pip_executable(python_exe) or Path(str(python_exe))
-                if str(pip_exe).endswith("python.exe") or str(pip_exe).endswith("python"):
-                    # Fallback if pip executable not found
-                    pip_cmd = [str(python_exe), "-m", "pip", "install", pkg]
-                else:
-                    pip_cmd = [str(pip_exe), "install", pkg]
+            except Exception:
+                pkg_norm = ""
+
+            # Idempotency guard. The self-heal orchestrator can call
+            # this function as a "repair" step after a probe fails — but
+            # the probe failure isn't always caused by the package
+            # actually being missing (transient import warnings,
+            # mis-classified errors, version-mismatch noise, etc.). If
+            # we blindly re-invoke pip when the package is already
+            # present and pip then fails for some unrelated reason
+            # (e.g. a transient network blip), the env's last_error
+            # gets overwritten with that unrelated failure and a
+            # WORKING env is demoted to BROKEN.
+            #
+            # Skip the install when ``importlib.metadata`` already
+            # reports the package as installed. We make an exception
+            # for ``llama-cpp-python`` because that path enforces a
+            # MINIMUM version (see the version check after a
+            # successful install below), so "already installed but
+            # too old" is a real failure shape we want to repair.
+            if pkg_norm and pkg_norm not in {"llama-cpp-python"}:
+                # Try the as-typed name AND a few normalised forms
+                # (pip names like ``auto-gptq`` import as ``auto_gptq``).
+                already = (
+                    _get_installed_version(pkg_norm)
+                    or _get_installed_version(pkg_norm.replace("-", "_"))
+                    or _get_installed_version(pkg_norm.replace("_", "-"))
+                )
+                if already:
+                    log(f"Package '{pkg}' already installed ({already}); skipping.")
+                    continue
+
+            log(f"Installing missing package: {pkg}...")
+            try:
+                # (continued from idempotency guard above)
+                # ALWAYS invoke pip via ``python -m pip``. Reasons:
+                #
+                # The auto-generated ``Scripts\pip.exe`` shim on Windows
+                # is a launcher EXE that embeds the venv's Python path
+                # and re-execs it. When the venv directory contains ``--``
+                # (e.g. ``tf-cu121-t25-bnb-edge--dedicated--google__gemma-4-E4B-it``),
+                # is unusually long, or sits on a path with characters
+                # the launcher's argv parsing dislikes, the shim exits
+                # with code 1 BEFORE pip itself runs — and produces zero
+                # stdout/stderr to capture. The healthcheck then sees
+                # "pip exited with code 1 and produced no output", flips
+                # the env to BROKEN, and a subsequent re-onboard hits
+                # the same launcher and fails identically.
+                #
+                # ``python -m pip`` bypasses the shim and runs pip as a
+                # module of the same interpreter — works everywhere pip
+                # is installed, regardless of path quirks. This is also
+                # pip's own documented recommendation.
+                pip_cmd = [str(python_exe), "-m", "pip", "install", pkg]
                 timeout_s = 300
                 env = None
 
@@ -2691,19 +2779,16 @@ sys.exit(0)
                     "peft": "peft>=0.18.0,<1.0",
                     "safetensors": "safetensors>=0.4.5,<0.6",
                 }
-                # Keep protobuf unpinned (many packages depend on it, and pinning can backfire)
+                # Keep protobuf unpinned (many packages depend on it, and pinning can backfire).
+                # All branches below use ``python -m pip`` for the same
+                # reason as the default branch above — see the long
+                # comment there for the silent-launcher-failure rationale.
                 if not is_edge and pkg_norm in pinned_map_stable:
                     spec = pinned_map_stable[pkg_norm]
-                    if str(pip_exe).endswith("python.exe") or str(pip_exe).endswith("python"):
-                        pip_cmd = [str(python_exe), "-m", "pip", "install", "--upgrade", "--no-deps", spec]
-                    else:
-                        pip_cmd = [str(pip_exe), "install", "--upgrade", "--no-deps", spec]
+                    pip_cmd = [str(python_exe), "-m", "pip", "install", "--upgrade", "--no-deps", spec]
                 elif is_edge and pkg_norm in {"transformers", "tokenizers", "accelerate", "peft", "safetensors"}:
                     # Edge envs intentionally track latest; still avoid dependency churn.
-                    if str(pip_exe).endswith("python.exe") or str(pip_exe).endswith("python"):
-                        pip_cmd = [str(python_exe), "-m", "pip", "install", "--upgrade", "--no-deps", pkg_norm]
-                    else:
-                        pip_cmd = [str(pip_exe), "install", "--upgrade", "--no-deps", pkg_norm]
+                    pip_cmd = [str(python_exe), "-m", "pip", "install", "--upgrade", "--no-deps", pkg_norm]
                 
                 # GPTQ: install from HuggingFace pre-built CUDA wheels to avoid source-build crashes.
                 # Source builds often leave "CUDA extension not installed" and cause 0xC0000005.

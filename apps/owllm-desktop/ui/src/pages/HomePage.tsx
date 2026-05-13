@@ -114,42 +114,78 @@ function LauncherCard({ spec }: { spec: LauncherSpec }) {
   );
 }
 
-// _create_status_row equivalent — main.py uses these for both
-// System Status (CPU/GPU/RAM) and Software Requirements (Python/
-// PyTorch/CUDA). Same visual shape: emoji + name + ok/x dot + value.
-type StatusRow = { icon: string; name: string; ok: boolean | "warn"; value: string };
+// _create_status_row equivalent — main.py:4845-4867. Visual shape:
+//   "<emoji> <bold label>"  ......(stretch)......  "<detail>"
+// Label color = green when ok, red when not (Qt _get_status_color);
+// detail color = #888 in dark mode (main.py:4862).
+type StatusRow = {
+  // Leading emoji from Qt (e.g. 🐍, 🔥, 🎮, 📦). Empty string means
+  // the label itself already starts with one (e.g. GPU rows).
+  icon: string;
+  // The full label text after the emoji prefix.
+  name: string;
+  // true = ✅ green; false = ❌ red; "warn" = orange (Qt fallback path
+  // in the "No GPUs detected" branch uses #FF9800 — main.py:7697).
+  ok: boolean | "warn";
+  // Right-aligned detail string (e.g. "Version 3.12.7").
+  value: string;
+};
+
+function statusColor(ok: boolean | "warn"): string {
+  // Qt _get_status_color(True/False) returns theme green/red; "warn"
+  // mirrors the No-GPU fallback at main.py:7697 (#FF9800).
+  if (ok === true) return "#22c55e";
+  if (ok === "warn") return "#FF9800";
+  return "#ef4444";
+}
 
 function StatusList({ rows }: { rows: StatusRow[] }) {
+  // No row backgrounds in Qt — sys_frame is "background: transparent"
+  // (main.py:7606). Spacing 6-8 px (main.py:7608, 7779).
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-      {rows.map((r, i) => (
-        <div key={i} style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          padding: "8px 12px",
-          background: "rgba(255,255,255,0.03)",
-          borderRadius: 8,
-          fontSize: 13,
-        }}>
-          <span style={{ fontSize: 18 }}>{r.icon}</span>
-          <span style={{ color: "#dadcdf", fontWeight: 600, flex: 1 }}>{r.name}</span>
-          <span style={{ color: "#9aa0a6", fontSize: 12 }}>{r.value}</span>
-          <span style={{
-            display: "inline-block",
-            width: 10, height: 10,
-            borderRadius: 5,
-            background: r.ok === true ? "#22c55e"
-                      : r.ok === "warn" ? "#fbbf24"
-                      : "#ef4444",
-            boxShadow: `0 0 6px ${
-              r.ok === true ? "#22c55e"
-              : r.ok === "warn" ? "#fbbf24"
-              : "#ef4444"
-            }`,
-          }} />
-        </div>
-      ))}
+      {rows.map((r, i) => {
+        const okStr = r.ok === true ? "✅" : r.ok === "warn" ? "⚠️" : "❌";
+        return (
+          <div key={i} style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            fontSize: 14,
+          }}>
+            <span style={{
+              color: statusColor(r.ok),
+              fontWeight: 700,
+            }}>
+              {okStr} {r.icon ? `${r.icon} ` : ""}{r.name}
+            </span>
+            <span style={{ flex: 1 }} />
+            <span style={{ color: "#888", fontSize: 12 }}>{r.value}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Per-GPU detail row used inside the System Status panel — mirrors
+// main.py:7641-7693 (GPU N: <name>  ........  💾 <memory>).
+function GpuRow({ index, name, memory }: { index: number; name: string; memory: string }) {
+  return (
+    <div style={{
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      fontSize: 13,
+      paddingLeft: 22, // align under the ✅ in the parent header
+    }}>
+      <span style={{ color: "#dadcdf" }}>
+        <b>GPU {index}:</b> {name}
+      </span>
+      <span style={{ flex: 1 }} />
+      <span style={{ color: "#dadcdf" }}>
+        💾 <b>{memory}</b>
+      </span>
     </div>
   );
 }
@@ -157,21 +193,46 @@ function StatusList({ rows }: { rows: StatusRow[] }) {
 function PanelHeader({ icon, label, action }: {
   icon: string; label: string; action?: React.ReactNode;
 }) {
+  // Qt header is 18pt bold (main.py:7566, 7769). 18pt ≈ 24 px.
   return (
     <div style={{
       display: "flex",
       alignItems: "center",
       marginBottom: 14,
+      gap: 12,
     }}>
       <div style={{
         flex: 1,
-        fontSize: 22,
+        fontSize: 24,
         fontWeight: 700,
         color: "#e6e8eb",
       }}>
         {icon} {label}
       </div>
       {action}
+    </div>
+  );
+}
+
+// Status: Ready row at the bottom of the System Status panel —
+// main.py:7739-7758. "Status:" in normal weight + "Ready" in large
+// bold green (16pt) on the right.
+function ReadyRow() {
+  return (
+    <div style={{
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      marginTop: 6,
+    }}>
+      <span style={{ color: "#dadcdf", fontWeight: 700 }}>Status:</span>
+      <span style={{
+        color: "#22c55e", // _get_status_color(True) — main.py:7748
+        fontSize: 22,     // 16pt ≈ 22 px (main.py:7749)
+        fontWeight: 700,
+      }}>
+        Ready
+      </span>
     </div>
   );
 }
@@ -226,20 +287,41 @@ function WelcomeCircle() {
 
 export default function HomePage() {
   // Static placeholders — will wire to engine_get('/v1/hardware') in
-  // a follow-up. The structure matches the Qt page so the visual
-  // port is faithful even before the data is live.
-  const systemStatus: StatusRow[] = [
-    { icon: "💻", name: "CPU",  ok: true,   value: "AMD Ryzen 9 · 16 cores" },
-    { icon: "🎮", name: "GPU",  ok: true,   value: "NVIDIA RTX 4090 · 24 GB" },
-    { icon: "🧠", name: "RAM",  ok: true,   value: "64 GB / 128 GB" },
-    { icon: "💾", name: "Disk", ok: "warn", value: "412 GB free" },
+  // a follow-up. The structure matches the Qt page (main.py:7561-7903)
+  // verbatim so the visual port is faithful before data is live.
+
+  // GPU block — Qt builds: "✅ N GPUs detected" header, then a per-GPU
+  // row for each detected GPU (main.py:7621-7693). When no GPUs, the
+  // fallback at main.py:7695-7706 is "⚠️ No GPUs detected" + a
+  // "Training will use CPU (slower)" muted line.
+  const gpus: { name: string; memory: string }[] = [
+    { name: "NVIDIA GeForce RTX 4090", memory: "24 GB" },
   ];
-  const requirements: StatusRow[] = [
-    { icon: "🐍", name: "Python 3.8+",   ok: true,  value: "3.12.7" },
-    { icon: "🔥", name: "PyTorch (CUDA)", ok: true,  value: "2.5.1+cu121" },
-    { icon: "⚡", name: "CUDA drivers",   ok: true,  value: "12.6" },
-    { icon: "📦", name: "llama.cpp",     ok: true,  value: "bundled" },
-  ];
+  const gpuOk = gpus.length > 0;
+
+  // CPU row — Qt: "CPU: <cpu_name>" left, "<cores> cores | 💾 <ram> GB
+  // RAM" right (main.py:7715-7735). Format both sides exactly.
+  const cpuName = "AMD Ryzen 9 7950X";
+  const cpuCores = 16;
+  const ramGb = 128;
+
+  // Software requirements — Qt builds exactly four rows:
+  //   Python 3.8+  / PyTorch (CUDA) / CUDA Drivers / Dependencies
+  // (main.py:7788-7873). The Fix Issues button only renders when
+  // pytorch_ok is False OR deps_ok is False (main.py:7876).
+  const pythonOk = true;
+  const pythonVer = "3.11.13";
+  const pytorchOk = true;
+  const pytorchVer = "2.5.1+cu121";
+  const cudaOk = true;
+  const cudaVer = "12.6";
+  const depsOk = true;
+  const depsMsg = depsOk
+    ? "Core packages found (full validation runs via Fix Issues)" // main.py:7862
+    : "Missing: torch, transformers"; // main.py:7864 shape
+
+  const showFixBtn = !pytorchOk || !depsOk;
+
   return (
     <div style={{ padding: "30px 40px", height: "100%", overflow: "auto" }}>
       <div
@@ -261,36 +343,123 @@ export default function HomePage() {
             icon="📊"
             label="System Status"
             action={
-              <button className="ghost-btn" style={{ height: 32 }}>
+              <button
+                data-ui="RefreshGpuBtn"
+                style={{
+                  // refreshGpuBtn styling — main.py:7577-7597.
+                  background: "linear-gradient(180deg, rgba(60,60,80,0.4), rgba(40,40,60,0.4))",
+                  border: "1px solid rgba(127,223,255,0.30)",
+                  borderRadius: 12,
+                  padding: "8px 15px",
+                  color: "#fff",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
                 🔄 Refresh Hardware Detection
               </button>
             }
           />
-          <StatusList rows={systemStatus} />
+
+          {/* GPU detection block — mirrors main.py:7621-7706 */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {gpuOk ? (
+              <>
+                <div style={{ color: "#22c55e", fontWeight: 700, fontSize: 14 }}>
+                  ✅ {gpus.length} GPU{gpus.length > 1 ? "s" : ""} detected
+                </div>
+                {gpus.map((g, i) => (
+                  <GpuRow key={i} index={i} name={g.name} memory={g.memory} />
+                ))}
+              </>
+            ) : (
+              <>
+                <div style={{ color: "#FF9800", fontWeight: 700, fontSize: 14 }}>
+                  ⚠️ No GPUs detected
+                </div>
+                <div style={{ color: "#dadcdf", fontSize: 13 }}>
+                  Training will use CPU (slower)
+                </div>
+              </>
+            )}
+
+            {/* CPU row — main.py:7714-7736 */}
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              fontSize: 13,
+              marginTop: 4,
+            }}>
+              <span style={{ color: "#dadcdf" }}>
+                <b>CPU:</b> {cpuName}
+              </span>
+              <span style={{ flex: 1 }} />
+              <span style={{ color: "#dadcdf" }}>
+                <b>{cpuCores} cores</b>
+                {ramGb ? <> | <b>💾 {ramGb} GB RAM</b></> : null}
+              </span>
+            </div>
+
+            <ReadyRow />
+          </div>
         </GridPanel>
 
         <GridPanel accent="rgba(127,223,255,0.30)">
           <PanelHeader icon="⚙️" label="Software Requirements & Setup" />
-          <StatusList rows={requirements} />
+          {/* Four rows in Qt order — main.py:7788-7873.
+              Detail strings reproduce Qt's f-strings verbatim. */}
+          <StatusList rows={[
+            {
+              icon: "🐍",
+              name: "Python 3.8+",
+              ok: pythonOk,
+              value: pythonOk ? `Version ${pythonVer}` : "Not found",
+            },
+            {
+              icon: "🔥",
+              name: "PyTorch (CUDA)",
+              ok: pytorchOk,
+              value: pytorchOk
+                ? `Version ${pytorchVer}`
+                : "CPU-only version installed", // or "Not installed"
+            },
+            {
+              icon: "🎮",
+              name: "CUDA Drivers",
+              ok: cudaOk,
+              value: cudaOk ? `Version ${cudaVer}` : "Not found",
+            },
+            {
+              icon: "📦",
+              name: "Dependencies",
+              ok: depsOk,
+              value: depsMsg,
+            },
+          ]} />
           <div style={{ flex: 1 }} />
-          <button
-            data-ui="FixIssuesBtn"
-            style={{
-              marginTop: 12,
-              height: 38,
-              padding: "0 18px",
-              borderRadius: 10,
-              border: "none",
-              background: "linear-gradient(180deg, #4a6cff, #3a55cc)",
-              color: "#fff",
-              fontSize: 14,
-              fontWeight: 700,
-              alignSelf: "flex-start",
-              cursor: "pointer",
-            }}
-          >
-            🛠 Fix Issues
-          </button>
+          {showFixBtn && (
+            <button
+              data-ui="FixIssuesBtn"
+              style={{
+                // Magenta gradient from main.py:7878-7900.
+                marginTop: 12,
+                minHeight: 42,
+                padding: "10px 18px",
+                borderRadius: 12,
+                border: "2px solid #f093fb",
+                background: "linear-gradient(180deg, rgba(240,147,251,0.6), rgba(245,87,108,0.6))",
+                color: "#fff",
+                fontSize: 17, // 13pt ≈ 17 px (main.py:7886)
+                fontWeight: 700,
+                alignSelf: "flex-start",
+                cursor: "pointer",
+              }}
+            >
+              🛠️ Fix Issues (Recommended)
+            </button>
+          )}
         </GridPanel>
 
         <WelcomeCircle />

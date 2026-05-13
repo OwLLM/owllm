@@ -1,83 +1,183 @@
 // BridgesPage — ported from LLM/desktop_app/pages/bridges_page.py
-// (BridgesPage._build_ui, line 589). Two cards side by side:
-//
-//   ┌─ ✈ Telegram ─────────┐  ┌─ 🟢 WhatsApp ─────────┐
-//   │ icon + title + status│  │ icon + title + status │
-//   │ Bot token            │  │ Phone number ID       │
-//   │ Allowed chat IDs     │  │ Access token          │
-//   │ Project select       │  │ Webhook verify token  │
-//   │ Auto-approve         │  │ Webhook URL           │
-//   │ ▶ Start              │  │ ▶ Start               │
-//   └──────────────────────┘  └───────────────────────┘
+// (BridgesPage._build_ui, line 589). Two cards side by side, one per
+// bridge. Each card mirrors the Qt _TelegramCard / _WhatsAppCard:
+// inputs, allow-list, project selector, auto-approve, separate Start
+// and Stop buttons, live status text and a colored status dot.
 //
 // Inputs are visual-only for now; saving runs through
 // load_bridge_configs / save_telegram_config / save_whatsapp_config
 // in the PySide6 version — those'll become /v1/bridges endpoints.
+//
+// NOTE: the Qt source uses literal unicode glyphs for the brand icons
+// (Telegram '✈' line 103, WhatsApp '💬' line 381), not PNGs — there
+// is no owl_telegram.png / owl_whatsapp.png in icons/Page_icons/, so
+// we keep the same glyphs.
 import React, { useState } from "react";
 
 type BridgeStatus = "stopped" | "running" | "error";
 
+// Qt: 10x10 dot, running color #4caf50, stopped color #5a6376
+// (bridges_page.py:350-352).
 function StatusDot({ state }: { state: BridgeStatus }) {
-  const color = state === "running" ? "#22c55e"
+  const color = state === "running" ? "#4caf50"
               : state === "error"   ? "#ef4444"
-              : "#9aa0a6";
+              : "#5a6376";
   return (
     <span style={{
       width: 10, height: 10, borderRadius: 5,
-      background: color, boxShadow: `0 0 6px ${color}`,
+      background: color,
       flexShrink: 0,
+      alignSelf: "flex-start",
     }} />
   );
 }
 
+// Qt _section_label (bridges_page.py:65): #9aa0a6, 11px, weight 600,
+// letter-spacing 0.6, uppercase, margin-top 4.
 function SectionLabel({ text }: { text: string }) {
   return (
     <div style={{
       color: "#9aa0a6", fontSize: 11, fontWeight: 600,
       letterSpacing: 0.6, textTransform: "uppercase",
-      marginTop: 8,
+      marginTop: 4,
     }}>
       {text}
     </div>
   );
 }
 
+// Qt _INPUT_STYLE (bridges_page.py:57): border-radius 8, padding 0/12,
+// font-size 13, min-height 30.
 function BridgeInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
   return (
     <input
       {...props}
       style={{
-        height: 36, padding: "0 12px",
+        height: 30, padding: "0 12px",
         borderRadius: 8, border: "1px solid rgba(255,255,255,0.10)",
         background: "rgba(0,0,0,0.30)",
         color: "#dadcdf", fontSize: 13,
+        outline: "none",
         ...props.style,
       }}
     />
   );
 }
 
+// Qt project_combo (bridges_page.py:158): min-height 32, palette(base)
+// background, 8px radius, 12px padding, 13px font.
+function ProjectSelect(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <select
+      {...props}
+      style={{
+        height: 32, padding: "0 12px",
+        borderRadius: 8, border: "1px solid rgba(255,255,255,0.10)",
+        background: "rgba(0,0,0,0.30)", color: "#fff", fontSize: 13,
+        outline: "none",
+        ...props.style,
+      }}
+    />
+  );
+}
+
+// Qt button heights: setMinimumHeight(34) (bridges_page.py:185, 193).
+const BTN_HEIGHT = 34;
+
+// Telegram start button style — Qt line 186: background #52b4ff.
+function startButtonStyle(accent: string, hoverAccent: string, disabled: boolean): React.CSSProperties {
+  return {
+    height: BTN_HEIGHT,
+    background: disabled ? "#2c313c" : accent,
+    color: disabled ? "#777" : "#fff",
+    border: "none",
+    borderRadius: 8,
+    padding: "0 18px",
+    fontWeight: 600,
+    fontSize: 13,
+    cursor: disabled ? "default" : "pointer",
+    flex: 1,
+    // hover handled inline via onMouseEnter/Leave below — kept simple
+    // and inline to match the file's existing approach.
+    transition: "background 120ms",
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    ...(hoverAccent ? {} : {}),
+  };
+}
+
+// Stop button style — Qt line 193-199: rgba(255,140,140,0.12) bg,
+// #ff8c8c text, no border, 8px radius, 18px padding.
+function stopButtonStyle(disabled: boolean): React.CSSProperties {
+  return {
+    height: BTN_HEIGHT,
+    background: disabled ? "transparent" : "rgba(255,140,140,0.12)",
+    color: disabled ? "#555" : "#ff8c8c",
+    border: "none",
+    borderRadius: 8,
+    padding: "0 18px",
+    fontWeight: 600,
+    fontSize: 13,
+    cursor: disabled ? "default" : "pointer",
+  };
+}
+
+// ---------------------------------------------------------------------
+// Telegram card — Qt _TelegramCard (bridges_page.py:80)
+// ---------------------------------------------------------------------
 function TelegramCard() {
   const [token, setToken] = useState("");
   const [chatIds, setChatIds] = useState("");
-  const [project, setProject] = useState("psm");
+  const [project, setProject] = useState("");
   const [autoApprove, setAutoApprove] = useState(false);
   const [status, setStatus] = useState<BridgeStatus>("stopped");
+  // Last update_id surfaced in the running status text (Qt line 277-279).
+  const [lastUpdateId] = useState<number>(0);
+  const [lastError] = useState<string>("");
+  // Chats that have actually messaged the bot since start — Qt line
+  // 307-335 renders these as clickable chips that add to the allow-list.
+  const [seenIds] = useState<number[]>([]);
+
+  // Qt accent for Telegram (#52b4ff, lines 106/112/186).
   const accent = "#52b4ff";
+
+  const running = status === "running";
+  const existingIds = new Set(
+    chatIds.split(",").map(s => s.trim()).filter(Boolean).map(Number).filter(n => !Number.isNaN(n))
+  );
+  const allowListActive = existingIds.size > 0;
+
+  // Status text — mirrors _TelegramCard.refresh_status (Qt 270-294).
+  const statusText = running
+    ? `Running — last update_id ${lastUpdateId}.${allowListActive ? " · allow-list active" : " · open (any chat)"}`
+    : (lastError ? `Stopped — last error: ${lastError}` : "Stopped.");
+
+  function addSeenId(cid: number) {
+    if (existingIds.has(cid)) return;
+    const next = [...existingIds, cid].map(String).join(", ");
+    setChatIds(next);
+  }
+
   return (
     <div style={{
       flex: 1,
-      background: "linear-gradient(180deg, #1c2540 0%, #131726 60%, #0e1220 100%)",
+      // Qt gradient: stop:0 #1c2540 → stop:0.6 palette(base) → stop:1 palette(base)
+      // palette(base) under dark theme is roughly #0e1117 (page bg).
+      background: "linear-gradient(180deg, #1c2540 0%, #0e1117 60%, #0e1117 100%)",
+      border: "none",
       borderRadius: 16,
+      // Qt outer margins (20, 18, 20, 18), spacing 10.
       padding: "18px 20px",
-      boxShadow: "0 4px 24px rgba(0,0,0,0.40)",
+      // Qt _add_shadow: blur 24, y-offset 4, alpha 110.
+      boxShadow: "0 4px 24px rgba(0,0,0,0.43)",
       display: "flex",
       flexDirection: "column",
-      gap: 6,
+      gap: 10,
+      minWidth: 0,
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ fontSize: 26, color: accent }}>✈</div>
-        <div style={{ flex: 1 }}>
+      {/* Header — icon + title + subtitle + dot (Qt 101-121). */}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+        <div style={{ fontSize: 26, color: accent, lineHeight: 1, fontFamily: "Segoe UI Symbol, sans-serif" }}>✈</div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: accent }}>Telegram</div>
           <div style={{ fontSize: 11, color: "#9aa0a6" }}>
             Bot token from @BotFather · long-poll · no public URL needed
@@ -86,9 +186,16 @@ function TelegramCard() {
         <StatusDot state={status} />
       </div>
 
+      {/* Bot token (Qt 124-129). */}
       <SectionLabel text="Bot token" />
-      <BridgeInput type="password" placeholder="123456:ABCdefGhi…" value={token} onChange={e => setToken(e.target.value)} />
+      <BridgeInput
+        type="password"
+        placeholder="123456:ABCdefGhi…"
+        value={token}
+        onChange={e => setToken(e.target.value)}
+      />
 
+      {/* Allowed chat IDs — OPTIONAL with explicit empty hint (Qt 133-139). */}
       <SectionLabel text="Allowed chat IDs (optional)" />
       <BridgeInput
         placeholder="(leave empty = any chat allowed) · 123456789, 987654321"
@@ -96,21 +203,48 @@ function TelegramCard() {
         onChange={e => setChatIds(e.target.value)}
       />
 
+      {/* Seen-chat-ID chip row — hidden until at least one ID is
+          discovered (Qt 144-154, 307-335). Caps at first 5 chips. */}
+      {seenIds.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{ color: "#9aa0a6", fontSize: 11 }}>Seen chats:</span>
+          {seenIds.slice(0, 5).map(cid => {
+            const known = existingIds.has(cid);
+            return (
+              <button
+                key={cid}
+                disabled={known}
+                onClick={() => addSeenId(cid)}
+                style={{
+                  // Qt chip: rgba(82,180,255,0.15) bg, #52b4ff text,
+                  // 10px radius, padding 2/8, font-size 10 (Qt 322-326).
+                  background: "rgba(82,180,255,0.15)",
+                  color: accent,
+                  border: "none",
+                  borderRadius: 10,
+                  padding: "2px 8px",
+                  fontSize: 10,
+                  cursor: known ? "default" : "pointer",
+                  opacity: known ? 0.6 : 1,
+                }}
+              >
+                {cid}{known ? "  ✓" : "  + add"}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Project (Qt 156-163). */}
       <SectionLabel text="Project" />
-      <select
-        value={project}
-        onChange={e => setProject(e.target.value)}
-        style={{
-          height: 36, padding: "0 12px",
-          borderRadius: 8, border: "1px solid rgba(255,255,255,0.10)",
-          background: "rgba(0,0,0,0.30)", color: "#fff", fontSize: 13,
-        }}
-      >
+      <ProjectSelect value={project} onChange={e => setProject(e.target.value)}>
+        <option value="">(no project)</option>
         <option value="psm">Product Studio Test</option>
         <option value="bug_hunter">Bug Hunter — esp-flash</option>
-      </select>
+      </ProjectSelect>
 
-      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#dadcdf", marginTop: 8 }}>
+      {/* Auto-approve — Qt label verbatim (line 167). */}
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#dadcdf" }}>
         <input
           type="checkbox"
           checked={autoApprove}
@@ -121,130 +255,207 @@ function TelegramCard() {
       </label>
 
       <div style={{ flex: 1 }} />
-      <div style={{ fontSize: 11, color: "#9aa0a6", marginTop: 4 }}>
-        {status === "running" ? "Running. Listening for messages." : "Stopped."}
+
+      {/* Status text — Qt 174-179. */}
+      <div style={{ fontSize: 11, color: "#9aa0a6" }}>{statusText}</div>
+
+      {/* Two buttons side by side — Qt 182-202. */}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          disabled={running}
+          onClick={() => setStatus("running")}
+          style={startButtonStyle(accent, "#62c4ff", running)}
+        >
+          Start
+        </button>
+        <button
+          disabled={!running}
+          onClick={() => setStatus("stopped")}
+          style={stopButtonStyle(!running)}
+        >
+          Stop
+        </button>
       </div>
-      <button
-        onClick={() => setStatus(status === "running" ? "stopped" : "running")}
-        style={{
-          height: 38, marginTop: 6,
-          background: status === "running"
-            ? "rgba(239,68,68,0.18)"
-            : "linear-gradient(180deg, #4CAF50, #388E3C)",
-          color: status === "running" ? "#ff8c8c" : "#fff",
-          border: status === "running" ? "1px solid rgba(239,68,68,0.55)" : "none",
-          borderRadius: 8,
-          fontSize: 13, fontWeight: 700,
-          cursor: "pointer",
-        }}
-      >
-        {status === "running" ? "⏹ Stop" : "▶ Start"}
-      </button>
     </div>
   );
 }
 
+// ---------------------------------------------------------------------
+// WhatsApp card — Qt _WhatsAppCard (bridges_page.py:360)
+// ---------------------------------------------------------------------
 function WhatsAppCard() {
-  const [phoneId,     setPhoneId]     = useState("");
-  const [accessToken, setAccessToken] = useState("");
+  const [token, setToken] = useState("");
+  const [phoneId, setPhoneId] = useState("");
   const [verifyToken, setVerifyToken] = useState("");
-  const [webhookUrl,  setWebhookUrl]  = useState("");
-  const [project,     setProject]     = useState("psm");
+  const [senders, setSenders] = useState("");
+  // Qt port range 1024-65535, default 8911 (bridges_page.py:430-431).
+  const [port, setPort] = useState<number>(8911);
+  const [project, setProject] = useState("");
   const [autoApprove, setAutoApprove] = useState(false);
-  const [status,      setStatus]      = useState<BridgeStatus>("stopped");
-  const accent = "#25d366";
+  const [status, setStatus] = useState<BridgeStatus>("stopped");
+  const [lastError] = useState<string>("");
+
+  // Qt accent for WhatsApp (#10a37f, lines 390/460).
+  const accent = "#10a37f";
+
+  const running = status === "running";
+
+  // Status text mirrors _WhatsAppCard.refresh_status (Qt 535-551).
+  const bind = `0.0.0.0:${port}`;
+  const statusText = running
+    ? `Listening on ${bind} — point your tunnel at this port and use it as the webhook callback URL in Meta.`
+    : (lastError ? `Stopped — last error: ${lastError}` : "Stopped.");
+
   return (
     <div style={{
       flex: 1,
-      background: "linear-gradient(180deg, #103027 0%, #15211c 60%, #0e1614 100%)",
+      // Qt gradient: stop:0 #16322a → stop:0.6 palette(base) → stop:1 palette(base) (line 364-370).
+      background: "linear-gradient(180deg, #16322a 0%, #0e1117 60%, #0e1117 100%)",
+      border: "none",
       borderRadius: 16,
       padding: "18px 20px",
-      boxShadow: "0 4px 24px rgba(0,0,0,0.40)",
+      boxShadow: "0 4px 24px rgba(0,0,0,0.43)",
       display: "flex",
       flexDirection: "column",
-      gap: 6,
+      gap: 10,
+      minWidth: 0,
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <div style={{ fontSize: 26, color: accent }}>🟢</div>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: accent }}>WhatsApp Cloud API</div>
+      {/* Header — Qt 380-399. WhatsApp uses the 💬 glyph (no color tint
+          on the icon — Qt line 384). */}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+        <div style={{ fontSize: 26, lineHeight: 1, fontFamily: "Segoe UI Emoji, sans-serif" }}>💬</div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: accent }}>WhatsApp</div>
           <div style={{ fontSize: 11, color: "#9aa0a6" }}>
-            Public webhook · point cloudflared / ngrok at the local port
+            Meta Cloud API · webhook needs a public URL (cloudflared/ngrok)
           </div>
         </div>
         <StatusDot state={status} />
       </div>
 
-      <SectionLabel text="Phone number ID" />
-      <BridgeInput placeholder="From Meta App → WhatsApp → API setup" value={phoneId} onChange={e => setPhoneId(e.target.value)} />
+      {/* Qt uses a QGridLayout from line 402 for the WhatsApp fields:
+          Row 0-1: Access token (full width)
+          Row 2-3: Phone number ID | Verify token
+          Row 4-5: Allowed senders (full width)
+          Row 6-7: Webhook port | Project */}
 
+      {/* Access token (Qt 406-410). */}
       <SectionLabel text="Access token" />
-      <BridgeInput type="password" placeholder="EAAB…" value={accessToken} onChange={e => setAccessToken(e.target.value)} />
+      <BridgeInput
+        type="password"
+        value={token}
+        onChange={e => setToken(e.target.value)}
+      />
 
-      <SectionLabel text="Webhook verify token" />
-      <BridgeInput placeholder="any-shared-secret" value={verifyToken} onChange={e => setVerifyToken(e.target.value)} />
+      {/* Phone number ID + Verify token side by side (Qt 412-419). */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel text="Phone number ID" />
+          <BridgeInput value={phoneId} onChange={e => setPhoneId(e.target.value)} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel text="Verify token" />
+          <BridgeInput value={verifyToken} onChange={e => setVerifyToken(e.target.value)} />
+        </div>
+      </div>
 
-      <SectionLabel text="Webhook URL (paste back into Meta App)" />
-      <BridgeInput placeholder="https://your-tunnel.example.com/webhook" value={webhookUrl} onChange={e => setWebhookUrl(e.target.value)} />
+      {/* Allowed senders — comma-separated E.164 (Qt 421-425). */}
+      <SectionLabel text="Allowed senders (comma E.164)" />
+      <BridgeInput
+        placeholder="393331234567, 14155551234"
+        value={senders}
+        onChange={e => setSenders(e.target.value)}
+      />
 
-      <SectionLabel text="Project" />
-      <select
-        value={project}
-        onChange={e => setProject(e.target.value)}
-        style={{
-          height: 36, padding: "0 12px",
-          borderRadius: 8, border: "1px solid rgba(255,255,255,0.10)",
-          background: "rgba(0,0,0,0.30)", color: "#fff", fontSize: 13,
-        }}
-      >
-        <option value="psm">Product Studio Test</option>
-        <option value="customer_support">Customer Support — support</option>
-      </select>
+      {/* Webhook port + Project (Qt 427-440). */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel text="Webhook port" />
+          <BridgeInput
+            type="number"
+            min={1024}
+            max={65535}
+            value={port}
+            onChange={e => {
+              const n = parseInt(e.target.value, 10);
+              if (!Number.isNaN(n)) setPort(Math.max(1024, Math.min(65535, n)));
+            }}
+          />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel text="Project" />
+          <ProjectSelect value={project} onChange={e => setProject(e.target.value)}>
+            <option value="">(no project)</option>
+            <option value="psm">Product Studio Test</option>
+            <option value="customer_support">Customer Support — support</option>
+          </ProjectSelect>
+        </div>
+      </div>
 
-      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#dadcdf", marginTop: 8 }}>
+      {/* Auto-approve — Qt label verbatim (line 443). No parenthetical
+          here, unlike Telegram. */}
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#dadcdf" }}>
         <input
           type="checkbox"
           checked={autoApprove}
           onChange={e => setAutoApprove(e.target.checked)}
           style={{ accentColor: accent }}
         />
-        Auto-approve every tool call (only for personal bots)
+        Auto-approve every tool call
       </label>
 
       <div style={{ flex: 1 }} />
-      <div style={{ fontSize: 11, color: "#9aa0a6", marginTop: 4 }}>
-        {status === "running" ? "Running. Webhook receiving." : "Stopped."}
+
+      <div style={{ fontSize: 11, color: "#9aa0a6" }}>{statusText}</div>
+
+      {/* Buttons — Qt 455-475. */}
+      <div style={{ display: "flex", gap: 8 }}>
+        <button
+          disabled={running}
+          onClick={() => setStatus("running")}
+          style={startButtonStyle(accent, "#22b88f", running)}
+        >
+          Start
+        </button>
+        <button
+          disabled={!running}
+          onClick={() => setStatus("stopped")}
+          style={stopButtonStyle(!running)}
+        >
+          Stop
+        </button>
       </div>
-      <button
-        onClick={() => setStatus(status === "running" ? "stopped" : "running")}
-        style={{
-          height: 38, marginTop: 6,
-          background: status === "running"
-            ? "rgba(239,68,68,0.18)"
-            : "linear-gradient(180deg, #4CAF50, #388E3C)",
-          color: status === "running" ? "#ff8c8c" : "#fff",
-          border: status === "running" ? "1px solid rgba(239,68,68,0.55)" : "none",
-          borderRadius: 8,
-          fontSize: 13, fontWeight: 700,
-          cursor: "pointer",
-        }}
-      >
-        {status === "running" ? "⏹ Stop" : "▶ Start"}
-      </button>
     </div>
   );
 }
 
+// ---------------------------------------------------------------------
+// Page — Qt BridgesPage._build_ui (bridges_page.py:589)
+// ---------------------------------------------------------------------
 export default function BridgesPage() {
   return (
-    <div style={{ padding: "24px 28px", height: "100%", display: "flex", flexDirection: "column", gap: 14, overflow: "auto" }}>
-      <div style={{ fontSize: 22, fontWeight: 800, color: "#fff" }}>Bridges</div>
-      <div style={{ fontSize: 12, color: "#9aa0a6", maxWidth: 900, lineHeight: 1.5 }}>
+    <div style={{
+      // Qt margins (28, 24, 28, 24), outer spacing 18 (bridges_page.py:591-592).
+      padding: "24px 28px",
+      height: "100%",
+      display: "flex",
+      flexDirection: "column",
+      gap: 18,
+      overflow: "auto",
+      background: "#0e1117",
+    }}>
+      {/* Title — Qt 594-598: 22pt bold #fff. */}
+      <div style={{ fontSize: 22, fontWeight: 700, color: "#fff" }}>Bridges</div>
+
+      {/* Subtitle — Qt 600-608 verbatim. */}
+      <div style={{ fontSize: 12, color: "#9aa0a6", lineHeight: 1.5 }}>
         Drive your agent team from a phone. Telegram needs only a bot
         token; WhatsApp Cloud API needs a public webhook URL — point a
         tunnel (cloudflared / ngrok) at the local port and copy that
         URL into the Meta App webhook config.
       </div>
+
+      {/* Two cards side by side, spacing 18 (Qt 610-616). */}
       <div style={{ flex: 1, display: "flex", gap: 18, minHeight: 0 }}>
         <TelegramCard />
         <WhatsAppCard />

@@ -136,40 +136,70 @@ function TeamCanvas({ width, height }: CanvasProps) {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, []);
-  const max_radius = Math.max(120, Math.min(w, h * 1.5) * 0.30);
-  const inner_offset = 130;
-  const max_depth = 1;
-  const step = (max_radius - inner_offset) / Math.max(1, max_depth);
-  const ring_radius = inner_offset + step;
-  const N = 8;
-  const arc_span = (Math.PI * 2) * (340 / 360);
-  const start_angle = -Math.PI / 2 - arc_span / 2;
-  // Each ring node = one agent in the active Team (mirrors the team JSON
-  // schema at LLM/core/agents/teams/*.json: every agent has a name + an
-  // `icon` field like "owl:owl_coder" that resolves to
-  // /Page_icons/Agents/owl_coder.png; the Qt `agent_team_canvas.py`
-  // paints those PNGs on top of the colored disc — we do the same here.
-  type Node = { x: number; y: number; label: string; icon: string; active: boolean };
-  const roster: { label: string; icon: string }[] = [
-    { label: "Workshop Writer",  icon: "Agents/owl_documentation.png" },
-    { label: "Onboarded Coder",  icon: "Agents/owl_coder.png" },
-    { label: "Backend Server",   icon: "owl_server.png" },
-    { label: "UI Designer",      icon: "Agents/owl_webapp.png" },
-    { label: "Product Studio",   icon: "owl_studio_square.png" },
-    { label: "Knowledge Doctor", icon: "Agents/owl_researcher.png" },
-    { label: "Frontend Coder",   icon: "Agents/owl_asssitant.png" },
-    { label: "Workshop Owl",     icon: "Agents/owl_critic.png" },
+  // LAYER_COLORS — IDENTICAL to agent_team_canvas.py:178-187. Index =
+  // BFS layer from the orchestrator (0=gold, 1=green, 2=blue, …). The
+  // orbital diagram and the graph view share this palette.
+  const LAYER_COLORS = [
+    "#f1c44a", "#48d486", "#3aa0ff", "#ee5b5b",
+    "#ff9a3a", "#9aa3b2", "#a578ff", "#ff79c4",
   ];
+  // Per-agent BFS depth from the orchestrator — mirrors _depth in
+  // agent_team_canvas.py:225-235. Real edges from set_edges() aren't
+  // wired into the React replica yet, so we fake two depth tiers
+  // among the 8 roster entries so the multi-ring shape reads
+  // correctly (suggestion from finding [0]).
+  const roster: { label: string; icon: string; depth: number; active: boolean }[] = [
+    { label: "Workshop Writer",  icon: "Agents/owl_documentation.png", depth: 1, active: true  },
+    { label: "Backend Server",   icon: "owl_server.png",               depth: 1, active: false },
+    { label: "UI Designer",      icon: "Agents/owl_webapp.png",        depth: 1, active: true  },
+    { label: "Knowledge Doctor", icon: "Agents/owl_researcher.png",    depth: 1, active: false },
+    { label: "Onboarded Coder",  icon: "Agents/owl_coder.png",         depth: 2, active: false },
+    { label: "Product Studio",   icon: "owl_studio_square.png",        depth: 2, active: false },
+    { label: "Frontend Coder",   icon: "Agents/owl_asssitant.png",     depth: 2, active: false },
+    { label: "Workshop Owl",     icon: "Agents/owl_critic.png",        depth: 2, active: false },
+  ];
+  // Group by depth — mirrors by_depth in agent_team_canvas.py:653-657.
+  const depthMap = new Map<number, typeof roster>();
+  for (const r of roster) {
+    if (!depthMap.has(r.depth)) depthMap.set(r.depth, []);
+    depthMap.get(r.depth)!.push(r);
+  }
+  const sortedDepths = Array.from(depthMap.keys()).sort((a, b) => a - b);
+  const max_depth = sortedDepths[sortedDepths.length - 1];
+  // Geometry — mirrors agent_team_canvas.py:668-685. inner_offset is
+  // the centre clearance; step is the gap between consecutive rings,
+  // floor-clamped so rings don't collapse onto the orchestrator. The
+  // 90 floor is from Qt at zoom=1.
+  const canvas_cap = Math.min(w - card_reserve, h) * 0.45;
+  const max_radius = Math.min(canvas_cap, Math.min(w, h) * 0.45);
+  const inner_offset = 130;
+  let step = (max_radius - inner_offset) / Math.max(1, max_depth);
+  if (step < 90) step = 90;
+  // Cached ring radii for the visible-ring painter — agent_team_canvas.py:683.
+  const ring_radii = sortedDepths.map(d => inner_offset + step * d);
+  const arc_span = (Math.PI * 2) * (340 / 360);
+  type Node = { x: number; y: number; label: string; icon: string; active: boolean; depth: number };
   const nodes: Node[] = [];
-  for (let i = 0; i < N; i++) {
-    const a = start_angle + (i + 0.5) * arc_span / N;
-    nodes.push({
-      x: cx + ring_radius * Math.cos(a),
-      y: cy + ring_radius * Math.sin(a),
-      label: roster[i].label,
-      icon:  roster[i].icon,
-      active: (i === 0 || i === 3),
-    });
+  // Distribute agents on each ring across a 340° arc — mirrors
+  // agent_team_canvas.py:705-714. theta = arc_span*(i+1)/count - π/2.
+  for (const depth of sortedDepths) {
+    const ringAgents = depthMap.get(depth)!;
+    const count = ringAgents.length;
+    const r = inner_offset + step * depth;
+    for (let i = 0; i < count; i++) {
+      const a = ringAgents[i];
+      const theta = count === 1
+        ? -Math.PI / 2
+        : (arc_span * (i + 1)) / count - Math.PI / 2;
+      nodes.push({
+        x: cx + r * Math.cos(theta),
+        y: cy + r * Math.sin(theta),
+        label: a.label,
+        icon:  a.icon,
+        active: a.active,
+        depth,
+      });
+    }
   }
   const NODE_R = 22; // matches `r = 22 + 4*pulse` in agent_team_canvas.py:1081
   // Scale off canvas — matches agent_team_canvas.py where r ≈ 0.18 * min(w,h)
@@ -177,9 +207,20 @@ function TeamCanvas({ width, height }: CanvasProps) {
   // dominates the centre without overlapping the agent ring.
   const orchestrator_r = Math.max(48, Math.min(w, h) * 0.10);
   // Rotating gold arc-rings — outer #f1c44a at r_out, inner #ffd76a at 0.7*r_out.
-  // Three 60° arcs at offsets 0/130/240 on each ring; rings counter-rotate.
+  // Three 60° arcs at offsets 0/130/240 on the outer ring; three 70° arcs
+  // at 0/110/230 on the inner ring (counter-rotating). Mirrors
+  // agent_team_canvas.py:996-1011.
   const arc_r_out = orchestrator_r * 1.7;
   const arc_r_in  = orchestrator_r * 1.2;
+  // Alpha pulse on the arcs + core — mirrors agent_team_canvas.py:1017
+  // (pulse = 0.5 + 0.5*sin(phase*2.6)). Drives the arc opacity envelope
+  // and the gold-core gradient stops so the hub feels alive instead of
+  // statically printed.
+  const pulse = 0.5 + 0.5 * Math.sin((arcPhase * Math.PI) / 180);
+  const arcAlphaOut = 0.78 + 0.14 * pulse;
+  const arcAlphaIn  = 0.70 + 0.16 * pulse;
+  const coreInner = 0.43 + 0.27 * pulse;  // Qt: 110+70*pulse → /255
+  const coreMid   = 0.20 + 0.16 * pulse;  // Qt: 50+40*pulse → /255
   const arcPath = (rad: number, startDeg: number, sweepDeg: number) => {
     const a0 = (startDeg * Math.PI) / 180;
     const a1 = ((startDeg + sweepDeg) * Math.PI) / 180;
@@ -209,6 +250,16 @@ function TeamCanvas({ width, height }: CanvasProps) {
             <stop offset="45%" stopColor="rgba(255,180,80,0.40)" />
             <stop offset="100%" stopColor="rgba(255,180,80,0)" />
           </radialGradient>
+          {/* Soft glowing gold core — translucent so the inner arc-ring
+              shows through. Replaces the opaque #1a2240 hub disk that was
+              masking the inner arc. Mirrors the QRadialGradient core at
+              agent_team_canvas.py:1018-1024 — alpha-pulsed gold center
+              fading to transparent. */}
+          <radialGradient id="orchCore" cx="50%" cy="50%" r="50%">
+            <stop offset="0%"   stopColor={`rgba(255,215,106,${coreInner.toFixed(3)})`} />
+            <stop offset="60%"  stopColor={`rgba(241,196,74,${coreMid.toFixed(3)})`} />
+            <stop offset="100%" stopColor="rgba(10,13,20,0)" />
+          </radialGradient>
           {/* Spoke gradient — cyan(α=110) → blue(α=30), mirrors the
               QLinearGradient(_NEON_CYAN→_NEON_BLUE) at
               agent_team_canvas.py:853-857. */}
@@ -219,7 +270,27 @@ function TeamCanvas({ width, height }: CanvasProps) {
             </linearGradient>
           ))}
         </defs>
-        <circle cx={cx} cy={cy} r={ring_radius} fill="none" stroke="rgba(120,220,255,0.25)" strokeWidth="1.6" strokeDasharray="4 4" />
+        {/* Visible orbit rings — one per BFS depth, coloured with
+            LAYER_COLORS so ring 1 = green, ring 2 = blue, etc. Pen
+            1.6px, alpha ~200/255. Mirrors _paint_rings in
+            agent_team_canvas.py:823-840. */}
+        {ring_radii.map((r, idx) => {
+          const layer = idx + 1;
+          const col = LAYER_COLORS[layer % LAYER_COLORS.length];
+          return (
+            <circle
+              key={"ring" + idx}
+              cx={cx}
+              cy={cy}
+              r={r}
+              fill="none"
+              stroke={col}
+              strokeOpacity={200 / 255}
+              strokeWidth={1.6}
+              strokeLinecap="round"
+            />
+          );
+        })}
         {nodes.map((n,i) => (
           <line key={"sp"+i} x1={cx} y1={cy} x2={n.x} y2={n.y} stroke={n.active?"rgba(120,220,255,0.55)":`url(#spokeGrad${i})`} strokeWidth={n.active?1.6:1.3} />
         ))}
@@ -233,8 +304,10 @@ function TeamCanvas({ width, height }: CanvasProps) {
           <circle key={"r"+i} cx={n.x} cy={n.y} r={28} fill="none" stroke="rgba(127,223,255,0.7)" strokeWidth="1.4" />
         ))}
         <circle cx={cx} cy={cy} r={orchestrator_r * 3.0} fill="url(#orchHalo)" />
-        <circle cx={cx} cy={cy} r={orchestrator_r * 1.5} fill="#1a2240" stroke="rgba(255,200,100,0.75)" strokeWidth="2.5" />
-        <circle cx={cx} cy={cy} r={orchestrator_r * 1.5} fill="none" stroke="rgba(127,223,255,0.45)" strokeWidth="1.2" strokeDasharray="3 3" />
+        {/* Translucent gold core replaces the opaque #1a2240 hub disk so
+            the inner arc-ring is no longer masked. The thin gold outline
+            stays for definition. */}
+        <circle cx={cx} cy={cy} r={orchestrator_r * 1.5} fill="url(#orchCore)" stroke="rgba(255,200,100,0.55)" strokeWidth="1.6" />
         {/* Outer rotating gold arc-ring — 3 × 60° arcs at offsets 0/130/240. */}
         {[0, 130, 240].map((off, i) => (
           <path
@@ -244,19 +317,20 @@ function TeamCanvas({ width, height }: CanvasProps) {
             strokeWidth={2.6}
             strokeLinecap="round"
             fill="none"
-            opacity={0.92}
+            opacity={arcAlphaOut}
           />
         ))}
-        {/* Inner rotating gold arc-ring — counter-rotates. */}
-        {[0, 130, 240].map((off, i) => (
+        {/* Inner rotating gold arc-ring — 3 × 70° arcs at offsets 0/110/230,
+            counter-rotating. Mirrors agent_team_canvas.py:1010-1011. */}
+        {[0, 110, 230].map((off, i) => (
           <path
             key={"arcIn" + i}
-            d={arcPath(arc_r_in, -arcPhase * 1.3 + off, 60)}
+            d={arcPath(arc_r_in, -arcPhase * 1.3 + off, 70)}
             stroke="#ffd76a"
             strokeWidth={2.0}
             strokeLinecap="round"
             fill="none"
-            opacity={0.85}
+            opacity={arcAlphaIn}
           />
         ))}
       </svg>

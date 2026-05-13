@@ -60,7 +60,19 @@ const SHIFT_OUT = BORDER_T / 2;               // shift_out = t//2 = 9
 const EXTRA_TOP = BADGE_H / 2;                // 97.5
 const EXTRA_RIGHT = 75;                       // extra_right
 const CORNER_PNG_W = 160;                     // corner_width (visible draw size)
-const CORNER_PNG_H = Math.round(CORNER_PNG_W * 488 / 486); // ~161px — aspect of corner_ul.png
+// Per-corner heights — Qt's get_corner_height(pixmap) computes a unique
+// height for each pixmap from its own aspect ratio, so each owl PNG
+// renders without vertical squish/stretch. Hard-coding one height
+// for all four corners (the previous behaviour) vertically stretched
+// corner_br.png (512x488 → wide) and corner_ur.png by ~7%, which
+// reads in the VLM diff as a dimmer / less-defined bottom-right owl.
+// Source dimensions verified on disk 2026-05-13:
+//   corner_ul.png 486x513, corner_ur.png 516x484,
+//   corner_bl.png 488x512, corner_br.png 512x488.
+const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486); // 169
+const CORNER_PNG_H_TR = Math.round(CORNER_PNG_W * 484 / 516); // 150
+const CORNER_PNG_H_BL = Math.round(CORNER_PNG_W * 512 / 488); // 168
+const CORNER_PNG_H_BR = Math.round(CORNER_PNG_W * 488 / 512); // 152
 
 // Position of the parent (inner content) rect inside the outer overlay.
 const PARENT_X = SHIFT_OUT + CORNER_OUTSET;                  // 19
@@ -120,11 +132,13 @@ function HybridFrame({ children, width, height }: {
   const midx = (outerL + outerR) / 2;
   const midy = (outerT + outerB) / 2;
 
-  // Corner PNG rects (port of corner_tl/tr/bl/br QRects).
+  // Corner PNG rects (port of corner_tl/tr/bl/br QRects). Bottom corners
+  // anchor to outerB using their own per-pixmap height — matches Qt's
+  // `outer.bottom() - corner_bl_height + 1 + corner_outset`.
   const cnTL = { x: outerL - CORNER_OUTSET,                          y: outerT - CORNER_OUTSET };
   const cnTR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET,       y: outerT - CORNER_OUTSET };
-  const cnBL = { x: outerL - CORNER_OUTSET,                          y: outerB - CORNER_PNG_H + 1 + CORNER_OUTSET };
-  const cnBR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET,       y: outerB - CORNER_PNG_H + 1 + CORNER_OUTSET };
+  const cnBL = { x: outerL - CORNER_OUTSET,                          y: outerB - CORNER_PNG_H_BL + 1 + CORNER_OUTSET };
+  const cnBR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET,       y: outerB - CORNER_PNG_H_BR + 1 + CORNER_OUTSET };
 
   // Top-centre owl badge — center horizontally on parent, place vertical
   // center at parent's top edge (so half above, half below).
@@ -178,10 +192,10 @@ function HybridFrame({ children, width, height }: {
           corner_br is just the static CornersNew/corner_br.png (Qt has a
           per-tab owl overlay too; not needed in the React port until we
           wire dynamic tabs). */}
-      <img src={`${CORNERS}/corner_br.png`} style={{ position:"absolute", left:cnBR.x, top:cnBR.y, width:CORNER_PNG_W, height:CORNER_PNG_H, pointerEvents:"none" }} />
-      <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:cnTL.x, top:cnTL.y, width:CORNER_PNG_W, height:CORNER_PNG_H, pointerEvents:"none" }} />
-      <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:cnTR.x, top:cnTR.y, width:CORNER_PNG_W, height:CORNER_PNG_H, pointerEvents:"none" }} />
-      <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:cnBL.x, top:cnBL.y, width:CORNER_PNG_W, height:CORNER_PNG_H, pointerEvents:"none" }} />
+      <img src={`${CORNERS}/corner_br.png`} style={{ position:"absolute", left:cnBR.x, top:cnBR.y, width:CORNER_PNG_W, height:CORNER_PNG_H_BR, pointerEvents:"none" }} />
+      <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:cnTL.x, top:cnTL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TL, pointerEvents:"none" }} />
+      <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:cnTR.x, top:cnTR.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TR, pointerEvents:"none" }} />
+      <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:cnBL.x, top:cnBL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_BL, pointerEvents:"none" }} />
 
       {/* Top-centre owl badge — 300x195, center vertically at parent.top */}
       <img src={`${ICONS}/owl_studio_square.png`} style={{ position:"absolute", left:badgeX, top:badgeY, width:BADGE_W, height:BADGE_H, pointerEvents:"none" }} />

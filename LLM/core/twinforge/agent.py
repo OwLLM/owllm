@@ -191,7 +191,8 @@ def compare(src: CaptureResult, tgt: CaptureResult,
             coder: Optional[CoderProvider] = None,
             target_file: Optional[str] = None,
             enable_vlm: bool = True,
-            enable_coder: bool = False) -> Dict:
+            enable_coder: bool = False,
+            source_context: Optional[str] = None) -> Dict:
     """Run the full diff + report pipeline."""
     regions = region_diff(src, tgt)
     overall = overall_diff(src, tgt)
@@ -269,14 +270,24 @@ def compare(src: CaptureResult, tgt: CaptureResult,
                 target_file=target_file,
                 src_png=src.png_path,            # ← let the coder SEE the source too
                 tgt_png=tgt.png_path,
+                source_context=source_context,   # ← code-aware: asset list + widget src
             )
         except TypeError:
-            # Older provider signature without src_png / tgt_png args.
-            code_fixes = provider_c.patch(
-                diff_text=text,
-                vlm_findings=vlm_differences,
-                target_file=target_file,
-            )
+            # Older provider signature without src_png / tgt_png / source_context.
+            try:
+                code_fixes = provider_c.patch(
+                    diff_text=text,
+                    vlm_findings=vlm_differences,
+                    target_file=target_file,
+                    src_png=src.png_path,
+                    tgt_png=tgt.png_path,
+                )
+            except TypeError:
+                code_fixes = provider_c.patch(
+                    diff_text=text,
+                    vlm_findings=vlm_differences,
+                    target_file=target_file,
+                )
         except Exception as exc:  # noqa: BLE001
             code_fixes = [CodeFix(
                 description=f"Coder provider crashed: {exc}",

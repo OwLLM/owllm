@@ -60,6 +60,7 @@ class CoderProvider(Protocol):
               max_changes: int = 6,
               src_png: Optional[str] = None,
               tgt_png: Optional[str] = None,
+              source_context: Optional[str] = None,
               ) -> List[CodeFix]: ...
 
 
@@ -77,7 +78,8 @@ class NullCoder:
     def patch(self, *, diff_text: str, vlm_findings: List[Any],
               target_file: str, max_changes: int = 6,
               src_png: Optional[str] = None,
-              tgt_png: Optional[str] = None) -> List[CodeFix]:
+              tgt_png: Optional[str] = None,
+              source_context: Optional[str] = None) -> List[CodeFix]:
         return [CodeFix(
             description=(
                 "Coder provider unavailable — set ANTHROPIC_API_KEY in "
@@ -148,7 +150,8 @@ class AnthropicCoder:
     def patch(self, *, diff_text: str, vlm_findings: List[Any],
               target_file: str, max_changes: int = 6,
               src_png: Optional[str] = None,
-              tgt_png: Optional[str] = None) -> List[CodeFix]:
+              tgt_png: Optional[str] = None,
+              source_context: Optional[str] = None) -> List[CodeFix]:
         if not self.api_key:
             return NullCoder().patch(
                 diff_text=diff_text, vlm_findings=vlm_findings,
@@ -172,6 +175,8 @@ class AnthropicCoder:
         )
 
         user_prompt = _PROMPT % max_changes
+        if source_context:
+            user_prompt += f"\n\n{source_context}\n"
         user_prompt += (
             "\n\n# STRUCTURAL DIFF REPORT\n"
             f"{diff_text}\n\n"

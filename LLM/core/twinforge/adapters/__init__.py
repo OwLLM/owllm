@@ -4,8 +4,8 @@ here — the diff core does not need to change.
 
 To implement a new adapter, satisfy the `AdapterBase` interface below:
 
-    from core.ui_agent.adapters import AdapterBase
-    from core.ui_agent.schema import CaptureResult, UIElement, Bounds
+    from core.twinforge.adapters import AdapterBase
+    from core.twinforge.schema import CaptureResult, UIElement, Bounds
 
     class UiaAdapter(AdapterBase):
         @classmethod
@@ -24,7 +24,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from core.ui_agent.schema import CaptureResult
+from core.twinforge.schema import CaptureResult
 
 
 class AdapterBase(ABC):

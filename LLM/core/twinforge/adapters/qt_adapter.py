@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from core.ui_agent.schema import Bounds, CaptureResult, UIElement
+from core.twinforge.schema import Bounds, CaptureResult, UIElement
 
 
 def capture(

@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from core.ui_agent.schema import Bounds, CaptureResult, UIElement
+from core.twinforge.schema import Bounds, CaptureResult, UIElement
 
 
 # JS snippet evaluated inside the page to extract the DOM tree. We do it

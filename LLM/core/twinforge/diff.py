@@ -27,7 +27,7 @@ import re
 import numpy as np
 from PIL import Image
 
-from core.ui_agent.schema import Bounds, CaptureResult, UIElement
+from core.twinforge.schema import Bounds, CaptureResult, UIElement
 
 
 # ----------------------------------------------------------------------

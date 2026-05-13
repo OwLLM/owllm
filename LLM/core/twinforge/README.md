@@ -80,23 +80,23 @@ Plus notes:
 
 ```bash
 # OWLLM Qt agents page vs the local React replica:
-python -m core.ui_agent compare \
+python -m core.twinforge compare \
     --source-adapter qt  --source-target agents \
     --source-width 1600 --source-height 960 \
     --target-adapter web --target-target ./web_replica/agents_page_v11.html \
     --target-width 1700 --target-height 1100 \
-    --out-dir ./ui_agent_out
+    --out-dir ./twinforge_out
 ```
 
 Outputs:
-* `ui_agent_out/source.png` — Qt screenshot
-* `ui_agent_out/target.png` — web screenshot
-* `ui_agent_out/source_tree.json` — Qt widget tree (normalized)
-* `ui_agent_out/target_tree.json` — DOM tree (normalized)
-* `ui_agent_out/report.txt` — text report
-* `ui_agent_out/report.html` — **self-contained interactive HTML**
-* `ui_agent_out/tile_grid.png` — per-region [src | tgt | delta] grid
-* `ui_agent_out/overlay.png` — 2-pane full-page comparison with boxes
+* `twinforge_out/source.png` — Qt screenshot
+* `twinforge_out/target.png` — web screenshot
+* `twinforge_out/source_tree.json` — Qt widget tree (normalized)
+* `twinforge_out/target_tree.json` — DOM tree (normalized)
+* `twinforge_out/report.txt` — text report
+* `twinforge_out/report.html` — **self-contained interactive HTML**
+* `twinforge_out/tile_grid.png` — per-region [src | tgt | delta] grid
+* `twinforge_out/overlay.png` — 2-pane full-page comparison with boxes
 
 ## Adding a new adapter
 

@@ -21,8 +21,8 @@ from typing import Dict, List, Optional, Any
 
 from PIL import Image
 
-from core.ui_agent.diff import RegionDiff
-from core.ui_agent.schema import CaptureResult
+from core.twinforge.diff import RegionDiff
+from core.twinforge.schema import CaptureResult
 
 
 def _img_to_b64(path: str, max_w: Optional[int] = None) -> str:
@@ -58,9 +58,12 @@ def render_html_report(
     src: CaptureResult, tgt: CaptureResult,
     regions: List[RegionDiff], overall_pct: float,
     unmatched_src: List[str], unmatched_tgt: List[str],
-    *, title: str = "UI Agent — Diff Report",
+    *, title: str = "TwinForge — Diff Report",
     out_path: str,
     vlm_differences = None,  # noqa: ANN001 — optional list of VLMDifference
+    code_fixes = None,       # noqa: ANN001 — optional list of CodeFix
+    vlm_provider_name: str = "disabled",
+    coder_provider_name: str = "disabled",
 ) -> str:
     """Write a self-contained HTML report. Returns the absolute path."""
     src_img = Image.open(src.png_path).convert("RGB")
@@ -97,6 +100,100 @@ def render_html_report(
 
     src_full = _img_to_b64(src.png_path, max_w=900)
     tgt_full = _img_to_b64(tgt.png_path, max_w=900)
+
+    # Available providers — same catalogue for perception and generation
+    # because TwinForge defaults both to one Anthropic model. Each entry
+    # is (label, wired_today, tooltip-text).
+    PROVIDERS = [
+        ("anthropic · claude-opus-4-7",  True,
+         "Anthropic Claude Opus 4.7 — strongest general reasoning + "
+         "vision. Recommended default for both perception and "
+         "generation. Needs ANTHROPIC_API_KEY."),
+        ("anthropic · claude-sonnet-4-6", True,
+         "Anthropic Claude Sonnet 4.6 — fast, cheap, vision-capable. "
+         "Good for tight iteration loops on small diffs."),
+        ("anthropic · claude-haiku-4-5",  True,
+         "Anthropic Claude Haiku 4.5 — fastest, lowest cost, still "
+         "vision-capable. Use for many small fixes per minute."),
+        ("openai · gpt-4o",               False,
+         "OpenAI GPT-4o — strong vision + code. Needs OpenAI adapter (not shipped yet)."),
+        ("openai · gpt-5",                False,
+         "OpenAI GPT-5 — strongest pure coder; vision OK. Pair as the "
+         "generation half with a more visual perception model."),
+        ("google · gemini-2.5-pro",       False,
+         "Google Gemini 2.5 Pro — vision-strong, long context. Good for "
+         "diffing very long pages."),
+        ("local · qwen2.5-vl-72b",        False,
+         "Local Qwen2.5-VL 72B — vision-capable, single A100/4090. "
+         "When pixels can't leave on-prem."),
+        ("local · qwen2.5-coder-32b",     False,
+         "Local Qwen2.5-Coder 32B — best local coder. Pair with a "
+         "local VLM for full on-prem loop."),
+        ("claude-code (subprocess)",      False,
+         "Spawn the Claude Code CLI as a subprocess — no API key "
+         "needed, reuses your existing auth. Slowest per call."),
+        ("disabled",                      True,
+         "No provider — skip this step entirely."),
+    ]
+
+    def _provider_options(active: str) -> str:
+        out = []
+        for label, _wired, _tooltip in PROVIDERS:
+            sel = " selected" if label == active else ""
+            out.append(f'<option value="{html.escape(label)}"{sel}>'
+                       f'{html.escape(label)}</option>')
+        return "".join(out)
+
+    def _provider_legend() -> str:
+        rows = []
+        for label, wired, tooltip in PROVIDERS:
+            badge = "✓ available" if wired else "needs adapter"
+            cls = "good" if wired else "mid"
+            rows.append(
+                f'<tr><td><code>{html.escape(label)}</code></td>'
+                f'<td><span class="badge {cls}">{badge}</span></td>'
+                f'<td>{html.escape(tooltip)}</td></tr>'
+            )
+        return "".join(rows)
+
+    provider_card_html = (
+        '<div class="provider-card">'
+        '<h3>Providers used for this run · hover ⓘ for details</h3>'
+        '<div class="provider-grid">'
+        '<label title="The PERCEPTION API. Looks at the two screenshots '
+        'and lists what differs — untagged decorations, missing elements, '
+        'wrong sizes a human would call out. Best models: vision-strong '
+        'ones (Claude Opus 4.7, GPT-4o, Gemini 2.5 Pro, Qwen-VL).">'
+        '<div class="label-row">'
+        '<span class="kind">Perception (VLM)</span>'
+        '<span class="info" title="The agent\'s eyes. Sends both screenshots '
+        'to a vision model and asks for a structured list of differences '
+        'with severity + fix suggestions. Disable with enable_vlm=False.">ⓘ</span>'
+        '</div>'
+        f'<select disabled name="vlm">{_provider_options(vlm_provider_name)}</select>'
+        '</label>'
+        '<label title="The GENERATION API. Takes the diff report + VLM '
+        'findings + the current target file and emits code patches. Best '
+        'models: strong coders (Claude Opus 4.7, GPT-5, Qwen2.5-Coder).">'
+        '<div class="label-row">'
+        '<span class="kind">Generation (Coder)</span>'
+        '<span class="info" title="The agent\'s hands. Sends the diff + '
+        'perception output + current target file to a coder model and '
+        'gets back ready-to-apply patches. Off by default; enable with '
+        'enable_coder=True + target_file=path.">ⓘ</span>'
+        '</div>'
+        f'<select disabled name="coder">{_provider_options(coder_provider_name)}</select>'
+        '</label>'
+        '</div>'
+        '<details class="provider-legend">'
+        '<summary>Available providers (click for the full catalogue)</summary>'
+        '<table>'
+        '<thead><tr><th>provider</th><th>status</th><th>when to pick it</th></tr></thead>'
+        f'<tbody>{_provider_legend()}</tbody>'
+        '</table>'
+        '</details>'
+        '</div>'
+    )
 
     # VLM differences as a separate top-level section. List comes pre-sorted
     # by severity from the provider; we just render it.
@@ -183,6 +280,31 @@ def render_html_report(
     .tile .notes { margin-top: 6px; font-size: 10px; color: #cbd2e0; max-height: 60px; overflow: auto; }
     .unmatched { display: flex; flex-wrap: wrap; gap: 4px; font-family: 'Consolas', monospace; font-size: 11px; }
     .unmatched span { padding: 2px 6px; background: #181c29; border-radius: 4px; }
+    .provider-card {
+      background: linear-gradient(180deg, #1a213a, #0f1424);
+      border: 1px solid #2a3142; border-radius: 12px;
+      padding: 18px; margin: 14px 0;
+    }
+    .provider-card h3 { margin: 0 0 12px; font-size: 13px; color: #88c0ff; text-transform: uppercase; letter-spacing: 0.6px; }
+    .provider-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .provider-grid label { display: flex; flex-direction: column; gap: 4px; cursor: help; }
+    .label-row { display: flex; align-items: center; gap: 6px; }
+    .label-row .kind { font-weight: 700; color: #fff; }
+    .info {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; border-radius: 50%;
+      background: rgba(120, 220, 255, 0.18); color: #7fdfff;
+      font-size: 11px; cursor: help; user-select: none;
+    }
+    .provider-grid select {
+      background: #0a0d14; color: #e6e8eb;
+      border: 1px solid #2a3142; border-radius: 6px;
+      padding: 6px 8px; font: inherit;
+    }
+    .provider-legend { margin-top: 12px; }
+    .provider-legend summary { cursor: pointer; color: #7888a8; font-size: 12px; padding: 4px 0; }
+    .provider-legend summary:hover { color: #cbd2e0; }
+    .provider-legend table { margin-top: 8px; font-size: 11px; }
     """
 
     body = f"""
@@ -211,6 +333,8 @@ def render_html_report(
         <div class="value">{len(regions)}</div>
       </div>
     </div>
+
+    {provider_card_html}
 
     <h2>Full-page comparison</h2>
     <div class="panel compare">

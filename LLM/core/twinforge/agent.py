@@ -7,8 +7,8 @@ interface and the diff module.
 
 Usage example (programmatic):
 
-    from core.ui_agent.adapters import qt_adapter, web_adapter
-    from core.ui_agent import agent
+    from core.twinforge.adapters import qt_adapter, web_adapter
+    from core.twinforge import agent
 
     src = qt_adapter.capture("agents", "out/src.png", "out/src.json")
     tgt = web_adapter.capture("path/to/replica.html",
@@ -25,11 +25,16 @@ from typing import Dict, List, Optional
 import numpy as np
 from PIL import Image, ImageDraw
 
-from core.ui_agent.diff import (
+from core.twinforge.diff import (
     RegionDiff, format_report, overall_diff, region_diff, unmatched_ids,
 )
-from core.ui_agent.schema import CaptureResult
-from core.ui_agent.vlm_diff import VLMDifference, default_provider, VLMProvider
+from core.twinforge.schema import CaptureResult
+from core.twinforge.vlm_diff import (
+    VLMDifference, default_provider as default_vlm_provider, VLMProvider,
+)
+from core.twinforge.coder import (
+    CodeFix, default_provider as default_coder_provider, CoderProvider,
+)
 
 
 def _crop_clip(img: Image.Image, b) -> Image.Image:
@@ -181,29 +186,24 @@ def compare(src: CaptureResult, tgt: CaptureResult,
             report_path: str, overlay_path: str,
             tile_grid_path: Optional[str] = None,
             html_report_path: Optional[str] = None,
-            title: str = "UI Agent — Diff Report",
+            title: str = "TwinForge — Diff Report",
             vlm: Optional[VLMProvider] = None,
-            enable_vlm: bool = True) -> Dict:
-    """Run the full diff + report pipeline.
-
-    Returns a dict with:
-      text          — formatted text report (also written to report_path)
-      regions       — list of RegionDiff
-      overall_pct   — single-number diff (for back-compat comparison)
-      overlay_path  — where the 2-pane visual overlay was saved
-      unmatched_src — ids in source not found in target
-      unmatched_tgt — ids in target not found in source
-    """
+            coder: Optional[CoderProvider] = None,
+            target_file: Optional[str] = None,
+            enable_vlm: bool = True,
+            enable_coder: bool = False) -> Dict:
+    """Run the full diff + report pipeline."""
     regions = region_diff(src, tgt)
     overall = overall_diff(src, tgt)
     unm_src, unm_tgt = unmatched_ids(src, tgt)
 
-    # VLM perception pass — the 'eyes' of the agent. Catches untagged
-    # decorative elements, paint-only widgets, and state coverage gaps
-    # that the widget-tree-based aligner cannot see.
+    # VLM perception pass — the 'eyes' of TwinForge. Catches untagged
+    # decorative elements, paint-only widgets, and state coverage gaps.
     vlm_differences: List[VLMDifference] = []
+    vlm_provider_name = "disabled"
     if enable_vlm:
-        provider = vlm if vlm is not None else default_provider()
+        provider = vlm if vlm is not None else default_vlm_provider()
+        vlm_provider_name = f"{provider.name} · {getattr(provider, 'model', '?')}"
         try:
             vlm_differences = provider.compare(
                 src.png_path, tgt.png_path, title=title,
@@ -214,10 +214,33 @@ def compare(src: CaptureResult, tgt: CaptureResult,
                 severity="low",
             )]
 
+    # Coder generation pass — the 'hands'. Off by default; opt in by
+    # passing enable_coder=True + target_file=<replica file path>.
+    code_fixes: List[CodeFix] = []
+    coder_provider_name = "disabled"
+    if enable_coder and target_file:
+        provider_c = coder if coder is not None else default_coder_provider()
+        coder_provider_name = (
+            f"{provider_c.name} · {getattr(provider_c, 'model', '?')}"
+        )
+        try:
+            code_fixes = provider_c.patch(
+                diff_text="(see report.txt)",
+                vlm_findings=vlm_differences,
+                target_file=target_file,
+            )
+        except Exception as exc:  # noqa: BLE001
+            code_fixes = [CodeFix(
+                description=f"Coder provider crashed: {exc}",
+                file_path="(none)", patch="",
+                is_full_file=False, confidence="low",
+            )]
+
     text = format_report(regions, overall,
                          unmatched_src=unm_src, unmatched_tgt=unm_tgt)
+    text += f"\n\nPROVIDERS: perception={vlm_provider_name} · generation={coder_provider_name}\n"
     if vlm_differences:
-        text += "\n\nPERCEIVED VISUAL DIFFERENCES (VLM)\n"
+        text += "\nPERCEIVED VISUAL DIFFERENCES (VLM)\n"
         text += "-" * 70 + "\n"
         for i, d in enumerate(vlm_differences, 1):
             text += (
@@ -225,17 +248,28 @@ def compare(src: CaptureResult, tgt: CaptureResult,
                 f"    location: {d.location}\n"
                 f"    fix:      {d.suggestion}\n"
             )
+    if code_fixes:
+        text += "\nGENERATED CODE FIXES (Coder)\n"
+        text += "-" * 70 + "\n"
+        for i, f in enumerate(code_fixes, 1):
+            text += (
+                f"{i:>2}. [{f.confidence}] {f.description}\n"
+                f"    file: {f.file_path}  ({len(f.patch)} chars)\n"
+            )
     Path(report_path).parent.mkdir(parents=True, exist_ok=True)
     Path(report_path).write_text(text, encoding="utf-8")
     _draw_region_overlay(src, tgt, regions, overlay_path)
     if tile_grid_path:
         _draw_tile_grid(src, tgt, regions, tile_grid_path)
     if html_report_path:
-        from core.ui_agent.html_report import render_html_report
+        from core.twinforge.html_report import render_html_report
         render_html_report(
             src, tgt, regions, overall,
             unm_src, unm_tgt,
             vlm_differences=vlm_differences,
+            code_fixes=code_fixes,
+            vlm_provider_name=vlm_provider_name,
+            coder_provider_name=coder_provider_name,
             title=title, out_path=html_report_path,
         )
     return {
@@ -245,4 +279,7 @@ def compare(src: CaptureResult, tgt: CaptureResult,
         "html_report_path": html_report_path,
         "unmatched_src": unm_src, "unmatched_tgt": unm_tgt,
         "vlm_differences": vlm_differences,
+        "code_fixes": code_fixes,
+        "vlm_provider_name": vlm_provider_name,
+        "coder_provider_name": coder_provider_name,
     }

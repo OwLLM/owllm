@@ -1,4 +1,4 @@
-"""CLI entry: `python -m core.ui_agent compare ...`.
+"""CLI entry: `python -m core.twinforge compare ...`.
 
 Lets a user (or shell script) run the agent without writing Python. The
 command is platform-blind: pass `--source-adapter qt --source-page agents`
@@ -13,8 +13,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from core.ui_agent import agent
-from core.ui_agent.adapters import qt_adapter, web_adapter
+from core.twinforge import agent
+from core.twinforge.adapters import qt_adapter, web_adapter
 
 
 def _capture_qt(target: str, out_png: str, out_tree: str,
@@ -83,7 +83,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m core.ui_agent")
+    parser = argparse.ArgumentParser(prog="python -m core.twinforge")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     cmp_ = sub.add_parser("compare", help="diff two captures")
@@ -99,7 +99,7 @@ def main(argv=None) -> int:
                       help="page name (qt) or URL/path (web)")
     cmp_.add_argument("--target-width", type=int, default=1700)
     cmp_.add_argument("--target-height", type=int, default=1100)
-    cmp_.add_argument("--out-dir", default="ui_agent_out",
+    cmp_.add_argument("--out-dir", default="twinforge_out",
                       help="where to write screenshots, trees, and the report")
     cmp_.add_argument("--title", default=None,
                       help="title for the generated HTML report")

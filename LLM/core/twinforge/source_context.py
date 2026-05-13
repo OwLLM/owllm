@@ -37,8 +37,13 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 
-# Default cap so we don't blow the prompt on a huge widget file.
-_DEFAULT_WIDGET_EXCERPT_CHARS = 12_000
+# Default cap per surface excerpt. Originally 12k chars; raised to 30k
+# on 2026-05-13 because the AppShell.tsx mapping now spans three pinned
+# ranges (hybrid_frame_window.py constants + paintEvent + main.py
+# header build) totaling ~20k chars. 12k truncated the paintEvent body
+# off the prompt — verifier/coder couldn't see corner_width=160 or
+# BADGE_W=300 and kept inventing smaller values.
+_DEFAULT_WIDGET_EXCERPT_CHARS = 30_000
 
 
 @dataclass
@@ -124,7 +129,38 @@ class SourceContext:
             # Coder will infer styles from the screenshots + the chrome
             # excerpts it can see.
             surface_sources={
+                # AppShell.tsx contains BOTH the HybridFrame (the
+                # ornamental window chrome — frame bars, corners,
+                # badge, outlines, brackets) AND the AppHeader/ModeBar
+                # at the top.
+                #
+                # Frame chrome lives in
+                # LLM/ui_frame/hybrid_frame/hybrid_frame_window.py —
+                # paintEvent is the source of truth for sizes
+                # (BADGE_W=300, BADGE_H=195, corner_width=160,
+                # CORNER_OUTSET=10, border_thickness=18), the dark
+                # border-bar fills, and the two cyan rounded outlines.
+                # Header chrome lives in main.py:2930-3400 (toggle
+                # buttons, color selector, wordmark, SysInfoBlock).
+                # Both files must be in scope for AppShell.tsx so the
+                # agents can quote exact constants from EITHER.
                 "AppShell.tsx": [
+                    # hybrid_frame_window.py — pinned to the ranges
+                    # the chrome agents actually need. Without these
+                    # explicit ranges, widget_excerpt_chars caps at
+                    # 12k chars and paintEvent (starting around line
+                    # 299) gets sliced off the end.
+                    #   1-100  : FrameAssets dataclass + BADGE/CORNER
+                    #            constants (BADGE_W=300, BADGE_H=195,
+                    #            CORNER_OUTSET=10, defaults).
+                    #   299-491: paintEvent + _draw_corner_brackets +
+                    #            _draw_edge_ticks — the entire render
+                    #            method. This is where corner_width=160,
+                    #            outer/inner rounded outlines, bracket
+                    #            lengths/insets, and the badge geometry
+                    #            live.
+                    (root / "LLM" / "ui_frame" / "hybrid_frame" / "hybrid_frame_window.py", (1, 100)),
+                    (root / "LLM" / "ui_frame" / "hybrid_frame" / "hybrid_frame_window.py", (299, 491)),
                     (root / "LLM" / "desktop_app" / "main.py", (2930, 3400)),
                 ],
                 "AgentsPage.tsx": [

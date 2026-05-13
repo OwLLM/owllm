@@ -81,17 +81,36 @@ afterwards.
 # HARD RULES
 1. Use your Edit/Read tools on the working file. Many small Edits
    beats one big Write.
+
 2. Use REAL source assets — every PNG in the asset block below is on
    disk. Reference via `<img src=...>` with the relative URL shown.
    Do NOT invent emoji glyphs or coloured rectangles to stand in for
    the real assets.
-3. Use the PySide6 source ground-truth below to find exact numbers:
-   sizes, colours, font sizes, geometry. If the source code shows
-   `width=114`, set width to 114 in the React file — not 120.
+
+3. **READ THE QT SOURCE FIRST. QUOTE THE EXACT CONSTANTS.**
+   For each verified finding, `source_evidence` names a file:line in
+   the PYSIDE6 SOURCE GROUND TRUTH section below. Use Read on that
+   file at that line range. Find the constants — `BADGE_W = 300`,
+   `BADGE_H = 195`, `corner_width = 160`, `border_thickness = 18`,
+   `CORNER_OUTSET = 10`, hex colors, alphas, etc.
+
+   Then apply those EXACT values in the React port. If Qt says
+   `corner_width = 160`, write `width: 160` — not 96, not 120, not
+   150. If Qt says `BADGE_W = 300, BADGE_H = 195`, write
+   `width: 300, height: 195` — not 58×58. Inventing your own
+   "reasonable-looking" numbers is the failure mode this rule fixes.
+
 4. Each verified finding includes `source_evidence` (file:line) and
    `target_evidence` (file:line). Read those locations first; the
    exact code is there.
-5. Stay inside `{surface}`. If you find yourself wanting to edit a
+
+5. **Port the LOGIC, not just the constants.** If the Qt source
+   draws multiple layers (e.g. dark fill bars + cyan outer outline +
+   cyan inner outline + corner brackets + edge ticks), port ALL the
+   layers — don't keep only the one the previous React version had.
+   Read the paintEvent / paint method end-to-end before writing.
+
+6. Stay inside `{surface}`. If you find yourself wanting to edit a
    different file, leave a TODO in the working file instead.
 
 # When finished

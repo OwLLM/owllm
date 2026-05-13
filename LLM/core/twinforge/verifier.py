@@ -104,9 +104,10 @@ _VERIFIER_PROMPT = """You are TwinForge's verifier subagent.
 
 A perception agent (VLM) just looked at two screenshots and produced a
 list of visual differences between SOURCE (Qt reference) and TARGET
-(React replica). The VLM sees images only — it doesn't read code. Some
-of its findings are wrong: it sometimes claims TARGET is missing
-elements that ARE rendered, just styled differently.
+(React replica). The VLM sees images only — it doesn't read code.
+Some of its findings are real; some are hallucinations; and some are
+real-but-misdescribed (the element exists but at wrong scale, colour,
+or geometry).
 
 Your job: for each VLM finding, verify it against the actual replica
 code AND the PySide6 source code, then route it to the correct
@@ -122,14 +123,41 @@ Call Read / Grep on:
     SOURCE: {src_png}
     TARGET: {tgt_png}
 
+# CRITICAL: EXISTENCE != CORRECTNESS.
+
+Do NOT reject a finding just because the element exists in the JSX.
+A previous run rejected "owl badge missing" because there was an
+`<img owl_studio_square>` in AppShell.tsx:66 — without checking that
+the JSX set width=58, while the Qt source defines BADGE_W=300 (5.2x
+scale gap). That reject was wrong: the badge IS missing at scale.
+
+For every finding, you MUST do a PARAMETER-LEVEL comparison:
+
+  1. Read the Qt source (in source_widget_paths). Find the relevant
+     constants / drawing calls. Quote the exact numbers.
+       - "BADGE_W = 300, BADGE_H = 195" (hybrid_frame_window.py:26-27)
+       - "corner_width = 160" (paintEvent line 375)
+       - "border_thickness = 18" (paintEvent setup)
+       - colors, alphas, line widths, fonts, paddings, etc.
+
+  2. Read the React JSX (in replica files). Find the same element.
+     Quote its actual numbers.
+
+  3. Compare. If they differ meaningfully (more than a couple px or
+     a perceptible colour shift), the finding is VERIFIED — even if
+     the element technically exists.
+
 # For each finding, output one verdict:
 
-* status="verified" — SOURCE really shows it AND TARGET really lacks
-  it (or has it visibly wrong). Worth fixing.
+* status="verified" — SOURCE really shows it AND TARGET visibly does
+  not match. Either missing entirely, or present at wrong parameters
+  (scale, colour, geometry, etc.). Worth fixing.
 
-* status="rejected" — VLM was wrong: either SOURCE doesn't show it
-  (VLM saw something that isn't there), or TARGET already implements
-  it (VLM missed existing code). Set rejection_reason.
+* status="rejected" — VLM was wrong AND the React already matches the
+  Qt source on parameters. Either the VLM saw something that isn't
+  there, or the implementation in React already has the right values.
+  Provide a rejection_reason that quotes BOTH the Qt constant AND the
+  React value to prove they match.
 
 * status="ambiguous" — can't tell from code alone (e.g. font weight,
   exact colour shade). Forward it with notes.

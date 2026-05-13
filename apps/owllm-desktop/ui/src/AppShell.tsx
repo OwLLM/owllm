@@ -41,29 +41,150 @@ const TABS: { key: TabKey; label: string }[] = [
 const ICONS = "/Page_icons";
 const CORNERS = `${ICONS}/CornersNew`;
 
+// ---------------------------------------------------------------------
+// HybridFrame — faithful port of
+// LLM/ui_frame/hybrid_frame/hybrid_frame_window.py::paintEvent.
+//
+// Geometry constants mirror the Qt source 1:1. Do NOT change without
+// reading paintEvent there side-by-side. The previous React version
+// (96px corners, 58px badge, cyan gradient bars only) was a sketch —
+// this is the real thing: 160px corner PNGs, 300x195 owl badge,
+// dark-filled border bars + cyan outer/inner rounded outlines +
+// corner brackets + edge ticks.
+// ---------------------------------------------------------------------
+const BADGE_W = 300;
+const BADGE_H = 195;                          // = BADGE_W * 0.65
+const BORDER_T = 18;                          // border_thickness
+const CORNER_OUTSET = 10;                     // CORNER_OUTSET
+const SHIFT_OUT = BORDER_T / 2;               // shift_out = t//2 = 9
+const EXTRA_TOP = BADGE_H / 2;                // 97.5
+const EXTRA_RIGHT = 75;                       // extra_right
+const CORNER_PNG_W = 160;                     // corner_width (visible draw size)
+const CORNER_PNG_H = Math.round(CORNER_PNG_W * 488 / 486); // ~161px — aspect of corner_ul.png
+
+// Position of the parent (inner content) rect inside the outer overlay.
+const PARENT_X = SHIFT_OUT + CORNER_OUTSET;                  // 19
+const PARENT_Y = EXTRA_TOP + SHIFT_OUT + CORNER_OUTSET;      // 116.5
+
+// Colours — Qt's QColor(primary).setAlpha(220) / accent.setAlpha(200)
+// rendered as teal/cyan in the source screenshot; lifted from the PNG.
+// frame_bg is QColor(primary).darker(300) — very dark navy.
+const FRAME_COLOR  = "rgba(200, 240, 255, 0.86)"; // outer outline
+const FRAME_ACCENT = "rgba(120, 220, 255, 0.78)"; // inner outline + brackets + ticks
+const FRAME_BG     = "rgba(8, 12, 24, 0.95)";     // border bar fill
+
 function HybridFrame({ children, width, height }: {
   children: React.ReactNode; width: number; height: number;
 }) {
-  const CORNER = 96, BORDER = 22, BADGE_H = 58;
-  const FRAME_LEFT = 19, FRAME_TOP = 116, RIGHT_OVERHANG = 79, BOTTOM_OVERHANG = 19;
-  const outerW = width + FRAME_LEFT + RIGHT_OVERHANG;
-  const outerH = height + FRAME_TOP + BOTTOM_OVERHANG;
-  const fc = "rgba(120, 220, 255, 0.86)";
-  const ac = "rgba(120, 220, 255, 0.78)";
+  // parent_w / parent_h are the dimensions of the inner content area
+  // (matches the Qt MainWindow's own rect inside the overlay).
+  const parent_w = width;
+  const parent_h = height;
+  const parent_x = PARENT_X;
+  const parent_y = PARENT_Y;
+  const t = BORDER_T;
+  const so = SHIFT_OUT;
+
+  // Outer overlay total size (mirrors eventFilter's Resize handler).
+  const outerW = parent_w + EXTRA_RIGHT + 2 * so + 2 * CORNER_OUTSET;
+  const outerH = parent_h + EXTRA_TOP + 2 * so + 2 * CORNER_OUTSET;
+
+  // Outer rounded-rect bounds (port of `outer = QRect(...)` in paintEvent).
+  const outerL = parent_x - so;
+  const outerT = parent_y - so;
+  const outerW2 = parent_w + 2 * so + t / 2;      // matches Qt's +t//2 quirk
+  const outerH2 = parent_h + 2 * so;
+  const outerR = outerL + outerW2;
+  const outerB = outerT + outerH2;
+
+  // Inner rounded-rect bounds (port of `inner = QRect(...)`).
+  const innerL = parent_x - so + t;
+  const innerT = parent_y - so + t;
+  const innerW = parent_w + 2 * so - 2 * t + t / 2;
+  const innerH = parent_h + 2 * so - 2 * t;
+
+  // Border bar fills (port of the four p.fillRect calls). They straddle
+  // the parent edge by ±so on each side, thickness t.
+  const topBar    = { x: parent_x - so, y: parent_y - so,            w: parent_w + 2 * so, h: t };
+  const botBar    = { x: parent_x - so, y: parent_y + parent_h - t / 2, w: parent_w + 2 * so, h: t };
+  const leftBar   = { x: parent_x - so, y: parent_y - so,            w: t, h: parent_h + 2 * so };
+  const rightBar  = { x: parent_x + parent_w, y: parent_y - so,      w: t, h: parent_h + 2 * so };
+
+  // Corner brackets — L-shapes inset 14px from the outer rect, 36px long.
+  const brkL = 36, brkI = 14;
+  const bxL = outerL + brkI, bxR = outerR - brkI;
+  const byT = outerT + brkI, byB = outerB - brkI;
+
+  // Edge ticks — short 18px marks at midpoints of each edge, inset 10px.
+  const tckL = 18, tckI = 10;
+  const midx = (outerL + outerR) / 2;
+  const midy = (outerT + outerB) / 2;
+
+  // Corner PNG rects (port of corner_tl/tr/bl/br QRects).
+  const cnTL = { x: outerL - CORNER_OUTSET,                          y: outerT - CORNER_OUTSET };
+  const cnTR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET,       y: outerT - CORNER_OUTSET };
+  const cnBL = { x: outerL - CORNER_OUTSET,                          y: outerB - CORNER_PNG_H + 1 + CORNER_OUTSET };
+  const cnBR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET,       y: outerB - CORNER_PNG_H + 1 + CORNER_OUTSET };
+
+  // Top-centre owl badge — center horizontally on parent, place vertical
+  // center at parent's top edge (so half above, half below).
+  const badgeX = parent_x + (parent_w - BADGE_W) / 2;
+  const badgeY = parent_y - BADGE_H / 2;
+
   return (
     <div style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
-      <div style={{ position:"absolute", left:FRAME_LEFT, top:FRAME_TOP, width, height, background:"#14152a", overflow:"hidden" }}>
+      {/* Inner content area (parent rect — the dark workspace fills this) */}
+      <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"#0e1117", overflow:"hidden" }}>
         {children}
       </div>
-      <div style={{ position:"absolute", left:FRAME_LEFT+CORNER/2, width:width-CORNER, top:FRAME_TOP-BORDER/2, height:BORDER, background:`linear-gradient(90deg, ${ac}, ${fc}, ${ac})`, opacity:1.0 }} />
-      <div style={{ position:"absolute", left:FRAME_LEFT+CORNER/2, width:width-CORNER, top:FRAME_TOP+height-BORDER/2, height:BORDER, background:`linear-gradient(90deg, ${ac}, ${fc}, ${ac})`, opacity:1.0 }} />
-      <div style={{ position:"absolute", top:FRAME_TOP+CORNER/2, height:height-CORNER, left:FRAME_LEFT-BORDER/2, width:BORDER, background:`linear-gradient(180deg, ${ac}, ${fc}, ${ac})`, opacity:1.0 }} />
-      <div style={{ position:"absolute", top:FRAME_TOP+CORNER/2, height:height-CORNER, left:FRAME_LEFT+width-BORDER/2, width:BORDER, background:`linear-gradient(180deg, ${ac}, ${fc}, ${ac})`, opacity:1.0 }} />
-      <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:FRAME_LEFT-CORNER/2, top:FRAME_TOP-CORNER/2, width:CORNER, height:CORNER, pointerEvents:"none" }} />
-      <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:FRAME_LEFT+width-CORNER/2, top:FRAME_TOP-CORNER/2, width:CORNER, height:CORNER, pointerEvents:"none" }} />
-      <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:FRAME_LEFT-CORNER/2, top:FRAME_TOP+height-CORNER/2, width:CORNER, height:CORNER, pointerEvents:"none" }} />
-      <img src={`${CORNERS}/corner_br.png`} style={{ position:"absolute", left:FRAME_LEFT+width-CORNER/2, top:FRAME_TOP+height-CORNER/2, width:CORNER, height:CORNER, pointerEvents:"none" }} />
-      <img src={`${ICONS}/owl_studio_square.png`} style={{ position:"absolute", left:FRAME_LEFT+width/2-BADGE_H/2, top:FRAME_TOP-BADGE_H/2-6, width:BADGE_H, height:BADGE_H, pointerEvents:"none" }} />
+
+      {/* Dark filled border bars — straddle each parent edge by ±so */}
+      <div style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:FRAME_BG }} />
+      <div style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:FRAME_BG }} />
+      <div style={{ position:"absolute", left:leftBar.x,  top:leftBar.y,  width:leftBar.w,  height:leftBar.h,  background:FRAME_BG }} />
+      <div style={{ position:"absolute", left:rightBar.x, top:rightBar.y, width:rightBar.w, height:rightBar.h, background:FRAME_BG }} />
+
+      {/* Outer + inner rounded-rect outlines, corner brackets, edge ticks */}
+      <svg width={outerW} height={outerH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
+        {/* Outer outline (frame_color, radius 14) — adjusted (1,1,-2,-2) */}
+        <rect x={outerL + 1} y={outerT + 1} width={outerW2 - 2} height={outerH2 - 2} rx={14} ry={14}
+              fill="none" stroke={FRAME_COLOR} strokeWidth={1} />
+        {/* Inner outline (frame_accent, radius 10) */}
+        <rect x={innerL} y={innerT} width={innerW} height={innerH} rx={10} ry={10}
+              fill="none" stroke={FRAME_ACCENT} strokeWidth={1} />
+
+        {/* Corner brackets — TL/TR/BL/BR L-shapes */}
+        <g stroke={FRAME_ACCENT} strokeWidth={1}>
+          <line x1={bxL} y1={byT} x2={bxL + brkL} y2={byT} />
+          <line x1={bxL} y1={byT} x2={bxL} y2={byT + brkL} />
+          <line x1={bxR} y1={byT} x2={bxR - brkL} y2={byT} />
+          <line x1={bxR} y1={byT} x2={bxR} y2={byT + brkL} />
+          <line x1={bxL} y1={byB} x2={bxL + brkL} y2={byB} />
+          <line x1={bxL} y1={byB} x2={bxL} y2={byB - brkL} />
+          <line x1={bxR} y1={byB} x2={bxR - brkL} y2={byB} />
+          <line x1={bxR} y1={byB} x2={bxR} y2={byB - brkL} />
+        </g>
+
+        {/* Edge ticks — short marks at edge midpoints */}
+        <g stroke={FRAME_ACCENT} strokeWidth={1}>
+          <line x1={midx - tckL / 2} y1={outerT + tckI} x2={midx + tckL / 2} y2={outerT + tckI} />
+          <line x1={midx - tckL / 2} y1={outerB - tckI} x2={midx + tckL / 2} y2={outerB - tckI} />
+          <line x1={outerL + tckI}   y1={midy - tckL / 2} x2={outerL + tckI} y2={midy + tckL / 2} />
+          <line x1={outerR - tckI}   y1={midy - tckL / 2} x2={outerR - tckI} y2={midy + tckL / 2} />
+        </g>
+      </svg>
+
+      {/* Corner PNGs — drawn LAST so they sit on top of outlines/brackets.
+          corner_br is just the static CornersNew/corner_br.png (Qt has a
+          per-tab owl overlay too; not needed in the React port until we
+          wire dynamic tabs). */}
+      <img src={`${CORNERS}/corner_br.png`} style={{ position:"absolute", left:cnBR.x, top:cnBR.y, width:CORNER_PNG_W, height:CORNER_PNG_H, pointerEvents:"none" }} />
+      <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:cnTL.x, top:cnTL.y, width:CORNER_PNG_W, height:CORNER_PNG_H, pointerEvents:"none" }} />
+      <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:cnTR.x, top:cnTR.y, width:CORNER_PNG_W, height:CORNER_PNG_H, pointerEvents:"none" }} />
+      <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:cnBL.x, top:cnBL.y, width:CORNER_PNG_W, height:CORNER_PNG_H, pointerEvents:"none" }} />
+
+      {/* Top-centre owl badge — 300x195, center vertically at parent.top */}
+      <img src={`${ICONS}/owl_studio_square.png`} style={{ position:"absolute", left:badgeX, top:badgeY, width:BADGE_W, height:BADGE_H, pointerEvents:"none" }} />
     </div>
   );
 }

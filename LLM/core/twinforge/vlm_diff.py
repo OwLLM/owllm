@@ -270,7 +270,22 @@ class AnthropicVLM:
 
 
 def default_provider() -> VLMProvider:
-    """Pick the best provider available in the current environment."""
+    """Pick the best provider available in the current environment.
+
+    Priority:
+      1. Claude Code subscription (claude CLI on PATH) — no API key
+         needed, uses the user's logged-in claude.ai session.
+      2. Anthropic API (ANTHROPIC_API_KEY set) — for headless / CI.
+      3. NullVLM — informational stub so the report tells the user
+         what to install.
+    """
+    try:
+        from core.twinforge.claude_code_provider import ClaudeCodeVLM
+        cc = ClaudeCodeVLM()
+        if cc.available():
+            return cc
+    except Exception:  # noqa: BLE001
+        pass
     p = AnthropicVLM()
     if p.available():
         return p

@@ -107,16 +107,24 @@ def render_html_report(
     # because TwinForge defaults both to one Anthropic model. Each entry
     # is (label, wired_today, tooltip-text).
     PROVIDERS = [
+        ("claude-code · claude-opus-4-7",  True,
+         "Claude Code subscription (Opus 4.7) — uses your logged-in "
+         "claude.ai session via the `claude` CLI. No API key needed. "
+         "Recommended default for both perception and generation."),
+        ("claude-code · claude-sonnet-4-6", True,
+         "Claude Code subscription (Sonnet 4.6) — faster + cheaper "
+         "than Opus, still vision-capable. Same subscription auth."),
+        ("claude-code · claude-haiku-4-5",  True,
+         "Claude Code subscription (Haiku 4.5) — fastest + cheapest "
+         "tier, vision-capable. Use for tight iteration loops."),
         ("anthropic · claude-opus-4-7",  True,
-         "Anthropic Claude Opus 4.7 — strongest general reasoning + "
-         "vision. Recommended default for both perception and "
-         "generation. Needs ANTHROPIC_API_KEY."),
+         "Anthropic API (Opus 4.7) — same model as Claude Code but "
+         "billed per-token. Set ANTHROPIC_API_KEY. Use in CI / "
+         "headless where no subscription auth exists."),
         ("anthropic · claude-sonnet-4-6", True,
-         "Anthropic Claude Sonnet 4.6 — fast, cheap, vision-capable. "
-         "Good for tight iteration loops on small diffs."),
+         "Anthropic API (Sonnet 4.6) — per-token billing."),
         ("anthropic · claude-haiku-4-5",  True,
-         "Anthropic Claude Haiku 4.5 — fastest, lowest cost, still "
-         "vision-capable. Use for many small fixes per minute."),
+         "Anthropic API (Haiku 4.5) — per-token billing."),
         ("openai · gpt-4o",               False,
          "OpenAI GPT-4o — strong vision + code. Needs OpenAI adapter (not shipped yet)."),
         ("openai · gpt-5",                False,
@@ -131,9 +139,6 @@ def render_html_report(
         ("local · qwen2.5-coder-32b",     False,
          "Local Qwen2.5-Coder 32B — best local coder. Pair with a "
          "local VLM for full on-prem loop."),
-        ("claude-code (subprocess)",      False,
-         "Spawn the Claude Code CLI as a subprocess — no API key "
-         "needed, reuses your existing auth. Slowest per call."),
         ("disabled",                      True,
          "No provider — skip this step entirely."),
     ]

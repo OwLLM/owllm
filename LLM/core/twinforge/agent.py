@@ -202,13 +202,18 @@ def compare(src: CaptureResult, tgt: CaptureResult,
     #   * configured — what would run if everything were available
     #   * status     — what actually ran this time (or why it didn't)
     vlm_differences: List[VLMDifference] = []
-    from core.twinforge.vlm_diff import AnthropicVLM as _DefaultVLM
-    from core.twinforge.coder import AnthropicCoder as _DefaultCoder
-    _default_vlm_intent = (
-        f"anthropic · {_DefaultVLM().model}" if vlm is None
-        else f"{getattr(vlm, 'name', '?')} · {getattr(vlm, 'model', '?')}"
+    # `configured` = whatever the default chain would pick FIRST today.
+    # Today that's ClaudeCodeVLM (subscription via `claude` CLI) — but
+    # we don't hard-code the name; we ask `default_vlm_provider()` to
+    # tell us, so the label tracks any future re-ordering of the chain.
+    if vlm is not None:
+        _vlm_intent_provider = vlm
+    else:
+        _vlm_intent_provider = default_vlm_provider()
+    vlm_configured = (
+        f"{getattr(_vlm_intent_provider, 'name', '?')} · "
+        f"{getattr(_vlm_intent_provider, 'model', '?')}"
     )
-    vlm_configured = _default_vlm_intent
     vlm_status = "disabled (enable_vlm=False)"
     if enable_vlm:
         provider = vlm if vlm is not None else default_vlm_provider()
@@ -233,11 +238,14 @@ def compare(src: CaptureResult, tgt: CaptureResult,
             vlm_status = f"crashed: {exc!s}"
 
     code_fixes: List[CodeFix] = []
-    _default_coder_intent = (
-        f"anthropic · {_DefaultCoder().model}" if coder is None
-        else f"{getattr(coder, 'name', '?')} · {getattr(coder, 'model', '?')}"
+    if coder is not None:
+        _coder_intent_provider = coder
+    else:
+        _coder_intent_provider = default_coder_provider()
+    coder_configured = (
+        f"{getattr(_coder_intent_provider, 'name', '?')} · "
+        f"{getattr(_coder_intent_provider, 'model', '?')}"
     )
-    coder_configured = _default_coder_intent
     coder_status = "disabled (enable_coder=False)"
     if enable_coder and target_file:
         provider_c = coder if coder is not None else default_coder_provider()

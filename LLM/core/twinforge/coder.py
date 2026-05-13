@@ -239,7 +239,20 @@ class AnthropicCoder:
 
 
 def default_provider() -> CoderProvider:
-    """Pick the best provider available in the current environment."""
+    """Pick the best provider available in the current environment.
+
+    Priority:
+      1. Claude Code subscription (claude CLI on PATH) — no API key.
+      2. Anthropic API (ANTHROPIC_API_KEY set).
+      3. NullCoder.
+    """
+    try:
+        from core.twinforge.claude_code_provider import ClaudeCodeCoder
+        cc = ClaudeCodeCoder()
+        if cc.available():
+            return cc
+    except Exception:  # noqa: BLE001
+        pass
     p = AnthropicCoder()
     if p.available():
         return p

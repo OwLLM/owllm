@@ -1,0 +1,305 @@
+"""Claude Code (subscription) providers for TwinForge.
+
+Reuses OWLLM's existing subscription auth pattern from
+``core/agents/backends/claude_cli.py`` so the user's logged-in
+``claude.ai`` session covers TwinForge too — no API key needed.
+
+Each call shells out to ``claude --print --model <key>``:
+
+  * Prompt + image references are piped via stdin (Windows-safe — the
+    .cmd shim chokes on multi-line argv values, but stdin is fine).
+  * Claude Code's built-in Read tool loads the referenced PNG files
+    from disk; no base64-in-stdin required.
+  * Stdout is the model's reply text. We parse the first JSON block
+    out of it (same robust pattern the API providers use).
+
+Two providers in this file:
+
+  * ``ClaudeCodeVLM``   — perception (same role as ``AnthropicVLM``)
+  * ``ClaudeCodeCoder`` — generation (same role as ``AnthropicCoder``)
+
+They mirror the API providers' interface and slot into the same
+``default_provider()`` chain. Available iff the ``claude`` CLI is
+installed and on PATH.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any, List, Optional
+
+from core.twinforge.vlm_diff import VLMDifference, NullVLM
+from core.twinforge.coder import CodeFix, NullCoder
+
+
+_log = logging.getLogger(__name__)
+
+
+def _claude_cli_path() -> Optional[str]:
+    return shutil.which("claude")
+
+
+def _run_claude_cli(prompt: str, model: str,
+                    *, timeout: Optional[float] = None,
+                    cwd: Optional[str] = None) -> str:
+    """Invoke ``claude --print`` and return its stdout.
+
+    Mirrors core.agents.backends.claude_cli — same stdin-piped prompt,
+    same encoding, same no-inner-timeout philosophy. Raises RuntimeError
+    on failure so the caller can fall back to the null provider.
+    """
+    exe = _claude_cli_path()
+    if exe is None:
+        raise RuntimeError(
+            "Claude CLI not found on PATH. Install with "
+            "'npm install -g @anthropic-ai/claude-code' and run "
+            "'claude /login' once to authorise the subscription."
+        )
+
+    cmd = [exe, "--print", "--model", model,
+           "--dangerously-skip-permissions"]
+    try:
+        proc = subprocess.run(
+            cmd, input=prompt,
+            capture_output=True, text=True,
+            timeout=timeout, check=False,
+            encoding="utf-8", errors="replace",
+            cwd=cwd,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"claude CLI not callable: {exc}")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"claude CLI exceeded timeout={timeout}s"
+        )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"claude CLI exited {proc.returncode}. "
+            f"stderr: {(proc.stderr or '').strip()[:400]}"
+        )
+    return (proc.stdout or "").strip()
+
+
+def _extract_json(text: str) -> Optional[dict]:
+    """Pull the first {...} JSON object out of model output."""
+    if not text:
+        return None
+    m = re.search(r"\{[\s\S]*\}", text)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except json.JSONDecodeError:
+        # Sometimes the model wraps the JSON in a fenced code block;
+        # strip backticks and try once more.
+        cleaned = re.sub(r"```(?:json)?\s*|\s*```", "", m.group(0))
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            return None
+
+
+# ----------------------------------------------------------------------
+# VLM via subscription
+# ----------------------------------------------------------------------
+_VLM_PROMPT = """You are TwinForge's perception agent. Two screenshots
+are on disk at the paths shown below. Use your Read tool to load both,
+then list the most important visual differences between them — things
+a developer would want to fix in the TARGET to match the SOURCE.
+
+Skip 1-pixel anti-aliasing differences. Focus on what looks obviously
+wrong: missing elements, wrong sizes / positions, wrong text content,
+wrong colours that read as different to a human glance.
+
+Return STRICT JSON only, no prose around it:
+
+{
+  "differences": [
+    {
+      "description": "<one short sentence>",
+      "severity":    "high" | "med" | "low",
+      "location":    "<human description: top centre, right pane, …>",
+      "suggestion":  "<one-line concrete fix>"
+    },
+    ...
+  ]
+}
+
+Limit to %d items, sorted by severity then visual impact. Skip
+anything too minor to fix.
+"""
+
+
+class ClaudeCodeVLM:
+    """Perception provider that uses the Claude Code subscription CLI.
+
+    Same role as ``AnthropicVLM`` — but routes through
+    ``claude --print`` so it uses the user's ``claude.ai`` session
+    instead of an API key. Slower per call (CLI spin-up + auth handshake),
+    free of credential management, and trivially shareable with anyone
+    already running OWLLM.
+    """
+    name = "claude-code"
+
+    def __init__(self,
+                 model: str = "claude-opus-4-7",
+                 timeout: Optional[float] = None,
+                 ) -> None:
+        self.model = model
+        self.timeout = timeout
+
+    def available(self) -> bool:
+        return _claude_cli_path() is not None
+
+    def compare(self, src_png: str, tgt_png: str,
+                *, title: str = "", max_items: int = 12,
+                ) -> List[VLMDifference]:
+        if not self.available():
+            return NullVLM().compare(
+                src_png, tgt_png, title=title, max_items=max_items,
+            )
+        src = str(Path(src_png).resolve())
+        tgt = str(Path(tgt_png).resolve())
+        prompt = (
+            f"# SOURCE image (reference Qt app)\n{src}\n\n"
+            f"# TARGET image (React replica)\n{tgt}\n\n"
+            f"# CONTEXT\n{title or '(no extra context)'}\n\n"
+            + (_VLM_PROMPT % max_items)
+        )
+        try:
+            stdout = _run_claude_cli(
+                prompt, model=self.model, timeout=self.timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("claude-code VLM call failed: %r", exc)
+            return [VLMDifference(
+                description=f"claude-code CLI failed: {exc}",
+                severity="low",
+                suggestion=(
+                    "Check that 'claude' is on PATH and you've run "
+                    "'claude /login' to authorise the subscription."
+                ),
+            )]
+        data = _extract_json(stdout)
+        if not data:
+            return [VLMDifference(
+                description=f"claude-code returned no JSON: {stdout[:200]!r}",
+                severity="low",
+            )]
+        items = data.get("differences") or []
+        out: List[VLMDifference] = []
+        for it in items[:max_items]:
+            out.append(VLMDifference(
+                description=str(it.get("description", "")).strip()[:300],
+                severity=str(it.get("severity", "med")).strip().lower()[:6],
+                location=str(it.get("location", "")).strip()[:120],
+                suggestion=str(it.get("suggestion", "")).strip()[:300],
+            ))
+        return out
+
+
+# ----------------------------------------------------------------------
+# Coder via subscription
+# ----------------------------------------------------------------------
+_CODER_PROMPT = """You are TwinForge's coder agent. The structural diff
+report, the perception findings, and the current target file are below.
+
+Emit code changes that close the biggest gaps. Focus on HIGH-severity
+findings first. Skip anything you'd estimate is more than 50 lines of
+new code.
+
+Return STRICT JSON only, no prose around it:
+
+{
+  "fixes": [
+    {
+      "description":  "<one short sentence>",
+      "file_path":    "<path/to/file/being/changed>",
+      "patch":        "<the COMPLETE new file content>",
+      "is_full_file": true,
+      "confidence":   "high" | "med" | "low"
+    },
+    ...
+  ]
+}
+
+Limit to %d fixes, sorted by impact. Prefer one well-targeted edit
+over many speculative ones.
+"""
+
+
+class ClaudeCodeCoder:
+    """Generation provider via Claude Code subscription CLI."""
+    name = "claude-code"
+
+    def __init__(self,
+                 model: str = "claude-opus-4-7",
+                 timeout: Optional[float] = None,
+                 ) -> None:
+        self.model = model
+        self.timeout = timeout
+
+    def available(self) -> bool:
+        return _claude_cli_path() is not None
+
+    def patch(self, *,
+              diff_text: str,
+              vlm_findings: List[Any],
+              target_file: str,
+              max_changes: int = 6,
+              ) -> List[CodeFix]:
+        if not self.available():
+            return NullCoder().patch(
+                diff_text=diff_text, vlm_findings=vlm_findings,
+                target_file=target_file, max_changes=max_changes,
+            )
+        target_content = ""
+        try:
+            target_content = Path(target_file).read_text(encoding="utf-8")[:200_000]
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("could not read target file %r: %r", target_file, exc)
+        vlm_summary = "\n".join(
+            f"- [{getattr(f, 'severity', 'med')}] {getattr(f, 'description', '')} "
+            f"(at {getattr(f, 'location', '?')}) -> {getattr(f, 'suggestion', '')}"
+            for f in (vlm_findings or [])
+        )
+        prompt = (
+            (_CODER_PROMPT % max_changes)
+            + "\n\n# STRUCTURAL DIFF REPORT\n" + diff_text
+            + "\n\n# VLM FINDINGS\n" + (vlm_summary or "(none)")
+            + f"\n\n# TARGET FILE — {target_file}\n```\n"
+            + target_content + "\n```\n"
+        )
+        try:
+            stdout = _run_claude_cli(
+                prompt, model=self.model, timeout=self.timeout,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return [CodeFix(
+                description=f"claude-code CLI failed: {exc}",
+                file_path="(none)", patch="",
+                is_full_file=False, confidence="low",
+            )]
+        data = _extract_json(stdout)
+        if not data:
+            return [CodeFix(
+                description=f"claude-code returned no JSON: {stdout[:200]!r}",
+                file_path="(none)", patch="",
+                is_full_file=False, confidence="low",
+            )]
+        items = data.get("fixes") or []
+        out: List[CodeFix] = []
+        for it in items[:max_changes]:
+            out.append(CodeFix(
+                description=str(it.get("description", "")).strip()[:300],
+                file_path=str(it.get("file_path", "")).strip()[:400],
+                patch=str(it.get("patch", "")),
+                is_full_file=bool(it.get("is_full_file", True)),
+                confidence=str(it.get("confidence", "med")).strip().lower()[:6],
+            ))
+        return out

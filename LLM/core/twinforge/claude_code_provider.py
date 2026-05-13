@@ -206,35 +206,92 @@ class ClaudeCodeVLM:
 # ----------------------------------------------------------------------
 # Coder via subscription
 # ----------------------------------------------------------------------
-_CODER_PROMPT = """You are TwinForge's coder agent. The structural diff
-report, the perception findings, and the current target file are below.
+# Rewrite (2026-05-13): the old impl asked Claude to JSON-encode the
+# COMPLETE new file content. For a 25k-char HTML page that's a coin-toss
+# even on Opus 4.7 — one missed quote and the patch is corrupt. With
+# Claude Code's subscription path the model already has Read / Edit /
+# Write tools at its disposal. Far better to:
+#
+#   1. Make a working COPY of the target file (timestamped, never
+#      overwrites the FINAL).
+#   2. Tell Claude its job is to edit that working copy in-place using
+#      its tools, NOT to print code back.
+#   3. After it exits, just read the working copy from disk. THAT is
+#      the patch.
+#
+# This eliminates the JSON-escape failure mode entirely and gives the
+# Coder native access to the screenshots (Read tool on the PNG paths
+# we hand it), so it can ground edits in the same visual data the VLM
+# used.
+_CODER_TOOL_PROMPT = """You are TwinForge's coder agent.
 
-Emit code changes that close the biggest gaps. Focus on HIGH-severity
-findings first. Skip anything you'd estimate is more than 50 lines of
-new code.
+Your ONLY job is to make TARGET match SOURCE more closely. You are
+NOT improving the design. You are NOT a UI designer. You are a
+high-precision pixel-matcher.
 
-Return STRICT JSON only, no prose around it:
+# HARD RULES — read carefully, you have failed previous runs by
+# violating these:
 
-{
-  "fixes": [
-    {
-      "description":  "<one short sentence>",
-      "file_path":    "<path/to/file/being/changed>",
-      "patch":        "<the COMPLETE new file content>",
-      "is_full_file": true,
-      "confidence":   "high" | "med" | "low"
-    },
-    ...
-  ]
-}
+1. **NEVER add visual flourishes** the source does not have.
+   - No box-shadow / boxShadow unless the source clearly has one.
+   - No additional linear-gradient or radial-gradient layers.
+   - No glow filters, drop-shadows, text-shadows.
+   - No new SVG <filter> or <radialGradient> defs.
+   - No "iconChip" / pill / capsule wrappers around emoji icons.
+   - If you find yourself thinking "this would look nicer with X",
+     STOP. The source does not have X. Do not add X.
 
-Limit to %d fixes, sorted by impact. Prefer one well-targeted edit
-over many speculative ones.
+2. **Only change properties the diff flagged.** If a diff line says
+   `src=86x32 tgt=85x32`, change ONLY width/height on that element to
+   86/32. Do NOT also change its colour, padding, shadow, font.
+   If an element is NOT in the diff report at quality < 60 OR is NOT
+   in the VLM findings, LEAVE IT ALONE.
+
+3. **Use the exact pixel numbers from the diff.** When the diff says
+   `width=114`, the new value is 114, not 124, not 120.
+
+4. **NEVER widen elements to add features.** If the diff says the
+   target should be NARROWER, narrow it; if WIDER, widen it; but
+   don't change other elements to "balance" things visually.
+
+5. **If you can't tell what to do for a high-severity finding, skip
+   it.** A no-op is better than an aesthetic guess.
+
+# Working file (edit IN PLACE with Edit/Write tools):
+  {target}
+
+# Reference screenshots (load with Read if you need to see them):
+  SOURCE (the reference, the ground truth):  {src_png}
+  TARGET (current state of the replica):     {tgt_png}
+
+# How to work:
+* Read the structural diff below. It has EXACT size + position
+  measurements per element. Trust the numbers; they are not opinions.
+* Read the VLM findings. They tell you what a human sees missing.
+  But filter through Hard Rule #1 — only ADD an element if the
+  source clearly has it; if you're not sure, skip.
+* Make SURGICAL Edit calls. Each Edit should change ONE property
+  to ONE value. Many small Edits, not one big Write.
+* Do NOT rewrite whole sections. Do NOT replace the whole file.
+* When finished, print one line: "DONE — N edits applied" and exit.
+
+# STRUCTURAL DIFF REPORT (use these exact numbers)
+{diff_text}
+
+# PERCEPTION FINDINGS (apply only the ones describing things actually
+# present in SOURCE)
+{vlm_summary}
 """
 
 
 class ClaudeCodeCoder:
-    """Generation provider via Claude Code subscription CLI."""
+    """Generation provider via Claude Code subscription CLI.
+
+    Lets Claude Code edit the target file with its own Edit/Write tools
+    (no JSON-encoded rewrite). The 'patch' on the returned CodeFix is
+    just the new file content read back from disk — the actual change
+    is already on the filesystem when this method returns.
+    """
     name = "claude-code"
 
     def __init__(self,
@@ -252,54 +309,77 @@ class ClaudeCodeCoder:
               vlm_findings: List[Any],
               target_file: str,
               max_changes: int = 6,
+              src_png: Optional[str] = None,
+              tgt_png: Optional[str] = None,
               ) -> List[CodeFix]:
         if not self.available():
             return NullCoder().patch(
                 diff_text=diff_text, vlm_findings=vlm_findings,
                 target_file=target_file, max_changes=max_changes,
             )
-        target_content = ""
-        try:
-            target_content = Path(target_file).read_text(encoding="utf-8")[:200_000]
-        except Exception as exc:  # noqa: BLE001
-            _log.warning("could not read target file %r: %r", target_file, exc)
+        target_path = Path(target_file).resolve()
+        if not target_path.exists():
+            return [CodeFix(
+                description=f"target file does not exist: {target_path}",
+                file_path=str(target_path), patch="",
+                is_full_file=False, confidence="low",
+            )]
+
+        # Make a timestamped working COPY. Claude edits this copy; the
+        # caller decides whether to promote it. Never touch the
+        # original target_file — that's the orchestrator's job.
+        from datetime import datetime
+        import shutil as _shutil
+        stamp = datetime.now().strftime("%y%m%d_%H%M%S")
+        suffix = target_path.suffix or ".html"
+        working = target_path.with_name(
+            f"{target_path.stem}_PATCH_{stamp}{suffix}"
+        )
+        _shutil.copy2(target_path, working)
+        _log.info("claude-code coder editing working copy: %s", working)
+
         vlm_summary = "\n".join(
             f"- [{getattr(f, 'severity', 'med')}] {getattr(f, 'description', '')} "
             f"(at {getattr(f, 'location', '?')}) -> {getattr(f, 'suggestion', '')}"
             for f in (vlm_findings or [])
         )
-        prompt = (
-            (_CODER_PROMPT % max_changes)
-            + "\n\n# STRUCTURAL DIFF REPORT\n" + diff_text
-            + "\n\n# VLM FINDINGS\n" + (vlm_summary or "(none)")
-            + f"\n\n# TARGET FILE — {target_file}\n```\n"
-            + target_content + "\n```\n"
+        prompt = _CODER_TOOL_PROMPT.format(
+            target=str(working),
+            src_png=str(Path(src_png).resolve()) if src_png else "(not provided)",
+            tgt_png=str(Path(tgt_png).resolve()) if tgt_png else "(not provided)",
+            diff_text=diff_text,
+            vlm_summary=vlm_summary or "(none)",
         )
         try:
             stdout = _run_claude_cli(
                 prompt, model=self.model, timeout=self.timeout,
+                # CLI cwd = the replica's dir, so relative asset URLs in
+                # the HTML (../../../icons/…) resolve to real files when
+                # the model wants to peek at them.
+                cwd=str(target_path.parent),
             )
         except Exception as exc:  # noqa: BLE001
             return [CodeFix(
                 description=f"claude-code CLI failed: {exc}",
-                file_path="(none)", patch="",
+                file_path=str(working), patch="",
                 is_full_file=False, confidence="low",
             )]
-        data = _extract_json(stdout)
-        if not data:
+
+        try:
+            new_content = working.read_text(encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
             return [CodeFix(
-                description=f"claude-code returned no JSON: {stdout[:200]!r}",
-                file_path="(none)", patch="",
+                description=f"could not read patched file back: {exc}",
+                file_path=str(working), patch="",
                 is_full_file=False, confidence="low",
             )]
-        items = data.get("fixes") or []
-        out: List[CodeFix] = []
-        for it in items[:max_changes]:
-            out.append(CodeFix(
-                description=str(it.get("description", "")).strip()[:300],
-                file_path=str(it.get("file_path", "")).strip()[:400],
-                patch=str(it.get("patch", "")),
-                is_full_file=bool(it.get("is_full_file", True)),
-                confidence=str(it.get("confidence", "med")).strip().lower()[:6],
-            ))
-        return out
+
+        # First line of stdout is typically "DONE — N edits applied".
+        first_line = (stdout.splitlines() or [""])[0].strip()[:200] or "(no summary)"
+        return [CodeFix(
+            description=first_line,
+            file_path=str(working),
+            patch=new_content,
+            is_full_file=True,
+            confidence="high",
+        )]

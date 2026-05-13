@@ -237,6 +237,11 @@ def compare(src: CaptureResult, tgt: CaptureResult,
             )]
             vlm_status = f"crashed: {exc!s}"
 
+    # Build the structural diff text NOW so we can pass it to the Coder
+    # (used to be a placeholder string — actual bug fix on 2026-05-13).
+    text = format_report(regions, overall,
+                         unmatched_src=unm_src, unmatched_tgt=unm_tgt)
+
     code_fixes: List[CodeFix] = []
     if coder is not None:
         _coder_intent_provider = coder
@@ -259,7 +264,16 @@ def compare(src: CaptureResult, tgt: CaptureResult,
             coder_status = f"ran via {provider_c.name} · {getattr(provider_c, 'model', '?')}"
         try:
             code_fixes = provider_c.patch(
-                diff_text="(see report.txt)",
+                diff_text=text,                  # ← real report, not a placeholder
+                vlm_findings=vlm_differences,
+                target_file=target_file,
+                src_png=src.png_path,            # ← let the coder SEE the source too
+                tgt_png=tgt.png_path,
+            )
+        except TypeError:
+            # Older provider signature without src_png / tgt_png args.
+            code_fixes = provider_c.patch(
+                diff_text=text,
                 vlm_findings=vlm_differences,
                 target_file=target_file,
             )
@@ -272,9 +286,6 @@ def compare(src: CaptureResult, tgt: CaptureResult,
             coder_status = f"crashed: {exc!s}"
     elif enable_coder and not target_file:
         coder_status = "skipped — enable_coder=True but no target_file given"
-
-    text = format_report(regions, overall,
-                         unmatched_src=unm_src, unmatched_tgt=unm_tgt)
     text += (
         f"\n\nPROVIDERS\n"
         f"  perception · configured: {vlm_configured}\n"

@@ -69,7 +69,7 @@ function ModeBar() {
       <div style={{ display:"flex", justifyContent:"center" }}>
         <div data-ui="AppTitle" style={{ textAlign:"center", width:128, height:45, fontSize:34, fontWeight:700, color:"#fff", letterSpacing:2, lineHeight:"45px" }}>OWLLM</div>
       </div>
-      <div data-ui="SysInfoBlock" style={{ minWidth:567, width:567, height:60, display:"flex", flexDirection:"column", alignItems:"stretch", justifyContent:"center", gap:3, fontSize:13, fontWeight:700, color:"#fff", textAlign:"right" }}>
+      <div data-ui="SysInfoBlock" style={{ minWidth:567, width:567, display:"flex", flexDirection:"column", alignItems:"stretch", gap:2, fontSize:13, fontWeight:700, color:"#fff", textAlign:"right" }}>
         <div data-ui="HeaderServersLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />Servers: 0</div>
         <div data-ui="HeaderApiKeyLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />API key: owllm-local</div>
         <div data-ui="HeaderVramLabel"><span className="status-dot" style={{ background:"#fbbf24", color:"#fbbf24" }} />VRAM: N/N</div>
@@ -103,7 +103,7 @@ function LocationRow() {
     <div style={{ height:52, padding:"10px 23px", background:"linear-gradient(180deg, #1f2632, #181c29)", borderRadius:10, margin:"0 23px", display:"flex", alignItems:"center", gap:10 }}>
       <div data-ui="LocationLabel" style={{ display:"inline-flex", alignItems:"center", height:32, width:58, fontSize:11, color:"#aaa", textTransform:"uppercase", letterSpacing:0.6, marginRight:4 }}>LOCATION</div>
       <input data-ui="LocationInput" defaultValue="/path/to/repo · esp-flash · github.com/me/x" style={{ width:346, height:32, borderRadius:8, padding:"0 12px", fontSize:13, background:"#0f0f19", color:"#dadcdf", border:"1px solid rgba(255,255,255,0.06)" }} />
-      <button data-ui="LocationBrowseBtn" className="ghost-btn" style={{ width:79 }}>Browse…</button>
+      <button data-ui="LocationBrowseBtn" className="ghost-btn">Browse…</button>
       <label data-ui="TrustWritesCheckbox" style={{ display:"inline-flex", alignItems:"center", width:94, height:16, lineHeight:"16px", fontSize:12, color:"#dadcdf", padding:0 }}>
         <input type="checkbox" defaultChecked style={{ marginRight:6, width:13, height:13, accentColor:"#7fdfff" }} />
         Trust writes
@@ -124,10 +124,10 @@ function GoalRow() {
     <div style={{ height:38, padding:"0 23px", margin:"12px 0", background:"transparent", display:"flex", alignItems:"center", gap:10 }}>
       <button data-ui="GoalAttachBtn" className="ghost-btn" style={{ height:38, width:51, padding:0, fontSize:16 }}>📎</button>
       <input data-ui="GoalInput" defaultValue="summarize the last commit and propose a follow-up. design image + build notes" style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"#161623", color:"#fff", border:"none" }} />
-      <button data-ui="GoalRunBtn" style={{ height:38, width:82, padding:0, borderRadius:10, border:"none", background:"#4a6cff", color:"#fff", fontWeight:700, fontSize:18 }}>Run</button>
+      <button data-ui="GoalRunBtn" style={{ height:38, width:82, padding:0, borderRadius:10, border:"none", background:"linear-gradient(180deg, #5e82ff, #3a55cc)", color:"#fff", fontWeight:700, fontSize:18, boxShadow:"0 2px 8px rgba(74,108,255,0.45)" }}>Run</button>
       <button data-ui="GoalCancelBtn" style={{ height:38, width:98, padding:0, borderRadius:10, border:"1px solid rgba(255,140,140,0.30)", background:"rgba(255,140,140,0.08)", color:"#ff8c8c", fontSize:18 }}>Cancel</button>
       <button data-ui="GoalTelemetryBtn" className="ghost-btn" style={{ height:38, width:44, padding:0, fontSize:16 }}>📊</button>
-      <button data-ui="GoalVoiceBtn" className="ghost-btn" style={{ height:38, width:64, padding:0, fontSize:16, fontWeight:"normal" }}>🔈</button>
+      <button data-ui="GoalVoiceBtn" className="ghost-btn" style={{ height:38, width:64, padding:0, fontSize:16 }}>🔈 ▾</button>
     </div>
   );
 }
@@ -174,8 +174,8 @@ function SuperUserCard() {
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
         <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:14, background:"linear-gradient(135deg, #4a6cff, #7fdfff)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, color:"#fff", fontWeight:700 }}>👤</div>
         <div style={{ flex:1 }}>
-          <div data-ui="suName" style={{ fontSize:18, fontWeight:700, color:"#fff", height:26, lineHeight:"26px" }}>Super User</div>
-          <div data-ui="suHint" style={{ fontSize:11, color:"#7888a8", height:74, lineHeight:1.4 }}>Team: PuShed Team — idle the agent team auger in Bach. Agents team page +1 detailed.</div>
+          <div data-ui="suName" style={{ fontSize:12, fontWeight:700, color:"#fff" }}>Super User</div>
+          <div data-ui="suHint" style={{ fontSize:10, color:"#7888a8" }}>idle — team pings you here</div>
         </div>
         <button data-ui="suIconBtn" className="ghost-btn" style={{ width:30, height:26, padding:0, fontSize:12 }}>⇱⇲</button>
         <button data-ui="suIconBtn" className="ghost-btn" style={{ width:26, height:26, padding:0, fontSize:14 }}>⚙</button>
@@ -286,7 +286,7 @@ last action from m,h is left protected.`;
   ];
   return (
     <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"#0c0f1a" }}>
-      <div data-ui="LogHeader" style={{ height:26, padding:"0 12px", background:"linear-gradient(90deg, rgba(120,220,255,0.22) 0%, rgba(220,180,255,0.16) 60%, rgba(255,200,100,0.14) 100%)", borderBottom:"1px solid rgba(120,220,255,0.35)", display:"flex", alignItems:"center", gap:8 }}>
+      <div data-ui="LogHeader" style={{ height:48, padding:"0 12px", background:"linear-gradient(90deg, rgba(120,220,255,0.22) 0%, rgba(220,180,255,0.16) 60%, rgba(255,200,100,0.14) 100%)", borderBottom:"1px solid rgba(120,220,255,0.35)", display:"flex", alignItems:"center", gap:8 }}>
         <button style={{ padding:"6px 14px", borderRadius:18, border:"1px solid rgba(127,223,255,0.55)", background:"rgba(127,223,255,0.30)", color:"#ffffff", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
         <button style={{ padding:"6px 14px", borderRadius:18, border:"1px solid rgba(220,180,255,0.40)", background:"rgba(220,180,255,0.18)", color:"#dcb0ff", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
         <div style={{ flex:1, fontSize:11, color:"#9aa0a6", paddingLeft:8 }}>Click an agent on the canvas to view its log.</div>
@@ -319,10 +319,10 @@ function AgentsPage() {
         <SubTabs />
         <LocationRow />
         <GoalRow />
-        <div data-ui="WorkspaceStack" style={{ height:665, width:1554, margin:"0 23px", display:"flex", overflow:"hidden", background:"#06080d", padding:0 }}>
+        <div data-ui="WorkspaceStack" style={{ height:665, display:"flex", overflow:"hidden", background:"#06080d", padding:"0 23px" }}>
           <div data-ui="RosterLeft" style={{ width:LEFT_W, display:"flex", flexDirection:"column", background:"#0a0d14" }}>
             <FlowHeader />
-            <div data-ui="CanvasStack" style={{ height:607, position:"relative" }}>
+            <div data-ui="CanvasStack" style={{ flex:1, position:"relative" }}>
               <TeamCanvas width={LEFT_W} height={607} />
               <div style={{ position:"absolute", top:8, left:8, width:360 }}>
                 <DesignStudioCard />

@@ -48,28 +48,29 @@ function HybridFrame({ children, width, height }) {
 }
 
 function ModeBar() {
-  const buttonStyle = { height:50, padding:"0 14px", background:"linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))", color:"#fff", border:"1px solid rgba(120,220,255,0.0)", borderRadius:6, fontSize:13, fontWeight:700, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", lineHeight:1.05, gap:2 };
-  const activeButton = { ...buttonStyle, border:"1px solid #d4af37", background:"linear-gradient(180deg, rgba(80,80,110,0.9), rgba(50,50,80,0.9))" };
+  const buttonStyle = { height:50, padding:"0 10px", background:"linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))", color:"#fff", border:"1px solid rgba(120,220,255,0.0)", borderRadius:6, fontSize:13, fontWeight:700, display:"flex", flexDirection:"row", alignItems:"center", justifyContent:"center", lineHeight:1.05, gap:8 };
+  const activeButton = { ...buttonStyle, border:"1px solid #d4af37", background:"linear-gradient(180deg, rgba(80,80,110,0.9), rgba(50,50,80,0.9))", boxShadow:"0 0 12px rgba(212,175,55,0.35)" };
   const colorBtn = (c) => ({ width:18, height:18, borderRadius:3, background:c, border:"none", padding:0 });
+  const iconChip = (bg) => ({ width:28, height:28, borderRadius:5, background:bg, display:"inline-flex", alignItems:"center", justifyContent:"center", fontSize:16, color:"#fff", boxShadow:"inset 0 1px 0 rgba(255,255,255,0.18), 0 1px 2px rgba(0,0,0,0.4)" });
   return (
-    <div data-ui="AppHeader" style={{ height:80, display:"grid", gridTemplateColumns:"auto 1fr auto", alignItems:"center", padding:"10px 50px 10px 20px", gap:16, background:"#1c2244" }}>
+    <div data-ui="AppHeader" style={{ height:80, display:"grid", gridTemplateColumns:"auto 1fr auto", alignItems:"center", padding:"10px 46px 10px 16px", gap:16, background:"#1c2244" }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <div data-ui="DarkModeBtn" style={{ width:70, height:50, borderRadius:6, background:"linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", lineHeight:1.0 }}>
-          <div style={{ fontSize:22 }}>🌙</div>
-          <div style={{ fontSize:11, fontWeight:700, color:"#fff" }}>Dark</div>
+        <div data-ui="DarkModeBtn" style={{ width:78, height:50, borderRadius:6, background:"linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))", display:"flex", flexDirection:"row", alignItems:"center", justifyContent:"center", gap:8, lineHeight:1.0 }}>
+          <div style={iconChip("linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)")}>🌙</div>
+          <div style={{ fontSize:12, fontWeight:700, color:"#fff" }}>Dark</div>
         </div>
         <div data-ui="ColorSelector" style={{ width:70, height:50, padding:4, display:"grid", gridTemplateColumns:"repeat(3, 18px)", gridTemplateRows:"repeat(2, 18px)", gap:3, background:"rgba(60,60,80,0.4)", borderRadius:6 }}>
           {["#667eea","#fbbf24","#ef4444","#3b82f6","#10b981","#6b7280"].map(c => <button key={c} style={colorBtn(c)} />)}
         </div>
-        <button data-ui="AdvancedToggle" style={{...buttonStyle, width:114}}><span style={{fontSize:18}}>⚙</span><span>Advanced</span></button>
-        <button data-ui="FineTuningToggle" style={{...buttonStyle, width:129}}><span style={{fontSize:18}}>🛠</span><span>Fine Tuning</span></button>
-        <button data-ui="AgenticTeamToggle" style={{...activeButton, width:147}}><span style={{fontSize:18}}>🎭</span><span>Agentic Team</span></button>
-        <button data-ui="GamifyToggle" style={{...buttonStyle, width:91}}><span style={{fontSize:18}}>🎮</span><span>Gamify</span></button>
+        <button data-ui="AdvancedToggle" style={{...buttonStyle, width:124}}><span style={iconChip("linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)")}>⚙</span><span>Advanced</span></button>
+        <button data-ui="FineTuningToggle" style={{...buttonStyle, width:139}}><span style={iconChip("linear-gradient(135deg, #10b981 0%, #047857 100%)")}>🛠</span><span>Fine Tuning</span></button>
+        <button data-ui="AgenticTeamToggle" style={{...activeButton, width:157}}><span style={iconChip("linear-gradient(135deg, #f59e0b 0%, #b45309 100%)")}>🎭</span><span>Agentic Team</span></button>
+        <button data-ui="GamifyToggle" style={{...buttonStyle, width:101}}><span style={iconChip("linear-gradient(135deg, #a855f7 0%, #6b21a8 100%)")}>🎮</span><span>Gamify</span></button>
       </div>
       <div style={{ display:"flex", justifyContent:"center" }}>
         <div data-ui="AppTitle" style={{ textAlign:"center", width:128, height:45, fontSize:34, fontWeight:700, color:"#fff", letterSpacing:2, lineHeight:"45px" }}>OWLLM</div>
       </div>
-      <div data-ui="SysInfoBlock" style={{ minWidth:567, width:567, height:60, display:"flex", flexDirection:"column", alignItems:"stretch", justifyContent:"center", gap:3, fontSize:13, fontWeight:700, color:"#fff", textAlign:"right" }}>
+      <div data-ui="SysInfoBlock" style={{ minWidth:567, width:567, display:"flex", flexDirection:"column", alignItems:"stretch", gap:4, fontSize:14, fontWeight:700, color:"#ffffff", textAlign:"right", lineHeight:1.4 }}>
         <div data-ui="HeaderServersLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />Servers: 0</div>
         <div data-ui="HeaderApiKeyLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />API key: owllm-local</div>
         <div data-ui="HeaderVramLabel"><span className="status-dot" style={{ background:"#fbbf24", color:"#fbbf24" }} />VRAM: N/N</div>
@@ -103,7 +104,7 @@ function LocationRow() {
     <div style={{ height:52, padding:"10px 23px", background:"linear-gradient(180deg, #1f2632, #181c29)", borderRadius:10, margin:"0 23px", display:"flex", alignItems:"center", gap:10 }}>
       <div data-ui="LocationLabel" style={{ display:"inline-flex", alignItems:"center", height:32, width:58, fontSize:11, color:"#aaa", textTransform:"uppercase", letterSpacing:0.6, marginRight:4 }}>LOCATION</div>
       <input data-ui="LocationInput" defaultValue="/path/to/repo · esp-flash · github.com/me/x" style={{ width:346, height:32, borderRadius:8, padding:"0 12px", fontSize:13, background:"#0f0f19", color:"#dadcdf", border:"1px solid rgba(255,255,255,0.06)" }} />
-      <button data-ui="LocationBrowseBtn" className="ghost-btn" style={{ width:79 }}>Browse…</button>
+      <button data-ui="LocationBrowseBtn" className="ghost-btn">Browse…</button>
       <label data-ui="TrustWritesCheckbox" style={{ display:"inline-flex", alignItems:"center", width:94, height:16, lineHeight:"16px", fontSize:12, color:"#dadcdf", padding:0 }}>
         <input type="checkbox" defaultChecked style={{ marginRight:6, width:13, height:13, accentColor:"#7fdfff" }} />
         Trust writes
@@ -124,10 +125,10 @@ function GoalRow() {
     <div style={{ height:38, padding:"0 23px", margin:"12px 0", background:"transparent", display:"flex", alignItems:"center", gap:10 }}>
       <button data-ui="GoalAttachBtn" className="ghost-btn" style={{ height:38, width:51, padding:0, fontSize:16 }}>📎</button>
       <input data-ui="GoalInput" defaultValue="summarize the last commit and propose a follow-up. design image + build notes" style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"#161623", color:"#fff", border:"none" }} />
-      <button data-ui="GoalRunBtn" style={{ height:38, width:82, padding:0, borderRadius:10, border:"none", background:"#4a6cff", color:"#fff", fontWeight:700, fontSize:18 }}>Run</button>
+      <button data-ui="GoalRunBtn" style={{ height:38, width:82, padding:0, borderRadius:10, border:"1px solid rgba(127,223,255,0.55)", background:"linear-gradient(180deg, #7fa3ff 0%, #4a6cff 50%, #2a3acc 100%)", color:"#fff", fontWeight:700, fontSize:18, boxShadow:"0 0 18px rgba(127,160,255,0.65), 0 2px 8px rgba(74,108,255,0.55), inset 0 1px 0 rgba(255,255,255,0.25)", textShadow:"0 1px 2px rgba(0,0,0,0.4)" }}>Run</button>
       <button data-ui="GoalCancelBtn" style={{ height:38, width:98, padding:0, borderRadius:10, border:"1px solid rgba(255,140,140,0.30)", background:"rgba(255,140,140,0.08)", color:"#ff8c8c", fontSize:18 }}>Cancel</button>
       <button data-ui="GoalTelemetryBtn" className="ghost-btn" style={{ height:38, width:44, padding:0, fontSize:16 }}>📊</button>
-      <button data-ui="GoalVoiceBtn" className="ghost-btn" style={{ height:38, width:64, padding:0, fontSize:16, fontWeight:"normal" }}>🔈</button>
+      <button data-ui="GoalVoiceBtn" className="ghost-btn" style={{ height:38, width:64, padding:0, fontSize:16, fontWeight:400 }}>🔈</button>
     </div>
   );
 }
@@ -171,11 +172,14 @@ function DesignStudioCard() {
 function SuperUserCard() {
   return (
     <div data-ui="SuperUserCard" style={{ margin:"8px 10px", padding:"10px 12px", borderRadius:12, background:"#181c29", border:"1px solid rgba(120,220,255,0.10)", width:320, height:280, display:"flex", flexDirection:"column", gap:8 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-        <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:14, background:"linear-gradient(135deg, #4a6cff, #7fdfff)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, color:"#fff", fontWeight:700 }}>👤</div>
-        <div style={{ flex:1 }}>
-          <div data-ui="suName" style={{ fontSize:18, fontWeight:700, color:"#fff", height:26, lineHeight:"26px" }}>Super User</div>
-          <div data-ui="suHint" style={{ fontSize:11, color:"#7888a8", height:74, lineHeight:1.4 }}>Team: PuShed Team — idle the agent team auger in Bach. Agents team page +1 detailed.</div>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <div data-ui="suAvatar" style={{ width:32, height:32, borderRadius:16, background:"linear-gradient(135deg, #4a6cff, #7fdfff)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"#fff", fontWeight:700, flexShrink:0, boxShadow:"0 0 8px rgba(127,223,255,0.4)" }}>👤</div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ display:"flex", alignItems:"baseline", gap:6 }}>
+            <div data-ui="suName" style={{ fontSize:13, fontWeight:700, color:"#fff" }}>Super User</div>
+            <div style={{ fontSize:10, color:"#7888a8" }}>· posted 11:43</div>
+          </div>
+          <div data-ui="suHint" style={{ fontSize:10, color:"#7888a8" }}>idle — team pings you here</div>
         </div>
         <button data-ui="suIconBtn" className="ghost-btn" style={{ width:30, height:26, padding:0, fontSize:12 }}>⇱⇲</button>
         <button data-ui="suIconBtn" className="ghost-btn" style={{ width:26, height:26, padding:0, fontSize:14 }}>⚙</button>
@@ -230,14 +234,34 @@ function TeamCanvas({ width, height }) {
             <stop offset="100%" stopColor="rgba(127,223,255,0)" />
           </radialGradient>
           <radialGradient id="orchHalo" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="rgba(255,200,100,0.85)" />
-            <stop offset="45%" stopColor="rgba(255,180,80,0.40)" />
-            <stop offset="100%" stopColor="rgba(255,180,80,0)" />
+            <stop offset="0%" stopColor="rgba(255,200,100,0.95)" />
+            <stop offset="25%" stopColor="rgba(255,180,80,0.55)" />
+            <stop offset="55%" stopColor="rgba(200,120,220,0.30)" />
+            <stop offset="100%" stopColor="rgba(120,220,255,0)" />
           </radialGradient>
+          <radialGradient id="bgGlow" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="rgba(140,90,220,0.30)" />
+            <stop offset="50%" stopColor="rgba(80,120,220,0.18)" />
+            <stop offset="100%" stopColor="rgba(60,120,200,0)" />
+          </radialGradient>
+          <linearGradient id="edgeGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="rgba(255,200,120,0.95)" />
+            <stop offset="60%" stopColor="rgba(127,223,255,0.55)" />
+            <stop offset="100%" stopColor="rgba(127,223,255,0.25)" />
+          </linearGradient>
+          <linearGradient id="edgeIdle" x1="0%" y1="0%" x2="100%" y2="0%">
+            <stop offset="0%" stopColor="rgba(127,223,255,0.45)" />
+            <stop offset="100%" stopColor="rgba(127,223,255,0.10)" />
+          </linearGradient>
+          <filter id="edgeGlow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="2.4" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
         </defs>
-        <circle cx={cx} cy={cy} r={ring_radius} fill="none" stroke="rgba(120,220,255,0.25)" strokeWidth="1.6" strokeDasharray="4 4" />
+        <circle cx={cx} cy={cy} r={ring_radius * 1.6} fill="url(#bgGlow)" />
+        <circle cx={cx} cy={cy} r={ring_radius} fill="none" stroke="rgba(120,220,255,0.30)" strokeWidth="1.6" strokeDasharray="4 4" />
         {nodes.map((n,i) => (
-          <line key={"sp"+i} x1={cx} y1={cy} x2={n.x} y2={n.y} stroke={n.active?"rgba(120,220,255,0.55)":"rgba(120,220,255,0.12)"} strokeWidth={n.active?1.6:1.2} />
+          <line key={"sp"+i} x1={cx} y1={cy} x2={n.x} y2={n.y} stroke={n.active?"url(#edgeGrad)":"url(#edgeIdle)"} strokeWidth={n.active?2.4:1.6} filter={n.active?"url(#edgeGlow)":undefined} />
         ))}
         {nodes.map((n,i) => (
           <circle key={"h"+i} cx={n.x} cy={n.y} r={n.active?52:38} fill={n.active?"url(#haloActive)":"url(#halo)"} />
@@ -248,12 +272,12 @@ function TeamCanvas({ width, height }) {
         {nodes.filter(n=>n.active).map((n,i) => (
           <circle key={"r"+i} cx={n.x} cy={n.y} r={28} fill="none" stroke="rgba(127,223,255,0.7)" strokeWidth="1.4" />
         ))}
-        <circle cx={cx} cy={cy} r={orchestrator_r * 3.0} fill="url(#orchHalo)" />
-        <circle cx={cx} cy={cy} r={orchestrator_r * 1.5} fill="#1a2240" stroke="rgba(255,200,100,0.75)" strokeWidth="2.5" />
-        <circle cx={cx} cy={cy} r={orchestrator_r * 1.5} fill="none" stroke="rgba(127,223,255,0.45)" strokeWidth="1.2" strokeDasharray="3 3" />
+        <circle cx={cx} cy={cy} r={orchestrator_r * 4.5} fill="url(#orchHalo)" />
+        <circle cx={cx} cy={cy} r={orchestrator_r * 1.6} fill="#1a2240" stroke="rgba(255,200,100,0.85)" strokeWidth="2.8" filter="url(#edgeGlow)" />
+        <circle cx={cx} cy={cy} r={orchestrator_r * 1.6} fill="none" stroke="rgba(127,223,255,0.55)" strokeWidth="1.2" strokeDasharray="3 3" />
       </svg>
-      <img src={`${ICONS}/owl_agentic.png`} style={{ position:"absolute", left:cx - orchestrator_r * 1.25, top:cy - orchestrator_r * 1.25, width:orchestrator_r * 2.5, height:orchestrator_r * 2.5, pointerEvents:"none", filter:"drop-shadow(0 0 12px rgba(255,200,100,0.55))" }} />
-      <div style={{ position:"absolute", left:cx-60, top:cy + orchestrator_r * 1.6, width:120, textAlign:"center", fontSize:11, fontWeight:700, color:"#ffd97a", textTransform:"uppercase", letterSpacing:0.8, textShadow:"0 1px 3px rgba(0,0,0,0.9)", pointerEvents:"none" }}>Orchestrator</div>
+      <img src={`${ICONS}/owl_agentic.png`} style={{ position:"absolute", left:cx - orchestrator_r * 1.5, top:cy - orchestrator_r * 1.5, width:orchestrator_r * 3.0, height:orchestrator_r * 3.0, pointerEvents:"none", filter:"drop-shadow(0 0 18px rgba(255,200,100,0.85))" }} />
+      <div style={{ position:"absolute", left:cx-70, top:cy + orchestrator_r * 1.75, width:140, textAlign:"center", fontSize:12, fontWeight:700, color:"#ffd97a", textTransform:"uppercase", letterSpacing:1.0, textShadow:"0 1px 4px rgba(0,0,0,0.95), 0 0 8px rgba(255,200,100,0.5)", pointerEvents:"none" }}>Orchestrator</div>
       {nodes.map((n,i) => (
         <div key={"l"+i} style={{ position:"absolute", left:n.x - 60, top:n.y + 30, width:120, textAlign:"center", fontSize:12, fontWeight:600, color:n.active?"#ffffff":"#e6e8eb", textTransform:"uppercase", letterSpacing:0.4, pointerEvents:"none", textShadow:"0 1px 3px rgba(0,0,0,0.9)" }}>{n.label}</div>
       ))}
@@ -280,25 +304,35 @@ oriented should think the "I shall not
 fail-call.thought_method". because given by the
 last action from m,h is left protected.`;
   const messages = [
-    { role:"orchestrator", color:"#ffd97a", text:"Routing task to UI Designer — stage 1 sketch." },
-    { role:"UI Designer",   color:"#7fdfff", text:"Drafted the brief outline; uploading mock." },
-    { role:"Workshop Writer", color:"#dcb0ff", text:"Will pair narrative with the mock once received." },
+    { role:"orchestrator", color:"#ffd97a", time:"11:43:02", text:"Routing task to UI Designer — stage 1 sketch." },
+    { role:"UI Designer",   color:"#7fdfff", time:"11:43:08", text:"Drafted the brief outline; uploading mock." },
+    { role:"Workshop Writer", color:"#dcb0ff", time:"11:43:14", text:"Will pair narrative with the mock once received." },
   ];
   return (
     <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"#0c0f1a" }}>
       <div data-ui="LogHeader" style={{ height:26, padding:"0 12px", background:"linear-gradient(90deg, rgba(120,220,255,0.22) 0%, rgba(220,180,255,0.16) 60%, rgba(255,200,100,0.14) 100%)", borderBottom:"1px solid rgba(120,220,255,0.35)", display:"flex", alignItems:"center", gap:8 }}>
-        <button style={{ padding:"6px 14px", borderRadius:18, border:"1px solid rgba(127,223,255,0.55)", background:"rgba(127,223,255,0.30)", color:"#ffffff", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
-        <button style={{ padding:"6px 14px", borderRadius:18, border:"1px solid rgba(220,180,255,0.40)", background:"rgba(220,180,255,0.18)", color:"#dcb0ff", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
-        <div style={{ flex:1, fontSize:11, color:"#9aa0a6", paddingLeft:8 }}>Click an agent on the canvas to view its log.</div>
-        <button className="ghost-btn" style={{ height:28, padding:"0 10px", fontSize:11 }}>🎯 Route</button>
-        <button className="ghost-btn" style={{ height:28, padding:"0 10px", fontSize:11 }}>⤴ Send</button>
+        <span style={{ width:8, height:8, borderRadius:4, background:"#ffd97a", boxShadow:"0 0 6px #ffd97a" }} />
+        <div style={{ fontSize:13, fontWeight:700, color:"#ffd97a", letterSpacing:0.6, textTransform:"uppercase" }}>Orchestrator</div>
+        <div style={{ fontSize:10, color:"#7888a8", paddingLeft:6 }}>· active · stage 1/3</div>
+        <div style={{ flex:1 }} />
+        <span style={{ fontSize:10, color:"#7fdfff" }}>● online</span>
+      </div>
+      <div style={{ height:36, padding:"0 12px", display:"flex", alignItems:"center", gap:8, borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
+        <button style={{ padding:"5px 12px", borderRadius:18, border:"1px solid rgba(127,223,255,0.55)", background:"rgba(127,223,255,0.30)", color:"#ffffff", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
+        <button style={{ padding:"5px 12px", borderRadius:18, border:"1px solid rgba(220,180,255,0.40)", background:"rgba(220,180,255,0.18)", color:"#dcb0ff", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
+        <div style={{ flex:1, fontSize:11, color:"#9aa0a6", paddingLeft:4 }}>Click an agent on the canvas to view its log.</div>
+        <button className="ghost-btn" style={{ height:26, padding:"0 8px", fontSize:11 }}>🎯 Route</button>
+        <button className="ghost-btn" style={{ height:26, padding:"0 8px", fontSize:11 }}>⤴ Send</button>
       </div>
       <div data-ui="OrchestratorLogTabs" style={{ flex:1, padding:"10px 10px", display:"flex", flexDirection:"column", gap:8, overflow:"hidden" }}>
         {messages.map((m, i) => (
           <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
-            <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d" }}>{m.role[0]}</div>
+            <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d", boxShadow:`0 0 8px ${m.color}55` }}>{m.role[0]}</div>
             <div style={{ flex:1, background:"rgba(255,255,255,0.04)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"6px 10px" }}>
-              <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:2 }}>{m.role}</div>
+              <div style={{ display:"flex", alignItems:"baseline", gap:8, marginBottom:2 }}>
+                <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5 }}>{m.role}</div>
+                <div style={{ fontSize:9, color:"#7888a8", fontFamily:"Consolas, monospace" }}>{m.time}</div>
+              </div>
               <div style={{ fontSize:12, color:"#dadcdf", lineHeight:1.4 }}>{m.text}</div>
             </div>
           </div>
@@ -319,10 +353,10 @@ function AgentsPage() {
         <SubTabs />
         <LocationRow />
         <GoalRow />
-        <div data-ui="WorkspaceStack" style={{ height:665, width:1554, margin:"0 23px", display:"flex", overflow:"hidden", background:"#06080d", padding:0 }}>
+        <div data-ui="WorkspaceStack" style={{ height:665, display:"flex", overflow:"hidden", background:"#06080d", padding:"0 23px" }}>
           <div data-ui="RosterLeft" style={{ width:LEFT_W, display:"flex", flexDirection:"column", background:"#0a0d14" }}>
             <FlowHeader />
-            <div data-ui="CanvasStack" style={{ height:607, position:"relative" }}>
+            <div data-ui="CanvasStack" style={{ flex:1, position:"relative" }}>
               <TeamCanvas width={LEFT_W} height={607} />
               <div style={{ position:"absolute", top:8, left:8, width:360 }}>
                 <DesignStudioCard />

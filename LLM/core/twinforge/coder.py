@@ -58,6 +58,8 @@ class CoderProvider(Protocol):
               vlm_findings: List[Any],
               target_file: str,
               max_changes: int = 6,
+              src_png: Optional[str] = None,
+              tgt_png: Optional[str] = None,
               ) -> List[CodeFix]: ...
 
 
@@ -73,7 +75,9 @@ class NullCoder:
         return False
 
     def patch(self, *, diff_text: str, vlm_findings: List[Any],
-              target_file: str, max_changes: int = 6) -> List[CodeFix]:
+              target_file: str, max_changes: int = 6,
+              src_png: Optional[str] = None,
+              tgt_png: Optional[str] = None) -> List[CodeFix]:
         return [CodeFix(
             description=(
                 "Coder provider unavailable — set ANTHROPIC_API_KEY in "
@@ -142,7 +146,9 @@ class AnthropicCoder:
         return bool(self.api_key)
 
     def patch(self, *, diff_text: str, vlm_findings: List[Any],
-              target_file: str, max_changes: int = 6) -> List[CodeFix]:
+              target_file: str, max_changes: int = 6,
+              src_png: Optional[str] = None,
+              tgt_png: Optional[str] = None) -> List[CodeFix]:
         if not self.api_key:
             return NullCoder().patch(
                 diff_text=diff_text, vlm_findings=vlm_findings,

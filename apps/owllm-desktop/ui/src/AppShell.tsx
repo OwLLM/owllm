@@ -8,9 +8,11 @@
 // header + tabs come from here.
 import React, { useState } from "react";
 import AgentsPage from "./pages/AgentsPage";
+import AccountsPage from "./pages/AccountsPage";
 import BridgesPage from "./pages/BridgesPage";
 import CodePage from "./pages/CodePage";
 import HomePage from "./pages/HomePage";
+import MCPPage from "./pages/MCPPage";
 import ServerPage from "./pages/ServerPage";
 import StubPage from "./pages/StubPage";
 import StudioPage from "./pages/StudioPage";
@@ -143,8 +145,8 @@ export default function AppShell() {
     case "bridges":  body = <BridgesPage />; break;
     case "studio":   body = <StudioPage />; break;
     case "code":     body = <CodePage />; break;
-    case "accounts": body = <StubPage label="Accounts" hint="API keys, providers, sessions." />; break;
-    case "mcp":      body = <StubPage label="MCP"      hint="MCP server registry + connections." />; break;
+    case "accounts": body = <AccountsPage />; break;
+    case "mcp":      body = <MCPPage />; break;
   }
   return (
     <HybridFrame width={INNER_W} height={INNER_H}>

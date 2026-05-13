@@ -597,6 +597,20 @@ def load_model(base_model, adapter_dir, use_4bit=True, offload=True):
         model_path = Path(base_model).resolve()
         if not model_path.exists():
             raise ValueError(f"Model path does not exist: {base_model}")
+        # The slot resolver in llm_server_manager can hand us EITHER:
+        #   - a directory (transformers-style models, or GGUF dirs with
+        #     multiple quants), OR
+        #   - a direct .gguf file (single-variant GGUF dir where the
+        #     YAML slot pins ``base_model`` to the specific variant —
+        #     see "Using GGUF runtime slot ..." log line).
+        # The historical check below was dir-only and would throw
+        # ``Model path is not a directory`` whenever the slot pinned
+        # the file. Detect the file case and route it to the GGUF
+        # backend using the file's parent as the model dir (which is
+        # what ``_load_gguf_model`` and ``_list_gguf_candidates``
+        # expect).
+        if model_path.is_file() and model_path.suffix.lower() == ".gguf":
+            return _load_gguf_model(model_path.parent)
         if not model_path.is_dir():
             raise ValueError(f"Model path is not a directory: {base_model}")
         # GGUF path: use llama-cpp backend and bypass transformers config checks.

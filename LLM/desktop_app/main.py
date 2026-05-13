@@ -21207,12 +21207,206 @@ class MainWindow(QMainWindow):
             # The server manager will check health again and reuse if it's our server
             return original_port
     
+    def _run_test_converse(self, seed_prompt: str) -> None:
+        """Dispatch the model-to-model converse loop from the Test page.
+
+        Pulls models / per-model settings from the Test widgets,
+        max_turns from ``test_converse_max_turns``, and routes the
+        ``ModelToModelWorker`` output into the Test ``chat_display``
+        (the unified Synchronized display that lives on this tab).
+
+        Memory: ``ModelToModelWorker.run`` accumulates ``history_lines``
+        and rebuilds the prompt each turn with ``Conversation so far:
+        <history>`` — so each model sees every previous reply, not
+        just the latest. That's the conversation memory the user
+        asked us to check.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        # Resolve the picked models from the Test combos. currentData()
+        # holds the full path payload assembled by _fill_model_combo
+        # → pickable_models.to_combo_payload.
+        use_c = (
+            hasattr(self, "test_model_count_3")
+            and self.test_model_count_3 is not None
+            and self.test_model_count_3.isChecked()
+        )
+        combo_keys = [(self.test_model_a, "a"), (self.test_model_b, "b")]
+        if use_c and hasattr(self, "test_model_c"):
+            combo_keys.append((self.test_model_c, "c"))
+
+        model_ids: list[tuple[str, str]] = []
+        paths_by_key: dict[str, str] = {}
+        for combo, key in combo_keys:
+            if combo is None:
+                continue
+            path = combo.currentData()
+            text = combo.currentText().strip()
+            if not path or (isinstance(path, str) and (path.startswith("(") or not path)):
+                QMessageBox.warning(
+                    self,
+                    "Models talk to each other",
+                    f"Please pick a model for slot {key.upper()}.",
+                )
+                return
+            paths_by_key[key] = str(path)
+            try:
+                model_id = self._resolve_chat_model_id_from_path(path)
+            except Exception as e:
+                derived_id = Path(path).name.replace("__", "/") if path else ""
+                try:
+                    self._maybe_show_reonboard_popup(str(e), derived_id, str(path))
+                except Exception:
+                    pass
+                QMessageBox.warning(
+                    self,
+                    "Models talk to each other",
+                    f"Could not resolve model for slot {key.upper()}: {e}",
+                )
+                return
+            model_ids.append((key, model_id))
+
+        if len(model_ids) < 2:
+            QMessageBox.warning(
+                self,
+                "Models talk to each other",
+                "Need at least two models for a conversation. Set the "
+                "chat count to 2 or 3 and pick the second/third model.",
+            )
+            return
+
+        # Per-model settings — pulled from the SAME panels the Test
+        # right-column shows, so the user's customisation (temp,
+        # max_tokens, system prompt) flows into the converse loop too.
+        sys_prompts: dict[str, str] = {}
+        temps: dict[str, float] = {}
+        tokens: dict[str, int] = {}
+        for key, settings_attr in (
+            ("a", "test_model_a_settings"),
+            ("b", "test_model_b_settings"),
+            ("c", "test_model_c_settings"),
+        ):
+            try:
+                s = getattr(self, settings_attr, None)
+                if s is None:
+                    continue
+                sys_prompts[key] = (s.system_prompt.toPlainText() or "").strip()
+                temps[key] = float(s.temperature.value())
+                tokens[key] = int(s.max_tokens.value())
+            except Exception:
+                continue
+
+        max_turns = 20
+        try:
+            if hasattr(self, "test_converse_max_turns"):
+                max_turns = int(self.test_converse_max_turns.value())
+        except Exception:
+            max_turns = 20
+
+        # Drop the seed prompt into the chat display and pre-emptively
+        # disable Send so the user doesn't double-fire.
+        try:
+            if hasattr(self, "chat_display") and self.chat_display is not None:
+                self.chat_display.add_user_message(seed_prompt)
+        except Exception:
+            pass
+        try:
+            self.test_send_btn.setEnabled(False)
+        except Exception:
+            pass
+
+        from desktop_app.model_to_model_worker import ModelToModelWorker
+        worker = ModelToModelWorker(
+            seed=seed_prompt,
+            model_ids=[mid for _, mid in model_ids],
+            model_keys=[k for k, _ in model_ids],
+            max_turns=max_turns,
+            system_prompts=sys_prompts,
+            temperatures=temps,
+            max_new_tokens=tokens,
+        )
+
+        def _on_turn_started(model_key: str) -> None:
+            try:
+                key = (model_key or "a").lower()[:1]
+                if hasattr(self.chat_display, "start_m2m_turn"):
+                    self.chat_display.start_m2m_turn(key)
+                else:
+                    fn = {
+                        "a": "start_model_a_response",
+                        "b": "start_model_b_response",
+                        "c": "start_model_c_response",
+                    }.get(key)
+                    if fn:
+                        getattr(self.chat_display, fn)()
+            except Exception:
+                pass
+
+        def _on_turn_finished(model_key: str, text: str) -> None:
+            try:
+                key = (model_key or "a").lower()[:1]
+                clean = self._clean_test_chat_answer(text or "")
+                if hasattr(self.chat_display, "finish_m2m_turn"):
+                    self.chat_display.finish_m2m_turn(key, clean)
+                else:
+                    fn = {
+                        "a": "update_model_a_response",
+                        "b": "update_model_b_response",
+                        "c": "update_model_c_response",
+                    }.get(key)
+                    if fn:
+                        getattr(self.chat_display, fn)(clean)
+            except Exception:
+                pass
+
+        def _on_error(message: str, _model_id: str, _model_key: str) -> None:
+            QMessageBox.warning(self, "Converse error", message or "Unknown error")
+
+        def _on_finished() -> None:
+            try:
+                self.test_send_btn.setEnabled(True)
+            except Exception:
+                pass
+            self._test_converse_worker = None
+
+        worker.turn_started.connect(_on_turn_started)
+        worker.turn_finished.connect(_on_turn_finished)
+        worker.error_signal.connect(_on_error)
+        worker.finished_signal.connect(_on_finished)
+        # Hard reference so Qt doesn't GC the QThread mid-run.
+        self._test_converse_worker = worker
+        worker.start()
+
     def _run_side_by_side_test(self) -> None:
         """Run inference on both models simultaneously"""
         user_prompt = self.test_prompt.toPlainText().strip()
         if not user_prompt:
             QMessageBox.warning(self, "Test", "Please enter a prompt.")
             return
+
+        # When the "Models talk to each other" toggle is on and the
+        # user has ≥ 2 chats configured, dispatch the converse loop
+        # instead of fanning out a single-shot to every model. The
+        # runner is the legacy ModelToModelWorker; we redirect its
+        # signals into the Test page's SynchronizedChatDisplay so
+        # the user sees the conversation in-place on this tab.
+        try:
+            converse_on = bool(
+                getattr(self, "test_models_converse", None) is not None
+                and self.test_models_converse.isChecked()
+                and self.test_models_converse.isEnabled()
+            )
+        except Exception:
+            converse_on = False
+        if converse_on:
+            count_one = (
+                hasattr(self, "test_model_count_1")
+                and self.test_model_count_1 is not None
+                and self.test_model_count_1.isChecked()
+            )
+            if not count_one:
+                self._run_test_converse(user_prompt)
+                return
 
         # Prevent overlapping turns (we need a strict turn boundary for correct memory)
         try:

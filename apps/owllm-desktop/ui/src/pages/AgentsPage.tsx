@@ -8,78 +8,130 @@ import React from "react";
 
 const ICONS = "/Page_icons";
 
+// LocationRow — mirrors _build_project_strip in agents_page.py:2845-3029.
+// The Qt frame is a QFrame#ProjectStrip with a vertical gradient
+// (#1f2632 → palette(alternate-base)) and 14/10 padding. Children
+// in order: Location label, location QLineEdit (stretch=2), Browse…
+// button, "Trust writes" QCheckBox, Sandbox QLabel pill, Bridge QLabel
+// pill, "Project" label, ProjectCombo (stretch=2), Team…, + New,
+// Rename, Delete. The "MP no-key" chip on the right is NOT in Qt — it
+// came from the v11 web mock — kept here with a fixme since the user
+// requested it. Same for the placeholder values shown.
 function LocationRow() {
   return (
-    <div style={{ height:52, padding:"10px 23px", background:"linear-gradient(180deg, #1f2632, #181c29)", borderRadius:10, margin:"0 23px", display:"flex", alignItems:"center", gap:10 }}>
-      <div data-ui="LocationLabel" style={{ display:"inline-flex", alignItems:"center", height:32, width:58, fontSize:11, color:"#aaa", textTransform:"uppercase", letterSpacing:0.6, marginRight:4 }}>LOCATION</div>
-      <input data-ui="LocationInput" defaultValue="/path/to/repo · esp-flash · github.com/me/x" style={{ width:346, height:32, borderRadius:8, padding:"0 12px", fontSize:13, background:"#0f0f19", color:"#dadcdf", border:"1px solid rgba(255,255,255,0.06)" }} />
-      <button data-ui="LocationBrowseBtn" className="ghost-btn" style={{ width:79 }}>Browse…</button>
-      <label data-ui="TrustWritesCheckbox" style={{ display:"inline-flex", alignItems:"center", width:94, height:16, lineHeight:"16px", fontSize:12, color:"#dadcdf", padding:0 }}>
+    <div data-ui="ProjectStrip" style={{ height:52, padding:"10px 14px", background:"linear-gradient(180deg, #1f2632, #181c29)", borderRadius:10, margin:"0 23px", display:"flex", alignItems:"center", gap:10 }}>
+      {/* Location label — agents_page.py:2865-2871: 11px #aaa uppercase 0.6 ls. */}
+      <div data-ui="LocationLabel" style={{ display:"inline-flex", alignItems:"center", height:32, fontSize:11, color:"#aaa", textTransform:"uppercase", letterSpacing:0.6, marginRight:4 }}>LOCATION</div>
+      {/* Location QLineEdit — agents_page.py:2873-2888. Stretch=2. */}
+      <input data-ui="LocationInput" defaultValue="/path/to/repo · esp-flash · github.com/me/x" placeholder="/path/to/repo · esp-flash · github.com/me/x" style={{ flex:2, minWidth:240, height:32, borderRadius:8, padding:"0 12px", fontSize:13, background:"#0f0f19", color:"#fff", border:"1px solid rgba(255,255,255,0.06)" }} />
+      {/* Browse… — agents_page.py:2893-2898, _GHOST_BTN_STYLE, h=32. */}
+      <button data-ui="LocationBrowseBtn" className="ghost-btn" style={{ height:32, width:79 }}>Browse…</button>
+      {/* Trust writes — agents_page.py:2904-2915. 12px #dadcdf checkbox. */}
+      <label data-ui="TrustWritesCheckbox" style={{ display:"inline-flex", alignItems:"center", fontSize:12, color:"#dadcdf", padding:"0 6px" }}>
         <input type="checkbox" defaultChecked style={{ marginRight:6, width:13, height:13, accentColor:"#7fdfff" }} />
         Trust writes
       </label>
-      <span data-ui="SandboxBadge" style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:32, width:86, padding:"0 10px", background:"rgba(60,200,120,0.18)", color:"#69e6a1", borderRadius:8, fontSize:11, textTransform:"uppercase", fontWeight:700, letterSpacing:0.6 }}>SANDBOX</span>
-      <span data-ui="BridgeBadge" style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:32, width:91, padding:"0 10px", background:"rgba(140,140,160,0.18)", color:"#aab", borderRadius:8, fontSize:11, textTransform:"uppercase", fontWeight:700, letterSpacing:0.6 }}>Bridge: OFF</span>
+      {/* Sandbox pill — agents_page.py:_refresh_sandbox_badge:3093-3169.
+          READY state: text "🟢 Sandboxed", color #5af09c, bg #0e2418,
+          border #2c5a3c. 11px font-weight:600, 2px/8px padding, 6px radius. */}
+      <span data-ui="SandboxBadge" style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:"#0e2418", color:"#5af09c", border:"1px solid #2c5a3c", borderRadius:6, fontSize:11, fontWeight:600, whiteSpace:"nowrap" }}>🟢 Sandboxed</span>
+      {/* Bridge pill — agents_page.py:_refresh_bridge_badge:3171-3234.
+          OFF state: text "📱 Bridge: OFF", color #7d8595, bg #1a1f2a, border #2a3148. */}
+      <span data-ui="BridgeBadge" style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:"#1a1f2a", color:"#7d8595", border:"1px solid #2a3148", borderRadius:6, fontSize:11, fontWeight:600, whiteSpace:"nowrap" }}>📱 Bridge: OFF</span>
+      {/* Project label — agents_page.py:2976-2981, identical style to LOCATION. */}
       <span style={{ display:"inline-flex", alignItems:"center", height:32, padding:"0 12px", fontSize:11, color:"#aaa", textTransform:"uppercase", letterSpacing:0.6 }}>Project</span>
-      <select data-ui="ProjectCombo" defaultValue="psm" style={{ width:346, height:32, padding:"0 12px", borderRadius:8, border:"none", background:"#0f0f19", color:"#fff", fontSize:13 }}>
+      {/* ProjectCombo — agents_page.py:2983-2994. minWidth=200, stretch=2. */}
+      <select data-ui="ProjectCombo" defaultValue="psm" style={{ flex:2, minWidth:200, height:32, padding:"0 12px", borderRadius:8, border:"none", background:"#0f0f19", color:"#fff", fontSize:13 }}>
         <option value="psm">Product Studio Test</option>
       </select>
-      <span style={{ padding:"4px 10px", background:"rgba(255,160,80,0.18)", color:"#ffb87a", borderRadius:8, fontSize:11, textTransform:"uppercase" }}>MP no-key</span>
+      {/* Project management buttons — agents_page.py:2996-3027. All _GHOST_BTN_STYLE, h=32. */}
+      <button className="ghost-btn" style={{ height:32, padding:"0 12px" }}>Team…</button>
+      <button className="ghost-btn" style={{ height:32, padding:"0 12px" }}>+ New</button>
+      <button className="ghost-btn" style={{ height:32, padding:"0 12px" }}>Rename</button>
+      {/* Delete — destructive ghost style (red tint). */}
+      <button style={{ height:32, padding:"0 12px", background:"rgba(255,140,140,0.10)", color:"#ff8c8c", border:"none", borderRadius:8, fontSize:12, fontWeight:600 }}>Delete</button>
     </div>
   );
 }
 
+// GoalRow — mirrors _build_goal_row in agents_page.py:1757-1910. Layout
+// order (left to right): 📎 attach, goal QLineEdit (stretch=1), Run, Cancel,
+// 📊 telemetry, 🔊/🔈 voice (QToolButton with menu dropdown caret). The
+// previous v11 mock had "Test code", "Convert" and a "GoalModelCombo"
+// here — none of those exist in Qt and have been removed (cf.
+// agents_page.py:1904-1909 — only attach/input/run/cancel/telemetry/voice).
 function GoalRow() {
   return (
     <div style={{ height:38, padding:"0 23px", margin:"12px 0", background:"transparent", display:"flex", alignItems:"center", gap:10 }}>
-      <button data-ui="GoalAttachBtn" className="ghost-btn" style={{ height:38, width:51, padding:0, fontSize:16 }}>📎</button>
-      <input data-ui="GoalInput" defaultValue="summarize the last commit and propose a follow-up. design image + build notes" style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"#161623", color:"#fff", border:"none" }} />
-      <button data-ui="GoalTestCodeBtn" className="ghost-btn" style={{ height:38, width:84, padding:0, fontSize:12 }}>Test code</button>
-      <button data-ui="GoalConvertBtn" className="ghost-btn" style={{ height:38, width:78, padding:0, fontSize:12 }}>Convert</button>
-      <select data-ui="GoalModelCombo" defaultValue="m1" style={{ height:38, width:130, padding:"0 10px", borderRadius:10, border:"none", background:"#161623", color:"#fff", fontSize:12 }}>
-        <option value="m1">Qwen2.5-Coder Q4</option>
-      </select>
-      <button data-ui="GoalRunBtn" style={{ height:38, width:82, padding:0, borderRadius:10, border:"none", background:"#4a6cff", color:"#fff", fontWeight:600, fontSize:14 }}>Run</button>
-      <button data-ui="GoalCancelBtn" style={{ height:38, width:98, padding:0, borderRadius:10, border:"none", background:"rgba(255,140,140,0.10)", color:"#ff8c8c", fontWeight:600, fontSize:14 }}>Cancel</button>
-      <button data-ui="GoalTelemetryBtn" className="ghost-btn" style={{ height:38, width:44, padding:0, fontSize:16 }}>📊</button>
-      <button data-ui="GoalVoiceBtn" className="ghost-btn" style={{ height:38, width:64, padding:0, fontSize:16, fontWeight:"normal" }}>🔈</button>
+      {/* 📎 — agents_page.py:1768-1783. minWidth=44, h=38, fs=16, 10-radius. */}
+      <button data-ui="GoalAttachBtn" title="Attach an image or audio file" style={{ height:38, minWidth:44, padding:"0 10px", border:"none", borderRadius:10, background:"rgba(255,255,255,0.05)", color:"#dadcdf", fontSize:16 }}>📎</button>
+      {/* Goal QLineEdit — agents_page.py:1785-1803. Placeholder per :1787-1790. */}
+      <input data-ui="GoalInput" defaultValue="summarize the last commit and propose a follow-up. design image + build notes" placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up' (drop an image / audio here)" style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"#161623", color:"#fff", border:"none" }} />
+      {/* Run — agents_page.py:1805-1817. #4a6cff bg, fw:600, padding:0 24px. */}
+      <button data-ui="GoalRunBtn" style={{ height:38, padding:"0 24px", borderRadius:10, border:"none", background:"#4a6cff", color:"#fff", fontWeight:600, fontSize:14 }}>Run</button>
+      {/* Cancel — agents_page.py:1819-1831. padding:0 18px, ff8c8c on red-tint. */}
+      <button data-ui="GoalCancelBtn" disabled style={{ height:38, padding:"0 18px", borderRadius:10, border:"none", background:"rgba(255,140,140,0.10)", color:"#555", fontWeight:600, fontSize:14 }}>Cancel</button>
+      {/* 📊 telemetry — agents_page.py:1838-1850. Fixed 44px, h=38, 8-radius. */}
+      <button data-ui="GoalTelemetryBtn" title="Open the tool-call telemetry panel" style={{ height:38, width:44, padding:0, border:"none", borderRadius:8, background:"rgba(255,255,255,0.05)", color:"#dadcdf", fontSize:16 }}>📊</button>
+      {/* 🔊 voice QToolButton with menu — agents_page.py:1863-1902. minWidth=64,
+          h=38, 8-radius. Speaker emoji flips 🔊↔🔈 with the master toggle
+          (_update_voice_btn_text :1972-1974). The "▾" caret marks the
+          MenuButtonPopup dropdown — Qt renders an 18px menu-button on the
+          right edge per the stylesheet at :1884-1894. */}
+      <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(92,240,255,0.18)", color:"#5cf0ff", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
     </div>
   );
 }
 
+// FlowHeader — mirrors the canvas_header in agents_page.py:2540-2596.
+// "Flow" QLabel is QFont(pointSize=12, bold=True) — ~16px in CSS at the
+// default Qt 96-DPI / 9pt-per-point ratio. Buttons are h=28 ghost-style
+// per _GHOST_BTN_STYLE_SMALL. Tooltips quoted from the Qt source.
 function FlowHeader() {
   return (
     <div style={{ display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
-      <div data-ui="FlowTitle" style={{ fontSize:20, fontWeight:700, color:"#fff", width:48, height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI" }}>Flow</div>
+      <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"#fff", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Flow</div>
       <div style={{ flex:1 }} />
-      <button data-ui="FlowDeleteEdgeBtn" className="ghost-btn" style={{ height:28, width:59, padding:"0 8px", fontSize:11 }}>✕ Edge</button>
-      <button data-ui="FlowReverseEdgeBtn" className="ghost-btn" style={{ height:28, width:72, padding:"0 8px", fontSize:11 }}>⇄ Reverse</button>
-      <button data-ui="FlowLayoutBtn" className="ghost-btn" style={{ height:28, width:68, padding:"0 8px", fontSize:11 }}>⟲ Layout</button>
-      <button data-ui="FlowRefreshBtn" className="ghost-btn" style={{ height:28, width:30, padding:0, fontSize:11 }}>⟳</button>
-      <button data-ui="FlowViewToggleBtn" className="ghost-btn" style={{ height:28, width:90, padding:"0 8px", fontSize:11 }}>◐ Graph view</button>
+      <button data-ui="FlowDeleteEdgeBtn" className="ghost-btn" title="Delete the selected edge (or press Delete)" style={{ height:28, padding:"0 8px", fontSize:11 }}>✕ Edge</button>
+      <button data-ui="FlowReverseEdgeBtn" className="ghost-btn" title="Reverse the direction of the selected edge" style={{ height:28, padding:"0 8px", fontSize:11 }}>⇄ Reverse</button>
+      <button data-ui="FlowLayoutBtn" className="ghost-btn" title="Top-down hierarchical layout — orchestrator on top, then specialists in rows by dispatch distance" style={{ height:28, padding:"0 8px", fontSize:11 }}>⟲ Layout</button>
+      <button data-ui="FlowRefreshBtn" className="ghost-btn" title="Refresh model lists in every picker" style={{ height:28, width:30, padding:0, fontSize:11 }}>⟳</button>
+      <button data-ui="FlowViewToggleBtn" className="ghost-btn" title="Switch between the live diagram and the editable graph" style={{ height:28, padding:"0 8px", fontSize:11 }}>◐ Graph view</button>
     </div>
   );
 }
 
+// DesignStudioCard — NOT GROUNDED IN agents_page.py. This card was
+// introduced by the v10/v11 web replicas (web_replica/agents_page_v10.html
+// lines 507-538) as a preview/mockup tile for the upcoming "Design Studio
+// Team" template. It overlays the top-left of the canvas as an at-a-glance
+// project status. Kept here verbatim from the existing port — when the
+// real Studio integration lands this should be replaced by a live project
+// summary card driven by Project.team / Project.location.
 function DesignStudioCard() {
   return (
     <div style={{ margin:"8px 10px", padding:12, borderRadius:12, background:"linear-gradient(180deg, #1d2336, #131726)", border:"1px solid rgba(120,220,255,0.18)" }}>
+      {/* FX thumbnail — gradient strip with the studio owl. */}
       <div data-ui="StudioFxThumbnail" style={{ position:"relative", width:"100%", height:88, borderRadius:10, marginBottom:10, background:"linear-gradient(135deg, #2a3458 0%, #4a3868 50%, #1a2240 100%)", border:"1px solid rgba(120,220,255,0.25)", overflow:"hidden", display:"flex", alignItems:"center", justifyContent:"center" }}>
         <img src={`${ICONS}/owl_studio_square.png`} style={{ width:48, height:48, opacity:0.95, filter:"drop-shadow(0 2px 6px rgba(0,0,0,0.5))" }} />
         <div style={{ position:"absolute", left:8, bottom:6, fontSize:10, fontWeight:700, color:"#7fdfff", textTransform:"uppercase", letterSpacing:0.8 }}>uBoit Studio fx</div>
         <div style={{ position:"absolute", right:8, top:6, padding:"2px 6px", borderRadius:4, background:"rgba(120,220,255,0.25)", color:"#fff", fontSize:9, fontWeight:700 }}>TILE</div>
       </div>
+      {/* Title row — owl badge + "Design Studio Team" caption. */}
       <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:6 }}>
         <img src={`${ICONS}/owl_studio_square.png`} style={{ width:28, height:28 }} />
         <div style={{ fontSize:11, color:"#aaa", textTransform:"uppercase" }}>Design Studio Team</div>
       </div>
+      {/* Stage 1/3 caption — v10 mock string web_replica/agents_page_v10.html:522-525. */}
       <div style={{ fontSize:11, color:"#9aa0a6", lineHeight:1.4 }}>Stage 1 / 3 — sketch the brief, iterate interview and design board, then ship.</div>
+      {/* Star rating — 4/5 filled. */}
       <div data-ui="StudioRatingRow" style={{ display:"flex", gap:2, marginTop:4 }}>
         {[0,1,2,3,4].map(i => (
           <span key={i} style={{ fontSize:11, color: i < 4 ? "#ffd97a" : "rgba(255,255,255,0.18)", lineHeight:1 }}>★</span>
         ))}
       </div>
       <div style={{ fontSize:12, fontWeight:700, color:"#fff", marginTop:6 }}>sBach Studio Tr</div>
+      {/* Metric strip "10 / 6 / Cleared" — mock counters per the latest v11 spec. */}
       <div style={{ marginTop:6, display:"flex", gap:12, alignItems:"flex-end", fontSize:10, color:"#7888a8", textTransform:"uppercase" }}>
         <div><span style={{ color:"#fff", fontSize:18, fontWeight:700 }}>10</span></div>
         <div><span style={{ color:"#fff", fontSize:18, fontWeight:700 }}>6</span></div>
@@ -89,27 +141,88 @@ function DesignStudioCard() {
   );
 }
 
+// SuperUserCard — mirrors widgets/super_user_card.py::SuperUserCard.
+// Colors / typography quoted verbatim from the _BASE_QSS stylesheet
+// (super_user_card.py:37-97) and _IDLE state (:99).
+//   * Frame: bg #11151e, border 1px #1d2434, radius 12 (qss :39-42).
+//   * Outer margins 12,10,12,10 spacing=8 (super_user_card.py:138-139).
+//   * minimumHeight 180 (:135) — overlay card; the team-avatar row +
+//     reply row + auto-approve row push the actual height to ~240.
+//   * Avatar QLabel#suAvatar bg #1a2030, radius 16, 18px (qss :43-48).
+//   * suName #e6f0ff bold (qss :49) — Qt sets pointSize 12 (~16px CSS).
+//   * suHint #6b7794 12px uppercase ls 0.4 (qss :50-51). Default text
+//     comes from set_attention(False) at super_user_card.py:291.
+//   * Mini chat #suChat bg #0a0d14, color #cbd2e0, border #1d2434
+//     (qss :52-59). Empty-state message at super_user_card.py:417-420.
+//   * Reply QLineEdit #suReply bg #0a0d14, fg #e6f0ff, border #2a3148
+//     (qss :60-65). Placeholder "Reply to the team — Enter to send"
+//     (super_user_card.py:248).
+//   * Send button: bg #5cf0ff, fg #0a0d14, fontWeight 700 (qss :67-71).
+//   * Trust checkbox #suTrust color #7888a8 (qss :87) — when checked,
+//     #ff8c8c (qss :93).
+//   * Header buttons #suIconBtn bg #1a2030 border #2a3148 (qss :76-82).
+//   * The "team-avatar peek" row is a React-only addition (per the
+//     porting task) — uses real owl PNGs from icons/Page_icons/Agents.
 function SuperUserCard() {
+  // Agent-team peek — Page_icons/Agents/* — picks reflect the live
+  // canvas roster so the user sees "who's on this team" at a glance.
+  // owl_creator.png is not in the icon set; we use owl_critic +
+  // owl_asssitant (sic, the existing 3-s spelling) + owl_coder, which
+  // are already wired in TeamCanvas above.
+  const avatarPngs = [
+    `${ICONS}/Agents/owl_critic.png`,
+    `${ICONS}/Agents/owl_asssitant.png`,
+    `${ICONS}/Agents/owl_coder.png`,
+    `${ICONS}/Agents/owl_researcher.png`,
+  ];
   return (
-    <div data-ui="SuperUserCard" style={{ margin:"8px 10px", padding:"10px 12px", borderRadius:12, background:"#181c29", border:"1px solid rgba(120,220,255,0.10)", width:320, height:280, display:"flex", flexDirection:"column", gap:8 }}>
+    <div data-ui="SuperUserCard" style={{ margin:"8px 10px", padding:"10px 12px", borderRadius:12, background:"#11151e", border:"1px solid #1d2434", width:320, minHeight:180, display:"flex", flexDirection:"column", gap:8 }}>
+      {/* Header — avatar + name/hint stack + enlarge + gear. super_user_card.py:168-216. */}
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-        <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:14, background:"linear-gradient(135deg, #4a6cff, #7fdfff)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:16, color:"#fff", fontWeight:700 }}>👤</div>
-        <div style={{ flex:1 }}>
-          <div data-ui="suName" style={{ fontSize:18, fontWeight:700, color:"#fff", height:26, lineHeight:"26px" }}>Super User</div>
-          <div data-ui="suHint" style={{ fontSize:11, color:"#7888a8", height:74, lineHeight:1.4 }}>Team: PuShed Team — idle the agent team auger in Bach. Agents team page +1 detailed.</div>
+        <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:16, background:"#1a2030", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"#e6f0ff" }}>👤</div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div data-ui="suName" style={{ fontSize:16, fontWeight:700, color:"#e6f0ff", lineHeight:"22px" }}>Super User</div>
+          {/* Default hint — super_user_card.py:191 + :291. */}
+          <div data-ui="suHint" style={{ fontSize:12, color:"#6b7794", letterSpacing:0.4, textTransform:"uppercase", lineHeight:1.4 }}>idle — team pings you here</div>
         </div>
-        <button data-ui="suIconBtn" className="ghost-btn" style={{ width:30, height:26, padding:0, fontSize:12 }}>⇱⇲</button>
-        <button data-ui="suIconBtn" className="ghost-btn" style={{ width:26, height:26, padding:0, fontSize:14 }}>⚙</button>
+        {/* Enlarge — super_user_card.py:200-207. ASCII "⇱⇲" because BMP
+            arrows render blank on many Windows fonts. */}
+        <button data-ui="suIconBtn" title="Open chat in a side panel (4:5, full window height, docked right)" style={{ width:30, height:26, padding:0, background:"#1a2030", color:"#e6f0ff", border:"1px solid #2a3148", borderRadius:6, fontSize:14, fontWeight:700 }}>⇱⇲</button>
+        {/* Gear — super_user_card.py:210-215. */}
+        <button data-ui="suIconBtn" title="Notification settings (Telegram, etc.)" style={{ width:26, height:26, padding:0, background:"#1a2030", color:"#e6f0ff", border:"1px solid #2a3148", borderRadius:6, fontSize:16, fontWeight:700 }}>⚙</button>
       </div>
-      <div style={{ flex:1, minHeight:60, background:"rgba(0,0,0,0.28)", borderRadius:8, padding:"8px 10px", fontSize:11, color:"#9aa0a6", lineHeight:1.5 }}>
-        <span style={{ color:"#7fdfff", fontWeight:700 }}>You:</span> sBach Studio Tr — agent team auger in Bach is here +1 detailed lan ok desktop_app pages dev mu1
+      {/* Agent-team peek — React-only extension per porting task. Shows
+          a horizontal owl strip so the user knows which agents are on
+          the team without leaving the card. */}
+      <div data-ui="suTeamPeek" style={{ display:"flex", alignItems:"center", gap:4, padding:"0 2px" }}>
+        {avatarPngs.map((src, i) => (
+          <img key={i} src={src} style={{ width:20, height:20, opacity:0.85, filter:"drop-shadow(0 1px 1px rgba(0,0,0,0.5))" }} />
+        ))}
+        <div style={{ fontSize:10, color:"#6b7794", letterSpacing:0.4, textTransform:"uppercase", marginLeft:4 }}>4 agents on team</div>
       </div>
-      <div data-ui="suInputRow" style={{ display:"flex", alignItems:"center", gap:6 }}>
-        <input placeholder="Reply to the team…" style={{ flex:1, height:28, borderRadius:6, padding:"0 10px", background:"#0f1218", color:"#fff", fontSize:11, border:"1px solid rgba(120,220,255,0.15)" }} />
-        <button data-ui="suSendBtn" style={{ height:28, padding:"0 12px", borderRadius:6, border:"none", background:"linear-gradient(180deg, #5e82ff, #3a55cc)", color:"#fff", fontSize:11, fontWeight:700 }}>Send</button>
+      {/* Mini chat QTextEdit#suChat — super_user_card.py:235-240, fixedHeight 80.
+          When empty, _refresh_chat (:415-421) renders the placeholder line. */}
+      <div data-ui="suChat" style={{ height:80, background:"#0a0d14", color:"#cbd2e0", border:"1px solid #1d2434", borderRadius:8, padding:"8px 10px", fontSize:13, lineHeight:1.5, overflow:"hidden" }}>
+        {/* Pre-seeded "You" line so the card isn't blank — Qt renders
+            user messages prefixed "You:" with #5cf0ff (super_user_card.py:424-437). */}
+        <div style={{ marginBottom:6 }}>
+          <span style={{ color:"#5cf0ff", fontWeight:700 }}>You:</span>{" "}
+          <span style={{ color:"#cbd2e0" }}>summarize the last commit and propose a follow-up</span>
+        </div>
+        <div>
+          <span style={{ color:"#ffc060", fontWeight:700 }}>Team:</span>{" "}
+          <span style={{ color:"#cbd2e0" }}>routing to UI Designer — stage 1 sketch.</span>
+        </div>
       </div>
-      <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:11, color:"#dadcdf" }}>
-        <input type="checkbox" />
+      {/* Reply input + Send — super_user_card.py:242-256. */}
+      <div data-ui="suInputRow" style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <input data-ui="suReply" placeholder="Reply to the team — Enter to send" style={{ flex:1, height:32, borderRadius:8, padding:"6px 10px", background:"#0a0d14", color:"#e6f0ff", fontSize:14, border:"1px solid #2a3148" }} />
+        <button data-ui="suSend" style={{ height:32, padding:"6px 14px", borderRadius:8, border:"1px solid #5cf0ff", background:"#5cf0ff", color:"#0a0d14", fontSize:13, fontWeight:700 }}>Send</button>
+      </div>
+      {/* Auto-approve QCheckBox#suTrust — super_user_card.py:218-233.
+          12px wide indicator with red fill when checked (qss :88-96). */}
+      <label data-ui="suTrust" style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color:"#7888a8" }}>
+        <input type="checkbox" style={{ width:12, height:12, accentColor:"#ff6060" }} />
         <span>auto-approve tool requests</span>
       </label>
     </div>
@@ -365,7 +478,22 @@ function TeamCanvas({ width, height }: CanvasProps) {
   );
 }
 
+// OrchestratorPane — mirrors the RIGHT pane of _build_roster
+// (agents_page.py:2683-2779). Structure:
+//   1. log_header QLabel — agents_page.py:2692-2699. 12pt bold #fff.
+//      Default text "Click an agent on the canvas to view its log."
+//      Once an agent is selected: f"📜 {display_label}"
+//      (agents_page.py:5355).
+//   2. picker_host — Model picker for selected agent. Hidden until
+//      a node is clicked (:2721).
+//   3. voice_host — Voice row for selected agent. Hidden by default (:2744).
+//   4. QTabWidget#OrchestratorLogTabs with two tabs:
+//        💬 Reply  (QTextEdit#OrchestratorReplyView, agents_page.py:2771)
+//        🧠 Thought (QTextEdit#OrchestratorThoughtView, :2772)
+//      Tab style — Qt default plus the log_view_css at :2749-2757
+//      (#0f1218 bg, Consolas, 14px).
 function OrchestratorPane() {
+  // Sample chain-of-thought blob — placeholder until the bus is wired.
   const code = `* peripheral is active.
 "TEXT" — selected agent "Sg" agent name header.
 def __name__ == "TEAM": team is given a default
@@ -383,31 +511,74 @@ to make the goal in running, all only is
 oriented should think the "I shall not
 fail-call.thought_method". because given by the
 last action from m,h is left protected.`;
+  // Per-role border + label colour palette — mirrors
+  // _append_log_line's prefix_color map in agents_page.py:5411-5419.
+  // user → #9ad9ff, reply → #a8e7a0, thought → #dcb0ff, etc.
   const messages = [
     { role:"orchestrator", color:"#ffd97a", text:"Routing task to UI Designer — stage 1 sketch." },
-    { role:"UI Designer",   color:"#7fdfff", text:"Drafted the brief outline; uploading mock." },
+    { role:"UI Designer",  color:"#7fdfff", text:"Drafted the brief outline; uploading mock." },
     { role:"Workshop Writer", color:"#dcb0ff", text:"Will pair narrative with the mock once received." },
   ];
+  // Reply is the default tab — agents_page.py:2773 / :5367.
+  const [activeTab, setActiveTab] = React.useState<"reply"|"thought">("reply");
   return (
-    <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"#0c0f1a" }}>
-      <div data-ui="LogHeader" style={{ height:26, padding:"0 12px", background:"linear-gradient(90deg, rgba(120,220,255,0.22) 0%, rgba(220,180,255,0.16) 60%, rgba(255,200,100,0.14) 100%)", borderBottom:"1px solid rgba(120,220,255,0.35)", display:"flex", alignItems:"center", gap:8 }}>
-        <button style={{ padding:"6px 14px", borderRadius:18, border:"1px solid rgba(60,242,107,0.70)", background:"rgba(60,242,107,0.18)", color:"#69e6a1", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>💬 1 Reply</button>
-        <button style={{ padding:"6px 14px", borderRadius:18, border:"1px solid rgba(60,242,107,0.70)", background:"rgba(60,242,107,0.18)", color:"#69e6a1", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>🧠 1 Thought</button>
-        <div style={{ flex:1, fontSize:11, color:"#9aa0a6", paddingLeft:8 }}>Click an agent on the canvas to view its log.</div>
-        <button className="ghost-btn" style={{ height:28, padding:"0 10px", fontSize:11 }}>🎯 Route</button>
-        <button className="ghost-btn" style={{ height:28, padding:"0 10px", fontSize:11 }}>⤴ Send</button>
+    <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"#0c0f1a", padding:"0 0 0 8px" }}>
+      {/* log_header QLabel — 12pt bold white. Default-state text per :2692.
+          Once a node is clicked, agents_page.py:5355 swaps in "📜 <label>". */}
+      <div data-ui="LogHeader" style={{ padding:"8px 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
+        <div style={{ fontSize:16, fontWeight:700, color:"#fff", letterSpacing:0.3 }}>📜 ORCHESTRATOR — Backend Coder</div>
+        <div style={{ flex:1 }} />
       </div>
-      <div data-ui="OrchestratorLogTabs" style={{ flex:1, padding:"10px 10px", display:"flex", flexDirection:"column", gap:8, overflow:"hidden" }}>
-        {messages.map((m, i) => (
-          <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
-            <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d" }}>{m.role[0]}</div>
-            <div style={{ flex:1, background:"rgba(255,255,255,0.04)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"4px 10px" }}>
-              <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:2 }}>{m.role}</div>
-              <div style={{ fontSize:12, color:"#dadcdf", lineHeight:1.3 }}>{m.text}</div>
+      {/* picker_host — agents_page.py:2704-2721. "MODEL" 11px #aaa label
+          + ModelPickerButton slot. Hidden until an agent is selected; we
+          show a representative state so the user sees the surface. */}
+      <div data-ui="PickerHost" style={{ padding:"0 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ fontSize:11, color:"#aaa", letterSpacing:0.6, textTransform:"uppercase" }}>Model</span>
+        <button style={{ flex:1, height:28, padding:"0 10px", background:"rgba(0,0,0,0.28)", color:"#e6e8eb", border:"none", borderRadius:6, fontSize:12, textAlign:"left" }}>Qwen2.5-Coder Q4 ▾</button>
+      </div>
+      {/* voice_host — agents_page.py:2727-2744. "VOICE" label + _AgentVoiceRow:
+          enable cb, voice button, rate spin, ▶ preview, ➤ broadcast. */}
+      <div data-ui="VoiceHost" style={{ padding:"0 12px 8px", display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ fontSize:11, color:"#aaa", letterSpacing:0.6, textTransform:"uppercase" }}>Voice</span>
+        <input type="checkbox" defaultChecked style={{ width:13, height:13, accentColor:"#5cf0ff" }} title="Speak this agent's replies aloud" />
+        <button style={{ flex:1, height:28, padding:"0 10px", background:"rgba(0,0,0,0.28)", color:"#e6e8eb", border:"none", borderRadius:6, fontSize:12, textAlign:"left" }}>Auto voice</button>
+        <input type="number" defaultValue={0} style={{ width:78, height:28, padding:"0 8px", background:"rgba(0,0,0,0.28)", color:"#e6e8eb", border:"none", borderRadius:6, fontSize:12 }} title="Speaking rate (words per minute)" />
+        <button style={{ width:28, height:28, padding:0, background:"rgba(255,255,255,0.06)", color:"#dadcdf", border:"none", borderRadius:6, fontSize:12 }} title="Preview this voice">▶</button>
+        <button style={{ width:28, height:28, padding:0, background:"rgba(255,255,255,0.06)", color:"#dadcdf", border:"none", borderRadius:6, fontSize:14 }} title="Apply this voice to every agent on the team">➤</button>
+      </div>
+      {/* QTabWidget#OrchestratorLogTabs — agents_page.py:2769-2773. Two
+          tabs (💬 Reply, 🧠 Thought). Reply is the default. The tab
+          headers are Qt's standard QTabBar; cyan when active. */}
+      <div data-ui="OrchestratorLogTabs" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:"0 0 8px" }}>
+        <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid rgba(120,220,255,0.10)" }}>
+          <button onClick={() => setActiveTab("reply")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "reply" ? "#7fdfff" : "#9aa0a6", fontSize:13, fontWeight:600, borderBottom: activeTab === "reply" ? "2px solid #7fdfff" : "2px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
+          <button onClick={() => setActiveTab("thought")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "thought" ? "#dcb0ff" : "#9aa0a6", fontSize:13, fontWeight:600, borderBottom: activeTab === "thought" ? "2px solid #dcb0ff" : "2px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
+          <div style={{ flex:1 }} />
+        </div>
+        {/* Reply tab body — QTextEdit#OrchestratorReplyView. log_view_css
+            from agents_page.py:2749-2757: #0f1218 bg #cbd2e0 fg, Consolas
+            14px. Inside: agent-prefixed lines + the code block. */}
+        <div data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"#0f1218", border:"1px solid rgba(120,220,255,0.08)", borderRadius:8, overflow:"hidden", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"#cbd2e0" }}>
+          {messages.map((m, i) => (
+            <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+              <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d", fontFamily:"Segoe UI, sans-serif" }}>{m.role[0].toUpperCase()}</div>
+              <div style={{ flex:1, background:"rgba(255,255,255,0.04)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"4px 10px" }}>
+                <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:2, fontFamily:"Segoe UI, sans-serif" }}>{m.role}</div>
+                <div style={{ fontSize:12, color:"#dadcdf", lineHeight:1.3, fontFamily:"Segoe UI, sans-serif" }}>{m.text}</div>
+              </div>
             </div>
-          </div>
-        ))}
-        <div data-ui="OrchestratorReplyView" style={{ flex:1, background:"#0f1218", borderRadius:8, padding:10, overflow:"hidden", fontFamily:"Consolas, 'Cascadia Mono', monospace", fontSize:12, lineHeight:1.5, color:"#cbd2e0", whiteSpace:"pre-wrap", border:"1px solid rgba(120,220,255,0.08)" }}>{code}</div>
+          ))}
+          {/* Code block — the highlighted snippet that mirrors what the
+              orchestrator writes into the chat view between regular
+              messages. whiteSpace:"pre-wrap" preserves the line breaks. */}
+          <div style={{ flex:1, marginTop:4, padding:8, background:"#0a0d14", border:"1px solid rgba(120,220,255,0.10)", borderRadius:6, whiteSpace:"pre-wrap", overflow:"auto" }}>{code}</div>
+        </div>
+        {/* Thought tab — QTextEdit#OrchestratorThoughtView. Receives
+            tool_call / tool_result / event / inline reasoning per
+            _append_log_line :5429-5434. */}
+        <div data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "block" : "none", margin:"8px 10px 0", padding:10, background:"#0f1218", border:"1px solid rgba(220,180,255,0.10)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"#cbd2e0" }}>
+          <div style={{ color:"#888", fontSize:11 }}>No thought traffic yet — tool calls, reasoning, and events land here while the team runs.</div>
+        </div>
       </div>
     </div>
   );

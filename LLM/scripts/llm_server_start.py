@@ -9,16 +9,13 @@ import yaml
 import subprocess
 from pathlib import Path
 
-# Windows: avoid console window when launched as child of desktop app
+_this_dir = Path(__file__).resolve().parent
+_llm_root = _this_dir.parent
+if str(_llm_root) not in sys.path:
+    sys.path.insert(0, str(_llm_root))
+
+# Do not hide child console windows.
 _SUBPROCESS_FLAGS = {}
-if sys.platform == "win32":
-    _si = subprocess.STARTUPINFO()
-    _si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-    _si.wShowWindow = subprocess.SW_HIDE
-    _SUBPROCESS_FLAGS = {
-        "startupinfo": _si,
-        "creationflags": subprocess.CREATE_NO_WINDOW,
-    }
 
 def main():
     # Validate arguments
@@ -55,9 +52,11 @@ def main():
     model_cfg = cfg["models"][model_id]
 
     # Set environment variables for server_app.py to read
-    os.environ["BASE_MODEL"] = model_cfg["base_model"]
-    # Make /health identify the configured model_id (helps detect port conflicts)
-    os.environ["MODEL_NAME"] = model_id
+    runtime_base_model = str(os.environ.get("LLM_RUNTIME_BASE_MODEL", "")).strip()
+    runtime_model_name = str(os.environ.get("LLM_RUNTIME_MODEL_NAME", "")).strip()
+    os.environ["BASE_MODEL"] = runtime_base_model or model_cfg["base_model"]
+    # Make /health identify the configured runtime slot (helps detect variant-specific reuse)
+    os.environ["MODEL_NAME"] = runtime_model_name or model_id
     
     if model_cfg.get("adapter_dir"):
         os.environ["ADAPTER_DIR"] = model_cfg["adapter_dir"]
@@ -65,6 +64,35 @@ def main():
     os.environ["MODEL_TYPE"] = model_cfg.get("model_type", "base")
     os.environ["USE_4BIT"] = str(model_cfg.get("use_4bit", True)).lower()
     runtime_backend = str(os.environ.get("LLM_RUNTIME_BACKEND", model_cfg.get("runtime_backend", "") or "")).strip()
+
+    # AUTO-ROUTE GGUF MODELS TO THE BUNDLED LLAMA-SERVER PROXY.
+    # The python wheel ``llama-cpp-python`` ships its own bundled
+    # ``llama.dll`` that drifts months behind upstream llama.cpp — wheel
+    # 0.3.23 (current latest as of 2026-05-13) returns Windows error
+    # 0xc000001d (STATUS_ILLEGAL_INSTRUCTION) on architectures it doesn't
+    # know like ``gemma4``. Meanwhile the in-tree
+    # ``LLM/runtime/llama.cpp/llama-server.exe`` (build 8648) DOES know
+    # them and loads the same file fine. The fix is to route any GGUF
+    # base model through ``bundled_proxy_server`` (which spawns the
+    # in-tree binary) instead of ``server_app`` (which loads via the
+    # wheel). The YAML can still override this by setting an explicit
+    # ``runtime_backend`` — we only auto-set when nothing is configured.
+    if not runtime_backend:
+        try:
+            base_path = Path(os.environ["BASE_MODEL"])
+            is_gguf = (
+                (base_path.is_file() and base_path.suffix.lower() == ".gguf")
+                or (base_path.is_dir() and any(base_path.rglob("*.gguf")))
+            )
+            if is_gguf:
+                runtime_backend = "llama_cpp_server"
+                print(
+                    "Auto-routing GGUF base to bundled llama-server "
+                    "(wheel-based loaders lag upstream archs)."
+                )
+        except Exception:
+            pass
+
     if runtime_backend:
         os.environ["LLM_RUNTIME_BACKEND"] = runtime_backend
 
@@ -80,7 +108,7 @@ def main():
 
     print(f"Starting LLM server for model: {model_id}")
     print(f"Port: {port}")
-    print(f"Base model: {model_cfg['base_model']}")
+    print(f"Base model: {os.environ['BASE_MODEL']}")
     if model_cfg.get("adapter_dir"):
         print(f"Adapter: {model_cfg['adapter_dir']}")
     print(f"Model type: {os.environ['MODEL_TYPE']}")
@@ -143,7 +171,7 @@ def main():
             "--host", "127.0.0.1",
             "--port", str(port),
             "--log-level", "info"
-        ], check=True, cwd=str(app_root), env=env)
+        ], check=True, cwd=str(app_root), env=env, **_SUBPROCESS_FLAGS)
     except KeyboardInterrupt:
         print("\nServer stopped by user")
         sys.exit(0)

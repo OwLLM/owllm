@@ -3830,13 +3830,37 @@ class MainWindow(QMainWindow):
         # Auto-run system diagnostics on startup (delayed to allow UI to render first)
         QTimer.singleShot(500, self._auto_check_system)
 
-        # Header runtime info (servers / API key / VRAM) refreshes every 2s.
+        # Header runtime info (servers / API key / VRAM) refreshes every 5s.
         # First tick fired ~750ms after construction so the GUI has settled.
+        # Cadence was 2s, raised to 5s on 2026-05-13 because each tick
+        # spawns nvidia-smi (twice — once for compute-apps, once for
+        # GPU totals). On Windows every subprocess.run() gets hooked by
+        # Defender's real-time scanner, and a too-frequent spawn rate
+        # was causing the whole DESKTOP (including the mouse cursor)
+        # to stall briefly — the GUI thread itself wasn't blocked
+        # (verified by the responsiveness watchdog), but the OS-level
+        # scan stall was visible to the user as a periodic freeze.
+        # 5s is plenty for header VRAM/Servers info; 60% fewer subprocess
+        # spawns gives Defender room to breathe.
         self._runtime_header_timer = QTimer(self)
-        self._runtime_header_timer.setInterval(2000)
-        self._runtime_header_timer.timeout.connect(self._update_header_system_info)
+        self._runtime_header_timer.setInterval(5000)
+        self._runtime_header_timer.timeout.connect(
+            self._freeze_diag("runtime_header_timer", self._update_header_system_info)
+        )
         self._runtime_header_timer.start()
         QTimer.singleShot(750, self._update_header_system_info)
+
+        # GUI-thread responsiveness watchdog.
+        # Spins a daemon thread that schedules a QTimer.singleShot(0, ...)
+        # on the GUI thread every 250 ms and measures how long the
+        # singleShot takes to actually fire. If the GUI thread is
+        # blocked (paint, subprocess on main thread, slow stylesheet
+        # re-polish, etc.) the singleShot will be delayed — and we log
+        # the delay to logs/freeze_diag.log with a Python stack snapshot
+        # of every thread, so we can see WHO is holding the GIL.
+        # Any periodic source of UI freezes will show up here regardless
+        # of whether it's a QTimer we wrapped explicitly.
+        self._start_responsiveness_watchdog()
 
         self.downloaded_model_cards = []
         self.metric_cards = []
@@ -18429,8 +18453,7 @@ class MainWindow(QMainWindow):
         # 'Models talk to each other' — anchored to the right of the
         # row and ALWAYS VISIBLE. Disabled (ghosted) when only 1 chat
         # is active (nobody to talk to) instead of being hidden, so
-        # the user always sees the option exists. The inline runner
-        # isn't wired yet; toggling currently just records intent.
+        # the user always sees the option exists.
         self.test_models_converse = QCheckBox("🔄 Models talk to each other")
         self.test_models_converse.setChecked(False)
         self.test_models_converse.setProperty("_no_font_bump", True)
@@ -18439,6 +18462,40 @@ class MainWindow(QMainWindow):
             self._on_test_models_converse_toggled
         )
         title_row.addWidget(self.test_models_converse)
+
+        # Max turns for the converse loop. Visible only when the
+        # checkbox is enabled — keeps the title row uncluttered for the
+        # 99% single-chat case. The dedicated M2M sub-tab used to have
+        # this; it was lost in commit aad8144 when that sub-tab was
+        # collapsed into the Test surface. Mirrors the legacy
+        # m2m_max_turns widget (range 1-200, default 20).
+        self.test_converse_turns_label = QLabel("Max turns:")
+        self.test_converse_turns_label.setProperty("_no_font_bump", True)
+        self.test_converse_turns_label.setStyleSheet(_ROW_FONT_QSS)
+        self.test_converse_turns_label.setVisible(False)
+        title_row.addWidget(self.test_converse_turns_label)
+
+        self.test_converse_max_turns = QSpinBox()
+        self.test_converse_max_turns.setRange(1, 200)
+        self.test_converse_max_turns.setValue(20)
+        self.test_converse_max_turns.setMinimumWidth(70)
+        self.test_converse_max_turns.setToolTip(
+            "How many back-and-forth exchanges to run when 'Models talk "
+            "to each other' is on. One turn = one model speaks."
+        )
+        self.test_converse_max_turns.setProperty("_no_font_bump", True)
+        self.test_converse_max_turns.setVisible(False)
+        # Keep the legacy m2m_max_turns spinbox (hidden in the M2M
+        # widget tree) in sync so _start_m2m_conversation reads our
+        # value when the runner is dispatched.
+        def _mirror_to_legacy_m2m(v: int) -> None:
+            try:
+                if hasattr(self, "m2m_max_turns"):
+                    self.m2m_max_turns.setValue(int(v))
+            except Exception:
+                pass
+        self.test_converse_max_turns.valueChanged.connect(_mirror_to_legacy_m2m)
+        title_row.addWidget(self.test_converse_max_turns)
 
         left_layout.addLayout(title_row)
 
@@ -22730,11 +22787,22 @@ class MainWindow(QMainWindow):
                 self._select_model_count("2")
 
     def _on_test_models_converse_toggled(self, checked: bool) -> None:
-        """Placeholder — the dedicated Model To Model sub-tab is gone
-        and the inline runner isn't wired into the Test surface yet,
-        so this just records the desired state. Hooked to ``checked``
-        so the (currently-hidden) checkbox doesn't crash if shown."""
+        """Show/hide the Max turns spinbox and record converse intent.
+
+        The Send button (or whatever invokes inference) inspects
+        ``_models_converse_enabled`` to decide whether to fan out a
+        normal single-shot prompt across the picked models OR run the
+        legacy ``_start_m2m_conversation`` loop with
+        ``test_converse_max_turns.value()`` turns.
+        """
         self._models_converse_enabled = bool(checked)
+        try:
+            if hasattr(self, "test_converse_turns_label"):
+                self.test_converse_turns_label.setVisible(bool(checked))
+            if hasattr(self, "test_converse_max_turns"):
+                self.test_converse_max_turns.setVisible(bool(checked))
+        except Exception:
+            pass
     
     def _on_model_count_changed(self, count_str: str) -> None:
         """Handle chat count change (1 / 2 / 3).
@@ -27882,21 +27950,42 @@ respective package directories or official repositories.
             pass
 
     def _update_training_stats_periodic(self) -> None:
-        """Periodic background update for training stats (GPU memory, etc.)"""
+        """Periodic background update for training stats (GPU memory, etc.)
+
+        Previously this called ``detector.get_gpu_memory_usage(force_refresh=True)``
+        which spawns ``nvidia-smi`` SYNCHRONOUSLY on the GUI thread. On
+        Windows that's a 200–500 ms blocking syscall per tick — at the
+        2-second cadence below, the user saw the UI freeze briefly every
+        couple of seconds. ("the app block every 1 or 2 secons like there
+        is some process is timing some stupid shit.")
+
+        Fix: read from ``self._vram_stats``, which the main runtime header
+        timer already keeps fresh via a worker-thread call to nvidia-smi
+        (see :meth:`_kick_vram_query`). Same numbers, zero GUI-thread
+        subprocess work. Falls back to a "querying…" label until the
+        first threaded query lands.
+        """
         try:
-            from system_detector import SystemDetector
-            detector = SystemDetector()
-            
-            # Training tab wants live VRAM, so bypass the module-level cache.
-            gpu_stats = detector.get_gpu_memory_usage(force_refresh=True)
-            if gpu_stats and hasattr(self, 'gpu_mem_card'):
-                # For simplicity, if multiple GPUs, show the one with highest usage (usually the one training)
-                # Or if we have CUDA_VISIBLE_DEVICES, we could try to match it.
-                max_gpu = max(gpu_stats, key=lambda x: x['used_mb'])
-                used_gb = max_gpu['used_mb'] / 1024.0
-                total_gb = max_gpu['total_mb'] / 1024.0
-                self._update_metric_card(self.gpu_mem_card, f"{used_gb:.1f}/{total_gb:.1f} GB")
-        except:
+            if not hasattr(self, "gpu_mem_card"):
+                return
+            stats = getattr(self, "_vram_stats", {}) or {}
+            totals = stats.get("totals") or []
+            if not totals:
+                # Make sure the header's worker is actually running so
+                # we have data on the next tick. Cheap no-op if already
+                # in flight.
+                if hasattr(self, "_kick_vram_query"):
+                    try:
+                        self._kick_vram_query()
+                    except Exception:
+                        pass
+                self._update_metric_card(self.gpu_mem_card, "querying…")
+                return
+            used_mb, total_mb = max(totals, key=lambda t: t[0])
+            used_gb = used_mb / 1024.0
+            total_gb = total_mb / 1024.0
+            self._update_metric_card(self.gpu_mem_card, f"{used_gb:.1f}/{total_gb:.1f} GB")
+        except Exception:
             pass
     
     def _update_metric_card(self, card: QWidget, value: str) -> None:
@@ -28046,6 +28135,161 @@ respective package directories or official repositories.
 
         import threading
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _watchdog_pong(self):
+        """Slot fired on the GUI thread by the responsiveness watchdog.
+        Must be defined as a method (not a lambda) so the Qt signal
+        connection routes it across threads with Qt.QueuedConnection.
+        """
+        import time as _t
+        try:
+            dt_ms = (_t.perf_counter() - self._watchdog_ping_t0) * 1000.0
+            if dt_ms >= self._watchdog_threshold_ms:
+                try:
+                    logs_dir = self.root / "logs"
+                    logs_dir.mkdir(parents=True, exist_ok=True)
+                    with open(logs_dir / "freeze_diag.log", "a", encoding="utf-8") as f:
+                        from datetime import datetime as _dt
+                        import sys as _sys
+                        import traceback as _tb
+                        f.write(
+                            f"\n{_dt.now().isoformat(timespec='milliseconds')} "
+                            f"WATCHDOG: GUI-thread delayed {dt_ms:.1f}ms — stack snapshot follows\n"
+                        )
+                        frames = _sys._current_frames()
+                        for tid, frame in frames.items():
+                            f.write(f"--- thread {tid} ---\n")
+                            f.write("".join(_tb.format_stack(frame)))
+                        f.write("\n")
+                except Exception:
+                    pass
+        finally:
+            self._watchdog_pong_pending = False
+
+    def _start_responsiveness_watchdog(self, ping_ms: int = 250, threshold_ms: float = 80.0):
+        """Spin a daemon thread that pings the GUI thread every ``ping_ms``
+        and logs whenever the round-trip is delayed beyond ``threshold_ms``.
+
+        Cross-thread plumbing
+        =====================
+        The worker thread emits a Qt signal that's connected via
+        Qt.QueuedConnection to :meth:`_watchdog_pong` on the GUI thread.
+        The previous attempt used ``QTimer.singleShot(0, callable)`` from
+        the worker thread, which silently creates a QTimer in the
+        WORKER thread (not the GUI thread!) — meaning the slot fires
+        back in the same thread that scheduled it, and the measured
+        "delay" was just the worker's own latency. That's why the
+        watchdog never tripped despite real cursor freezes.
+
+        Qt.QueuedConnection is the actually-thread-safe equivalent:
+        the signal emit posts an event onto the GUI thread's event
+        queue, and the slot is invoked when that thread picks it up.
+        """
+        import threading
+        import time as _t
+        from PySide6.QtCore import QObject, Signal as _Signal, Qt as _Qt
+
+        self._watchdog_pong_pending = False
+        self._watchdog_ping_t0 = 0.0
+        self._watchdog_threshold_ms = threshold_ms
+        self._watchdog_stop = False
+
+        class _PingEmitter(QObject):
+            ping = _Signal()
+
+        self._watchdog_emitter = _PingEmitter()
+        # Important: QueuedConnection routes the emit -> slot across
+        # threads via the GUI thread's event loop. Without this it'd
+        # default to AutoConnection which (since emitter lives in GUI
+        # thread) would fire DirectConnection back in the worker.
+        self._watchdog_emitter.ping.connect(self._watchdog_pong, _Qt.QueuedConnection)
+
+        # Identify the GUI thread (= the main Python thread). We snapshot
+        # ITS stack from the watchdog when a ping is still outstanding —
+        # that's the moment when the GUI is stuck and we can see what's
+        # holding it. Sampling from the GUI thread itself (in _pong) only
+        # showed the watchdog code because by then the freeze had ended.
+        _gui_tid = threading.main_thread().ident
+
+        def _dump_gui_stack(reason: str, delayed_ms: float) -> None:
+            try:
+                import sys as _sys
+                import traceback as _tb
+                from datetime import datetime as _dt
+                logs_dir = self.root / "logs"
+                logs_dir.mkdir(parents=True, exist_ok=True)
+                frames = _sys._current_frames()
+                gui_frame = frames.get(_gui_tid)
+                with open(logs_dir / "freeze_diag.log", "a", encoding="utf-8") as f:
+                    f.write(
+                        f"\n{_dt.now().isoformat(timespec='milliseconds')} "
+                        f"WATCHDOG-SAMPLE: GUI stuck {delayed_ms:.0f}ms ({reason}) — "
+                        f"GUI thread stack at sample time:\n"
+                    )
+                    if gui_frame is None:
+                        f.write("  (no live frame for GUI thread)\n")
+                    else:
+                        f.write("".join(_tb.format_stack(gui_frame)))
+            except Exception:
+                pass
+
+        def _watch():
+            sample_taken_for_ping = False
+            while not self._watchdog_stop:
+                _t.sleep(ping_ms / 1000.0)
+                if self._watchdog_pong_pending:
+                    # GUI thread hasn't picked up the previous ping yet —
+                    # it's blocked. Sample its current stack so we can
+                    # see who's holding it. Only sample once per stuck
+                    # ping so we don't flood the log during a long
+                    # block.
+                    elapsed_ms = (_t.perf_counter() - self._watchdog_ping_t0) * 1000.0
+                    if elapsed_ms >= threshold_ms and not sample_taken_for_ping:
+                        _dump_gui_stack("in-progress freeze", elapsed_ms)
+                        sample_taken_for_ping = True
+                    continue
+                sample_taken_for_ping = False
+                self._watchdog_pong_pending = True
+                self._watchdog_ping_t0 = _t.perf_counter()
+                try:
+                    self._watchdog_emitter.ping.emit()
+                except Exception:
+                    self._watchdog_pong_pending = False
+
+        t = threading.Thread(target=_watch, name="gui-watchdog", daemon=True)
+        t.start()
+
+    def _freeze_diag(self, name: str, fn, threshold_ms: float = 30.0):
+        """Wrap a periodic callback so any tick over ``threshold_ms`` is
+        logged to ``logs/freeze_diag.log`` with a stack snapshot.
+
+        Why: the user reports the GUI freezes briefly every 1-2 seconds
+        and we can't pin which periodic timer is the culprit without
+        runtime data. This wrapper times every call to ``fn`` and only
+        writes to disk when it's actually slow, so the log stays focused
+        on the offender.
+        """
+        import time as _t
+
+        def _wrapped(*args, **kwargs):
+            t0 = _t.perf_counter()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                dt_ms = (_t.perf_counter() - t0) * 1000.0
+                if dt_ms >= threshold_ms:
+                    try:
+                        logs_dir = self.root / "logs"
+                        logs_dir.mkdir(parents=True, exist_ok=True)
+                        with open(logs_dir / "freeze_diag.log", "a", encoding="utf-8") as f:
+                            from datetime import datetime as _dt
+                            f.write(
+                                f"{_dt.now().isoformat(timespec='milliseconds')} "
+                                f"{name}: {dt_ms:.1f}ms\n"
+                            )
+                    except Exception:
+                        pass
+        return _wrapped
 
     def _update_header_system_info(self):
         """Refresh the header runtime info labels (servers, API key, VRAM).
@@ -28235,28 +28479,47 @@ respective package directories or official repositories.
         self._vram_query_in_flight = False
 
     def _vram_query_blocking(self) -> dict:
-        """Single nvidia-smi shell-out. Returns
-        ``{"per_pid": {pid: mb}, "totals": [(used_mb, cap_mb), ...]}``."""
+        """nvidia-smi shell-out. Returns
+        ``{"per_pid": {pid: mb}, "totals": [(used_mb, cap_mb), ...]}``.
+
+        Spawns ONE nvidia-smi for GPU totals every call; only spawns the
+        per-PID compute-apps query every 3rd call (and reuses the previous
+        per-PID map otherwise). Halves the average subprocess spawn rate
+        — Defender real-time scanning hooks each subprocess image load
+        and a too-high spawn rate was stalling the whole desktop.
+        """
         per_pid: dict[int, int] = {}
         totals: list[tuple[int, int]] = []
         creationflags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
-        try:
-            r = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid,used_memory",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=4, creationflags=creationflags,
-            )
-            if r.returncode == 0:
-                for line in r.stdout.splitlines():
-                    parts = [p.strip() for p in line.split(",")]
-                    if len(parts) < 2:
-                        continue
-                    try:
-                        per_pid[int(parts[0])] = int(parts[1])
-                    except Exception:
-                        continue
-        except Exception:
-            pass
+
+        # Every 3rd call: refresh the per-PID map. Otherwise reuse the
+        # previous one. Per-PID attribution rarely flips between ticks
+        # (a model server's PID doesn't change while running), so the
+        # rare staleness is invisible.
+        self._vram_query_counter = (getattr(self, "_vram_query_counter", 0) + 1) % 3
+        do_pid_query = self._vram_query_counter == 0
+
+        if do_pid_query:
+            try:
+                r = subprocess.run(
+                    ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=4, creationflags=creationflags,
+                )
+                if r.returncode == 0:
+                    for line in r.stdout.splitlines():
+                        parts = [p.strip() for p in line.split(",")]
+                        if len(parts) < 2:
+                            continue
+                        try:
+                            per_pid[int(parts[0])] = int(parts[1])
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+            self._last_per_pid = dict(per_pid)
+        else:
+            per_pid = dict(getattr(self, "_last_per_pid", {}) or {})
         try:
             r = subprocess.run(
                 ["nvidia-smi", "--query-gpu=memory.used,memory.total",

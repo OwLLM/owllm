@@ -21345,6 +21345,17 @@ class MainWindow(QMainWindow):
         def _on_turn_finished(model_key: str, text: str) -> None:
             try:
                 key = (model_key or "a").lower()[:1]
+                # Push the RAW per-turn output (post-label-trim but
+                # pre-CoT-filter) into the Test page's Unfiltered tab
+                # BEFORE we run _clean_test_chat_answer for the bubble.
+                # Otherwise a model that emits only reasoning leaves the
+                # bubble showing the "produced only internal reasoning"
+                # placeholder and the Unfiltered tab empty — which is
+                # exactly the user's complaint.
+                try:
+                    self._append_test_chat_unfiltered(key.upper(), text or "")
+                except Exception:
+                    pass
                 clean = self._clean_test_chat_answer(text or "")
                 if hasattr(self.chat_display, "finish_m2m_turn"):
                     self.chat_display.finish_m2m_turn(key, clean)

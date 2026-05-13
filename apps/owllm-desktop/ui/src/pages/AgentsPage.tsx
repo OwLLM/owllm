@@ -74,6 +74,11 @@ function DesignStudioCard() {
         <div style={{ fontSize:11, color:"#aaa", textTransform:"uppercase" }}>Design Studio Team</div>
       </div>
       <div style={{ fontSize:11, color:"#9aa0a6", lineHeight:1.4 }}>Stage 1 / 3 — sketch the brief, iterate interview and design board, then ship.</div>
+      <div data-ui="StudioRatingRow" style={{ display:"flex", gap:2, marginTop:4 }}>
+        {[0,1,2,3,4].map(i => (
+          <span key={i} style={{ fontSize:11, color: i < 4 ? "#ffd97a" : "rgba(255,255,255,0.18)", lineHeight:1 }}>★</span>
+        ))}
+      </div>
       <div style={{ fontSize:12, fontWeight:700, color:"#fff", marginTop:6 }}>sBach Studio Tr</div>
       <div style={{ marginTop:6, display:"flex", gap:12, alignItems:"flex-end", fontSize:10, color:"#7888a8", textTransform:"uppercase" }}>
         <div><span style={{ color:"#fff", fontSize:18, fontWeight:700 }}>10</span></div>
@@ -118,6 +123,19 @@ function TeamCanvas({ width, height }: CanvasProps) {
   const card_reserve = Math.min(410, w * 0.35);
   const cx = card_reserve + (w - card_reserve) / 2;
   const cy = h / 2;
+  // Animated phase for the centre's rotating gold arc-rings — mirrors
+  // _paint_centre's QTimer-driven _phase in agent_team_canvas.py:979-1067.
+  const [arcPhase, setArcPhase] = React.useState(0);
+  React.useEffect(() => {
+    let raf = 0;
+    const start = performance.now();
+    const tick = (now: number) => {
+      setArcPhase(((now - start) / 1000) * 36); // 36 deg/sec
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
   const max_radius = Math.max(120, Math.min(w, h * 1.5) * 0.30);
   const inner_offset = 130;
   const max_depth = 1;
@@ -154,9 +172,26 @@ function TeamCanvas({ width, height }: CanvasProps) {
     });
   }
   const NODE_R = 22; // matches `r = 22 + 4*pulse` in agent_team_canvas.py:1081
-  const orchestrator_r = 32;
+  // Scale off canvas — matches agent_team_canvas.py where r ≈ 0.18 * min(w,h)
+  // for the centre. We use a slightly tighter 0.10 floor so the hub
+  // dominates the centre without overlapping the agent ring.
+  const orchestrator_r = Math.max(48, Math.min(w, h) * 0.10);
+  // Rotating gold arc-rings — outer #f1c44a at r_out, inner #ffd76a at 0.7*r_out.
+  // Three 60° arcs at offsets 0/130/240 on each ring; rings counter-rotate.
+  const arc_r_out = orchestrator_r * 1.7;
+  const arc_r_in  = orchestrator_r * 1.2;
+  const arcPath = (rad: number, startDeg: number, sweepDeg: number) => {
+    const a0 = (startDeg * Math.PI) / 180;
+    const a1 = ((startDeg + sweepDeg) * Math.PI) / 180;
+    const sx = cx + rad * Math.cos(a0);
+    const sy = cy + rad * Math.sin(a0);
+    const ex = cx + rad * Math.cos(a1);
+    const ey = cy + rad * Math.sin(a1);
+    const large = sweepDeg > 180 ? 1 : 0;
+    return `M ${sx} ${sy} A ${rad} ${rad} 0 ${large} 1 ${ex} ${ey}`;
+  };
   return (
-    <div data-ui="AgentTeamCanvas" style={{ position:"relative", width:w, height:h, background:`radial-gradient(ellipse at ${cx}px ${cy}px, rgba(60, 120, 200, 0.22) 0%, rgba(0, 0, 0, 0) 60%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow:"hidden" }}>
+    <div data-ui="AgentTeamCanvas" style={{ position:"relative", width:w, height:h, background:`radial-gradient(ellipse at ${cx}px ${cy}px, rgba(192,138,255,0.10) 0%, rgba(116,164,255,0.06) 30%, rgba(40,60,110,0.04) 60%, rgba(0,0,0,0) 85%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow:"hidden" }}>
       <svg width={w} height={h} style={{ position:"absolute", left:0, top:0 }}>
         <defs>
           <radialGradient id="halo" cx="50%" cy="50%" r="50%">
@@ -200,8 +235,32 @@ function TeamCanvas({ width, height }: CanvasProps) {
         <circle cx={cx} cy={cy} r={orchestrator_r * 3.0} fill="url(#orchHalo)" />
         <circle cx={cx} cy={cy} r={orchestrator_r * 1.5} fill="#1a2240" stroke="rgba(255,200,100,0.75)" strokeWidth="2.5" />
         <circle cx={cx} cy={cy} r={orchestrator_r * 1.5} fill="none" stroke="rgba(127,223,255,0.45)" strokeWidth="1.2" strokeDasharray="3 3" />
+        {/* Outer rotating gold arc-ring — 3 × 60° arcs at offsets 0/130/240. */}
+        {[0, 130, 240].map((off, i) => (
+          <path
+            key={"arcOut" + i}
+            d={arcPath(arc_r_out, arcPhase + off, 60)}
+            stroke="#f1c44a"
+            strokeWidth={2.6}
+            strokeLinecap="round"
+            fill="none"
+            opacity={0.92}
+          />
+        ))}
+        {/* Inner rotating gold arc-ring — counter-rotates. */}
+        {[0, 130, 240].map((off, i) => (
+          <path
+            key={"arcIn" + i}
+            d={arcPath(arc_r_in, -arcPhase * 1.3 + off, 60)}
+            stroke="#ffd76a"
+            strokeWidth={2.0}
+            strokeLinecap="round"
+            fill="none"
+            opacity={0.85}
+          />
+        ))}
       </svg>
-      <img src={`${ICONS}/owl_agentic.png`} style={{ position:"absolute", left:cx - orchestrator_r * 1.25, top:cy - orchestrator_r * 1.25, width:orchestrator_r * 2.5, height:orchestrator_r * 2.5, pointerEvents:"none", filter:"drop-shadow(0 0 12px rgba(255,200,100,0.55))" }} />
+      <img src={`${ICONS}/owl_agentic.png`} style={{ position:"absolute", left:cx - orchestrator_r * 1.12, top:cy - orchestrator_r * 1.12, width:orchestrator_r * 2.24, height:orchestrator_r * 2.24, pointerEvents:"none", filter:"drop-shadow(0 0 16px rgba(255,200,100,0.55)) drop-shadow(0 0 28px rgba(255,180,80,0.35))" }} />
       <div style={{ position:"absolute", left:cx-60, top:cy + orchestrator_r * 1.6, width:120, textAlign:"center", fontSize:11, fontWeight:700, color:"#ffd97a", textTransform:"uppercase", letterSpacing:0.8, textShadow:"0 1px 3px rgba(0,0,0,0.9)", pointerEvents:"none" }}>Orchestrator</div>
       {nodes.map((n,i) => (
         // Owl PNG ON TOP of each agent disc — same job as the
@@ -226,7 +285,7 @@ function TeamCanvas({ width, height }: CanvasProps) {
         />
       ))}
       {nodes.map((n,i) => (
-        <div key={"l"+i} style={{ position:"absolute", left:n.x - 60, top:n.y + 30, width:120, textAlign:"center", fontSize:12, fontWeight:600, color:n.active?"#ffffff":"#e6e8eb", textTransform:"uppercase", letterSpacing:0.4, pointerEvents:"none", textShadow:"0 1px 3px rgba(0,0,0,0.9)" }}>{n.label}</div>
+        <div key={"l"+i} style={{ position:"absolute", left:n.x - 60, top:n.y + 30, width:120, textAlign:"center", fontSize:12, fontWeight:600, color:n.active?"#ffffff":"#e6e8eb", letterSpacing:0.4, pointerEvents:"none", textShadow:"0 1px 3px rgba(0,0,0,0.9)" }}>{n.label}</div>
       ))}
     </div>
   );

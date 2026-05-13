@@ -14,6 +14,8 @@ src-tauri/.tauri/
 
 # TwinForge working copies + per-run backups (the Coder edits a
 # timestamped sibling and the run driver may leave a *_PREPATCH_*.tsx
-# on disk when it restores after a regression).
-ui/src/pages/*_PATCH_*.tsx
-ui/src/pages/*_PREPATCH_*.tsx
+# on disk so the user can revert by-hand after a regression).
+ui/src/**/*_PATCH_*.tsx
+ui/src/**/*_PREPATCH_*.tsx
+ui/src/**/*_PATCH_*.css
+ui/src/**/*_PREPATCH_*.css

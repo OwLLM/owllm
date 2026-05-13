@@ -84,8 +84,8 @@ function ModeBar() {
       <div style={{ display:"flex", justifyContent:"center" }}>
         <div data-ui="AppTitle" style={{ textAlign:"center", width:128, height:45, fontSize:34, fontWeight:700, color:"#fff", letterSpacing:2, lineHeight:"45px" }}>OWLLM</div>
       </div>
-      <div data-ui="SysInfoBlock" style={{ minWidth:567, width:567, height:60, display:"flex", flexDirection:"column", alignItems:"stretch", justifyContent:"center", gap:3, fontSize:13, fontWeight:700, color:"#fff", textAlign:"right" }}>
-        <div data-ui="HeaderServersLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />Servers: 0</div>
+      <div data-ui="SysInfoBlock" style={{ minWidth:543, width:543, height:60, display:"flex", flexDirection:"column", alignItems:"stretch", justifyContent:"center", gap:3, fontSize:12, fontWeight:700, color:"#fff", textAlign:"right" }}>
+        <div data-ui="HeaderServersLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />Servers: 1 [Quagenmed-K4] Abbreviated Q4_K_M GGUF…</div>
         <div data-ui="HeaderApiKeyLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />API key: owllm-local</div>
         <div data-ui="HeaderVramLabel"><span className="status-dot" style={{ background:"#fbbf24", color:"#fbbf24" }} />VRAM: N/N</div>
       </div>

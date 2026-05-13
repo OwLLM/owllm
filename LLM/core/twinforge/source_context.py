@@ -60,6 +60,12 @@ class SourceContext:
     asset_dirs: List[Path] = field(default_factory=list)
     widget_files: List[Path] = field(default_factory=list)
     team_files: List[Path] = field(default_factory=list)
+    # Replica files the Coder is allowed to edit (in addition to its
+    # primary working copy). For the React port the agents page chrome
+    # lives in AppShell.tsx, the page body in AgentsPage.tsx — both
+    # need to be reachable when the Coder is fixing a layout issue
+    # that spans the boundary.
+    replica_files: List[Path] = field(default_factory=list)
     widget_excerpt_chars: int = _DEFAULT_WIDGET_EXCERPT_CHARS
 
     # ------------------------------------------------------------------
@@ -69,6 +75,7 @@ class SourceContext:
     def for_owllm_agents_page(cls, repo_root: Path | str) -> "SourceContext":
         """Pre-configured for the OWLLM agents-page replica use case."""
         root = Path(repo_root).resolve()
+        ui_src = root / "apps" / "owllm-desktop" / "ui" / "src"
         return cls(
             repo_root=root,
             asset_dirs=[
@@ -82,6 +89,12 @@ class SourceContext:
             team_files=list(
                 (root / "LLM" / "core" / "agents" / "teams").glob("*.json")
             ),
+            # The chrome + page-body split for the agents tab.
+            replica_files=[
+                ui_src / "AppShell.tsx",
+                ui_src / "pages" / "AgentsPage.tsx",
+                ui_src / "styles.css",
+            ],
         )
 
     # ------------------------------------------------------------------
@@ -154,6 +167,7 @@ class SourceContext:
                           *,
                           include_widgets: bool = True,
                           include_teams: bool = True,
+                          include_replica: bool = True,
                           ) -> str:
         """Render the markdown section the Coder receives.
 
@@ -208,6 +222,36 @@ class SourceContext:
                 lines.append(f"\n## {rel}\n")
                 lines.append("```python")
                 lines.append(self._widget_excerpt(wf))
+                lines.append("```")
+
+        # Section 2.5 — replica files (the React port's editable surface)
+        if include_replica and self.replica_files:
+            lines.append("")
+            lines.append("# REPLICA FILES (you may Edit any of these)")
+            lines.append(
+                "Your primary working copy is the file passed as the "
+                "Working file at the top of this prompt — but the agents "
+                "page chrome (HybridFrame, ModeBar, SubTabs) lives in "
+                "AppShell.tsx, the page body in AgentsPage.tsx, and "
+                "global classes in styles.css. Use your Edit tool on "
+                "whichever file actually contains the element you need "
+                "to change. Both must be valid TSX/CSS after your edits "
+                "— Vite hot-reload picks the change up immediately."
+            )
+            for rf in self.replica_files:
+                if not rf.exists():
+                    continue
+                rel = rf.resolve().relative_to(self.repo_root).as_posix() \
+                    if str(rf).startswith(str(self.repo_root)) else str(rf)
+                lines.append(f"\n## {rel}\n")
+                lang = "tsx" if rf.suffix == ".tsx" else (
+                    "css" if rf.suffix == ".css" else "ts"
+                )
+                lines.append(f"```{lang}")
+                try:
+                    lines.append(rf.read_text(encoding="utf-8", errors="replace")[:self.widget_excerpt_chars])
+                except OSError as exc:
+                    lines.append(f"(read error: {exc})")
                 lines.append("```")
 
         # Section 3 — team JSONs (optional)

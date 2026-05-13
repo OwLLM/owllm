@@ -34,8 +34,13 @@ function GoalRow() {
     <div style={{ height:38, padding:"0 23px", margin:"12px 0", background:"transparent", display:"flex", alignItems:"center", gap:10 }}>
       <button data-ui="GoalAttachBtn" className="ghost-btn" style={{ height:38, width:51, padding:0, fontSize:16 }}>📎</button>
       <input data-ui="GoalInput" defaultValue="summarize the last commit and propose a follow-up. design image + build notes" style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"#161623", color:"#fff", border:"none" }} />
-      <button data-ui="GoalRunBtn" style={{ height:38, width:82, padding:0, borderRadius:10, border:"none", background:"#4a6cff", color:"#fff", fontWeight:700, fontSize:18 }}>Run</button>
-      <button data-ui="GoalCancelBtn" style={{ height:38, width:98, padding:0, borderRadius:10, border:"1px solid rgba(255,140,140,0.30)", background:"rgba(255,140,140,0.08)", color:"#ff8c8c", fontSize:18 }}>Cancel</button>
+      <button data-ui="GoalTestCodeBtn" className="ghost-btn" style={{ height:38, width:84, padding:0, fontSize:12 }}>Test code</button>
+      <button data-ui="GoalConvertBtn" className="ghost-btn" style={{ height:38, width:78, padding:0, fontSize:12 }}>Convert</button>
+      <select data-ui="GoalModelCombo" defaultValue="m1" style={{ height:38, width:130, padding:"0 10px", borderRadius:10, border:"none", background:"#161623", color:"#fff", fontSize:12 }}>
+        <option value="m1">Qwen2.5-Coder Q4</option>
+      </select>
+      <button data-ui="GoalRunBtn" style={{ height:38, width:82, padding:0, borderRadius:10, border:"none", background:"#22c55e", color:"#fff", fontWeight:700, fontSize:18 }}>Run</button>
+      <button data-ui="GoalCancelBtn" style={{ height:38, width:98, padding:0, borderRadius:10, border:"1px solid rgba(255,80,80,0.55)", background:"#ef4444", color:"#fff", fontWeight:700, fontSize:18 }}>Cancel</button>
       <button data-ui="GoalTelemetryBtn" className="ghost-btn" style={{ height:38, width:44, padding:0, fontSize:16 }}>📊</button>
       <button data-ui="GoalVoiceBtn" className="ghost-btn" style={{ height:38, width:64, padding:0, fontSize:16, fontWeight:"normal" }}>🔈</button>
     </div>
@@ -70,9 +75,10 @@ function DesignStudioCard() {
       </div>
       <div style={{ fontSize:11, color:"#9aa0a6", lineHeight:1.4 }}>Stage 1 / 3 — sketch the brief, iterate interview and design board, then ship.</div>
       <div style={{ fontSize:12, fontWeight:700, color:"#fff", marginTop:6 }}>sBach Studio Tr</div>
-      <div style={{ marginTop:6, display:"flex", gap:12, fontSize:10, color:"#7888a8", textTransform:"uppercase" }}>
-        <div>I<br /><span style={{ color:"#fff", fontSize:18 }}>16</span></div>
-        <div>—<br /><span style={{ color:"#fff", fontSize:18 }}>—</span></div>
+      <div style={{ marginTop:6, display:"flex", gap:12, alignItems:"flex-end", fontSize:10, color:"#7888a8", textTransform:"uppercase" }}>
+        <div><span style={{ color:"#fff", fontSize:18, fontWeight:700 }}>10</span></div>
+        <div><span style={{ color:"#fff", fontSize:18, fontWeight:700 }}>6</span></div>
+        <div style={{ marginLeft:"auto", fontSize:10, color:"#7888a8" }}>Cleared</div>
       </div>
     </div>
   );
@@ -120,12 +126,34 @@ function TeamCanvas({ width, height }: CanvasProps) {
   const N = 8;
   const arc_span = (Math.PI * 2) * (340 / 360);
   const start_angle = -Math.PI / 2 - arc_span / 2;
-  const nodes: { x: number; y: number; label: string; active: boolean }[] = [];
-  const labels = ["Workshop Writer","Onboarded Coder","Backend Server","UI Designer","Backend Hub","Design Critic","Frontend Coder","Workshop Owl"];
+  // Each ring node = one agent in the active Team (mirrors the team JSON
+  // schema at LLM/core/agents/teams/*.json: every agent has a name + an
+  // `icon` field like "owl:owl_coder" that resolves to
+  // /Page_icons/Agents/owl_coder.png; the Qt `agent_team_canvas.py`
+  // paints those PNGs on top of the colored disc — we do the same here.
+  type Node = { x: number; y: number; label: string; icon: string; active: boolean };
+  const roster: { label: string; icon: string }[] = [
+    { label: "Workshop Writer",  icon: "Agents/owl_documentation.png" },
+    { label: "Onboarded Coder",  icon: "Agents/owl_coder.png" },
+    { label: "Backend Server",   icon: "owl_server.png" },
+    { label: "UI Designer",      icon: "Agents/owl_webapp.png" },
+    { label: "Product Studio",   icon: "owl_studio_square.png" },
+    { label: "Knowledge Doctor", icon: "Agents/owl_researcher.png" },
+    { label: "Frontend Coder",   icon: "Agents/owl_asssitant.png" },
+    { label: "Workshop Owl",     icon: "Agents/owl_critic.png" },
+  ];
+  const nodes: Node[] = [];
   for (let i = 0; i < N; i++) {
     const a = start_angle + (i + 0.5) * arc_span / N;
-    nodes.push({ x: cx + ring_radius * Math.cos(a), y: cy + ring_radius * Math.sin(a), label: labels[i], active: (i === 0 || i === 3) });
+    nodes.push({
+      x: cx + ring_radius * Math.cos(a),
+      y: cy + ring_radius * Math.sin(a),
+      label: roster[i].label,
+      icon:  roster[i].icon,
+      active: (i === 0 || i === 3),
+    });
   }
+  const NODE_R = 22; // matches `r = 22 + 4*pulse` in agent_team_canvas.py:1081
   const orchestrator_r = 32;
   return (
     <div data-ui="AgentTeamCanvas" style={{ position:"relative", width:w, height:h, background:`radial-gradient(ellipse at ${cx}px ${cy}px, rgba(60, 120, 200, 0.22) 0%, rgba(0, 0, 0, 0) 60%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow:"hidden" }}>
@@ -167,6 +195,28 @@ function TeamCanvas({ width, height }: CanvasProps) {
       <img src={`${ICONS}/owl_agentic.png`} style={{ position:"absolute", left:cx - orchestrator_r * 1.25, top:cy - orchestrator_r * 1.25, width:orchestrator_r * 2.5, height:orchestrator_r * 2.5, pointerEvents:"none", filter:"drop-shadow(0 0 12px rgba(255,200,100,0.55))" }} />
       <div style={{ position:"absolute", left:cx-60, top:cy + orchestrator_r * 1.6, width:120, textAlign:"center", fontSize:11, fontWeight:700, color:"#ffd97a", textTransform:"uppercase", letterSpacing:0.8, textShadow:"0 1px 3px rgba(0,0,0,0.9)", pointerEvents:"none" }}>Orchestrator</div>
       {nodes.map((n,i) => (
+        // Owl PNG ON TOP of each agent disc — same job as the
+        // `_paint_icon(p, icon_rect, agent.icon)` call at
+        // agent_team_canvas.py:1134. icon_rect = (-r,-r,2r,2r), so
+        // the image fills the disc.
+        <img
+          key={"i"+i}
+          src={`${ICONS}/${n.icon}`}
+          style={{
+            position: "absolute",
+            left: n.x - NODE_R,
+            top:  n.y - NODE_R,
+            width:  NODE_R * 2,
+            height: NODE_R * 2,
+            objectFit: "contain",
+            pointerEvents: "none",
+            filter: n.active
+              ? "drop-shadow(0 0 6px rgba(127,223,255,0.85))"
+              : "drop-shadow(0 1px 2px rgba(0,0,0,0.5))",
+          }}
+        />
+      ))}
+      {nodes.map((n,i) => (
         <div key={"l"+i} style={{ position:"absolute", left:n.x - 60, top:n.y + 30, width:120, textAlign:"center", fontSize:12, fontWeight:600, color:n.active?"#ffffff":"#e6e8eb", textTransform:"uppercase", letterSpacing:0.4, pointerEvents:"none", textShadow:"0 1px 3px rgba(0,0,0,0.9)" }}>{n.label}</div>
       ))}
     </div>
@@ -199,8 +249,8 @@ last action from m,h is left protected.`;
   return (
     <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"#0c0f1a" }}>
       <div data-ui="LogHeader" style={{ height:26, padding:"0 12px", background:"linear-gradient(90deg, rgba(120,220,255,0.22) 0%, rgba(220,180,255,0.16) 60%, rgba(255,200,100,0.14) 100%)", borderBottom:"1px solid rgba(120,220,255,0.35)", display:"flex", alignItems:"center", gap:8 }}>
-        <button style={{ padding:"6px 14px", borderRadius:18, border:"1px solid rgba(127,223,255,0.55)", background:"rgba(127,223,255,0.30)", color:"#ffffff", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
-        <button style={{ padding:"6px 14px", borderRadius:18, border:"1px solid rgba(220,180,255,0.40)", background:"rgba(220,180,255,0.18)", color:"#dcb0ff", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
+        <button style={{ padding:"6px 14px", borderRadius:18, border:"1px solid rgba(60,242,107,0.70)", background:"rgba(60,242,107,0.18)", color:"#69e6a1", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>💬 1 Reply</button>
+        <button style={{ padding:"6px 14px", borderRadius:18, border:"1px solid rgba(60,242,107,0.70)", background:"rgba(60,242,107,0.18)", color:"#69e6a1", fontSize:12, fontWeight:700, display:"inline-flex", alignItems:"center", gap:4 }}>🧠 1 Thought</button>
         <div style={{ flex:1, fontSize:11, color:"#9aa0a6", paddingLeft:8 }}>Click an agent on the canvas to view its log.</div>
         <button className="ghost-btn" style={{ height:28, padding:"0 10px", fontSize:11 }}>🎯 Route</button>
         <button className="ghost-btn" style={{ height:28, padding:"0 10px", fontSize:11 }}>⤴ Send</button>

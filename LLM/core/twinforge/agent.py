@@ -197,13 +197,30 @@ def compare(src: CaptureResult, tgt: CaptureResult,
     overall = overall_diff(src, tgt)
     unm_src, unm_tgt = unmatched_ids(src, tgt)
 
-    # VLM perception pass — the 'eyes' of TwinForge. Catches untagged
-    # decorative elements, paint-only widgets, and state coverage gaps.
+    # VLM perception pass — the 'eyes' of TwinForge.
+    # We always record TWO labels:
+    #   * configured — what would run if everything were available
+    #   * status     — what actually ran this time (or why it didn't)
     vlm_differences: List[VLMDifference] = []
-    vlm_provider_name = "disabled"
+    from core.twinforge.vlm_diff import AnthropicVLM as _DefaultVLM
+    from core.twinforge.coder import AnthropicCoder as _DefaultCoder
+    _default_vlm_intent = (
+        f"anthropic · {_DefaultVLM().model}" if vlm is None
+        else f"{getattr(vlm, 'name', '?')} · {getattr(vlm, 'model', '?')}"
+    )
+    vlm_configured = _default_vlm_intent
+    vlm_status = "disabled (enable_vlm=False)"
     if enable_vlm:
         provider = vlm if vlm is not None else default_vlm_provider()
-        vlm_provider_name = f"{provider.name} · {getattr(provider, 'model', '?')}"
+        # If the picked provider can introspect availability, do so:
+        avail = getattr(provider, "available", lambda: True)()
+        if not avail:
+            vlm_status = (
+                f"FALLBACK to null — {provider.name} unavailable "
+                f"(set ANTHROPIC_API_KEY to enable)"
+            )
+        else:
+            vlm_status = f"ran via {provider.name} · {getattr(provider, 'model', '?')}"
         try:
             vlm_differences = provider.compare(
                 src.png_path, tgt.png_path, title=title,
@@ -213,16 +230,25 @@ def compare(src: CaptureResult, tgt: CaptureResult,
                 description=f"VLM provider crashed: {exc}",
                 severity="low",
             )]
+            vlm_status = f"crashed: {exc!s}"
 
-    # Coder generation pass — the 'hands'. Off by default; opt in by
-    # passing enable_coder=True + target_file=<replica file path>.
     code_fixes: List[CodeFix] = []
-    coder_provider_name = "disabled"
+    _default_coder_intent = (
+        f"anthropic · {_DefaultCoder().model}" if coder is None
+        else f"{getattr(coder, 'name', '?')} · {getattr(coder, 'model', '?')}"
+    )
+    coder_configured = _default_coder_intent
+    coder_status = "disabled (enable_coder=False)"
     if enable_coder and target_file:
         provider_c = coder if coder is not None else default_coder_provider()
-        coder_provider_name = (
-            f"{provider_c.name} · {getattr(provider_c, 'model', '?')}"
-        )
+        avail = getattr(provider_c, "available", lambda: True)()
+        if not avail:
+            coder_status = (
+                f"FALLBACK to null — {provider_c.name} unavailable "
+                f"(set ANTHROPIC_API_KEY to enable)"
+            )
+        else:
+            coder_status = f"ran via {provider_c.name} · {getattr(provider_c, 'model', '?')}"
         try:
             code_fixes = provider_c.patch(
                 diff_text="(see report.txt)",
@@ -235,10 +261,19 @@ def compare(src: CaptureResult, tgt: CaptureResult,
                 file_path="(none)", patch="",
                 is_full_file=False, confidence="low",
             )]
+            coder_status = f"crashed: {exc!s}"
+    elif enable_coder and not target_file:
+        coder_status = "skipped — enable_coder=True but no target_file given"
 
     text = format_report(regions, overall,
                          unmatched_src=unm_src, unmatched_tgt=unm_tgt)
-    text += f"\n\nPROVIDERS: perception={vlm_provider_name} · generation={coder_provider_name}\n"
+    text += (
+        f"\n\nPROVIDERS\n"
+        f"  perception · configured: {vlm_configured}\n"
+        f"  perception · status:     {vlm_status}\n"
+        f"  generation · configured: {coder_configured}\n"
+        f"  generation · status:     {coder_status}\n"
+    )
     if vlm_differences:
         text += "\nPERCEIVED VISUAL DIFFERENCES (VLM)\n"
         text += "-" * 70 + "\n"
@@ -268,8 +303,10 @@ def compare(src: CaptureResult, tgt: CaptureResult,
             unm_src, unm_tgt,
             vlm_differences=vlm_differences,
             code_fixes=code_fixes,
-            vlm_provider_name=vlm_provider_name,
-            coder_provider_name=coder_provider_name,
+            vlm_provider_configured=vlm_configured,
+            vlm_provider_status=vlm_status,
+            coder_provider_configured=coder_configured,
+            coder_provider_status=coder_status,
             title=title, out_path=html_report_path,
         )
     return {
@@ -280,6 +317,8 @@ def compare(src: CaptureResult, tgt: CaptureResult,
         "unmatched_src": unm_src, "unmatched_tgt": unm_tgt,
         "vlm_differences": vlm_differences,
         "code_fixes": code_fixes,
-        "vlm_provider_name": vlm_provider_name,
-        "coder_provider_name": coder_provider_name,
+        "vlm_configured": vlm_configured,
+        "vlm_status": vlm_status,
+        "coder_configured": coder_configured,
+        "coder_status": coder_status,
     }

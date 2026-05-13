@@ -62,8 +62,10 @@ def render_html_report(
     out_path: str,
     vlm_differences = None,  # noqa: ANN001 — optional list of VLMDifference
     code_fixes = None,       # noqa: ANN001 — optional list of CodeFix
-    vlm_provider_name: str = "disabled",
-    coder_provider_name: str = "disabled",
+    vlm_provider_configured: str = "anthropic · claude-opus-4-7",
+    vlm_provider_status: str = "unknown",
+    coder_provider_configured: str = "anthropic · claude-opus-4-7",
+    coder_provider_status: str = "unknown",
 ) -> str:
     """Write a self-contained HTML report. Returns the absolute path."""
     src_img = Image.open(src.png_path).convert("RGB")
@@ -156,10 +158,19 @@ def render_html_report(
             )
         return "".join(rows)
 
+    def _status_class(s: str) -> str:
+        sl = s.lower()
+        if "ran via" in sl: return "good"
+        if "disabled" in sl or "fallback" in sl or "skipped" in sl: return "mid"
+        if "crashed" in sl: return "bad"
+        return "mid"
+
     provider_card_html = (
         '<div class="provider-card">'
         '<h3>Providers used for this run · hover ⓘ for details</h3>'
         '<div class="provider-grid">'
+
+        # ---- Perception ----
         '<label title="The PERCEPTION API. Looks at the two screenshots '
         'and lists what differs — untagged decorations, missing elements, '
         'wrong sizes a human would call out. Best models: vision-strong '
@@ -170,8 +181,13 @@ def render_html_report(
         'to a vision model and asks for a structured list of differences '
         'with severity + fix suggestions. Disable with enable_vlm=False.">ⓘ</span>'
         '</div>'
-        f'<select disabled name="vlm">{_provider_options(vlm_provider_name)}</select>'
+        f'<select disabled name="vlm">{_provider_options(vlm_provider_configured)}</select>'
+        f'<div class="status-line">status: '
+        f'<span class="badge {_status_class(vlm_provider_status)}">'
+        f'{html.escape(vlm_provider_status)}</span></div>'
         '</label>'
+
+        # ---- Generation ----
         '<label title="The GENERATION API. Takes the diff report + VLM '
         'findings + the current target file and emits code patches. Best '
         'models: strong coders (Claude Opus 4.7, GPT-5, Qwen2.5-Coder).">'
@@ -182,8 +198,12 @@ def render_html_report(
         'gets back ready-to-apply patches. Off by default; enable with '
         'enable_coder=True + target_file=path.">ⓘ</span>'
         '</div>'
-        f'<select disabled name="coder">{_provider_options(coder_provider_name)}</select>'
+        f'<select disabled name="coder">{_provider_options(coder_provider_configured)}</select>'
+        f'<div class="status-line">status: '
+        f'<span class="badge {_status_class(coder_provider_status)}">'
+        f'{html.escape(coder_provider_status)}</span></div>'
         '</label>'
+
         '</div>'
         '<details class="provider-legend">'
         '<summary>Available providers (click for the full catalogue)</summary>'
@@ -305,6 +325,8 @@ def render_html_report(
     .provider-legend summary { cursor: pointer; color: #7888a8; font-size: 12px; padding: 4px 0; }
     .provider-legend summary:hover { color: #cbd2e0; }
     .provider-legend table { margin-top: 8px; font-size: 11px; }
+    .status-line { font-size: 11px; color: #7888a8; margin-top: 6px; }
+    .status-line .badge { margin-left: 2px; }
     """
 
     body = f"""

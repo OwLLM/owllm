@@ -67,6 +67,10 @@ class CoderProvider(Protocol):
 # ----------------------------------------------------------------------
 class NullCoder:
     name = "null"
+    model = "—"
+
+    def available(self) -> bool:
+        return False
 
     def patch(self, *, diff_text: str, vlm_findings: List[Any],
               target_file: str, max_changes: int = 6) -> List[CodeFix]:

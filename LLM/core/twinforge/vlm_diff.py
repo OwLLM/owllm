@@ -82,6 +82,10 @@ class VLMProvider(Protocol):
 # ----------------------------------------------------------------------
 class NullVLM:
     name = "null"
+    model = "—"
+
+    def available(self) -> bool:
+        return False
 
     def compare(self, src_png: str, tgt_png: str,
                 *, title: str = "", max_items: int = 12,

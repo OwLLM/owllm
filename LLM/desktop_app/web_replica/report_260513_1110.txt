@@ -1,0 +1,64 @@
+OVERALL pixel diff: 29.03%
+Per-element regions matched: 45
+
+ #  id                           kind        qual     pix   SSIM    ΔE  notes
+--------------------------------------------------------------------------------------------------------------
+ 1  FlowTitle                    text        3.9   96.9%  0.06  35.2  pos off by (+10, +2)
+ 2  LogHeader                    text       17.7   99.0%  0.30  26.4  size src=532x26 tgt=532x21; text src='📜 
+ 3  FlowViewToggleBtn            button     23.2   99.0%  0.34  21.3  pos off by (-10, +2)
+ 4  FlowLayoutBtn                button     23.7   99.6%  0.34  19.8  pos off by (-6, +2)
+ 5  FlowDeleteEdgeBtn            button     24.5   99.6%  0.34  18.6  
+ 6  FlowReverseEdgeBtn           button     24.8   99.3%  0.36  19.7  
+ 7  BridgeBadge                  text       25.7   88.4%  0.25  15.4  pos off by (+14, -4); text src='📱 Bridge
+ 8  FlowRefreshBtn               button     25.9  100.0%  0.35  17.8  pos off by (-8, +2)
+ 9  SandboxBadge                 text       27.1   98.2%  0.40  20.3  pos off by (+14, -4); text src='🟢 Sandbo
+10  AgenticTeamToggle            button     27.7   99.0%  0.55  34.0  pos off by (+14, -4); text src='🎭\nAgent
+11  AppTitle                     text       28.6   39.0%  0.21  35.2  pos off by (+24, -3)
+12  TrustWritesCheckbox          other      31.8   36.4%  0.15  22.0  pos off by (+14, -4)
+13  suIconBtn                    button     36.3   37.9%  0.20  18.3  pos off by (+5, -140); font_size_px 16 v
+14  suHint                       text       37.9   32.8%  0.14  13.6  size src=190x74 tgt=192x14; pos off by (
+15  GoalCancelBtn                button     38.0   95.5%  0.57  17.7  
+16  ColorSelector                container  48.1   35.0%  0.42  18.7  font_size_px 12 vs 16
+17  RosterRight                  container  49.6   36.0%  0.40  14.1  
+18  suAvatar                     text       49.9   20.8%  0.28  11.7  pos off by (+3, -140); color_bg #1a2030 
+19  AppHeader                    container  51.4   33.0%  0.52  22.2  size src=1592x80 tgt=1600x80; font_size_
+20  OrchestratorLogTabs          container  53.9   25.8%  0.41  13.0  size src=532x543 tgt=532x760; pos off by
+21  suName                       text       54.5   22.4%  0.47  18.5  size src=190x26 tgt=192x16; pos off by (
+22  OrchestratorReplyView        input      56.0   18.9%  0.38  11.4  size src=530x495 tgt=512x713; pos off by
+23  LocationLabel                text       56.7   21.3%  0.40  10.4  pos off by (+9, -4); text src='Location'
+24  HeaderApiKeyLabel            text       57.0   17.0%  0.53  21.9  size src=551x17 tgt=567x17; pos off by (
+25  DarkModeBtn                  container  57.6   25.7%  0.52  15.9  font_size_px 12 vs 16
+26  WorkspaceStack               container  57.6   32.2%  0.51  12.7  size src=1554x665 tgt=1600x665; pos off 
+27  LocationInput                input      58.6   16.8%  0.50  17.4  pos off by (+13, -4); text missing in ta
+28  SuperUserCard                other      59.5   18.8%  0.48  13.1  pos off by (+4, -104); color_fg #11151e 
+29  GoalTelemetryBtn             button     59.6   18.8%  0.57  20.0  
+30  GamifyToggle                 button     62.3   21.7%  0.53  11.8  pos off by (+18, -4); text src='🎮\nGamif
+31  RosterLeft                   container  62.7   29.8%  0.59  11.5  
+32  FineTuningToggle             button     65.1   20.3%  0.58  11.9  pos off by (+10, -4); text src='🛠\nFine 
+33  AgentTeamCanvas              canvas     65.4   23.3%  0.60  11.1  
+34  CanvasStack                  container  65.4   23.3%  0.60  11.1  size src=1014x607 tgt=1014x624
+35  AdvancedToggle               button     65.7   20.1%  0.59  11.9  pos off by (+6, -4); text src='⚙\nAdvanc
+36  SysInfoBlock                 container  67.8   12.0%  0.68  19.0  size src=567x60 tgt=567x55; pos off by (
+37  HeaderVramLabel              text       69.4   11.8%  0.70  18.3  pos off by (+29, -6); text src='💾 VRAM: 
+38  GoalVoiceBtn                 button     72.4    8.6%  0.68  13.7  text src='🔈' tgt='🔈 ▾'; font_weight norm
+39  HeaderServersLabel           text       73.4    8.5%  0.75  17.5  size src=567x18 tgt=567x17; pos off by (
+40  RosterSplitter               container  73.4   30.8%  0.76   8.3  size src=1554x665 tgt=8x665; pos off by 
+41  ProjectCombo                 list       73.6    8.7%  0.72  14.8  pos off by (+36, -4); text in target onl
+42  GoalAttachBtn                button     75.3    9.0%  0.67   8.4  
+43  LocationBrowseBtn            button     77.9   12.6%  0.73   7.0  size src=79x32 tgt=80x32; pos off by (+1
+44  GoalInput                    input      79.5    8.2%  0.78  10.5  text missing in target
+45  GoalRunBtn                   button     90.1    8.4%  0.91   4.3  font_weight bold/normal
+
+Unmatched in source (8): Frame, FullscreenBtn, ProjectStrip, suChat, suReply, suSend, suTrust, windowBorderContainer
+
+PROVIDERS
+  perception · configured: anthropic · claude-opus-4-7
+  perception · status:     FALLBACK to null — null unavailable (set ANTHROPIC_API_KEY to enable)
+  generation · configured: anthropic · claude-opus-4-7
+  generation · status:     disabled (enable_coder=False)
+
+PERCEIVED VISUAL DIFFERENCES (VLM)
+----------------------------------------------------------------------
+ 1. [low] VLM diff unavailable — set ANTHROPIC_API_KEY in the environment (or wire a different provider) to enable perception-based diff.
+    location: (global)
+    fix:      export ANTHROPIC_API_KEY=…

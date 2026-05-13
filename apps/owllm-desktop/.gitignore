@@ -1,0 +1,19 @@
+node_modules/
+dist/
+ui/dist/
+target/
+*.log
+.DS_Store
+
+# Bundled Python engine — ~1.8 GB. Re-synced from LLM/ by
+# tools/sync_python_engine.ps1 on each build; never committed.
+python_engine/
+
+# Tauri generated stubs that bloat the build cache.
+src-tauri/.tauri/
+
+# TwinForge working copies + per-run backups (the Coder edits a
+# timestamped sibling and the run driver may leave a *_PREPATCH_*.tsx
+# on disk when it restores after a regression).
+ui/src/pages/*_PATCH_*.tsx
+ui/src/pages/*_PREPATCH_*.tsx

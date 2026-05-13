@@ -1,0 +1,27 @@
+html, body { margin: 0; padding: 0; background: #06080d; font-family: "Segoe UI", "Inter", system-ui, sans-serif; color: #e6e8eb; overflow: hidden; }
+* { box-sizing: border-box; }
+button { font-family: inherit; cursor: pointer; font-weight: bold; }
+
+.ghost-btn {
+  background: rgba(255, 255, 255, 0.04);
+  color: #dadcdf;
+  border: none;
+  border-radius: 8px;
+  padding: 0 14px;
+  font-size: 12px;
+  height: 32px;
+  font-weight: bold;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ghost-btn:hover { background: rgba(255, 255, 255, 0.10); color: #fff; }
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 8px;
+  box-shadow: 0 0 6px currentColor;
+}

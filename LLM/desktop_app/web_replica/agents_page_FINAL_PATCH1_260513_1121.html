@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>OWLLM — Agentic Team (v11, VLM-corrected)</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  html, body { margin: 0; padding: 0; background: #06080d; font-family: "Segoe UI", "Inter", system-ui, sans-serif; color: #e6e8eb; overflow: hidden; }
+  * { box-sizing: border-box; }
+  button { font-family: inherit; cursor: pointer; font-weight: bold; }
+  .ghost-btn { background: rgba(255,255,255,0.04); color: #dadcdf; border: none; border-radius: 8px; padding: 0 14px; font-size: 12px; height: 32px; font-weight: bold; display: inline-flex; align-items: center; gap: 6px; }
+  .ghost-btn:hover { background: rgba(255,255,255,0.10); color: #fff; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+const ICONS = "../../../icons/Page_icons";
+const CORNERS = `${ICONS}/CornersNew`;
+
+function HybridFrame({ children, width, height }) {
+  const CORNER = 96, BORDER = 18, BADGE_H = 58;
+  const FRAME_LEFT = 19, FRAME_TOP = 116, RIGHT_OVERHANG = 79, BOTTOM_OVERHANG = 19;
+  const outerW = width + FRAME_LEFT + RIGHT_OVERHANG;
+  const outerH = height + FRAME_TOP + BOTTOM_OVERHANG;
+  const fc = "rgba(120, 220, 255, 0.86)";
+  const ac = "rgba(120, 220, 255, 0.78)";
+  return (
+    <div style={{ position: "relative", width: outerW, height: outerH, background: "transparent" }}>
+      <div style={{ position: "absolute", left: FRAME_LEFT, top: FRAME_TOP, width, height, background: "#14152a", overflow: "hidden" }}>{children}</div>
+      <div style={{ position: "absolute", left: FRAME_LEFT + CORNER/2, width: width - CORNER, top: FRAME_TOP - BORDER/2, height: BORDER, background: `linear-gradient(90deg, ${ac}, ${fc}, ${ac})`, opacity: 0.8 }} />
+      <div style={{ position: "absolute", left: FRAME_LEFT + CORNER/2, width: width - CORNER, top: FRAME_TOP + height - BORDER/2, height: BORDER, background: `linear-gradient(90deg, ${ac}, ${fc}, ${ac})`, opacity: 0.8 }} />
+      <div style={{ position: "absolute", top: FRAME_TOP + CORNER/2, height: height - CORNER, left: FRAME_LEFT - BORDER/2, width: BORDER, background: `linear-gradient(180deg, ${ac}, ${fc}, ${ac})`, opacity: 0.8 }} />
+      <div style={{ position: "absolute", top: FRAME_TOP + CORNER/2, height: height - CORNER, left: FRAME_LEFT + width - BORDER/2, width: BORDER, background: `linear-gradient(180deg, ${ac}, ${fc}, ${ac})`, opacity: 0.8 }} />
+      <img src={`${CORNERS}/corner_ul.png`} style={{ position: "absolute", left: FRAME_LEFT - CORNER/2, top: FRAME_TOP - CORNER/2, width: CORNER, height: CORNER, pointerEvents: "none" }} />
+      <img src={`${CORNERS}/corner_ur.png`} style={{ position: "absolute", left: FRAME_LEFT + width - CORNER/2, top: FRAME_TOP - CORNER/2, width: CORNER, height: CORNER, pointerEvents: "none" }} />
+      <img src={`${CORNERS}/corner_bl.png`} style={{ position: "absolute", left: FRAME_LEFT - CORNER/2, top: FRAME_TOP + height - CORNER/2, width: CORNER, height: CORNER, pointerEvents: "none" }} />
+      <img src={`${CORNERS}/corner_br.png`} style={{ position: "absolute", left: FRAME_LEFT + width - CORNER/2, top: FRAME_TOP + height - CORNER/2, width: CORNER, height: CORNER, pointerEvents: "none" }} />
+      <img src={`${ICONS}/owl_studio_square.png`} style={{ position: "absolute", left: FRAME_LEFT + width/2 - BADGE_H/2, top: FRAME_TOP - BADGE_H/2 - 6, width: BADGE_H, height: BADGE_H, pointerEvents: "none" }} />
+    </div>
+  );
+}
+
+function ModeBar() {
+  const buttonStyle = { height: 50, padding: "0 14px", background: "linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))", color: "#fff", border: "1px solid rgba(120,220,255,0.0)", borderRadius: 6, fontSize: 13, fontWeight: 700, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", lineHeight: 1.05, gap: 2 };
+  const activeButton = { ...buttonStyle, border: "1px solid #d4af37", background: "linear-gradient(180deg, rgba(80,80,110,0.9), rgba(50,50,80,0.9))" };
+  const colorBtn = (c) => ({ width: 18, height: 18, borderRadius: 3, background: c, border: "none", padding: 0 });
+  return (
+    <div data-ui="AppHeader" style={{ height: 80, display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", padding: "10px 50px 10px 20px", gap: 16, background: "#1c2244" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div data-ui="DarkModeBtn" style={{ width: 70, height: 50, borderRadius: 6, background: "linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", lineHeight: 1.0 }}>
+          <div style={{ fontSize: 22 }}>🌙</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#fff" }}>Dark</div>
+        </div>
+        <div data-ui="ColorSelector" style={{ width: 70, height: 50, padding: 4, display: "grid", gridTemplateColumns: "repeat(3, 18px)", gridTemplateRows: "repeat(2, 18px)", gap: 3, background: "rgba(60,60,80,0.4)", borderRadius: 6 }}>
+          {["#667eea","#fbbf24","#ef4444","#3b82f6","#10b981","#6b7280"].map(c => <button key={c} style={colorBtn(c)} />)}
+        </div>
+        <button style={{...buttonStyle, width: 114}}><span style={{fontSize:18}}>⚙</span><span>Advanced</span></button>
+        <button style={{...buttonStyle, width: 129}}><span style={{fontSize:18}}>🛠</span><span>Fine Tuning</span></button>
+        <button style={{...activeButton, width: 147}}><span style={{fontSize:18}}>🎭</span><span>Agentic Team</span></button>
+        <button style={{...buttonStyle, width: 91}}><span style={{fontSize:18}}>🎮</span><span>Gamify</span></button>
+      </div>
+      <div style={{ display: "flex", justifyContent: "center" }}>
+        <div style={{ textAlign: "center", width: 128, height: 45, fontSize: 34, fontWeight: 700, color: "#fff", letterSpacing: 2, lineHeight: "45px" }}>OWLLM</div>
+      </div>
+      <div style={{ minWidth: 567, width: 567, display: "flex", flexDirection: "column", alignItems: "stretch", gap: 2, fontSize: 13, fontWeight: 700, color: "#fff", textAlign: "right" }}>
+        <div>🟢 Servers: 0</div>
+        <div>🔑 API key: owllm-local</div>
+        <div>💾 VRAM: N/N</div>
+      </div>
+    </div>
+  );
+}
+
+function SubTabs() {
+  // VLM fix: remove MCP tab so primary nav matches source.
+  const tabs = ["🏠 Home", "🖥 Server", "🔌 Bridges", "🎭 Agents", "🛠 Studio", "💻 Code", "🔐 Accounts"];
+  return (
+    <div style={{ height: 76, background: "#1a1f2c", display: "flex", alignItems: "center", padding: "0 24px", gap: 6, fontSize: 13, color: "#dadcdf" }}>
+      {tabs.map(t => {
+        const active = t.includes("Agents");
+        return (
+          <div key={t} style={{ padding: "10px 16px", background: active ? "rgba(120,220,255,0.20)" : "transparent", color: active ? "#7fdfff" : "#9aa0a6", borderRadius: 8, fontWeight: 600 }}>{t}</div>
+        );
+      })}
+      <div style={{ flex: 1 }} />
+      <div style={{ color: "#888", fontSize: 11 }}>Product Studio Test ▾</div>
+      <button className="ghost-btn">Team</button>
+      <button className="ghost-btn">+ New</button>
+      <button className="ghost-btn">Rename</button>
+      <button className="ghost-btn">Delete</button>
+    </div>
+  );
+}
+
+function LocationRow() {
+  return (
+    <div style={{ height: 52, padding: "10px 23px", background: "linear-gradient(180deg, #1f2632, #181c29)", borderRadius: 10, margin: "0 23px", display: "flex", alignItems: "center", gap: 10 }}>
+      <div style={{ display: "inline-flex", alignItems: "center", height: 32, width: 58, fontSize: 11, color: "#aaa", textTransform: "uppercase", letterSpacing: 0.6, marginRight: 4 }}>LOCATION</div>
+      {/* VLM fix: status chips before the path input */}
+      <span style={{ display: "inline-flex", alignItems: "center", height: 22, padding: "0 8px", background: "rgba(80,200,120,0.20)", color: "#73e69c", borderRadius: 6, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>Build active</span>
+      <span style={{ display: "inline-flex", alignItems: "center", height: 22, padding: "0 8px", background: "rgba(120,180,255,0.18)", color: "#9cc4ff", borderRadius: 6, fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 }}>Configured</span>
+      <input defaultValue="/path/to/repo · esp-flash · github.com/me/x" style={{ width: 280, height: 32, borderRadius: 8, padding: "0 12px", fontSize: 13, background: "#0f0f19", color: "#dadcdf", border: "1px solid rgba(255,255,255,0.06)" }} />
+      <button className="ghost-btn">Browse…</button>
+      <label style={{ display: "inline-flex", alignItems: "center", width: 94, height: 16, lineHeight: "16px", fontSize: 12, color: "#dadcdf", padding: 0 }}>
+        <input type="checkbox" defaultChecked style={{ marginRight: 6, width: 13, height: 13, accentColor: "#7fdfff" }} />
+        Trust writes
+      </label>
+      <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", height: 32, width: 86, padding: "0 10px", background: "rgba(60,200,120,0.18)", color: "#69e6a1", borderRadius: 8, fontSize: 11, textTransform: "uppercase", fontWeight: 700, letterSpacing: 0.6 }}>SANDBOX</span>
+      <span style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", height: 32, width: 91, padding: "0 10px", background: "rgba(140,140,160,0.18)", color: "#aab", borderRadius: 8, fontSize: 11, textTransform: "uppercase", fontWeight: 700, letterSpacing: 0.6 }}>Bridge: OFF</span>
+      <span style={{ display: "inline-flex", alignItems: "center", height: 32, padding: "0 12px", fontSize: 11, color: "#aaa", textTransform: "uppercase", letterSpacing: 0.6 }}>Project</span>
+      <select defaultValue="psm" style={{ width: 260, height: 32, padding: "0 12px", borderRadius: 8, border: "none", background: "#0f0f19", color: "#fff", fontSize: 13 }}>
+        <option value="psm">Product Studio Test</option>
+      </select>
+      <span style={{ padding: "4px 10px", background: "rgba(255,160,80,0.18)", color: "#ffb87a", borderRadius: 8, fontSize: 11, textTransform: "uppercase" }}>MP no-key</span>
+    </div>
+  );
+}
+
+function GoalRow() {
+  // VLM fix: Run pill = green, Cancel pill = red/orange
+  return (
+    <div style={{ height: 38, padding: "0 23px", margin: "12px 0", background: "transparent", display: "flex", alignItems: "center", gap: 10 }}>
+      <button className="ghost-btn" style={{height: 38, width: 51, padding: 0, fontSize: 16}}>📎</button>
+      <input defaultValue="summarize the last commit and propose a follow-up. design image + build notes" style={{ flex: 1, height: 38, borderRadius: 10, padding: "0 14px", fontSize: 13, background: "#161623", color: "#fff", border: "none" }} />
+      <button style={{ height: 38, width: 96, padding: 0, borderRadius: 19, border: "none", background: "linear-gradient(180deg, #2fbf6a, #1f9c52)", color: "#fff", fontWeight: 700, fontSize: 15, boxShadow: "0 1px 0 rgba(255,255,255,0.15) inset" }}>▶ Run</button>
+      <button style={{ height: 38, width: 110, padding: 0, borderRadius: 19, border: "none", background: "linear-gradient(180deg, #ef5350, #c84442)", color: "#fff", fontWeight: 700, fontSize: 15, boxShadow: "0 1px 0 rgba(255,255,255,0.15) inset" }}>■ Cancel</button>
+      <button className="ghost-btn" style={{height: 38, width: 44, padding: 0, fontSize: 16}}>📊</button>
+      <button className="ghost-btn" style={{height: 38, width: 64, padding: 0, fontSize: 16}}>🔈 ▾</button>
+    </div>
+  );
+}
+
+function FlowHeader() {
+  // VLM fix: add Branch / Restart / Loops toolbar buttons next to Edge/Grouped/Logged.
+  return (
+    <div style={{ display: "flex", alignItems: "center", padding: "6px 10px", gap: 6, borderBottom: "1px solid rgba(255,255,255,0.04)", flexWrap: "wrap" }}>
+      <div style={{ fontSize: 20, fontWeight: 700, color: "#fff", width: 48, height: 28, display: "flex", alignItems: "center" }}>Flow</div>
+      <button className="ghost-btn" style={{ height: 28, padding: "0 8px", fontSize: 11 }}>✕ Edge</button>
+      <button className="ghost-btn" style={{ height: 28, padding: "0 8px", fontSize: 11 }}>⇄ Reverse</button>
+      <button className="ghost-btn" style={{ height: 28, padding: "0 8px", fontSize: 11 }}>⟲ Layout</button>
+      <button className="ghost-btn" style={{ height: 28, padding: "0 8px", fontSize: 11 }}>⎇ Branch</button>
+      <button className="ghost-btn" style={{ height: 28, padding: "0 8px", fontSize: 11 }}>↻ Restart</button>
+      <button className="ghost-btn" style={{ height: 28, padding: "0 8px", fontSize: 11 }}>∞ Loops</button>
+      <div style={{ flex: 1 }} />
+      <button className="ghost-btn" style={{ height: 28, width: 30, padding: 0, fontSize: 11 }}>⟳</button>
+      <button className="ghost-btn" style={{ height: 28, padding: "0 8px", fontSize: 11 }}>◐ Graph view</button>
+    </div>
+  );
+}
+
+function DesignStudioCard() {
+  // VLM fix: add 10 / 18 / 0 stats row + "Cancel · Cleared" footer link.
+  const StatCell = ({ label, value, color }) => (
+    <div style={{ flex: 1, textAlign: "center" }}>
+      <div style={{ fontSize: 18, fontWeight: 700, color }}>{value}</div>
+      <div style={{ fontSize: 9, color: "#7888a8", textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</div>
+    </div>
+  );
+  return (
+    <div style={{ margin: "8px 10px", padding: 12, borderRadius: 12, background: "linear-gradient(180deg, #1d2336, #131726)", border: "1px solid rgba(120,220,255,0.18)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+        <img src={`${ICONS}/owl_studio_square.png`} style={{ width: 28, height: 28 }} />
+        <div style={{ fontSize: 11, color: "#aaa", textTransform: "uppercase" }}>Design Studio Team</div>
+      </div>
+      <div style={{ fontSize: 11, color: "#9aa0a6", lineHeight: 1.4 }}>Stage 1 / 3 — sketch the brief, iterate interview and design board, then ship.</div>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "#fff", marginTop: 6 }}>sBach Studio Tr</div>
+      <div style={{ marginTop: 8, display: "flex", gap: 6, padding: "6px 4px", background: "rgba(0,0,0,0.25)", borderRadius: 8 }}>
+        <StatCell label="Done" value="10" color="#7fdfff" />
+        <StatCell label="Queued" value="18" color="#fbbf24" />
+        <StatCell label="Failed" value="0" color="#9aa0a6" />
+      </div>
+      <div style={{ marginTop: 6, fontSize: 10, color: "#6c7a99", textAlign: "right", cursor: "pointer" }}>Cancel · Cleared</div>
+    </div>
+  );
+}
+
+function SuperUserCard() {
+  // VLM fix: explicit Reply-to-Run button + team line + agents-team page link.
+  return (
+    <div style={{ margin: "8px 10px", padding: "10px 12px", borderRadius: 12, background: "#181c29", border: "1px solid rgba(120,220,255,0.10)", width: 320, minHeight: 240, display: "flex", flexDirection: "column", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <div style={{ width: 28, height: 28, borderRadius: 14, background: "rgba(255,255,255,0.08)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16 }}>👤</div>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#fff" }}>Super User</div>
+          <div style={{ fontSize: 10, color: "#7888a8" }}>Team: Design Studio · <span style={{ color: "#7fdfff", textDecoration: "underline", cursor: "pointer" }}>Agents Team page</span></div>
+        </div>
+        <button className="ghost-btn" style={{ width: 30, height: 26, padding: 0, fontSize: 12 }}>⇱⇲</button>
+        <button className="ghost-btn" style={{ width: 26, height: 26, padding: 0, fontSize: 14 }}>⚙</button>
+      </div>
+      <textarea defaultValue="Type a reply to the orchestrator…" style={{ minHeight: 70, background: "rgba(0,0,0,0.28)", border: "1px solid rgba(255,255,255,0.05)", borderRadius: 8, padding: "8px 10px", fontSize: 11, color: "#cbd2e0", resize: "none", lineHeight: 1.5, fontFamily: "inherit" }} />
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#dadcdf", flex: 1 }}>
+          <input type="checkbox" />
+          <span>auto-approve tool requests</span>
+        </label>
+        <button style={{ height: 30, padding: "0 12px", borderRadius: 15, border: "none", background: "linear-gradient(180deg, #2fbf6a, #1f9c52)", color: "#fff", fontWeight: 700, fontSize: 12 }}>↪ Reply-to-Run</button>
+      </div>
+    </div>
+  );
+}
+
+function TeamCanvas({ width, height }) {
+  const w = width, h = height;
+  const card_reserve = Math.min(410, w * 0.35);
+  const cx = card_reserve + (w - card_reserve) / 2;
+  const cy = h / 2;
+  const max_radius = Math.max(120, Math.min(w, h * 1.5) * 0.30);
+  const inner_offset = 130;
+  const step = (max_radius - inner_offset);
+  const ring_radius = inner_offset + step;
+  const N = 8;
+  const arc_span = (Math.PI * 2) * (340 / 360);
+  const start_angle = -Math.PI / 2 - arc_span / 2;
+  // VLM fix: richer node tiles — each node has an emoji role icon inside the disc.
+  const ROLES = [
+    { label: "Workshop Writer",  icon: "✍️", color: "#a78bfa" },
+    { label: "Onboarded Coder",  icon: "🧑‍💻", color: "#60a5fa" },
+    { label: "Backend Server",   icon: "🖥",   color: "#34d399" },
+    { label: "UI Designer",      icon: "🎨",    color: "#f472b6" },
+    { label: "Backend Hub",      icon: "🔌",    color: "#22d3ee" },
+    { label: "Design Critic",    icon: "🔍",    color: "#facc15" },
+    { label: "Frontend Coder",   icon: "💻",   color: "#38bdf8" },
+    { label: "Workshop Owl",     icon: "🦉",    color: "#fbbf24" },
+  ];
+  const nodes = [];
+  for (let i = 0; i < N; i++) {
+    const a = start_angle + (i + 0.5) * arc_span / N;
+    nodes.push({ x: cx + ring_radius * Math.cos(a), y: cy + ring_radius * Math.sin(a), ...ROLES[i] });
+  }
+  const orchestrator_r = 30;
+  return (
+    <div style={{ position: "relative", width: w, height: h, background: `radial-gradient(ellipse at ${cx}px ${cy}px, rgba(60, 120, 200, 0.20) 0%, rgba(0, 0, 0, 0) 60%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow: "hidden" }}>
+      <svg width={w} height={h} style={{ position:"absolute", left:0, top:0 }}>
+        <defs>
+          <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="rgba(120,180,255,0.6)" />
+            <stop offset="60%" stopColor="rgba(120,180,255,0.18)" />
+            <stop offset="100%" stopColor="rgba(120,180,255,0)" />
+          </radialGradient>
+          <radialGradient id="orchHalo" cx="50%" cy="50%" r="50%">
+            <stop offset="0%" stopColor="rgba(255,210,120,0.75)" />
+            <stop offset="100%" stopColor="rgba(255,200,100,0)" />
+          </radialGradient>
+        </defs>
+        {/* VLM fix: concentric faint ring backdrop */}
+        <circle cx={cx} cy={cy} r={ring_radius + 50} fill="none" stroke="rgba(120,220,255,0.06)" strokeWidth="1" />
+        <circle cx={cx} cy={cy} r={ring_radius + 25} fill="none" stroke="rgba(120,220,255,0.08)" strokeWidth="1" />
+        <circle cx={cx} cy={cy} r={ring_radius} fill="none" stroke="rgba(120,220,255,0.22)" strokeWidth="1.6" />
+        <circle cx={cx} cy={cy} r={ring_radius - 35} fill="none" stroke="rgba(120,220,255,0.08)" strokeWidth="1" />
+        {/* spokes */}
+        {nodes.map((n,i) => (
+          <line key={i} x1={cx} y1={cy} x2={n.x} y2={n.y} stroke="rgba(120,220,255,0.22)" strokeWidth="1.4" strokeDasharray="3,3" />
+        ))}
+        {/* node halos */}
+        {nodes.map((n,i) => (
+          <circle key={"h"+i} cx={n.x} cy={n.y} r={36} fill="url(#halo)" />
+        ))}
+        {/* node discs */}
+        {nodes.map((n,i) => (
+          <circle key={"d"+i} cx={n.x} cy={n.y} r={24} fill="#1a2240" stroke={n.color} strokeWidth="2" />
+        ))}
+        {/* orchestrator halo + selected ring (golden glow) */}
+        <circle cx={cx} cy={cy} r={orchestrator_r * 2.4} fill="url(#orchHalo)" />
+        <circle cx={cx} cy={cy} r={orchestrator_r + 6} fill="none" stroke="rgba(255,210,120,0.65)" strokeWidth="1.5" strokeDasharray="4,3" />
+        <circle cx={cx} cy={cy} r={orchestrator_r} fill="#1c2244" stroke="#ffd27a" strokeWidth="2.5" />
+      </svg>
+      {/* outer-node role-icon glyphs sitting on top of each disc */}
+      {nodes.map((n,i) => (
+        <div key={"i"+i} style={{ position: "absolute", left: n.x - 18, top: n.y - 18, width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, pointerEvents: "none" }}>{n.icon}</div>
+      ))}
+      {/* Central crest + crown badge (VLM fix: selected agent indicator) */}
+      <img src={`${ICONS}/owl_agentic.png`} style={{ position: "absolute", left: cx - orchestrator_r * 0.85, top: cy - orchestrator_r * 0.85, width: orchestrator_r * 1.7, height: orchestrator_r * 1.7, pointerEvents: "none" }} />
+      <div style={{ position: "absolute", left: cx - 14, top: cy - orchestrator_r - 20, width: 28, height: 22, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, pointerEvents: "none", filter: "drop-shadow(0 0 4px rgba(255,210,120,0.8))" }}>👑</div>
+      <div style={{ position: "absolute", left: cx - 60, top: cy + orchestrator_r + 6, width: 120, textAlign: "center", fontSize: 10, fontWeight: 700, color: "#ffd27a", letterSpacing: 0.6, textTransform: "uppercase", pointerEvents: "none" }}>Orchestrator</div>
+      {/* outer-node labels */}
+      {nodes.map((n,i) => (
+        <div key={"l"+i} style={{ position: "absolute", left: n.x - 50, top: n.y + 28, width: 100, textAlign: "center", fontSize: 9, color: "#cbd2e0", textTransform: "uppercase", letterSpacing: 0.4, pointerEvents: "none" }}>{n.label}</div>
+      ))}
+    </div>
+  );
+}
+
+function OrchestratorPane() {
+  // VLM fix: render real Orchestrator header (title + model selector +
+  // Reply/Thought chips) when an agent is selected. Placeholder text
+  // shows only when none is. Default to selected for this static page.
+  const selected = true;
+  const code = `* peripheral is active.
+"TEXT" — selected agent "Sg" agent name header.
+def __name__ == "TEAM": team is given a default
+config; each task starts with stalecaching agents
+that aren't named so OK to make a default
+"" stage.
+"selected_path" — list left in place hue
+rendered well until 2025 mirrors pending agent
+to renew current 25.0 + every "ms".
+
+*Approvals strip* — slot left in place but
+rendered null until 2025 mirrors pending
+approvals to renew current 25.0 + every "ms".`;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", background: "#0c0f1a" }}>
+      {selected ? (
+        <div style={{ display: "flex", flexDirection: "column", background: "#11151f", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+          <div style={{ height: 38, padding: "0 12px", display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ width: 22, height: 22, borderRadius: 11, background: "rgba(255,210,120,0.18)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13 }}>🦉</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>Orchestrator</div>
+            <select defaultValue="opus4" style={{ background: "#0f1218", color: "#cbd2e0", border: "1px solid rgba(255,255,255,0.10)", borderRadius: 6, fontSize: 11, padding: "2px 6px", height: 26 }}>
+              <option value="opus4">Claude Opus 4 (latest/extra)</option>
+              <option value="sonnet">Claude Sonnet 4</option>
+              <option value="haiku">Claude Haiku 4.5</option>
+            </select>
+            <div style={{ flex: 1 }} />
+            <button style={{ padding: "4px 10px", borderRadius: 12, border: "1px solid rgba(120,220,255,0.45)", background: "rgba(120,220,255,0.18)", color: "#7fdfff", fontSize: 11, fontWeight: 700 }}>💬 Reply</button>
+            <button style={{ padding: "4px 10px", borderRadius: 12, border: "1px solid rgba(220,180,255,0.30)", background: "rgba(220,180,255,0.10)", color: "#dcb0ff", fontSize: 11, fontWeight: 700 }}>🧠 Thought</button>
+          </div>
+        </div>
+      ) : (
+        <div style={{ height: 36, display: "flex", alignItems: "center", gap: 6, padding: "0 12px", color: "#9aa0a6", fontSize: 12 }}>
+          📜 Click an agent on the canvas to view its log.
+        </div>
+      )}
+      <div style={{ flex: 1, padding: "8px 10px 10px", display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ flex: 1, background: "#0f1218", borderRadius: 8, padding: 10, overflow: "auto", fontFamily: "Consolas, 'Cascadia Mono', monospace", fontSize: 13, lineHeight: 1.5, color: "#cbd2e0", whiteSpace: "pre-wrap" }}>{code}</div>
+      </div>
+    </div>
+  );
+}
+
+function AgentsPage() {
+  const INNER_W = 1600, INNER_H = 960;
+  const LEFT_W = 1014, RIGHT_W = 532, SPLITTER_W = 8;
+  return (
+    <HybridFrame width={INNER_W} height={INNER_H}>
+      <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+        <ModeBar />
+        <SubTabs />
+        <LocationRow />
+        <GoalRow />
+        <div style={{ height: 665, display: "flex", overflow: "hidden", background: "#06080d", padding: "0 23px" }}>
+          <div style={{ width: LEFT_W, display: "flex", flexDirection: "column", background: "#0a0d14" }}>
+            <FlowHeader />
+            <div style={{ flex: 1, position: "relative" }}>
+              <TeamCanvas width={LEFT_W} height={607} />
+              <div style={{ position: "absolute", top: 8, left: 8, width: 360 }}>
+                <DesignStudioCard />
+                <SuperUserCard />
+              </div>
+            </div>
+          </div>
+          <div style={{ width: SPLITTER_W, background: "#1a1f2c" }} />
+          <div style={{ width: RIGHT_W }}>
+            <OrchestratorPane />
+          </div>
+        </div>
+      </div>
+    </HybridFrame>
+  );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<AgentsPage />);
+</script>
+</body>
+</html>

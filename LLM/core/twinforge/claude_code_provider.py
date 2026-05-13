@@ -111,31 +111,72 @@ def _extract_json(text: str) -> Optional[dict]:
 # ----------------------------------------------------------------------
 # VLM via subscription
 # ----------------------------------------------------------------------
-_VLM_PROMPT = """You are TwinForge's perception agent. Two screenshots
-are on disk at the paths shown below. Use your Read tool to load both,
-then list the most important visual differences between them — things
-a developer would want to fix in the TARGET to match the SOURCE.
+_VLM_PROMPT = """You are TwinForge's perception agent for the OWLLM
+agents page. Two screenshots are on disk at the paths shown below.
+Use your Read tool to load both.
 
-Skip 1-pixel anti-aliasing differences. Focus on what looks obviously
-wrong: missing elements, wrong sizes / positions, wrong text content,
-wrong colours that read as different to a human glance.
+DO NOT just list whatever your saliency map highlights. The center
+region of the page (canvas, agent nodes, panes) is busy and visually
+dominant; the periphery (window frame, corners, badge) is decorative
+and easily ignored. Previous runs over-reported center-pane polish
+and missed glaring chrome differences. Avoid that failure mode.
 
-Return STRICT JSON only, no prose around it:
+You MUST visit each of the regions below and report any visible gap.
+For regions that match well, emit a finding with severity="low" and
+description="matches" so the caller knows you actually looked.
+
+REGIONS TO CHECK (in this order, do not skip any):
+
+  R1. HybridFrame chrome — the ornamental window frame:
+        * cyan/teal gradient border bars (top / bottom / left / right)
+        * 4 ornamental corner PNGs at the corners of the frame
+        * an owl badge perched at the top-centre of the frame
+        * the OWLLM wordmark above/below the badge
+      Compare bar visibility, corner ornaments, badge presence.
+
+  R2. AppHeader / ModeBar — the dark bar across the top with:
+        * Dark mode tile, color selector 2×3 swatches
+        * Toggle buttons (Advanced, Fine Tuning, Agentic Team, Gamify)
+          with active-state styling
+        * Centered OWLLM wordmark
+        * Right-side SysInfoBlock (Servers / API key / VRAM rows with
+          status dots)
+
+  R3. SubTabs row — the 8-tab navigation strip
+        (🏠 Home / 🖥 Server / 🔌 Bridges / 🎭 Agents / 🛠 Studio /
+         💻 Code / 🔐 Accounts / 🔧 MCP) plus right-side workspace
+        controls (Team / + New / Rename / Delete).
+
+  R4. Page body — left pane (DesignStudioCard + Super User card),
+        center canvas (radial agent ring + orchestrator hub + arc
+        rings), right pane (orchestrator chat + Reply/Thought chips
+        + goal input + Run/Cancel).
+
+For each region you find a real gap in, emit ONE finding. For the
+center-pane (R4), avoid reporting more than %d total findings across
+the whole image — the cap is shared. The frame chrome (R1) and the
+header chrome (R2) get priority.
+
+Skip 1-pixel anti-aliasing. Focus on missing elements, wrong sizes,
+wrong text, wrong colours.
+
+Return STRICT JSON only, no prose:
 
 {
   "differences": [
     {
       "description": "<one short sentence>",
       "severity":    "high" | "med" | "low",
-      "location":    "<human description: top centre, right pane, …>",
+      "region":      "R1" | "R2" | "R3" | "R4",
+      "location":    "<human description: top-left corner, badge, …>",
       "suggestion":  "<one-line concrete fix>"
     },
     ...
   ]
 }
 
-Limit to %d items, sorted by severity then visual impact. Skip
-anything too minor to fix.
+Sort by region (R1 first), then severity. R1 'matches' findings are
+also acceptable — they tell the caller you actually looked.
 """
 
 
@@ -203,6 +244,7 @@ class ClaudeCodeVLM:
                 severity=str(it.get("severity", "med")).strip().lower()[:6],
                 location=str(it.get("location", "")).strip()[:120],
                 suggestion=str(it.get("suggestion", "")).strip()[:300],
+                region=str(it.get("region", "")).strip().upper()[:4],
             ))
         return out
 

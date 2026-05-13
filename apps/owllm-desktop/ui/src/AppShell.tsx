@@ -44,7 +44,7 @@ const CORNERS = `${ICONS}/CornersNew`;
 function HybridFrame({ children, width, height }: {
   children: React.ReactNode; width: number; height: number;
 }) {
-  const CORNER = 96, BORDER = 18, BADGE_H = 58;
+  const CORNER = 96, BORDER = 22, BADGE_H = 58;
   const FRAME_LEFT = 19, FRAME_TOP = 116, RIGHT_OVERHANG = 79, BOTTOM_OVERHANG = 19;
   const outerW = width + FRAME_LEFT + RIGHT_OVERHANG;
   const outerH = height + FRAME_TOP + BOTTOM_OVERHANG;
@@ -55,10 +55,10 @@ function HybridFrame({ children, width, height }: {
       <div style={{ position:"absolute", left:FRAME_LEFT, top:FRAME_TOP, width, height, background:"#14152a", overflow:"hidden" }}>
         {children}
       </div>
-      <div style={{ position:"absolute", left:FRAME_LEFT+CORNER/2, width:width-CORNER, top:FRAME_TOP-BORDER/2, height:BORDER, background:`linear-gradient(90deg, ${ac}, ${fc}, ${ac})`, opacity:0.85 }} />
-      <div style={{ position:"absolute", left:FRAME_LEFT+CORNER/2, width:width-CORNER, top:FRAME_TOP+height-BORDER/2, height:BORDER, background:`linear-gradient(90deg, ${ac}, ${fc}, ${ac})`, opacity:0.85 }} />
-      <div style={{ position:"absolute", top:FRAME_TOP+CORNER/2, height:height-CORNER, left:FRAME_LEFT-BORDER/2, width:BORDER, background:`linear-gradient(180deg, ${ac}, ${fc}, ${ac})`, opacity:0.85 }} />
-      <div style={{ position:"absolute", top:FRAME_TOP+CORNER/2, height:height-CORNER, left:FRAME_LEFT+width-BORDER/2, width:BORDER, background:`linear-gradient(180deg, ${ac}, ${fc}, ${ac})`, opacity:0.85 }} />
+      <div style={{ position:"absolute", left:FRAME_LEFT+CORNER/2, width:width-CORNER, top:FRAME_TOP-BORDER/2, height:BORDER, background:`linear-gradient(90deg, ${ac}, ${fc}, ${ac})`, opacity:1.0 }} />
+      <div style={{ position:"absolute", left:FRAME_LEFT+CORNER/2, width:width-CORNER, top:FRAME_TOP+height-BORDER/2, height:BORDER, background:`linear-gradient(90deg, ${ac}, ${fc}, ${ac})`, opacity:1.0 }} />
+      <div style={{ position:"absolute", top:FRAME_TOP+CORNER/2, height:height-CORNER, left:FRAME_LEFT-BORDER/2, width:BORDER, background:`linear-gradient(180deg, ${ac}, ${fc}, ${ac})`, opacity:1.0 }} />
+      <div style={{ position:"absolute", top:FRAME_TOP+CORNER/2, height:height-CORNER, left:FRAME_LEFT+width-BORDER/2, width:BORDER, background:`linear-gradient(180deg, ${ac}, ${fc}, ${ac})`, opacity:1.0 }} />
       <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:FRAME_LEFT-CORNER/2, top:FRAME_TOP-CORNER/2, width:CORNER, height:CORNER, pointerEvents:"none" }} />
       <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:FRAME_LEFT+width-CORNER/2, top:FRAME_TOP-CORNER/2, width:CORNER, height:CORNER, pointerEvents:"none" }} />
       <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:FRAME_LEFT-CORNER/2, top:FRAME_TOP+height-CORNER/2, width:CORNER, height:CORNER, pointerEvents:"none" }} />
@@ -88,12 +88,12 @@ function ModeBar() {
         <button data-ui="GamifyToggle" style={{...buttonStyle, width:91}}><span style={{fontSize:18}}>🎮</span><span>Gamify</span></button>
       </div>
       <div style={{ display:"flex", justifyContent:"center" }}>
-        <div data-ui="AppTitle" style={{ textAlign:"center", width:128, height:45, fontSize:34, fontWeight:700, color:"#fff", letterSpacing:2, lineHeight:"45px" }}>OWLLM</div>
+        <div data-ui="AppTitle" style={{ textAlign:"center", width:128, height:45, fontSize:29, fontWeight:700, color:"#fff", letterSpacing:2, lineHeight:"45px" }}>OWLLM</div>
       </div>
       <div data-ui="SysInfoBlock" style={{ minWidth:543, width:543, height:60, display:"flex", flexDirection:"column", alignItems:"stretch", justifyContent:"center", gap:3, fontSize:12, fontWeight:700, color:"#fff", textAlign:"right" }}>
         <div data-ui="HeaderServersLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />Servers: 1 [Quagenmed-K4] Abbreviated Q4_K_M GGUF…</div>
         <div data-ui="HeaderApiKeyLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />API key: owllm-local</div>
-        <div data-ui="HeaderVramLabel"><span className="status-dot" style={{ background:"#fbbf24", color:"#fbbf24" }} />VRAM: N/N</div>
+        <div data-ui="HeaderVramLabel"><span style={{ marginRight:4 }}>💾</span>VRAM: 8.4 / 24.0 GB</div>
       </div>
     </div>
   );

@@ -39,8 +39,8 @@ function GoalRow() {
       <select data-ui="GoalModelCombo" defaultValue="m1" style={{ height:38, width:130, padding:"0 10px", borderRadius:10, border:"none", background:"#161623", color:"#fff", fontSize:12 }}>
         <option value="m1">Qwen2.5-Coder Q4</option>
       </select>
-      <button data-ui="GoalRunBtn" style={{ height:38, width:82, padding:0, borderRadius:10, border:"none", background:"#22c55e", color:"#fff", fontWeight:700, fontSize:18 }}>Run</button>
-      <button data-ui="GoalCancelBtn" style={{ height:38, width:98, padding:0, borderRadius:10, border:"1px solid rgba(255,80,80,0.55)", background:"#ef4444", color:"#fff", fontWeight:700, fontSize:18 }}>Cancel</button>
+      <button data-ui="GoalRunBtn" style={{ height:38, width:82, padding:0, borderRadius:10, border:"none", background:"#4a6cff", color:"#fff", fontWeight:600, fontSize:14 }}>Run</button>
+      <button data-ui="GoalCancelBtn" style={{ height:38, width:98, padding:0, borderRadius:10, border:"none", background:"rgba(255,140,140,0.10)", color:"#ff8c8c", fontWeight:600, fontSize:14 }}>Cancel</button>
       <button data-ui="GoalTelemetryBtn" className="ghost-btn" style={{ height:38, width:44, padding:0, fontSize:16 }}>📊</button>
       <button data-ui="GoalVoiceBtn" className="ghost-btn" style={{ height:38, width:64, padding:0, fontSize:16, fontWeight:"normal" }}>🔈</button>
     </div>

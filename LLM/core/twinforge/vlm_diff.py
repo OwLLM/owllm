@@ -61,6 +61,7 @@ class VLMDifference:
     severity: str = "med"          # "high" | "med" | "low"
     location: str = ""             # human description, e.g. "top centre"
     suggestion: str = ""           # how to fix in the target
+    region: str = ""               # R1-R4 anchor (frame/header/tabs/body)
     src_box: Optional[list] = None  # [x, y, w, h] if VLM gave coords; else None
     tgt_box: Optional[list] = None
 

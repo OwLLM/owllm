@@ -35,6 +35,12 @@ from core.twinforge.vlm_diff import (
 from core.twinforge.coder import (
     CodeFix, default_provider as default_coder_provider, CoderProvider,
 )
+from core.twinforge.verifier import (
+    VerifiedFinding, ClaudeCodeVerifier,
+    group_by_surface, default_provider as default_verifier_provider,
+)
+from core.twinforge.parallel_coder import dispatch_parallel
+from core.twinforge.source_context import SourceContext
 
 
 def _crop_clip(img: Image.Image, b) -> Image.Image:
@@ -192,7 +198,10 @@ def compare(src: CaptureResult, tgt: CaptureResult,
             target_file: Optional[str] = None,
             enable_vlm: bool = True,
             enable_coder: bool = False,
-            source_context: Optional[str] = None) -> Dict:
+            source_context: Optional[str] = None,
+            source_context_bundle: Optional["SourceContext"] = None,
+            enable_parallel_coder: bool = False,
+            cwd: Optional[str] = None) -> Dict:
     """Run the full diff + report pipeline."""
     regions = region_diff(src, tgt)
     overall = overall_diff(src, tgt)
@@ -243,6 +252,33 @@ def compare(src: CaptureResult, tgt: CaptureResult,
     text = format_report(regions, overall,
                          unmatched_src=unm_src, unmatched_tgt=unm_tgt)
 
+    # Verifier — second-opinion subagent. Same Claude model as the
+    # VLM, but with code access. Rejects hallucinated findings and
+    # routes the survivors to the replica file that owns them. Skipped
+    # when parallel coder is off (legacy single-Coder doesn't use
+    # surface routing).
+    verified_findings: List[VerifiedFinding] = []
+    verifier_status = "disabled (enable_parallel_coder=False)"
+    verifier_configured = "—"
+    if enable_parallel_coder and enable_vlm and vlm_differences and source_context_bundle is not None:
+        verifier = ClaudeCodeVerifier()
+        verifier_configured = f"{verifier.name} · {verifier.model}"
+        if not verifier.available():
+            verifier_status = "FALLBACK — claude CLI not on PATH"
+        else:
+            verifier_status = f"ran via {verifier.name} · {verifier.model}"
+            try:
+                verified_findings = verifier.verify(
+                    findings=vlm_differences,
+                    replica_files=list(source_context_bundle.replica_files),
+                    source_widget_files=list(source_context_bundle.widget_files),
+                    src_png=src.png_path,
+                    tgt_png=tgt.png_path,
+                    cwd=cwd,
+                )
+            except Exception as exc:  # noqa: BLE001
+                verifier_status = f"crashed: {exc!s}"
+
     code_fixes: List[CodeFix] = []
     if coder is not None:
         _coder_intent_provider = coder
@@ -253,7 +289,41 @@ def compare(src: CaptureResult, tgt: CaptureResult,
         f"{getattr(_coder_intent_provider, 'model', '?')}"
     )
     coder_status = "disabled (enable_coder=False)"
-    if enable_coder and target_file:
+
+    # Parallel multi-surface coder path — dispatches one Claude CLI
+    # per replica file in parallel. Activated when both
+    # `enable_parallel_coder` and a `source_context_bundle` are given.
+    # Falls back to single-Coder path below otherwise.
+    if (enable_coder and enable_parallel_coder
+            and source_context_bundle is not None
+            and verified_findings):
+        groups = group_by_surface(verified_findings)
+        surface_files = {
+            p.name: p for p in source_context_bundle.replica_files
+        }
+        source_excerpts = {
+            name: source_context_bundle.widget_excerpt_for_surface(name)
+            for name in surface_files
+        }
+        asset_blk = source_context_bundle.asset_block(
+            replica_path=source_context_bundle.replica_files[0]
+            if source_context_bundle.replica_files else None
+        )
+        dispatch_cwd = cwd or str(source_context_bundle.repo_root)
+        code_fixes = dispatch_parallel(
+            grouped_findings=groups,
+            surface_files=surface_files,
+            source_excerpts=source_excerpts,
+            asset_block=asset_blk,
+            src_png=src.png_path,
+            tgt_png=tgt.png_path,
+            cwd=dispatch_cwd,
+        )
+        coder_status = (
+            f"parallel via claude-code · {len(code_fixes)} surfaces "
+            f"({', '.join(sorted(groups))})"
+        )
+    elif enable_coder and target_file:
         provider_c = coder if coder is not None else default_coder_provider()
         avail = getattr(provider_c, "available", lambda: True)()
         if not avail:
@@ -301,6 +371,8 @@ def compare(src: CaptureResult, tgt: CaptureResult,
         f"\n\nPROVIDERS\n"
         f"  perception · configured: {vlm_configured}\n"
         f"  perception · status:     {vlm_status}\n"
+        f"  verifier   · configured: {verifier_configured}\n"
+        f"  verifier   · status:     {verifier_status}\n"
         f"  generation · configured: {coder_configured}\n"
         f"  generation · status:     {coder_status}\n"
     )
@@ -313,6 +385,31 @@ def compare(src: CaptureResult, tgt: CaptureResult,
                 f"    location: {d.location}\n"
                 f"    fix:      {d.suggestion}\n"
             )
+    if verified_findings:
+        verified_block: List[str] = []
+        rejected_block: List[str] = []
+        for v in verified_findings:
+            line = (
+                f"  [{v.severity}] [{v.surface or '?'}] {v.description}\n"
+                f"      source: {v.source_evidence}\n"
+                f"      target: {v.target_evidence}\n"
+                f"      fix:    {v.suggestion}"
+            )
+            if v.status == "verified":
+                verified_block.append(line)
+            elif v.status == "rejected":
+                rejected_block.append(
+                    f"  [REJECTED] {v.description}\n"
+                    f"      reason: {v.rejection_reason}"
+                )
+        if verified_block:
+            text += "\nVERIFIED FINDINGS (routed to coders)\n"
+            text += "-" * 70 + "\n"
+            text += "\n".join(verified_block) + "\n"
+        if rejected_block:
+            text += "\nREJECTED FINDINGS (VLM hallucinations)\n"
+            text += "-" * 70 + "\n"
+            text += "\n".join(rejected_block) + "\n"
     if code_fixes:
         text += "\nGENERATED CODE FIXES (Coder)\n"
         text += "-" * 70 + "\n"
@@ -346,6 +443,9 @@ def compare(src: CaptureResult, tgt: CaptureResult,
         "html_report_path": html_report_path,
         "unmatched_src": unm_src, "unmatched_tgt": unm_tgt,
         "vlm_differences": vlm_differences,
+        "verified_findings": verified_findings,
+        "verifier_configured": verifier_configured,
+        "verifier_status": verifier_status,
         "code_fixes": code_fixes,
         "vlm_configured": vlm_configured,
         "vlm_status": vlm_status,

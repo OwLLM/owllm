@@ -34,7 +34,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 
 # Default cap so we don't blow the prompt on a huge widget file.
@@ -46,6 +46,12 @@ class AssetEntry:
     abs_path: Path
     repo_rel: str       # e.g. "icons/Page_icons/owl_agentic.png"
     size_bytes: int
+
+
+# (path, optional (start_line, end_line)) — line range is inclusive,
+# 1-indexed. When the range is None the whole file (capped by
+# widget_excerpt_chars) is used.
+SourceRef = Tuple[Path, Optional[Tuple[int, int]]]
 
 
 @dataclass
@@ -66,6 +72,12 @@ class SourceContext:
     # need to be reachable when the Coder is fixing a layout issue
     # that spans the boundary.
     replica_files: List[Path] = field(default_factory=list)
+    # Per-surface mapping: replica file basename -> list of PySide6
+    # source refs (file + optional line range) that prove what that
+    # surface should look like. The parallel coder uses this to give
+    # each per-file Coder only the relevant slice of the Qt code,
+    # instead of dumping every widget into every prompt.
+    surface_sources: Dict[str, List[SourceRef]] = field(default_factory=dict)
     widget_excerpt_chars: int = _DEFAULT_WIDGET_EXCERPT_CHARS
 
     # ------------------------------------------------------------------
@@ -95,6 +107,32 @@ class SourceContext:
                 ui_src / "pages" / "AgentsPage.tsx",
                 ui_src / "styles.css",
             ],
+            # AppShell.tsx wraps the whole window: HybridFrame +
+            # AppHeader (DarkModeBtn, ColorSelector, AdvancedToggle,
+            # FineTuningToggle, AgenticTeamToggle, GamifyToggle,
+            # AppTitle, SysInfoBlock) + SubTabs. The Qt code that
+            # builds it lives in main.py lines ~2930-3400 (header
+            # construction). Pinned ranges so we don't dump 30k+ LoC.
+            #
+            # AgentsPage.tsx body is the agents-tab content: roster
+            # + canvas + orchestrator + workspace. Canvas paint logic
+            # is the centrepiece — agent_team_canvas.py / agent_canvas.py
+            # already enumerated in widget_files.
+            #
+            # styles.css carries global class rules (.ghost-btn etc.).
+            # No single Qt source slice maps cleanly; the per-surface
+            # Coder will infer styles from the screenshots + the chrome
+            # excerpts it can see.
+            surface_sources={
+                "AppShell.tsx": [
+                    (root / "LLM" / "desktop_app" / "main.py", (2930, 3400)),
+                ],
+                "AgentsPage.tsx": [
+                    (root / "LLM" / "desktop_app" / "widgets" / "agent_team_canvas.py", None),
+                    (root / "LLM" / "desktop_app" / "widgets" / "agent_canvas.py", None),
+                ],
+                "styles.css": [],
+            },
         )
 
     # ------------------------------------------------------------------
@@ -121,6 +159,89 @@ class SourceContext:
                     sz = -1
                 out.append(AssetEntry(abs_path=f, repo_rel=rel, size_bytes=sz))
         return out
+
+    # ------------------------------------------------------------------
+    # Per-surface helpers — used by the parallel coder dispatcher to
+    # build focused per-file briefs.
+    # ------------------------------------------------------------------
+    def widget_excerpt_for_surface(self, surface: str,
+                                    max_chars: Optional[int] = None) -> str:
+        """Render a markdown-formatted PySide6 excerpt for a surface.
+
+        ``surface`` is the basename of a replica file (e.g.
+        ``"AppShell.tsx"``). Returns empty string if no mapping exists.
+        """
+        cap = max_chars or self.widget_excerpt_chars
+        refs = self.surface_sources.get(surface) or []
+        if not refs:
+            return ""
+        out_lines: List[str] = []
+        used = 0
+        for path, line_range in refs:
+            if used >= cap:
+                break
+            chunk = self._slice_file(path, line_range)
+            if not chunk:
+                continue
+            chunk = chunk[: max(0, cap - used)]
+            try:
+                rel = path.resolve().relative_to(self.repo_root).as_posix()
+            except ValueError:
+                rel = str(path)
+            label = (
+                f"{rel} (lines {line_range[0]}-{line_range[1]})"
+                if line_range else rel
+            )
+            out_lines.append(f"## {label}\n")
+            out_lines.append("```python")
+            out_lines.append(chunk)
+            out_lines.append("```\n")
+            used += len(chunk)
+        return "\n".join(out_lines)
+
+    def _slice_file(self, p: Path,
+                    line_range: Optional[Tuple[int, int]]) -> str:
+        if not p.exists():
+            return f"(missing: {p})"
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return f"(read error: {exc})"
+        if line_range is None:
+            return text
+        start, end = line_range
+        lines = text.splitlines()
+        sliced = lines[max(0, start - 1): max(0, end)]
+        return "\n".join(sliced)
+
+    def asset_block(self, replica_path: Optional[Path] = None) -> str:
+        """Render just the asset list section — used by per-surface
+        Coders that don't need the widget code dump."""
+        assets = self.assets()
+        lines: List[str] = []
+        lines.append(
+            "The source repo ships these PNGs. Reference via `<img src=...>` "
+            "with the relative URL shown — do NOT invent emoji."
+        )
+        if replica_path is not None and assets:
+            base_dir = assets[0].abs_path.parent
+            rel_base = self._relpath_from(replica_path, base_dir)
+            lines.append(f"\nRelative base from this replica: `{rel_base}/`")
+        lines.append("")
+        if not assets:
+            lines.append("(no assets discovered)")
+            return "\n".join(lines)
+        lines.append("```")
+        for a in assets:
+            if replica_path is not None:
+                rel_url = self._relpath_from(replica_path, a.abs_path)
+                lines.append(
+                    f"{a.repo_rel:<50} {a.size_bytes:>8}  src=\"{rel_url}\""
+                )
+            else:
+                lines.append(f"{a.repo_rel:<50} {a.size_bytes:>8}")
+        lines.append("```")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Widget-source excerpts — keep the bits that matter for replication

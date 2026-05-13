@@ -228,7 +228,7 @@ function ModeBar() {
       <div data-ui="SysInfoBlock" style={{ minWidth:543, width:543, height:60, display:"flex", flexDirection:"column", alignItems:"stretch", justifyContent:"center", gap:3, fontSize:12, fontWeight:700, color:"#fff", textAlign:"right" }}>
         <div data-ui="HeaderServersLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />Servers: 1 [Quagenmed-K4] Abbreviated Q4_K_M GGUF…</div>
         <div data-ui="HeaderApiKeyLabel"><span className="status-dot" style={{ background:"#22c55e", color:"#22c55e" }} />API key: owllm-local</div>
-        <div data-ui="HeaderVramLabel"><span style={{ marginRight:4 }}>💾</span>VRAM: 8.4 / 24.0 GB</div>
+        <div data-ui="HeaderVramLabel"><span style={{ marginRight:4 }}>💾</span>VRAM: N/A</div>
       </div>
     </div>
   );

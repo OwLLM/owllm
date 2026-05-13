@@ -101,41 +101,68 @@ function FlowHeader() {
   );
 }
 
-// DesignStudioCard — NOT GROUNDED IN agents_page.py. This card was
-// introduced by the v10/v11 web replicas (web_replica/agents_page_v10.html
-// lines 507-538) as a preview/mockup tile for the upcoming "Design Studio
-// Team" template. It overlays the top-left of the canvas as an at-a-glance
-// project status. Kept here verbatim from the existing port — when the
-// real Studio integration lands this should be replaced by a live project
-// summary card driven by Project.team / Project.location.
-function DesignStudioCard() {
+// TeamInfoCard — faithful port of paint_team_card in
+// agent_info_card.py:394-521. Shown when no agent is selected (i.e.
+// the default canvas overlay). Layout, in order:
+//   * Card rect — CARD_W_MAX=320 × CARD_H_TEAM=264 (lines 92/102), 12px
+//     radius. Diagonal background gradient #121622@230 → #080b12@230
+//     (lines 416-418). Diagonal CYAN→VIOLET border at alpha 220 / 1.6px
+//     (lines 420-423). _NEON_CYAN = "#5cf0ff", _NEON_VIOLET = "#c08aff".
+//   * '● TEAM' ribbon — top of card, 22px tall, 8/8/8/8 inset, 6px
+//     radius. Horizontal gradient cyan@60 → violet@10 (lines 426-432).
+//     Label is 9pt bold _TEXT_BRIGHT = #e6f0ff (lines 433-442).
+//   * Owl picture — 100×100 disc at (14, 38) from card origin. Cyan
+//     radial halo (cyan@110 → cyan@0), then dark fill #1e2434 with
+//     1.4px _TEXT_BRIGHT@200 ring (lines 444-456). Owl pixmap scaled
+//     to pic_size * 0.85 (lines 458-470).
+//   * Team name — centred 11pt bold under the picture (lines 478-484).
+//   * Description block — 9pt _TEXT_BRIGHT word-wrapped, 96px tall,
+//     to the right of the picture (info_x = pic_x + 100 + 18 = 132)
+//     starting at pic_y - 4 = 34. Truncated to 240 chars (lines 486-502).
+//   * AGENTS / CONNECTIONS stat row — at card bottom (above the
+//     picker reserve area = 38 + CARD_PICKER_RESERVE=44). 8pt bold
+//     _TEXT_DIM = #7888a8 labels, 11pt bold _TEXT_BRIGHT values.
+//     Stats are offset by 90px from info_x (lines 504-520).
+function TeamInfoCard() {
+  // Card constants — mirror agent_info_card.py:86-102.
+  const CARD_W = 320;
+  const CARD_H = 264;
+  const TEAM_NAME = "Design Studio Team";
+  const TEAM_DESC = "Sketch the brief, iterate interview and design board, then ship — three-stage flow that pairs UI sketches with narrative notes from the workshop writer.";
+  const AGENT_COUNT = 8;
+  const EDGE_COUNT = 12;
+  // Inner geometry — pic_x/y, info_x/y, stat_y — match paint_team_card.
+  const pic_x = 14, pic_y = 38, pic_size = 100;
+  const info_x = pic_x + pic_size + 18;        // 132
+  const info_y = pic_y - 4;                    // 34
+  const info_w = CARD_W - 14 - info_x;         // 174
+  const stat_y = CARD_H - 38 - 44;             // 182 (card_h - 38 - CARD_PICKER_RESERVE)
   return (
-    <div style={{ margin:"8px 10px", padding:12, borderRadius:12, background:"linear-gradient(180deg, #1d2336, #131726)", border:"1px solid rgba(120,220,255,0.18)" }}>
-      {/* FX thumbnail — gradient strip with the studio owl. */}
-      <div data-ui="StudioFxThumbnail" style={{ position:"relative", width:"100%", height:88, borderRadius:10, marginBottom:10, background:"linear-gradient(135deg, #2a3458 0%, #4a3868 50%, #1a2240 100%)", border:"1px solid rgba(120,220,255,0.25)", overflow:"hidden", display:"flex", alignItems:"center", justifyContent:"center" }}>
-        <img src={`${ICONS}/owl_studio_square.png`} style={{ width:48, height:48, opacity:0.95, filter:"drop-shadow(0 2px 6px rgba(0,0,0,0.5))" }} />
-        <div style={{ position:"absolute", left:8, bottom:6, fontSize:10, fontWeight:700, color:"#7fdfff", textTransform:"uppercase", letterSpacing:0.8 }}>uBoit Studio fx</div>
-        <div style={{ position:"absolute", right:8, top:6, padding:"2px 6px", borderRadius:4, background:"rgba(120,220,255,0.25)", color:"#fff", fontSize:9, fontWeight:700 }}>TILE</div>
+    <div data-ui="TeamInfoCard" style={{ position:"relative", width:CARD_W, height:CARD_H, borderRadius:12, background:"linear-gradient(135deg, rgba(18,22,34,0.90) 0%, rgba(8,11,18,0.90) 100%)", boxShadow:"inset 0 0 0 1.6px transparent", border:"1.6px solid transparent", backgroundOrigin:"border-box", backgroundClip:"padding-box, border-box", overflow:"hidden" }}>
+      {/* Border overlay — separate layer because gradient borders aren't
+          a single-property CSS feature. Mirrors the diagonal CYAN→VIOLET
+          QPen at agent_info_card.py:420-423. */}
+      <div style={{ position:"absolute", inset:0, borderRadius:12, padding:"1.6px", background:"linear-gradient(135deg, rgba(92,240,255,0.86) 0%, rgba(192,138,255,0.86) 100%)", WebkitMask:"linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)", WebkitMaskComposite:"xor", maskComposite:"exclude", pointerEvents:"none" }} />
+      {/* '● TEAM' ribbon — 22px tall, 8px inset from card edges. */}
+      <div data-ui="TeamRibbon" style={{ position:"absolute", left:8, top:8, width:CARD_W - 16, height:22, borderRadius:6, background:"linear-gradient(90deg, rgba(92,240,255,0.235) 0%, rgba(192,138,255,0.039) 100%)", border:"1px solid rgba(92,240,255,0.47)", display:"flex", alignItems:"center", paddingLeft:10, fontSize:12, fontWeight:700, color:"#e6f0ff", fontFamily:"Segoe UI", letterSpacing:0.2 }}>● TEAM</div>
+      {/* Owl picture — 100×100 disc with cyan radial halo. */}
+      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y - 6, width:pic_size + 12, height:pic_size + 12, borderRadius:"50%", background:"radial-gradient(circle, rgba(92,240,255,0.43) 0%, rgba(92,240,255,0) 100%)", pointerEvents:"none" }} />
+      <div style={{ position:"absolute", left:pic_x, top:pic_y, width:pic_size, height:pic_size, borderRadius:"50%", background:"#1e2434", border:"1.4px solid rgba(230,240,255,0.78)", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden" }}>
+        <img src={`${ICONS}/owl_AgenticTeam.png`} style={{ width:pic_size * 0.85, height:pic_size * 0.85, objectFit:"contain" }} />
       </div>
-      {/* Title row — owl badge + "Design Studio Team" caption. */}
-      <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:6 }}>
-        <img src={`${ICONS}/owl_studio_square.png`} style={{ width:28, height:28 }} />
-        <div style={{ fontSize:11, color:"#aaa", textTransform:"uppercase" }}>Design Studio Team</div>
+      {/* Team name — centred 11pt bold under the picture. 11pt ≈ 15px CSS. */}
+      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y + pic_size + 6, width:pic_size + 12, height:20, textAlign:"center", fontSize:15, fontWeight:700, color:"#e6f0ff", fontFamily:"Segoe UI", lineHeight:"20px" }}>{TEAM_NAME}</div>
+      {/* Description block — 9pt _TEXT_BRIGHT word-wrapped, capped at 240 chars. */}
+      <div style={{ position:"absolute", left:info_x, top:info_y, width:info_w, height:96, fontSize:12, color:"#e6f0ff", fontFamily:"Segoe UI", lineHeight:1.35, overflow:"hidden" }}>{TEAM_DESC.length > 240 ? TEAM_DESC.slice(0, 237) + "…" : TEAM_DESC}</div>
+      {/* AGENTS / CONNECTIONS stat row — 8pt bold _TEXT_DIM labels,
+          11pt bold _TEXT_BRIGHT values, 90px column gap. */}
+      <div style={{ position:"absolute", left:info_x, top:stat_y, width:info_w, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"#7888a8", fontFamily:"Segoe UI", letterSpacing:0.4 }}>
+        <span style={{ width:90 }}>AGENTS</span>
+        <span>CONNECTIONS</span>
       </div>
-      {/* Stage 1/3 caption — v10 mock string web_replica/agents_page_v10.html:522-525. */}
-      <div style={{ fontSize:11, color:"#9aa0a6", lineHeight:1.4 }}>Stage 1 / 3 — sketch the brief, iterate interview and design board, then ship.</div>
-      {/* Star rating — 4/5 filled. */}
-      <div data-ui="StudioRatingRow" style={{ display:"flex", gap:2, marginTop:4 }}>
-        {[0,1,2,3,4].map(i => (
-          <span key={i} style={{ fontSize:11, color: i < 4 ? "#ffd97a" : "rgba(255,255,255,0.18)", lineHeight:1 }}>★</span>
-        ))}
-      </div>
-      <div style={{ fontSize:12, fontWeight:700, color:"#fff", marginTop:6 }}>sBach Studio Tr</div>
-      {/* Metric strip "10 / 6 / Cleared" — mock counters per the latest v11 spec. */}
-      <div style={{ marginTop:6, display:"flex", gap:12, alignItems:"flex-end", fontSize:10, color:"#7888a8", textTransform:"uppercase" }}>
-        <div><span style={{ color:"#fff", fontSize:18, fontWeight:700 }}>10</span></div>
-        <div><span style={{ color:"#fff", fontSize:18, fontWeight:700 }}>6</span></div>
-        <div style={{ marginLeft:"auto", fontSize:10, color:"#7888a8" }}>Cleared</div>
+      <div style={{ position:"absolute", left:info_x, top:stat_y + 14, width:info_w, height:18, display:"flex", alignItems:"center", fontSize:15, fontWeight:700, color:"#e6f0ff", fontFamily:"Segoe UI" }}>
+        <span style={{ width:90 }}>{AGENT_COUNT}</span>
+        <span>{EDGE_COUNT}</span>
       </div>
     </div>
   );
@@ -345,7 +372,7 @@ function TeamCanvas({ width, height }: CanvasProps) {
     return `M ${sx} ${sy} A ${rad} ${rad} 0 ${large} 1 ${ex} ${ey}`;
   };
   return (
-    <div data-ui="AgentTeamCanvas" style={{ position:"relative", width:w, height:h, background:`radial-gradient(ellipse at ${cx}px ${cy}px, rgba(192,138,255,0.10) 0%, rgba(116,164,255,0.06) 30%, rgba(40,60,110,0.04) 60%, rgba(0,0,0,0) 85%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow:"hidden" }}>
+    <div data-ui="AgentTeamCanvas" style={{ position:"relative", width:w, height:h, background:`radial-gradient(ellipse at ${w/2}px ${h/2}px, rgba(192,138,255,0.10) 0%, rgba(116,164,255,0.06) 30%, rgba(40,60,110,0.04) 60%, rgba(0,0,0,0) 85%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow:"hidden" }}>
       <svg width={w} height={h} style={{ position:"absolute", left:0, top:0 }}>
         <defs>
           <radialGradient id="halo" cx="50%" cy="50%" r="50%">
@@ -526,7 +553,11 @@ last action from m,h is left protected.`;
       {/* log_header QLabel — 12pt bold white. Default-state text per :2692.
           Once a node is clicked, agents_page.py:5355 swaps in "📜 <label>". */}
       <div data-ui="LogHeader" style={{ padding:"8px 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
-        <div style={{ fontSize:16, fontWeight:700, color:"#fff", letterSpacing:0.3 }}>📜 ORCHESTRATOR — Backend Coder</div>
+        {/* Default state — agents_page.py:2692 plain "Click an agent…" string.
+            Once an agent is selected, agents_page.py:5355 swaps to
+            f"📜 {display_label}" (no "ORCHESTRATOR —" prefix exists anywhere
+            in Qt). 12pt bold #fff per :2694-2698. */}
+        <div style={{ fontSize:16, fontWeight:700, color:"#fff", letterSpacing:0.3 }}>Click an agent on the canvas to view its log.</div>
         <div style={{ flex:1 }} />
       </div>
       {/* picker_host — agents_page.py:2704-2721. "MODEL" 11px #aaa label
@@ -551,8 +582,11 @@ last action from m,h is left protected.`;
           headers are Qt's standard QTabBar; cyan when active. */}
       <div data-ui="OrchestratorLogTabs" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:"0 0 8px" }}>
         <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid rgba(120,220,255,0.10)" }}>
-          <button onClick={() => setActiveTab("reply")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "reply" ? "#7fdfff" : "#9aa0a6", fontSize:13, fontWeight:600, borderBottom: activeTab === "reply" ? "2px solid #7fdfff" : "2px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
-          <button onClick={() => setActiveTab("thought")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "thought" ? "#dcb0ff" : "#9aa0a6", fontSize:13, fontWeight:600, borderBottom: activeTab === "thought" ? "2px solid #dcb0ff" : "2px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
+          {/* Tab weights/underline tuned to match Qt's native QTabBar:
+              500 weight + 1.5px underline reads closer to the thin
+              native accent line than 600 + 2px did. */}
+          <button onClick={() => setActiveTab("reply")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "reply" ? "#7fdfff" : "#9aa0a6", fontSize:13, fontWeight:500, borderBottom: activeTab === "reply" ? "1.5px solid #7fdfff" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
+          <button onClick={() => setActiveTab("thought")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "thought" ? "#dcb0ff" : "#9aa0a6", fontSize:13, fontWeight:500, borderBottom: activeTab === "thought" ? "1.5px solid #dcb0ff" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
           <div style={{ flex:1 }} />
         </div>
         {/* Reply tab body — QTextEdit#OrchestratorReplyView. log_view_css
@@ -596,7 +630,7 @@ export default function AgentsPage() {
           <div data-ui="CanvasStack" style={{ height:607, position:"relative" }}>
             <TeamCanvas width={LEFT_W} height={607} />
             <div style={{ position:"absolute", top:8, left:8, width:360 }}>
-              <DesignStudioCard />
+              <TeamInfoCard />
               <SuperUserCard />
             </div>
           </div>

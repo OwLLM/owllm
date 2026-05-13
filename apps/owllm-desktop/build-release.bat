@@ -37,6 +37,13 @@ set "DIST=%cd%\dist"
 if not exist "%DIST%" mkdir "%DIST%"
 copy /Y "%RELEASE%\owllm-desktop.exe" "%cd%\OwLLM Desktop.exe" >nul
 copy /Y "%RELEASE%\owllm-desktop.exe" "%DIST%\OwLLM Desktop.exe" >nul
+rem WebView2Loader.dll MUST sit next to the exe — without it Windows
+rem aborts startup with "WebView2Loader.dll was not found". The release
+rem build emits it into %RELEASE%; copy alongside both portable exes.
+if exist "%RELEASE%\WebView2Loader.dll" (
+  copy /Y "%RELEASE%\WebView2Loader.dll" "%cd%\WebView2Loader.dll" >nul
+  copy /Y "%RELEASE%\WebView2Loader.dll" "%DIST%\WebView2Loader.dll" >nul
+)
 copy /Y "%RELEASE%\bundle\nsis\OwLLM Desktop_0.1.0_x64-setup.exe" "%DIST%\OwLLM Desktop Setup.exe" >nul
 echo   Run now:       %cd%\OwLLM Desktop.exe
 echo   Dist exe:      %DIST%\OwLLM Desktop.exe

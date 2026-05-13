@@ -12,12 +12,18 @@ cd /d "%~dp0"
 title OWLLM Desktop
 
 set "EXE=%cd%\OwLLM Desktop.exe"
+set "WEBVIEW_DLL=%cd%\WebView2Loader.dll"
+
+rem Sanity: the exe needs WebView2Loader.dll as a sibling on Windows.
+rem If the DLL is missing, treat it as a stale build and force a rebuild
+rem so build-release.bat re-copies it alongside the exe.
+set "REBUILD=0"
+if exist "%EXE%" if not exist "%WEBVIEW_DLL%" set "REBUILD=1"
 
 rem Freshness check — rebuild if any .tsx/.ts/.css/.rs source is newer
 rem than the built exe. PowerShell one-liner: compare LastWriteTime
 rem against the most recent source file. Exits 1 if a rebuild is needed.
-set "REBUILD=0"
-if exist "%EXE%" (
+if exist "%EXE%" if "!REBUILD!"=="0" (
   for /f %%i in ('powershell -NoProfile -Command "$exe=Get-Item '%EXE%'; $newest=Get-ChildItem -Recurse -File '%cd%\ui\src','%cd%\src-tauri\src','%cd%\src-tauri\Cargo.toml','%cd%\src-tauri\tauri.conf.json' ^| Sort-Object LastWriteTime -Descending ^| Select-Object -First 1; if ($newest -and $newest.LastWriteTime -gt $exe.LastWriteTime) { 'stale' } else { 'fresh' }"') do set "FRESHNESS=%%i"
   if /i "!FRESHNESS!"=="stale" set "REBUILD=1"
 )

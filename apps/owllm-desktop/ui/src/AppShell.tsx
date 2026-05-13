@@ -8,6 +8,8 @@
 // header + tabs come from here.
 import React, { useState } from "react";
 import AgentsPage from "./pages/AgentsPage";
+import BridgesPage from "./pages/BridgesPage";
+import CodePage from "./pages/CodePage";
 import HomePage from "./pages/HomePage";
 import ServerPage from "./pages/ServerPage";
 import StubPage from "./pages/StubPage";
@@ -138,9 +140,9 @@ export default function AppShell() {
     case "agents":   body = <AgentsPage />; break;
     case "server":   body = <ServerPage />; break;
     case "home":     body = <HomePage />; break;
-    case "bridges":  body = <StubPage label="Bridges"  hint="LLM Studio / external runtime bridges." />; break;
+    case "bridges":  body = <BridgesPage />; break;
     case "studio":   body = <StudioPage />; break;
-    case "code":     body = <StubPage label="Code"     hint="File browser + diff + multi-file edit." />; break;
+    case "code":     body = <CodePage />; break;
     case "accounts": body = <StubPage label="Accounts" hint="API keys, providers, sessions." />; break;
     case "mcp":      body = <StubPage label="MCP"      hint="MCP server registry + connections." />; break;
   }

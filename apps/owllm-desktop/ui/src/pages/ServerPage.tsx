@@ -1,3 +1,8 @@
+// ServerPage — model picker + LLM server lifecycle controls. Ported
+// from the original App.tsx that was the Tauri shell's only screen
+// before the multi-page refactor. Talks to the Python engine through
+// the Tauri commands engine_get / engine_post / engine_start /
+// engine_stop, which proxy HTTP to /v1/* endpoints.
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -8,7 +13,7 @@ type EnvInfo = { env_key: string; python: string };
 type ModelsResponse = { ok: boolean; models?: ModelInfo[]; error?: string; message?: string };
 type EnvsResponse = { ok: boolean; envs?: EnvInfo[]; envs_dir?: string; error?: string; message?: string };
 
-export function App() {
+export default function ServerPage() {
   const [logs, setLogs] = useState<string[]>([]);
   const [modelId, setModelId] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -32,14 +37,11 @@ export function App() {
     };
   }, []);
 
-  useEffect(() => {
-    refreshAll();
-  }, []);
+  useEffect(() => { refreshAll(); }, []);
 
   async function engineGet<T>(path: string): Promise<T> {
     return JSON.parse(await invoke<string>("engine_get", { path })) as T;
   }
-
   async function enginePost<T>(path: string, body: unknown): Promise<T> {
     return JSON.parse(await invoke<string>("engine_post", { path, body: JSON.stringify(body) })) as T;
   }
@@ -51,12 +53,10 @@ export function App() {
       const [modelRes, envRes, hwRes] = await Promise.all([
         engineGet<ModelsResponse>("/v1/models"),
         engineGet<EnvsResponse>("/v1/envs"),
-        engineGet<Record<string, unknown>>("/v1/hardware")
+        engineGet<Record<string, unknown>>("/v1/hardware"),
       ]);
-
       if (!modelRes.ok) throw new Error(modelRes.message || modelRes.error || "Failed to load models");
       if (!envRes.ok) throw new Error(envRes.message || envRes.error || "Failed to load envs");
-
       const nextModels = modelRes.models || [];
       setModels(nextModels);
       setEnvs(envRes.envs || []);
@@ -90,29 +90,29 @@ export function App() {
   }
 
   return (
-    <div style={{ fontFamily: "system-ui", padding: 18, display: "grid", gap: 14, color: "#111" }}>
+    <div style={{ padding: 18, display: "grid", gap: 14, color: "#e6e8eb" }}>
       <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "start" }}>
         <div>
-          <div style={{ fontSize: 24, fontWeight: 800 }}>OwLLM Desktop</div>
-          <div style={{ opacity: 0.75, marginTop: 4 }}>
-            Rust desktop shell with a supervised Python engine. Select a configured model and manage its server.
+          <div style={{ fontSize: 22, fontWeight: 800 }}>Server</div>
+          <div style={{ opacity: 0.75, marginTop: 4, fontSize: 13 }}>
+            Pick a configured model and manage its LLM server lifecycle.
           </div>
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
-          <button onClick={refreshAll} disabled={!!busy}>Refresh</button>
-          <button onClick={() => invoke("engine_start")} disabled={!!busy}>Start engine</button>
-          <button onClick={() => invoke("engine_stop")} disabled={!!busy}>Stop engine</button>
+          <button className="ghost-btn" onClick={refreshAll} disabled={!!busy}>Refresh</button>
+          <button className="ghost-btn" onClick={() => invoke("engine_start")} disabled={!!busy}>Start engine</button>
+          <button className="ghost-btn" onClick={() => invoke("engine_stop")} disabled={!!busy}>Stop engine</button>
         </div>
       </div>
 
       {error ? (
-        <div style={{ border: "1px solid #ff9f9f", background: "#fff3f3", color: "#9b1c1c", borderRadius: 8, padding: 12 }}>
+        <div style={{ border: "1px solid #ff9f9f", background: "rgba(255,80,80,0.10)", color: "#ffb0b0", borderRadius: 8, padding: 12 }}>
           {error}
         </div>
       ) : null}
 
       <div style={{ display: "grid", gridTemplateColumns: "minmax(340px, 440px) 1fr", gap: 14 }}>
-        <section style={{ border: "1px solid #ddd", borderRadius: 10, padding: 14, background: "#fff" }}>
+        <section style={{ border: "1px solid rgba(120,220,255,0.18)", borderRadius: 10, padding: 14, background: "#181c29" }}>
           <div style={{ fontWeight: 800, marginBottom: 10 }}>Configured models</div>
           <div style={{ display: "grid", gap: 8, maxHeight: 390, overflow: "auto" }}>
             {models.length === 0 ? <div style={{ opacity: 0.7 }}>No models found in llm_backends.yaml.</div> : null}
@@ -122,11 +122,12 @@ export function App() {
                 onClick={() => setModelId(m.model_id)}
                 style={{
                   textAlign: "left",
-                  border: modelId === m.model_id ? "2px solid #2557d6" : "1px solid #ddd",
+                  border: modelId === m.model_id ? "2px solid #7fdfff" : "1px solid rgba(255,255,255,0.10)",
                   borderRadius: 8,
                   padding: 10,
-                  background: modelId === m.model_id ? "#eef3ff" : "#fafafa",
-                  cursor: "pointer"
+                  background: modelId === m.model_id ? "rgba(127,223,255,0.10)" : "rgba(255,255,255,0.02)",
+                  color: "#e6e8eb",
+                  cursor: "pointer",
                 }}
               >
                 <div style={{ fontWeight: 700 }}>{m.model_id}</div>
@@ -139,22 +140,22 @@ export function App() {
           </div>
         </section>
 
-        <section style={{ border: "1px solid #ddd", borderRadius: 10, padding: 14, background: "#fff" }}>
+        <section style={{ border: "1px solid rgba(120,220,255,0.18)", borderRadius: 10, padding: 14, background: "#181c29" }}>
           <div style={{ fontWeight: 800, marginBottom: 10 }}>Server control</div>
           <div style={{ display: "grid", gap: 10 }}>
-          <label>
-            Model ID{" "}
-            <input
-              value={modelId}
-              onChange={(e) => setModelId(e.target.value)}
-              placeholder="from llm_backends.yaml"
-              style={{ width: "min(720px, 100%)", padding: 8 }}
-            />
-          </label>
+            <label>
+              Model ID{" "}
+              <input
+                value={modelId}
+                onChange={(e) => setModelId(e.target.value)}
+                placeholder="from llm_backends.yaml"
+                style={{ width: "min(720px, 100%)", padding: 8, background: "#0f0f19", color: "#fff", border: "1px solid rgba(255,255,255,0.10)", borderRadius: 6 }}
+              />
+            </label>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button disabled={!modelId || !!busy} onClick={() => runServerAction("start")}>Start server</button>
-              <button disabled={!modelId || !!busy} onClick={() => runServerAction("status")}>Status</button>
-              <button disabled={!modelId || !!busy} onClick={() => runServerAction("stop")}>Stop server</button>
+              <button className="ghost-btn" disabled={!modelId || !!busy} onClick={() => runServerAction("start")}>Start server</button>
+              <button className="ghost-btn" disabled={!modelId || !!busy} onClick={() => runServerAction("status")}>Status</button>
+              <button className="ghost-btn" disabled={!modelId || !!busy} onClick={() => runServerAction("stop")}>Stop server</button>
               {busy ? <span style={{ opacity: 0.7 }}>busy: {busy}</span> : null}
             </div>
             <div style={{ fontSize: 13, opacity: 0.75 }}>
@@ -170,31 +171,13 @@ export function App() {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <div>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>Hardware</div>
-          <pre
-            style={{
-              height: 240,
-              overflow: "auto",
-              background: "#0b1020",
-              color: "#d7e0ff",
-              padding: 12,
-              borderRadius: 8
-            }}
-          >
+          <pre style={{ height: 240, overflow: "auto", background: "#0b1020", color: "#d7e0ff", padding: 12, borderRadius: 8 }}>
             {hardware}
           </pre>
         </div>
         <div>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>Python envs ({envs.length}) / engine log</div>
-          <pre
-            style={{
-              height: 240,
-              overflow: "auto",
-              background: "#111",
-              color: "#eee",
-              padding: 12,
-              borderRadius: 8
-            }}
-          >
+          <pre style={{ height: 240, overflow: "auto", background: "#0b1020", color: "#d7e0ff", padding: 12, borderRadius: 8 }}>
             {envs.map((e) => `${e.env_key}  ${e.python}`).join("\n")}
             {envs.length ? "\n\n--- engine log ---\n" : ""}
             {logPanel || "No engine output yet."}

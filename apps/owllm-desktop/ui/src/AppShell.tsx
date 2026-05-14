@@ -92,12 +92,13 @@ const BADGE_H = 195;
 const BORDER_T = 18;
 const CORNER_OUTSET = 10;
 const SHIFT_OUT = BORDER_T / 2;
-// EXTRA_TOP = BADGE_H / 2 reserves headroom above the cyan top
-// frame so the owl badge can peek above the inner content (matches
-// the original Qt HybridFrame look). Setting this to 0 made the
-// badge cover the ModeBar's middle — keep the headroom.
-const EXTRA_TOP = BADGE_H / 2;
-const EXTRA_RIGHT = 75;
+// EXTRA_TOP / EXTRA_RIGHT used to reserve headroom for the peeking
+// owl badge + an asymmetric right band from the Qt port. Set to 0
+// so all four paddings collapse to the SHIFT_OUT + CORNER_OUTSET
+// baseline (19 px on every side). Wastes far less screen real
+// estate when maximized.
+const EXTRA_TOP = 0;
+const EXTRA_RIGHT = 0;
 const CORNER_PNG_W = 160;
 const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);
 const CORNER_PNG_H_TR = Math.round(CORNER_PNG_W * 484 / 516);

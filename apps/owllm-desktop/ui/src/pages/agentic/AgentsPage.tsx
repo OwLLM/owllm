@@ -7,6 +7,7 @@
 // bridges.rs, server state via server_status. No hardcoded rosters.
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import NewProjectDialog from "./NewProjectDialog";
 
 const ICONS = "/Page_icons";
 
@@ -14,7 +15,11 @@ const ICONS = "/Page_icons";
 type ProjectRow = {
   id: string; name: string; description: string; location: string;
   trust_writes: boolean; auto_approve_all: boolean;
-  team: string[]; team_default_model_id: string; updated_at: string;
+  team: string[]; team_default_model_id: string;
+  /// Routing graph blob — `{"edges": [{"source":"x","target":"y"}]}`.
+  /// Empty string when the project hasn't customised routing yet.
+  graph_json: string;
+  updated_at: string;
 };
 type TeamTemplateBackend = { id: string; path: string; built_in: boolean; data: any };
 type AgentRoleBackend    = { id: string; path: string; built_in: boolean; data: any };
@@ -24,7 +29,17 @@ type BridgeConfigs = { telegram: TelegramCfg; whatsapp: WhatsAppCfg };
 type ServerStatus = { running: boolean; model_id: string | null; port: number | null; message: string };
 
 // ---------- Domain types ----------
-type AgentSpec = { name: string; base: string; icon?: string | null };
+type AgentSpec = {
+  name: string;
+  base: string;
+  icon?: string | null;
+  // The team JSON ships rich per-agent text — a short description
+  // shown in cards and a longer extra_prompt that augments the role's
+  // base system prompt during dispatch. Keep both around so the
+  // specialist prompt builder can layer them.
+  description?: string;
+  extraPrompt?: string;
+};
 type Edge = { source: string; target: string };
 type Team = {
   id: string;
@@ -36,7 +51,20 @@ type Team = {
   agents: AgentSpec[];
   edges: Edge[];
 };
-type RoleData = { name: string; icon?: string; description?: string };
+type RoleData = {
+  name: string;
+  icon?: string;
+  description?: string;
+  /// Canonical role system prompt from the yaml file (the `|` block
+  /// scalar that defines the agent's behaviour rules). Used by the
+  /// specialist prompt builder during dispatch.
+  systemPrompt?: string;
+  /// Whether this role is allowed to dispatch (from `can_dispatch`).
+  canDispatch?: boolean;
+  /// Default sampling temperature from the yaml; used by the dispatch
+  /// loop when an agent has no per-agent override.
+  defaultTemperature?: number;
+};
 type GoalMsg = { role: string; color: string; text: string };
 
 // ---------- Icon + label helpers ----------
@@ -99,7 +127,15 @@ function displayLabel(fullName: string): string {
 function toTeam(t: TeamTemplateBackend): Team {
   const d = t.data ?? {};
   const agents: AgentSpec[] = Array.isArray(d.agents)
-    ? d.agents.map((a: any) => ({ name: a.name, base: a.base, icon: a.icon ?? null }))
+    ? d.agents.map((a: any) => ({
+        name: a.name,
+        base: a.base,
+        icon: a.icon ?? null,
+        description: typeof a.description === "string" ? a.description : undefined,
+        // Qt source spells this `extra_prompt`; we expose it camel-case
+        // on the React side so usage doesn't pierce snake_case.
+        extraPrompt: typeof a.extra_prompt === "string" ? a.extra_prompt : undefined,
+      }))
     : [];
   const edges: Edge[] = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
   return {
@@ -114,11 +150,25 @@ function toTeam(t: TeamTemplateBackend): Team {
   };
 }
 
-// Build a virtual Team from a project's raw agent-name list (no
-// template attached). Star topology is implicit — no edges, all
-// non-orchestrator agents land on ring 1.
+// Build a virtual Team from a project's raw agent-name list. If the
+// project has a stored routing graph (graph_json), parse it; otherwise
+// the diagram/graph view falls back to the star topology computed in
+// computeDepths().
 function projectToTeam(p: ProjectRow): Team {
   const agents: AgentSpec[] = p.team.map(n => ({ name: n, base: n }));
+  let edges: Edge[] = [];
+  if (p.graph_json && p.graph_json.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(p.graph_json);
+      if (Array.isArray(parsed?.edges)) {
+        edges = parsed.edges
+          .filter((e: any) => typeof e?.source === "string" && typeof e?.target === "string")
+          .map((e: any) => ({ source: e.source, target: e.target }));
+      }
+    } catch {
+      // Stale graph_json — silently fall back to empty.
+    }
+  }
   return {
     id: `project:${p.id}`,
     name: p.name,
@@ -127,7 +177,7 @@ function projectToTeam(p: ProjectRow): Team {
     description: p.description || "Project — agents from the saved roster.",
     icon: "owl:owl_agentic",
     agents,
-    edges: [],
+    edges,
   };
 }
 
@@ -177,6 +227,7 @@ function LocationRow({
   location, onChangeLocation, onBrowse,
   trustWrites, onToggleTrustWrites,
   bridgeOn,
+  onNewProject, onRenameProject, onDeleteProject,
 }: {
   projects: ProjectRow[];
   selectedId: string;
@@ -190,6 +241,9 @@ function LocationRow({
   trustWrites: boolean;
   onToggleTrustWrites: () => void;
   bridgeOn: boolean;
+  onNewProject: () => void;
+  onRenameProject: () => void;
+  onDeleteProject: () => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   // Sandbox semantics: trust_writes=true → agent writes are trusted
@@ -221,9 +275,9 @@ function LocationRow({
         }
       </select>
       <button className="ghost-btn" onClick={() => setPickerOpen(v => !v)} style={{ height:32, padding:"0 12px" }} title="Pick a team template to display on the canvas">Team…</button>
-      <button className="ghost-btn" style={{ height:32, padding:"0 12px" }}>+ New</button>
-      <button className="ghost-btn" style={{ height:32, padding:"0 12px" }}>Rename</button>
-      <button style={{ height:32, padding:"0 12px", background:"rgba(255,140,140,0.10)", color:"#ff8c8c", border:"none", borderRadius:8, fontSize:12, fontWeight:600 }}>Delete</button>
+      <button className="ghost-btn" onClick={onNewProject} title="Create a new project from a team template" style={{ height:32, padding:"0 12px" }}>+ New</button>
+      <button className="ghost-btn" onClick={onRenameProject} title="Rename the selected project" disabled={!selectedId} style={{ height:32, padding:"0 12px" }}>Rename</button>
+      <button onClick={onDeleteProject} title="Delete the selected project" disabled={!selectedId} style={{ height:32, padding:"0 12px", background: selectedId ? "rgba(255,140,140,0.10)" : "var(--bg-surface)", color: selectedId ? "#ff8c8c" : "var(--fg-subtle)", border:"none", borderRadius:8, fontSize:12, fontWeight:600, cursor: selectedId ? "pointer" : "not-allowed" }}>Delete</button>
       {pickerOpen && (
         <div style={{ position:"absolute", top:60, right:14, background:"var(--bg-panel)", border:"1px solid var(--border-strong)", borderRadius:10, padding:8, zIndex:50, maxHeight:340, overflow:"auto", minWidth:280, boxShadow:"0 8px 30px rgba(0,0,0,0.6)" }}>
           <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:1, textTransform:"uppercase", padding:"6px 10px" }}>Team template</div>
@@ -1200,17 +1254,29 @@ function buildOrchestratorPrompt(
   orch: AgentSpec,
 ): string {
   const specialists = team.agents.filter(a => a.name !== orch.name);
+  // Prefer the spec's own description (team JSON, agent-specific) over
+  // the base role's description; the team JSONs intentionally tailor
+  // each agent's blurb for the team context.
   const roster = specialists.map(a => {
-    const role = roleByName.get(a.base);
-    const desc = role?.description ?? "";
+    const desc = a.description ?? roleByName.get(a.base)?.description ?? "";
     return `  - ${a.name} (${a.base}): ${desc}`;
   }).join("\n");
   const orchRole = roleByName.get(orch.base);
-  const baseGuidance = orchRole?.description ?? "Plan the work, dispatch one task at a time, integrate the results.";
+  // Layered guidance: prefer the role yaml's full system_prompt
+  // (the canonical playbook), then the team-specific extra_prompt
+  // appended below it, falling back to the role's one-line
+  // description, then a hard-coded minimum if even that's missing.
+  const orchBase =
+    orchRole?.systemPrompt ??
+    orchRole?.description ??
+    "Plan the work, dispatch one task at a time, integrate the results.";
+  const orchSystemPrompt = orch.extraPrompt
+    ? `${orchBase}\n\n--- TEAM-SPECIFIC GUIDANCE ---\n${orch.extraPrompt}`
+    : orchBase;
   return [
     `You are the orchestrator of the '${team.display}' team.`,
     "",
-    baseGuidance,
+    orchSystemPrompt,
     "",
     `YOUR SPECIALISTS (use their EXACT names when dispatching):`,
     roster || "  (none — solo)",
@@ -1231,17 +1297,32 @@ function buildSpecialistPrompt(
   roleByName: Map<string, RoleData>,
 ): string {
   const role = roleByName.get(spec.base);
-  const roleDesc = role?.description ?? "";
-  const extra = (spec as any).extra_prompt ?? (spec as any).extraPrompt ?? "";
-  return [
+  // Layer: role base prompt (from yaml) + team-specific spec
+  // description + team-specific extra_prompt. All three are present
+  // in well-curated teams like code_artisan; only the role base is
+  // present for ad-hoc project rosters.
+  const layers: string[] = [
     `You are ${displayLabel(spec.name)} (${spec.base}) on the '${team.display}' team.`,
     "",
-    roleDesc,
-    extra ? "\n" + extra : "",
-    "",
-    "The orchestrator has dispatched the task below. Reply concisely and directly with your work.",
-    "Do NOT dispatch further — only the orchestrator may dispatch. Stay in your role.",
-  ].join("\n");
+  ];
+  // Canonical role system prompt from the yaml file is the strongest
+  // signal — fall back to the one-line description when missing.
+  const roleBase = role?.systemPrompt ?? role?.description;
+  if (roleBase) {
+    layers.push(roleBase);
+    layers.push("");
+  }
+  if (spec.description && spec.description !== role?.description) {
+    layers.push(`Your job on this team: ${spec.description}`);
+    layers.push("");
+  }
+  if (spec.extraPrompt) {
+    layers.push(spec.extraPrompt);
+    layers.push("");
+  }
+  layers.push("The orchestrator has dispatched the task below. Reply concisely and directly with your work.");
+  layers.push("Do NOT dispatch further — only the orchestrator may dispatch. Stay in your role.");
+  return layers.join("\n");
 }
 
 type Dispatch = { agentName: string; instruction: string };
@@ -1389,6 +1470,58 @@ export default function AgentsPage() {
     }
   }
 
+  // + New / Rename / Delete project handlers — all write through the
+  // create_project / update_project / delete_project Tauri commands.
+  // After every mutation we refetch list_projects so the combo box +
+  // selection stay accurate.
+  const [newProjOpen, setNewProjOpen] = useState(false);
+  const reloadProjects = async () => {
+    try {
+      const rows = await invoke<ProjectRow[]>("list_projects");
+      setProjects(rows);
+      return rows;
+    } catch (e) {
+      console.error("list_projects failed", e);
+      return [] as ProjectRow[];
+    }
+  };
+  const onNewProject = () => setNewProjOpen(true);
+  const onProjectCreated = async (row: ProjectRow) => {
+    const rows = await reloadProjects();
+    // Select the freshly-created project. Fall back to id from the
+    // returned row if list_projects raced.
+    const target = rows.find(p => p.id === row.id) ?? row;
+    setSelectedProjectId(target.id);
+    setLocationOverride(target.location);
+    setPickedTeamId(null);
+    setTrustWritesOverride(null);
+  };
+  const onRenameProject = async () => {
+    if (!selectedProject) return;
+    const next = window.prompt(`Rename project '${selectedProject.name}' to:`, selectedProject.name);
+    if (!next || next.trim() === "" || next.trim() === selectedProject.name) return;
+    try {
+      await invoke("update_project", { input: { id: selectedProject.id, name: next.trim() } });
+      await reloadProjects();
+    } catch (e: any) {
+      alert(`Rename failed: ${e?.message ?? e}`);
+    }
+  };
+  const onDeleteProject = async () => {
+    if (!selectedProject) return;
+    if (!window.confirm(`Delete project '${selectedProject.name}'?\n\nThis only removes the project row; the folder on disk stays.`)) return;
+    try {
+      await invoke("delete_project", { id: selectedProject.id });
+      const rows = await reloadProjects();
+      // Snap to the next project (if any).
+      const fallback = rows[0]?.id ?? "";
+      setSelectedProjectId(fallback);
+      setPickedTeamId(null);
+    } catch (e: any) {
+      alert(`Delete failed: ${e?.message ?? e}`);
+    }
+  };
+
   // Initial load — projects, teams, roles, bridges in parallel.
   useEffect(() => {
     let dead = false;
@@ -1417,6 +1550,9 @@ export default function AgentsPage() {
           name: d.name ?? r.id,
           icon: typeof d.icon === "string" ? d.icon : undefined,
           description: typeof d.description === "string" ? d.description : undefined,
+          systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
+          canDispatch: d.can_dispatch === true,
+          defaultTemperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
         });
       }
       setRoleByName(m);
@@ -1468,6 +1604,69 @@ export default function AgentsPage() {
     setSelectedNode(null);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTeam?.id]);
+
+  // Persist edge edits back to the project's graph_json so the wiring
+  // survives across app restarts. Only fires when the user is editing
+  // a project's own roster (no template override active) and they've
+  // actually touched the edges (editedEdges !== null). Debounced so
+  // rapid drags don't hammer SQLite.
+  useEffect(() => {
+    if (!selectedProject) return;
+    if (pickedTeamId !== null) return;
+    if (editedEdges === null) return;
+    const id = window.setTimeout(async () => {
+      try {
+        await invoke("update_project", {
+          input: {
+            id: selectedProject.id,
+            graph_json: JSON.stringify({ edges: editedEdges }),
+          },
+        });
+        await reloadProjects();
+      } catch (e) {
+        console.error("persist edges failed", e);
+      }
+    }, 600);
+    return () => window.clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editedEdges, selectedProject?.id, pickedTeamId]);
+
+  // Persist trust_writes toggles too. Same debounce shape.
+  useEffect(() => {
+    if (!selectedProject) return;
+    if (trustWritesOverride === null) return;
+    if (trustWritesOverride === selectedProject.trust_writes) return;
+    const id = window.setTimeout(async () => {
+      try {
+        await invoke("update_project", {
+          input: { id: selectedProject.id, trust_writes: trustWritesOverride },
+        });
+        await reloadProjects();
+      } catch (e) {
+        console.error("persist trust_writes failed", e);
+      }
+    }, 400);
+    return () => window.clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trustWritesOverride, selectedProject?.id]);
+
+  // Persist location edits the same way.
+  useEffect(() => {
+    if (!selectedProject) return;
+    if (locationOverride === selectedProject.location) return;
+    const id = window.setTimeout(async () => {
+      try {
+        await invoke("update_project", {
+          input: { id: selectedProject.id, location: locationOverride },
+        });
+        await reloadProjects();
+      } catch (e) {
+        console.error("persist location failed", e);
+      }
+    }, 700);
+    return () => window.clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [locationOverride, selectedProject?.id]);
 
   // Effective edges: edited copy if present, otherwise the template's.
   const currentEdges: Edge[] = editedEdges ?? (activeTeam?.edges ?? []);
@@ -1610,13 +1809,19 @@ export default function AgentsPage() {
     // Anchor the goal in the user log first.
     appendLog("you", { role: "you", color: "#9ad9ff", text });
 
+    // Each role yaml ships a default_temperature; honour it instead of
+    // a hardcoded 0.4/0.5 split. Orchestrator base = 0.3, specialists
+    // vary (coder=0.2, critic=0.2, researcher=0.3, …).
+    const tempFor = (spec: AgentSpec, fallback: number) =>
+      roleByName.get(spec.base)?.defaultTemperature ?? fallback;
+
     try {
       // ----- Phase 1: orchestrator plan + dispatches -----
       setActiveAgent(orch.name);
       const orchPrompt = buildOrchestratorPrompt(activeTeam, roleByName, orch);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchReply = await streamChatCompletion(
-        port, modelId, orchPrompt, text, 0.4, ctrl.signal,
+        port, modelId, orchPrompt, text, tempFor(orch, 0.4), ctrl.signal,
         (delta) => streamLog(orch.name, delta),
       );
 
@@ -1653,7 +1858,7 @@ export default function AgentsPage() {
         appendLog(spec.name, { role: "dispatch", color: "#9aa0a6", text: `📩 ${d.instruction}` });
         appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
         const specText = await streamChatCompletion(
-          port, modelId, specPrompt, d.instruction, 0.5, ctrl.signal,
+          port, modelId, specPrompt, d.instruction, tempFor(spec, 0.5), ctrl.signal,
           (delta) => streamLog(spec.name, delta),
         );
         specialistReplies.push({ name: spec.name, text: specText.trim() });
@@ -1678,7 +1883,7 @@ export default function AgentsPage() {
       ].join("\n");
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const finalReply = await streamChatCompletion(
-        port, modelId, buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput, 0.4, ctrl.signal,
+        port, modelId, buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput, tempFor(orch, 0.4), ctrl.signal,
         (delta) => streamLog(orch.name, delta),
       );
       setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim() }]);
@@ -1721,6 +1926,16 @@ export default function AgentsPage() {
         trustWrites={trustWrites}
         onToggleTrustWrites={() => setTrustWritesOverride(v => !(v ?? selectedProject?.trust_writes ?? false))}
         bridgeOn={bridgeOn}
+        onNewProject={onNewProject}
+        onRenameProject={onRenameProject}
+        onDeleteProject={onDeleteProject}
+      />
+      <NewProjectDialog
+        open={newProjOpen}
+        onClose={() => setNewProjOpen(false)}
+        onCreated={onProjectCreated}
+        teams={teams}
+        defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
       />
       <GoalRow goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy} />
       <div data-ui="WorkspaceStack" style={{ height:665, width:1554, margin:"0 23px", display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0 }}>

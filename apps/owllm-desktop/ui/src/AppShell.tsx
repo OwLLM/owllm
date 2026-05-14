@@ -474,6 +474,12 @@ function SysInfoBlock() {
 // ---------------------------------------------------------------------
 // SubTabs — composed dynamically from the visible page list.
 // ---------------------------------------------------------------------
+// Page keys that should be right-aligned in the SubTabs row: Info
+// (from CORE) plus everything contributed by ADVANCED. They're the
+// "utility" pages, visually separated from the work surfaces by a
+// flex spacer.
+const RIGHT_ALIGNED_KEYS = new Set(["info", "mcp", "environment", "accounts", "logs"]);
+
 function SubTabs({
   pages, activeKey, onChange,
 }: {
@@ -481,6 +487,31 @@ function SubTabs({
   activeKey: string;
   onChange: (key: string) => void;
 }) {
+  const renderTab = (p: PageDef) => {
+    const active = p.key === activeKey;
+    return (
+      <div
+        key={p.key}
+        onClick={() => onChange(p.key)}
+        style={{
+          padding: "10px 16px",
+          background: active ? "var(--accent-soft)" : "transparent",
+          color: active ? "var(--accent)" : "var(--fg-muted)",
+          borderRadius: 8,
+          fontWeight: 600,
+          borderBottom: active ? "2px solid var(--accent)" : "2px solid transparent",
+          cursor: "pointer",
+          userSelect: "none",
+        }}
+      >
+        {p.label}
+      </div>
+    );
+  };
+
+  const leftTabs  = pages.filter(p => !RIGHT_ALIGNED_KEYS.has(p.key));
+  const rightTabs = pages.filter(p =>  RIGHT_ALIGNED_KEYS.has(p.key));
+
   return (
     <div style={{
       height: 76, background: "var(--bg-card)",
@@ -488,28 +519,9 @@ function SubTabs({
       padding: "0 24px", gap: 6, fontSize: 13, color: "var(--fg)",
       borderBottom: "1px solid var(--border)",
     }}>
-      {pages.map(p => {
-        const active = p.key === activeKey;
-        return (
-          <div
-            key={p.key}
-            onClick={() => onChange(p.key)}
-            style={{
-              padding: "10px 16px",
-              background: active ? "var(--accent-soft)" : "transparent",
-              color: active ? "var(--accent)" : "var(--fg-muted)",
-              borderRadius: 8,
-              fontWeight: 600,
-              borderBottom: active ? "2px solid var(--accent)" : "2px solid transparent",
-              cursor: "pointer",
-              userSelect: "none",
-            }}
-          >
-            {p.label}
-          </div>
-        );
-      })}
+      {leftTabs.map(renderTab)}
       <div style={{ flex: 1 }} />
+      {rightTabs.map(renderTab)}
     </div>
   );
 }

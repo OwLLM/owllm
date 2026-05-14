@@ -49,15 +49,25 @@ struct Inner {
 pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<ServerStatus, String> {
     let mut inner = state.inner.lock().await;
     // Reap dead child so the "running" bit doesn't lie after a crash.
-    let alive = match inner.child.as_mut() {
-        Some(c) => matches!(c.try_wait(), Ok(None)),
-        None => false,
+    let (alive, exit_code) = match inner.child.as_mut() {
+        Some(c) => match c.try_wait() {
+            Ok(None) => (true, None),
+            Ok(Some(status)) => (false, status.code()),
+            Err(_) => (false, None),
+        },
+        None => (false, None),
     };
-    if !alive {
+    if !alive && inner.child.is_some() {
+        // Transition from running -> dead: overwrite the stale
+        // "Starting on http://..." message so the UI shows the truth.
         inner.child = None;
-        if inner.message.is_empty() {
-            inner.message = "Not running.".to_string();
-        }
+        inner.message = match exit_code {
+            Some(0) => "Stopped cleanly.".to_string(),
+            Some(code) => format!("Crashed (exit code {code}). Check the log for details."),
+            None => "Process ended unexpectedly. Check the log for details.".to_string(),
+        };
+    } else if !alive && inner.message.is_empty() {
+        inner.message = "Not running.".to_string();
     }
     Ok(ServerStatus {
         running: alive,
@@ -101,6 +111,13 @@ pub async fn server_start(
     cmd.arg("--model").arg(&base_model);
     cmd.arg("--host").arg("127.0.0.1");
     cmd.arg("--port").arg(port.to_string());
+    // `-fit off` disables llama.cpp's auto-fit pass, which routinely
+    // crashes with GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)
+    // on models the heuristic can't place (verified on supergemma4 +
+    // gemma-4-E4B in this tree). With auto-fit off, the model runs on
+    // CPU by default; advanced GPU layer routing will land alongside
+    // the upcoming hardware-config UI.
+    cmd.arg("-fit").arg("off");
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

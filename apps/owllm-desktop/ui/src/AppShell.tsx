@@ -15,12 +15,18 @@
 // modules.ts plus a directory under pages/.
 import React, { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import {
+  ALL_MODULES,
+  ADVANCED,
+  CORE,
+  getInstalledModes,
+  ModeId,
+  PageDef,
+} from "./core/modules";
 
 // Live state shown in the header SysInfoBlock — polled every 2s
 // from the same Rust commands the ServerPage uses, so the two views
-// can't disagree. ServerStatus matches src-tauri/src/server.rs
-// `ServerStatus`; VramStatus matches src-tauri/src/hardware.rs.
+// can't disagree.
 type ServerStatusLite = {
   running: boolean;
   model_id: string | null;
@@ -51,19 +57,10 @@ function useLiveSysInfo() {
   }, []);
   return { server, vram };
 }
-import {
-  ALL_MODULES,
-  ADVANCED,
-  CORE,
-  getInstalledModes,
-  ModeId,
-  PageDef,
-} from "./core/modules";
 
 // Track the live viewport so HybridFrame fills the window instead
-// of being clipped to a fixed 1600x960 box. With decorations:false
-// any size mismatch (display scaling, future window resize) clips
-// the chrome on the right/bottom.
+// of being clipped to a fixed 1600x960 box. On display scaling /
+// resize, the fluid math keeps the inner content sized correctly.
 function useViewportSize() {
   const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight });
   useEffect(() => {
@@ -72,61 +69,6 @@ function useViewportSize() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   return size;
-}
-
-// The window is `decorations: false` (see tauri.conf.json) — the
-// HybridFrame chrome IS the window border. These three buttons are
-// the only system controls we provide; drag-to-move is wired via
-// the data-tauri-drag-region attribute on the ModeBar.
-function WindowControls() {
-  const w = getCurrentWindow();
-  const btn: React.CSSProperties = {
-    width: 36, height: 28, border: "none", background: "transparent",
-    color: "#dadcdf", fontSize: 14, cursor: "pointer", userSelect: "none",
-    display: "flex", alignItems: "center", justifyContent: "center",
-  };
-  return (
-    <div style={{
-      position: "absolute", top: 8, right: 14, zIndex: 50,
-      display: "flex", gap: 2,
-    }}>
-      <button title="Minimize" style={btn} onClick={() => w.minimize()}>—</button>
-      <button title="Maximize" style={btn} onClick={() => w.toggleMaximize()}>▢</button>
-      <button title="Close" style={{ ...btn, color: "#ff8080" }} onClick={() => w.close()}>✕</button>
-    </div>
-  );
-}
-
-// With decorations:false the native resize borders are gone, so we
-// paint 8 invisible 6-pixel hot regions around the window edges and
-// route mousedown into Tauri's startResizeDragging() — same model as
-// VS Code, Discord, etc. Without this the window would be locked at
-// its initial size.
-type ResizeDir = "North" | "South" | "East" | "West" | "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
-function ResizeEdges() {
-  const w = getCurrentWindow();
-  const begin = (dir: ResizeDir) => (e: React.MouseEvent) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    // Tauri 2 expects a string union; TS types here are loose since
-    // @tauri-apps/api doesn't re-export ResizeDirection cleanly.
-    (w as any).startResizeDragging(dir);
-  };
-  const T = 6;          // grab thickness (px) along straight edges
-  const C = 14;         // grab size (px) of corner squares
-  const base: React.CSSProperties = { position: "absolute", zIndex: 60, background: "transparent" };
-  return (
-    <>
-      <div onMouseDown={begin("North")}      style={{ ...base, top: 0, left: C, right: C, height: T, cursor: "ns-resize" }} />
-      <div onMouseDown={begin("South")}      style={{ ...base, bottom: 0, left: C, right: C, height: T, cursor: "ns-resize" }} />
-      <div onMouseDown={begin("West")}       style={{ ...base, left: 0, top: C, bottom: C, width: T, cursor: "ew-resize" }} />
-      <div onMouseDown={begin("East")}       style={{ ...base, right: 0, top: C, bottom: C, width: T, cursor: "ew-resize" }} />
-      <div onMouseDown={begin("NorthWest")}  style={{ ...base, top: 0, left: 0, width: C, height: C, cursor: "nwse-resize" }} />
-      <div onMouseDown={begin("NorthEast")}  style={{ ...base, top: 0, right: 0, width: C, height: C, cursor: "nesw-resize" }} />
-      <div onMouseDown={begin("SouthWest")}  style={{ ...base, bottom: 0, left: 0, width: C, height: C, cursor: "nesw-resize" }} />
-      <div onMouseDown={begin("SouthEast")}  style={{ ...base, bottom: 0, right: 0, width: C, height: C, cursor: "nwse-resize" }} />
-    </>
-  );
 }
 
 // Minimums match tauri.conf.json window.{minWidth,minHeight} so the
@@ -199,13 +141,10 @@ function HybridFrame({ children, outerW, outerH }: {
   return (
     <div style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"#0e1117", overflow:"hidden" }}>{children}</div>
-      {/* The four chrome bars double as drag-regions: any visible
-          part of the frame acts like a titlebar, the way the user
-          intuitively expects on a frameless window. */}
-      <div data-tauri-drag-region style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:FRAME_BG }} />
-      <div data-tauri-drag-region style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:FRAME_BG }} />
-      <div data-tauri-drag-region style={{ position:"absolute", left:leftBar.x,  top:leftBar.y,  width:leftBar.w,  height:leftBar.h,  background:FRAME_BG }} />
-      <div data-tauri-drag-region style={{ position:"absolute", left:rightBar.x, top:rightBar.y, width:rightBar.w, height:rightBar.h, background:FRAME_BG }} />
+      <div style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:FRAME_BG }} />
+      <div style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:FRAME_BG }} />
+      <div style={{ position:"absolute", left:leftBar.x,  top:leftBar.y,  width:leftBar.w,  height:leftBar.h,  background:FRAME_BG }} />
+      <div style={{ position:"absolute", left:rightBar.x, top:rightBar.y, width:rightBar.w, height:rightBar.h, background:FRAME_BG }} />
       <svg width={outerW} height={outerH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
         <rect x={outerL + 1} y={outerT + 1} width={outerW2 - 2} height={outerH2 - 2} rx={14} ry={14} fill="none" stroke={FRAME_COLOR} strokeWidth={1} />
         <rect x={innerL} y={innerT} width={innerW} height={innerH} rx={10} ry={10} fill="none" stroke={FRAME_ACCENT} strokeWidth={1} />
@@ -286,7 +225,7 @@ function ModeBar({
   const visibleToggles = TOGGLES.filter(t => installed.includes(t.id as ModeId));
 
   return (
-    <div data-ui="AppHeader" data-tauri-drag-region style={{
+    <div data-ui="AppHeader" style={{
       height: 80,
       display: "grid", gridTemplateColumns: "auto 1fr auto",
       alignItems: "center", padding: "10px 50px 10px 20px", gap: 16,
@@ -501,31 +440,24 @@ export default function AppShell() {
   const vp = useViewportSize();
 
   return (
-    <div style={{ position: "relative", width: vp.w, height: vp.h, overflow: "hidden" }}>
-      {/* ResizeEdges + WindowControls live OUTSIDE HybridFrame so
-          their absolute coordinates are anchored to the real window
-          (0,0)..(vp.w,vp.h), not to the inner clipped content area. */}
-      <ResizeEdges />
-      <WindowControls />
-      <HybridFrame outerW={vp.w} outerH={vp.h}>
-        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-          <ModeBar
-            mode={mode}
-            setMode={handleSetMode}
-            advancedOpen={advancedOpen}
-            setAdvancedOpen={handleSetAdvanced}
-            installed={installed}
-          />
-          <SubTabs
-            pages={visiblePages}
-            activeKey={activeKey}
-            onChange={setActiveKey}
-          />
-          <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
-            {PageBody ? <PageBody /> : null}
-          </div>
+    <HybridFrame outerW={vp.w} outerH={vp.h}>
+      <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+        <ModeBar
+          mode={mode}
+          setMode={handleSetMode}
+          advancedOpen={advancedOpen}
+          setAdvancedOpen={handleSetAdvanced}
+          installed={installed}
+        />
+        <SubTabs
+          pages={visiblePages}
+          activeKey={activeKey}
+          onChange={setActiveKey}
+        />
+        <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
+          {PageBody ? <PageBody /> : null}
         </div>
-      </HybridFrame>
-    </div>
+      </div>
+    </HybridFrame>
   );
 }

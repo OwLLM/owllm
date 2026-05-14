@@ -23,6 +23,9 @@ pub struct ModelInfo {
     pub model_id: String,
     pub port: Option<u16>,
     pub base_model: Option<String>,
+    /// Size of the GGUF in MiB. Useful for the Models page so the
+    /// user can sort by disk footprint without a separate stat call.
+    pub size_mib: Option<u64>,
 }
 
 #[tauri::command]
@@ -50,10 +53,14 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("unknown")
                 .to_string();
+            let size_mib = std::fs::metadata(&path)
+                .ok()
+                .map(|m| m.len() / 1024 / 1024);
             ModelInfo {
                 model_id: id,
                 port: Some(base_port.saturating_add(i as u16)),
                 base_model: Some(path.to_string_lossy().into_owned()),
+                size_mib,
             }
         })
         .collect();

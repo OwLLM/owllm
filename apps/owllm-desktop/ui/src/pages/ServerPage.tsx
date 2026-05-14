@@ -19,6 +19,7 @@
 // llama.cpp with CREATE_NO_WINDOW directly from Rust.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 // Real Page_icons PNG served by vite.config.ts middleware
 // (same pattern as AgentsPage.tsx / CodePage.tsx).
@@ -35,6 +36,7 @@ type ServerStatus = {
   port: number | null;
   message: string;
 };
+type ServerLog = { stream: "stdout" | "stderr"; line: string };
 
 // Thin wrappers over the native Tauri commands. No HTTP, no proxy.
 async function listModels(): Promise<ModelInfo[]> {
@@ -886,7 +888,25 @@ export default function ServerPage() {
     setLogs((prev) => [...prev, line].slice(-2000));
   }
 
+  // Live log stream from the native server.rs supervisor — emits a
+  // `server-log` event per stdout/stderr line of the llama.cpp child.
+  useEffect(() => {
+    const unlisten = listen<ServerLog>("server-log", (ev) => {
+      const p = ev.payload;
+      const prefix = p.stream === "stderr" ? "[stderr] " : "";
+      setLogs((prev) => [...prev, `${prefix}${p.line}`].slice(-2000));
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
   useEffect(() => { refreshAll(); }, []);
+  // Poll status every 2s so the UI tracks crashes/exits.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      serverStatus().then(st => setServerState(JSON.stringify(st, null, 2))).catch(() => {});
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, []);
 
   async function refreshAll() {
     setBusy("Loading model registry");

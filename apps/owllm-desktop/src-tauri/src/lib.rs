@@ -81,10 +81,11 @@ pub fn run() {
 #[cfg(windows)]
 mod win_nc {
     use std::sync::OnceLock;
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, GetWindowLongPtrW, SetWindowLongPtrW,
-        GWLP_WNDPROC, WM_NCCALCSIZE,
+        CallWindowProcW, DefWindowProcW, GetSystemMetrics, GetWindowLongPtrW,
+        IsZoomed, SetWindowLongPtrW, GWLP_WNDPROC, NCCALCSIZE_PARAMS,
+        SM_CXFRAME, SM_CXPADDEDBORDER, SM_CYFRAME, WM_NCCALCSIZE,
     };
 
     /// Original window proc pointer, captured the first time we
@@ -110,8 +111,29 @@ mod win_nc {
         hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
     ) -> LRESULT {
         if msg == WM_NCCALCSIZE && wparam.0 != 0 {
-            // wParam != 0 means "give me the new client rect". Return 0
-            // → the client rect equals the proposed window rect.
+            // wParam != 0 means "give me the new client rect". For a
+            // frameless window we normally collapse the client area to
+            // the whole proposed window rect (return 0).
+            //
+            // When the window is MAXIMIZED, Windows positions it so
+            // that ~8px of resize border on each side hangs OFF-screen
+            // (that's how a standard window hides those edges). If we
+            // accept that rect as-is, our content paints those 8px
+            // off-screen — the user sees a "big pad on the top and
+            // right". The fix is the standard Win32 dance: inset the
+            // proposed client rect by SM_CXFRAME + SM_CXPADDEDBORDER
+            // on each side when IsZoomed() is true so the content
+            // shrinks back into the visible work area.
+            let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
+            if !params.is_null() && IsZoomed(hwnd).as_bool() {
+                let inset_x = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                let inset_y = GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                let r: &mut RECT = &mut (*params).rgrc[0];
+                r.left   += inset_x;
+                r.top    += inset_y;
+                r.right  -= inset_x;
+                r.bottom -= inset_y;
+            }
             return LRESULT(0);
         }
         if let Some(&p) = ORIGINAL_PROC.get() {

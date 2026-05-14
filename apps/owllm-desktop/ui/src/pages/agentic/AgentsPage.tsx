@@ -27,6 +27,12 @@ type TelegramCfg = { bot_token: string; project_id: string; auto_approve?: boole
 type WhatsAppCfg = { access_token: string; project_id: string; auto_approve?: boolean };
 type BridgeConfigs = { telegram: TelegramCfg; whatsapp: WhatsAppCfg };
 type ServerStatus = { running: boolean; model_id: string | null; port: number | null; message: string };
+type ModelInfo = {
+  model_id: string;
+  port: number | null;
+  base_model: string | null;
+  size_mib: number | null;
+};
 
 // ---------- Domain types ----------
 type AgentSpec = {
@@ -388,9 +394,20 @@ function FlowHeader({
 }
 
 // TeamInfoCard — agent_info_card.py:394-521. Driven by the active team.
-function TeamInfoCard({ team }: { team: Team | null }) {
+// Now with a "TEAM MODEL" row at the bottom: a single select that
+// assigns the model to EVERY agent on the team at once (clears per-
+// agent overrides so the team genuinely runs on one model again).
+function TeamInfoCard({
+  team, models, teamModel, onChangeTeamModel, serverModelId,
+}: {
+  team: Team | null;
+  models: ModelInfo[];
+  teamModel: string;
+  onChangeTeamModel: (id: string) => void;
+  serverModelId: string | null;
+}) {
   const CARD_W = 320;
-  const CARD_H = 264;
+  const CARD_H = 312; // bumped from 264 to fit the MODEL row below stats.
   if (!team) {
     return (
       <div data-ui="TeamInfoCard" style={{ width:CARD_W, height:CARD_H, borderRadius:12, background:"var(--bg-panel)", border:"1px dashed rgba(255,255,255,0.10)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, textAlign:"center", color:"var(--fg-subtle)", fontSize:12 }}>
@@ -402,8 +419,9 @@ function TeamInfoCard({ team }: { team: Team | null }) {
   const info_x = pic_x + pic_size + 18;
   const info_y = pic_y - 4;
   const info_w = CARD_W - 14 - info_x;
-  const stat_y = CARD_H - 38 - 44;
-  const desc = team.description.length > 240 ? team.description.slice(0, 237) + "…" : team.description;
+  const stat_y = pic_y + pic_size + 30;
+  const model_y = stat_y + 36;
+  const desc = team.description.length > 200 ? team.description.slice(0, 197) + "…" : team.description;
   return (
     <div data-ui="TeamInfoCard" style={{ position:"relative", width:CARD_W, height:CARD_H, borderRadius:12, background:"linear-gradient(135deg, rgba(18,22,34,0.90) 0%, rgba(8,11,18,0.90) 100%)", border:"1.6px solid transparent", overflow:"hidden" }}>
       <div style={{ position:"absolute", inset:0, borderRadius:12, padding:"1.6px", background:"linear-gradient(135deg, rgba(92,240,255,0.86) 0%, rgba(192,138,255,0.86) 100%)", WebkitMask:"linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)", WebkitMaskComposite:"xor", maskComposite:"exclude", pointerEvents:"none" }} />
@@ -424,6 +442,39 @@ function TeamInfoCard({ team }: { team: Team | null }) {
         <span style={{ width:90 }}>{team.agents.length}</span>
         <span>{team.edges.length}</span>
       </div>
+      {/* MODEL row — applies to every agent on the team. */}
+      <div style={{ position:"absolute", left:14, top:model_y, width:CARD_W - 28, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", fontFamily:"Segoe UI", letterSpacing:0.4 }}>
+        <span style={{ flex:1 }}>TEAM MODEL · assigns to every agent</span>
+      </div>
+      <select
+        data-ui="TeamModelSelect"
+        value={teamModel}
+        onChange={e => onChangeTeamModel(e.target.value)}
+        title={teamModel
+          ? `Every agent on this team will use '${teamModel}'.`
+          : (serverModelId
+              ? `No team default — agents fall back to whatever model the Server tab is running ('${serverModelId}').`
+              : "No team default and no server running. Pick a model here OR start one on the Server tab.")
+        }
+        style={{
+          position:"absolute", left:14, top:model_y + 16, width:CARD_W - 28, height:30,
+          padding:"0 10px", borderRadius:8,
+          background:"var(--bg-input)", color:"var(--fg-strong)",
+          border:"1px solid var(--border)",
+          fontSize:12,
+        }}
+      >
+        <option value="">
+          {serverModelId
+            ? `(use server model · ${serverModelId})`
+            : "(use server model — start one on the Server tab)"}
+        </option>
+        {models.map(m => (
+          <option key={m.model_id} value={m.model_id}>
+            {m.model_id}{m.size_mib != null ? `  ·  ${Math.round(m.size_mib / 100) / 10} GiB` : ""}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
@@ -1102,6 +1153,7 @@ function OrchestratorPane({
   agentLogs, runError, serverState,
   selectedAgent, activeAgent,
   team, phase,
+  models, modelFor, onPickAgentModel,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
   runError: string | null;
@@ -1110,11 +1162,13 @@ function OrchestratorPane({
   activeAgent: string | null;
   team: Team | null;
   phase: DispatchPhase;
+  models: ModelInfo[];
+  /// Resolved model id for the agent (per-agent → team default → server fallback).
+  modelFor: (agentName: string) => string;
+  /// Set the per-agent model override. Pass an empty string to clear.
+  onPickAgentModel: (agentName: string, modelId: string) => void;
 }) {
   const [activeTab, setActiveTab] = useState<"reply"|"thought">("reply");
-  const modelLabel = serverState.running && serverState.model_id
-    ? `${serverState.model_id} (port ${serverState.port})`
-    : "(no model running)";
   // Pick which buffer to show: explicit selection > currently-active
   // agent > orchestrator (so the user sees the plan even if nothing
   // is selected yet) > "you" (which holds the goal echo).
@@ -1169,7 +1223,34 @@ function OrchestratorPane({
       </div>
       <div data-ui="PickerHost" style={{ padding:"0 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Model</span>
-        <button style={{ flex:1, height:28, padding:"0 10px", background:"var(--bg-surface)", color: serverState.running ? "var(--fg)" : "var(--fg-subtle)", border:"1px solid var(--border)", borderRadius:6, fontSize:12, textAlign:"left" }} title={serverState.message}>{modelLabel}</button>
+        <select
+          data-ui="AgentModelSelect"
+          value={modelFor(focus)}
+          onChange={e => onPickAgentModel(focus, e.target.value)}
+          disabled={focus === "you" || focus === "system"}
+          title={
+            focus === "you" || focus === "system"
+              ? "Select an agent on the canvas to assign a model."
+              : `Override the model for ${displayLabel(focus)}. Falls back to the team's default, then the running server.`
+          }
+          style={{
+            flex:1, height:28, padding:"0 10px",
+            background:"var(--bg-surface)", color:"var(--fg)",
+            border:"1px solid var(--border)", borderRadius:6,
+            fontSize:12,
+          }}
+        >
+          <option value="">
+            {serverState.running && serverState.model_id
+              ? `(use team / server model · ${serverState.model_id})`
+              : "(use team / server model — none running)"}
+          </option>
+          {models.map(m => (
+            <option key={m.model_id} value={m.model_id}>
+              {m.model_id}{m.size_mib != null ? `  ·  ${Math.round(m.size_mib / 100) / 10} GiB` : ""}
+            </option>
+          ))}
+        </select>
       </div>
       <div data-ui="VoiceHost" style={{ padding:"0 12px 8px", display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Voice</span>
@@ -1430,6 +1511,19 @@ export default function AgentsPage() {
 
   const [locationOverride, setLocationOverride] = useState<string>("");
   const [trustWritesOverride, setTrustWritesOverride] = useState<boolean | null>(null);
+  /// Optional override of the project's team_default_model_id. When
+  /// null we render the saved value; when non-null we render this and
+  /// persist it on a debounce.
+  const [teamModelOverride, setTeamModelOverride] = useState<string | null>(null);
+  /// Per-agent model picks. Keys are agent names (matching team.agents);
+  /// values are the model_id chosen on the OrchestratorPane Model
+  /// dropdown. Empty string means "no override" (fall back to the team
+  /// default → server model).
+  const [perAgentModel, setPerAgentModel] = useState<Map<string, string>>(new Map());
+  /// Discovered GGUFs from the model registry. Loaded once on mount;
+  /// refreshed when the user re-opens the Server tab (the registry
+  /// itself is disk-backed and stable for a given session).
+  const [models, setModels] = useState<ModelInfo[]>([]);
 
   const [goal, setGoal] = useState<string>("summarize the last commit and propose a follow-up");
   const [busy, setBusy] = useState<boolean>(false);
@@ -1526,7 +1620,7 @@ export default function AgentsPage() {
   useEffect(() => {
     let dead = false;
     (async () => {
-      const [rawProjects, rawTeams, rawRoles, rawBridges] = await Promise.all([
+      const [rawProjects, rawTeams, rawRoles, rawBridges, rawModels] = await Promise.all([
         invoke<ProjectRow[]>("list_projects").catch(() => [] as ProjectRow[]),
         invoke<TeamTemplateBackend[]>("list_team_templates").catch(() => [] as TeamTemplateBackend[]),
         invoke<AgentRoleBackend[]>("list_agent_roles").catch(() => [] as AgentRoleBackend[]),
@@ -1534,9 +1628,11 @@ export default function AgentsPage() {
           telegram: { bot_token: "", project_id: "" },
           whatsapp: { access_token: "", project_id: "" },
         } as BridgeConfigs)),
+        invoke<ModelInfo[]>("list_models").catch(() => [] as ModelInfo[]),
       ]);
       if (dead) return;
       setProjects(rawProjects);
+      setModels(rawModels);
       if (rawProjects.length > 0) {
         setSelectedProjectId(rawProjects[0].id);
         setLocationOverride(rawProjects[0].location || "");
@@ -1582,6 +1678,10 @@ export default function AgentsPage() {
     if (selectedProject) {
       setLocationOverride(selectedProject.location || "");
       setTrustWritesOverride(null);
+      setTeamModelOverride(null);
+      // Wipe per-agent model picks too — they belong to a single
+      // project session, not across projects.
+      setPerAgentModel(new Map());
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProject?.id]);
@@ -1602,6 +1702,9 @@ export default function AgentsPage() {
     setSelectedEdgeIdx(null);
     setNodePositions(null);
     setSelectedNode(null);
+    // Per-agent model picks reference agent NAMES from the previous
+    // team — those names may not exist in the new team. Drop them.
+    setPerAgentModel(new Map());
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTeam?.id]);
 
@@ -1667,6 +1770,26 @@ export default function AgentsPage() {
     return () => window.clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationOverride, selectedProject?.id]);
+
+  // Persist the team default model id when the user picks one on the
+  // TeamInfoCard. Same debounced shape as location/trust_writes.
+  useEffect(() => {
+    if (!selectedProject) return;
+    if (teamModelOverride === null) return;
+    if (teamModelOverride === selectedProject.team_default_model_id) return;
+    const id = window.setTimeout(async () => {
+      try {
+        await invoke("update_project", {
+          input: { id: selectedProject.id, team_default_model_id: teamModelOverride },
+        });
+        await reloadProjects();
+      } catch (e) {
+        console.error("persist team_default_model_id failed", e);
+      }
+    }, 400);
+    return () => window.clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teamModelOverride, selectedProject?.id]);
 
   // Effective edges: edited copy if present, otherwise the template's.
   const currentEdges: Edge[] = editedEdges ?? (activeTeam?.edges ?? []);
@@ -1764,6 +1887,37 @@ export default function AgentsPage() {
 
   const trustWrites = trustWritesOverride ?? (selectedProject?.trust_writes ?? false);
 
+  // Effective team default: pending override > saved on project >
+  // empty string (which means "use the server model fallback").
+  const effectiveTeamModel =
+    teamModelOverride ?? selectedProject?.team_default_model_id ?? "";
+
+  // Resolve the model id we should send for a given agent. Priority:
+  //   per-agent override > team default > server's running model > "local"
+  // Empty-string overrides fall through to the next layer. The string
+  // we return is the `model` field in /v1/chat/completions; llama-server
+  // ignores it today but the multi-server path will use it to route.
+  const modelFor = (agentName: string): string => {
+    const per = perAgentModel.get(agentName);
+    if (per && per.trim()) return per;
+    if (effectiveTeamModel.trim()) return effectiveTeamModel;
+    return serverState.model_id ?? "local";
+  };
+  const onPickAgentModel = (agentName: string, modelId: string) => {
+    setPerAgentModel(prev => {
+      const next = new Map(prev);
+      if (modelId.trim() === "") next.delete(agentName);
+      else next.set(agentName, modelId);
+      return next;
+    });
+  };
+  const onPickTeamModel = (modelId: string) => {
+    setTeamModelOverride(modelId);
+    // Picking a team-wide model implies "every agent uses this one" —
+    // wipe per-agent overrides so the UI behaviour matches the intent.
+    setPerAgentModel(new Map());
+  };
+
   const bridgeOn = useMemo(() => {
     if (!selectedProject) return false;
     const t = bridges.telegram;
@@ -1804,7 +1958,6 @@ export default function AgentsPage() {
 
     const orch = findOrchestratorSpec(activeTeam)!;
     const port = serverState.port;
-    const modelId = serverState.model_id ?? "local";
 
     // Anchor the goal in the user log first.
     appendLog("you", { role: "you", color: "#9ad9ff", text });
@@ -1821,7 +1974,7 @@ export default function AgentsPage() {
       const orchPrompt = buildOrchestratorPrompt(activeTeam, roleByName, orch);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchReply = await streamChatCompletion(
-        port, modelId, orchPrompt, text, tempFor(orch, 0.4), ctrl.signal,
+        port, modelFor(orch.name), orchPrompt, text, tempFor(orch, 0.4), ctrl.signal,
         (delta) => streamLog(orch.name, delta),
       );
 
@@ -1858,7 +2011,7 @@ export default function AgentsPage() {
         appendLog(spec.name, { role: "dispatch", color: "#9aa0a6", text: `📩 ${d.instruction}` });
         appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
         const specText = await streamChatCompletion(
-          port, modelId, specPrompt, d.instruction, tempFor(spec, 0.5), ctrl.signal,
+          port, modelFor(spec.name), specPrompt, d.instruction, tempFor(spec, 0.5), ctrl.signal,
           (delta) => streamLog(spec.name, delta),
         );
         specialistReplies.push({ name: spec.name, text: specText.trim() });
@@ -1883,7 +2036,7 @@ export default function AgentsPage() {
       ].join("\n");
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const finalReply = await streamChatCompletion(
-        port, modelId, buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput, tempFor(orch, 0.4), ctrl.signal,
+        port, modelFor(orch.name), buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput, tempFor(orch, 0.4), ctrl.signal,
         (delta) => streamLog(orch.name, delta),
       );
       setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim() }]);
@@ -1961,7 +2114,13 @@ export default function AgentsPage() {
                 {/* Overlay only on the orbital diagram — the graph
                     view needs the full canvas for its cards. */}
                 <div style={{ position:"absolute", top:8, left:8, width:360 }}>
-                  <TeamInfoCard team={renderTeam} />
+                  <TeamInfoCard
+                    team={renderTeam}
+                    models={models}
+                    teamModel={effectiveTeamModel}
+                    onChangeTeamModel={onPickTeamModel}
+                    serverModelId={serverState.model_id}
+                  />
                   <SuperUserCard
                     team={renderTeam}
                     roleByName={roleByName}
@@ -2001,6 +2160,9 @@ export default function AgentsPage() {
             activeAgent={activeAgent}
             team={renderTeam}
             phase={phase}
+            models={models}
+            modelFor={modelFor}
+            onPickAgentModel={onPickAgentModel}
           />
         </div>
       </div>

@@ -16,6 +16,7 @@
 // user-saved overrides under LLM/data/. No more baked arrays.
 import React, { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import SkillLibraryDialog from "./SkillLibraryDialog";
 
 const ICONS = "/Page_icons";
 const AGENT_ICON_DIR = `${ICONS}/Agents`;
@@ -1152,34 +1153,36 @@ export default function StudioPage() {
   // banner CTA / 📚 Skill Library button. Hides plain roles so only
   // SKILL.md packs remain.
   const [skillsOnly, setSkillsOnly] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const [teams, setTeams] = useState<Team[]>(TEAMS_FALLBACK);
   const [agents, setAgents] = useState<AgentDef[]>(AGENTS_FALLBACK);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  const loadAll = async () => {
+    try {
+      const [rawTeams, rawAgents, rawSkills] = await Promise.all([
+        invoke<TeamTemplateBackend[]>("list_team_templates"),
+        invoke<AgentRoleBackend[]>("list_agent_roles"),
+        invoke<SkillPackBackend[]>("list_skill_packs"),
+      ]);
+      setTeams(rawTeams.map(toTeam));
+      // Roles + SKILL.md packs both surface as agent cards. Roles
+      // come first (built-in identities), skills follow (user-
+      // installed capabilities). Each carries its own provenance
+      // flags so the AgentDetailPanel can label them.
+      setAgents([
+        ...rawAgents.map(toAgentDef),
+        ...rawSkills.map(skillToAgentDef),
+      ]);
+    } catch (e) {
+      setLoadError(String(e));
+    }
+  };
   useEffect(() => {
     let dead = false;
-    (async () => {
-      try {
-        const [rawTeams, rawAgents, rawSkills] = await Promise.all([
-          invoke<TeamTemplateBackend[]>("list_team_templates"),
-          invoke<AgentRoleBackend[]>("list_agent_roles"),
-          invoke<SkillPackBackend[]>("list_skill_packs"),
-        ]);
-        if (dead) return;
-        setTeams(rawTeams.map(toTeam));
-        // Roles + SKILL.md packs both surface as agent cards. Roles
-        // come first (built-in identities), skills follow (user-
-        // installed capabilities). Each carries its own provenance
-        // flags so the AgentDetailPanel can label them.
-        setAgents([
-          ...rawAgents.map(toAgentDef),
-          ...rawSkills.map(skillToAgentDef),
-        ]);
-      } catch (e) {
-        if (!dead) setLoadError(String(e));
-      }
-    })();
+    (async () => { if (!dead) await loadAll(); })();
     return () => { dead = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const filteredTeams = useMemo(() => {
@@ -1262,12 +1265,10 @@ export default function StudioPage() {
     );
   };
   const handleOpenSkillLibrary = () => {
-    // Switch to the Agents view + apply the skills-only filter so the
-    // user only sees SKILL.md packs (Anthropic helpers + any local
-    // installs under LLM/data/skills/).
-    setView("agents");
-    setSkillsOnly(true);
-    setAgentQuery("");
+    // Open the modal port of widgets/skill_library_dialog.py — git-
+    // clones a curated source, walks for SKILL.md, lets the user
+    // install with Anthropic→OWLLM tool-name aliasing applied.
+    setLibraryOpen(true);
   };
 
   return (
@@ -1403,6 +1404,15 @@ export default function StudioPage() {
           </div>
         </>
       )}
+
+      {/* Modal port of widgets/skill_library_dialog.py — git-clones
+          curated sources (Anthropic, obra/superpowers, custom URL),
+          discovers SKILL.md, installs with alias rewriting. */}
+      <SkillLibraryDialog
+        open={libraryOpen}
+        onClose={() => setLibraryOpen(false)}
+        onChange={() => loadAll()}
+      />
     </div>
   );
 }

@@ -19,6 +19,7 @@ mod models;
 mod paths;
 mod projects;
 mod server;
+mod skill_library;
 
 use tauri::Manager;
 
@@ -59,6 +60,13 @@ pub fn run() {
             server::server_status,
             server::server_start,
             server::server_stop,
+            skill_library::list_skill_sources,
+            skill_library::fetch_skill_source,
+            skill_library::discover_skills,
+            skill_library::install_skill,
+            skill_library::uninstall_skill,
+            skill_library::list_installed_skill_folders,
+            skill_library::read_skill_md,
         ])
         .run(tauri::generate_context!())
         .expect("error while running OwLLM Desktop");

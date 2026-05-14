@@ -131,18 +131,32 @@ function HybridFrame({ children, outerW, outerH }: {
   const so = SHIFT_OUT;
   const outerL = parent_x - so;
   const outerT = parent_y - so;
-  const outerW2 = parent_w + 2 * so + t / 2;
+  // Outer cyan rect spans symmetrically around the content panel.
+  // Old code added `+ t / 2` here (and to innerW below), pushing the
+  // right edge 9 px beyond the symmetric layout — that's why the
+  // right padding rendered ~1 px while the other three sides were
+  // ~10 px. With this off, all four outer edges are 10 px from the
+  // window edge.
+  const outerW2 = parent_w + 2 * so;
   const outerH2 = parent_h + 2 * so;
   const outerR = outerL + outerW2;
   const outerB = outerT + outerH2;
   const innerL = parent_x - so + t;
   const innerT = parent_y - so + t;
-  const innerW = parent_w + 2 * so - 2 * t + t / 2;
+  // Same asymmetric `+ t / 2` was here — drop it so the inner accent
+  // rect is centered like the outer one.
+  const innerW = parent_w + 2 * so - 2 * t;
   const innerH = parent_h + 2 * so - 2 * t;
+  // All four cyan bars are now centered on the content rectangle's
+  // edges. leftBar straddles x=parent_x (so half-in, half-out by t/2),
+  // and rightBar mirrors it around parent_x+parent_w. Previously the
+  // right bar started AT parent_x+parent_w and extended outward by
+  // the full t — pushing it ~9 px further right than the left bar
+  // was left, which compounded the outerW2 asymmetry.
   const topBar   = { x: parent_x - so, y: parent_y - so, w: parent_w + 2 * so, h: t };
   const botBar   = { x: parent_x - so, y: parent_y + parent_h - t / 2, w: parent_w + 2 * so, h: t };
   const leftBar  = { x: parent_x - so, y: parent_y - so, w: t, h: parent_h + 2 * so };
-  const rightBar = { x: parent_x + parent_w, y: parent_y - so, w: t, h: parent_h + 2 * so };
+  const rightBar = { x: parent_x + parent_w - so, y: parent_y - so, w: t, h: parent_h + 2 * so };
   const brkL = 36, brkI = 14;
   const bxL = outerL + brkI, bxR = outerR - brkI;
   const byT = outerT + brkI, byB = outerB - brkI;

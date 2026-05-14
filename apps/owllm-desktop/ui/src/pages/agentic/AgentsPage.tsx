@@ -461,8 +461,9 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
 
 // TeamCanvas — agent_team_canvas.py's orbital diagram. Roster from
 // the active team, depth from the routing graph.
-function TeamCanvas({ width, height, team, roleByName }: {
+function TeamCanvas({ width, height, team, roleByName, activeAgent }: {
   width: number; height: number; team: Team | null; roleByName: Map<string, RoleData>;
+  activeAgent: string | null;
 }) {
   const w = width, h = height;
   const card_reserve = Math.min(410, w * 0.35);
@@ -496,9 +497,9 @@ function TeamCanvas({ width, height, team, roleByName }: {
         label: displayLabel(a.name),
         iconRef: agentIconRef(a, roleByName),
         depth: Math.max(1, depths.get(a.name) ?? 1),
-        active: false,
+        active: a.name === activeAgent,
       }));
-  }, [team, roleByName]);
+  }, [team, roleByName, activeAgent]);
 
   const depthMap = useMemo(() => {
     const m = new Map<number, RosterRow[]>();
@@ -717,6 +718,7 @@ type GraphPos = Map<string, { x: number; y: number }>;
 function GraphCanvas({
   width, height, team, roleByName,
   selectedNode, onSelectNode,
+  activeAgent,
   edges, onEdgesChange,
   selectedEdgeIdx, onSelectEdge,
   positions, onPositionsChange,
@@ -724,6 +726,7 @@ function GraphCanvas({
   width: number; height: number;
   team: Team | null; roleByName: Map<string, RoleData>;
   selectedNode: string | null; onSelectNode: (name: string | null) => void;
+  activeAgent: string | null;
   edges: Edge[]; onEdgesChange: (edges: Edge[]) => void;
   selectedEdgeIdx: number | null; onSelectEdge: (idx: number | null) => void;
   positions: GraphPos | null; onPositionsChange: (p: GraphPos) => void;
@@ -937,6 +940,7 @@ function GraphCanvas({
           const isOrch = n.name === orchName;
           const accent = isOrch ? "#ffd76a" : LAYER_COLORS[(n.depth + 1) % LAYER_COLORS.length];
           const sel = selectedNode === n.name;
+          const isActive = activeAgent === n.name;
           const isDragTarget = drag?.over === n.name;
           return (
             <div
@@ -954,13 +958,15 @@ function GraphCanvas({
               style={{
                 position: "absolute", left: n.x, top: n.y,
                 width: NODE_W, height: NODE_H, borderRadius: 14,
-                background: sel
+                background: sel || isActive
                   ? "linear-gradient(180deg, #232a3a 0%, #1a1f2c 100%)"
                   : isDragTarget
                   ? "linear-gradient(180deg, #1d2a32 0%, #11151e 100%)"
                   : "linear-gradient(180deg, #1a1f2c 0%, #11151e 100%)",
-                border: `1.8px solid ${sel ? accent : isDragTarget ? "var(--accent)" : "rgba(255,255,255,0.07)"}`,
-                boxShadow: sel
+                border: `1.8px solid ${isActive ? "#3cf26b" : sel ? accent : isDragTarget ? "var(--accent)" : "rgba(255,255,255,0.07)"}`,
+                boxShadow: isActive
+                  ? "0 0 0 3px rgba(60,242,107,0.40), 0 6px 22px rgba(0,0,0,0.6)"
+                  : sel
                   ? `0 0 0 2px ${accent}55, 0 6px 22px rgba(0,0,0,0.6)`
                   : isDragTarget
                   ? "0 0 0 2px rgba(92,240,255,0.40), 0 6px 22px rgba(0,0,0,0.6)"
@@ -1034,59 +1040,117 @@ function GraphCanvas({
   );
 }
 
-// OrchestratorPane — RIGHT pane of _build_roster (agents_page.py:2683-2779).
-// Model picker shows the live server model + port.
-function OrchestratorPane({ messages, runError, serverState }: {
-  messages: GoalMsg[]; runError: string | null; serverState: ServerStatus;
+// OrchestratorPane — RIGHT pane. Now driven by the active agent's
+// per-agent log buffer; click a node on the canvas to view its log
+// (default = whichever agent the dispatcher is currently driving,
+// fallback = orchestrator).
+function OrchestratorPane({
+  agentLogs, runError, serverState,
+  selectedAgent, activeAgent,
+  team, phase,
+}: {
+  agentLogs: Map<string, GoalMsg[]>;
+  runError: string | null;
+  serverState: ServerStatus;
+  selectedAgent: string | null;
+  activeAgent: string | null;
+  team: Team | null;
+  phase: DispatchPhase;
 }) {
   const [activeTab, setActiveTab] = useState<"reply"|"thought">("reply");
   const modelLabel = serverState.running && serverState.model_id
     ? `${serverState.model_id} (port ${serverState.port})`
     : "(no model running)";
+  // Pick which buffer to show: explicit selection > currently-active
+  // agent > orchestrator (so the user sees the plan even if nothing
+  // is selected yet) > "you" (which holds the goal echo).
+  const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
+  const focus =
+    selectedAgent ??
+    activeAgent ??
+    orchName ??
+    "you";
+  const focusLabel = focus === "you"
+    ? "📜 You"
+    : team
+    ? `📜 ${displayLabel(focus)}`
+    : `📜 ${focus}`;
+
+  // Filter the focused agent's messages. The "you" buffer always
+  // contains just the user goal echo; useful as a sanity check.
+  const messages = agentLogs.get(focus) ?? [];
+
+  // Phase indicator pill for the header.
+  const phaseColor = phase === "idle" || phase === "done"
+    ? "#7d8595"
+    : phase === "planning"
+    ? "#ffd97a"
+    : phase === "dispatching"
+    ? "#3cf26b"
+    : "#c08aff"; // integrating
+  const phaseText = phase === "idle"
+    ? "Idle"
+    : phase === "planning"
+    ? "Planning…"
+    : phase === "dispatching"
+    ? `Dispatching${activeAgent ? `: ${displayLabel(activeAgent)}` : ""}`
+    : phase === "integrating"
+    ? "Integrating…"
+    : "Done";
+
   return (
     <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"var(--bg-elevated)", padding:"0 0 0 8px" }}>
       <div data-ui="LogHeader" style={{ padding:"8px 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
-        <div style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", letterSpacing:0.3 }}>Click an agent on the canvas to view its log.</div>
-        <div style={{ flex:1 }} />
+        <div style={{ fontSize:15, fontWeight:700, color:"var(--fg-strong)", letterSpacing:0.3, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", flex:1 }}>
+          {focusLabel}
+        </div>
+        <span style={{
+          fontSize:10, fontWeight:700, letterSpacing:0.6, textTransform:"uppercase",
+          color: phaseColor,
+          background: `${phaseColor}22`,
+          border: `1px solid ${phaseColor}55`,
+          borderRadius:999, padding:"2px 8px",
+          whiteSpace:"nowrap",
+        }}>{phaseText}</span>
       </div>
       <div data-ui="PickerHost" style={{ padding:"0 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Model</span>
-        <button style={{ flex:1, height:28, padding:"0 10px", background:"rgba(0,0,0,0.28)", color: serverState.running ? "#e6e8eb" : "#7d8595", border:"none", borderRadius:6, fontSize:12, textAlign:"left" }} title={serverState.message}>{modelLabel}</button>
+        <button style={{ flex:1, height:28, padding:"0 10px", background:"var(--bg-surface)", color: serverState.running ? "var(--fg)" : "var(--fg-subtle)", border:"1px solid var(--border)", borderRadius:6, fontSize:12, textAlign:"left" }} title={serverState.message}>{modelLabel}</button>
       </div>
       <div data-ui="VoiceHost" style={{ padding:"0 12px 8px", display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Voice</span>
         <input type="checkbox" defaultChecked style={{ width:13, height:13, accentColor:"var(--accent)" }} title="Speak this agent's replies aloud" />
-        <button style={{ flex:1, height:28, padding:"0 10px", background:"rgba(0,0,0,0.28)", color:"var(--fg)", border:"none", borderRadius:6, fontSize:12, textAlign:"left" }}>Auto voice</button>
-        <input type="number" defaultValue={0} style={{ width:78, height:28, padding:"0 8px", background:"rgba(0,0,0,0.28)", color:"var(--fg)", border:"none", borderRadius:6, fontSize:12 }} title="Speaking rate (words per minute)" />
-        <button style={{ width:28, height:28, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"none", borderRadius:6, fontSize:12 }} title="Preview this voice">▶</button>
-        <button style={{ width:28, height:28, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"none", borderRadius:6, fontSize:14 }} title="Apply this voice to every agent on the team">➤</button>
+        <button style={{ flex:1, height:28, padding:"0 10px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:12, textAlign:"left" }}>Auto voice</button>
+        <input type="number" defaultValue={0} style={{ width:78, height:28, padding:"0 8px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:12 }} title="Speaking rate (words per minute)" />
+        <button style={{ width:28, height:28, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:12 }} title="Preview this voice">▶</button>
+        <button style={{ width:28, height:28, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:14 }} title="Apply this voice to every agent on the team">➤</button>
       </div>
       <div data-ui="OrchestratorLogTabs" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:"0 0 8px" }}>
-        <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid rgba(120,220,255,0.10)" }}>
-          <button onClick={() => setActiveTab("reply")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "reply" ? "var(--accent)" : "#9aa0a6", fontSize:13, fontWeight:500, borderBottom: activeTab === "reply" ? "1.5px solid #7fdfff" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
-          <button onClick={() => setActiveTab("thought")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "thought" ? "#dcb0ff" : "#9aa0a6", fontSize:13, fontWeight:500, borderBottom: activeTab === "thought" ? "1.5px solid #dcb0ff" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
+        <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)" }}>
+          <button onClick={() => setActiveTab("reply")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "reply" ? "var(--accent)" : "var(--fg-muted)", fontSize:13, fontWeight:500, borderBottom: activeTab === "reply" ? "1.5px solid var(--accent)" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
+          <button onClick={() => setActiveTab("thought")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "thought" ? "#dcb0ff" : "var(--fg-muted)", fontSize:13, fontWeight:500, borderBottom: activeTab === "thought" ? "1.5px solid #dcb0ff" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
           <div style={{ flex:1 }} />
         </div>
-        <div data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-elevated)", border:"1px solid rgba(120,220,255,0.08)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"var(--fg)" }}>
+        <div data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"var(--fg)" }}>
           {runError ? (<div style={{ border:"1px solid #ff9f9f", background:"rgba(255,80,80,0.10)", color:"#ffb0b0", borderRadius:6, padding:8, fontSize:12 }}>{runError}</div>) : null}
           {messages.length === 0 && !runError ? (
-            <div style={{ color:"#7a7f87", fontSize:12 }}>
+            <div style={{ color:"var(--fg-subtle)", fontSize:12 }}>
               {serverState.running && serverState.model_id
-                ? `Ready. Type a goal in the input above and press Run — it goes to ${serverState.model_id}.`
+                ? `Ready. Type a goal above and press Run — the orchestrator will plan, dispatch, and integrate.`
                 : "Start a model on the Server tab first, then type a goal above and click Run."}
             </div>
           ) : null}
           {messages.map((m, i) => (
             <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
-              <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"var(--bg-app)", fontFamily:"Segoe UI, sans-serif" }}>{(m.role[0] || "?").toUpperCase()}</div>
+              <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d", fontFamily:"Segoe UI, sans-serif" }}>{(m.role[0] || "?").toUpperCase()}</div>
               <div style={{ flex:1, background:"var(--bg-surface)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"4px 10px" }}>
                 <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:2, fontFamily:"Segoe UI, sans-serif" }}>{m.role}</div>
-                <div style={{ fontSize:12, color:"var(--fg)", lineHeight:1.4, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap" }}>{m.text}</div>
+                <div style={{ fontSize:12, color:"var(--fg)", lineHeight:1.4, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap" }}>{m.text || (m.role === focus || focus === orchName ? "…" : "")}</div>
               </div>
             </div>
           ))}
         </div>
-        <div data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "block" : "none", margin:"8px 10px 0", padding:10, background:"var(--bg-elevated)", border:"1px solid rgba(220,180,255,0.10)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"var(--fg)" }}>
+        <div data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "block" : "none", margin:"8px 10px 0", padding:10, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"var(--fg)" }}>
           <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>No thought traffic yet — tool calls, reasoning, and events land here while the team runs.</div>
         </div>
       </div>
@@ -1095,6 +1159,177 @@ function OrchestratorPane({ messages, runError, serverState }: {
 }
 
 // ---------- Main ----------
+// ---------- Dispatch loop helpers ----------
+//
+// The agentic team runs entirely in React: it issues sequential
+// /v1/chat/completions calls against the running llama-server, parses
+// the orchestrator's reply for `@agent: instruction` directives, and
+// dispatches each one to the matching specialist. After the
+// specialists finish, the orchestrator gets one more turn to
+// integrate their replies into a final answer for the user.
+//
+// No Python; no Rust dispatch worker. Cancellation goes through an
+// AbortController on each fetch.
+
+const ROLE_COLORS: Record<string, string> = {
+  orchestrator: "#ffd97a",
+  coder:        "#9ad9ff",
+  critic:       "#ff8c8c",
+  researcher:   "#c08aff",
+  operator:     "#a8e6cf",
+  documentation:"#ffc8a2",
+  devops:       "#94a3b8",
+  webapp:       "#82d4f1",
+  assistant:    "#dadcdf",
+};
+function colorForAgent(spec: AgentSpec): string {
+  return ROLE_COLORS[spec.base] ?? ROLE_COLORS[spec.name] ?? "#9ad9ff";
+}
+
+function findOrchestratorSpec(team: Team): AgentSpec | undefined {
+  return (
+    team.agents.find(a => a.name === "orchestrator") ??
+    team.agents.find(a => a.base === "orchestrator") ??
+    team.agents[0]
+  );
+}
+
+function buildOrchestratorPrompt(
+  team: Team,
+  roleByName: Map<string, RoleData>,
+  orch: AgentSpec,
+): string {
+  const specialists = team.agents.filter(a => a.name !== orch.name);
+  const roster = specialists.map(a => {
+    const role = roleByName.get(a.base);
+    const desc = role?.description ?? "";
+    return `  - ${a.name} (${a.base}): ${desc}`;
+  }).join("\n");
+  const orchRole = roleByName.get(orch.base);
+  const baseGuidance = orchRole?.description ?? "Plan the work, dispatch one task at a time, integrate the results.";
+  return [
+    `You are the orchestrator of the '${team.display}' team.`,
+    "",
+    baseGuidance,
+    "",
+    `YOUR SPECIALISTS (use their EXACT names when dispatching):`,
+    roster || "  (none — solo)",
+    "",
+    "HOW TO RESPOND:",
+    "1. Start with a short paragraph that restates the user's goal in your own words.",
+    "2. Sketch a brief plan (2-5 bullet points).",
+    "3. Dispatch tasks using EXACTLY this format, ONE per line, ONE specialist per line:",
+    "      @<agent_name>: <clear, specific instruction>",
+    "4. Dispatch only the agents you actually need. Skip dispatches if the goal is trivial enough to answer yourself.",
+    "5. After dispatches run, you'll be invoked again with the specialists' replies — produce the final answer for the user then.",
+  ].join("\n");
+}
+
+function buildSpecialistPrompt(
+  team: Team,
+  spec: AgentSpec,
+  roleByName: Map<string, RoleData>,
+): string {
+  const role = roleByName.get(spec.base);
+  const roleDesc = role?.description ?? "";
+  const extra = (spec as any).extra_prompt ?? (spec as any).extraPrompt ?? "";
+  return [
+    `You are ${displayLabel(spec.name)} (${spec.base}) on the '${team.display}' team.`,
+    "",
+    roleDesc,
+    extra ? "\n" + extra : "",
+    "",
+    "The orchestrator has dispatched the task below. Reply concisely and directly with your work.",
+    "Do NOT dispatch further — only the orchestrator may dispatch. Stay in your role.",
+  ].join("\n");
+}
+
+type Dispatch = { agentName: string; instruction: string };
+
+function parseDispatches(text: string, team: Team, exclude: string): Dispatch[] {
+  const known = new Set(team.agents.map(a => a.name));
+  const lines = text.split(/\r?\n/);
+  const out: Dispatch[] = [];
+  // Accept `@coder: do X`, `- @coder: do X`, ` 1. @coder: do X` etc.
+  const re = /^[\s\-\d.*•]*@([A-Za-z0-9._\-]+)\s*[:：]\s*(.+)$/;
+  for (const raw of lines) {
+    const m = raw.trim().match(re);
+    if (!m) continue;
+    const name = m[1];
+    if (!known.has(name)) continue;
+    if (name === exclude) continue;          // orchestrator never self-dispatches
+    out.push({ agentName: name, instruction: m[2].trim() });
+  }
+  return out;
+}
+
+type StreamHandler = (delta: string) => void;
+
+async function streamChatCompletion(
+  port: number,
+  modelId: string,
+  systemPrompt: string,
+  userMessage: string,
+  temperature: number,
+  signal: AbortSignal,
+  onDelta: StreamHandler,
+): Promise<string> {
+  const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: modelId || "local",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      stream: true,
+      temperature,
+    }),
+    signal,
+  });
+  if (!resp.ok || !resp.body) {
+    throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
+  }
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let acc = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).replace(/\r$/, "");
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const body = line.slice(5).trim();
+      if (!body || body === "[DONE]") continue;
+      try {
+        const j = JSON.parse(body);
+        const delta: string | undefined = j?.choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta) {
+          acc += delta;
+          onDelta(delta);
+        }
+      } catch { /* skip malformed chunk */ }
+    }
+  }
+  return acc;
+}
+
+// Strip any `@agent: …` directive lines from the orchestrator's reply
+// so the final user-facing rendering doesn't double-show them.
+function stripDispatchDirectives(text: string): string {
+  const re = /^[\s\-\d.*•]*@[A-Za-z0-9._\-]+\s*[:：]/;
+  return text.split(/\r?\n/).filter(l => !re.test(l.trim())).join("\n");
+}
+
+// Phase the dispatch loop is currently in. Used by the chrome to
+// disable Run, show the activity hint, light up the busy spinner.
+type DispatchPhase = "idle" | "planning" | "dispatching" | "integrating" | "done";
+
 export default function AgentsPage() {
   const LEFT_W = 1014, RIGHT_W = 532, SPLITTER_W = 8;
 
@@ -1116,10 +1351,16 @@ export default function AgentsPage() {
   const [trustWritesOverride, setTrustWritesOverride] = useState<boolean | null>(null);
 
   const [goal, setGoal] = useState<string>("summarize the last commit and propose a follow-up");
-  const [messages, setMessages] = useState<GoalMsg[]>([]);
   const [busy, setBusy] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Per-agent log buffers — keyed by agent.name (plus "you" for the
+  // user goal echo and "system" for errors). OrchestratorPane filters
+  // these by selectedNode; canvas highlights `activeAgent`.
+  const [agentLogs, setAgentLogs] = useState<Map<string, GoalMsg[]>>(new Map());
+  const [activeAgent, setActiveAgent] = useState<string | null>(null);
+  const [phase, setPhase] = useState<DispatchPhase>("idle");
 
   // Diagram (orbital) ↔ Graph (top-down hierarchical) toggle. Mirrors
   // agents_page.py:_on_view_toggle_clicked. Selected node lives here
@@ -1253,76 +1494,72 @@ export default function AgentsPage() {
   };
   const resetGraphLayout = () => setNodePositions(null);
 
-  // Send a chat message from the Super User card. Mirrors the run
-  // path but uses the supChat list so the conversation lives next to
-  // the team avatar peek. The Tools/Reply pane on the right gets a
-  // mirror so the user sees the stream there too.
+  // ----- Per-agent log mutation helpers -----
+  // Append a fresh entry to a given agent's buffer.
+  const appendLog = (agent: string, msg: GoalMsg) => {
+    setAgentLogs(prev => {
+      const next = new Map(prev);
+      const cur = next.get(agent) ?? [];
+      next.set(agent, [...cur, msg]);
+      return next;
+    });
+  };
+  // Stream a delta into the LAST message of an agent's buffer (used by
+  // the live SSE stream so each token lands in the right pane).
+  const streamLog = (agent: string, delta: string) => {
+    setAgentLogs(prev => {
+      const next = new Map(prev);
+      const cur = next.get(agent) ?? [];
+      if (cur.length === 0) return prev;
+      const last = cur[cur.length - 1];
+      const updated = [...cur];
+      updated[updated.length - 1] = { ...last, text: last.text + delta };
+      next.set(agent, updated);
+      return next;
+    });
+  };
+
+  // SuperUserCard Send — drops a one-off message into the Super User
+  // log buffer. The dispatch loop above handles the orchestrator-led
+  // flow; this lets the user sneak in a side note without re-running.
   const onSupSend = async (text: string) => {
     const userMsg: GoalMsg = { role: "you", color: "#9ad9ff", text };
     setSupChat(prev => [...prev, userMsg]);
-    setMessages(prev => [...prev, userMsg]);
+    appendLog("you", userMsg);
     if (!serverState.running || !serverState.port) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: "No model server is running — start one on the Server tab to dispatch this." };
       setSupChat(prev => [...prev, errMsg]);
-      setMessages(prev => [...prev, errMsg]);
+      appendLog("system", errMsg);
       return;
     }
-    const replyMsg: GoalMsg = { role: serverState.model_id || "orchestrator", color: "#ffd97a", text: "" };
+    const replyMsg: GoalMsg = { role: "orchestrator", color: "#ffd97a", text: "" };
     setSupChat(prev => [...prev, replyMsg]);
-    setMessages(prev => [...prev, replyMsg]);
+    appendLog("orchestrator", replyMsg);
     try {
-      const resp = await fetch(`http://127.0.0.1:${serverState.port}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: serverState.model_id ?? "local",
-          messages: [
-            { role: "system", content: activeTeam ? `You are the orchestrator of '${activeTeam.display}'. Answer the user concisely.` : "You are the team's orchestrator." },
-            { role: "user", content: text },
-          ],
-          stream: true,
-          temperature: 0.5,
-        }),
-      });
-      if (!resp.ok || !resp.body) throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-      const reader = resp.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).replace(/\r$/, "");
-          buf = buf.slice(nl + 1);
-          if (!line.startsWith("data:")) continue;
-          const body = line.slice(5).trim();
-          if (!body || body === "[DONE]") continue;
-          try {
-            const j = JSON.parse(body);
-            const delta: string | undefined = j?.choices?.[0]?.delta?.content;
-            if (typeof delta === "string" && delta) {
-              setSupChat(curr => {
-                const out = curr.slice();
-                const last = out[out.length - 1];
-                if (last) out[out.length - 1] = { ...last, text: last.text + delta };
-                return out;
-              });
-              setMessages(curr => {
-                const out = curr.slice();
-                const last = out[out.length - 1];
-                if (last) out[out.length - 1] = { ...last, text: last.text + delta };
-                return out;
-              });
-            }
-          } catch { /* skip malformed chunk */ }
-        }
-      }
+      const sys = activeTeam
+        ? `You are the orchestrator of '${activeTeam.display}'. Answer the user concisely.`
+        : "You are the team's orchestrator.";
+      await streamChatCompletion(
+        serverState.port,
+        serverState.model_id ?? "local",
+        sys,
+        text,
+        0.5,
+        new AbortController().signal,
+        (delta) => {
+          setSupChat(curr => {
+            const out = curr.slice();
+            const last = out[out.length - 1];
+            if (last) out[out.length - 1] = { ...last, text: last.text + delta };
+            return out;
+          });
+          streamLog("orchestrator", delta);
+        },
+      );
     } catch (e: any) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: String(e?.message ?? e) };
       setSupChat(prev => [...prev, errMsg]);
-      setMessages(prev => [...prev, errMsg]);
+      appendLog("system", errMsg);
     }
   };
 
@@ -1337,7 +1574,14 @@ export default function AgentsPage() {
     return tOn || wOn;
   }, [bridges, selectedProject]);
 
-  async function onRun() {
+  // ===== Dispatch loop =====
+  // Run a multi-agent dispatch end-to-end:
+  //   1. Plan      — orchestrator streams its plan + dispatch directives
+  //   2. Dispatch  — one specialist per parsed `@agent: instruction` line
+  //   3. Integrate — orchestrator gets one more turn with all replies
+  // Each phase streams into the matching per-agent log buffer; the
+  // canvas's `activeAgent` highlights whichever agent is on stage.
+  async function dispatchGoal() {
     setRunError(null);
     const text = goal.trim();
     if (!text) return;
@@ -1345,84 +1589,118 @@ export default function AgentsPage() {
       setRunError("No model server is running. Go to the Server tab and start a model first.");
       return;
     }
-    const userMsg: GoalMsg = { role: "you", color: "#9ad9ff", text };
-    const replyMsg: GoalMsg = { role: serverState.model_id || "orchestrator", color: "#ffd97a", text: "" };
-    setMessages(prev => [...prev, userMsg, replyMsg]);
+    if (!activeTeam || activeTeam.agents.length === 0) {
+      setRunError("No team is loaded. Pick a team via 'Team…' or select a project with a roster.");
+      return;
+    }
+
+    // Wipe the per-run log buffers but keep the SuperUserCard chat
+    // (which represents the user-facing thread of the conversation).
+    setAgentLogs(new Map());
+    setRunError(null);
     setBusy(true);
+    setPhase("planning");
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
-    // Build system message from the active team's roster + orchestrator
-    // role. Falls back to a generic prompt when no team is loaded.
-    let systemMsg = "You are the team's orchestrator. Restate the goal concisely, then sketch a small concrete plan.";
-    if (activeTeam) {
-      const orchSpec = activeTeam.agents.find(a => a.name === "orchestrator" || a.base === "orchestrator");
-      const orchRole = orchSpec ? roleByName.get(orchSpec.base) : null;
-      const teamRoster = activeTeam.agents
-        .filter(a => a !== orchSpec)
-        .map(a => `${displayLabel(a.name)} (${a.base})`)
-        .join(", ");
-      systemMsg =
-        `You are the orchestrator of '${activeTeam.display}'. ` +
-        `Team: ${teamRoster || "(solo)"}.\n` +
-        (orchRole?.description ? orchRole.description + "\n" : "") +
-        "Produce: a one-paragraph restatement of the goal, then a numbered plan (3–7 steps) noting which teammate handles each step.";
-    }
+    const orch = findOrchestratorSpec(activeTeam)!;
+    const port = serverState.port;
+    const modelId = serverState.model_id ?? "local";
+
+    // Anchor the goal in the user log first.
+    appendLog("you", { role: "you", color: "#9ad9ff", text });
 
     try {
-      const resp = await fetch(`http://127.0.0.1:${serverState.port}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: serverState.model_id ?? "local",
-          messages: [
-            { role: "system", content: systemMsg },
-            { role: "user", content: text },
-          ],
-          stream: true,
-          temperature: 0.5,
-        }),
-        signal: ctrl.signal,
-      });
-      if (!resp.ok || !resp.body) {
-        throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
+      // ----- Phase 1: orchestrator plan + dispatches -----
+      setActiveAgent(orch.name);
+      const orchPrompt = buildOrchestratorPrompt(activeTeam, roleByName, orch);
+      appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+      const orchReply = await streamChatCompletion(
+        port, modelId, orchPrompt, text, 0.4, ctrl.signal,
+        (delta) => streamLog(orch.name, delta),
+      );
+
+      // Mirror to the SuperUserCard so the user-facing thread shows
+      // the orchestrator's plan + (later) the integrated answer.
+      setSupChat(prev => [
+        ...prev,
+        { role: "you", color: "#9ad9ff", text },
+      ]);
+
+      // ----- Phase 2: parse + dispatch -----
+      const dispatches = parseDispatches(orchReply, activeTeam, orch.name);
+
+      // If the orchestrator didn't dispatch anything, its first reply
+      // IS the final answer — surface it to the user and stop.
+      if (dispatches.length === 0) {
+        const clean = stripDispatchDirectives(orchReply).trim();
+        setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: clean || orchReply }]);
+        setPhase("done");
+        setActiveAgent(null);
+        return;
       }
-      const reader = resp.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        let nl;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl).replace(/\r$/, "");
-          buf = buf.slice(nl + 1);
-          if (!line.startsWith("data:")) continue;
-          const body = line.slice(5).trim();
-          if (!body || body === "[DONE]") continue;
-          try {
-            const j = JSON.parse(body);
-            const delta: string | undefined = j?.choices?.[0]?.delta?.content;
-            if (typeof delta === "string" && delta) {
-              setMessages(curr => {
-                const out = curr.slice();
-                const last = out[out.length - 1];
-                if (last) out[out.length - 1] = { ...last, text: last.text + delta };
-                return out;
-              });
-            }
-          } catch { /* skip malformed chunk */ }
-        }
+
+      setPhase("dispatching");
+      const specialistReplies: Array<{ name: string; text: string }> = [];
+      for (const d of dispatches) {
+        if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
+        const spec = activeTeam.agents.find(a => a.name === d.agentName);
+        if (!spec) continue;
+        setActiveAgent(spec.name);
+        const specPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName);
+        // Anchor the dispatch instruction in the agent's log so the
+        // user can see what was asked of them.
+        appendLog(spec.name, { role: "dispatch", color: "#9aa0a6", text: `📩 ${d.instruction}` });
+        appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
+        const specText = await streamChatCompletion(
+          port, modelId, specPrompt, d.instruction, 0.5, ctrl.signal,
+          (delta) => streamLog(spec.name, delta),
+        );
+        specialistReplies.push({ name: spec.name, text: specText.trim() });
       }
+
+      if (specialistReplies.length === 0) {
+        setPhase("done");
+        setActiveAgent(null);
+        return;
+      }
+
+      // ----- Phase 3: orchestrator integration -----
+      setPhase("integrating");
+      setActiveAgent(orch.name);
+      const integrationInput = [
+        `The user's original goal:\n${text}`,
+        "",
+        "Your specialists' replies:",
+        ...specialistReplies.map(r => `\n— ${displayLabel(r.name)} —\n${r.text}`),
+        "",
+        "Now write the FINAL answer for the user. Be concise, structured, and quote the relevant specialist when useful. Do not dispatch again.",
+      ].join("\n");
+      appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+      const finalReply = await streamChatCompletion(
+        port, modelId, buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput, 0.4, ctrl.signal,
+        (delta) => streamLog(orch.name, delta),
+      );
+      setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim() }]);
+
+      setPhase("done");
     } catch (e: any) {
-      if (e?.name === "AbortError") setRunError("Stopped.");
-      else setRunError(String(e?.message ?? e));
+      if (e?.name === "AbortError") {
+        setRunError("Stopped.");
+        appendLog("system", { role: "system", color: "#ff8c8c", text: "⏹ Stopped by user." });
+      } else {
+        setRunError(String(e?.message ?? e));
+        appendLog("system", { role: "system", color: "#ff8c8c", text: `⚠ ${String(e?.message ?? e)}` });
+      }
+      setPhase("idle");
     } finally {
       setBusy(false);
+      setActiveAgent(null);
       abortRef.current = null;
     }
   }
+
+  const onRun = dispatchGoal;
 
   function onCancel() {
     abortRef.current?.abort();
@@ -1458,7 +1736,13 @@ export default function AgentsPage() {
           <div data-ui="CanvasStack" style={{ height:607, position:"relative" }}>
             {viewMode === "diagram" ? (
               <>
-                <TeamCanvas width={LEFT_W} height={607} team={renderTeam} roleByName={roleByName} />
+                <TeamCanvas
+                  width={LEFT_W}
+                  height={607}
+                  team={renderTeam}
+                  roleByName={roleByName}
+                  activeAgent={activeAgent}
+                />
                 {/* Overlay only on the orbital diagram — the graph
                     view needs the full canvas for its cards. */}
                 <div style={{ position:"absolute", top:8, left:8, width:360 }}>
@@ -1481,6 +1765,7 @@ export default function AgentsPage() {
                 roleByName={roleByName}
                 selectedNode={selectedNode}
                 onSelectNode={setSelectedNode}
+                activeAgent={activeAgent}
                 edges={currentEdges}
                 onEdgesChange={(es) => { setEditedEdges(es); setSelectedEdgeIdx(null); }}
                 selectedEdgeIdx={selectedEdgeIdx}
@@ -1493,7 +1778,15 @@ export default function AgentsPage() {
         </div>
         <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, background:"var(--bg-card)" }} />
         <div style={{ width:RIGHT_W }}>
-          <OrchestratorPane messages={messages} runError={runError} serverState={serverState} />
+          <OrchestratorPane
+            agentLogs={agentLogs}
+            runError={runError}
+            serverState={serverState}
+            selectedAgent={selectedNode}
+            activeAgent={activeAgent}
+            team={renderTeam}
+            phase={phase}
+          />
         </div>
       </div>
     </>

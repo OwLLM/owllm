@@ -102,17 +102,35 @@ function LocationRow() {
 // previous v11 mock had "Test code", "Convert" and a "GoalModelCombo"
 // here — none of those exist in Qt and have been removed (cf.
 // agents_page.py:1904-1909 — only attach/input/run/cancel/telemetry/voice).
-function GoalRow() {
+function GoalRow({ goal, setGoal, onRun, onCancel, busy }: {
+  goal: string; setGoal: (g: string) => void;
+  onRun: () => void; onCancel: () => void; busy: boolean;
+}) {
   return (
     <div style={{ height:38, padding:"0 23px", margin:"12px 0", background:"transparent", display:"flex", alignItems:"center", gap:10 }}>
       {/* 📎 — agents_page.py:1768-1783. minWidth=44, h=38, fs=16, 10-radius. */}
       <button data-ui="GoalAttachBtn" title="Attach an image or audio file" style={{ height:38, minWidth:44, padding:"0 10px", border:"none", borderRadius:10, background:"rgba(255,255,255,0.05)", color:"#dadcdf", fontSize:16 }}>📎</button>
       {/* Goal QLineEdit — agents_page.py:1785-1803. Placeholder per :1787-1790. */}
-      <input data-ui="GoalInput" defaultValue="summarize the last commit and propose a follow-up. design image + build notes" placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up' (drop an image / audio here)" style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"#161623", color:"#fff", border:"none" }} />
+      <input data-ui="GoalInput"
+        value={goal}
+        onChange={e => setGoal(e.target.value)}
+        onKeyDown={e => { if (e.key === "Enter" && !busy) onRun(); }}
+        placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up' (drop an image / audio here)"
+        style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"#161623", color:"#fff", border:"none" }} />
       {/* Run — agents_page.py:1805-1817. #4a6cff bg, fw:600, padding:0 24px. */}
-      <button data-ui="GoalRunBtn" style={{ height:38, padding:"0 24px", borderRadius:10, border:"none", background:"#4a6cff", color:"#fff", fontWeight:600, fontSize:14 }}>Run</button>
+      <button data-ui="GoalRunBtn" disabled={busy || !goal.trim()} onClick={onRun}
+        style={{ height:38, padding:"0 24px", borderRadius:10, border:"none",
+                 background: busy || !goal.trim() ? "rgba(74,108,255,0.25)" : "#4a6cff",
+                 color: busy || !goal.trim() ? "#9aa0a6" : "#fff", fontWeight:600, fontSize:14,
+                 cursor: busy || !goal.trim() ? "not-allowed" : "pointer" }}>
+        {busy ? "Running…" : "Run"}
+      </button>
       {/* Cancel — agents_page.py:1819-1831. padding:0 18px, ff8c8c on red-tint. */}
-      <button data-ui="GoalCancelBtn" disabled style={{ height:38, padding:"0 18px", borderRadius:10, border:"none", background:"rgba(255,140,140,0.10)", color:"#555", fontWeight:600, fontSize:14 }}>Cancel</button>
+      <button data-ui="GoalCancelBtn" disabled={!busy} onClick={onCancel}
+        style={{ height:38, padding:"0 18px", borderRadius:10, border:"none",
+                 background: busy ? "rgba(255,140,140,0.20)" : "rgba(255,140,140,0.10)",
+                 color: busy ? "#ff8c8c" : "#555", fontWeight:600, fontSize:14,
+                 cursor: busy ? "pointer" : "not-allowed" }}>Cancel</button>
       {/* 📊 telemetry — agents_page.py:1838-1850. Fixed 44px, h=38, 8-radius. */}
       <button data-ui="GoalTelemetryBtn" title="Open the tool-call telemetry panel" style={{ height:38, width:44, padding:0, border:"none", borderRadius:8, background:"rgba(255,255,255,0.05)", color:"#dadcdf", fontSize:16 }}>📊</button>
       {/* 🔊 voice QToolButton with menu — agents_page.py:1863-1902. minWidth=64,
@@ -561,33 +579,13 @@ function TeamCanvas({ width, height }: CanvasProps) {
 //        🧠 Thought (QTextEdit#OrchestratorThoughtView, :2772)
 //      Tab style — Qt default plus the log_view_css at :2749-2757
 //      (#0f1218 bg, Consolas, 14px).
-function OrchestratorPane() {
-  // Sample chain-of-thought blob — placeholder until the bus is wired.
-  const code = `* peripheral is active.
-"TEXT" — selected agent "Sg" agent name header.
-def __name__ == "TEAM": team is given a default
-config; each task starts with stalecaching agents
-that aren't named so OK to make a default
-"" stage.
-"TEAM" — selected agent "Sg" agent name header.
-"selected_path" — list left in place hue
-rendered well until 2025 mirrors pending agent
-to renew current 25.0 + every "ms" — pretty
-much "wow" then 7.
+type GoalMsg = { role: string; color: string; text: string };
 
-if we
-to make the goal in running, all only is
-oriented should think the "I shall not
-fail-call.thought_method". because given by the
-last action from m,h is left protected.`;
-  // Per-role border + label colour palette — mirrors
-  // _append_log_line's prefix_color map in agents_page.py:5411-5419.
-  // user → #9ad9ff, reply → #a8e7a0, thought → #dcb0ff, etc.
-  const messages = [
-    { role:"orchestrator", color:"#ffd97a", text:"Routing task to UI Designer — stage 1 sketch." },
-    { role:"UI Designer",  color:"#7fdfff", text:"Drafted the brief outline; uploading mock." },
-    { role:"Workshop Writer", color:"#dcb0ff", text:"Will pair narrative with the mock once received." },
-  ];
+function OrchestratorPane({ messages, runError, serverModel }: {
+  messages: GoalMsg[];
+  runError: string | null;
+  serverModel: string | null;
+}) {
   // Reply is the default tab — agents_page.py:2773 / :5367.
   const [activeTab, setActiveTab] = React.useState<"reply"|"thought">("reply");
   return (
@@ -634,20 +632,26 @@ last action from m,h is left protected.`;
         {/* Reply tab body — QTextEdit#OrchestratorReplyView. log_view_css
             from agents_page.py:2749-2757: #0f1218 bg #cbd2e0 fg, Consolas
             14px. Inside: agent-prefixed lines + the code block. */}
-        <div data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"#0f1218", border:"1px solid rgba(120,220,255,0.08)", borderRadius:8, overflow:"hidden", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"#cbd2e0" }}>
+        <div data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"#0f1218", border:"1px solid rgba(120,220,255,0.08)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"#cbd2e0" }}>
+          {runError ? (
+            <div style={{ border:"1px solid #ff9f9f", background:"rgba(255,80,80,0.10)", color:"#ffb0b0", borderRadius:6, padding:8, fontSize:12 }}>{runError}</div>
+          ) : null}
+          {messages.length === 0 && !runError ? (
+            <div style={{ color:"#7a7f87", fontSize:12 }}>
+              {serverModel
+                ? `Ready. Type a goal in the input above and press Run — it goes to ${serverModel}.`
+                : "Start a model on the Server tab first, then type a goal above and click Run."}
+            </div>
+          ) : null}
           {messages.map((m, i) => (
             <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
-              <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d", fontFamily:"Segoe UI, sans-serif" }}>{m.role[0].toUpperCase()}</div>
+              <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d", fontFamily:"Segoe UI, sans-serif" }}>{(m.role[0] || "?").toUpperCase()}</div>
               <div style={{ flex:1, background:"rgba(255,255,255,0.04)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"4px 10px" }}>
                 <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:2, fontFamily:"Segoe UI, sans-serif" }}>{m.role}</div>
-                <div style={{ fontSize:12, color:"#dadcdf", lineHeight:1.3, fontFamily:"Segoe UI, sans-serif" }}>{m.text}</div>
+                <div style={{ fontSize:12, color:"#dadcdf", lineHeight:1.4, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap" }}>{m.text}</div>
               </div>
             </div>
           ))}
-          {/* Code block — the highlighted snippet that mirrors what the
-              orchestrator writes into the chat view between regular
-              messages. whiteSpace:"pre-wrap" preserves the line breaks. */}
-          <div style={{ flex:1, marginTop:4, padding:8, background:"#0a0d14", border:"1px solid rgba(120,220,255,0.10)", borderRadius:6, whiteSpace:"pre-wrap", overflow:"auto" }}>{code}</div>
         </div>
         {/* Thought tab — QTextEdit#OrchestratorThoughtView. Receives
             tool_call / tool_result / event / inline reasoning per
@@ -660,12 +664,118 @@ last action from m,h is left protected.`;
   );
 }
 
+type ServerStatus = {
+  running: boolean;
+  model_id: string | null;
+  port: number | null;
+  message: string;
+};
+
 export default function AgentsPage() {
   const LEFT_W = 1014, RIGHT_W = 532, SPLITTER_W = 8;
+
+  const [goal, setGoal] = useState<string>("summarize the last commit and propose a follow-up");
+  const [messages, setMessages] = useState<GoalMsg[]>([]);
+  const [busy, setBusy] = useState<boolean>(false);
+  const [runError, setRunError] = useState<string | null>(null);
+  const [serverState, setServerState] = useState<ServerStatus>({
+    running: false, model_id: null, port: null, message: "",
+  });
+  const abortRef = React.useRef<AbortController | null>(null);
+
+  // Poll the running server so we know which port to target.
+  useEffect(() => {
+    let dead = false;
+    const tick = async () => {
+      try {
+        const s = await invoke<ServerStatus>("server_status");
+        if (!dead) setServerState(s);
+      } catch { /* keep last good value */ }
+    };
+    tick();
+    const id = window.setInterval(tick, 3000);
+    return () => { dead = true; window.clearInterval(id); };
+  }, []);
+
+  async function onRun() {
+    setRunError(null);
+    const text = goal.trim();
+    if (!text) return;
+    if (!serverState.running || !serverState.port) {
+      setRunError("No model server is running. Go to the Server tab and start a model first.");
+      return;
+    }
+    // Append the user goal as the first bubble + an empty
+    // orchestrator bubble that streamed tokens will land in.
+    const userMsg: GoalMsg = { role: "you", color: "#9ad9ff", text };
+    const replyMsg: GoalMsg = { role: serverState.model_id || "orchestrator", color: "#ffd97a", text: "" };
+    setMessages(prev => [...prev, userMsg, replyMsg]);
+    setBusy(true);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    try {
+      const resp = await fetch(`http://127.0.0.1:${serverState.port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: serverState.model_id ?? "local",
+          messages: [
+            { role: "system", content: "You are the team's orchestrator. Restate the goal concisely, then sketch a small concrete plan." },
+            { role: "user", content: text },
+          ],
+          stream: true,
+          temperature: 0.5,
+        }),
+        signal: ctrl.signal,
+      });
+      if (!resp.ok || !resp.body) {
+        throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
+      }
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).replace(/\r$/, "");
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const body = line.slice(5).trim();
+          if (!body || body === "[DONE]") continue;
+          try {
+            const j = JSON.parse(body);
+            const delta: string | undefined = j?.choices?.[0]?.delta?.content;
+            if (typeof delta === "string" && delta) {
+              setMessages(curr => {
+                const out = curr.slice();
+                const last = out[out.length - 1];
+                if (last) out[out.length - 1] = { ...last, text: last.text + delta };
+                return out;
+              });
+            }
+          } catch { /* skip malformed chunk */ }
+        }
+      }
+    } catch (e: any) {
+      if (e?.name === "AbortError") setRunError("Stopped.");
+      else setRunError(String(e?.message ?? e));
+    } finally {
+      setBusy(false);
+      abortRef.current = null;
+    }
+  }
+
+  function onCancel() {
+    abortRef.current?.abort();
+  }
+
   return (
     <>
       <LocationRow />
-      <GoalRow />
+      <GoalRow goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy} />
       <div data-ui="WorkspaceStack" style={{ height:665, width:1554, margin:"0 23px", display:"flex", overflow:"hidden", background:"#06080d", padding:0 }}>
         <div data-ui="RosterLeft" style={{ width:LEFT_W, display:"flex", flexDirection:"column", background:"#0a0d14" }}>
           <FlowHeader />
@@ -679,7 +789,11 @@ export default function AgentsPage() {
         </div>
         <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, background:"#1a1f2c" }} />
         <div style={{ width:RIGHT_W }}>
-          <OrchestratorPane />
+          <OrchestratorPane
+            messages={messages}
+            runError={runError}
+            serverModel={serverState.running ? serverState.model_id : null}
+          />
         </div>
       </div>
     </>

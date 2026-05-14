@@ -176,29 +176,29 @@ fn strip_windows_decorations(hwnd_raw: isize) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE,
         SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE,
-        WS_CAPTION, WS_SYSMENU,
+        WS_CAPTION, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_SYSMENU, WS_THICKFRAME,
     };
     let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
     unsafe {
-        // Strip ONLY the visible title-bar bits. CRITICALLY we KEEP
-        // WS_THICKFRAME — that's the style that tells the OS this
-        // window is "movable + resizable like a normal app window",
-        // which in turn:
-        //   * makes startDragging() (WM_NCLBUTTONDOWN(HTCAPTION))
-        //     restore-and-follow-cursor when maximized (otherwise
-        //     the drag silently snaps the window back),
-        //   * makes maximize obey the work area (under WS_THICKFRAME
-        //     plus our WM_GETMINMAXINFO clamp), and
-        //   * preserves the invisible resize edges so our explicit
-        //     ResizeEdges JS handlers + the OS both work.
+        // Strip ONLY the visible title-bar bits, AND explicitly ADD
+        // WS_THICKFRAME + the min/max box bits. Tauri's
+        // `decorations: false` at create time strips WS_THICKFRAME on
+        // Tauri 2.10+ (this changed between releases — the previous
+        // setup that assumed Tauri preserved it broke drag + maximize
+        // on the user's machine). Without WS_THICKFRAME the OS:
+        //   * places a "maximized" window over the FULL monitor rect
+        //     (covering the taskbar), and
+        //   * doesn't recognize startDragging()'s WM_NCLBUTTONDOWN
+        //     (HTCAPTION) as a real move command, so the drag silently
+        //     snaps the window back to its starting position.
         //
-        // WS_CAPTION (the title strip) is the visible source of the
-        // "we look like a normal Windows app" appearance — strip it.
-        // WS_SYSMENU (system menu icon) makes no sense without a
-        // caption — strip it too. Everything else stays.
+        // The fix is to FORCE the style bits we want — both add the
+        // ones we need AND strip the ones we don't — instead of
+        // trusting Tauri's pre-state.
         let style = GetWindowLongW(hwnd, GWL_STYLE);
         let strip = (WS_CAPTION.0 | WS_SYSMENU.0) as i32;
-        let new_style = style & !strip;
+        let add   = (WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0) as i32;
+        let new_style = (style & !strip) | add;
         SetWindowLongW(hwnd, GWL_STYLE, new_style);
 
         // Subclass the window proc so WM_NCCALCSIZE returns 0 →

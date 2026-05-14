@@ -65,9 +65,54 @@ pub fn run() {
 }
 
 #[cfg(windows)]
+mod win_nc {
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, GetWindowLongPtrW, SetWindowLongPtrW,
+        GWLP_WNDPROC, WM_NCCALCSIZE,
+    };
+
+    /// Original window proc pointer, captured the first time we
+    /// subclass. All non-NC messages flow back through it.
+    static ORIGINAL_PROC: OnceLock<isize> = OnceLock::new();
+
+    /// Replace the window proc with one that swallows WM_NCCALCSIZE.
+    /// Returning 0 from WM_NCCALCSIZE tells the OS that the entire
+    /// window IS the client area — no non-client space for a title
+    /// strip, no DWM accent border, nothing. This is the documented
+    /// Windows technique for fully custom frames (Discord/VSCode use
+    /// it). DWMWA_BORDER_COLOR doesn't exist on Win10, so the prior
+    /// fix was a no-op there — this works on both Win10 and Win11.
+    pub fn subclass(hwnd: HWND) {
+        unsafe {
+            let original = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+            let _ = ORIGINAL_PROC.set(original);
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as isize);
+        }
+    }
+
+    unsafe extern "system" fn hook_proc(
+        hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_NCCALCSIZE && wparam.0 != 0 {
+            // wParam != 0 means "give me the new client rect". Return 0
+            // → the client rect equals the proposed window rect.
+            return LRESULT(0);
+        }
+        if let Some(&p) = ORIGINAL_PROC.get() {
+            // Forward everything else to the original Tauri/tao proc.
+            let proc: extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT =
+                std::mem::transmute(p);
+            return CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam);
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+}
+
+#[cfg(windows)]
 fn strip_windows_decorations(hwnd_raw: isize) {
     use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE,
         SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE,
@@ -76,33 +121,25 @@ fn strip_windows_decorations(hwnd_raw: isize) {
     let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
     unsafe {
         let style = GetWindowLongW(hwnd, GWL_STYLE);
-        // Keep min/max box bits — the OS uses them for taskbar
-        // interactions (Win+D restore, snap layouts) even when the
-        // titlebar buttons aren't visible.
         let strip = (WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0) as i32;
         let keep = (WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0) as i32;
         let new_style = (style & !strip) | keep;
         SetWindowLongW(hwnd, GWL_STYLE, new_style);
-        // SWP_FRAMECHANGED is what actually flushes the new frame.
+
+        // Subclass the window proc so WM_NCCALCSIZE returns 0 →
+        // client area covers the entire window, no residual title
+        // strip or accent border can be painted by the OS or DWM.
+        win_nc::subclass(hwnd);
+
+        // SWP_FRAMECHANGED forces the OS to recalculate the frame
+        // immediately, which in turn triggers our new WM_NCCALCSIZE
+        // handler. Without this, the existing frame persists until a
+        // resize/move.
         let _ = SetWindowPos(
             hwnd,
             None,
             0, 0, 0, 0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-
-        // Kill the Win11 DWM accent border + the 1px caption shadow.
-        // DWMWA_COLOR_NONE = 0xFFFFFFFE — tells DWM "draw no border
-        // at all" on this window. Without this, Win11 paints a thin
-        // light border + residual "OwLLM Desktop" title strip around
-        // the window even with WS_CAPTION off.
-        const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
-        let color = DWMWA_COLOR_NONE;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &color as *const _ as *const _,
-            std::mem::size_of::<u32>() as u32,
         );
     }
 }

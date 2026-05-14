@@ -12,10 +12,22 @@
 //
 // Launcher card specs are the literal _LAUNCHER_CARDS tuple at
 // main.py:4143-4166 (same accents, owl PNGs, taglines, blurbs).
-// System status + requirement rows are static placeholders for
-// now — they'll wire to invoke('hardware_info') (native Rust
-// command in src-tauri/src/lib.rs) once the probe is implemented.
-import React from "react";
+// System status reads from the native Rust `hardware_info` command
+// (src-tauri/src/hardware.rs) — no Python, no console popups.
+// Software requirements remain placeholders until they have their
+// own native probes (Python interpreter / PyTorch / CUDA / deps).
+import React, { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
+type GpuInfo = { index: number; name: string; vram_gb: number };
+type HardwareInfo = {
+  cpu_name: string;
+  cpu_cores: number;
+  cpu_threads: number;
+  ram_total_gb: number;
+  ram_used_gb: number;
+  gpus: GpuInfo[];
+};
 
 const ICONS = "/Page_icons";
 
@@ -286,25 +298,32 @@ function WelcomeCircle() {
 }
 
 export default function HomePage() {
-  // Static placeholders — will wire to invoke('hardware_info') in a
-  // follow-up (native Rust command in src-tauri/src/lib.rs). The
-  // structure matches the Qt page (main.py:7561-7903) verbatim so the
-  // visual port is faithful before data is live.
+  // Live hardware from native Rust (src-tauri/src/hardware.rs). The
+  // command always returns Ok with a default if probing fails, so we
+  // never need an error-path UI here.
+  const [hw, setHw] = useState<HardwareInfo | null>(null);
+  const refreshHw = () => {
+    invoke<HardwareInfo>("hardware_info")
+      .then(setHw)
+      .catch(() => setHw(null));
+  };
+  useEffect(() => { refreshHw(); }, []);
 
-  // GPU block — Qt builds: "✅ N GPUs detected" header, then a per-GPU
-  // row for each detected GPU (main.py:7621-7693). When no GPUs, the
-  // fallback at main.py:7695-7706 is "⚠️ No GPUs detected" + a
-  // "Training will use CPU (slower)" muted line.
-  const gpus: { name: string; memory: string }[] = [
-    { name: "NVIDIA GeForce RTX 4090", memory: "24 GB" },
-  ];
+  // Qt format: "✅ N GPUs detected" + per-GPU rows (main.py:7621-7693)
+  // or "⚠️ No GPUs detected" + "Training will use CPU (slower)" when
+  // none found (main.py:7695-7706). Format VRAM as integer GB to match
+  // Qt's "💾 N GB" rendering.
+  const gpus = (hw?.gpus ?? []).map(g => ({
+    name: g.name,
+    memory: g.vram_gb > 0 ? `${Math.round(g.vram_gb)} GB` : "—",
+  }));
   const gpuOk = gpus.length > 0;
 
   // CPU row — Qt: "CPU: <cpu_name>" left, "<cores> cores | 💾 <ram> GB
-  // RAM" right (main.py:7715-7735). Format both sides exactly.
-  const cpuName = "AMD Ryzen 9 7950X";
-  const cpuCores = 16;
-  const ramGb = 128;
+  // RAM" right (main.py:7715-7735).
+  const cpuName = hw?.cpu_name || "—";
+  const cpuCores = hw?.cpu_cores || hw?.cpu_threads || 0;
+  const ramGb = hw ? Math.round(hw.ram_total_gb) : 0;
 
   // Software requirements — Qt builds exactly four rows:
   //   Python 3.8+  / PyTorch (CUDA) / CUDA Drivers / Dependencies
@@ -346,6 +365,7 @@ export default function HomePage() {
             action={
               <button
                 data-ui="RefreshGpuBtn"
+                onClick={refreshHw}
                 style={{
                   // refreshGpuBtn styling — main.py:7577-7597.
                   background: "linear-gradient(180deg, rgba(60,60,80,0.4), rgba(40,40,60,0.4))",

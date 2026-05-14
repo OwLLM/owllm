@@ -11,7 +11,7 @@
 // call will become a Tauri command — for now the click handlers are
 // stubs that only update the status line, mirroring the Qt status
 // transitions verbatim.
-import React, { useState } from "react";
+import { useState } from "react";
 
 const ICONS = "/Page_icons";
 
@@ -40,13 +40,15 @@ const LAUNCH_BTN_TEXT = "Launch / Re-embed";
 // Header label between workspace and combo — line 268.
 const CLINE_ARROW_LABEL = "Cline →";
 
-// Status label initial text + color — lines 264-265.
-const STATUS_INITIAL = "Idle.";
+// Status label initial color — lines 264-265.
 const STATUS_COLOR = "#888";
 
-// Status transitions — quoted verbatim from code_page.py.
+// Status transitions — quoted verbatim from code_page.py. STATUS_INITIAL
+// ("Idle.") and STATUS_PREPARING were defined here but never reached by
+// the React port (the user enters the page after bootstrap; the
+// preparing state belongs to the launcher worker we haven't ported).
+// Keeping only the strings the React state machine actually emits.
 const STATUS_BUNDLE_READY = "Bundle ready. Click Launch / Re-embed."; // line 299, 322
-const STATUS_PREPARING = "Preparing bundled VSCodium…";           // line 304
 const STATUS_LAUNCHING = "Launching VSCodium…";                   // line 732
 
 // _BootstrapWorker progress messages — lines 177-184.
@@ -117,7 +119,9 @@ export default function CodePage() {
   // The Qt code falls back to ``Path.cwd()`` when no remembered workspace
   // exists; we use the repo root as a sensible default until a Tauri
   // command exposes the real persisted setting.
-  const [workspace, setWorkspace] = useState<string>("C:/1_Git/LocaLLM");
+  // setWorkspace will be hooked up once a Tauri command exposes the
+  // real persisted setting + a native folder-picker dialog.
+  const [workspace] = useState<string>("C:/1_Git/LocaLLM");
 
   const sortedModels = sortModels(MOCK_MODELS);
   const [modelBasePath, setModelBasePath] = useState<string>(

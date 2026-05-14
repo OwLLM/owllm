@@ -14,7 +14,6 @@ import CodePage from "./pages/CodePage";
 import HomePage from "./pages/HomePage";
 import MCPPage from "./pages/MCPPage";
 import ServerPage from "./pages/ServerPage";
-import StubPage from "./pages/StubPage";
 import StudioPage from "./pages/StudioPage";
 
 const INNER_W = 1600, INNER_H = 960;

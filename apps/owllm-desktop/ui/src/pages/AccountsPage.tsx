@@ -16,7 +16,7 @@
 // Background of host page is #0e1117 (per style notes); Qt uses
 // palette(base) for the gradient's bottom stop — we hard-code the
 // same value here so cards visually dissolve into the page.
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const PAGE_BG = "#0e1117"; // matches palette(base) used by Qt gradient stops 0.6 + 1
 
@@ -482,10 +482,11 @@ export default function AccountsPage() {
     setCardState(spec.key, { connected: false, testText: "", testOk: null });
   }
 
-  function handleDialogSave(value: string) {
+  function handleDialogSave(_value: string) {
     if (!dialogFor) return;
     // Qt: agent_runtime_manager.save_stored_secret(env_name, value)
-    // (line 475). value is already trimmed inside ApiKeyDialog.
+    // (line 475). _value is already trimmed inside ApiKeyDialog and
+    // will be persisted once the native save command lands.
     setCardState(dialogFor.key, { connected: true, testText: "", testOk: null });
     setDialogFor(null);
   }

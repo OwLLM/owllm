@@ -67,6 +67,7 @@ pub fn run() {
 #[cfg(windows)]
 fn strip_windows_decorations(hwnd_raw: isize) {
     use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_BORDER_COLOR};
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE,
         SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE,
@@ -88,6 +89,20 @@ fn strip_windows_decorations(hwnd_raw: isize) {
             None,
             0, 0, 0, 0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+
+        // Kill the Win11 DWM accent border + the 1px caption shadow.
+        // DWMWA_COLOR_NONE = 0xFFFFFFFE — tells DWM "draw no border
+        // at all" on this window. Without this, Win11 paints a thin
+        // light border + residual "OwLLM Desktop" title strip around
+        // the window even with WS_CAPTION off.
+        const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+        let color = DWMWA_COLOR_NONE;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR,
+            &color as *const _ as *const _,
+            std::mem::size_of::<u32>() as u32,
         );
     }
 }

@@ -144,10 +144,10 @@ const BORDER_T = 18;
 const CORNER_OUTSET = 10;
 const SHIFT_OUT = BORDER_T / 2;
 // EXTRA_TOP bumps the top padding from the 19 px baseline (SHIFT_OUT
-// + CORNER_OUTSET) up to 45 px total — leaving 26 px of extra
+// + CORNER_OUTSET) up to 54 px total — leaving 35 px of extra
 // breathing room above the HybridFrame for the peeking owl badge.
 // EXTRA_RIGHT stays 0 so the right side keeps the symmetric 19 px.
-const EXTRA_TOP = 26;
+const EXTRA_TOP = 35;
 const EXTRA_RIGHT = 0;
 const CORNER_PNG_W = 160;
 const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);

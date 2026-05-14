@@ -276,7 +276,16 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy }: {
 }
 
 // FlowHeader — canvas_header in agents_page.py:2540-2596.
-function FlowHeader() {
+// The view toggle flips between the live orbital diagram and the
+// editable graph (top-down hierarchical). Mirrors
+// _on_view_toggle_clicked at agents_page.py:5307.
+function FlowHeader({ viewMode, onToggleView }: {
+  viewMode: "diagram" | "graph"; onToggleView: () => void;
+}) {
+  const toggleLabel = viewMode === "diagram" ? "◐ Graph view" : "◑ Diagram view";
+  const toggleTitle = viewMode === "diagram"
+    ? "Switch to the editable graph (top-down hierarchical layout)"
+    : "Switch back to the live orbital diagram";
   return (
     <div style={{ display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
       <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"#fff", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Flow</div>
@@ -285,7 +294,13 @@ function FlowHeader() {
       <button data-ui="FlowReverseEdgeBtn" className="ghost-btn" title="Reverse the direction of the selected edge" style={{ height:28, padding:"0 8px", fontSize:11 }}>⇄ Reverse</button>
       <button data-ui="FlowLayoutBtn" className="ghost-btn" title="Top-down hierarchical layout — orchestrator on top, then specialists in rows by dispatch distance" style={{ height:28, padding:"0 8px", fontSize:11 }}>⟲ Layout</button>
       <button data-ui="FlowRefreshBtn" className="ghost-btn" title="Refresh model lists in every picker" style={{ height:28, width:30, padding:0, fontSize:11 }}>⟳</button>
-      <button data-ui="FlowViewToggleBtn" className="ghost-btn" title="Switch between the live diagram and the editable graph" style={{ height:28, padding:"0 8px", fontSize:11 }}>◐ Graph view</button>
+      <button
+        data-ui="FlowViewToggleBtn"
+        className="ghost-btn"
+        onClick={onToggleView}
+        title={toggleTitle}
+        style={{ height:28, padding:"0 8px", fontSize:11, background: viewMode === "graph" ? "rgba(120,220,255,0.18)" : undefined, color: viewMode === "graph" ? "#7fdfff" : undefined }}
+      >{toggleLabel}</button>
     </div>
   );
 }
@@ -433,7 +448,7 @@ function TeamCanvas({ width, height, team, roleByName }: {
   const ring_radii = sortedDepths.map(d => inner_offset + step * d);
   const arc_span = (Math.PI * 2) * (340 / 360);
 
-  type Node = { x: number; y: number; label: string; iconRef: string; active: boolean; depth: number };
+  type Node = { name: string; x: number; y: number; label: string; iconRef: string; active: boolean; depth: number };
   const nodes: Node[] = [];
   for (const depth of sortedDepths) {
     const ringAgents = depthMap.get(depth)!;
@@ -443,6 +458,7 @@ function TeamCanvas({ width, height, team, roleByName }: {
       const a = ringAgents[i];
       const theta = count === 1 ? -Math.PI / 2 : (arc_span * (i + 1)) / count - Math.PI / 2;
       nodes.push({
+        name: a.name,
         x: cx + r * Math.cos(theta),
         y: cy + r * Math.sin(theta),
         label: a.label,
@@ -452,6 +468,23 @@ function TeamCanvas({ width, height, team, roleByName }: {
       });
     }
   }
+  // Lookup by agent name so we can draw real routing edges from the
+  // team's graph (vs the simple star spokes that radiate from the
+  // orchestrator). The orchestrator's coords sit at the centre (cx,cy).
+  const nodeByName = new Map<string, { x: number; y: number }>();
+  for (const n of nodes) nodeByName.set(n.name, { x: n.x, y: n.y });
+  const orchSpec = team?.agents.find(a => a.name === "orchestrator" || a.base === "orchestrator");
+  if (orchSpec) nodeByName.set(orchSpec.name, { x: cx, y: cy });
+  // Non-trivial routing edges (anything that isn't orchestrator → X,
+  // because those are already drawn as star spokes). Drawing them on
+  // top of the orbital diagram exposes the real flow without making
+  // the picture too busy.
+  const orchName = orchSpec?.name;
+  const routingEdges = (team?.edges ?? []).filter(e =>
+    e.source !== orchName &&
+    nodeByName.has(e.source) &&
+    nodeByName.has(e.target)
+  );
   const NODE_R = 22;
   const orchestrator_r = Math.max(48, Math.min(w, h) * 0.10);
   const arc_r_out = orchestrator_r * 1.7;
@@ -513,6 +546,42 @@ function TeamCanvas({ width, height, team, roleByName }: {
         {nodes.map((n,i) => (
           <line key={"sp"+i} x1={cx} y1={cy} x2={n.x} y2={n.y} stroke={n.active?"rgba(120,220,255,0.55)":`url(#spokeGrad${i})`} strokeWidth={n.active?1.6:1.3} />
         ))}
+        {/* Routing edges between specialists — drawn as gentle curves
+            with a violet tint so they read as the team's actual flow,
+            not just radial spokes. Arrowhead via marker. */}
+        <defs>
+          <marker id="routeArrow" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(192,138,255,0.85)" />
+          </marker>
+        </defs>
+        {routingEdges.map((e, i) => {
+          const a = nodeByName.get(e.source)!;
+          const b = nodeByName.get(e.target)!;
+          // Shorten so the arrowhead lands at the disc edge, not inside.
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const len = Math.hypot(dx, dy) || 1;
+          const ux = dx / len, uy = dy / len;
+          const trim = 24;
+          const sx = a.x + ux * trim, sy = a.y + uy * trim;
+          const ex = b.x - ux * trim, ey = b.y - uy * trim;
+          // Quadratic control point offset perpendicular to the line so
+          // forward + reverse edges don't overlap exactly.
+          const mx = (sx + ex) / 2, my = (sy + ey) / 2;
+          const px = -uy, py = ux;
+          const offset = 18;
+          const qx = mx + px * offset, qy = my + py * offset;
+          return (
+            <path
+              key={"edge"+i}
+              d={`M ${sx} ${sy} Q ${qx} ${qy} ${ex} ${ey}`}
+              stroke="rgba(192,138,255,0.65)"
+              strokeWidth={1.4}
+              fill="none"
+              markerEnd="url(#routeArrow)"
+            />
+          );
+        })}
         {nodes.map((n,i) => (
           <circle key={"h"+i} cx={n.x} cy={n.y} r={n.active?52:38} fill={n.active?"url(#haloActive)":"url(#halo)"} />
         ))}
@@ -557,6 +626,186 @@ function TeamCanvas({ width, height, team, roleByName }: {
       {nodes.length === 0 && (
         <div style={{ position:"absolute", left:cx-180, top:cy + orchestrator_r * 2 + 20, width:360, textAlign:"center", fontSize:12, color:"#6c7280", pointerEvents:"none" }}>
           No specialists on this team yet. Click <b>Team…</b> above to load a template.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// GraphCanvas — editable graph view. Top-down hierarchical layout:
+// orchestrator on row 0, then specialists in rows by BFS depth (same
+// computeDepths used by the orbital diagram). Edges are drawn as
+// directional curves from source-bottom-port to target-top-port,
+// arrowhead via SVG marker.
+//
+// Mirrors LLM/desktop_app/widgets/agent_canvas.py:TeamGraphView at a
+// static (non-draggable) level — the QGraphicsScene drag-to-create-
+// edge interaction is a follow-up. Click a node to select it (the
+// FlowHeader's ✕ Edge / ⇄ Reverse will hook in once edge editing
+// lands).
+function GraphCanvas({ width, height, team, roleByName, selected, onSelect }: {
+  width: number; height: number;
+  team: Team | null; roleByName: Map<string, RoleData>;
+  selected: string | null; onSelect: (name: string | null) => void;
+}) {
+  const w = width, h = height;
+  if (!team || team.agents.length === 0) {
+    return (
+      <div data-ui="GraphCanvas" style={{ position:"relative", width:w, height:h, background:"linear-gradient(180deg, #101522 0%, #06080d 100%)", display:"flex", alignItems:"center", justifyContent:"center", color:"#6c7280", fontSize:13 }}>
+        No agents on this team yet. Pick a template via <b style={{ margin:"0 4px" }}>Team…</b>.
+      </div>
+    );
+  }
+
+  const LAYER_COLORS = [
+    "#f1c44a", "#48d486", "#3aa0ff", "#ee5b5b",
+    "#ff9a3a", "#9aa3b2", "#a578ff", "#ff79c4",
+  ];
+
+  // Depth per agent. The orchestrator is depth 0; everyone else lands
+  // on the BFS distance from it via team.edges (or depth 1 if no edges).
+  const depths = useMemo(() => computeDepths(team), [team]);
+  const orchName =
+    team.agents.find(a => a.name === "orchestrator")?.name ??
+    team.agents.find(a => a.base === "orchestrator")?.name ??
+    team.agents[0].name;
+
+  const byDepth = useMemo(() => {
+    const m = new Map<number, AgentSpec[]>();
+    for (const a of team.agents) {
+      const d = depths.get(a.name) ?? 0;
+      if (!m.has(d)) m.set(d, []);
+      m.get(d)!.push(a);
+    }
+    return m;
+  }, [team, depths]);
+  const sortedDepths = Array.from(byDepth.keys()).sort((a, b) => a - b);
+
+  // Card geometry — scaled down from Qt's 220x340 so up to 8 fit in
+  // a row at LEFT_W=1014.
+  const NODE_W = 140;
+  const NODE_H = 116;
+  const ROW_GAP = 56;
+  const COL_GAP = 24;
+  const TOP_PAD = 40;
+
+  // Place each node. Rows centred horizontally.
+  type GNode = { name: string; spec: AgentSpec; x: number; y: number; depth: number };
+  const placed: GNode[] = [];
+  for (let rowIdx = 0; rowIdx < sortedDepths.length; rowIdx++) {
+    const depth = sortedDepths[rowIdx];
+    const row = byDepth.get(depth)!;
+    const totalW = row.length * NODE_W + Math.max(0, row.length - 1) * COL_GAP;
+    const startX = (w - totalW) / 2;
+    const y = TOP_PAD + rowIdx * (NODE_H + ROW_GAP);
+    for (let colIdx = 0; colIdx < row.length; colIdx++) {
+      const a = row[colIdx];
+      placed.push({
+        name: a.name,
+        spec: a,
+        x: startX + colIdx * (NODE_W + COL_GAP),
+        y,
+        depth,
+      });
+    }
+  }
+  const byName = new Map<string, GNode>();
+  for (const n of placed) byName.set(n.name, n);
+
+  // Resolve edges into endpoints. Skip edges that reference a missing
+  // agent (defensive — team JSONs sometimes have stale entries).
+  const edges = (team.edges ?? []).filter(e => byName.has(e.source) && byName.has(e.target));
+
+  return (
+    <div
+      data-ui="GraphCanvas"
+      onClick={() => onSelect(null)}
+      style={{ position:"relative", width:w, height:h, background:"linear-gradient(180deg, #101522 0%, #06080d 100%)", overflow:"auto" }}
+    >
+      <svg width={w} height={Math.max(h, TOP_PAD + sortedDepths.length * (NODE_H + ROW_GAP) + 40)} style={{ position:"absolute", left:0, top:0 }}>
+        <defs>
+          <marker id="graphArrow" viewBox="0 0 10 10" refX="9" refY="5"
+                  markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(120,220,255,0.85)" />
+          </marker>
+        </defs>
+        {edges.map((e, i) => {
+          const s = byName.get(e.source)!;
+          const t = byName.get(e.target)!;
+          const sx = s.x + NODE_W / 2;
+          const sy = s.y + NODE_H;
+          const ex = t.x + NODE_W / 2;
+          const ey = t.y;
+          // Cubic curve so the arrow lands top-centre and exits
+          // bottom-centre — good for parent→child dispatches in a top-
+          // down layout. Same-row or upward edges get a soft sideways
+          // bow so they don't collide with node bodies.
+          const sameRow = s.depth === t.depth;
+          const upward = t.y < s.y;
+          let d: string;
+          if (sameRow || upward) {
+            const dx = ex - sx;
+            const midY = (sy + ey) / 2;
+            const bow = Math.sign(dx) * 60 + (sameRow ? 80 : 0);
+            d = `M ${sx} ${sy} C ${sx + bow} ${midY}, ${ex - bow} ${midY}, ${ex} ${ey}`;
+          } else {
+            const c1y = sy + (ey - sy) * 0.55;
+            const c2y = sy + (ey - sy) * 0.45;
+            d = `M ${sx} ${sy} C ${sx} ${c1y}, ${ex} ${c2y}, ${ex} ${ey}`;
+          }
+          return (
+            <path
+              key={"ge"+i}
+              d={d}
+              stroke="rgba(120,220,255,0.55)"
+              strokeWidth={1.6}
+              fill="none"
+              markerEnd="url(#graphArrow)"
+            />
+          );
+        })}
+      </svg>
+      {placed.map(n => {
+        const isOrch = n.name === orchName;
+        const accent = isOrch ? "#ffd76a" : LAYER_COLORS[(n.depth + 1) % LAYER_COLORS.length];
+        const sel = selected === n.name;
+        return (
+          <div
+            key={n.name}
+            onClick={(e) => { e.stopPropagation(); onSelect(n.name); }}
+            style={{
+              position: "absolute", left: n.x, top: n.y,
+              width: NODE_W, height: NODE_H, borderRadius: 12,
+              background: sel
+                ? "linear-gradient(180deg, #2a3142 0%, #1d212a 100%)"
+                : "linear-gradient(180deg, #1a1f2c 0%, #121622 100%)",
+              border: `1.6px solid ${sel ? accent : "rgba(255,255,255,0.06)"}`,
+              boxShadow: sel ? `0 0 0 2px ${accent}55, 0 4px 16px rgba(0,0,0,0.6)` : "0 2px 8px rgba(0,0,0,0.5)",
+              padding: "10px 10px",
+              display: "flex", flexDirection: "column", gap: 6,
+              cursor: "pointer",
+              userSelect: "none",
+            }}
+          >
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <img src={owlSrc(agentIconRef(n.spec, roleByName))} style={{ width:36, height:36, objectFit:"contain", flexShrink:0 }} />
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ color:"#fff", fontSize:12, fontWeight:700, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{displayLabel(n.name)}</div>
+                <div style={{ color:"#9aa0a6", fontSize:10, letterSpacing:0.4, textTransform:"uppercase" }}>{n.spec.base}</div>
+              </div>
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:"auto" }}>
+              {isOrch && (
+                <span style={{ color: accent, background: "rgba(255,215,106,0.12)", border: `1px solid ${accent}55`, borderRadius: 5, padding: "1px 6px", fontSize: 9, letterSpacing: 0.5, fontWeight: 700 }}>LEADER</span>
+              )}
+              <span style={{ color: accent, fontSize: 9, fontWeight: 600, letterSpacing: 0.4, textTransform: "uppercase" }}>Depth {n.depth}</span>
+            </div>
+          </div>
+        );
+      })}
+      {edges.length === 0 && (
+        <div style={{ position:"absolute", bottom:20, left:0, right:0, textAlign:"center", color:"#6c7280", fontSize:11, pointerEvents:"none" }}>
+          No routing edges in this team — drawing implicit star topology from orchestrator.
         </div>
       )}
     </div>
@@ -649,6 +898,12 @@ export default function AgentsPage() {
   const [busy, setBusy] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Diagram (orbital) ↔ Graph (top-down hierarchical) toggle. Mirrors
+  // agents_page.py:_on_view_toggle_clicked. Selected node lives here
+  // too so the toggle preserves the selection across views.
+  const [viewMode, setViewMode] = useState<"diagram" | "graph">("diagram");
+  const [selectedNode, setSelectedNode] = useState<string | null>(null);
 
   // Initial load — projects, teams, roles, bridges in parallel.
   useEffect(() => {
@@ -839,9 +1094,23 @@ export default function AgentsPage() {
       <GoalRow goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy} />
       <div data-ui="WorkspaceStack" style={{ height:665, width:1554, margin:"0 23px", display:"flex", overflow:"hidden", background:"#06080d", padding:0 }}>
         <div data-ui="RosterLeft" style={{ width:LEFT_W, display:"flex", flexDirection:"column", background:"#0a0d14" }}>
-          <FlowHeader />
+          <FlowHeader
+            viewMode={viewMode}
+            onToggleView={() => setViewMode(v => v === "diagram" ? "graph" : "diagram")}
+          />
           <div data-ui="CanvasStack" style={{ height:607, position:"relative" }}>
-            <TeamCanvas width={LEFT_W} height={607} team={activeTeam} roleByName={roleByName} />
+            {viewMode === "diagram" ? (
+              <TeamCanvas width={LEFT_W} height={607} team={activeTeam} roleByName={roleByName} />
+            ) : (
+              <GraphCanvas
+                width={LEFT_W}
+                height={607}
+                team={activeTeam}
+                roleByName={roleByName}
+                selected={selectedNode}
+                onSelect={setSelectedNode}
+              />
+            )}
             <div style={{ position:"absolute", top:8, left:8, width:360 }}>
               <TeamInfoCard team={activeTeam} />
               <SuperUserCard team={activeTeam} roleByName={roleByName} />

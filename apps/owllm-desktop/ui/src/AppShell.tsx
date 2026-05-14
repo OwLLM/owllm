@@ -455,11 +455,6 @@ function SubTabs({
         );
       })}
       <div style={{ flex: 1 }} />
-      <div style={{ color: "#888", fontSize: 11 }}>Product Studio Test ▾</div>
-      <button className="ghost-btn">Team</button>
-      <button className="ghost-btn">+ New</button>
-      <button className="ghost-btn">Rename</button>
-      <button className="ghost-btn">Delete</button>
     </div>
   );
 }
@@ -519,6 +514,30 @@ export default function AppShell() {
       if (onAdvancedPage) setActiveKey(defaultKeyForMode(mode));
     }
   };
+
+  // Cross-page navigation hook. StudioPage etc. dispatch
+  // `new CustomEvent('owllm:navigate', { detail: { key } })` to jump
+  // between tabs (e.g. "+ New project from <team>" → Agents). We also
+  // flip the mode toggle when the target page belongs to one.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ key?: string }>).detail;
+      const key = detail?.key;
+      if (typeof key !== "string") return;
+      // Find which module owns this page key so we can light up the
+      // matching ModeBar toggle alongside the SubTabs row.
+      for (const m of ALL_MODULES) {
+        if (m.pages.some(p => p.key === key) && m.id !== "core") {
+          if (m.id === "advanced") setAdvancedOpen(true);
+          else if (m.id === "finetuning" || m.id === "agentic" || m.id === "gamify") setMode(m.id);
+          break;
+        }
+      }
+      setActiveKey(key);
+    };
+    window.addEventListener("owllm:navigate", handler as EventListener);
+    return () => window.removeEventListener("owllm:navigate", handler as EventListener);
+  }, []);
 
   // Resolve the active page's component.
   const activePage = visiblePages.find(p => p.key === activeKey)

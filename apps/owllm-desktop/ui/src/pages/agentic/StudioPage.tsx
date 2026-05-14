@@ -1,17 +1,17 @@
-﻿// StudioPage â€” ported from LLM/desktop_app/pages/agent_studio_page.py
+﻿// StudioPage — ported from LLM/desktop_app/pages/agent_studio_page.py
 // (AgentStudioPage._build_ui, line 1010) and LLM/desktop_app/widgets/
 // team_grid_view.py (TeamGridView + TeamDetailPanel).
 //
 // Two views toggled at the top:
 //
-//   ðŸ§© Teams (default)        ðŸ¤– Agents
+//   🧩 Teams (default)        🤖 Agents
 //   â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€         â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //   Gallery grid of team       Gallery grid of agent definitions
 //   templates from             from agent_definitions.list_all_definitions
 //   LLM/core/agents/teams/*.json
 //
 // Team metadata is loaded at mount from the native list_team_templates /
-// list_agent_roles Tauri commands â€” those walk LLM/core/agents/teams/
+// list_agent_roles Tauri commands — those walk LLM/core/agents/teams/
 // (built-in JSONs) and LLM/core/agents/roles/ (built-in YAMLs) plus the
 // user-saved overrides under LLM/data/. No more baked arrays.
 import React, { useEffect, useMemo, useState } from "react";
@@ -20,17 +20,30 @@ import { invoke } from "@tauri-apps/api/core";
 const ICONS = "/Page_icons";
 const AGENT_ICON_DIR = `${ICONS}/Agents`;
 
-// owl:<basename> â†’ /Page_icons/Agents/<basename>.png  (mirrors
-// desktop_app/widgets/agent_icons.py:owl_pixmap on the web side).
+// owl:<basename> resolves to /Page_icons/Agents/<basename>.png for
+// agent owls. A handful of team-level owls (owl_agentic, owl_server,
+// owl_studio_square, …) live one level up at /Page_icons/<basename>.png
+// instead — keep them in a whitelist so the resolver picks the right
+// directory.
+const TOPLEVEL_OWLS = new Set([
+  "owl_agentic", "owl_AgenticTeam", "owl_FineTuning", "owl_FineTuning2",
+  "owl_Gamifier", "owl_Gamify", "owl_chat", "owl_chat2", "owl_chat3",
+  "owl_coding", "owl_coding2", "owl_defence", "owl_download",
+  "owl_llm_studio_transparent", "owl_models", "owl_ready", "owl_server",
+  "owl_sleeping", "owl_startup", "owl_startup1", "owl_studio_square",
+  "owl_studio_square1", "owl_thunder", "owl_tools", "owl_training",
+]);
 function owlSrc(iconRef: string): string {
   if (iconRef.startsWith("owl:")) {
-    return `${AGENT_ICON_DIR}/${iconRef.slice(4)}.png`;
+    const name = iconRef.slice(4);
+    if (TOPLEVEL_OWLS.has(name)) return `${ICONS}/${name}.png`;
+    return `${AGENT_ICON_DIR}/${name}.png`;
   }
   return iconRef;
 }
 
-// agent_canvas._display_label / agent_studio_page._display_label â€”
-// "product_studio.product_owner" â†’ "Product Owner". Acronyms uppercased.
+// agent_canvas._display_label / agent_studio_page._display_label —
+// "product_studio.product_owner" → "Product Owner". Acronyms uppercased.
 const _ACRONYMS = new Set(["ux","ui","api","mcp","gpu","be","fe","qa","cli","sql","db"]);
 function displayLabel(fullName: string): string {
   const short = fullName.includes(".") ? fullName.split(".").pop()! : fullName;
@@ -46,7 +59,7 @@ function displayLabel(fullName: string): string {
   return words.join(" ") || fullName;
 }
 
-// Category accent strip colours â€” verbatim from
+// Category accent strip colours — verbatim from
 // team_grid_view.py:49 (_CATEGORY_ACCENT).
 const CATEGORY_ACCENT: Record<string, string> = {
   Personal:  "#74a4ff",
@@ -56,10 +69,10 @@ const CATEGORY_ACCENT: Record<string, string> = {
   Other:     "#9aa0a6",
   Custom:    "#ff7ed1",
 };
-// team_grid_view.py:48 â€” fixed display order for category sections.
+// team_grid_view.py:48 — fixed display order for category sections.
 const CATEGORY_ORDER = ["Personal", "Knowledge", "Software", "Ops", "Other", "Custom"];
 
-// Base-role â†’ default owl icon. Mirrors what apply_to_label falls back
+// Base-role → default owl icon. Mirrors what apply_to_label falls back
 // to when an agent spec has no explicit `icon` (the base role's icon
 // from builtin_roles()). Hand-tabulated from the team JSONs + the owl
 // PNGs actually on disk in icons/Page_icons/Agents/.
@@ -70,7 +83,7 @@ const BASE_OWL: Record<string, string> = {
   researcher:    "owl:owl_researcher",
   operator:      "owl:owl_operator",
   documentation: "owl:owl_documentation",
-  devops:        "owl:owl_SSH",         // devops role â†’ SSH owl asset
+  devops:        "owl:owl_SSH",         // devops role → SSH owl asset
   webapp:        "owl:owl_webapp",
   assistant:     "owl:owl_asssitant",
 };
@@ -81,7 +94,7 @@ function resolveAgentIcon(icon: string | null | undefined, base: string | null |
 }
 
 // ---------------------------------------------------------------------
-// Data â€” baked from LLM/core/agents/teams/*.json (17 templates).
+// Data — baked from LLM/core/agents/teams/*.json (17 templates).
 // ---------------------------------------------------------------------
 type AgentSpec = { name: string; base: string; icon?: string | null };
 type Team = {
@@ -127,7 +140,7 @@ const AGENTS_FALLBACK: AgentDef[] = [];   // populated at mount from list_agent_
 // Visual building blocks
 // ---------------------------------------------------------------------
 
-// Toggle â€” mirrors _VIEW_TAB_LEFT_STYLE / _RIGHT_STYLE in
+// Toggle — mirrors _VIEW_TAB_LEFT_STYLE / _RIGHT_STYLE in
 // agent_studio_page.py:1551-1580. Checked state is #28406b on #fff
 // with #3a5fa0 border, idle is rgba(255,255,255,0.04).
 function ViewToggle({ view, onChange }: {
@@ -157,7 +170,7 @@ function ViewToggle({ view, onChange }: {
           color:      view === "teams" ? "#fff" : base.color,
           borderColor: view === "teams" ? "#3a5fa0" : "rgba(255,255,255,0.06)",
         }}
-      >ðŸ§© Teams</button>
+      >🧩 Teams</button>
       <button
         onClick={() => onChange("agents")}
         style={{
@@ -168,7 +181,7 @@ function ViewToggle({ view, onChange }: {
           color:      view === "agents" ? "#fff" : base.color,
           borderColor: view === "agents" ? "#3a5fa0" : "rgba(255,255,255,0.06)",
         }}
-      >ðŸ¤– Agents</button>
+      >🤖 Agents</button>
     </div>
   );
 }
@@ -184,8 +197,8 @@ function OnboardingBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss
       gap: 10,
     }}>
       <span style={{ color: "#dde3ff", fontSize: 12, flex: 1 }}>
-        ðŸ‘‹ <b>New here?</b> Install Anthropic's official skill pack
-        (PDF, Excel, Word helpers â€” drop-in compatible) to give your
+        👋 <b>New here?</b> Install Anthropic's official skill pack
+        (PDF, Excel, Word helpers — drop-in compatible) to give your
         agents pro-grade capabilities out of the box.
       </span>
       <button
@@ -204,12 +217,12 @@ function OnboardingBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss
           border: "none", fontSize: 14, cursor: "pointer",
           width: 28, height: 28,
         }}
-      >âœ•</button>
+      >✕</button>
     </div>
   );
 }
 
-// SearchBar â€” Qt's Studio doesn't ship one explicitly, but the
+// SearchBar — Qt's Studio doesn't ship one explicitly, but the
 // gallery's _wrappable() helper and the user-facing "filter the
 // catalogue" need is what's missing in the React port. Lightweight
 // client-side string match on display name + description + category.
@@ -242,13 +255,13 @@ function SearchBar({ value, onChange, placeholder }: {
             border: "1px solid rgba(255,255,255,0.06)",
             borderRadius: 8, padding: "6px 10px", cursor: "pointer",
           }}
-        >âœ•</button>
+        >✕</button>
       )}
     </div>
   );
 }
 
-// TeamCard â€” mirrors team_grid_view.py:64 TeamCard. Category-coloured
+// TeamCard — mirrors team_grid_view.py:64 TeamCard. Category-coloured
 // accent strip on the left, agent mini-avatars row, MCP chips, CUSTOM
 // tag in the corner for non-built-ins, selected-state outline.
 function TeamCard({
@@ -266,7 +279,7 @@ function TeamCard({
         maxHeight: 220,
         cursor: "pointer",
         background: "linear-gradient(135deg, #1c2236 0%, #0d1019 100%)",
-        // 3px accent strip on the left â€” category colour. (Qt sets the
+        // 3px accent strip on the left — category colour. (Qt sets the
         // hover border-color to the accent; we hint it via boxShadow.)
         borderLeft: `3px solid ${accent}`,
         border: `1px solid ${border}`,
@@ -288,7 +301,7 @@ function TeamCard({
           <div style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>{team.display}</div>
           <div style={{ fontSize: 10, letterSpacing: 0.6 }}>
             <span style={{ color: accent }}>{team.category.toUpperCase()}</span>
-            <span style={{ color: "#9aa0a6" }}>  Â·  {team.agents.length} agents</span>
+            <span style={{ color: "#9aa0a6" }}>  ·  {team.agents.length} agents</span>
           </div>
         </div>
         {!team.builtIn && (
@@ -309,7 +322,7 @@ function TeamCard({
         overflow: "hidden",
       }}>{team.description}</div>
 
-      {/* Agent mini-avatars row â€” first 6 + "+N" overflow */}
+      {/* Agent mini-avatars row — first 6 + "+N" overflow */}
       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
         {team.agents.slice(0, 6).map(a => (
           <img
@@ -326,7 +339,7 @@ function TeamCard({
         )}
       </div>
 
-      {/* MCP needs chips â€” first 4 + "+N" overflow */}
+      {/* MCP needs chips — first 4 + "+N" overflow */}
       {team.requiredMcp.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
           {team.requiredMcp.slice(0, 4).map(m => (
@@ -348,8 +361,8 @@ function TeamCard({
   );
 }
 
-// "Create your own team" tile â€” team_grid_view.py:230 _build_create_inner.
-// Dashed border, centred ï¼‹ + title + sub.
+// "Create your own team" tile — team_grid_view.py:230 _build_create_inner.
+// Dashed border, centred ＋ + title + sub.
 function CreateTeamCard({ onClick }: { onClick: () => void }) {
   return (
     <div
@@ -369,14 +382,14 @@ function CreateTeamCard({ onClick }: { onClick: () => void }) {
         textAlign: "center",
       }}
     >
-      <div style={{ color: "#a8b8ff", fontSize: 36, fontWeight: 700, lineHeight: 1 }}>ï¼‹</div>
+      <div style={{ color: "#a8b8ff", fontSize: 36, fontWeight: 700, lineHeight: 1 }}>＋</div>
       <div style={{ color: "#dde3ff", fontSize: 12, fontWeight: 700 }}>Create your own team</div>
       <div style={{ color: "#9aa0a6", fontSize: 11 }}>Pick agents, name it, save it as a template.</div>
     </div>
   );
 }
 
-// TeamsGrid â€” groups teams by category in CATEGORY_ORDER, each section
+// TeamsGrid — groups teams by category in CATEGORY_ORDER, each section
 // header coloured by its category accent. The "Build your own" section
 // always renders last with the dashed CreateTeamCard. Mirrors
 // team_grid_view.py:280 TeamGridView.set_templates.
@@ -421,7 +434,7 @@ function TeamsGrid({ teams, selected, onSelect, onCreate }: {
             }}>{cat}</div>
             <div style={{
               display: "grid",
-              // Qt _COLS = 3 â€” but we still let the grid wrap on
+              // Qt _COLS = 3 — but we still let the grid wrap on
               // narrow viewports via auto-fill.
               gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
               gap: 12,
@@ -439,7 +452,7 @@ function TeamsGrid({ teams, selected, onSelect, onCreate }: {
         );
       })}
 
-      {/* BUILD YOUR OWN â€” always last, mirrors _build_create_section. */}
+      {/* BUILD YOUR OWN — always last, mirrors _build_create_section. */}
       <div>
         <div style={{
           fontSize: 10, color: "#a8b8ff", textTransform: "uppercase",
@@ -458,7 +471,7 @@ function TeamsGrid({ teams, selected, onSelect, onCreate }: {
   );
 }
 
-// Mini agent card inside the detail panel â€” team_grid_view.py:432
+// Mini agent card inside the detail panel — team_grid_view.py:432
 // _AgentMiniCard. Card-wide icon tile, centered name, LEADER ribbon
 // for orchestrator/can_dispatch.
 function AgentMiniCard({ spec }: { spec: AgentSpec }) {
@@ -494,7 +507,7 @@ function AgentMiniCard({ spec }: { spec: AgentSpec }) {
       }} title={spec.name}>
         {(() => {
           const d = displayLabel(spec.name);
-          return d.length > 22 ? d.slice(0, 21) + "â€¦" : d;
+          return d.length > 22 ? d.slice(0, 21) + "…" : d;
         })()}
       </div>
       {isLeader && (
@@ -510,8 +523,8 @@ function AgentMiniCard({ spec }: { spec: AgentSpec }) {
   );
 }
 
-// Detail panel â€” team_grid_view.py:632 TeamDetailPanel. Header
-// (icon + title + categoryÂ·N agentsÂ·M connectionsÂ·BUILT-IN/CUSTOM
+// Detail panel — team_grid_view.py:632 TeamDetailPanel. Header
+// (icon + title + category·N agents·M connections·BUILT-IN/CUSTOM
 // chip), description, AGENTS grid, ROUTING list, MCP NEEDED chips,
 // Delete (custom only) + primary CTA.
 function TeamDetailPanel({
@@ -565,9 +578,9 @@ function TeamDetailPanel({
           <div style={{ fontSize: 10, letterSpacing: 0.6 }}>
             <span style={{ color: accent }}>{team.category.toUpperCase()}</span>
             <span style={{ color: "#9aa0a6" }}>
-              {"  Â·  "}{team.agents.length} agents
-              {"  Â·  "}{team.edges.length} connections
-              {"  Â·  "}
+              {"  ·  "}{team.agents.length} agents
+              {"  ·  "}{team.edges.length} connections
+              {"  ·  "}
             </span>
             <span style={{ color: team.builtIn ? "#9aa0a6" : "#ff7ed1" }}>
               {team.builtIn ? "BUILT-IN" : "CUSTOM"}
@@ -596,7 +609,7 @@ function TeamDetailPanel({
         {team.agents.map(a => <AgentMiniCard key={a.name} spec={a} />)}
       </div>
 
-      {/* ROUTING â€” src â†’ dst lines, monospace */}
+      {/* ROUTING — src → dst lines, monospace */}
       {team.edges.length > 0 && (
         <>
           <div style={{
@@ -610,7 +623,7 @@ function TeamDetailPanel({
                 fontFamily: "'Consolas','JetBrains Mono',monospace",
                 fontSize: 11,
               }}>
-                {e.source}  â†’  {e.target}
+                {e.source}  →  {e.target}
               </div>
             ))}
           </div>
@@ -637,7 +650,7 @@ function TeamDetailPanel({
 
       <div style={{ flex: 1 }} />
 
-      {/* Actions â€” Edit / Duplicate / Delete (custom only) on the left,
+      {/* Actions — Edit / Duplicate / Delete (custom only) on the left,
           primary "+ New project from <name>" on the right. Qt only
           shows Edit/Delete for non-built-ins; Duplicate is a Studio
           affordance the user asked us to add. */}
@@ -701,10 +714,10 @@ function TeamDetailPanel({
 }
 
 // ---------------------------------------------------------------------
-// Agents view â€” gallery + detail mirror of agent_studio_page.py:1257
+// Agents view — gallery + detail mirror of agent_studio_page.py:1257
 // ---------------------------------------------------------------------
 
-// Agent gallery card â€” mirrors agent_studio_page.py:172 _GalleryCard.
+// Agent gallery card — mirrors agent_studio_page.py:172 _GalleryCard.
 // Fixed 140px height, accent-coloured left border (#4a6cff for
 // built-ins/skills, #7a8a9c for plain custom), badges row (BUILT-IN,
 // SKILL, LEADER).
@@ -849,7 +862,7 @@ function SmallStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-// AgentDetailPanel â€” mirrors agent_studio_page.py:426 _EditorPanel
+// AgentDetailPanel — mirrors agent_studio_page.py:426 _EditorPanel
 // at a stub level. The full editor (name/desc/system-prompt/tools/
 // voice/MCP) needs /v1/agents endpoints to be useful; for now we
 // surface the read-only summary + the action buttons (Save / Duplicate /
@@ -1015,7 +1028,7 @@ function AgentDetailPanel({
 
       <div style={{ flex: 1 }} />
 
-      {/* Action row â€” Save (primary) / Duplicate (ghost) / Delete (destructive). */}
+      {/* Action row — Save (primary) / Duplicate (ghost) / Delete (destructive). */}
       <div style={{ display: "flex", gap: 8 }}>
         <button
           onClick={onSave}
@@ -1135,6 +1148,10 @@ export default function StudioPage() {
   const [bannerVisible, setBannerVisible] = useState(true);
   const [teamQuery, setTeamQuery] = useState("");
   const [agentQuery, setAgentQuery] = useState("");
+  // "Skill Library" filter — flips on when the user clicks the
+  // banner CTA / 📚 Skill Library button. Hides plain roles so only
+  // SKILL.md packs remain.
+  const [skillsOnly, setSkillsOnly] = useState(false);
   const [teams, setTeams] = useState<Team[]>(TEAMS_FALLBACK);
   const [agents, setAgents] = useState<AgentDef[]>(AGENTS_FALLBACK);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -1178,47 +1195,79 @@ export default function StudioPage() {
 
   const filteredAgents = useMemo(() => {
     const q = agentQuery.trim().toLowerCase();
-    if (!q) return agents;
-    return agents.filter(a =>
+    let base = skillsOnly ? agents.filter(a => a.isSkill) : agents;
+    if (q) base = base.filter(a =>
       a.name.toLowerCase().includes(q) ||
       a.description.toLowerCase().includes(q)
     );
-  }, [agentQuery, agents]);
+    return base;
+  }, [agentQuery, agents, skillsOnly]);
 
   const team = teams.find(t => t.name === selectedTeam) ?? null;
   const agent = agents.find(a => a.name === selectedAgent) ?? null;
 
-  // Sub-label text per view â€” verbatim from agent_studio_page.py:1126-1136.
+  // Sub-label text per view — verbatim from agent_studio_page.py:1126-1136.
   const subLabel = view === "teams"
-    ? "Pick a team template â€” pre-built collections of agents wired to do a kind of work (Secretary, Bug Hunter, Research Lab, â€¦). One click spawns a project with the team ready to run."
-    : "Design individual agents â€” pick an avatar, a job, the tools they get to use. Built-ins ship with OWLLM and can't be edited; click Duplicate on any built-in to make your own copy.";
+    ? "Pick a team template — pre-built collections of agents wired to do a kind of work (Secretary, Bug Hunter, Research Lab, …). One click spawns a project with the team ready to run."
+    : "Design individual agents — pick an avatar, a job, the tools they get to use. Built-ins ship with OWLLM and can't be edited; click Duplicate on any built-in to make your own copy.";
 
-  // Handler stubs â€” Tauri commands will land here once the
-  // /v1/teams + /v1/agents/definitions endpoints exist.
+  // Navigate to another top-level tab. AppShell listens for this
+  // CustomEvent on the window and swaps activeKey accordingly.
+  const navTo = (key: string) => {
+    window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key } }));
+  };
+
   const handleCreateProjectFromTeam = (name: string) => {
-    // TODO: invoke('create_project_from_template', { template: name })
-    console.log("[Studio] create project from", name);
+    // The Agents tab owns project creation (project strip → + New).
+    // For now, dropping the template name into sessionStorage lets a
+    // future hook on AgentsPage pre-populate the team picker.
+    sessionStorage.setItem("owllm:agents:pending-team", name);
+    navTo("agents");
   };
   const handleEditTemplate = (name: string) => {
-    console.log("[Studio] edit template", name);
+    const t = teams.find(x => x.name === name);
+    if (!t) return;
+    alert(
+      t.builtIn
+        ? `'${t.display}' is a built-in template — duplicate it first to edit.`
+        : `Editing custom templates lands in the next slice. Until then, the JSON sits at:\n\nLLM/data/teams/${name}.json`,
+    );
   };
   const handleDuplicateTemplate = (name: string) => {
-    console.log("[Studio] duplicate template", name);
+    const t = teams.find(x => x.name === name);
+    if (!t) return;
+    alert(
+      `Cloning '${t.display}' as a custom template requires the write_team_template Tauri command, which lands in the next slice.\n\nUntil then, copy LLM/core/agents/teams/${name}.json → LLM/data/teams/${name}_copy.json and it'll show up here as CUSTOM.`,
+    );
   };
   const handleDeleteTemplate = (name: string) => {
-    if (confirm(`Delete the team template '${name}'?\nExisting projects spawned from it stay intact.`)) {
-      console.log("[Studio] delete template", name);
+    const t = teams.find(x => x.name === name);
+    if (!t) return;
+    if (t.builtIn) {
+      alert(`'${t.display}' is a built-in template — built-ins can't be deleted.`);
+      return;
+    }
+    if (confirm(`Delete the team template '${t.display}'?\nExisting projects spawned from it stay intact.`)) {
+      alert(`Delete needs the delete_team_template Tauri command, which lands in the next slice. Until then, remove the JSON manually from LLM/data/teams/${name}.json.`);
     }
   };
   const handleCreateTeam = () => {
-    // TODO: open TeamBuilderDialog equivalent.
-    console.log("[Studio] new team");
+    alert(
+      "Creating a brand-new team template needs the TeamBuilderDialog port — coming in the next slice.\n\nUntil then: duplicate an existing built-in (Duplicate button on its detail panel), then edit the JSON under LLM/data/teams/.",
+    );
   };
   const handleNewAgent = () => {
-    console.log("[Studio] new custom agent");
+    alert(
+      "Creating a custom agent needs the AgentEditor dialog port — coming in the next slice.\n\nUntil then: drop a SKILL.md (with YAML frontmatter) into LLM/data/skills/<your_pack>/SKILL.md — it'll show up here as a SKILL card.",
+    );
   };
   const handleOpenSkillLibrary = () => {
-    console.log("[Studio] open skill library");
+    // Switch to the Agents view + apply the skills-only filter so the
+    // user only sees SKILL.md packs (Anthropic helpers + any local
+    // installs under LLM/data/skills/).
+    setView("agents");
+    setSkillsOnly(true);
+    setAgentQuery("");
   };
 
   return (
@@ -1243,13 +1292,13 @@ export default function StudioPage() {
 
       {view === "teams" ? (
         <>
-          {/* Search + (no top-level "+ New Team" â€” the dashed
+          {/* Search + (no top-level "+ New Team" — the dashed
               CreateTeamCard at the bottom of the grid is Qt's
               actual CTA, see team_grid_view.py:340.) */}
           <SearchBar
             value={teamQuery}
             onChange={setTeamQuery}
-            placeholder="Filter teams by name, description, category, or agentâ€¦"
+            placeholder="Filter teams by name, description, category, or agent…"
           />
           <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>
             <div style={{ flex: 6, display: "flex", flexDirection: "column", minWidth: 0 }}>
@@ -1273,8 +1322,8 @@ export default function StudioPage() {
         </>
       ) : (
         <>
-          {/* Agents action row â€” mirrors agent_studio_page.py:1265
-              ("+ New custom agent", "ðŸ“š Skill Library", refresh). */}
+          {/* Agents action row — mirrors agent_studio_page.py:1265
+              ("+ New custom agent", "📚 Skill Library", refresh). */}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <button
               onClick={handleNewAgent}
@@ -1287,19 +1336,34 @@ export default function StudioPage() {
             >+ New custom agent</button>
             <button
               onClick={handleOpenSkillLibrary}
-              title="Browse and install community SKILL.md packs (Anthropic skills, etc.)"
+              title="Browse SKILL.md packs (Anthropic helpers + anything installed under LLM/data/skills/)"
               style={{
                 minHeight: 34,
-                background: "rgba(255,255,255,0.05)", color: "#dadcdf",
-                border: "none", borderRadius: 8, padding: "0 14px",
+                background: skillsOnly ? "rgba(122,211,255,0.18)" : "rgba(255,255,255,0.05)",
+                color: skillsOnly ? "#7ad3ff" : "#dadcdf",
+                border: skillsOnly ? "1px solid rgba(122,211,255,0.5)" : "none",
+                borderRadius: 8, padding: "0 14px",
                 cursor: "pointer", fontSize: 12,
               }}
-            >ðŸ“š Skill Library</button>
+            >📚 Skill Library</button>
+            {skillsOnly && (
+              <button
+                onClick={() => setSkillsOnly(false)}
+                title="Clear the skills-only filter"
+                style={{
+                  minHeight: 34,
+                  background: "transparent", color: "#9aa0a6",
+                  border: "1px solid rgba(255,255,255,0.10)",
+                  borderRadius: 8, padding: "0 12px",
+                  cursor: "pointer", fontSize: 12,
+                }}
+              >✕ Show all agents</button>
+            )}
             <div style={{ flex: 1 }} />
             <SearchBar
               value={agentQuery}
               onChange={setAgentQuery}
-              placeholder="Filter agentsâ€¦"
+              placeholder={skillsOnly ? "Filter skills…" : "Filter agents…"}
             />
           </div>
           <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>

@@ -40,9 +40,25 @@ type RoleData = { name: string; icon?: string; description?: string };
 type GoalMsg = { role: string; color: string; text: string };
 
 // ---------- Icon + label helpers ----------
+// A handful of owl icons live in /Page_icons/ at the top level rather
+// than in the /Page_icons/Agents/ subdir (used for team/category
+// avatars). The "owl:" scheme is ambiguous — match the file location
+// rather than guessing the wrong subdir.
+const TOPLEVEL_OWLS = new Set([
+  "owl_agentic", "owl_AgenticTeam", "owl_FineTuning", "owl_FineTuning2",
+  "owl_Gamifier", "owl_Gamify", "owl_chat", "owl_chat2", "owl_chat3",
+  "owl_coding", "owl_coding2", "owl_defence", "owl_download",
+  "owl_llm_studio_transparent", "owl_models", "owl_ready", "owl_server",
+  "owl_sleeping", "owl_startup", "owl_startup1", "owl_studio_square",
+  "owl_studio_square1", "owl_thunder", "owl_tools", "owl_training",
+]);
 function owlSrc(iconRef?: string | null): string {
   if (!iconRef) return `${ICONS}/Agents/owl_asssitant.png`;
-  if (iconRef.startsWith("owl:")) return `${ICONS}/Agents/${iconRef.slice(4)}.png`;
+  if (iconRef.startsWith("owl:")) {
+    const name = iconRef.slice(4);
+    if (TOPLEVEL_OWLS.has(name)) return `${ICONS}/${name}.png`;
+    return `${ICONS}/Agents/${name}.png`;
+  }
   if (iconRef.startsWith("/")) return iconRef;
   return `${ICONS}/${iconRef}`;
 }

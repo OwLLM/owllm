@@ -12,7 +12,7 @@
    186, 189, 196) with var(--accent) / var(--accent-glow-*) so the
    teal-cyan token from styles.css actually propagates to the canvas. */
 
-html, body, #root { margin: 0; padding: 0; background: #06080d; font-family: "Segoe UI", "Inter", system-ui, sans-serif; color: #e6e8eb; overflow: hidden; height: 100%; }
+html, body, #root { margin: 0; padding: 0; background: transparent; font-family: "Segoe UI", "Inter", system-ui, sans-serif; color: #e6e8eb; overflow: hidden; height: 100%; }
 * { box-sizing: border-box; }
 button { font-family: inherit; cursor: pointer; font-weight: bold; }
 

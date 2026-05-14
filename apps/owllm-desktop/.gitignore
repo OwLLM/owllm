@@ -5,8 +5,9 @@ target/
 *.log
 .DS_Store
 
-# Bundled Python engine — ~1.8 GB. Re-synced from LLM/ by
-# tools/sync_python_engine.ps1 on each build; never committed.
+# Bundled Python engine — wiped on 2026-05-14 (Rust owns the runtime).
+# Kept here as a safety net in case stale local checkouts still have
+# the directory; never committed.
 python_engine/
 
 # Tauri generated stubs that bloat the build cache.

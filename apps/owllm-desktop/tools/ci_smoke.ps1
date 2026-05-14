@@ -6,7 +6,8 @@ $app = Resolve-Path (Join-Path $here "..")
 Push-Location $app
 
 try {
-  python (Join-Path $app "python_engine\scripts\smoke_engine_imports.py") | Write-Host
+  # Python smoke (python_engine) was removed on 2026-05-14 when the
+  # bundled Python HTTP server was deleted. Rust now owns the runtime.
 
   npm run build | Write-Host
 

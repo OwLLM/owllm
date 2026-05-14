@@ -13,8 +13,8 @@
 // Launcher card specs are the literal _LAUNCHER_CARDS tuple at
 // main.py:4143-4166 (same accents, owl PNGs, taglines, blurbs).
 // System status + requirement rows are static placeholders for
-// now — they'll wire to invoke('engine_get', '/v1/hardware') when
-// the backend story for that lands.
+// now — they'll wire to invoke('hardware_info') (native Rust
+// command in src-tauri/src/lib.rs) once the probe is implemented.
 import React from "react";
 
 const ICONS = "/Page_icons";
@@ -286,9 +286,10 @@ function WelcomeCircle() {
 }
 
 export default function HomePage() {
-  // Static placeholders — will wire to engine_get('/v1/hardware') in
-  // a follow-up. The structure matches the Qt page (main.py:7561-7903)
-  // verbatim so the visual port is faithful before data is live.
+  // Static placeholders — will wire to invoke('hardware_info') in a
+  // follow-up (native Rust command in src-tauri/src/lib.rs). The
+  // structure matches the Qt page (main.py:7561-7903) verbatim so the
+  // visual port is faithful before data is live.
 
   // GPU block — Qt builds: "✅ N GPUs detected" header, then a per-GPU
   // row for each detected GPU (main.py:7621-7693). When no GPUs, the

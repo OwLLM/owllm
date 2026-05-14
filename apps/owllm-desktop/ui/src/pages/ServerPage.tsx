@@ -10,34 +10,44 @@
 //   │ Config: …           │ Active Servers list │                │
 //   └─────────────────────┴─────────────────────┴────────────────┘
 //
-// The PySide6 page has heavy lifecycle code (background threads for
-// server start, active-server probe, LLM status probe) — those run
-// in the Rust supervisor + Python engine in the new app. The React
-// page is the control surface: pulls /v1/models, /v1/server/status,
-// /v1/hardware via the existing `engine_get` / `engine_post` Tauri
-// commands, and emits Start/Stop via /v1/server/start | /stop.
+// ARCHITECTURE NOTE (2026-05-14): the always-on Python HTTP engine
+// was deleted. Rust now owns the runtime. The control surface here
+// calls native Tauri commands (`list_models`, `server_status`,
+// `server_start`, `server_stop`, `hardware_info`) defined in
+// src-tauri/src/lib.rs. Those commands are currently stubs that
+// return empty/default state; their real implementations will spawn
+// llama.cpp with CREATE_NO_WINDOW directly from Rust.
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
 // Real Page_icons PNG served by vite.config.ts middleware
 // (same pattern as AgentsPage.tsx / CodePage.tsx).
 const ICONS = "/Page_icons";
 
-type EngineLog = { stream: "stdout" | "stderr"; line: string };
-type ModelInfo = { model_id: string; port?: number; base_model?: string };
-type EnvInfo = { env_key: string; python: string };
-type ModelsResponse = { ok: boolean; models?: ModelInfo[]; error?: string; message?: string };
-type EnvsResponse = { ok: boolean; envs?: EnvInfo[]; envs_dir?: string; error?: string; message?: string };
+type ModelInfo = {
+  model_id: string;
+  port?: number | null;
+  base_model?: string | null;
+};
+type ServerStatus = {
+  running: boolean;
+  model_id: string | null;
+  port: number | null;
+  message: string;
+};
 
-// Reusable wrappers for the existing Tauri proxies in lib.rs.
-async function engineGet<T>(path: string): Promise<T> {
-  return JSON.parse(await invoke<string>("engine_get", { path })) as T;
+// Thin wrappers over the native Tauri commands. No HTTP, no proxy.
+async function listModels(): Promise<ModelInfo[]> {
+  return invoke<ModelInfo[]>("list_models");
 }
-async function enginePost<T>(path: string, body: unknown): Promise<T> {
-  return JSON.parse(
-    await invoke<string>("engine_post", { path, body: JSON.stringify(body) })
-  ) as T;
+async function serverStatus(): Promise<ServerStatus> {
+  return invoke<ServerStatus>("server_status");
+}
+async function serverStart(modelId: string): Promise<void> {
+  await invoke("server_start", { modelId });
+}
+async function serverStop(): Promise<void> {
+  await invoke("server_stop");
 }
 
 // ---------------------------------------------------------------------
@@ -870,38 +880,23 @@ export default function ServerPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string>("");
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [envs, setEnvs] = useState<EnvInfo[]>([]);
   const [serverState, setServerState] = useState<string>("Not checked");
 
   function appendLog(line: string) {
     setLogs((prev) => [...prev, line].slice(-2000));
   }
 
-  useEffect(() => {
-    const unlisten = listen<EngineLog>("engine-log", (ev) => {
-      const p = ev.payload;
-      const prefix = p.stream === "stderr" ? "[stderr] " : "";
-      setLogs((prev) => [...prev, `${prefix}${p.line}`].slice(-2000));
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, []);
-
   useEffect(() => { refreshAll(); }, []);
 
   async function refreshAll() {
-    setBusy("Loading app state");
+    setBusy("Loading model registry");
     setError("");
     try {
-      const [modelRes, envRes] = await Promise.all([
-        engineGet<ModelsResponse>("/v1/models"),
-        engineGet<EnvsResponse>("/v1/envs"),
-      ]);
-      if (!modelRes.ok) throw new Error(modelRes.message || modelRes.error || "Failed to load models");
-      if (!envRes.ok) throw new Error(envRes.message || envRes.error || "Failed to load envs");
-      const nextModels = modelRes.models || [];
-      setModels(nextModels);
-      setEnvs(envRes.envs || []);
-      if (!modelId && nextModels.length > 0) setModelId(nextModels[0].model_id);
+      const next = await listModels();
+      setModels(next);
+      if (!modelId && next.length > 0) setModelId(next[0].model_id);
+      const st = await serverStatus();
+      setServerState(JSON.stringify(st, null, 2));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -910,22 +905,22 @@ export default function ServerPage() {
   }
 
   async function runServerAction(action: "start" | "stop" | "status") {
-    if (!modelId) return;
+    if (!modelId && action !== "stop") return;
     setBusy(`${action} server`);
     setError("");
     try {
-      let res: Record<string, unknown>;
-      if (action === "status") {
-        const q = encodeURIComponent(modelId);
-        res = await engineGet<Record<string, unknown>>(`/v1/server/status?model_id=${q}`);
-      } else {
-        res = await enginePost<Record<string, unknown>>(`/v1/server/${action}`, { model_id: modelId });
+      if (action === "start") {
+        await serverStart(modelId);
+        appendLog(`[server] start requested for ${modelId}`);
+      } else if (action === "stop") {
+        await serverStop();
+        appendLog(`[server] stop requested`);
       }
-      setServerState(JSON.stringify(res, null, 2));
-      appendLog(`[LLM] ${action} → ${JSON.stringify(res).slice(0, 200)}`);
+      const st = await serverStatus();
+      setServerState(JSON.stringify(st, null, 2));
     } catch (e) {
       setError(String(e));
-      appendLog(`[LLM] ${action} error: ${String(e)}`);
+      appendLog(`[server] ${action} error: ${String(e)}`);
     } finally {
       setBusy(null);
     }
@@ -954,11 +949,12 @@ export default function ServerPage() {
           🖧 Servers
         </div>
         <div style={{ fontSize: 12, color: "#9aa0a6" }}>
-          {envs.length} Python env{envs.length === 1 ? "" : "s"} discovered
+          {models.length} model{models.length === 1 ? "" : "s"} configured
         </div>
         <button className="ghost-btn" onClick={refreshAll} disabled={!!busy}>Refresh</button>
-        <button className="ghost-btn" onClick={() => invoke("engine_start")} disabled={!!busy}>Start engine</button>
-        <button className="ghost-btn" onClick={() => invoke("engine_stop")} disabled={!!busy}>Stop engine</button>
+        {/* Engine Start/Stop buttons removed in the Python wipe (2026-05-14).
+            Server lifecycle is now per-model via the Server control panel
+            below — there is no longer a background process to start/stop. */}
       </div>
 
       <div style={{

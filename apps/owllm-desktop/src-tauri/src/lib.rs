@@ -88,7 +88,7 @@ mod win_nc {
         unsafe {
             let original = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
             let _ = ORIGINAL_PROC.set(original);
-            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as isize);
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as *const () as isize);
         }
     }
 

@@ -17,7 +17,9 @@
 use crate::paths;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 #[derive(Serialize, Clone)]
 pub struct TeamTemplate {

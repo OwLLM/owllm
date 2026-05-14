@@ -470,18 +470,26 @@ function LLMServerColumn({
 }) {
   const selectedModel = models.find(m => m.model_id === modelId);
 
-  // serverState is a JSON dump from /v1/server/{start,stop,status}. We
-  // best-effort parse it into a status kind so the colored dot tracks
-  // the real backend status. Qt does this via /health polling (LlmStatusProbeThread).
+  // Parse the JSON dump from server_status into a status kind. The
+  // previous substring check was buggy: `"running":false` still
+  // contains the WORD "running", so it always reported the server
+  // as up — which left Start permanently disabled.
   const [statusKind, statusDetail] = useMemo<[LlmStatusKind, string?]>(() => {
     if (busy === "start server") return ["starting"];
-    const low = serverState.toLowerCase();
-    if (!low || low.includes("not checked")) return ["not_running"];
-    if (low.includes('"status": "ok"') || low.includes("running")) return ["running"];
-    if (low.includes('"status": "loading"') || low.includes("loading")) return ["loading"];
-    if (low.includes("not_started") || low.includes("standby")) return ["standby"];
-    if (low.includes("error")) return ["error"];
-    return ["not_running"];
+    if (!serverState || serverState === "Not checked") return ["not_running"];
+    try {
+      const s = JSON.parse(serverState) as {
+        running?: boolean;
+        message?: string;
+      };
+      if (s.running === true) return ["running"];
+      const msg = (s.message || "").toLowerCase();
+      if (msg.includes("crashed") || msg.includes("ended unexpectedly")) return ["error"];
+      if (msg.includes("loading") || msg.includes("starting")) return ["loading"];
+      return ["not_running"];
+    } catch {
+      return ["not_running"];
+    }
   }, [serverState, busy]);
 
   const decor = llmStatusDecor(statusKind, statusDetail);

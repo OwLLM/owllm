@@ -14,7 +14,6 @@
 // port       = deterministic 10500 + sorted index, so the same set of
 //              files always assigns the same ports across runs.
 
-use crate::accounts;
 use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -69,41 +68,39 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
         }
     }
 
-    // Cloud models — gated on the matching API key being saved on this
-    // machine. Without the key the dispatch loop can't authenticate, so
-    // showing the option would be a footgun.
-    let status = accounts::accounts_status();
-    if status.anthropic_api_key {
-        for id in [
-            "claude-opus-4-7",
-            "claude-sonnet-4-6",
-            "claude-haiku-4-5-20251001",
-        ] {
-            out.push(ModelInfo {
-                model_id: id.to_string(),
-                port: None,
-                base_model: None,
-                size_mib: None,
-                provider: "anthropic".to_string(),
-            });
-        }
+    // Cloud models — ALWAYS surfaced so the user can see Claude / GPT
+    // options in the agent dropdowns even before saving a key. If they
+    // pick one without the matching credentials saved, the dispatch
+    // loop will surface a clear error pointing them at the Accounts
+    // page. Hiding the options behind a credentials check (the prior
+    // behaviour) made it look like the feature was missing.
+    for id in [
+        "claude-opus-4-7",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
+    ] {
+        out.push(ModelInfo {
+            model_id: id.to_string(),
+            port: None,
+            base_model: None,
+            size_mib: None,
+            provider: "anthropic".to_string(),
+        });
     }
-    if status.openai_api_key {
-        for id in [
-            "gpt-5",
-            "gpt-5-mini",
-            "gpt-4.1",
-            "gpt-4o",
-            "gpt-4o-mini",
-        ] {
-            out.push(ModelInfo {
-                model_id: id.to_string(),
-                port: None,
-                base_model: None,
-                size_mib: None,
-                provider: "openai".to_string(),
-            });
-        }
+    for id in [
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-4.1",
+        "gpt-4o",
+        "gpt-4o-mini",
+    ] {
+        out.push(ModelInfo {
+            model_id: id.to_string(),
+            port: None,
+            base_model: None,
+            size_mib: None,
+            provider: "openai".to_string(),
+        });
     }
 
     Ok(out)

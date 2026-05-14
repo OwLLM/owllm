@@ -38,18 +38,7 @@ function startDrag(e: React.MouseEvent) {
   // Don't drag when clicking a button / interactive element.
   if ((e.target as HTMLElement).closest("button, input, select, textarea, a")) return;
   e.preventDefault();
-  // Tauri's startDragging() calls ReleaseCapture + WM_NCLBUTTONDOWN(HTCAPTION)
-  // which works whether the window is normal OR maximized (maximized
-  // gets restored under the cursor, standard Windows behavior).
   getCurrentWindow().startDragging().catch(() => { /* not in Tauri ctx */ });
-}
-
-// Double-click the title bar = toggle maximize, matching native
-// Windows behavior. Without this the user is stuck with the [▢]
-// button if the resize handles also fail.
-function onHeaderDoubleClick(e: React.MouseEvent) {
-  if ((e.target as HTMLElement).closest("button, input, select, textarea, a")) return;
-  getCurrentWindow().toggleMaximize().catch(() => {});
 }
 
 type ResizeDir =
@@ -67,24 +56,6 @@ function ResizeEdges() {
   // position:fixed anchors directly to the viewport instead of
   // depending on a parent wrapper that might be sized wrong. Very
   // high z-index so nothing in the page can ever cover the handles.
-  // BUT: when the window is maximized, resize is a no-op AND the top
-  // edge band steals clicks from the title-bar drag region (which
-  // the user expects to restore-and-drag). So we hide ourselves
-  // entirely while maximized.
-  const [maximized, setMaximized] = useState(false);
-  useEffect(() => {
-    let dead = false;
-    const probe = async () => {
-      try {
-        const m = await getCurrentWindow().isMaximized();
-        if (!dead) setMaximized(m);
-      } catch { /* not in tauri */ }
-    };
-    probe();
-    const id = window.setInterval(probe, 200);
-    return () => { dead = true; window.clearInterval(id); };
-  }, []);
-  if (maximized) return null;
   const base: React.CSSProperties = { position: "fixed", zIndex: 10000, background: "transparent" };
   return (
     <>
@@ -341,7 +312,7 @@ function ModeBar({
   const visibleToggles = TOGGLES.filter(t => installed.includes(t.id as ModeId));
 
   return (
-    <div data-ui="AppHeader" data-tauri-drag-region onMouseDown={startDrag} onDoubleClick={onHeaderDoubleClick} style={{
+    <div data-ui="AppHeader" onMouseDown={startDrag} style={{
       position: "relative",
       height: 80,
       display: "grid", gridTemplateColumns: "auto 1fr auto auto",

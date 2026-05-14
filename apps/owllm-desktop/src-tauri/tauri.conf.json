@@ -34,13 +34,15 @@
       {
         "label": "main",
         "title": "OwLLM Desktop",
-        "width": 1720,
-        "height": 1140,
+        "width": 1440,
+        "height": 900,
         "minWidth": 1024,
-        "minHeight": 720,
+        "minHeight": 640,
         "resizable": true,
+        "maximized": true,
         "decorations": true,
-        "transparent": false
+        "transparent": false,
+        "center": true
       }
     ]
   },

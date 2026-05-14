@@ -302,6 +302,7 @@ function ModeBar({
 
   return (
     <div data-ui="AppHeader" onMouseDown={startDrag} style={{
+      position: "relative",
       height: 80,
       display: "grid", gridTemplateColumns: "auto 1fr auto auto",
       alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
@@ -359,13 +360,29 @@ function ModeBar({
         ))}
       </div>
 
-      <div style={{ display: "flex", justifyContent: "center" }}>
-        <div data-ui="AppTitle" style={{
-          textAlign: "center", width: 128, height: 45,
+      {/* Spacer for the grid column so the layout still flows; the
+          actual OWLLM title is position:absolute centered against the
+          ModeBar so the left button cluster width doesn't push it
+          off-axis. */}
+      <div />
+
+      {/* OWLLM title — absolutely positioned to the window centre.
+          Pointer events disabled so it doesn't intercept drag clicks. */}
+      <div
+        data-ui="AppTitle"
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: "50%",
+          transform: "translate(-50%, -50%)",
+          width: 160,
+          height: 45,
           fontSize: 29, fontWeight: 700, color: "#fff",
           letterSpacing: 2, lineHeight: "45px",
-        }}>OWLLM</div>
-      </div>
+          textAlign: "center",
+          pointerEvents: "none",
+        }}
+      >OWLLM</div>
 
       <SysInfoBlock />
       <WindowControls />

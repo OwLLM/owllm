@@ -44,6 +44,10 @@ version = "0.58"
 features = [
   "Win32_Foundation",
   "Win32_UI_WindowsAndMessaging",
+  # Needed for GetMonitorInfo / MonitorFromWindow / MONITORINFO —
+  # used by the WM_GETMINMAXINFO handler to clamp maximize to the
+  # taskbar-aware monitor work area.
+  "Win32_Graphics_Gdi",
 ]
 
 [dev-dependencies]

@@ -82,23 +82,29 @@ pub fn run() {
 mod win_nc {
     use std::sync::OnceLock;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, GetSystemMetrics, GetWindowLongPtrW,
-        IsZoomed, SetWindowLongPtrW, GWLP_WNDPROC, NCCALCSIZE_PARAMS,
-        SM_CXFRAME, SM_CXPADDEDBORDER, SM_CYFRAME, WM_NCCALCSIZE,
+        CallWindowProcW, DefWindowProcW, GetWindowLongPtrW, SetWindowLongPtrW,
+        GWLP_WNDPROC, MINMAXINFO, WM_GETMINMAXINFO, WM_NCCALCSIZE,
     };
 
     /// Original window proc pointer, captured the first time we
     /// subclass. All non-NC messages flow back through it.
     static ORIGINAL_PROC: OnceLock<isize> = OnceLock::new();
 
-    /// Replace the window proc with one that swallows WM_NCCALCSIZE.
-    /// Returning 0 from WM_NCCALCSIZE tells the OS that the entire
-    /// window IS the client area — no non-client space for a title
-    /// strip, no DWM accent border, nothing. This is the documented
-    /// Windows technique for fully custom frames (Discord/VSCode use
-    /// it). DWMWA_BORDER_COLOR doesn't exist on Win10, so the prior
-    /// fix was a no-op there — this works on both Win10 and Win11.
+    /// Replace the window proc with one that swallows WM_NCCALCSIZE
+    /// (so no system frame is drawn) AND clamps WM_GETMINMAXINFO to
+    /// the monitor work area (so maximize doesn't hide under the
+    /// taskbar). This is the documented Discord/VSCode pattern for
+    /// fully custom Windows frames. CRUCIAL: we must KEEP
+    /// WS_THICKFRAME on the window style — that's what makes maximize
+    /// snap to the work area and drag-from-caption restore properly.
+    /// Stripping THICKFRAME (our previous bug) caused maximize to use
+    /// the whole monitor rect (so the taskbar covered the bottom) and
+    /// disabled the OS's "restore on drag" logic, which is why drag
+    /// was snapping back.
     pub fn subclass(hwnd: HWND) {
         unsafe {
             let original = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
@@ -111,28 +117,40 @@ mod win_nc {
         hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
     ) -> LRESULT {
         if msg == WM_NCCALCSIZE && wparam.0 != 0 {
-            // wParam != 0 means "give me the new client rect". For a
-            // frameless window we normally collapse the client area to
-            // the whole proposed window rect (return 0).
-            //
-            // When the window is MAXIMIZED, Windows positions it so
-            // that ~8px of resize border on each side hangs OFF-screen
-            // (that's how a standard window hides those edges). If we
-            // accept that rect as-is, our content paints those 8px
-            // off-screen — the user sees a "big pad on the top and
-            // right". The fix is the standard Win32 dance: inset the
-            // proposed client rect by SM_CXFRAME + SM_CXPADDEDBORDER
-            // on each side when IsZoomed() is true so the content
-            // shrinks back into the visible work area.
-            let params = lparam.0 as *mut NCCALCSIZE_PARAMS;
-            if !params.is_null() && IsZoomed(hwnd).as_bool() {
-                let inset_x = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
-                let inset_y = GetSystemMetrics(SM_CYFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
-                let r: &mut RECT = &mut (*params).rgrc[0];
-                r.left   += inset_x;
-                r.top    += inset_y;
-                r.right  -= inset_x;
-                r.bottom -= inset_y;
+            // wParam != 0 means "give me the new client rect". Return 0
+            // → the client rect equals the proposed window rect, i.e.
+            // no non-client area. Combined with WM_GETMINMAXINFO below,
+            // maximized state already sits inside the work area so we
+            // don't need to inset the rect ourselves.
+            return LRESULT(0);
+        }
+        if msg == WM_GETMINMAXINFO {
+            // Tell Windows to maximize to the monitor WORK AREA (not
+            // the full monitor rect). Without this, a window without
+            // a system frame can be maximized over the taskbar — which
+            // is exactly the "appears below the taskbar" bug the user
+            // hit. This is the standard Win32 frameless-window dance.
+            let info = lparam.0 as *mut MINMAXINFO;
+            if !info.is_null() {
+                let monitor: HMONITOR = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+                let mut mi = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    rcMonitor: RECT::default(),
+                    rcWork: RECT::default(),
+                    dwFlags: 0,
+                };
+                if GetMonitorInfoW(monitor, &mut mi).as_bool() {
+                    // ptMaxPosition is RELATIVE to the monitor's
+                    // top-left in virtual screen coordinates.
+                    (*info).ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
+                    (*info).ptMaxPosition.y = mi.rcWork.top  - mi.rcMonitor.top;
+                    (*info).ptMaxSize.x     = mi.rcWork.right  - mi.rcWork.left;
+                    (*info).ptMaxSize.y     = mi.rcWork.bottom - mi.rcWork.top;
+                    // Track maxes too so the OS doesn't think the
+                    // window can grow taller than the work area.
+                    (*info).ptMaxTrackSize.x = (*info).ptMaxSize.x;
+                    (*info).ptMaxTrackSize.y = (*info).ptMaxSize.y;
+                }
             }
             return LRESULT(0);
         }
@@ -152,19 +170,35 @@ fn strip_windows_decorations(hwnd_raw: isize) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE,
         SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE,
-        WS_CAPTION, WS_THICKFRAME, WS_SYSMENU, WS_MINIMIZEBOX, WS_MAXIMIZEBOX,
+        WS_CAPTION, WS_SYSMENU,
     };
     let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
     unsafe {
+        // Strip ONLY the visible title-bar bits. CRITICALLY we KEEP
+        // WS_THICKFRAME — that's the style that tells the OS this
+        // window is "movable + resizable like a normal app window",
+        // which in turn:
+        //   * makes startDragging() (WM_NCLBUTTONDOWN(HTCAPTION))
+        //     restore-and-follow-cursor when maximized (otherwise
+        //     the drag silently snaps the window back),
+        //   * makes maximize obey the work area (under WS_THICKFRAME
+        //     plus our WM_GETMINMAXINFO clamp), and
+        //   * preserves the invisible resize edges so our explicit
+        //     ResizeEdges JS handlers + the OS both work.
+        //
+        // WS_CAPTION (the title strip) is the visible source of the
+        // "we look like a normal Windows app" appearance — strip it.
+        // WS_SYSMENU (system menu icon) makes no sense without a
+        // caption — strip it too. Everything else stays.
         let style = GetWindowLongW(hwnd, GWL_STYLE);
-        let strip = (WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0) as i32;
-        let keep = (WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0) as i32;
-        let new_style = (style & !strip) | keep;
+        let strip = (WS_CAPTION.0 | WS_SYSMENU.0) as i32;
+        let new_style = style & !strip;
         SetWindowLongW(hwnd, GWL_STYLE, new_style);
 
         // Subclass the window proc so WM_NCCALCSIZE returns 0 →
         // client area covers the entire window, no residual title
         // strip or accent border can be painted by the OS or DWM.
+        // AND so WM_GETMINMAXINFO clamps maximize to the work area.
         win_nc::subclass(hwnd);
 
         // SWP_FRAMECHANGED forces the OS to recalculate the frame

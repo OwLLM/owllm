@@ -70,27 +70,25 @@ function ResizeEdges() {
   );
 }
 
+// Window controls — rendered INLINE inside the ModeBar so they're
+// clearly part of the app's own chrome and don't read as a
+// detached titlebar. Earlier we had these `position: fixed` at the
+// very top of the viewport, which visually mimicked a Windows
+// titlebar even though WS_CAPTION was off.
 function WindowControls() {
   const w = getCurrentWindow();
   const btn: React.CSSProperties = {
-    width: 38, height: 28, border: "none",
-    background: "transparent", color: "#dadcdf",
-    fontSize: 14, cursor: "pointer", userSelect: "none",
+    width: 36, height: 28, border: "none",
+    background: "rgba(255,255,255,0.04)", color: "#dadcdf",
+    fontSize: 13, cursor: "pointer", userSelect: "none",
     display: "flex", alignItems: "center", justifyContent: "center",
+    borderRadius: 5,
   };
-  // position:fixed top-right — anchored to viewport regardless of
-  // what HybridFrame is doing underneath. z-index 10001 so it sits
-  // above the resize corner (which has 10000).
   return (
-    <div style={{
-      position: "fixed", top: 6, right: 12, zIndex: 10001,
-      display: "flex", gap: 2,
-      background: "rgba(28,34,68,0.85)",
-      borderRadius: 6, padding: "2px 4px",
-    }}>
+    <div style={{ display: "flex", gap: 4, marginLeft: 8 }}>
       <button title="Minimize" style={btn} onClick={() => w.minimize()}>—</button>
       <button title="Maximize" style={btn} onClick={() => w.toggleMaximize()}>▢</button>
-      <button title="Close" style={{ ...btn, color: "#ff8080" }} onClick={() => w.close()}>✕</button>
+      <button title="Close" style={{ ...btn, background: "rgba(244,67,54,0.18)", color: "#ff8080" }} onClick={() => w.close()}>✕</button>
     </div>
   );
 }
@@ -155,7 +153,12 @@ const BADGE_H = 195;
 const BORDER_T = 18;
 const CORNER_OUTSET = 10;
 const SHIFT_OUT = BORDER_T / 2;
-const EXTRA_TOP = BADGE_H / 2;
+// EXTRA_TOP used to be BADGE_H/2 so the owl badge could peek above
+// the top frame line. In a truly frameless Tauri window that empty
+// region read as a Windows-style titlebar strip, so we zero it
+// out — the cyan frame now sits at the very top of the viewport.
+// The badge is rendered inside the chrome instead (see badgeY).
+const EXTRA_TOP = 0;
 const EXTRA_RIGHT = 75;
 const CORNER_PNG_W = 160;
 const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);
@@ -208,7 +211,12 @@ function HybridFrame({ children, outerW, outerH }: {
   const cnBL = { x: outerL - CORNER_OUTSET,                    y: outerB - CORNER_PNG_H_BL + 1 + CORNER_OUTSET };
   const cnBR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET, y: outerB - CORNER_PNG_H_BR + 1 + CORNER_OUTSET };
   const badgeX = parent_x + (parent_w - BADGE_W) / 2;
-  const badgeY = parent_y - BADGE_H / 2;
+  // With EXTRA_TOP = 0, the badge can no longer half-overhang above
+  // the top frame (nothing is up there). Slide it down so its top
+  // edge aligns with the cyan top frame; the bottom half overlaps
+  // the ModeBar inside the inner content. Same "owl stamp on the
+  // header" feel, no titlebar-shaped empty space above.
+  const badgeY = parent_y - so;
   return (
     <div style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"#0e1117", overflow:"hidden" }}>{children}</div>
@@ -298,13 +306,14 @@ function ModeBar({
   return (
     <div data-ui="AppHeader" onMouseDown={startDrag} style={{
       height: 80,
-      display: "grid", gridTemplateColumns: "auto 1fr auto",
-      alignItems: "center", padding: "10px 70px 10px 20px", gap: 16,
+      display: "grid", gridTemplateColumns: "auto 1fr auto auto",
+      alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
       background: "#1c2244",
       // The ModeBar is the visible drag handle — onMouseDown above
       // delegates to startDragging() unless the click lands on a
-      // button/select. padding-right 70 leaves room for the
-      // window-controls strip in the top-right corner.
+      // button/select. The 4th grid column hosts the inline window
+      // controls so min/max/close are obviously part of app chrome,
+      // not a detached titlebar strip.
       cursor: "default",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -362,6 +371,7 @@ function ModeBar({
       </div>
 
       <SysInfoBlock />
+      <WindowControls />
     </div>
   );
 }
@@ -517,10 +527,9 @@ export default function AppShell() {
 
   return (
     <>
-      {/* WindowControls + ResizeEdges are position:fixed and anchored
-          to the viewport — sit on top of every page regardless of
-          what HybridFrame does. */}
-      <WindowControls />
+      {/* Only ResizeEdges is position:fixed at the viewport edges.
+          WindowControls live inline INSIDE the ModeBar so they read
+          as app chrome, not a separate titlebar strip. */}
       <ResizeEdges />
       <HybridFrame outerW={vp.w} outerH={vp.h}>
         <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>

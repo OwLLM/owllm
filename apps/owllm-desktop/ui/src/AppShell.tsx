@@ -143,12 +143,11 @@ const BADGE_H = 195;
 const BORDER_T = 18;
 const CORNER_OUTSET = 10;
 const SHIFT_OUT = BORDER_T / 2;
-// EXTRA_TOP / EXTRA_RIGHT used to reserve headroom for the peeking
-// owl badge + an asymmetric right band from the Qt port. Set to 0
-// so all four paddings collapse to the SHIFT_OUT + CORNER_OUTSET
-// baseline (19 px on every side). Wastes far less screen real
-// estate when maximized.
-const EXTRA_TOP = 0;
+// EXTRA_TOP bumps the top padding from the 19 px baseline (SHIFT_OUT
+// + CORNER_OUTSET) up to 45 px total — leaving 26 px of extra
+// breathing room above the HybridFrame for the peeking owl badge.
+// EXTRA_RIGHT stays 0 so the right side keeps the symmetric 19 px.
+const EXTRA_TOP = 26;
 const EXTRA_RIGHT = 0;
 const CORNER_PNG_W = 160;
 const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);

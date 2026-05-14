@@ -29,6 +29,17 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 # tab). `bundled` ships the SQLite C lib so we don't depend on an
 # externally installed sqlite3.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Direct Win32 access. Tauri 2.10's set_decorations(false) is silently
+# ignored on Windows — verified with GetWindowLong: WS_CAPTION stays
+# set. We strip the decoration bits ourselves and call SetWindowPos
+# with SWP_FRAMECHANGED. Limited to the few APIs we need so the dep
+# stays slim.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Win32_Foundation",
+  "Win32_UI_WindowsAndMessaging",
+]
 
 [dev-dependencies]
 tempfile = "3"

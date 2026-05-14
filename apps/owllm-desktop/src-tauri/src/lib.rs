@@ -27,6 +27,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             hardware::hardware_info,
+            hardware::vram_status,
             models::list_models,
             server::server_status,
             server::server_start,

@@ -14,7 +14,43 @@
 // not touch this file. Adding a brand-new mode = one entry in
 // modules.ts plus a directory under pages/.
 import React, { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+
+// Live state shown in the header SysInfoBlock — polled every 2s
+// from the same Rust commands the ServerPage uses, so the two views
+// can't disagree. ServerStatus matches src-tauri/src/server.rs
+// `ServerStatus`; VramStatus matches src-tauri/src/hardware.rs.
+type ServerStatusLite = {
+  running: boolean;
+  model_id: string | null;
+  port: number | null;
+  message: string;
+};
+type VramGpu = { index: number; used_mib: number; total_mib: number };
+type VramStatusLite = { gpus: VramGpu[] };
+function useLiveSysInfo() {
+  const [server, setServer] = useState<ServerStatusLite>({
+    running: false, model_id: null, port: null, message: "",
+  });
+  const [vram, setVram] = useState<VramStatusLite>({ gpus: [] });
+  useEffect(() => {
+    let dead = false;
+    const tick = async () => {
+      try {
+        const [s, v] = await Promise.all([
+          invoke<ServerStatusLite>("server_status"),
+          invoke<VramStatusLite>("vram_status"),
+        ]);
+        if (!dead) { setServer(s); setVram(v); }
+      } catch { /* keep last good values */ }
+    };
+    tick();
+    const id = window.setInterval(tick, 2000);
+    return () => { dead = true; window.clearInterval(id); };
+  }, []);
+  return { server, vram };
+}
 import {
   ALL_MODULES,
   ADVANCED,
@@ -310,15 +346,45 @@ function ModeBar({
         }}>OWLLM</div>
       </div>
 
-      <div data-ui="SysInfoBlock" style={{
-        minWidth: 543, width: 543, height: 60,
-        display: "flex", flexDirection: "column",
-        alignItems: "stretch", justifyContent: "center", gap: 3,
-        fontSize: 12, fontWeight: 700, color: "#fff", textAlign: "right",
-      }}>
-        <div data-ui="HeaderServersLabel"><span className="status-dot" style={{ background: "#22c55e", color: "#22c55e" }} />Servers: 1 [Quagenmed-K4] Abbreviated Q4_K_M GGUF…</div>
-        <div data-ui="HeaderApiKeyLabel"><span className="status-dot" style={{ background: "#22c55e", color: "#22c55e" }} />API key: owllm-local</div>
-        <div data-ui="HeaderVramLabel"><span style={{ marginRight: 4 }}>💾</span>VRAM: N/A</div>
+      <SysInfoBlock />
+    </div>
+  );
+}
+
+// Header right-block — live status. Replaces the hardcoded Qt
+// mock-up that pretended a "Quagenmed-K4" server was always
+// running and VRAM was "N/A".
+function SysInfoBlock() {
+  const { server, vram } = useLiveSysInfo();
+  const dotColor = server.running ? "#22c55e" : "#888";
+  const serverLine = server.running
+    ? `Server: ${server.model_id ?? "?"}${server.port ? `  ·  port ${server.port}` : ""}`
+    : "Server: stopped";
+  const vramLine = vram.gpus.length === 0
+    ? "VRAM: N/A"
+    : vram.gpus
+        .map(g => `GPU${g.index}: ${(g.used_mib / 1024).toFixed(1)} / ${(g.total_mib / 1024).toFixed(1)} GiB`)
+        .join("   ");
+  // API key label echoes the local-only convention from the Qt app
+  // (server_page.py:1093). Real per-user keys land alongside the
+  // Accounts page wiring.
+  return (
+    <div data-ui="SysInfoBlock" style={{
+      minWidth: 543, width: 543, height: 60,
+      display: "flex", flexDirection: "column",
+      alignItems: "stretch", justifyContent: "center", gap: 3,
+      fontSize: 12, fontWeight: 700, color: "#fff", textAlign: "right",
+    }}>
+      <div data-ui="HeaderServersLabel">
+        <span className="status-dot" style={{ background: dotColor, color: dotColor }} />
+        {serverLine}
+      </div>
+      <div data-ui="HeaderApiKeyLabel">
+        <span className="status-dot" style={{ background: "#22c55e", color: "#22c55e" }} />
+        API key: owllm-local
+      </div>
+      <div data-ui="HeaderVramLabel" title={server.message || undefined}>
+        <span style={{ marginRight: 4 }}>💾</span>{vramLine}
       </div>
     </div>
   );

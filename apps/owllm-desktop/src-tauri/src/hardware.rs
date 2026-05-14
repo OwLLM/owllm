@@ -38,6 +38,74 @@ pub async fn hardware_info() -> Result<HardwareInfo, String> {
     Ok(probe().await)
 }
 
+#[derive(Default, Serialize, Clone)]
+pub struct VramStatus {
+    pub gpus: Vec<VramGpu>,
+}
+
+#[derive(Default, Serialize, Clone)]
+pub struct VramGpu {
+    pub index: u32,
+    pub used_mib: u32,
+    pub total_mib: u32,
+}
+
+/// Tauri command: live VRAM usage via nvidia-smi (no console popup).
+/// Called every 2s by the header SysInfo block. Returns an empty GPU
+/// list when nvidia-smi is unavailable (non-NVIDIA / no driver) so
+/// the UI can degrade gracefully.
+#[tauri::command]
+pub async fn vram_status() -> Result<VramStatus, String> {
+    Ok(VramStatus {
+        gpus: vram_via_nvidia_smi().await.unwrap_or_default(),
+    })
+}
+
+#[cfg(windows)]
+async fn vram_via_nvidia_smi() -> Option<Vec<VramGpu>> {
+    use tokio::process::Command;
+    let mut cmd = Command::new("nvidia-smi");
+    cmd.args([
+        "--query-gpu=memory.used,memory.total",
+        "--format=csv,noheader,nounits",
+    ]);
+    cmd.creation_flags(0x08000000);
+    let out = cmd.output().await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    Some(parse_nvidia_smi(&stdout))
+}
+
+#[cfg(not(windows))]
+async fn vram_via_nvidia_smi() -> Option<Vec<VramGpu>> {
+    None
+}
+
+/// Parse the `nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits`
+/// output: one line per GPU, comma-separated MiB values, e.g.
+///
+///   8958, 23027
+///   11655, 11513
+fn parse_nvidia_smi(text: &str) -> Vec<VramGpu> {
+    text.lines()
+        .enumerate()
+        .filter_map(|(i, raw)| {
+            let line = raw.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let (u, t) = line.split_once(',')?;
+            Some(VramGpu {
+                index: i as u32,
+                used_mib: u.trim().parse().ok()?,
+                total_mib: t.trim().parse().ok()?,
+            })
+        })
+        .collect()
+}
+
 async fn probe() -> HardwareInfo {
     let mut info = HardwareInfo::default();
 
@@ -164,6 +232,25 @@ mod tests {
     #[test]
     fn parses_empty_input() {
         assert!(parse_wmic_list("").is_empty());
+    }
+
+    #[test]
+    fn parses_nvidia_smi_dual_gpu() {
+        // Real-world sample captured from the rig:
+        //   $ nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits
+        let sample = "8958, 23027\r\n11655, 11513\r\n";
+        let v = parse_nvidia_smi(sample);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].index, 0);
+        assert_eq!(v[0].used_mib, 8958);
+        assert_eq!(v[0].total_mib, 23027);
+        assert_eq!(v[1].used_mib, 11655);
+        assert_eq!(v[1].total_mib, 11513);
+    }
+
+    #[test]
+    fn parses_nvidia_smi_empty() {
+        assert!(parse_nvidia_smi("").is_empty());
     }
 
     #[test]

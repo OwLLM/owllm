@@ -114,10 +114,12 @@ pub async fn server_start(
     // `-fit off` disables llama.cpp's auto-fit pass, which routinely
     // crashes with GGML_ASSERT(n_inputs < GGML_SCHED_MAX_SPLIT_INPUTS)
     // on models the heuristic can't place (verified on supergemma4 +
-    // gemma-4-E4B in this tree). With auto-fit off, the model runs on
-    // CPU by default; advanced GPU layer routing will land alongside
-    // the upcoming hardware-config UI.
+    // gemma-4-E4B in this tree). Pair with `-ngl 99` so all layers
+    // go to GPU explicitly — without -ngl, `-fit off` defaults to
+    // CPU and the user sees zero VRAM use, which feels like the app
+    // is faking it. 99 is the conventional "all layers" sentinel.
     cmd.arg("-fit").arg("off");
+    cmd.arg("-ngl").arg("99");
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

@@ -153,12 +153,11 @@ const BADGE_H = 195;
 const BORDER_T = 18;
 const CORNER_OUTSET = 10;
 const SHIFT_OUT = BORDER_T / 2;
-// EXTRA_TOP used to be BADGE_H/2 so the owl badge could peek above
-// the top frame line. In a truly frameless Tauri window that empty
-// region read as a Windows-style titlebar strip, so we zero it
-// out — the cyan frame now sits at the very top of the viewport.
-// The badge is rendered inside the chrome instead (see badgeY).
-const EXTRA_TOP = 0;
+// EXTRA_TOP = BADGE_H / 2 reserves headroom above the cyan top
+// frame so the owl badge can peek above the inner content (matches
+// the original Qt HybridFrame look). Setting this to 0 made the
+// badge cover the ModeBar's middle — keep the headroom.
+const EXTRA_TOP = BADGE_H / 2;
 const EXTRA_RIGHT = 75;
 const CORNER_PNG_W = 160;
 const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);
@@ -211,12 +210,10 @@ function HybridFrame({ children, outerW, outerH }: {
   const cnBL = { x: outerL - CORNER_OUTSET,                    y: outerB - CORNER_PNG_H_BL + 1 + CORNER_OUTSET };
   const cnBR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET, y: outerB - CORNER_PNG_H_BR + 1 + CORNER_OUTSET };
   const badgeX = parent_x + (parent_w - BADGE_W) / 2;
-  // With EXTRA_TOP = 0, the badge can no longer half-overhang above
-  // the top frame (nothing is up there). Slide it down so its top
-  // edge aligns with the cyan top frame; the bottom half overlaps
-  // the ModeBar inside the inner content. Same "owl stamp on the
-  // header" feel, no titlebar-shaped empty space above.
-  const badgeY = parent_y - so;
+  // Original geometry: badge straddles the top frame line, half
+  // peeking out into the EXTRA_TOP headroom, half overlapping the
+  // ModeBar inside the inner content.
+  const badgeY = parent_y - BADGE_H / 2;
   return (
     <div style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"#0e1117", overflow:"hidden" }}>{children}</div>
@@ -395,10 +392,15 @@ function SysInfoBlock() {
   // Accounts page wiring.
   return (
     <div data-ui="SysInfoBlock" style={{
-      minWidth: 543, width: 543, height: 60,
+      maxWidth: 420, height: 60,
       display: "flex", flexDirection: "column",
       alignItems: "stretch", justifyContent: "center", gap: 3,
       fontSize: 12, fontWeight: 700, color: "#fff", textAlign: "right",
+      // Trimmed from the Qt-port's hard 543px to free room for the
+      // inline WindowControls 4th grid column. overflow:hidden +
+      // text-overflow on the children below keeps long model ids
+      // from pushing the layout.
+      overflow: "hidden",
     }}>
       <div data-ui="HeaderServersLabel">
         <span className="status-dot" style={{ background: dotColor, color: dotColor }} />

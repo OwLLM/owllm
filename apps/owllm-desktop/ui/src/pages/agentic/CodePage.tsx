@@ -12,6 +12,14 @@
 // stubs that only update the status line, mirroring the Qt status
 // transitions verbatim.
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
+type EditorLaunch = {
+  editor: string;
+  command: string;
+  workspace: string;
+  message: string;
+};
 
 const ICONS = "/Page_icons";
 
@@ -135,15 +143,14 @@ export default function CodePage() {
   // top-level HWND so it can reparent it. None of that is reachable
   // from a Tauri webview, so this stub only mirrors the visible status
   // transitions: ``Launching VSCodium…`` then a faux ``embedded`` line.
-  const onLaunch = () => {
+  const onLaunch = async () => {
     setStatus(STATUS_LAUNCHING);
-    // Qt does QTimer.singleShot(200, _poll_for_hwnd) up to 100 times
-    // (~20s). We surface a representative success line after a brief
-    // tick so the user sees the same UX progression. The real call
-    // will become invoke("launch_vscodium", { workspace, model_id }).
-    window.setTimeout(() => {
-      setStatus("VSCodium launched externally. (Tauri command stub.)");
-    }, 600);
+    try {
+      const res = await invoke<EditorLaunch>("launch_external_editor", { workspace });
+      setStatus(`${res.editor} launched in its own window. (${res.command})`);
+    } catch (e) {
+      setStatus(`Launch failed: ${e}`);
+    }
   };
 
   const onBrowseWorkspace = () => {

@@ -12,9 +12,29 @@
 // (Telegram '✈' line 103, WhatsApp '💬' line 381), not PNGs — there
 // is no owl_telegram.png / owl_whatsapp.png in icons/Page_icons/, so
 // we keep the same glyphs.
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 type BridgeStatus = "stopped" | "running" | "error";
+
+// Shapes mirror src-tauri/src/bridges.rs
+type TelegramConfig = {
+  bot_token: string;
+  allowed_chat_ids: number[];
+  project_id: string;
+  auto_approve: boolean;
+};
+type WhatsAppConfig = {
+  access_token: string;
+  phone_number_id: string;
+  verify_token: string;
+  webhook_port: number;
+  webhook_host: string;
+  allowed_senders: string[];
+  project_id: string;
+  auto_approve: boolean;
+};
+type BridgeConfigs = { telegram: TelegramConfig; whatsapp: WhatsAppConfig };
 
 // Qt: 10x10 dot, running color #4caf50, stopped color #5a6376
 // (bridges_page.py:350-352).
@@ -130,6 +150,46 @@ function TelegramCard() {
   const [project, setProject] = useState("");
   const [autoApprove, setAutoApprove] = useState(false);
   const [status, setStatus] = useState<BridgeStatus>("stopped");
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Load persisted config from ~/.owllm/bridge_config.json so user
+  // doesn't re-enter the bot token every launch.
+  useEffect(() => {
+    let dead = false;
+    invoke<BridgeConfigs>("load_bridge_configs").then(c => {
+      if (dead) return;
+      const t = c.telegram;
+      setToken(t.bot_token || "");
+      setChatIds((t.allowed_chat_ids || []).join(", "));
+      setProject(t.project_id || "");
+      setAutoApprove(!!t.auto_approve);
+    }).catch(() => { /* keep blank defaults */ });
+    return () => { dead = true; };
+  }, []);
+
+  async function persist() {
+    setSaveError(null);
+    const ids = chatIds.split(",")
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(Number)
+      .filter(n => Number.isFinite(n));
+    try {
+      await invoke("save_telegram_config", {
+        cfg: {
+          bot_token: token,
+          allowed_chat_ids: ids,
+          project_id: project,
+          auto_approve: autoApprove,
+        } as TelegramConfig,
+      });
+      setSavedFlash(true);
+      window.setTimeout(() => setSavedFlash(false), 1600);
+    } catch (e) {
+      setSaveError(String(e));
+    }
+  }
   // Last update_id surfaced in the running status text (Qt line 277-279).
   const [lastUpdateId] = useState<number>(0);
   const [lastError] = useState<string>("");
@@ -258,9 +318,27 @@ function TelegramCard() {
 
       {/* Status text — Qt 174-179. */}
       <div style={{ fontSize: 11, color: "#9aa0a6" }}>{statusText}</div>
+      {saveError ? (
+        <div style={{ fontSize: 11, color: "#ffb0b0" }}>{saveError}</div>
+      ) : null}
 
-      {/* Two buttons side by side — Qt 182-202. */}
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button
+          onClick={persist}
+          style={{
+            height: BTN_HEIGHT, padding: "0 14px",
+            background: "rgba(255,255,255,0.06)",
+            color: "#dadcdf",
+            border: "1px solid rgba(255,255,255,0.10)",
+            borderRadius: 8, fontWeight: 600, fontSize: 12,
+            cursor: "pointer",
+          }}
+          title="Persist these settings to ~/.owllm/bridge_config.json"
+        >💾 Save</button>
+        {savedFlash ? (
+          <span style={{ fontSize: 11, color: "#4caf50", fontWeight: 700 }}>✓ Saved</span>
+        ) : null}
+        <div style={{ flex: 1 }} />
         <button
           disabled={running}
           onClick={() => setStatus("running")}
@@ -294,6 +372,47 @@ function WhatsAppCard() {
   const [autoApprove, setAutoApprove] = useState(false);
   const [status, setStatus] = useState<BridgeStatus>("stopped");
   const [lastError] = useState<string>("");
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let dead = false;
+    invoke<BridgeConfigs>("load_bridge_configs").then(c => {
+      if (dead) return;
+      const w = c.whatsapp;
+      setToken(w.access_token || "");
+      setPhoneId(w.phone_number_id || "");
+      setVerifyToken(w.verify_token || "");
+      setSenders((w.allowed_senders || []).join(", "));
+      setPort(w.webhook_port || 8911);
+      setProject(w.project_id || "");
+      setAutoApprove(!!w.auto_approve);
+    }).catch(() => { /* keep blank defaults */ });
+    return () => { dead = true; };
+  }, []);
+
+  async function persist() {
+    setSaveError(null);
+    const allow = senders.split(",").map(s => s.trim()).filter(Boolean);
+    try {
+      await invoke("save_whatsapp_config", {
+        cfg: {
+          access_token: token,
+          phone_number_id: phoneId,
+          verify_token: verifyToken,
+          webhook_port: port,
+          webhook_host: "0.0.0.0",
+          allowed_senders: allow,
+          project_id: project,
+          auto_approve: autoApprove,
+        } as WhatsAppConfig,
+      });
+      setSavedFlash(true);
+      window.setTimeout(() => setSavedFlash(false), 1600);
+    } catch (e) {
+      setSaveError(String(e));
+    }
+  }
 
   // Qt accent for WhatsApp (#10a37f, lines 390/460).
   const accent = "#10a37f";
@@ -407,9 +526,27 @@ function WhatsAppCard() {
       <div style={{ flex: 1 }} />
 
       <div style={{ fontSize: 11, color: "#9aa0a6" }}>{statusText}</div>
+      {saveError ? (
+        <div style={{ fontSize: 11, color: "#ffb0b0" }}>{saveError}</div>
+      ) : null}
 
-      {/* Buttons — Qt 455-475. */}
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button
+          onClick={persist}
+          style={{
+            height: BTN_HEIGHT, padding: "0 14px",
+            background: "rgba(255,255,255,0.06)",
+            color: "#dadcdf",
+            border: "1px solid rgba(255,255,255,0.10)",
+            borderRadius: 8, fontWeight: 600, fontSize: 12,
+            cursor: "pointer",
+          }}
+          title="Persist these settings to ~/.owllm/bridge_config.json"
+        >💾 Save</button>
+        {savedFlash ? (
+          <span style={{ fontSize: 11, color: "#4caf50", fontWeight: 700 }}>✓ Saved</span>
+        ) : null}
+        <div style={{ flex: 1 }} />
         <button
           disabled={running}
           onClick={() => setStatus("running")}

@@ -25,6 +25,10 @@ thiserror = "1"
 # Cross-platform CPU/RAM probe. GPU detection still goes via the
 # Windows-specific wmic shell-out below (no NVML dep yet).
 sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+# Read the legacy LLM/data/owllm_state.db for project listing (agentic
+# tab). `bundled` ships the SQLite C lib so we don't depend on an
+# externally installed sqlite3.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -4,9 +4,23 @@
 //
 // Asset URLs are root-relative ("/Page_icons/owl_agentic.png") and
 // resolve via the dev-only middleware in vite.config.ts.
-import React from "react";
+import React, { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 const ICONS = "/Page_icons";
+
+// Mirrors src-tauri/src/projects.rs ProjectRow.
+type ProjectRow = {
+  id: string;
+  name: string;
+  description: string;
+  location: string;
+  trust_writes: boolean;
+  auto_approve_all: boolean;
+  team: string[];
+  team_default_model_id: string;
+  updated_at: string;
+};
 
 // LocationRow — mirrors _build_project_strip in agents_page.py:2845-3029.
 // The Qt frame is a QFrame#ProjectStrip with a vertical gradient
@@ -18,12 +32,35 @@ const ICONS = "/Page_icons";
 // came from the v11 web mock — kept here with a fixme since the user
 // requested it. Same for the placeholder values shown.
 function LocationRow() {
+  const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [selectedId, setSelectedId] = useState<string>("");
+  const [location, setLocation] = useState<string>("");
+
+  useEffect(() => {
+    let dead = false;
+    invoke<ProjectRow[]>("list_projects").then(rows => {
+      if (dead) return;
+      setProjects(rows);
+      if (rows.length > 0) {
+        setSelectedId(rows[0].id);
+        setLocation(rows[0].location || "");
+      }
+    }).catch(() => { /* no DB yet — keep empty */ });
+    return () => { dead = true; };
+  }, []);
+
+  const onChangeProject = (id: string) => {
+    setSelectedId(id);
+    const row = projects.find(p => p.id === id);
+    setLocation(row?.location ?? "");
+  };
+
   return (
     <div data-ui="ProjectStrip" style={{ height:52, padding:"10px 14px", background:"linear-gradient(180deg, #1f2632, #181c29)", borderRadius:10, margin:"0 23px", display:"flex", alignItems:"center", gap:10 }}>
       {/* Location label — agents_page.py:2865-2871: 11px #aaa uppercase 0.6 ls. */}
       <div data-ui="LocationLabel" style={{ display:"inline-flex", alignItems:"center", height:32, fontSize:11, color:"#aaa", textTransform:"uppercase", letterSpacing:0.6, marginRight:4 }}>LOCATION</div>
       {/* Location QLineEdit — agents_page.py:2873-2888. Stretch=2. */}
-      <input data-ui="LocationInput" defaultValue="/path/to/repo · esp-flash · github.com/me/x" placeholder="/path/to/repo · esp-flash · github.com/me/x" style={{ flex:2, minWidth:240, height:32, borderRadius:8, padding:"0 12px", fontSize:13, background:"#0f0f19", color:"#fff", border:"1px solid rgba(255,255,255,0.06)" }} />
+      <input data-ui="LocationInput" value={location} onChange={e => setLocation(e.target.value)} placeholder="/path/to/repo · esp-flash · github.com/me/x" style={{ flex:2, minWidth:240, height:32, borderRadius:8, padding:"0 12px", fontSize:13, background:"#0f0f19", color:"#fff", border:"1px solid rgba(255,255,255,0.06)" }} />
       {/* Browse… — agents_page.py:2893-2898, _GHOST_BTN_STYLE, h=32. */}
       <button data-ui="LocationBrowseBtn" className="ghost-btn" style={{ height:32, width:79 }}>Browse…</button>
       {/* Trust writes — agents_page.py:2904-2915. 12px #dadcdf checkbox. */}
@@ -41,8 +78,13 @@ function LocationRow() {
       {/* Project label — agents_page.py:2976-2981, identical style to LOCATION. */}
       <span style={{ display:"inline-flex", alignItems:"center", height:32, padding:"0 12px", fontSize:11, color:"#aaa", textTransform:"uppercase", letterSpacing:0.6 }}>Project</span>
       {/* ProjectCombo — agents_page.py:2983-2994. minWidth=200, stretch=2. */}
-      <select data-ui="ProjectCombo" defaultValue="psm" style={{ flex:2, minWidth:200, height:32, padding:"0 12px", borderRadius:8, border:"none", background:"#0f0f19", color:"#fff", fontSize:13 }}>
-        <option value="psm">Product Studio Test</option>
+      <select data-ui="ProjectCombo" value={selectedId} onChange={e => onChangeProject(e.target.value)} style={{ flex:2, minWidth:200, height:32, padding:"0 12px", borderRadius:8, border:"none", background:"#0f0f19", color:"#fff", fontSize:13 }}>
+        {projects.length === 0
+          ? <option value="">(no projects — create one in the legacy app)</option>
+          : projects.map(p => (
+              <option key={p.id} value={p.id}>{p.name}</option>
+            ))
+        }
       </select>
       {/* Project management buttons — agents_page.py:2996-3027. All _GHOST_BTN_STYLE, h=32. */}
       <button className="ghost-btn" style={{ height:32, padding:"0 12px" }}>Team…</button>

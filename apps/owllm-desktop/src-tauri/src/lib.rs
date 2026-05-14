@@ -11,9 +11,13 @@
 // Each command lives in its own module so this file stays a wiring
 // manifest and nothing more.
 
+mod agents;
+mod bridges;
+mod code;
 mod hardware;
 mod models;
 mod paths;
+mod projects;
 mod server;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -26,9 +30,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            agents::list_team_templates,
+            agents::list_agent_roles,
+            bridges::load_bridge_configs,
+            bridges::save_telegram_config,
+            bridges::save_whatsapp_config,
+            code::launch_external_editor,
             hardware::hardware_info,
             hardware::vram_status,
             models::list_models,
+            projects::list_projects,
             server::server_status,
             server::server_start,
             server::server_stop,

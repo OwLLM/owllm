@@ -1,23 +1,26 @@
-// StudioPage — ported from LLM/desktop_app/pages/agent_studio_page.py
+﻿// StudioPage â€” ported from LLM/desktop_app/pages/agent_studio_page.py
 // (AgentStudioPage._build_ui, line 1010) and LLM/desktop_app/widgets/
 // team_grid_view.py (TeamGridView + TeamDetailPanel).
 //
 // Two views toggled at the top:
 //
-//   🧩 Teams (default)        🤖 Agents
-//   ─────────────────         ───────────
+//   ðŸ§© Teams (default)        ðŸ¤– Agents
+//   â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€         â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 //   Gallery grid of team       Gallery grid of agent definitions
 //   templates from             from agent_definitions.list_all_definitions
 //   LLM/core/agents/teams/*.json
 //
-// Team metadata is baked from the JSONs (17 templates). Once the backend
-// exposes /v1/teams + /v1/agents/definitions this becomes a fetch.
-import React, { useMemo, useState } from "react";
+// Team metadata is loaded at mount from the native list_team_templates /
+// list_agent_roles Tauri commands â€” those walk LLM/core/agents/teams/
+// (built-in JSONs) and LLM/core/agents/roles/ (built-in YAMLs) plus the
+// user-saved overrides under LLM/data/. No more baked arrays.
+import React, { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 const ICONS = "/Page_icons";
 const AGENT_ICON_DIR = `${ICONS}/Agents`;
 
-// owl:<basename> → /Page_icons/Agents/<basename>.png  (mirrors
+// owl:<basename> â†’ /Page_icons/Agents/<basename>.png  (mirrors
 // desktop_app/widgets/agent_icons.py:owl_pixmap on the web side).
 function owlSrc(iconRef: string): string {
   if (iconRef.startsWith("owl:")) {
@@ -26,8 +29,8 @@ function owlSrc(iconRef: string): string {
   return iconRef;
 }
 
-// agent_canvas._display_label / agent_studio_page._display_label —
-// "product_studio.product_owner" → "Product Owner". Acronyms uppercased.
+// agent_canvas._display_label / agent_studio_page._display_label â€”
+// "product_studio.product_owner" â†’ "Product Owner". Acronyms uppercased.
 const _ACRONYMS = new Set(["ux","ui","api","mcp","gpu","be","fe","qa","cli","sql","db"]);
 function displayLabel(fullName: string): string {
   const short = fullName.includes(".") ? fullName.split(".").pop()! : fullName;
@@ -43,7 +46,7 @@ function displayLabel(fullName: string): string {
   return words.join(" ") || fullName;
 }
 
-// Category accent strip colours — verbatim from
+// Category accent strip colours â€” verbatim from
 // team_grid_view.py:49 (_CATEGORY_ACCENT).
 const CATEGORY_ACCENT: Record<string, string> = {
   Personal:  "#74a4ff",
@@ -53,10 +56,10 @@ const CATEGORY_ACCENT: Record<string, string> = {
   Other:     "#9aa0a6",
   Custom:    "#ff7ed1",
 };
-// team_grid_view.py:48 — fixed display order for category sections.
+// team_grid_view.py:48 â€” fixed display order for category sections.
 const CATEGORY_ORDER = ["Personal", "Knowledge", "Software", "Ops", "Other", "Custom"];
 
-// Base-role → default owl icon. Mirrors what apply_to_label falls back
+// Base-role â†’ default owl icon. Mirrors what apply_to_label falls back
 // to when an agent spec has no explicit `icon` (the base role's icon
 // from builtin_roles()). Hand-tabulated from the team JSONs + the owl
 // PNGs actually on disk in icons/Page_icons/Agents/.
@@ -67,7 +70,7 @@ const BASE_OWL: Record<string, string> = {
   researcher:    "owl:owl_researcher",
   operator:      "owl:owl_operator",
   documentation: "owl:owl_documentation",
-  devops:        "owl:owl_SSH",         // devops role → SSH owl asset
+  devops:        "owl:owl_SSH",         // devops role â†’ SSH owl asset
   webapp:        "owl:owl_webapp",
   assistant:     "owl:owl_asssitant",
 };
@@ -78,7 +81,7 @@ function resolveAgentIcon(icon: string | null | undefined, base: string | null |
 }
 
 // ---------------------------------------------------------------------
-// Data — baked from LLM/core/agents/teams/*.json (17 templates).
+// Data â€” baked from LLM/core/agents/teams/*.json (17 templates).
 // ---------------------------------------------------------------------
 type AgentSpec = { name: string; base: string; icon?: string | null };
 type Team = {
@@ -93,375 +96,7 @@ type Team = {
   builtIn: boolean;
 };
 
-const TEAMS: Team[] = [
-  {
-    name: "bug_hunter", display: "Bug Hunter", category: "Software",
-    icon: "owl:owl_critic", builtIn: true,
-    description: "Reproduce, bisect, root-cause, patch, and add a regression test.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "reproducer", base: "coder" },
-      { name: "bisector", base: "coder" },
-      { name: "root_cause", base: "researcher" },
-      { name: "patcher", base: "coder" },
-      { name: "regression_test_author", base: "coder" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "reproducer" },
-      { source: "reproducer", target: "bisector" },
-      { source: "bisector", target: "root_cause" },
-      { source: "root_cause", target: "patcher" },
-      { source: "patcher", target: "regression_test_author" },
-      { source: "regression_test_author", target: "orchestrator" },
-    ],
-    requiredMcp: [],
-  },
-  {
-    name: "code_artisan", display: "Code Artisan", category: "Software",
-    icon: "owl:owl_coder", builtIn: true,
-    description: "Quality-first coding team. Design before coding, tests alongside the implementation, refactor before review, multi-axis review at the end.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "architect", base: "researcher", icon: "owl:owl_researcher" },
-      { name: "coder", base: "coder" },
-      { name: "refactorer", base: "coder", icon: "owl:owl_coder" },
-      { name: "critic", base: "critic" },
-      { name: "docs", base: "documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "architect" },
-      { source: "architect", target: "coder" },
-      { source: "coder", target: "refactorer" },
-      { source: "refactorer", target: "critic" },
-      { source: "critic", target: "orchestrator" },
-      { source: "orchestrator", target: "docs" },
-    ],
-    requiredMcp: [],
-  },
-  {
-    name: "code_reviewer", display: "Code Reviewer", category: "Software",
-    icon: "owl:owl_critic", builtIn: true,
-    description: "Multi-axis code review: security, performance, style. Read-only.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "security_reviewer", base: "critic" },
-      { name: "perf_reviewer", base: "critic" },
-      { name: "style_critic", base: "critic" },
-      { name: "summarizer", base: "documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "security_reviewer" },
-      { source: "orchestrator", target: "perf_reviewer" },
-      { source: "orchestrator", target: "style_critic" },
-      { source: "orchestrator", target: "summarizer" },
-    ],
-    requiredMcp: [],
-  },
-  {
-    name: "concierge", display: "Concierge", category: "Personal",
-    icon: "owl:owl_operator", builtIn: true,
-    description: "Books, orders, reserves. Compares options, fills out forms, files the receipts.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "researcher", base: "researcher" },
-      { name: "executor", base: "operator", icon: "owl:owl_operator" },
-      { name: "receipts_archivist", base: "documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "researcher" },
-      { source: "researcher", target: "orchestrator" },
-      { source: "orchestrator", target: "executor" },
-      { source: "executor", target: "orchestrator" },
-      { source: "orchestrator", target: "receipts_archivist" },
-    ],
-    requiredMcp: ["mcp.browser", "mcp.email", "mcp.calendar", "mcp.files"],
-  },
-  {
-    name: "customer_support", display: "Customer Support", category: "Ops",
-    icon: "owl:owl_operator", builtIn: true,
-    description: "Triages tickets, answers from the KB, escalates the rest, writes post-mortems.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "triager", base: "operator" },
-      { name: "kb_responder", base: "documentation" },
-      { name: "escalation_router", base: "operator" },
-      { name: "postmortem_writer", base: "documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "triager" },
-      { source: "triager", target: "kb_responder" },
-      { source: "kb_responder", target: "orchestrator" },
-      { source: "orchestrator", target: "escalation_router" },
-      { source: "orchestrator", target: "postmortem_writer" },
-    ],
-    requiredMcp: ["mcp.helpdesk", "mcp.files", "mcp.slack"],
-  },
-  {
-    name: "data_analyst", display: "Data Analyst", category: "Software",
-    icon: "owl:owl_coder", builtIn: true,
-    description: "SQL writer, notebook runner, visualizer, narrator. Turns a question into a chart + a paragraph.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "sql_writer", base: "coder" },
-      { name: "notebook_runner", base: "coder" },
-      { name: "visualizer", base: "coder" },
-      { name: "narrator", base: "documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "sql_writer" },
-      { source: "sql_writer", target: "notebook_runner" },
-      { source: "notebook_runner", target: "visualizer" },
-      { source: "visualizer", target: "narrator" },
-      { source: "narrator", target: "orchestrator" },
-    ],
-    requiredMcp: ["mcp.db", "mcp.notebook"],
-  },
-  {
-    name: "dev_squad", display: "Dev Squad", category: "Software",
-    icon: "owl:owl_coder", builtIn: true,
-    description: "Solo-dev squad: orchestrator, coder, critic, devops, docs. The canonical software-build team.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "coder", base: "coder" },
-      { name: "critic", base: "critic" },
-      { name: "devops", base: "devops" },
-      { name: "docs", base: "documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "coder" },
-      { source: "coder", target: "critic" },
-      { source: "critic", target: "orchestrator" },
-      { source: "orchestrator", target: "devops" },
-      { source: "orchestrator", target: "docs" },
-    ],
-    requiredMcp: [],
-  },
-  {
-    name: "finance", display: "Finance Steward", category: "Personal",
-    icon: "owl:owl_documentation", builtIn: true,
-    description: "Classifies transactions, watches the budget, tracks tax lots, drafts invoices.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "classifier", base: "researcher" },
-      { name: "budget_watcher", base: "researcher" },
-      { name: "tax_lot_tracker", base: "researcher" },
-      { name: "invoice_writer", base: "documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "classifier" },
-      { source: "classifier", target: "orchestrator" },
-      { source: "orchestrator", target: "budget_watcher" },
-      { source: "orchestrator", target: "tax_lot_tracker" },
-      { source: "orchestrator", target: "invoice_writer" },
-    ],
-    requiredMcp: ["mcp.files", "mcp.spreadsheet", "mcp.email"],
-  },
-  {
-    name: "health_coach", display: "Health & Habits", category: "Personal",
-    icon: "owl:owl_documentation", builtIn: true,
-    description: "Logs habits, plans the week, critiques nutrition, runs the weekly review.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "logger", base: "operator" },
-      { name: "planner", base: "operator" },
-      { name: "nutrition_critic", base: "critic" },
-      { name: "reviewer", base: "documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "logger" },
-      { source: "logger", target: "orchestrator" },
-      { source: "orchestrator", target: "planner" },
-      { source: "orchestrator", target: "nutrition_critic" },
-      { source: "orchestrator", target: "reviewer" },
-    ],
-    requiredMcp: ["mcp.calendar", "mcp.files"],
-  },
-  {
-    name: "learning_tutor", display: "Learning Tutor", category: "Knowledge",
-    icon: "owl:owl_documentation", builtIn: true,
-    description: "Builds curricula, explains concepts, runs quizzes, schedules spaced-repetition reviews.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "curriculum_planner", base: "documentation" },
-      { name: "explainer", base: "documentation" },
-      { name: "quiz_master", base: "documentation" },
-      { name: "srs_scheduler", base: "operator" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "curriculum_planner" },
-      { source: "curriculum_planner", target: "orchestrator" },
-      { source: "orchestrator", target: "explainer" },
-      { source: "explainer", target: "orchestrator" },
-      { source: "orchestrator", target: "quiz_master" },
-      { source: "orchestrator", target: "srs_scheduler" },
-    ],
-    requiredMcp: ["mcp.files", "mcp.calendar"],
-  },
-  {
-    name: "product_studio", display: "Product Studio", category: "Software",
-    icon: "owl:owl_researcher", builtIn: true,
-    description: "Design-first team for greenfield products. Phase 1 (Design) interviews the user, splits FE/BE planning, produces a structured whitepaper. Phase 2 (Build) reads the whitepaper, implements FE and BE in parallel against a shared API contract.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "product_owner", base: "operator", icon: "owl:owl_operator" },
-      { name: "ux_designer", base: "researcher", icon: "owl:owl_researcher" },
-      { name: "backend_arch", base: "researcher", icon: "owl:owl_researcher" },
-      { name: "whitepaper_writer", base: "documentation", icon: "owl:owl_documentation" },
-      { name: "design_critic", base: "critic", icon: "owl:owl_critic" },
-      { name: "frontend_coder", base: "coder", icon: "owl:owl_coder" },
-      { name: "backend_coder", base: "coder", icon: "owl:owl_coder" },
-      { name: "code_critic", base: "critic", icon: "owl:owl_critic" },
-      { name: "docs_writer", base: "documentation", icon: "owl:owl_documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "product_owner" },
-      { source: "product_owner", target: "orchestrator" },
-      { source: "orchestrator", target: "ux_designer" },
-      { source: "ux_designer", target: "orchestrator" },
-      { source: "orchestrator", target: "backend_arch" },
-      { source: "backend_arch", target: "orchestrator" },
-      { source: "orchestrator", target: "whitepaper_writer" },
-      { source: "whitepaper_writer", target: "design_critic" },
-      { source: "design_critic", target: "orchestrator" },
-      { source: "orchestrator", target: "frontend_coder" },
-      { source: "frontend_coder", target: "code_critic" },
-      { source: "orchestrator", target: "backend_coder" },
-      { source: "backend_coder", target: "code_critic" },
-      { source: "code_critic", target: "orchestrator" },
-      { source: "orchestrator", target: "docs_writer" },
-      { source: "docs_writer", target: "orchestrator" },
-    ],
-    requiredMcp: [],
-  },
-  {
-    name: "research_lab", display: "Research Lab", category: "Knowledge",
-    icon: "owl:owl_researcher", builtIn: true,
-    description: "Deep-research team. Gathers sources, reads them carefully, synthesises, fact-checks, cites.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "librarian", base: "researcher" },
-      { name: "deep_reader", base: "researcher" },
-      { name: "synthesizer", base: "documentation" },
-      { name: "fact_checker", base: "critic" },
-      { name: "citer", base: "documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "librarian" },
-      { source: "librarian", target: "deep_reader" },
-      { source: "deep_reader", target: "synthesizer" },
-      { source: "synthesizer", target: "fact_checker" },
-      { source: "fact_checker", target: "citer" },
-      { source: "citer", target: "orchestrator" },
-      { source: "orchestrator", target: "orchestrator" },
-    ],
-    requiredMcp: ["mcp.browser", "mcp.files"],
-  },
-  {
-    name: "sales_outreach", display: "Sales Outreach", category: "Ops",
-    icon: "owl:owl_documentation", builtIn: true,
-    description: "Researches prospects, drafts personalised outreach, tracks replies, qualifies leads.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "prospect_researcher", base: "researcher" },
-      { name: "opener", base: "documentation" },
-      { name: "follow_up_scheduler", base: "operator" },
-      { name: "crm_logger", base: "operator" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "prospect_researcher" },
-      { source: "prospect_researcher", target: "opener" },
-      { source: "opener", target: "orchestrator" },
-      { source: "orchestrator", target: "follow_up_scheduler" },
-      { source: "orchestrator", target: "crm_logger" },
-      { source: "crm_logger", target: "orchestrator" },
-    ],
-    requiredMcp: ["mcp.email", "mcp.linkedin", "mcp.crm", "mcp.calendar"],
-  },
-  {
-    name: "secretary", display: "Secretary", category: "Personal",
-    icon: "owl:owl_orchestrator1", builtIn: true,
-    description: "Owns your inbox, calendar, and chat channels. Triages, drafts replies, schedules events, and produces a daily brief.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "triager", base: "operator", icon: "owl:owl_operator" },
-      { name: "responder", base: "documentation", icon: "owl:owl_documentation" },
-      { name: "scheduler", base: "operator", icon: "owl:owl_operator" },
-      { name: "digest", base: "documentation", icon: "owl:owl_documentation" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "triager" },
-      { source: "triager", target: "responder" },
-      { source: "responder", target: "orchestrator" },
-      { source: "orchestrator", target: "scheduler" },
-      { source: "orchestrator", target: "digest" },
-    ],
-    requiredMcp: ["mcp.email", "mcp.calendar", "mcp.whatsapp", "mcp.telegram"],
-  },
-  {
-    name: "smart_home", display: "Smart Home", category: "Ops",
-    icon: "owl:owl_operator", builtIn: true,
-    description: "Polls devices, runs routines, watches automations, surfaces anomalies.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "event_watcher", base: "operator" },
-      { name: "automation_planner", base: "operator" },
-      { name: "shopping_keeper", base: "documentation" },
-      { name: "family_announcer", base: "operator" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "event_watcher" },
-      { source: "event_watcher", target: "orchestrator" },
-      { source: "orchestrator", target: "automation_planner" },
-      { source: "orchestrator", target: "shopping_keeper" },
-      { source: "orchestrator", target: "family_announcer" },
-    ],
-    requiredMcp: ["mcp.home_assistant", "mcp.calendar", "mcp.whatsapp", "mcp.telegram"],
-  },
-  {
-    name: "social_desk", display: "Social Desk", category: "Knowledge",
-    icon: "owl:owl_operator", builtIn: true,
-    description: "Drafts posts, schedules across platforms, monitors engagement, summarises top threads.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "trend_scout", base: "researcher" },
-      { name: "copywriter", base: "documentation" },
-      { name: "thumbnail_briefer", base: "documentation" },
-      { name: "scheduler", base: "operator" },
-      { name: "moderator", base: "operator" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "trend_scout" },
-      { source: "trend_scout", target: "copywriter" },
-      { source: "copywriter", target: "orchestrator" },
-      { source: "orchestrator", target: "thumbnail_briefer" },
-      { source: "orchestrator", target: "scheduler" },
-      { source: "orchestrator", target: "moderator" },
-    ],
-    requiredMcp: ["mcp.browser", "mcp.twitter", "mcp.linkedin", "mcp.telegram"],
-  },
-  {
-    name: "writers_room", display: "Writers' Room", category: "Knowledge",
-    icon: "owl:owl_documentation", builtIn: true,
-    description: "Outlines, drafts, edits, copy-edits, fact-checks. The long-form-writing team.",
-    agents: [
-      { name: "orchestrator", base: "orchestrator", icon: "owl:owl_orchestrator1" },
-      { name: "outliner", base: "documentation" },
-      { name: "drafter", base: "documentation" },
-      { name: "editor", base: "documentation" },
-      { name: "seo_critic", base: "critic" },
-      { name: "publisher", base: "operator" },
-    ],
-    edges: [
-      { source: "orchestrator", target: "outliner" },
-      { source: "outliner", target: "drafter" },
-      { source: "drafter", target: "editor" },
-      { source: "editor", target: "seo_critic" },
-      { source: "seo_critic", target: "orchestrator" },
-      { source: "orchestrator", target: "publisher" },
-    ],
-    requiredMcp: ["mcp.files", "mcp.browser"],
-  },
-];
+const TEAMS_FALLBACK: Team[] = [];   // populated at mount from list_team_templates
 
 // Built-in agent definitions (mirrors core/agents/agent_definitions.py
 // list_all_definitions). Real metadata will arrive via
@@ -474,23 +109,13 @@ type AgentDef = {
   isSkill?: boolean;
   canDispatch?: boolean;
 };
-const AGENTS: AgentDef[] = [
-  { name: "orchestrator",  icon: "owl:owl_orchestrator1", description: "Plans the work, dispatches one task at a time, integrates results, decides when the team is done.", builtIn: true, canDispatch: true },
-  { name: "coder",         icon: "owl:owl_coder",         description: "Reads/edits files, runs shell commands, writes code. The doer.",                                       builtIn: true },
-  { name: "critic",        icon: "owl:owl_critic",        description: "Reviews code/output for correctness, safety, completeness. Returns APPROVE / REVISE / REJECT.",         builtIn: true },
-  { name: "researcher",    icon: "owl:owl_researcher",    description: "Finds sources, extracts claims with citations, synthesises. The library-card carrier of the team.",    builtIn: true },
-  { name: "operator",      icon: "owl:owl_operator",      description: "Operates external systems: browser, files, shell, ssh. The hands of the team.",                        builtIn: true },
-  { name: "documentation", icon: "owl:owl_documentation", description: "Writes/updates docs, runbooks, READMEs, changelogs. Synthesises long-form narrative.",                 builtIn: true },
-  { name: "webapp",        icon: "owl:owl_webapp",        description: "Builds web frontends. React + plain HTML + design-system aware.",                                       builtIn: true },
-  { name: "SSH",           icon: "owl:owl_SSH",           description: "Connects to remote hosts via SSH, inspects production, deploys updates.",                               builtIn: true },
-  { name: "assistant",     icon: "owl:owl_asssitant",     description: "General-purpose helper. The generalist agent for one-shot tasks that don't need a specialist.",         builtIn: true },
-];
+const AGENTS_FALLBACK: AgentDef[] = [];   // populated at mount from list_agent_roles
 
 // ---------------------------------------------------------------------
 // Visual building blocks
 // ---------------------------------------------------------------------
 
-// Toggle — mirrors _VIEW_TAB_LEFT_STYLE / _RIGHT_STYLE in
+// Toggle â€” mirrors _VIEW_TAB_LEFT_STYLE / _RIGHT_STYLE in
 // agent_studio_page.py:1551-1580. Checked state is #28406b on #fff
 // with #3a5fa0 border, idle is rgba(255,255,255,0.04).
 function ViewToggle({ view, onChange }: {
@@ -520,7 +145,7 @@ function ViewToggle({ view, onChange }: {
           color:      view === "teams" ? "#fff" : base.color,
           borderColor: view === "teams" ? "#3a5fa0" : "rgba(255,255,255,0.06)",
         }}
-      >🧩 Teams</button>
+      >ðŸ§© Teams</button>
       <button
         onClick={() => onChange("agents")}
         style={{
@@ -531,7 +156,7 @@ function ViewToggle({ view, onChange }: {
           color:      view === "agents" ? "#fff" : base.color,
           borderColor: view === "agents" ? "#3a5fa0" : "rgba(255,255,255,0.06)",
         }}
-      >🤖 Agents</button>
+      >ðŸ¤– Agents</button>
     </div>
   );
 }
@@ -547,8 +172,8 @@ function OnboardingBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss
       gap: 10,
     }}>
       <span style={{ color: "#dde3ff", fontSize: 12, flex: 1 }}>
-        👋 <b>New here?</b> Install Anthropic's official skill pack
-        (PDF, Excel, Word helpers — drop-in compatible) to give your
+        ðŸ‘‹ <b>New here?</b> Install Anthropic's official skill pack
+        (PDF, Excel, Word helpers â€” drop-in compatible) to give your
         agents pro-grade capabilities out of the box.
       </span>
       <button
@@ -567,12 +192,12 @@ function OnboardingBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss
           border: "none", fontSize: 14, cursor: "pointer",
           width: 28, height: 28,
         }}
-      >✕</button>
+      >âœ•</button>
     </div>
   );
 }
 
-// SearchBar — Qt's Studio doesn't ship one explicitly, but the
+// SearchBar â€” Qt's Studio doesn't ship one explicitly, but the
 // gallery's _wrappable() helper and the user-facing "filter the
 // catalogue" need is what's missing in the React port. Lightweight
 // client-side string match on display name + description + category.
@@ -605,13 +230,13 @@ function SearchBar({ value, onChange, placeholder }: {
             border: "1px solid rgba(255,255,255,0.06)",
             borderRadius: 8, padding: "6px 10px", cursor: "pointer",
           }}
-        >✕</button>
+        >âœ•</button>
       )}
     </div>
   );
 }
 
-// TeamCard — mirrors team_grid_view.py:64 TeamCard. Category-coloured
+// TeamCard â€” mirrors team_grid_view.py:64 TeamCard. Category-coloured
 // accent strip on the left, agent mini-avatars row, MCP chips, CUSTOM
 // tag in the corner for non-built-ins, selected-state outline.
 function TeamCard({
@@ -629,7 +254,7 @@ function TeamCard({
         maxHeight: 220,
         cursor: "pointer",
         background: "linear-gradient(135deg, #1c2236 0%, #0d1019 100%)",
-        // 3px accent strip on the left — category colour. (Qt sets the
+        // 3px accent strip on the left â€” category colour. (Qt sets the
         // hover border-color to the accent; we hint it via boxShadow.)
         borderLeft: `3px solid ${accent}`,
         border: `1px solid ${border}`,
@@ -651,7 +276,7 @@ function TeamCard({
           <div style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>{team.display}</div>
           <div style={{ fontSize: 10, letterSpacing: 0.6 }}>
             <span style={{ color: accent }}>{team.category.toUpperCase()}</span>
-            <span style={{ color: "#9aa0a6" }}>  ·  {team.agents.length} agents</span>
+            <span style={{ color: "#9aa0a6" }}>  Â·  {team.agents.length} agents</span>
           </div>
         </div>
         {!team.builtIn && (
@@ -672,7 +297,7 @@ function TeamCard({
         overflow: "hidden",
       }}>{team.description}</div>
 
-      {/* Agent mini-avatars row — first 6 + "+N" overflow */}
+      {/* Agent mini-avatars row â€” first 6 + "+N" overflow */}
       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
         {team.agents.slice(0, 6).map(a => (
           <img
@@ -689,7 +314,7 @@ function TeamCard({
         )}
       </div>
 
-      {/* MCP needs chips — first 4 + "+N" overflow */}
+      {/* MCP needs chips â€” first 4 + "+N" overflow */}
       {team.requiredMcp.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
           {team.requiredMcp.slice(0, 4).map(m => (
@@ -711,8 +336,8 @@ function TeamCard({
   );
 }
 
-// "Create your own team" tile — team_grid_view.py:230 _build_create_inner.
-// Dashed border, centred ＋ + title + sub.
+// "Create your own team" tile â€” team_grid_view.py:230 _build_create_inner.
+// Dashed border, centred ï¼‹ + title + sub.
 function CreateTeamCard({ onClick }: { onClick: () => void }) {
   return (
     <div
@@ -732,14 +357,14 @@ function CreateTeamCard({ onClick }: { onClick: () => void }) {
         textAlign: "center",
       }}
     >
-      <div style={{ color: "#a8b8ff", fontSize: 36, fontWeight: 700, lineHeight: 1 }}>＋</div>
+      <div style={{ color: "#a8b8ff", fontSize: 36, fontWeight: 700, lineHeight: 1 }}>ï¼‹</div>
       <div style={{ color: "#dde3ff", fontSize: 12, fontWeight: 700 }}>Create your own team</div>
       <div style={{ color: "#9aa0a6", fontSize: 11 }}>Pick agents, name it, save it as a template.</div>
     </div>
   );
 }
 
-// TeamsGrid — groups teams by category in CATEGORY_ORDER, each section
+// TeamsGrid â€” groups teams by category in CATEGORY_ORDER, each section
 // header coloured by its category accent. The "Build your own" section
 // always renders last with the dashed CreateTeamCard. Mirrors
 // team_grid_view.py:280 TeamGridView.set_templates.
@@ -784,7 +409,7 @@ function TeamsGrid({ teams, selected, onSelect, onCreate }: {
             }}>{cat}</div>
             <div style={{
               display: "grid",
-              // Qt _COLS = 3 — but we still let the grid wrap on
+              // Qt _COLS = 3 â€” but we still let the grid wrap on
               // narrow viewports via auto-fill.
               gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
               gap: 12,
@@ -802,7 +427,7 @@ function TeamsGrid({ teams, selected, onSelect, onCreate }: {
         );
       })}
 
-      {/* BUILD YOUR OWN — always last, mirrors _build_create_section. */}
+      {/* BUILD YOUR OWN â€” always last, mirrors _build_create_section. */}
       <div>
         <div style={{
           fontSize: 10, color: "#a8b8ff", textTransform: "uppercase",
@@ -821,7 +446,7 @@ function TeamsGrid({ teams, selected, onSelect, onCreate }: {
   );
 }
 
-// Mini agent card inside the detail panel — team_grid_view.py:432
+// Mini agent card inside the detail panel â€” team_grid_view.py:432
 // _AgentMiniCard. Card-wide icon tile, centered name, LEADER ribbon
 // for orchestrator/can_dispatch.
 function AgentMiniCard({ spec }: { spec: AgentSpec }) {
@@ -857,7 +482,7 @@ function AgentMiniCard({ spec }: { spec: AgentSpec }) {
       }} title={spec.name}>
         {(() => {
           const d = displayLabel(spec.name);
-          return d.length > 22 ? d.slice(0, 21) + "…" : d;
+          return d.length > 22 ? d.slice(0, 21) + "â€¦" : d;
         })()}
       </div>
       {isLeader && (
@@ -873,8 +498,8 @@ function AgentMiniCard({ spec }: { spec: AgentSpec }) {
   );
 }
 
-// Detail panel — team_grid_view.py:632 TeamDetailPanel. Header
-// (icon + title + category·N agents·M connections·BUILT-IN/CUSTOM
+// Detail panel â€” team_grid_view.py:632 TeamDetailPanel. Header
+// (icon + title + categoryÂ·N agentsÂ·M connectionsÂ·BUILT-IN/CUSTOM
 // chip), description, AGENTS grid, ROUTING list, MCP NEEDED chips,
 // Delete (custom only) + primary CTA.
 function TeamDetailPanel({
@@ -928,9 +553,9 @@ function TeamDetailPanel({
           <div style={{ fontSize: 10, letterSpacing: 0.6 }}>
             <span style={{ color: accent }}>{team.category.toUpperCase()}</span>
             <span style={{ color: "#9aa0a6" }}>
-              {"  ·  "}{team.agents.length} agents
-              {"  ·  "}{team.edges.length} connections
-              {"  ·  "}
+              {"  Â·  "}{team.agents.length} agents
+              {"  Â·  "}{team.edges.length} connections
+              {"  Â·  "}
             </span>
             <span style={{ color: team.builtIn ? "#9aa0a6" : "#ff7ed1" }}>
               {team.builtIn ? "BUILT-IN" : "CUSTOM"}
@@ -959,7 +584,7 @@ function TeamDetailPanel({
         {team.agents.map(a => <AgentMiniCard key={a.name} spec={a} />)}
       </div>
 
-      {/* ROUTING — src → dst lines, monospace */}
+      {/* ROUTING â€” src â†’ dst lines, monospace */}
       {team.edges.length > 0 && (
         <>
           <div style={{
@@ -973,7 +598,7 @@ function TeamDetailPanel({
                 fontFamily: "'Consolas','JetBrains Mono',monospace",
                 fontSize: 11,
               }}>
-                {e.source}  →  {e.target}
+                {e.source}  â†’  {e.target}
               </div>
             ))}
           </div>
@@ -1000,7 +625,7 @@ function TeamDetailPanel({
 
       <div style={{ flex: 1 }} />
 
-      {/* Actions — Edit / Duplicate / Delete (custom only) on the left,
+      {/* Actions â€” Edit / Duplicate / Delete (custom only) on the left,
           primary "+ New project from <name>" on the right. Qt only
           shows Edit/Delete for non-built-ins; Duplicate is a Studio
           affordance the user asked us to add. */}
@@ -1064,10 +689,10 @@ function TeamDetailPanel({
 }
 
 // ---------------------------------------------------------------------
-// Agents view — gallery + detail mirror of agent_studio_page.py:1257
+// Agents view â€” gallery + detail mirror of agent_studio_page.py:1257
 // ---------------------------------------------------------------------
 
-// Agent gallery card — mirrors agent_studio_page.py:172 _GalleryCard.
+// Agent gallery card â€” mirrors agent_studio_page.py:172 _GalleryCard.
 // Fixed 140px height, accent-coloured left border (#4a6cff for
 // built-ins/skills, #7a8a9c for plain custom), badges row (BUILT-IN,
 // SKILL, LEADER).
@@ -1143,7 +768,7 @@ function AgentCard({
   );
 }
 
-// AgentDetailPanel — mirrors agent_studio_page.py:426 _EditorPanel
+// AgentDetailPanel â€” mirrors agent_studio_page.py:426 _EditorPanel
 // at a stub level. The full editor (name/desc/system-prompt/tools/
 // voice/MCP) needs /v1/agents endpoints to be useful; for now we
 // surface the read-only summary + the action buttons (Save / Duplicate /
@@ -1184,7 +809,7 @@ function AgentDetailPanel({
       display: "flex", flexDirection: "column", gap: 14,
       overflow: "auto",
     }}>
-      {/* Big avatar + name field. Qt uses a 240×240 button (line 477). */}
+      {/* Big avatar + name field. Qt uses a 240Ã—240 button (line 477). */}
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start" }}>
         <div style={{
           width: 200, height: 200, flexShrink: 0,
@@ -1224,7 +849,7 @@ function AgentDetailPanel({
           background: "rgba(74,108,255,0.10)",
           borderRadius: 8, padding: "8px 12px", fontSize: 13,
         }}>
-          🔒  This is a built-in agent. To modify it, click <b>Duplicate</b> first.
+          ðŸ”’  This is a built-in agent. To modify it, click <b>Duplicate</b> first.
         </div>
       )}
 
@@ -1241,7 +866,7 @@ function AgentDetailPanel({
 
       <div style={{ flex: 1 }} />
 
-      {/* Action row — Save (primary) / Duplicate (ghost) / Delete (destructive). */}
+      {/* Action row â€” Save (primary) / Duplicate (ghost) / Delete (destructive). */}
       <div style={{ display: "flex", gap: 8 }}>
         <button
           onClick={onSave}
@@ -1282,6 +907,39 @@ function AgentDetailPanel({
 // ---------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------
+// Backend shapes — match Rust agents::TeamTemplate / AgentRole.
+type TeamTemplateBackend = { id: string; path: string; built_in: boolean; data: any };
+type AgentRoleBackend     = { id: string; path: string; built_in: boolean; data: any };
+
+function toTeam(t: TeamTemplateBackend): Team {
+  const d = t.data ?? {};
+  const agents: AgentSpec[] = Array.isArray(d.agents)
+    ? d.agents.map((a: any) => ({ name: a.name, base: a.base, icon: a.icon ?? null }))
+    : [];
+  const edges = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
+  return {
+    name: d.name ?? t.id,
+    display: d.display_name ?? t.id,
+    category: d.category ?? "Other",
+    icon: d.icon ?? "owl:owl_asssitant",
+    description: d.description ?? "",
+    agents,
+    edges,
+    requiredMcp: Array.isArray(d.required_mcp) ? d.required_mcp : [],
+    builtIn: t.built_in,
+  };
+}
+function toAgentDef(r: AgentRoleBackend): AgentDef {
+  const d = r.data ?? {};
+  return {
+    name: d.name ?? r.id,
+    icon: d.icon ?? "owl:owl_asssitant",
+    description: d.description ?? "",
+    builtIn: r.built_in,
+    canDispatch: d.can_dispatch === true,
+  };
+}
+
 export default function StudioPage() {
   const [view, setView] = useState<"teams" | "agents">("teams");
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
@@ -1289,36 +947,57 @@ export default function StudioPage() {
   const [bannerVisible, setBannerVisible] = useState(true);
   const [teamQuery, setTeamQuery] = useState("");
   const [agentQuery, setAgentQuery] = useState("");
+  const [teams, setTeams] = useState<Team[]>(TEAMS_FALLBACK);
+  const [agents, setAgents] = useState<AgentDef[]>(AGENTS_FALLBACK);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const [rawTeams, rawAgents] = await Promise.all([
+          invoke<TeamTemplateBackend[]>("list_team_templates"),
+          invoke<AgentRoleBackend[]>("list_agent_roles"),
+        ]);
+        if (dead) return;
+        setTeams(rawTeams.map(toTeam));
+        setAgents(rawAgents.map(toAgentDef));
+      } catch (e) {
+        if (!dead) setLoadError(String(e));
+      }
+    })();
+    return () => { dead = true; };
+  }, []);
 
   const filteredTeams = useMemo(() => {
     const q = teamQuery.trim().toLowerCase();
-    if (!q) return TEAMS;
-    return TEAMS.filter(t =>
+    if (!q) return teams;
+    return teams.filter(t =>
       t.display.toLowerCase().includes(q) ||
       t.description.toLowerCase().includes(q) ||
       t.category.toLowerCase().includes(q) ||
       t.agents.some(a => a.name.toLowerCase().includes(q))
     );
-  }, [teamQuery]);
+  }, [teamQuery, teams]);
 
   const filteredAgents = useMemo(() => {
     const q = agentQuery.trim().toLowerCase();
-    if (!q) return AGENTS;
-    return AGENTS.filter(a =>
+    if (!q) return agents;
+    return agents.filter(a =>
       a.name.toLowerCase().includes(q) ||
       a.description.toLowerCase().includes(q)
     );
-  }, [agentQuery]);
+  }, [agentQuery, agents]);
 
-  const team = TEAMS.find(t => t.name === selectedTeam) ?? null;
-  const agent = AGENTS.find(a => a.name === selectedAgent) ?? null;
+  const team = teams.find(t => t.name === selectedTeam) ?? null;
+  const agent = agents.find(a => a.name === selectedAgent) ?? null;
 
-  // Sub-label text per view — verbatim from agent_studio_page.py:1126-1136.
+  // Sub-label text per view â€” verbatim from agent_studio_page.py:1126-1136.
   const subLabel = view === "teams"
-    ? "Pick a team template — pre-built collections of agents wired to do a kind of work (Secretary, Bug Hunter, Research Lab, …). One click spawns a project with the team ready to run."
-    : "Design individual agents — pick an avatar, a job, the tools they get to use. Built-ins ship with OWLLM and can't be edited; click Duplicate on any built-in to make your own copy.";
+    ? "Pick a team template â€” pre-built collections of agents wired to do a kind of work (Secretary, Bug Hunter, Research Lab, â€¦). One click spawns a project with the team ready to run."
+    : "Design individual agents â€” pick an avatar, a job, the tools they get to use. Built-ins ship with OWLLM and can't be edited; click Duplicate on any built-in to make your own copy.";
 
-  // Handler stubs — Tauri commands will land here once the
+  // Handler stubs â€” Tauri commands will land here once the
   // /v1/teams + /v1/agents/definitions endpoints exist.
   const handleCreateProjectFromTeam = (name: string) => {
     // TODO: invoke('create_project_from_template', { template: name })
@@ -1368,13 +1047,13 @@ export default function StudioPage() {
 
       {view === "teams" ? (
         <>
-          {/* Search + (no top-level "+ New Team" — the dashed
+          {/* Search + (no top-level "+ New Team" â€” the dashed
               CreateTeamCard at the bottom of the grid is Qt's
               actual CTA, see team_grid_view.py:340.) */}
           <SearchBar
             value={teamQuery}
             onChange={setTeamQuery}
-            placeholder="Filter teams by name, description, category, or agent…"
+            placeholder="Filter teams by name, description, category, or agentâ€¦"
           />
           <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>
             <div style={{ flex: 6, display: "flex", flexDirection: "column", minWidth: 0 }}>
@@ -1398,8 +1077,8 @@ export default function StudioPage() {
         </>
       ) : (
         <>
-          {/* Agents action row — mirrors agent_studio_page.py:1265
-              ("+ New custom agent", "📚 Skill Library", refresh). */}
+          {/* Agents action row â€” mirrors agent_studio_page.py:1265
+              ("+ New custom agent", "ðŸ“š Skill Library", refresh). */}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <button
               onClick={handleNewAgent}
@@ -1419,12 +1098,12 @@ export default function StudioPage() {
                 border: "none", borderRadius: 8, padding: "0 14px",
                 cursor: "pointer", fontSize: 12,
               }}
-            >📚 Skill Library</button>
+            >ðŸ“š Skill Library</button>
             <div style={{ flex: 1 }} />
             <SearchBar
               value={agentQuery}
               onChange={setAgentQuery}
-              placeholder="Filter agents…"
+              placeholder="Filter agentsâ€¦"
             />
           </div>
           <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>

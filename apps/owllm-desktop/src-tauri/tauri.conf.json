@@ -17,7 +17,15 @@
           "identifier": "default",
           "description": "Default window capability",
           "windows": ["main"],
-          "permissions": ["core:default", "core:event:default"]
+          "permissions": [
+            "core:default",
+            "core:event:default",
+            "core:window:default",
+            "core:window:allow-minimize",
+            "core:window:allow-toggle-maximize",
+            "core:window:allow-close",
+            "core:window:allow-start-dragging"
+          ]
         }
       ]
     },
@@ -29,7 +37,10 @@
         "height": 1140,
         "minWidth": 1024,
         "minHeight": 720,
-        "resizable": true
+        "resizable": true,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false
       }
     ]
   },

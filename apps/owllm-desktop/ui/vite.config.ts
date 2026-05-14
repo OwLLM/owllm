@@ -14,17 +14,18 @@ export default defineConfig({
   plugins: [
     react(),
     {
-      // Dev-only middleware: serve <repo>/icons subfolders at the URL root,
-      // so <img src="/Page_icons/owl_agentic.png"> just works. We don't use
-      // Vite's `publicDir` because that would copy ~100MB of icons into
-      // the Tauri production bundle on every build.
+      // Dev: serve <repo>/icons/<sub>/... at /<sub>/... via middleware.
+      // Build: copy the *used* icon subfolders into dist/ so the same
+      //        URLs work when Tauri serves the static bundle. We don't
+      //        use Vite's `publicDir` because that would force-copy
+      //        the entire ~100 MB icons/ tree on every build; the
+      //        whitelist below keeps the bundle to ~25 MB.
       name: "serve-localllm-icons",
       configureServer(server) {
         server.middlewares.use((req, res, next) => {
           if (!req.url || (req.method !== "GET" && req.method !== "HEAD")) return next();
           const urlPath = req.url.split("?", 1)[0];
           const candidate = path.join(ICONS_DIR, decodeURIComponent(urlPath));
-          // Path-traversal guard: candidate MUST live under ICONS_DIR.
           if (!candidate.startsWith(ICONS_DIR + path.sep)) return next();
           fs.stat(candidate, (err, stat) => {
             if (err || !stat.isFile()) return next();
@@ -35,6 +36,19 @@ export default defineConfig({
             fs.createReadStream(candidate).pipe(res);
           });
         });
+      },
+      writeBundle() {
+        // vite.config.ts lives in apps/owllm-desktop/ui/; `root: "ui"`
+        // makes the build output land in apps/owllm-desktop/ui/dist/.
+        const distDir = path.resolve(__dirname, "dist");
+        const want = ["Page_icons", "Backgrounds", "3d"];
+        for (const sub of want) {
+          const src = path.join(ICONS_DIR, sub);
+          const dst = path.join(distDir, sub);
+          if (!fs.existsSync(src)) continue;
+          fs.rmSync(dst, { recursive: true, force: true });
+          fs.cpSync(src, dst, { recursive: true });
+        }
       },
     },
   ],

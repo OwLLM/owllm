@@ -14,6 +14,7 @@
 // not touch this file. Adding a brand-new mode = one entry in
 // modules.ts plus a directory under pages/.
 import React, { useMemo, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ALL_MODULES,
   ADVANCED,
@@ -22,6 +23,29 @@ import {
   ModeId,
   PageDef,
 } from "./core/modules";
+
+// The window is `decorations: false` (see tauri.conf.json) — the
+// HybridFrame chrome IS the window border. These three buttons are
+// the only system controls we provide; drag-to-move is wired via
+// the data-tauri-drag-region attribute on the ModeBar.
+function WindowControls() {
+  const w = getCurrentWindow();
+  const btn: React.CSSProperties = {
+    width: 36, height: 28, border: "none", background: "transparent",
+    color: "#dadcdf", fontSize: 14, cursor: "pointer", userSelect: "none",
+    display: "flex", alignItems: "center", justifyContent: "center",
+  };
+  return (
+    <div style={{
+      position: "absolute", top: 8, right: 14, zIndex: 50,
+      display: "flex", gap: 2,
+    }}>
+      <button title="Minimize" style={btn} onClick={() => w.minimize()}>—</button>
+      <button title="Maximize" style={btn} onClick={() => w.toggleMaximize()}>▢</button>
+      <button title="Close" style={{ ...btn, color: "#ff8080" }} onClick={() => w.close()}>✕</button>
+    </div>
+  );
+}
 
 const INNER_W = 1600, INNER_H = 960;
 
@@ -173,7 +197,7 @@ function ModeBar({
   const visibleToggles = TOGGLES.filter(t => installed.includes(t.id as ModeId));
 
   return (
-    <div data-ui="AppHeader" style={{
+    <div data-ui="AppHeader" data-tauri-drag-region style={{
       height: 80,
       display: "grid", gridTemplateColumns: "auto 1fr auto",
       alignItems: "center", padding: "10px 50px 10px 20px", gap: 16,
@@ -357,6 +381,7 @@ export default function AppShell() {
 
   return (
     <HybridFrame width={INNER_W} height={INNER_H}>
+      <WindowControls />
       <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
         <ModeBar
           mode={mode}

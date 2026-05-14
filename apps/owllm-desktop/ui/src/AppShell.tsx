@@ -26,11 +26,62 @@ import {
 } from "./core/modules";
 import { ACCENTS, AccentKey, Mode, useTheme } from "./theme";
 
-// The window now has a native OS title bar (tauri.conf.json sets
-// decorations:true + transparent:false) so drag, resize, and the
-// min/max/close buttons are all handled by Windows. The JS-side
-// startDragging / startResizeDragging / WindowControls components
-// that used to be here are gone — they're no longer needed.
+// tauri.conf.json now sets decorations:false again — the OS title
+// bar is completely hidden so the desktop shows through the cyan
+// HybridFrame corners cleanly. That means we own drag, resize, and
+// min/max/close ourselves.
+
+function startDrag(e: React.MouseEvent) {
+  if (e.button !== 0) return;
+  if ((e.target as HTMLElement).closest("button, input, select, textarea, a")) return;
+  e.preventDefault();
+  getCurrentWindow().startDragging().catch(() => { /* not in Tauri ctx */ });
+}
+
+type ResizeDir =
+  | "North" | "South" | "East" | "West"
+  | "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
+
+function ResizeEdges() {
+  const start = (dir: ResizeDir) => (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    (getCurrentWindow() as any).startResizeDragging(dir).catch?.(() => {});
+  };
+  const T = 6;
+  const C = 14;
+  const base: React.CSSProperties = { position: "fixed", zIndex: 10000, background: "transparent" };
+  return (
+    <>
+      <div onMouseDown={start("North")}      style={{ ...base, top: 0, left: C, right: C, height: T, cursor: "ns-resize" }} />
+      <div onMouseDown={start("South")}      style={{ ...base, bottom: 0, left: C, right: C, height: T, cursor: "ns-resize" }} />
+      <div onMouseDown={start("West")}       style={{ ...base, left: 0, top: C, bottom: C, width: T, cursor: "ew-resize" }} />
+      <div onMouseDown={start("East")}       style={{ ...base, right: 0, top: C, bottom: C, width: T, cursor: "ew-resize" }} />
+      <div onMouseDown={start("NorthWest")}  style={{ ...base, top: 0, left: 0,  width: C, height: C, cursor: "nwse-resize" }} />
+      <div onMouseDown={start("NorthEast")}  style={{ ...base, top: 0, right: 0, width: C, height: C, cursor: "nesw-resize" }} />
+      <div onMouseDown={start("SouthWest")}  style={{ ...base, bottom: 0, left: 0,  width: C, height: C, cursor: "nesw-resize" }} />
+      <div onMouseDown={start("SouthEast")}  style={{ ...base, bottom: 0, right: 0, width: C, height: C, cursor: "nwse-resize" }} />
+    </>
+  );
+}
+
+function WindowControls() {
+  const w = getCurrentWindow();
+  const btn: React.CSSProperties = {
+    width: 36, height: 28, border: "none",
+    background: "var(--bg-surface)", color: "var(--fg-muted)",
+    fontSize: 13, cursor: "pointer", userSelect: "none",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    borderRadius: 5,
+  };
+  return (
+    <div style={{ display: "flex", gap: 4, marginLeft: 8 }}>
+      <button title="Minimize" style={btn} onClick={() => w.minimize()}>—</button>
+      <button title="Maximize" style={btn} onClick={() => w.toggleMaximize()}>▢</button>
+      <button title="Close" style={{ ...btn, background: "rgba(244,67,54,0.18)", color: "#ff8080" }} onClick={() => w.close()}>✕</button>
+    </div>
+  );
+}
 
 // Live state shown in the header SysInfoBlock — polled every 2s
 // from the same Rust commands the ServerPage uses, so the two views
@@ -265,12 +316,13 @@ function ModeBar({
   const visibleToggles = TOGGLES.filter(t => installed.includes(t.id as ModeId));
 
   return (
-    <div data-ui="AppHeader" style={{
+    <div data-ui="AppHeader" onMouseDown={startDrag} style={{
       position: "relative",
       height: 80,
-      display: "grid", gridTemplateColumns: "auto 1fr auto",
+      display: "grid", gridTemplateColumns: "auto 1fr auto auto",
       alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
       background: "#1c2244",
+      cursor: "default",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {/* Dark/Light toggle. Persists via theme.ts. */}
@@ -371,6 +423,7 @@ function ModeBar({
       >OWLLM</div>
 
       <SysInfoBlock />
+      <WindowControls />
     </div>
   );
 }
@@ -552,6 +605,7 @@ export default function AppShell() {
 
   return (
     <>
+      <ResizeEdges />
       <HybridFrame outerW={vp.w} outerH={vp.h}>
         <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
           <ModeBar

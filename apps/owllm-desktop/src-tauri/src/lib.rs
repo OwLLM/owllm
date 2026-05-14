@@ -23,8 +23,6 @@ mod projects;
 mod server;
 mod skill_library;
 
-use tauri::Manager;
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -32,19 +30,6 @@ pub fn run() {
             // Module-local state lives where the module lives; lib.rs
             // just kicks off the install.
             server::install(app);
-
-            // Force frameless on Windows by stripping the decoration
-            // bits directly. Tauri 2.10's `decorations: false` in
-            // tauri.conf.json AND `set_decorations(false)` at setup
-            // both leave WS_CAPTION + WS_THICKFRAME set (verified via
-            // GetWindowLong on the HWND). Doing the SetWindowLong
-            // ourselves is the only thing that takes.
-            #[cfg(windows)]
-            if let Some(w) = app.get_webview_window("main") {
-                if let Ok(hwnd) = w.hwnd() {
-                    strip_windows_decorations(hwnd.0 as isize);
-                }
-            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -84,79 +69,11 @@ pub fn run() {
         .expect("error while running OwLLM Desktop");
 }
 
-#[cfg(windows)]
-mod win_nc {
-    use std::sync::OnceLock;
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CallWindowProcW, DefWindowProcW, GetWindowLongPtrW, SetWindowLongPtrW,
-        GWLP_WNDPROC, WM_NCCALCSIZE,
-    };
-
-    /// Original window proc pointer, captured the first time we
-    /// subclass. All non-NC messages flow back through it.
-    static ORIGINAL_PROC: OnceLock<isize> = OnceLock::new();
-
-    /// Replace the window proc with one that swallows WM_NCCALCSIZE.
-    /// Returning 0 from WM_NCCALCSIZE tells the OS that the entire
-    /// window IS the client area — no non-client space for a title
-    /// strip, no DWM accent border, nothing. This is the documented
-    /// Windows technique for fully custom frames (Discord/VSCode use
-    /// it).
-    pub fn subclass(hwnd: HWND) {
-        unsafe {
-            let original = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
-            let _ = ORIGINAL_PROC.set(original);
-            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, hook_proc as *const () as isize);
-        }
-    }
-
-    unsafe extern "system" fn hook_proc(
-        hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
-    ) -> LRESULT {
-        if msg == WM_NCCALCSIZE && wparam.0 != 0 {
-            // wParam != 0 means "give me the new client rect". Return 0
-            // → the client rect equals the proposed window rect.
-            return LRESULT(0);
-        }
-        if let Some(&p) = ORIGINAL_PROC.get() {
-            // Forward everything else to the original Tauri/tao proc.
-            let proc: extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT =
-                std::mem::transmute(p);
-            return CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam);
-        }
-        DefWindowProcW(hwnd, msg, wparam, lparam)
-    }
-}
-
-#[cfg(windows)]
-fn strip_windows_decorations(hwnd_raw: isize) {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongW, SetWindowLongW, SetWindowPos, GWL_STYLE,
-        SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_NOACTIVATE,
-        WS_CAPTION, WS_THICKFRAME, WS_SYSMENU, WS_MINIMIZEBOX, WS_MAXIMIZEBOX,
-    };
-    // Restored to the exact state from commit 004fbe7 — the last
-    // version where drag + maximize worked for the user. The window
-    // chrome detours I shipped over 7cfd10c → e4b3ad6 made things
-    // worse on this machine, so revert to the known-good code and
-    // leave window behaviour alone going forward.
-    let hwnd = HWND(hwnd_raw as *mut std::ffi::c_void);
-    unsafe {
-        let style = GetWindowLongW(hwnd, GWL_STYLE);
-        let strip = (WS_CAPTION.0 | WS_THICKFRAME.0 | WS_SYSMENU.0) as i32;
-        let keep = (WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0) as i32;
-        let new_style = (style & !strip) | keep;
-        SetWindowLongW(hwnd, GWL_STYLE, new_style);
-
-        win_nc::subclass(hwnd);
-
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            0, 0, 0, 0,
-            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
-}
+// All custom Win32 window-style manipulation removed. tauri.conf.json
+// now sets `decorations: true` + `transparent: false`, so the OS
+// paints a normal title bar and the drag/maximize/min behaviour is
+// whatever Windows does for any other application. After several
+// failed attempts at making the frameless variant draggable on this
+// machine, falling back to the OS-native window chrome is the path
+// that just works — at the cost of a visible title strip above our
+// custom AppShell content.

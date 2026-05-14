@@ -26,73 +26,11 @@ import {
 } from "./core/modules";
 import { ACCENTS, AccentKey, Mode, useTheme } from "./theme";
 
-// Frameless window — `decorations: false` in tauri.conf.json. We
-// paint our own drag region (the ModeBar) and our own min/max/close
-// + 8 resize hot regions. Mouse handlers call Tauri's APIs directly
-// — relying on the `data-tauri-drag-region` attribute alone has
-// been unreliable across rebuilds, so we wire the handlers
-// explicitly and trust nothing else.
-
-function startDrag(e: React.MouseEvent) {
-  if (e.button !== 0) return;
-  // Don't drag when clicking a button / interactive element.
-  if ((e.target as HTMLElement).closest("button, input, select, textarea, a")) return;
-  e.preventDefault();
-  getCurrentWindow().startDragging().catch(() => { /* not in Tauri ctx */ });
-}
-
-type ResizeDir =
-  | "North" | "South" | "East" | "West"
-  | "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
-
-function ResizeEdges() {
-  const start = (dir: ResizeDir) => (e: React.MouseEvent) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    (getCurrentWindow() as any).startResizeDragging(dir).catch?.(() => {});
-  };
-  const T = 6;   // thickness of edge bands
-  const C = 14;  // size of corner squares
-  // position:fixed anchors directly to the viewport instead of
-  // depending on a parent wrapper that might be sized wrong. Very
-  // high z-index so nothing in the page can ever cover the handles.
-  const base: React.CSSProperties = { position: "fixed", zIndex: 10000, background: "transparent" };
-  return (
-    <>
-      <div onMouseDown={start("North")}      style={{ ...base, top: 0, left: C, right: C, height: T, cursor: "ns-resize" }} />
-      <div onMouseDown={start("South")}      style={{ ...base, bottom: 0, left: C, right: C, height: T, cursor: "ns-resize" }} />
-      <div onMouseDown={start("West")}       style={{ ...base, left: 0, top: C, bottom: C, width: T, cursor: "ew-resize" }} />
-      <div onMouseDown={start("East")}       style={{ ...base, right: 0, top: C, bottom: C, width: T, cursor: "ew-resize" }} />
-      <div onMouseDown={start("NorthWest")}  style={{ ...base, top: 0, left: 0,  width: C, height: C, cursor: "nwse-resize" }} />
-      <div onMouseDown={start("NorthEast")}  style={{ ...base, top: 0, right: 0, width: C, height: C, cursor: "nesw-resize" }} />
-      <div onMouseDown={start("SouthWest")}  style={{ ...base, bottom: 0, left: 0,  width: C, height: C, cursor: "nesw-resize" }} />
-      <div onMouseDown={start("SouthEast")}  style={{ ...base, bottom: 0, right: 0, width: C, height: C, cursor: "nwse-resize" }} />
-    </>
-  );
-}
-
-// Window controls — rendered INLINE inside the ModeBar so they're
-// clearly part of the app's own chrome and don't read as a
-// detached titlebar. Earlier we had these `position: fixed` at the
-// very top of the viewport, which visually mimicked a Windows
-// titlebar even though WS_CAPTION was off.
-function WindowControls() {
-  const w = getCurrentWindow();
-  const btn: React.CSSProperties = {
-    width: 36, height: 28, border: "none",
-    background: "var(--bg-surface)", color: "var(--fg-muted)",
-    fontSize: 13, cursor: "pointer", userSelect: "none",
-    display: "flex", alignItems: "center", justifyContent: "center",
-    borderRadius: 5,
-  };
-  return (
-    <div style={{ display: "flex", gap: 4, marginLeft: 8 }}>
-      <button title="Minimize" style={btn} onClick={() => w.minimize()}>—</button>
-      <button title="Maximize" style={btn} onClick={() => w.toggleMaximize()}>▢</button>
-      <button title="Close" style={{ ...btn, background: "rgba(244,67,54,0.18)", color: "#ff8080" }} onClick={() => w.close()}>✕</button>
-    </div>
-  );
-}
+// The window now has a native OS title bar (tauri.conf.json sets
+// decorations:true + transparent:false) so drag, resize, and the
+// min/max/close buttons are all handled by Windows. The JS-side
+// startDragging / startResizeDragging / WindowControls components
+// that used to be here are gone — they're no longer needed.
 
 // Live state shown in the header SysInfoBlock — polled every 2s
 // from the same Rust commands the ServerPage uses, so the two views
@@ -312,18 +250,12 @@ function ModeBar({
   const visibleToggles = TOGGLES.filter(t => installed.includes(t.id as ModeId));
 
   return (
-    <div data-ui="AppHeader" onMouseDown={startDrag} style={{
+    <div data-ui="AppHeader" style={{
       position: "relative",
       height: 80,
-      display: "grid", gridTemplateColumns: "auto 1fr auto auto",
+      display: "grid", gridTemplateColumns: "auto 1fr auto",
       alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
       background: "#1c2244",
-      // The ModeBar is the visible drag handle — onMouseDown above
-      // delegates to startDragging() unless the click lands on a
-      // button/select. The 4th grid column hosts the inline window
-      // controls so min/max/close are obviously part of app chrome,
-      // not a detached titlebar strip.
-      cursor: "default",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {/* Dark/Light toggle. Persists via theme.ts. */}
@@ -424,7 +356,6 @@ function ModeBar({
       >OWLLM</div>
 
       <SysInfoBlock />
-      <WindowControls />
     </div>
   );
 }
@@ -606,10 +537,6 @@ export default function AppShell() {
 
   return (
     <>
-      {/* Only ResizeEdges is position:fixed at the viewport edges.
-          WindowControls live inline INSIDE the ModeBar so they read
-          as app chrome, not a separate titlebar strip. */}
-      <ResizeEdges />
       <HybridFrame outerW={vp.w} outerH={vp.h}>
         <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
           <ModeBar

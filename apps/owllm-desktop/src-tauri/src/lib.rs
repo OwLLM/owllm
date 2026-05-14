@@ -14,6 +14,7 @@
 mod agents;
 mod bridges;
 mod code;
+mod dialog;
 mod hardware;
 mod models;
 mod paths;
@@ -53,6 +54,8 @@ pub fn run() {
             bridges::save_telegram_config,
             bridges::save_whatsapp_config,
             code::launch_external_editor,
+            dialog::pick_folder,
+            dialog::pick_file,
             hardware::hardware_info,
             hardware::vram_status,
             models::list_models,

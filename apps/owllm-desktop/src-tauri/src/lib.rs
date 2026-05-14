@@ -87,30 +87,20 @@ pub fn run() {
 #[cfg(windows)]
 mod win_nc {
     use std::sync::OnceLock;
-    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GetWindowLongPtrW, SetWindowLongPtrW,
-        GWLP_WNDPROC, MINMAXINFO, WM_GETMINMAXINFO, WM_NCCALCSIZE,
+        GWLP_WNDPROC, HTCAPTION, MINMAXINFO, SC_MAXIMIZE, SC_MINIMIZE, SC_RESTORE,
+        WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_NCLBUTTONDOWN, WM_SYSCOMMAND,
     };
 
     /// Original window proc pointer, captured the first time we
     /// subclass. All non-NC messages flow back through it.
     static ORIGINAL_PROC: OnceLock<isize> = OnceLock::new();
 
-    /// Replace the window proc with one that swallows WM_NCCALCSIZE
-    /// (so no system frame is drawn) AND clamps WM_GETMINMAXINFO to
-    /// the monitor work area (so maximize doesn't hide under the
-    /// taskbar). This is the documented Discord/VSCode pattern for
-    /// fully custom Windows frames. CRUCIAL: we must KEEP
-    /// WS_THICKFRAME on the window style — that's what makes maximize
-    /// snap to the work area and drag-from-caption restore properly.
-    /// Stripping THICKFRAME (our previous bug) caused maximize to use
-    /// the whole monitor rect (so the taskbar covered the bottom) and
-    /// disabled the OS's "restore on drag" logic, which is why drag
-    /// was snapping back.
     pub fn subclass(hwnd: HWND) {
         unsafe {
             let original = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
@@ -122,51 +112,78 @@ mod win_nc {
     unsafe extern "system" fn hook_proc(
         hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
     ) -> LRESULT {
-        if msg == WM_NCCALCSIZE && wparam.0 != 0 {
-            // wParam != 0 means "give me the new client rect". Return 0
-            // → the client rect equals the proposed window rect, i.e.
-            // no non-client area. Combined with WM_GETMINMAXINFO below,
-            // maximized state already sits inside the work area so we
-            // don't need to inset the rect ourselves.
-            return LRESULT(0);
-        }
-        if msg == WM_GETMINMAXINFO {
-            // Tell Windows to maximize to the monitor WORK AREA (not
-            // the full monitor rect). Without this, a window without
-            // a system frame can be maximized over the taskbar — which
-            // is exactly the "appears below the taskbar" bug the user
-            // hit. This is the standard Win32 frameless-window dance.
-            let info = lparam.0 as *mut MINMAXINFO;
-            if !info.is_null() {
-                let monitor: HMONITOR = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-                let mut mi = MONITORINFO {
-                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                    rcMonitor: RECT::default(),
-                    rcWork: RECT::default(),
-                    dwFlags: 0,
-                };
-                if GetMonitorInfoW(monitor, &mut mi).as_bool() {
-                    // ptMaxPosition is RELATIVE to the monitor's
-                    // top-left in virtual screen coordinates.
-                    (*info).ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
-                    (*info).ptMaxPosition.y = mi.rcWork.top  - mi.rcMonitor.top;
-                    (*info).ptMaxSize.x     = mi.rcWork.right  - mi.rcWork.left;
-                    (*info).ptMaxSize.y     = mi.rcWork.bottom - mi.rcWork.top;
-                    // Track maxes too so the OS doesn't think the
-                    // window can grow taller than the work area.
-                    (*info).ptMaxTrackSize.x = (*info).ptMaxSize.x;
-                    (*info).ptMaxTrackSize.y = (*info).ptMaxSize.y;
+        match msg {
+            WM_NCCALCSIZE if wparam.0 != 0 => {
+                // Return 0 → entire window IS the client area. No
+                // system-painted frame. Combined with WM_GETMINMAXINFO
+                // below, maximized state already sits inside the work
+                // area so we don't need to inset the rect ourselves.
+                return LRESULT(0);
+            }
+            WM_GETMINMAXINFO => {
+                // Clamp maximize to the monitor WORK AREA (taskbar-
+                // aware). Without this, a frameless window maximizes
+                // over the full monitor rect and the taskbar covers
+                // the bottom. THIS is the path that fires when the
+                // OS routes the maximize itself.
+                clamp_to_work_area(hwnd, lparam);
+                return LRESULT(0);
+            }
+            WM_NCLBUTTONDOWN if wparam.0 == HTCAPTION as usize => {
+                // Tao's default WM_NCLBUTTONDOWN handler swallows the
+                // caption click and does its own (broken-for-us) move
+                // logic. Bypass Tao by going straight to DefWindowProcW,
+                // which enters the standard Win32 modal move loop.
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+            WM_SYSCOMMAND => {
+                // For SC_MAXIMIZE / SC_RESTORE / SC_MINIMIZE we also
+                // want the standard Win32 path so our
+                // WM_GETMINMAXINFO clamp fires. Tao's own handler may
+                // call SetWindowPos directly with custom dimensions,
+                // bypassing the clamp.
+                let cmd = wparam.0 & 0xFFF0;
+                if cmd == SC_MAXIMIZE as usize
+                    || cmd == SC_RESTORE  as usize
+                    || cmd == SC_MINIMIZE as usize
+                {
+                    return DefWindowProcW(hwnd, msg, wparam, lparam);
                 }
             }
-            return LRESULT(0);
+            _ => {}
         }
         if let Some(&p) = ORIGINAL_PROC.get() {
-            // Forward everything else to the original Tauri/tao proc.
             let proc: extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT =
                 std::mem::transmute(p);
             return CallWindowProcW(Some(proc), hwnd, msg, wparam, lparam);
         }
         DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+
+    unsafe fn clamp_to_work_area(hwnd: HWND, lparam: LPARAM) {
+        let info = lparam.0 as *mut MINMAXINFO;
+        if info.is_null() { return; }
+        let monitor: HMONITOR = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT::default(),
+            rcWork: RECT::default(),
+            dwFlags: 0,
+        };
+        if GetMonitorInfoW(monitor, &mut mi).as_bool() {
+            (*info).ptMaxPosition = POINT {
+                x: mi.rcWork.left - mi.rcMonitor.left,
+                y: mi.rcWork.top  - mi.rcMonitor.top,
+            };
+            (*info).ptMaxSize = POINT {
+                x: mi.rcWork.right  - mi.rcWork.left,
+                y: mi.rcWork.bottom - mi.rcWork.top,
+            };
+            // Don't clamp ptMaxTrackSize — leaving it at the OS default
+            // lets the user resize the (non-maximized) window freely,
+            // including to a size larger than the work area if they
+            // want. ptMaxSize controls ONLY the zoomed/maximized rect.
+        }
     }
 }
 

@@ -455,7 +455,7 @@ export default function AppShell() {
             activeKey={activeKey}
             onChange={setActiveKey}
           />
-          <div style={{ flex: 1, overflow: "auto" }}>
+          <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
             {PageBody ? <PageBody /> : null}
           </div>
         </div>

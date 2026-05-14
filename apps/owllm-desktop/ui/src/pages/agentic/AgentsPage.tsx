@@ -1975,12 +1975,20 @@ export default function AgentsPage() {
     const userMsg: GoalMsg = { role: "you", color: "#9ad9ff", text };
     setSupChat(prev => [...prev, userMsg]);
     appendLog("you", userMsg);
-    if (!serverState.running || !serverState.port) {
+
+    // Resolve which model this send will hit, BEFORE checking the
+    // local server. A team configured to use Claude or GPT doesn't
+    // need llama-server running at all.
+    const supModelId = effectiveTeamModel.trim() || (serverState.model_id ?? "local");
+    const supProvider = providerFor(supModelId);
+
+    if (supProvider === "local" && (!serverState.running || !serverState.port)) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: "No model server is running — start one on the Server tab to dispatch this." };
       setSupChat(prev => [...prev, errMsg]);
       appendLog("system", errMsg);
       return;
     }
+
     const replyMsg: GoalMsg = { role: "orchestrator", color: "#ffd97a", text: "" };
     setSupChat(prev => [...prev, replyMsg]);
     appendLog("orchestrator", replyMsg);
@@ -1988,10 +1996,8 @@ export default function AgentsPage() {
       const sys = activeTeam
         ? `You are the orchestrator of '${activeTeam.display}'. Answer the user concisely.`
         : "You are the team's orchestrator.";
-      const supModelId = effectiveTeamModel.trim() || (serverState.model_id ?? "local");
-      const supProvider = providerFor(supModelId);
       await streamChatCompletion(
-        serverState.port,
+        serverState.port ?? 0,
         supModelId,
         supProvider,
         sys,

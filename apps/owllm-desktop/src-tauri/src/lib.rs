@@ -70,10 +70,8 @@ pub fn run() {
 }
 
 // All custom Win32 window-style manipulation removed. tauri.conf.json
-// now sets `decorations: true` + `transparent: false`, so the OS
-// paints a normal title bar and the drag/maximize/min behaviour is
-// whatever Windows does for any other application. After several
-// failed attempts at making the frameless variant draggable on this
-// machine, falling back to the OS-native window chrome is the path
-// that just works — at the cost of a visible title strip above our
-// custom AppShell content.
+// drives the window directly: decorations:false + transparent:true
+// gives a fully invisible OS chrome with the desktop showing through
+// the HybridFrame corner gaps. Drag, resize, and min/max/close are
+// handled by JS handlers in AppShell.tsx talking to Tauri's window
+// APIs (startDragging, startResizeDragging, toggleMaximize).

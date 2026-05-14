@@ -1,24 +1,118 @@
+/* OWLLM design tokens. Components reference these via var(--…). The
+   theme.ts hook flips `data-theme` on <html> and rewrites --accent so
+   every value below propagates without a re-render. */
+
 :root {
-  /* Canonical accent — matches Qt _NEON_CYAN (agent_team_canvas.py:64).
-     Replaces the bluer `#7fdfff` / `rgba(120,220,255,…)` literals. */
+  /* Canonical accent — overwritten by theme.ts when the user picks a
+     colour square in the header. Also drives the legacy --accent /
+     --accent-glow tokens kept below for backwards compatibility. */
   --accent: #5cf0ff;
   --accent-rgb: 92, 240, 255;
+  --accent-fg: #06080d;                       /* readable on the accent fill */
+  --accent-soft: rgba(92, 240, 255, 0.18);
+  --accent-strong: rgba(92, 240, 255, 0.55);
   --accent-glow-soft: rgba(92, 240, 255, 0.35);
   --accent-glow-strong: rgba(92, 240, 255, 0.65);
+
+  /* Universal status colours — same in both modes. */
+  --ok: #22c55e;
+  --warn: #FF9800;
+  --error: #ef4444;
 }
 
-/* TODO(twinforge): replace `#7fdfff` and `rgba(120,220,255,…)` literals
-   in apps/owllm-desktop/ui/src/pages/AgentsPage.tsx (e.g. lines 178,
-   186, 189, 196) with var(--accent) / var(--accent-glow-*) so the
-   teal-cyan token from styles.css actually propagates to the canvas. */
+/* Dark theme — the original look. Each token has a "semantic" name
+   describing what it's for, not the literal hex; component code reads
+   `var(--bg-panel)` not `#0e1117`. */
+:root[data-theme="dark"] {
+  --bg: #06080d;
+  --bg-app: #06080d;
+  --bg-panel: #0e1117;
+  --bg-elevated: #11151e;
+  --bg-card: #1a1f2c;
+  --bg-header: #1c2244;
+  --bg-input: #0f0f19;
+  --bg-surface: rgba(255, 255, 255, 0.04);
+  --bg-surface-hover: rgba(255, 255, 255, 0.10);
+  --bg-overlay: rgba(6, 8, 13, 0.72);
 
-html, body, #root { margin: 0; padding: 0; background: transparent; font-family: "Segoe UI", "Inter", system-ui, sans-serif; color: #e6e8eb; overflow: hidden; height: 100%; }
+  --fg: #e6e8eb;
+  --fg-strong: #ffffff;
+  --fg-muted: #9aa0a6;
+  --fg-subtle: #6c7280;
+  --fg-dim: #5a6270;
+
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --border-accent: rgba(var(--accent-rgb), 0.30);
+
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.40);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.50);
+  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.60);
+
+  --ghost-bg: rgba(255, 255, 255, 0.04);
+  --ghost-fg: #dadcdf;
+  --ghost-hover-bg: rgba(255, 255, 255, 0.10);
+  --ghost-hover-fg: #fff;
+}
+
+/* Light theme. Backgrounds become greys, foreground darkens. The
+   accent token doesn't change — the user's colour picks should read
+   clearly against either backdrop, so the only tweak is that on
+   light mode we shift --accent-fg to ensure contrast. */
+:root[data-theme="light"] {
+  --bg: #f0f2f5;
+  --bg-app: #f0f2f5;
+  --bg-panel: #ffffff;
+  --bg-elevated: #f7f8fa;
+  --bg-card: #ffffff;
+  --bg-header: #e4e7ec;
+  --bg-input: #ffffff;
+  --bg-surface: rgba(0, 0, 0, 0.04);
+  --bg-surface-hover: rgba(0, 0, 0, 0.08);
+  --bg-overlay: rgba(20, 22, 28, 0.55);
+
+  --fg: #1a1f2c;
+  --fg-strong: #06080d;
+  --fg-muted: #5a6270;
+  --fg-subtle: #8a8f99;
+  --fg-dim: #a0a4ad;
+
+  --border: rgba(0, 0, 0, 0.10);
+  --border-strong: rgba(0, 0, 0, 0.20);
+  --border-accent: rgba(var(--accent-rgb), 0.45);
+
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.10);
+  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.18);
+
+  --ghost-bg: rgba(0, 0, 0, 0.04);
+  --ghost-fg: #1a1f2c;
+  --ghost-hover-bg: rgba(0, 0, 0, 0.08);
+  --ghost-hover-fg: #06080d;
+}
+
+/* Default to dark until ThemeProvider has run. */
+:root:not([data-theme]) {
+  color-scheme: dark;
+}
+:root[data-theme="dark"] { color-scheme: dark; }
+:root[data-theme="light"] { color-scheme: light; }
+
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  font-family: "Segoe UI", "Inter", system-ui, sans-serif;
+  color: var(--fg);
+  overflow: hidden;
+  height: 100%;
+}
 * { box-sizing: border-box; }
 button { font-family: inherit; cursor: pointer; font-weight: bold; }
 
 .ghost-btn {
-  background: rgba(255, 255, 255, 0.04);
-  color: #dadcdf;
+  background: var(--ghost-bg);
+  color: var(--ghost-fg);
   border: none;
   border-radius: 8px;
   padding: 0 14px;
@@ -29,7 +123,14 @@ button { font-family: inherit; cursor: pointer; font-weight: bold; }
   align-items: center;
   gap: 6px;
 }
-.ghost-btn:hover { background: rgba(255, 255, 255, 0.10); color: #fff; }
+.ghost-btn:hover {
+  background: var(--ghost-hover-bg);
+  color: var(--ghost-hover-fg);
+}
+.ghost-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 .status-dot {
   display: inline-block;
@@ -38,4 +139,26 @@ button { font-family: inherit; cursor: pointer; font-weight: bold; }
   border-radius: 50%;
   margin-right: 8px;
   box-shadow: 0 0 6px currentColor;
+}
+
+/* Native <select> inherits the system theme; force-fit by matching
+   data-theme. Without this, Windows draws light combo bodies in dark
+   mode and you get a flash of white when the dropdown opens. */
+:root[data-theme="dark"] select option { background: var(--bg-panel); color: var(--fg); }
+:root[data-theme="light"] select option { background: var(--bg-panel); color: var(--fg); }
+
+input, select, textarea {
+  color: inherit;
+}
+
+/* Scrollbar styling for both themes — defaults look glaring in light
+   mode (chunky grey scrollbar on white). */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--accent-rgb), 0.45);
 }

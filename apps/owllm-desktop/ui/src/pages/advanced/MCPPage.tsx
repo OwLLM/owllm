@@ -1,4 +1,4 @@
-// MCPPage — ported from LLM/desktop_app/pages/mcp_page.py (MCPPage, line 14).
+﻿// MCPPage — ported from LLM/desktop_app/pages/mcp_page.py (MCPPage, line 14).
 // Tabbed container with three sub-tabs:
 //
 //   📦 Catalog     — browse MCP servers from the registry
@@ -17,7 +17,7 @@ import React, { useMemo, useState } from "react";
 type SubTab = "catalog" | "connections" | "tools";
 
 const ICONS = "/Page_icons";
-const PANEL_BG = "#0e1117";
+const PANEL_BG = "var(--bg-panel)";
 
 // ---------------------------------------------------------------------
 // CATALOG  — mcp_catalog_page.py
@@ -136,14 +136,14 @@ function InstallConfirmDialog({
         minWidth: 420, maxWidth: 520,
         border: "1px solid rgba(102,126,234,0.3)",
       }}>
-        <div style={{ color: "#fff", fontSize: 16, fontWeight: 700, marginBottom: 12 }}>
+        <div style={{ color: "var(--fg-strong)", fontSize: 16, fontWeight: 700, marginBottom: 12 }}>
           Confirm Installation
         </div>
-        <div style={{ color: "#dadcdf", fontSize: 13, lineHeight: 1.6 }}>
+        <div style={{ color: "var(--fg)", fontSize: 13, lineHeight: 1.6 }}>
           Install <b>{server.name}</b>?
           <div style={{ marginTop: 10 }}><b>Method:</b> {server.install_method}</div>
           <div><b>Package:</b> {server.package_name}</div>
-          <div style={{ marginTop: 10, color: "#9aa0a6" }}>
+          <div style={{ marginTop: 10, color: "var(--fg-muted)" }}>
             This will download and install the server. Continue?
           </div>
         </div>
@@ -178,7 +178,7 @@ function ServerCard({ server, onInstall }: {
         }}>
           {server.icon || "🔌"}
         </div>
-        <div style={{ color: "#fff", fontWeight: 700, fontSize: 14 }}>
+        <div style={{ color: "var(--fg-strong)", fontWeight: 700, fontSize: 14 }}>
           {server.name}
         </div>
       </div>
@@ -188,12 +188,12 @@ function ServerCard({ server, onInstall }: {
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         {server.categories.slice(0, 3).map(cat => (  // max 3 per server_card.py:84
           <span key={cat} style={{
-            background: "rgba(102,126,234,0.30)", color: "#fff",
+            background: "rgba(102,126,234,0.30)", color: "var(--fg-strong)",
             padding: "2px 8px", borderRadius: 4, fontSize: 11,
           }}>{cat}</span>
         ))}
       </div>
-      <div style={{ display: "flex", gap: 12, fontSize: 11, color: "#888" }}>
+      <div style={{ display: "flex", gap: 12, fontSize: 11, color: "var(--fg-subtle)" }}>
         {server.publisher && <span>by {server.publisher}</span>}
         <span>📦 {server.install_method}</span>
       </div>
@@ -201,7 +201,7 @@ function ServerCard({ server, onInstall }: {
         onClick={() => onInstall(server.id)}
         disabled={server.installed}
         style={{
-          padding: 8, borderRadius: 4, border: "none", color: "#fff",
+          padding: 8, borderRadius: 4, border: "none", color: "var(--fg-strong)",
           fontWeight: 700, fontSize: 12, marginTop: 4,
           cursor: server.installed ? "default" : "pointer",
           background: server.installed
@@ -270,24 +270,24 @@ function CatalogTab() {
       {/* Title — mcp_catalog_page.py:154 */}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <img src={`${ICONS}/owl_tools.png`} style={{ width: 28, height: 28 }} alt="" />
-        <div style={{ color: "#fff", fontSize: 18, fontWeight: 700 }}>📦 MCP Catalog</div>
+        <div style={{ color: "var(--fg-strong)", fontSize: 18, fontWeight: 700 }}>📦 MCP Catalog</div>
       </div>
 
       {/* Top bar — Search | Category | Sort | Refresh
           mcp_catalog_page.py:158-193 */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ color: "#fff", fontSize: 12 }}>Search:</span>
+        <span style={{ color: "var(--fg-strong)", fontSize: 12 }}>Search:</span>
         <input
           value={search}
           onChange={e => setSearch(e.target.value)}
           placeholder="Search servers..."
           style={inputStyle}
         />
-        <span style={{ color: "#fff", fontSize: 12 }}>Category:</span>
+        <span style={{ color: "var(--fg-strong)", fontSize: 12 }}>Category:</span>
         <select value={category} onChange={e => setCategory(e.target.value)} style={selectStyle}>
           {categories.map(c => <option key={c} value={c}>{c}</option>)}
         </select>
-        <span style={{ color: "#fff", fontSize: 12 }}>Sort:</span>
+        <span style={{ color: "var(--fg-strong)", fontSize: 12 }}>Sort:</span>
         <select
           value={sort}
           onChange={e => setSort(e.target.value as "Popular" | "Recent")}
@@ -318,7 +318,7 @@ function CatalogTab() {
       {/* Server cards — vertical list, spacing 12 (mcp_catalog_page.py:224) */}
       <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
         {visible.length === 0 && (
-          <div style={{ color: "#888", textAlign: "center", padding: 40, fontSize: 12 }}>
+          <div style={{ color: "var(--fg-subtle)", textAlign: "center", padding: 40, fontSize: 12 }}>
             No servers match the current filters.
           </div>
         )}
@@ -369,7 +369,7 @@ const STATUS_META: Record<ConnStatus, { color: string; label: string }> = {
   configured: { color: "#FF9800", label: "Configured" },
   running:    { color: "#4CAF50", label: "Running"    },
   connected:  { color: "#2196F3", label: "Connected"  },
-  stopped:    { color: "#888",    label: "Stopped"    },
+  stopped:    { color: "var(--fg-subtle)",    label: "Stopped"    },
 };
 
 const SAMPLE_CONNECTIONS: Connection[] = [
@@ -441,7 +441,7 @@ function ConfigureDialog({
         minWidth: 500, maxWidth: 600, maxHeight: "85vh", overflow: "auto",
         border: "1px solid rgba(102,126,234,0.3)",
       }}>
-        <div style={{ color: "#fff", fontSize: 16, fontWeight: 700, marginBottom: 16 }}>
+        <div style={{ color: "var(--fg-strong)", fontSize: 16, fontWeight: 700, marginBottom: 16 }}>
           Configure: {conn.name}
         </div>
 
@@ -504,10 +504,10 @@ function HandshakeInspector({ conn, onClose }: { conn: Connection; onClose: () =
         minWidth: 480, maxWidth: 640,
         border: "1px solid rgba(102,126,234,0.3)",
       }}>
-        <div style={{ color: "#fff", fontSize: 16, fontWeight: 700, marginBottom: 12 }}>
+        <div style={{ color: "var(--fg-strong)", fontSize: 16, fontWeight: 700, marginBottom: 12 }}>
           Handshake — {conn.name}
         </div>
-        <div style={{ color: "#dadcdf", fontSize: 12, lineHeight: 1.7 }}>
+        <div style={{ color: "var(--fg)", fontSize: 12, lineHeight: 1.7 }}>
           <div><b>server_id:</b> <code>{conn.server_id}</code></div>
           <div><b>install_method:</b> {conn.install_method}</div>
           <div><b>status:</b> {STATUS_META[conn.status].label}</div>
@@ -564,7 +564,7 @@ function ConnectionCard({
       display: "flex", flexDirection: "column", gap: 8,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{ color: "#fff", fontWeight: 700, fontSize: 14, flex: 1 }}>
+        <div style={{ color: "var(--fg-strong)", fontWeight: 700, fontSize: 14, flex: 1 }}>
           {conn.name}
         </div>
         <button
@@ -575,13 +575,13 @@ function ConnectionCard({
           🔍 Inspect
         </button>
         <span style={{
-          background: meta.color, color: "#fff",
+          background: meta.color, color: "var(--fg-strong)",
           padding: "4px 12px", borderRadius: 4,
           fontSize: 11, fontWeight: 700,
         }}>{meta.label}</span>
       </div>
 
-      <div style={{ display: "flex", gap: 16, fontSize: 11, color: "#888" }}>
+      <div style={{ display: "flex", gap: 16, fontSize: 11, color: "var(--fg-subtle)" }}>
         <span>Method: {conn.install_method}</span>
         <span style={{ fontFamily: "Consolas, monospace" }}>{conn.config.url}</span>
       </div>
@@ -656,7 +656,7 @@ function ConnectionsTab() {
       {/* Header — mcp_connections_page.py:163-193 */}
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <img src={`${ICONS}/owl_server.png`} style={{ width: 28, height: 28 }} alt="" />
-        <div style={{ color: "#fff", fontSize: 18, fontWeight: 700, flex: 1 }}>
+        <div style={{ color: "var(--fg-strong)", fontSize: 18, fontWeight: 700, flex: 1 }}>
           🔌 MCP Connections
         </div>
         <button onClick={connectLocal} style={btnPrimary}>🔗 Connect to Local Server</button>
@@ -664,13 +664,13 @@ function ConnectionsTab() {
       </div>
 
       {/* Info subtitle — mcp_connections_page.py:196-201 */}
-      <div style={{ color: "#888", fontSize: 12 }}>
+      <div style={{ color: "var(--fg-subtle)", fontSize: 12 }}>
         Manage installed MCP servers. Configure, start, and connect to servers to use their tools.
       </div>
 
       <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column", gap: 12 }}>
         {conns.length === 0 && (
-          <div style={{ color: "#888", textAlign: "center", padding: 40, fontSize: 12 }}>
+          <div style={{ color: "var(--fg-subtle)", textAlign: "center", padding: 40, fontSize: 12 }}>
             No servers installed. Go to Catalog to install servers.
           </div>
         )}
@@ -758,7 +758,7 @@ function SchemaViewer({ schema }: { schema?: Record<string, unknown> }) {
   // JSON-schema. Here we show a read-only viewer (matches the Qt
   // schema_form intent at mcp_tools_page.py:80-94).
   if (!schema) return (
-    <div style={{ color: "#888", fontSize: 11, fontStyle: "italic" }}>
+    <div style={{ color: "var(--fg-subtle)", fontSize: 11, fontStyle: "italic" }}>
       No parameters required.
     </div>
   );
@@ -800,7 +800,7 @@ function ToolCard({ tool, onRun, onToggle, onSelect }: {
           background: "rgba(102,126,234,0.15)", borderRadius: 8,
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>🔧</div>
-        <div style={{ color: "#fff", fontSize: 14, fontWeight: 700, flex: 1 }}>
+        <div style={{ color: "var(--fg-strong)", fontSize: 14, fontWeight: 700, flex: 1 }}>
           {tool.name}
         </div>
         <label
@@ -841,7 +841,7 @@ function ToolCard({ tool, onRun, onToggle, onSelect }: {
         style={{
           padding: 8, borderRadius: 6, border: "1px solid rgba(102,126,234,0.40)",
           background: "linear-gradient(90deg, rgba(102,126,234,0.30), rgba(118,75,162,0.30))",
-          color: "#fff", fontWeight: 600, fontSize: 11, cursor: "pointer",
+          color: "var(--fg-strong)", fontWeight: 600, fontSize: 11, cursor: "pointer",
         }}
       >▶ Run Tool</button>
     </div>
@@ -898,7 +898,7 @@ function ToolsTab() {
     <div style={{ flex: 1, display: "flex", flexDirection: "column", padding: 16, gap: 12, overflow: "hidden" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <img src={`${ICONS}/owl_tools.png`} style={{ width: 28, height: 28 }} alt="" />
-        <div style={{ color: "#fff", fontSize: 18, fontWeight: 700 }}>🧩 MCP Tools</div>
+        <div style={{ color: "var(--fg-strong)", fontSize: 18, fontWeight: 700 }}>🧩 MCP Tools</div>
       </div>
 
       {/* Top bar — Search | Category | Refresh (mcp_tools_page.py:246-266) */}
@@ -915,7 +915,7 @@ function ToolsTab() {
         <button style={btnGhost}>🔄 Refresh</button>
       </div>
 
-      <div style={{ color: "#dadcdf", fontSize: 12 }}>
+      <div style={{ color: "var(--fg)", fontSize: 12 }}>
         {tools.length} tool(s) from {new Set(tools.map(t => t.source_server)).size} connected
         server(s). Agents can call any of these per their tool_allowlist
         (toggle <i>Enable</i> on each card).
@@ -936,7 +936,7 @@ function ToolsTab() {
             ))}
           </div>
           {visible.length === 0 && (
-            <div style={{ color: "#888", textAlign: "center", padding: 40, fontSize: 12 }}>
+            <div style={{ color: "var(--fg-subtle)", textAlign: "center", padding: 40, fontSize: 12 }}>
               No tools available. Connect to servers first.
             </div>
           )}
@@ -950,12 +950,12 @@ function ToolsTab() {
             display: "flex", flexDirection: "column", gap: 10, overflow: "auto",
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ color: "#fff", fontSize: 16, fontWeight: 700, flex: 1 }}>
+              <div style={{ color: "var(--fg-strong)", fontSize: 16, fontWeight: 700, flex: 1 }}>
                 {selected.name}
               </div>
               <button onClick={() => setSelected(null)} style={{ ...btnGhost, padding: "2px 8px", fontSize: 14 }}>✕</button>
             </div>
-            <div style={{ color: "#888", fontSize: 11 }}>From: {selected.source_server}</div>
+            <div style={{ color: "var(--fg-subtle)", fontSize: 11 }}>From: {selected.source_server}</div>
             <div style={{ color: "#b0b0b0", fontSize: 12, lineHeight: 1.5 }}>
               {selected.description}
             </div>
@@ -975,7 +975,7 @@ function ToolsTab() {
             <button onClick={execute} style={{
               padding: 10, borderRadius: 8, border: "1px solid rgba(76,175,80,0.50)",
               background: "linear-gradient(90deg, rgba(76,175,80,0.30), rgba(102,126,234,0.30))",
-              color: "#fff", fontWeight: 600, fontSize: 12, cursor: "pointer",
+              color: "var(--fg-strong)", fontWeight: 600, fontSize: 12, cursor: "pointer",
             }}>▶ Execute Tool</button>
 
             {output && (
@@ -1008,44 +1008,44 @@ function ToolsTab() {
 const inputStyle: React.CSSProperties = {
   height: 32, padding: "0 12px",
   borderRadius: 6, border: "1px solid rgba(102,126,234,0.30)",
-  background: "rgba(40,40,50,0.80)", color: "#fff", fontSize: 12,
+  background: "rgba(40,40,50,0.80)", color: "var(--fg-strong)", fontSize: 12,
 };
 const selectStyle: React.CSSProperties = {
   ...inputStyle, padding: "0 10px",
 };
 const lblStyle: React.CSSProperties = {
-  display: "block", color: "#fff", fontSize: 12,
+  display: "block", color: "var(--fg-strong)", fontSize: 12,
   fontWeight: 500, marginBottom: 4, marginTop: 8,
 };
 const btnGhost: React.CSSProperties = {
   height: 32, padding: "0 14px", borderRadius: 6,
   border: "1px solid rgba(102,126,234,0.50)",
   background: "rgba(102,126,234,0.30)",
-  color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer",
+  color: "var(--fg-strong)", fontSize: 12, fontWeight: 600, cursor: "pointer",
 };
 const btnPrimary: React.CSSProperties = {
   height: 32, padding: "0 14px", borderRadius: 4,
-  border: "none", color: "#fff", fontWeight: 700, fontSize: 12,
+  border: "none", color: "var(--fg-strong)", fontWeight: 700, fontSize: 12,
   cursor: "pointer",
   background: "rgba(102,126,234,0.80)",
 };
 const btnPurple: React.CSSProperties = {
-  padding: "6px 12px", borderRadius: 4, border: "none", color: "#fff",
+  padding: "6px 12px", borderRadius: 4, border: "none", color: "var(--fg-strong)",
   fontSize: 11, fontWeight: 600, cursor: "pointer",
   background: "rgba(102,126,234,0.60)",
 };
 const btnGreen: React.CSSProperties = {
-  padding: "6px 12px", borderRadius: 4, border: "none", color: "#fff",
+  padding: "6px 12px", borderRadius: 4, border: "none", color: "var(--fg-strong)",
   fontSize: 11, fontWeight: 600, cursor: "pointer",
   background: "rgba(76,175,80,0.60)",
 };
 const btnRed: React.CSSProperties = {
-  padding: "6px 12px", borderRadius: 4, border: "none", color: "#fff",
+  padding: "6px 12px", borderRadius: 4, border: "none", color: "var(--fg-strong)",
   fontSize: 11, fontWeight: 600, cursor: "pointer",
   background: "rgba(244,67,54,0.60)",
 };
 const btnGray: React.CSSProperties = {
-  padding: "6px 12px", borderRadius: 4, border: "none", color: "#fff",
+  padding: "6px 12px", borderRadius: 4, border: "none", color: "var(--fg-strong)",
   fontSize: 11, fontWeight: 600, cursor: "pointer",
   background: "rgba(158,158,158,0.60)",
 };
@@ -1079,7 +1079,7 @@ export default function MCPPage() {
               style={{
                 padding: "10px 20px",
                 background: active ? "rgba(102,126,234,0.80)" : "rgba(30,30,40,0.80)",
-                color: "#fff", border: "none",
+                color: "var(--fg-strong)", border: "none",
                 borderTopLeftRadius: 6, borderTopRightRadius: 6,
                 fontSize: 13, fontWeight: 600,
                 cursor: "pointer", minHeight: 32,

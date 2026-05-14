@@ -1,4 +1,4 @@
-import StubPage from "../../core/StubPage";
+﻿import StubPage from "../../core/StubPage";
 
 // Qt: main.py — Gamify hosts the merged 3D playground (characters
 // + arena). Renders a Three.js scene with custom characters, NPCs,

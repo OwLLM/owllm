@@ -1,4 +1,4 @@
-import StubPage from "../../core/StubPage";
+﻿import StubPage from "../../core/StubPage";
 
 // Qt: main.py::_build_environment_management_page (line 25680) +
 // _build_environments_subtab (25728). Per-model virtual environments:

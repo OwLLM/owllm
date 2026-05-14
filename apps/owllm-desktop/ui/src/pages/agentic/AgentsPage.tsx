@@ -1,4 +1,4 @@
-// AgentsPage — agentic tab body. Frame + header + tabs come from
+﻿// AgentsPage — agentic tab body. Frame + header + tabs come from
 // AppShell. Layout: location strip, goal row, then the workspace
 // (canvas + cards + orchestrator pane).
 //
@@ -199,22 +199,22 @@ function LocationRow({
   const sandboxBg    = trustWrites ? "#241a0e" : "#0e2418";
   const sandboxBorder= trustWrites ? "#5a3c2c" : "#2c5a3c";
   const bridgeText   = bridgeOn ? "📱 Bridge: ON" : "📱 Bridge: OFF";
-  const bridgeColor  = bridgeOn ? "#5cf0ff" : "#7d8595";
+  const bridgeColor  = bridgeOn ? "var(--accent)" : "#7d8595";
   const bridgeBg     = bridgeOn ? "#0a2230" : "#1a1f2a";
   const bridgeBorder = bridgeOn ? "#2a5060" : "#2a3148";
   return (
     <div data-ui="ProjectStrip" style={{ height:52, padding:"10px 14px", background:"linear-gradient(180deg, #1f2632, #181c29)", borderRadius:10, margin:"0 23px", display:"flex", alignItems:"center", gap:10, position:"relative" }}>
-      <div data-ui="LocationLabel" style={{ display:"inline-flex", alignItems:"center", height:32, fontSize:11, color:"#aaa", textTransform:"uppercase", letterSpacing:0.6, marginRight:4 }}>LOCATION</div>
-      <input data-ui="LocationInput" value={location} onChange={e => onChangeLocation(e.target.value)} placeholder="/path/to/repo · esp-flash · github.com/me/x" style={{ flex:2, minWidth:240, height:32, borderRadius:8, padding:"0 12px", fontSize:13, background:"#0f0f19", color:"#fff", border:"1px solid rgba(255,255,255,0.06)" }} />
+      <div data-ui="LocationLabel" style={{ display:"inline-flex", alignItems:"center", height:32, fontSize:11, color:"var(--fg-muted)", textTransform:"uppercase", letterSpacing:0.6, marginRight:4 }}>LOCATION</div>
+      <input data-ui="LocationInput" value={location} onChange={e => onChangeLocation(e.target.value)} placeholder="/path/to/repo · esp-flash · github.com/me/x" style={{ flex:2, minWidth:240, height:32, borderRadius:8, padding:"0 12px", fontSize:13, background:"var(--bg-input)", color:"var(--fg-strong)", border:"1px solid var(--border)" }} />
       <button data-ui="LocationBrowseBtn" className="ghost-btn" onClick={onBrowse} title="Pick a project folder" style={{ height:32, width:79 }}>Browse…</button>
-      <label data-ui="TrustWritesCheckbox" style={{ display:"inline-flex", alignItems:"center", fontSize:12, color:"#dadcdf", padding:"0 6px" }}>
-        <input type="checkbox" checked={trustWrites} onChange={onToggleTrustWrites} style={{ marginRight:6, width:13, height:13, accentColor:"#7fdfff" }} />
+      <label data-ui="TrustWritesCheckbox" style={{ display:"inline-flex", alignItems:"center", fontSize:12, color:"var(--fg)", padding:"0 6px" }}>
+        <input type="checkbox" checked={trustWrites} onChange={onToggleTrustWrites} style={{ marginRight:6, width:13, height:13, accentColor:"var(--accent)" }} />
         Trust writes
       </label>
       <span data-ui="SandboxBadge" style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:sandboxBg, color:sandboxColor, border:`1px solid ${sandboxBorder}`, borderRadius:6, fontSize:11, fontWeight:600, whiteSpace:"nowrap" }}>{sandboxText}</span>
       <span data-ui="BridgeBadge" style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:bridgeBg, color:bridgeColor, border:`1px solid ${bridgeBorder}`, borderRadius:6, fontSize:11, fontWeight:600, whiteSpace:"nowrap" }}>{bridgeText}</span>
-      <span style={{ display:"inline-flex", alignItems:"center", height:32, padding:"0 12px", fontSize:11, color:"#aaa", textTransform:"uppercase", letterSpacing:0.6 }}>Project</span>
-      <select data-ui="ProjectCombo" value={selectedId} onChange={e => onChangeProject(e.target.value)} style={{ flex:2, minWidth:200, height:32, padding:"0 12px", borderRadius:8, border:"none", background:"#0f0f19", color:"#fff", fontSize:13 }}>
+      <span style={{ display:"inline-flex", alignItems:"center", height:32, padding:"0 12px", fontSize:11, color:"var(--fg-muted)", textTransform:"uppercase", letterSpacing:0.6 }}>Project</span>
+      <select data-ui="ProjectCombo" value={selectedId} onChange={e => onChangeProject(e.target.value)} style={{ flex:2, minWidth:200, height:32, padding:"0 12px", borderRadius:8, border:"none", background:"var(--bg-input)", color:"var(--fg-strong)", fontSize:13 }}>
         {projects.length === 0
           ? <option value="">(no projects — create one in Studio)</option>
           : projects.map(p => (<option key={p.id} value={p.id}>{p.name}</option>))
@@ -225,15 +225,15 @@ function LocationRow({
       <button className="ghost-btn" style={{ height:32, padding:"0 12px" }}>Rename</button>
       <button style={{ height:32, padding:"0 12px", background:"rgba(255,140,140,0.10)", color:"#ff8c8c", border:"none", borderRadius:8, fontSize:12, fontWeight:600 }}>Delete</button>
       {pickerOpen && (
-        <div style={{ position:"absolute", top:60, right:14, background:"#0e1117", border:"1px solid rgba(255,255,255,0.10)", borderRadius:10, padding:8, zIndex:50, maxHeight:340, overflow:"auto", minWidth:280, boxShadow:"0 8px 30px rgba(0,0,0,0.6)" }}>
-          <div style={{ fontSize:10, color:"#aaa", letterSpacing:1, textTransform:"uppercase", padding:"6px 10px" }}>Team template</div>
-          <button onClick={() => { onPickTeam(null); setPickerOpen(false); }} style={{ display:"block", width:"100%", textAlign:"left", padding:"8px 12px", border:"none", background: pickedTeamId === null ? "rgba(92,240,255,0.12)" : "transparent", color:"#dadcdf", fontSize:12, cursor:"pointer", borderRadius:6 }}>(use project roster)</button>
+        <div style={{ position:"absolute", top:60, right:14, background:"var(--bg-panel)", border:"1px solid var(--border-strong)", borderRadius:10, padding:8, zIndex:50, maxHeight:340, overflow:"auto", minWidth:280, boxShadow:"0 8px 30px rgba(0,0,0,0.6)" }}>
+          <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:1, textTransform:"uppercase", padding:"6px 10px" }}>Team template</div>
+          <button onClick={() => { onPickTeam(null); setPickerOpen(false); }} style={{ display:"block", width:"100%", textAlign:"left", padding:"8px 12px", border:"none", background: pickedTeamId === null ? "rgba(92,240,255,0.12)" : "transparent", color:"var(--fg)", fontSize:12, cursor:"pointer", borderRadius:6 }}>(use project roster)</button>
           {teams.map(t => (
-            <button key={t.id} onClick={() => { onPickTeam(t.id); setPickerOpen(false); }} style={{ display:"flex", alignItems:"center", gap:8, width:"100%", textAlign:"left", padding:"8px 12px", border:"none", background: pickedTeamId === t.id ? "rgba(92,240,255,0.12)" : "transparent", color:"#dadcdf", fontSize:12, cursor:"pointer", borderRadius:6 }}>
+            <button key={t.id} onClick={() => { onPickTeam(t.id); setPickerOpen(false); }} style={{ display:"flex", alignItems:"center", gap:8, width:"100%", textAlign:"left", padding:"8px 12px", border:"none", background: pickedTeamId === t.id ? "rgba(92,240,255,0.12)" : "transparent", color:"var(--fg)", fontSize:12, cursor:"pointer", borderRadius:6 }}>
               <img src={owlSrc(t.icon)} style={{ width:20, height:20, objectFit:"contain", flexShrink:0 }} />
               <div style={{ display:"flex", flexDirection:"column", minWidth:0, flex:1 }}>
-                <span style={{ color:"#fff", fontWeight:600 }}>{t.display}</span>
-                <span style={{ fontSize:10, color:"#9aa0a6" }}>{t.category.toUpperCase()} · {t.agents.length} agents</span>
+                <span style={{ color:"var(--fg-strong)", fontWeight:600 }}>{t.display}</span>
+                <span style={{ fontSize:10, color:"var(--fg-muted)" }}>{t.category.toUpperCase()} · {t.agents.length} agents</span>
               </div>
             </button>
           ))}
@@ -251,13 +251,13 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy }: {
 }) {
   return (
     <div style={{ height:38, padding:"0 23px", margin:"12px 0", background:"transparent", display:"flex", alignItems:"center", gap:10 }}>
-      <button data-ui="GoalAttachBtn" title="Attach an image or audio file" style={{ height:38, minWidth:44, padding:"0 10px", border:"none", borderRadius:10, background:"rgba(255,255,255,0.05)", color:"#dadcdf", fontSize:16 }}>📎</button>
+      <button data-ui="GoalAttachBtn" title="Attach an image or audio file" style={{ height:38, minWidth:44, padding:"0 10px", border:"none", borderRadius:10, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16 }}>📎</button>
       <input data-ui="GoalInput"
         value={goal}
         onChange={e => setGoal(e.target.value)}
         onKeyDown={e => { if (e.key === "Enter" && !busy) onRun(); }}
         placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up' (drop an image / audio here)"
-        style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"#161623", color:"#fff", border:"none" }} />
+        style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"var(--bg-input)", color:"var(--fg-strong)", border:"none" }} />
       <button data-ui="GoalRunBtn" disabled={busy || !goal.trim()} onClick={onRun}
         style={{ height:38, padding:"0 24px", borderRadius:10, border:"none",
                  background: busy || !goal.trim() ? "rgba(74,108,255,0.25)" : "#4a6cff",
@@ -270,8 +270,8 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy }: {
                  background: busy ? "rgba(255,140,140,0.20)" : "rgba(255,140,140,0.10)",
                  color: busy ? "#ff8c8c" : "#555", fontWeight:600, fontSize:14,
                  cursor: busy ? "pointer" : "not-allowed" }}>Cancel</button>
-      <button data-ui="GoalTelemetryBtn" title="Open the tool-call telemetry panel" style={{ height:38, width:44, padding:0, border:"none", borderRadius:8, background:"rgba(255,255,255,0.05)", color:"#dadcdf", fontSize:16 }}>📊</button>
-      <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(92,240,255,0.18)", color:"#5cf0ff", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
+      <button data-ui="GoalTelemetryBtn" title="Open the tool-call telemetry panel" style={{ height:38, width:44, padding:0, border:"none", borderRadius:8, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16 }}>📊</button>
+      <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(92,240,255,0.18)", color:"var(--accent)", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
     </div>
   );
 }
@@ -295,8 +295,8 @@ function FlowHeader({
     ? "Switch to the editable graph (top-down hierarchical layout)"
     : "Switch back to the live orbital diagram";
   return (
-    <div style={{ display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid rgba(255,255,255,0.04)" }}>
-      <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"#fff", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Flow</div>
+    <div style={{ display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid var(--border)" }}>
+      <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Flow</div>
       <div style={{ flex:1 }} />
       <button
         data-ui="FlowDeleteEdgeBtn"
@@ -327,7 +327,7 @@ function FlowHeader({
         className="ghost-btn"
         onClick={onToggleView}
         title={toggleTitle}
-        style={{ height:28, padding:"0 8px", fontSize:11, background: viewMode === "graph" ? "rgba(120,220,255,0.18)" : undefined, color: viewMode === "graph" ? "#7fdfff" : undefined }}
+        style={{ height:28, padding:"0 8px", fontSize:11, background: viewMode === "graph" ? "rgba(120,220,255,0.18)" : undefined, color: viewMode === "graph" ? "var(--accent)" : undefined }}
       >{toggleLabel}</button>
     </div>
   );
@@ -339,7 +339,7 @@ function TeamInfoCard({ team }: { team: Team | null }) {
   const CARD_H = 264;
   if (!team) {
     return (
-      <div data-ui="TeamInfoCard" style={{ width:CARD_W, height:CARD_H, borderRadius:12, background:"#0e1117", border:"1px dashed rgba(255,255,255,0.10)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, textAlign:"center", color:"#6c7280", fontSize:12 }}>
+      <div data-ui="TeamInfoCard" style={{ width:CARD_W, height:CARD_H, borderRadius:12, background:"var(--bg-panel)", border:"1px dashed rgba(255,255,255,0.10)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, textAlign:"center", color:"var(--fg-subtle)", fontSize:12 }}>
         Pick a project on the strip, or click <b style={{ margin:"0 4px" }}>Team…</b> to load a template onto the canvas.
       </div>
     );
@@ -353,20 +353,20 @@ function TeamInfoCard({ team }: { team: Team | null }) {
   return (
     <div data-ui="TeamInfoCard" style={{ position:"relative", width:CARD_W, height:CARD_H, borderRadius:12, background:"linear-gradient(135deg, rgba(18,22,34,0.90) 0%, rgba(8,11,18,0.90) 100%)", border:"1.6px solid transparent", overflow:"hidden" }}>
       <div style={{ position:"absolute", inset:0, borderRadius:12, padding:"1.6px", background:"linear-gradient(135deg, rgba(92,240,255,0.86) 0%, rgba(192,138,255,0.86) 100%)", WebkitMask:"linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)", WebkitMaskComposite:"xor", maskComposite:"exclude", pointerEvents:"none" }} />
-      <div data-ui="TeamRibbon" style={{ position:"absolute", left:8, top:8, width:CARD_W - 16, height:22, borderRadius:6, background:"linear-gradient(90deg, rgba(92,240,255,0.235) 0%, rgba(192,138,255,0.039) 100%)", border:"1px solid rgba(92,240,255,0.47)", display:"flex", alignItems:"center", paddingLeft:10, fontSize:12, fontWeight:700, color:"#e6f0ff", fontFamily:"Segoe UI", letterSpacing:0.2 }}>● {team.category.toUpperCase()}</div>
+      <div data-ui="TeamRibbon" style={{ position:"absolute", left:8, top:8, width:CARD_W - 16, height:22, borderRadius:6, background:"linear-gradient(90deg, rgba(92,240,255,0.235) 0%, rgba(192,138,255,0.039) 100%)", border:"1px solid rgba(92,240,255,0.47)", display:"flex", alignItems:"center", paddingLeft:10, fontSize:12, fontWeight:700, color:"var(--fg)", fontFamily:"Segoe UI", letterSpacing:0.2 }}>● {team.category.toUpperCase()}</div>
       <div style={{ position:"absolute", left:pic_x - 6, top:pic_y - 6, width:pic_size + 12, height:pic_size + 12, borderRadius:"50%", background:"radial-gradient(circle, rgba(92,240,255,0.43) 0%, rgba(92,240,255,0) 100%)", pointerEvents:"none" }} />
       <div style={{ position:"absolute", left:pic_x, top:pic_y, width:pic_size, height:pic_size, borderRadius:"50%", background:"#1e2434", border:"1.4px solid rgba(230,240,255,0.78)", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden" }}>
         <img src={owlSrc(team.icon)} style={{ width:pic_size * 0.85, height:pic_size * 0.85, objectFit:"contain" }} />
       </div>
-      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y + pic_size + 6, width:pic_size + 12, height:20, textAlign:"center", fontSize:15, fontWeight:700, color:"#e6f0ff", fontFamily:"Segoe UI", lineHeight:"20px" }}>{team.display}</div>
-      <div style={{ position:"absolute", left:info_x, top:info_y, width:info_w, height:96, fontSize:12, color:"#e6f0ff", fontFamily:"Segoe UI", lineHeight:1.35, overflow:"hidden" }}>
-        {desc || <span style={{ color:"#7888a8" }}>(no description)</span>}
+      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y + pic_size + 6, width:pic_size + 12, height:20, textAlign:"center", fontSize:15, fontWeight:700, color:"var(--fg)", fontFamily:"Segoe UI", lineHeight:"20px" }}>{team.display}</div>
+      <div style={{ position:"absolute", left:info_x, top:info_y, width:info_w, height:96, fontSize:12, color:"var(--fg)", fontFamily:"Segoe UI", lineHeight:1.35, overflow:"hidden" }}>
+        {desc || <span style={{ color:"var(--fg-muted)" }}>(no description)</span>}
       </div>
-      <div style={{ position:"absolute", left:info_x, top:stat_y, width:info_w, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"#7888a8", fontFamily:"Segoe UI", letterSpacing:0.4 }}>
+      <div style={{ position:"absolute", left:info_x, top:stat_y, width:info_w, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", fontFamily:"Segoe UI", letterSpacing:0.4 }}>
         <span style={{ width:90 }}>AGENTS</span>
         <span>CONNECTIONS</span>
       </div>
-      <div style={{ position:"absolute", left:info_x, top:stat_y + 14, width:info_w, height:18, display:"flex", alignItems:"center", fontSize:15, fontWeight:700, color:"#e6f0ff", fontFamily:"Segoe UI" }}>
+      <div style={{ position:"absolute", left:info_x, top:stat_y + 14, width:info_w, height:18, display:"flex", alignItems:"center", fontSize:15, fontWeight:700, color:"var(--fg)", fontFamily:"Segoe UI" }}>
         <span style={{ width:90 }}>{team.agents.length}</span>
         <span>{team.edges.length}</span>
       </div>
@@ -394,29 +394,29 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
     setDraft("");
   };
   return (
-    <div data-ui="SuperUserCard" style={{ margin:"8px 10px", padding:"10px 12px", borderRadius:12, background:"#11151e", border:"1px solid #1d2434", width:320, minHeight:180, display:"flex", flexDirection:"column", gap:8 }}>
+    <div data-ui="SuperUserCard" style={{ margin:"8px 10px", padding:"10px 12px", borderRadius:12, background:"var(--bg-elevated)", border:"1px solid var(--border)", width:320, minHeight:180, display:"flex", flexDirection:"column", gap:8 }}>
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-        <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:16, background:"#1a2030", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"#e6f0ff" }}>👤</div>
+        <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:16, background:"#1a2030", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"var(--fg)" }}>👤</div>
         <div style={{ flex:1, minWidth:0 }}>
-          <div data-ui="suName" style={{ fontSize:16, fontWeight:700, color:"#e6f0ff", lineHeight:"22px" }}>Super User</div>
-          <div data-ui="suHint" style={{ fontSize:12, color:"#6b7794", letterSpacing:0.4, textTransform:"uppercase", lineHeight:1.4 }}>
+          <div data-ui="suName" style={{ fontSize:16, fontWeight:700, color:"var(--fg)", lineHeight:"22px" }}>Super User</div>
+          <div data-ui="suHint" style={{ fontSize:12, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase", lineHeight:1.4 }}>
             {chat.length > 0 ? `${chat.length} message${chat.length === 1 ? "" : "s"} in this run` : "idle — team pings you here"}
           </div>
         </div>
-        <button data-ui="suIconBtn" title="Open chat in a side panel (4:5, full window height, docked right)" style={{ width:30, height:26, padding:0, background:"#1a2030", color:"#e6f0ff", border:"1px solid #2a3148", borderRadius:6, fontSize:14, fontWeight:700 }}>⇱⇲</button>
-        <button data-ui="suIconBtn" title="Notification settings (Telegram, etc.)" style={{ width:26, height:26, padding:0, background:"#1a2030", color:"#e6f0ff", border:"1px solid #2a3148", borderRadius:6, fontSize:16, fontWeight:700 }}>⚙</button>
+        <button data-ui="suIconBtn" title="Open chat in a side panel (4:5, full window height, docked right)" style={{ width:30, height:26, padding:0, background:"#1a2030", color:"var(--fg)", border:"1px solid #2a3148", borderRadius:6, fontSize:14, fontWeight:700 }}>⇱⇲</button>
+        <button data-ui="suIconBtn" title="Notification settings (Telegram, etc.)" style={{ width:26, height:26, padding:0, background:"#1a2030", color:"var(--fg)", border:"1px solid #2a3148", borderRadius:6, fontSize:16, fontWeight:700 }}>⚙</button>
       </div>
       {peekAgents.length > 0 && (
         <div data-ui="suTeamPeek" style={{ display:"flex", alignItems:"center", gap:4, padding:"0 2px" }}>
           {peekAgents.map((a, i) => (
             <img key={i} src={owlSrc(agentIconRef(a, roleByName))} title={displayLabel(a.name)} style={{ width:20, height:20, opacity:0.85, filter:"drop-shadow(0 1px 1px rgba(0,0,0,0.5))" }} />
           ))}
-          <div style={{ fontSize:10, color:"#6b7794", letterSpacing:0.4, textTransform:"uppercase", marginLeft:4 }}>{team?.agents.length ?? 0} agents on team</div>
+          <div style={{ fontSize:10, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase", marginLeft:4 }}>{team?.agents.length ?? 0} agents on team</div>
         </div>
       )}
-      <div data-ui="suChat" style={{ height:80, background:"#0a0d14", color:"#cbd2e0", border:"1px solid #1d2434", borderRadius:8, padding:"8px 10px", fontSize:12, lineHeight:1.45, overflow:"auto", display:"flex", flexDirection:"column", gap:4 }}>
+      <div data-ui="suChat" style={{ height:80, background:"var(--bg-elevated)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:8, padding:"8px 10px", fontSize:12, lineHeight:1.45, overflow:"auto", display:"flex", flexDirection:"column", gap:4 }}>
         {chat.length === 0 ? (
-          <div style={{ color:"#6b7794", fontStyle:"italic" }}>
+          <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
             {team
               ? `${team.display} is idle. Type a message below or use the goal bar to dispatch.`
               : "Pick a project or team template to begin."}
@@ -424,7 +424,7 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
         ) : lastMessages.map((m, i) => (
           <div key={i}>
             <span style={{ color: m.color, fontWeight:700 }}>{m.role === "you" ? "You" : (m.role[0]?.toUpperCase() + m.role.slice(1))}:</span>{" "}
-            <span style={{ color:"#cbd2e0" }}>{m.text.length > 200 ? m.text.slice(0, 197) + "…" : m.text}</span>
+            <span style={{ color:"var(--fg)" }}>{m.text.length > 200 ? m.text.slice(0, 197) + "…" : m.text}</span>
           </div>
         ))}
       </div>
@@ -435,7 +435,7 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
           onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === "Enter") submit(); }}
           placeholder="Reply to the team — Enter to send"
-          style={{ flex:1, height:32, borderRadius:8, padding:"6px 10px", background:"#0a0d14", color:"#e6f0ff", fontSize:14, border:"1px solid #2a3148" }}
+          style={{ flex:1, height:32, borderRadius:8, padding:"6px 10px", background:"var(--bg-elevated)", color:"var(--fg)", fontSize:14, border:"1px solid #2a3148" }}
         />
         <button
           data-ui="suSend"
@@ -444,8 +444,8 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
           style={{
             height:32, padding:"6px 14px", borderRadius:8,
             border:"1px solid #5cf0ff",
-            background: draft.trim() ? "#5cf0ff" : "rgba(92,240,255,0.25)",
-            color: draft.trim() ? "#0a0d14" : "#7d8595",
+            background: draft.trim() ? "var(--accent)" : "rgba(92,240,255,0.25)",
+            color: draft.trim() ? "var(--bg-elevated)" : "#7d8595",
             fontSize:13, fontWeight:700,
             cursor: draft.trim() ? "pointer" : "not-allowed",
           }}
@@ -657,7 +657,7 @@ function TeamCanvas({ width, height, team, roleByName }: {
           <circle key={"h"+i} cx={n.x} cy={n.y} r={n.active?52:38} fill={n.active?"url(#haloActive)":"url(#halo)"} />
         ))}
         {nodes.map((n,i) => (
-          <circle key={"d"+i} cx={n.x} cy={n.y} r={22} fill="#3b4a7a" stroke={n.active?"#7fdfff":"rgba(120,220,255,0.6)"} strokeWidth={n.active?2.4:1.6} />
+          <circle key={"d"+i} cx={n.x} cy={n.y} r={22} fill="#3b4a7a" stroke={n.active?"var(--accent)":"rgba(120,220,255,0.6)"} strokeWidth={n.active?2.4:1.6} />
         ))}
         {nodes.filter(n=>n.active).map((n,i) => (
           <circle key={"r"+i} cx={n.x} cy={n.y} r={28} fill="none" stroke="rgba(127,223,255,0.7)" strokeWidth="1.4" />
@@ -695,7 +695,7 @@ function TeamCanvas({ width, height, team, roleByName }: {
         <div key={"l"+i} style={{ position:"absolute", left:n.x - 60, top:n.y + 30, width:120, textAlign:"center", fontSize:12, fontWeight:600, color:n.active?"#ffffff":"#e6e8eb", letterSpacing:0.4, pointerEvents:"none", textShadow:"0 1px 3px rgba(0,0,0,0.9)" }}>{n.label}</div>
       ))}
       {nodes.length === 0 && (
-        <div style={{ position:"absolute", left:cx-180, top:cy + orchestrator_r * 2 + 20, width:360, textAlign:"center", fontSize:12, color:"#6c7280", pointerEvents:"none" }}>
+        <div style={{ position:"absolute", left:cx-180, top:cy + orchestrator_r * 2 + 20, width:360, textAlign:"center", fontSize:12, color:"var(--fg-subtle)", pointerEvents:"none" }}>
           No specialists on this team yet. Click <b>Team…</b> above to load a template.
         </div>
       )}
@@ -823,7 +823,7 @@ function GraphCanvas({
 
   if (!team || team.agents.length === 0) {
     return (
-      <div data-ui="GraphCanvas" style={{ position:"relative", width:w, height:h, background:"linear-gradient(180deg, #101522 0%, #06080d 100%)", display:"flex", alignItems:"center", justifyContent:"center", color:"#6c7280", fontSize:13 }}>
+      <div data-ui="GraphCanvas" style={{ position:"relative", width:w, height:h, background:"linear-gradient(180deg, #101522 0%, #06080d 100%)", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--fg-subtle)", fontSize:13 }}>
         No agents on this team yet. Pick a template via <b style={{ margin:"0 4px" }}>Team…</b>.
       </div>
     );
@@ -883,7 +883,7 @@ function GraphCanvas({
               <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(120,220,255,0.85)" />
             </marker>
             <marker id="graphArrowSel" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="#5cf0ff" />
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)" />
             </marker>
           </defs>
           {/* Existing edges */}
@@ -904,7 +904,7 @@ function GraphCanvas({
                 />
                 <path
                   d={edgePath(s, t)}
-                  stroke={sel ? "#5cf0ff" : "rgba(120,220,255,0.55)"}
+                  stroke={sel ? "var(--accent)" : "rgba(120,220,255,0.55)"}
                   strokeWidth={sel ? 2.6 : 1.6}
                   fill="none"
                   markerEnd={sel ? "url(#graphArrowSel)" : "url(#graphArrow)"}
@@ -923,12 +923,12 @@ function GraphCanvas({
               <g>
                 <path
                   d={`M ${sP.x} ${sP.y} C ${sP.x + dx} ${sP.y}, ${tx - dx} ${ty}, ${tx} ${ty}`}
-                  stroke={drag.over ? "#5cf0ff" : "rgba(120,220,255,0.55)"}
+                  stroke={drag.over ? "var(--accent)" : "rgba(120,220,255,0.55)"}
                   strokeWidth={drag.over ? 2.4 : 1.6}
                   strokeDasharray="6 4"
                   fill="none"
                 />
-                <circle cx={tx} cy={ty} r={6} fill={drag.over ? "#5cf0ff" : "rgba(120,220,255,0.55)"} />
+                <circle cx={tx} cy={ty} r={6} fill={drag.over ? "var(--accent)" : "rgba(120,220,255,0.55)"} />
               </g>
             );
           })()}
@@ -959,7 +959,7 @@ function GraphCanvas({
                   : isDragTarget
                   ? "linear-gradient(180deg, #1d2a32 0%, #11151e 100%)"
                   : "linear-gradient(180deg, #1a1f2c 0%, #11151e 100%)",
-                border: `1.8px solid ${sel ? accent : isDragTarget ? "#5cf0ff" : "rgba(255,255,255,0.07)"}`,
+                border: `1.8px solid ${sel ? accent : isDragTarget ? "var(--accent)" : "rgba(255,255,255,0.07)"}`,
                 boxShadow: sel
                   ? `0 0 0 2px ${accent}55, 0 6px 22px rgba(0,0,0,0.6)`
                   : isDragTarget
@@ -975,7 +975,7 @@ function GraphCanvas({
               <div style={{ width:"100%", height:120, display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:10 }}>
                 <img src={owlSrc(agentIconRef(n.spec, roleByName))} style={{ width:96, height:96, objectFit:"contain" }} />
               </div>
-              <div style={{ color:"#fff", fontSize:13, fontWeight:700, textAlign:"center", lineHeight:1.2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+              <div style={{ color:"var(--fg-strong)", fontSize:13, fontWeight:700, textAlign:"center", lineHeight:1.2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                 {displayLabel(n.name)}
               </div>
               <div style={{ color: accent, fontSize:10, fontWeight:600, textAlign:"center", letterSpacing:0.6, textTransform:"uppercase" }}>
@@ -985,7 +985,7 @@ function GraphCanvas({
                 {isOrch && (
                   <span style={{ color: accent, background: "rgba(255,215,106,0.12)", border: `1px solid ${accent}55`, borderRadius: 5, padding: "1px 7px", fontSize: 9, letterSpacing: 0.5, fontWeight: 700 }}>LEADER</span>
                 )}
-                <span style={{ color: "#7888a8", fontSize: 9, fontWeight: 600, letterSpacing: 0.4 }}>DEPTH {n.depth}</span>
+                <span style={{ color: "var(--fg-muted)", fontSize: 9, fontWeight: 600, letterSpacing: 0.4 }}>DEPTH {n.depth}</span>
               </div>
 
               {/* INPUT port — left edge centre, orange. Click target for incoming edges. */}
@@ -1026,7 +1026,7 @@ function GraphCanvas({
       </div>
       {/* Empty-state hint */}
       {liveEdges.length === 0 && !drag && (
-        <div style={{ position:"absolute", bottom:8, left:0, right:0, textAlign:"center", color:"#6c7280", fontSize:11, pointerEvents:"none" }}>
+        <div style={{ position:"absolute", bottom:8, left:0, right:0, textAlign:"center", color:"var(--fg-subtle)", fontSize:11, pointerEvents:"none" }}>
           Drag from a blue output port → drop on another card to wire a dispatch edge. Click an edge to select it, then ✕ Edge / ⇄ Reverse.
         </div>
       )}
@@ -1044,30 +1044,30 @@ function OrchestratorPane({ messages, runError, serverState }: {
     ? `${serverState.model_id} (port ${serverState.port})`
     : "(no model running)";
   return (
-    <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"#0c0f1a", padding:"0 0 0 8px" }}>
+    <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"var(--bg-elevated)", padding:"0 0 0 8px" }}>
       <div data-ui="LogHeader" style={{ padding:"8px 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
-        <div style={{ fontSize:16, fontWeight:700, color:"#fff", letterSpacing:0.3 }}>Click an agent on the canvas to view its log.</div>
+        <div style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", letterSpacing:0.3 }}>Click an agent on the canvas to view its log.</div>
         <div style={{ flex:1 }} />
       </div>
       <div data-ui="PickerHost" style={{ padding:"0 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ fontSize:11, color:"#aaa", letterSpacing:0.6, textTransform:"uppercase" }}>Model</span>
+        <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Model</span>
         <button style={{ flex:1, height:28, padding:"0 10px", background:"rgba(0,0,0,0.28)", color: serverState.running ? "#e6e8eb" : "#7d8595", border:"none", borderRadius:6, fontSize:12, textAlign:"left" }} title={serverState.message}>{modelLabel}</button>
       </div>
       <div data-ui="VoiceHost" style={{ padding:"0 12px 8px", display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ fontSize:11, color:"#aaa", letterSpacing:0.6, textTransform:"uppercase" }}>Voice</span>
-        <input type="checkbox" defaultChecked style={{ width:13, height:13, accentColor:"#5cf0ff" }} title="Speak this agent's replies aloud" />
-        <button style={{ flex:1, height:28, padding:"0 10px", background:"rgba(0,0,0,0.28)", color:"#e6e8eb", border:"none", borderRadius:6, fontSize:12, textAlign:"left" }}>Auto voice</button>
-        <input type="number" defaultValue={0} style={{ width:78, height:28, padding:"0 8px", background:"rgba(0,0,0,0.28)", color:"#e6e8eb", border:"none", borderRadius:6, fontSize:12 }} title="Speaking rate (words per minute)" />
-        <button style={{ width:28, height:28, padding:0, background:"rgba(255,255,255,0.06)", color:"#dadcdf", border:"none", borderRadius:6, fontSize:12 }} title="Preview this voice">▶</button>
-        <button style={{ width:28, height:28, padding:0, background:"rgba(255,255,255,0.06)", color:"#dadcdf", border:"none", borderRadius:6, fontSize:14 }} title="Apply this voice to every agent on the team">➤</button>
+        <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Voice</span>
+        <input type="checkbox" defaultChecked style={{ width:13, height:13, accentColor:"var(--accent)" }} title="Speak this agent's replies aloud" />
+        <button style={{ flex:1, height:28, padding:"0 10px", background:"rgba(0,0,0,0.28)", color:"var(--fg)", border:"none", borderRadius:6, fontSize:12, textAlign:"left" }}>Auto voice</button>
+        <input type="number" defaultValue={0} style={{ width:78, height:28, padding:"0 8px", background:"rgba(0,0,0,0.28)", color:"var(--fg)", border:"none", borderRadius:6, fontSize:12 }} title="Speaking rate (words per minute)" />
+        <button style={{ width:28, height:28, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"none", borderRadius:6, fontSize:12 }} title="Preview this voice">▶</button>
+        <button style={{ width:28, height:28, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"none", borderRadius:6, fontSize:14 }} title="Apply this voice to every agent on the team">➤</button>
       </div>
       <div data-ui="OrchestratorLogTabs" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:"0 0 8px" }}>
         <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid rgba(120,220,255,0.10)" }}>
-          <button onClick={() => setActiveTab("reply")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "reply" ? "#7fdfff" : "#9aa0a6", fontSize:13, fontWeight:500, borderBottom: activeTab === "reply" ? "1.5px solid #7fdfff" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
+          <button onClick={() => setActiveTab("reply")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "reply" ? "var(--accent)" : "#9aa0a6", fontSize:13, fontWeight:500, borderBottom: activeTab === "reply" ? "1.5px solid #7fdfff" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
           <button onClick={() => setActiveTab("thought")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "thought" ? "#dcb0ff" : "#9aa0a6", fontSize:13, fontWeight:500, borderBottom: activeTab === "thought" ? "1.5px solid #dcb0ff" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
           <div style={{ flex:1 }} />
         </div>
-        <div data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"#0f1218", border:"1px solid rgba(120,220,255,0.08)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"#cbd2e0" }}>
+        <div data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-elevated)", border:"1px solid rgba(120,220,255,0.08)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"var(--fg)" }}>
           {runError ? (<div style={{ border:"1px solid #ff9f9f", background:"rgba(255,80,80,0.10)", color:"#ffb0b0", borderRadius:6, padding:8, fontSize:12 }}>{runError}</div>) : null}
           {messages.length === 0 && !runError ? (
             <div style={{ color:"#7a7f87", fontSize:12 }}>
@@ -1078,16 +1078,16 @@ function OrchestratorPane({ messages, runError, serverState }: {
           ) : null}
           {messages.map((m, i) => (
             <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
-              <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d", fontFamily:"Segoe UI, sans-serif" }}>{(m.role[0] || "?").toUpperCase()}</div>
-              <div style={{ flex:1, background:"rgba(255,255,255,0.04)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"4px 10px" }}>
+              <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"var(--bg-app)", fontFamily:"Segoe UI, sans-serif" }}>{(m.role[0] || "?").toUpperCase()}</div>
+              <div style={{ flex:1, background:"var(--bg-surface)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"4px 10px" }}>
                 <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:2, fontFamily:"Segoe UI, sans-serif" }}>{m.role}</div>
-                <div style={{ fontSize:12, color:"#dadcdf", lineHeight:1.4, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap" }}>{m.text}</div>
+                <div style={{ fontSize:12, color:"var(--fg)", lineHeight:1.4, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap" }}>{m.text}</div>
               </div>
             </div>
           ))}
         </div>
-        <div data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "block" : "none", margin:"8px 10px 0", padding:10, background:"#0f1218", border:"1px solid rgba(220,180,255,0.10)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"#cbd2e0" }}>
-          <div style={{ color:"#888", fontSize:11 }}>No thought traffic yet — tool calls, reasoning, and events land here while the team runs.</div>
+        <div data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "block" : "none", margin:"8px 10px 0", padding:10, background:"var(--bg-elevated)", border:"1px solid rgba(220,180,255,0.10)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"var(--fg)" }}>
+          <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>No thought traffic yet — tool calls, reasoning, and events land here while the team runs.</div>
         </div>
       </div>
     </div>
@@ -1445,8 +1445,8 @@ export default function AgentsPage() {
         bridgeOn={bridgeOn}
       />
       <GoalRow goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy} />
-      <div data-ui="WorkspaceStack" style={{ height:665, width:1554, margin:"0 23px", display:"flex", overflow:"hidden", background:"#06080d", padding:0 }}>
-        <div data-ui="RosterLeft" style={{ width:LEFT_W, display:"flex", flexDirection:"column", background:"#0a0d14" }}>
+      <div data-ui="WorkspaceStack" style={{ height:665, width:1554, margin:"0 23px", display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0 }}>
+        <div data-ui="RosterLeft" style={{ width:LEFT_W, display:"flex", flexDirection:"column", background:"var(--bg-elevated)" }}>
           <FlowHeader
             viewMode={viewMode}
             onToggleView={() => setViewMode(v => v === "diagram" ? "graph" : "diagram")}
@@ -1491,7 +1491,7 @@ export default function AgentsPage() {
             )}
           </div>
         </div>
-        <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, background:"#1a1f2c" }} />
+        <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, background:"var(--bg-card)" }} />
         <div style={{ width:RIGHT_W }}>
           <OrchestratorPane messages={messages} runError={runError} serverState={serverState} />
         </div>

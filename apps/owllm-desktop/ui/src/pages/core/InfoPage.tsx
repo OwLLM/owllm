@@ -1,4 +1,4 @@
-// InfoPage — app/build summary plus a live hardware probe. Pulls
+﻿// InfoPage — app/build summary plus a live hardware probe. Pulls
 // everything from native commands so this view never lies.
 //
 // Qt: main.py::_build_info_tab (line 27273) was a tall list of
@@ -31,11 +31,11 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
       gridTemplateColumns: "180px 1fr",
       gap: 12,
       padding: "6px 0",
-      borderBottom: "1px solid rgba(255,255,255,0.04)",
+      borderBottom: "1px solid var(--border)",
       fontSize: 12,
     }}>
-      <div style={{ color: "#9aa0a6" }}>{label}</div>
-      <div style={{ color: "#dadcdf", fontFamily: "Consolas, monospace", fontSize: 12 }}>{value}</div>
+      <div style={{ color: "var(--fg-muted)" }}>{label}</div>
+      <div style={{ color: "var(--fg)", fontFamily: "Consolas, monospace", fontSize: 12 }}>{value}</div>
     </div>
   );
 }
@@ -52,7 +52,7 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
       gap: 4,
     }}>
       <div style={{
-        fontSize: 14, fontWeight: 700, color: "#dadcdf",
+        fontSize: 14, fontWeight: 700, color: "var(--fg)",
         borderBottom: "1px solid rgba(127,223,255,0.10)",
         paddingBottom: 6, marginBottom: 6,
       }}>{title}</div>
@@ -107,12 +107,12 @@ export default function InfoPage() {
       display: "flex",
       flexDirection: "column",
       gap: 14,
-      background: "#0e1117",
-      color: "#dadcdf",
+      background: "var(--bg-panel)",
+      color: "var(--fg)",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <img src={`${ICONS}/owl_startup.png`} alt="" style={{ width: 32, height: 32, objectFit: "contain" }} />
-        <div style={{ fontSize: 24, fontWeight: 800, color: "#fff" }}>ℹ️ Info</div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: "var(--fg-strong)" }}>ℹ️ Info</div>
         <div style={{ flex: 1 }} />
         <button className="ghost-btn" onClick={refresh}>🔄 Refresh</button>
       </div>
@@ -185,16 +185,16 @@ export default function InfoPage() {
           <Row label="Total on disk" value={`${totalGgufGiB.toFixed(1)} GiB`} />
           <Row
             label="Root"
-            value={<code style={{ color: "#7fdfff" }}>LLM/models/</code>}
+            value={<code style={{ color: "var(--accent)" }}>LLM/models/</code>}
           />
           <Row
             label="Runtime"
-            value={<code style={{ color: "#7fdfff" }}>LLM/runtime/llama.cpp/llama-server.exe</code>}
+            value={<code style={{ color: "var(--accent)" }}>LLM/runtime/llama.cpp/llama-server.exe</code>}
           />
         </Card>
 
         <Card title="📜 What this app does">
-          <div style={{ fontSize: 12, color: "#cbd2e0", lineHeight: 1.6 }}>
+          <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.6 }}>
             Native Rust supervises every subprocess with <code>CREATE_NO_WINDOW</code> — no
             console popups. React talks to Rust via Tauri commands; there is
             no embedded Python HTTP server. Python is invoked one-shot only
@@ -203,11 +203,11 @@ export default function InfoPage() {
         </Card>
 
         <Card title="🔗 Where to go next">
-          <div style={{ fontSize: 12, color: "#cbd2e0", lineHeight: 1.6 }}>
-            <strong style={{ color: "#7fdfff" }}>Server</strong> — start / stop a model.<br />
-            <strong style={{ color: "#7fdfff" }}>Models</strong> (under Fine Tuning) — browse discovered GGUFs.<br />
-            <strong style={{ color: "#7fdfff" }}>Chat</strong> (under Fine Tuning) — talk to the running model.<br />
-            <strong style={{ color: "#7fdfff" }}>Advanced ⚙</strong> — MCP, Environment, Accounts, Logs.
+          <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.6 }}>
+            <strong style={{ color: "var(--accent)" }}>Server</strong> — start / stop a model.<br />
+            <strong style={{ color: "var(--accent)" }}>Models</strong> (under Fine Tuning) — browse discovered GGUFs.<br />
+            <strong style={{ color: "var(--accent)" }}>Chat</strong> (under Fine Tuning) — talk to the running model.<br />
+            <strong style={{ color: "var(--accent)" }}>Advanced ⚙</strong> — MCP, Environment, Accounts, Logs.
           </div>
         </Card>
       </div>

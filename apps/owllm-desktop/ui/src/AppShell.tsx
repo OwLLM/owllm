@@ -24,6 +24,7 @@ import {
   ModeId,
   PageDef,
 } from "./core/modules";
+import { ACCENTS, AccentKey, Mode, useTheme } from "./theme";
 
 // Frameless window — `decorations: false` in tauri.conf.json. We
 // paint our own drag region (the ModeBar) and our own min/max/close
@@ -79,7 +80,7 @@ function WindowControls() {
   const w = getCurrentWindow();
   const btn: React.CSSProperties = {
     width: 36, height: 28, border: "none",
-    background: "rgba(255,255,255,0.04)", color: "#dadcdf",
+    background: "var(--bg-surface)", color: "var(--fg-muted)",
     fontSize: 13, cursor: "pointer", userSelect: "none",
     display: "flex", alignItems: "center", justifyContent: "center",
     borderRadius: 5,
@@ -166,6 +167,10 @@ const CORNER_PNG_H_BL = Math.round(CORNER_PNG_W * 512 / 488);
 const CORNER_PNG_H_BR = Math.round(CORNER_PNG_W * 488 / 512);
 const PARENT_X = SHIFT_OUT + CORNER_OUTSET;
 const PARENT_Y = EXTRA_TOP + SHIFT_OUT + CORNER_OUTSET;
+// The cyan glass frame stays the same in both modes — it reads as
+// app chrome rather than content. The inner content background
+// switches via var(--bg-panel) so dark/light affects what's inside
+// the frame.
 const FRAME_COLOR  = "rgba(200, 240, 255, 0.86)";
 const FRAME_ACCENT = "rgba(120, 220, 255, 0.78)";
 const FRAME_BG     = "rgba(8, 12, 24, 0.95)";
@@ -216,7 +221,7 @@ function HybridFrame({ children, outerW, outerH }: {
   const badgeY = parent_y - BADGE_H / 2;
   return (
     <div style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
-      <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"#0e1117", overflow:"hidden" }}>{children}</div>
+      <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
       <div style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:FRAME_BG }} />
       <div style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:FRAME_BG }} />
       <div style={{ position:"absolute", left:leftBar.x,  top:leftBar.y,  width:leftBar.w,  height:leftBar.h,  background:FRAME_BG }} />
@@ -258,13 +263,22 @@ type ActiveMode = "home" | "finetuning" | "agentic" | "gamify";
 
 function ModeBar({
   mode, setMode, advancedOpen, setAdvancedOpen, installed,
+  themeMode, onToggleThemeMode, accentKey, onPickAccent,
 }: {
   mode: ActiveMode;
   setMode: (m: ActiveMode) => void;
   advancedOpen: boolean;
   setAdvancedOpen: (v: boolean) => void;
   installed: ModeId[];
+  themeMode: Mode;
+  onToggleThemeMode: () => void;
+  accentKey: AccentKey;
+  onPickAccent: (k: AccentKey) => void;
 }) {
+  // The header is always the dark blue band so the cyan frame +
+  // OWLLM title read consistently across themes. Buttons therefore
+  // stay light-on-dark regardless of mode — we don't drive their
+  // colours from the theme.
   const baseBtn: React.CSSProperties = {
     height: 50, padding: "0 14px",
     background: "linear-gradient(180deg, rgba(60,60,80,0.85), rgba(40,40,60,0.85))",
@@ -283,9 +297,6 @@ function ModeBar({
     border: "1px solid #ffd080",
     background: "linear-gradient(180deg, rgba(80,70,50,0.85), rgba(60,50,30,0.85))",
   };
-  const colorBtn = (c: string): React.CSSProperties => ({
-    width: 18, height: 18, borderRadius: 3, background: c, border: "none", padding: 0,
-  });
 
   // Filter the three mode toggles to only those installed.
   // ActiveMode excludes "home" / "core" / "advanced" — only the three
@@ -315,23 +326,51 @@ function ModeBar({
       cursor: "default",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div data-ui="DarkModeBtn" style={{
-          width: 70, height: 50, borderRadius: 6,
-          background: "linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))",
-          display: "flex", flexDirection: "column",
-          alignItems: "center", justifyContent: "center", lineHeight: 1.0,
-        }}>
-          <div style={{ fontSize: 22 }}>🌙</div>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "#fff" }}>Dark</div>
-        </div>
+        {/* Dark/Light toggle. Persists via theme.ts. */}
+        <button
+          data-ui="DarkModeBtn"
+          onClick={onToggleThemeMode}
+          title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          style={{
+            width: 70, height: 50, borderRadius: 6,
+            background: "linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))",
+            border: "none",
+            display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center", lineHeight: 1.0,
+            cursor: "pointer", padding: 0,
+          }}
+        >
+          <div style={{ fontSize: 22 }}>{themeMode === "dark" ? "🌙" : "☀"}</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: "#fff" }}>
+            {themeMode === "dark" ? "Dark" : "Light"}
+          </div>
+        </button>
+        {/* Six accent-colour squares. Active square gets a white ring. */}
         <div data-ui="ColorSelector" style={{
           width: 70, height: 50, padding: 4,
           display: "grid", gridTemplateColumns: "repeat(3, 18px)", gridTemplateRows: "repeat(2, 18px)",
           gap: 3, background: "rgba(60,60,80,0.4)", borderRadius: 6,
         }}>
-          {["#667eea","#fbbf24","#ef4444","#3b82f6","#10b981","#6b7280"].map(c =>
-            <button key={c} style={colorBtn(c)} />
-          )}
+          {ACCENTS.map(a => {
+            const selected = a.key === accentKey;
+            return (
+              <button
+                key={a.key}
+                onClick={() => onPickAccent(a.key)}
+                title={a.label}
+                style={{
+                  width: 18, height: 18, borderRadius: 3,
+                  background: a.color,
+                  border: selected ? "2px solid #fff" : "1px solid rgba(255,255,255,0.15)",
+                  boxShadow: selected ? `0 0 0 1px ${a.color}, 0 0 6px ${a.color}` : "none",
+                  padding: 0,
+                  cursor: "pointer",
+                  transition: "transform 0.08s",
+                  transform: selected ? "scale(1.08)" : "scale(1)",
+                }}
+              />
+            );
+          })}
         </div>
 
         {/* Advanced toggle — independent. Reveals advanced pages. */}
@@ -446,9 +485,10 @@ function SubTabs({
 }) {
   return (
     <div style={{
-      height: 76, background: "#1a1f2c",
+      height: 76, background: "var(--bg-card)",
       display: "flex", alignItems: "center",
-      padding: "0 24px", gap: 6, fontSize: 13, color: "#dadcdf",
+      padding: "0 24px", gap: 6, fontSize: 13, color: "var(--fg)",
+      borderBottom: "1px solid var(--border)",
     }}>
       {pages.map(p => {
         const active = p.key === activeKey;
@@ -458,11 +498,11 @@ function SubTabs({
             onClick={() => onChange(p.key)}
             style={{
               padding: "10px 16px",
-              background: active ? "rgba(120,220,255,0.20)" : "transparent",
-              color: active ? "#7fdfff" : "#9aa0a6",
+              background: active ? "var(--accent-soft)" : "transparent",
+              color: active ? "var(--accent)" : "var(--fg-muted)",
               borderRadius: 8,
               fontWeight: 600,
-              borderBottom: active ? "2px solid #7fdfff" : "2px solid transparent",
+              borderBottom: active ? "2px solid var(--accent)" : "2px solid transparent",
               cursor: "pointer",
               userSelect: "none",
             }}
@@ -483,6 +523,7 @@ export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
   const [mode, setMode] = useState<ActiveMode>("home");
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(false);
+  const theme = useTheme();
 
   // Compose the visible page list: Core always, plus the active
   // mode's pages, plus Advanced's pages when advancedOpen.
@@ -577,6 +618,10 @@ export default function AppShell() {
             advancedOpen={advancedOpen}
             setAdvancedOpen={handleSetAdvanced}
             installed={installed}
+            themeMode={theme.mode}
+            onToggleThemeMode={theme.toggleMode}
+            accentKey={theme.accentKey}
+            onPickAccent={theme.setAccentKey}
           />
           <SubTabs
             pages={visiblePages}

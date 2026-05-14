@@ -1,4 +1,4 @@
-// CodePage — ported from LLM/desktop_app/pages/code_page.py
+﻿// CodePage — ported from LLM/desktop_app/pages/code_page.py
 // (CodePage.__init__ + UI scaffolding, line 217).
 //
 // The PySide6 version embeds a bundled VSCodium top-level window inside
@@ -181,7 +181,7 @@ export default function CodePage() {
         // QVBoxLayout.setContentsMargins(8, 6, 8, 8) + setSpacing(6) — lines 242-243.
         padding: "6px 8px 8px 8px",
         height: "100%",
-        background: "#0e1117",
+        background: "var(--bg-panel)",
         display: "flex",
         flexDirection: "column",
         gap: 6,
@@ -204,7 +204,7 @@ export default function CodePage() {
         >
           {/* Verbatim from QLabel(f"Workspace: {self._workspace}") — line 248. */}
           Workspace:{" "}
-          <span style={{ color: "#dadcdf", fontFamily: "Consolas, monospace" }}>
+          <span style={{ color: "var(--fg)", fontFamily: "Consolas, monospace" }}>
             {workspace}
           </span>
         </div>
@@ -221,7 +221,7 @@ export default function CodePage() {
             height: 28,
             padding: "0 10px",
             borderRadius: 6,
-            border: "1px solid rgba(255,255,255,0.10)",
+            border: "1px solid var(--border-strong)",
             background: "transparent",
             color: "#cfd2d6",
             fontSize: 12,
@@ -246,9 +246,9 @@ export default function CodePage() {
             height: 30,
             padding: "0 10px",
             borderRadius: 6,
-            border: "1px solid rgba(255,255,255,0.10)",
-            background: "#0f0f19",
-            color: "#fff",
+            border: "1px solid var(--border-strong)",
+            background: "var(--bg-input)",
+            color: "var(--fg-strong)",
             fontSize: 13,
           }}
         >
@@ -271,7 +271,7 @@ export default function CodePage() {
             padding: "0 16px",
             borderRadius: 8,
             background: "linear-gradient(180deg, #4a6cff, #3a55cc)",
-            color: "#fff",
+            color: "var(--fg-strong)",
             border: "none",
             fontWeight: 700,
             cursor: "pointer",
@@ -296,7 +296,7 @@ export default function CodePage() {
       <div
         style={{
           flex: 1,
-          background: "#06080d",
+          background: "var(--bg-app)",
           border: "1px dashed rgba(127,223,255,0.18)",
           borderRadius: 12,
           display: "flex",
@@ -321,13 +321,13 @@ export default function CodePage() {
             filter: "drop-shadow(0 6px 18px rgba(0,0,0,0.6))",
           }}
         />
-        <div style={{ fontSize: 18, fontWeight: 700, color: "#dadcdf" }}>
+        <div style={{ fontSize: 18, fontWeight: 700, color: "var(--fg)" }}>
           Bundled VSCodium with Cline
         </div>
         <div
           style={{
             fontSize: 13,
-            color: "#9aa0a6",
+            color: "var(--fg-muted)",
             maxWidth: 620,
             textAlign: "center",
             lineHeight: 1.6,
@@ -350,7 +350,7 @@ export default function CodePage() {
               padding: "0 22px",
               borderRadius: 10,
               background: "linear-gradient(180deg, #4CAF50, #388E3C)",
-              color: "#fff",
+              color: "var(--fg-strong)",
               border: "none",
               fontWeight: 700,
               fontSize: 14,
@@ -363,7 +363,7 @@ export default function CodePage() {
         <div
           style={{
             fontSize: 11,
-            color: "#7888a8",
+            color: "var(--fg-muted)",
             marginTop: 8,
             textAlign: "center",
             maxWidth: 560,

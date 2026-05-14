@@ -1,4 +1,4 @@
-// ServerPage — ported from LLM/desktop_app/pages/server_page.py
+﻿// ServerPage — ported from LLM/desktop_app/pages/server_page.py
 // (ServerPage._setup_ui, line 463). Three-column splitter with the
 // Qt fixed ratio 40/40/20 (server_page.py:1022-1027).
 //
@@ -79,7 +79,7 @@ function GroupBox({ title, tooltip, children, style }: {
     >
       <div style={{
         fontSize: 14, fontWeight: 700,
-        color: "#dadcdf",
+        color: "var(--fg)",
         marginBottom: 6,
         borderBottom: "1px solid rgba(127,223,255,0.10)",
         paddingBottom: 6,
@@ -115,9 +115,9 @@ function CompactInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
         height: 28,
         padding: "0 10px",
         borderRadius: 6,
-        border: "1px solid rgba(255,255,255,0.10)",
-        background: "#0f0f19",
-        color: "#dadcdf",
+        border: "1px solid var(--border-strong)",
+        background: "var(--bg-input)",
+        color: "var(--fg)",
         fontSize: 12,
         ...props.style,
       }}
@@ -287,7 +287,7 @@ function MCPServerColumn({ appendLog }: { appendLog: (s: string) => void }) {
 
       <div
         title="URL where the MCP server listens. External clients point at this URL."
-        style={{ fontSize: 12, color: "#9aa0a6" }}
+        style={{ fontSize: 12, color: "var(--fg-muted)" }}
       >
         {running ? `http://${address}` : "Address: -"}
       </div>
@@ -334,7 +334,7 @@ function MCPServerColumn({ appendLog }: { appendLog: (s: string) => void }) {
         gap: 6, alignItems: "center",
         marginTop: 6,
       }}>
-        <span style={{ fontSize: 12, color: "#aaa" }} title="TCP port the MCP HTTP server listens on. Default 8763.">
+        <span style={{ fontSize: 12, color: "var(--fg-muted)" }} title="TCP port the MCP HTTP server listens on. Default 8763.">
           Port:
         </span>
         <CompactInput
@@ -344,19 +344,19 @@ function MCPServerColumn({ appendLog }: { appendLog: (s: string) => void }) {
           maxLength={5}
         />
         <label
-          style={{ fontSize: 12, color: "#dadcdf", display: "inline-flex", alignItems: "center", gap: 6 }}
+          style={{ fontSize: 12, color: "var(--fg)", display: "inline-flex", alignItems: "center", gap: 6 }}
           title="Off = bind to 127.0.0.1 (localhost only). On = bind to 0.0.0.0 (any device on your local network can reach it). Set a Token if you flip this on."
         >
           <input
             type="checkbox"
             checked={lan}
             onChange={e => setLan(e.target.checked)}
-            style={{ accentColor: "#7fdfff" }}
+            style={{ accentColor: "var(--accent)" }}
           />
           LAN
         </label>
 
-        <span style={{ fontSize: 12, color: "#aaa" }} title="Shared secret external clients must send as X-Auth-Token.">
+        <span style={{ fontSize: 12, color: "var(--fg-muted)" }} title="Shared secret external clients must send as X-Auth-Token.">
           Token:
         </span>
         <CompactInput
@@ -372,7 +372,7 @@ function MCPServerColumn({ appendLog }: { appendLog: (s: string) => void }) {
           title="Generate a fresh random auth token (overwrites the current one)."
         >🎲</button>
 
-        <span style={{ fontSize: 12, color: "#aaa" }} title="Workspace folder the MCP tools (shell, file ops, git) operate inside.">
+        <span style={{ fontSize: 12, color: "var(--fg-muted)" }} title="Workspace folder the MCP tools (shell, file ops, git) operate inside.">
           Root:
         </span>
         <CompactInput value={root} onChange={e => setRoot(e.target.value)} />
@@ -573,7 +573,7 @@ function LLMServerColumn({
     >
       <StatusLabel text={decor.text} color={decor.color} />
 
-      <div style={{ fontSize: 12, fontWeight: 700, color: "#dadcdf", marginTop: 4 }}
+      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)", marginTop: 4 }}
            title="Pick which downloaded model the inference server should serve.">
         Select Model:
       </div>
@@ -582,8 +582,8 @@ function LLMServerColumn({
         onChange={e => setModelId(e.target.value)}
         style={{
           height: 32, padding: "0 10px", borderRadius: 6,
-          border: "1px solid rgba(255,255,255,0.10)",
-          background: "#0f0f19", color: "#fff", fontSize: 13,
+          border: "1px solid var(--border-strong)",
+          background: "var(--bg-input)", color: "var(--fg-strong)", fontSize: 13,
         }}
       >
         {models.length === 0 ? (
@@ -604,23 +604,23 @@ function LLMServerColumn({
         gridTemplateColumns: "60px 1fr",
         gap: 4, fontSize: 12, marginTop: 4,
       }}>
-        <span style={{ color: "#aaa" }}>Model:</span>
-        <span style={{ color: "#dadcdf", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ color: "var(--fg-muted)" }}>Model:</span>
+        <span style={{ color: "var(--fg)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {selectedModel?.base_model || "-"}
         </span>
-        <span style={{ color: "#aaa" }}>Port:</span>
-        <span style={{ color: "#dadcdf" }}>{selectedModel?.port ?? "-"}</span>
+        <span style={{ color: "var(--fg-muted)" }}>Port:</span>
+        <span style={{ color: "var(--fg)" }}>{selectedModel?.port ?? "-"}</span>
       </div>
 
-      <div style={{ fontSize: 12, fontWeight: 700, color: "#dadcdf", marginTop: 6 }}>
+      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)", marginTop: 6 }}>
         OpenAI API:
       </div>
       <div
         style={{
           fontSize: 11,
-          color: "#7fdfff",
+          color: "var(--accent)",
           padding: "6px 10px",
-          background: "#0a0d14",
+          background: "var(--bg-elevated)",
           borderRadius: 6,
           userSelect: "text",
           fontFamily: "Consolas, monospace",
@@ -703,7 +703,7 @@ function LLMServerColumn({
       {/* Active inference servers — Qt active_servers_group (server_page.py:919-951) */}
       <div style={{
         marginTop: 8,
-        fontSize: 13, fontWeight: 700, color: "#dadcdf",
+        fontSize: 13, fontWeight: 700, color: "var(--fg)",
         borderTop: "1px solid rgba(127,223,255,0.10)",
         paddingTop: 8,
       }}
@@ -715,8 +715,8 @@ function LLMServerColumn({
         // Qt: minHeight=100, maxHeight=180 (server_page.py:928-929)
         minHeight: 100, maxHeight: 180,
         overflow: "auto",
-        background: "#0a0d14",
-        border: "1px solid rgba(255,255,255,0.08)",
+        background: "var(--bg-elevated)",
+        border: "1px solid var(--border)",
         borderRadius: 6,
         padding: 4,
       }}>
@@ -744,7 +744,7 @@ function LLMServerColumn({
               style={{
                 padding: "4px 8px",
                 fontSize: 12,
-                color: "#dadcdf",
+                color: "var(--fg)",
                 background: selected ? "rgba(127,223,255,0.10)" : "transparent",
                 cursor: "pointer",
                 borderRadius: 4,
@@ -781,7 +781,7 @@ function LLMServerColumn({
         >⏹ Stop selected</button>
       </div>
 
-      <div style={{ fontSize: 11, color: "#888", marginTop: 4 }}>
+      <div style={{ fontSize: 11, color: "var(--fg-subtle)", marginTop: 4 }}>
         State: <code style={{ fontSize: 10 }}>{serverState.slice(0, 200)}</code>
       </div>
     </GroupBox>
@@ -843,8 +843,8 @@ function LogColumn({ logs, onClear }: { logs: string[]; onClear: () => void }) {
         maxHeight: 460,
         margin: 0,
         padding: 12,
-        background: "#0a0d14",
-        color: "#cbd2e0",
+        background: "var(--bg-elevated)",
+        color: "var(--fg)",
         borderRadius: 6,
         fontSize: 11,
         lineHeight: 1.45,
@@ -962,7 +962,7 @@ export default function ServerPage() {
       display: "flex",
       flexDirection: "column",
       gap: 12,
-      background: "#0e1117",
+      background: "var(--bg-panel)",
       minHeight: 0,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -972,11 +972,11 @@ export default function ServerPage() {
           alt=""
           style={{ width: 32, height: 32, objectFit: "contain" }}
         />
-        <div style={{ fontSize: 24, fontWeight: 800, color: "#dadcdf", flex: 1 }}>
+        <div style={{ fontSize: 24, fontWeight: 800, color: "var(--fg)", flex: 1 }}>
           {/* Qt title is "🖧 Servers" (server_page.py:471) */}
           🖧 Servers
         </div>
-        <div style={{ fontSize: 12, color: "#9aa0a6" }}>
+        <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
           {models.length} model{models.length === 1 ? "" : "s"} configured
         </div>
         <button className="ghost-btn" onClick={refreshAll} disabled={!!busy}>Refresh</button>

@@ -1,4 +1,4 @@
-// BridgesPage — ported from LLM/desktop_app/pages/bridges_page.py
+﻿// BridgesPage — ported from LLM/desktop_app/pages/bridges_page.py
 // (BridgesPage._build_ui, line 589). Two cards side by side, one per
 // bridge. Each card mirrors the Qt _TelegramCard / _WhatsAppCard:
 // inputs, allow-list, project selector, auto-approve, separate Start
@@ -57,7 +57,7 @@ function StatusDot({ state }: { state: BridgeStatus }) {
 function SectionLabel({ text }: { text: string }) {
   return (
     <div style={{
-      color: "#9aa0a6", fontSize: 11, fontWeight: 600,
+      color: "var(--fg-muted)", fontSize: 11, fontWeight: 600,
       letterSpacing: 0.6, textTransform: "uppercase",
       marginTop: 4,
     }}>
@@ -74,9 +74,9 @@ function BridgeInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
       {...props}
       style={{
         height: 30, padding: "0 12px",
-        borderRadius: 8, border: "1px solid rgba(255,255,255,0.10)",
+        borderRadius: 8, border: "1px solid var(--border-strong)",
         background: "rgba(0,0,0,0.30)",
-        color: "#dadcdf", fontSize: 13,
+        color: "var(--fg)", fontSize: 13,
         outline: "none",
         ...props.style,
       }}
@@ -92,8 +92,8 @@ function ProjectSelect(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
       {...props}
       style={{
         height: 32, padding: "0 12px",
-        borderRadius: 8, border: "1px solid rgba(255,255,255,0.10)",
-        background: "rgba(0,0,0,0.30)", color: "#fff", fontSize: 13,
+        borderRadius: 8, border: "1px solid var(--border-strong)",
+        background: "rgba(0,0,0,0.30)", color: "var(--fg-strong)", fontSize: 13,
         outline: "none",
         ...props.style,
       }}
@@ -239,7 +239,7 @@ function TelegramCard() {
         <div style={{ fontSize: 26, color: accent, lineHeight: 1, fontFamily: "Segoe UI Symbol, sans-serif" }}>✈</div>
         <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: accent }}>Telegram</div>
-          <div style={{ fontSize: 11, color: "#9aa0a6" }}>
+          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
             Bot token from @BotFather · long-poll · no public URL needed
           </div>
         </div>
@@ -267,7 +267,7 @@ function TelegramCard() {
           discovered (Qt 144-154, 307-335). Caps at first 5 chips. */}
       {seenIds.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          <span style={{ color: "#9aa0a6", fontSize: 11 }}>Seen chats:</span>
+          <span style={{ color: "var(--fg-muted)", fontSize: 11 }}>Seen chats:</span>
           {seenIds.slice(0, 5).map(cid => {
             const known = existingIds.has(cid);
             return (
@@ -304,7 +304,7 @@ function TelegramCard() {
       </ProjectSelect>
 
       {/* Auto-approve — Qt label verbatim (line 167). */}
-      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#dadcdf" }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg)" }}>
         <input
           type="checkbox"
           checked={autoApprove}
@@ -317,7 +317,7 @@ function TelegramCard() {
       <div style={{ flex: 1 }} />
 
       {/* Status text — Qt 174-179. */}
-      <div style={{ fontSize: 11, color: "#9aa0a6" }}>{statusText}</div>
+      <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>{statusText}</div>
       {saveError ? (
         <div style={{ fontSize: 11, color: "#ffb0b0" }}>{saveError}</div>
       ) : null}
@@ -327,9 +327,9 @@ function TelegramCard() {
           onClick={persist}
           style={{
             height: BTN_HEIGHT, padding: "0 14px",
-            background: "rgba(255,255,255,0.06)",
-            color: "#dadcdf",
-            border: "1px solid rgba(255,255,255,0.10)",
+            background: "var(--bg-surface)",
+            color: "var(--fg)",
+            border: "1px solid var(--border-strong)",
             borderRadius: 8, fontWeight: 600, fontSize: 12,
             cursor: "pointer",
           }}
@@ -445,7 +445,7 @@ function WhatsAppCard() {
         <div style={{ fontSize: 26, lineHeight: 1, fontFamily: "Segoe UI Emoji, sans-serif" }}>💬</div>
         <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
           <div style={{ fontSize: 15, fontWeight: 700, color: accent }}>WhatsApp</div>
-          <div style={{ fontSize: 11, color: "#9aa0a6" }}>
+          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
             Meta Cloud API · webhook needs a public URL (cloudflared/ngrok)
           </div>
         </div>
@@ -513,7 +513,7 @@ function WhatsAppCard() {
 
       {/* Auto-approve — Qt label verbatim (line 443). No parenthetical
           here, unlike Telegram. */}
-      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#dadcdf" }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg)" }}>
         <input
           type="checkbox"
           checked={autoApprove}
@@ -525,7 +525,7 @@ function WhatsAppCard() {
 
       <div style={{ flex: 1 }} />
 
-      <div style={{ fontSize: 11, color: "#9aa0a6" }}>{statusText}</div>
+      <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>{statusText}</div>
       {saveError ? (
         <div style={{ fontSize: 11, color: "#ffb0b0" }}>{saveError}</div>
       ) : null}
@@ -535,9 +535,9 @@ function WhatsAppCard() {
           onClick={persist}
           style={{
             height: BTN_HEIGHT, padding: "0 14px",
-            background: "rgba(255,255,255,0.06)",
-            color: "#dadcdf",
-            border: "1px solid rgba(255,255,255,0.10)",
+            background: "var(--bg-surface)",
+            color: "var(--fg)",
+            border: "1px solid var(--border-strong)",
             borderRadius: 8, fontWeight: 600, fontSize: 12,
             cursor: "pointer",
           }}
@@ -579,13 +579,13 @@ export default function BridgesPage() {
       flexDirection: "column",
       gap: 18,
       overflow: "auto",
-      background: "#0e1117",
+      background: "var(--bg-panel)",
     }}>
       {/* Title — Qt 594-598: 22pt bold #fff. */}
-      <div style={{ fontSize: 22, fontWeight: 700, color: "#fff" }}>Bridges</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: "var(--fg-strong)" }}>Bridges</div>
 
       {/* Subtitle — Qt 600-608 verbatim. */}
-      <div style={{ fontSize: 12, color: "#9aa0a6", lineHeight: 1.5 }}>
+      <div style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.5 }}>
         Drive your agent team from a phone. Telegram needs only a bot
         token; WhatsApp Cloud API needs a public webhook URL — point a
         tunnel (cloudflared / ngrok) at the local port and copy that

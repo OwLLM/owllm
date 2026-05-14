@@ -65,7 +65,7 @@ function displayLabel(fullName: string): string {
 const CATEGORY_ACCENT: Record<string, string> = {
   Personal:  "#74a4ff",
   Knowledge: "#c08aff",
-  Software:  "#5cf0ff",
+  Software:  "var(--accent)",
   Ops:       "#ffb56a",
   Other:     "#9aa0a6",
   Custom:    "#ff7ed1",
@@ -152,9 +152,9 @@ function ViewToggle({ view, onChange }: {
     padding: "0 22px",
     fontSize: 12,
     fontWeight: 600,
-    background: "rgba(255,255,255,0.04)",
-    color: "#9aa0a6",
-    border: "1px solid rgba(255,255,255,0.06)",
+    background: "var(--bg-surface)",
+    color: "var(--fg-muted)",
+    border: "1px solid var(--border)",
     cursor: "pointer",
     letterSpacing: 0.3,
   };
@@ -169,7 +169,7 @@ function ViewToggle({ view, onChange }: {
           borderRight: "none",
           background: view === "teams" ? "#28406b" : base.background,
           color:      view === "teams" ? "#fff" : base.color,
-          borderColor: view === "teams" ? "#3a5fa0" : "rgba(255,255,255,0.06)",
+          borderColor: view === "teams" ? "#3a5fa0" : "var(--border)",
         }}
       >🧩 Teams</button>
       <button
@@ -180,7 +180,7 @@ function ViewToggle({ view, onChange }: {
           borderTopLeftRadius: 0, borderBottomLeftRadius: 0,
           background: view === "agents" ? "#28406b" : base.background,
           color:      view === "agents" ? "#fff" : base.color,
-          borderColor: view === "agents" ? "#3a5fa0" : "rgba(255,255,255,0.06)",
+          borderColor: view === "agents" ? "#3a5fa0" : "var(--border)",
         }}
       >🤖 Agents</button>
     </div>
@@ -205,7 +205,7 @@ function OnboardingBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss
       <button
         onClick={onOpen}
         style={{
-          background: "#4a6cff", color: "#fff", border: "none",
+          background: "#4a6cff", color: "var(--fg-strong)", border: "none",
           borderRadius: 8, padding: "6px 14px", fontWeight: 600,
           fontSize: 12, cursor: "pointer",
         }}
@@ -238,9 +238,9 @@ function SearchBar({ value, onChange, placeholder }: {
         placeholder={placeholder}
         style={{
           flex: 1,
-          background: "rgba(255,255,255,0.04)",
-          border: "1px solid rgba(255,255,255,0.06)",
-          color: "#dadcdf",
+          background: "var(--bg-surface)",
+          border: "1px solid var(--border)",
+          color: "var(--fg)",
           borderRadius: 8,
           padding: "8px 12px",
           fontSize: 13,
@@ -252,8 +252,8 @@ function SearchBar({ value, onChange, placeholder }: {
           onClick={() => onChange("")}
           title="Clear"
           style={{
-            background: "transparent", color: "#9aa0a6",
-            border: "1px solid rgba(255,255,255,0.06)",
+            background: "transparent", color: "var(--fg-muted)",
+            border: "1px solid var(--border)",
             borderRadius: 8, padding: "6px 10px", cursor: "pointer",
           }}
         >✕</button>
@@ -271,7 +271,7 @@ function TeamCard({
   team: Team; selected: boolean; onClick: () => void;
 }) {
   const accent = CATEGORY_ACCENT[team.category] ?? "#74a4ff";
-  const border = selected ? "rgba(124,150,255,0.95)" : "rgba(255,255,255,0.06)";
+  const border = selected ? "rgba(124,150,255,0.95)" : "var(--bg-surface)";
   return (
     <div
       onClick={onClick}
@@ -299,10 +299,10 @@ function TeamCard({
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <img src={owlSrc(team.icon)} style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }} />
         <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
-          <div style={{ color: "#fff", fontWeight: 700, fontSize: 13 }}>{team.display}</div>
+          <div style={{ color: "var(--fg-strong)", fontWeight: 700, fontSize: 13 }}>{team.display}</div>
           <div style={{ fontSize: 10, letterSpacing: 0.6 }}>
             <span style={{ color: accent }}>{team.category.toUpperCase()}</span>
-            <span style={{ color: "#9aa0a6" }}>  ·  {team.agents.length} agents</span>
+            <span style={{ color: "var(--fg-muted)" }}>  ·  {team.agents.length} agents</span>
           </div>
         </div>
         {!team.builtIn && (
@@ -315,7 +315,7 @@ function TeamCard({
       </div>
 
       <div style={{
-        color: "#bbc1cc", fontSize: 11, lineHeight: 1.45,
+        color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45,
         maxHeight: 48,
         display: "-webkit-box",
         WebkitLineClamp: 3,
@@ -334,7 +334,7 @@ function TeamCard({
           />
         ))}
         {team.agents.length > 6 && (
-          <span style={{ color: "#9aa0a6", fontSize: 10 }}>
+          <span style={{ color: "var(--fg-muted)", fontSize: 10 }}>
             +{team.agents.length - 6}
           </span>
         )}
@@ -345,14 +345,14 @@ function TeamCard({
         <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
           {team.requiredMcp.slice(0, 4).map(m => (
             <span key={m} style={{
-              color: "#9aa0a6",
-              background: "rgba(255,255,255,0.05)",
+              color: "var(--fg-muted)",
+              background: "var(--bg-surface)",
               borderRadius: 4, padding: "1px 6px",
               fontSize: 9,
             }}>{m.replace(/^mcp\./, "")}</span>
           ))}
           {team.requiredMcp.length > 4 && (
-            <span style={{ color: "#9aa0a6", fontSize: 9 }}>
+            <span style={{ color: "var(--fg-muted)", fontSize: 9 }}>
               +{team.requiredMcp.length - 4}
             </span>
           )}
@@ -385,7 +385,7 @@ function CreateTeamCard({ onClick }: { onClick: () => void }) {
     >
       <div style={{ color: "#a8b8ff", fontSize: 36, fontWeight: 700, lineHeight: 1 }}>＋</div>
       <div style={{ color: "#dde3ff", fontSize: 12, fontWeight: 700 }}>Create your own team</div>
-      <div style={{ color: "#9aa0a6", fontSize: 11 }}>Pick agents, name it, save it as a template.</div>
+      <div style={{ color: "var(--fg-muted)", fontSize: 11 }}>Pick agents, name it, save it as a template.</div>
     </div>
   );
 }
@@ -477,7 +477,7 @@ function TeamsGrid({ teams, selected, onSelect, onCreate }: {
 // for orchestrator/can_dispatch.
 function AgentMiniCard({ spec }: { spec: AgentSpec }) {
   const isLeader = spec.base === "orchestrator";
-  const accent = isLeader ? "#ffc060" : "rgba(255,255,255,0.06)";
+  const accent = isLeader ? "#ffc060" : "var(--bg-surface)";
   return (
     <div style={{
       position: "relative",
@@ -492,7 +492,7 @@ function AgentMiniCard({ spec }: { spec: AgentSpec }) {
       <div style={{
         height: 110,
         background: "rgba(255,255,255,0.03)",
-        border: "1px solid rgba(255,255,255,0.04)",
+        border: "1px solid var(--border)",
         borderRadius: 8,
         display: "flex", alignItems: "center", justifyContent: "center",
       }}>
@@ -541,10 +541,10 @@ function TeamDetailPanel({
     return (
       <div style={{
         flex: 1,
-        background: "#0f1218",
-        border: "1px solid rgba(255,255,255,0.04)",
+        background: "var(--bg-elevated)",
+        border: "1px solid var(--border)",
         borderRadius: 12, padding: 24,
-        color: "#6c7280", fontSize: 12,
+        color: "var(--fg-subtle)", fontSize: 12,
         display: "flex", alignItems: "center", justifyContent: "center",
         textAlign: "center",
       }}>
@@ -559,8 +559,8 @@ function TeamDetailPanel({
   return (
     <div style={{
       flex: 1,
-      background: "#0f1218",
-      border: "1px solid rgba(255,255,255,0.04)",
+      background: "var(--bg-elevated)",
+      border: "1px solid var(--border)",
       borderRadius: 12, padding: 20,
       display: "flex", flexDirection: "column", gap: 12,
       overflow: "auto",
@@ -575,10 +575,10 @@ function TeamDetailPanel({
           <img src={owlSrc(team.icon)} style={{ width: 64, height: 64, objectFit: "contain" }} />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 18, fontWeight: 800, color: "#fff" }}>{team.display}</div>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)" }}>{team.display}</div>
           <div style={{ fontSize: 10, letterSpacing: 0.6 }}>
             <span style={{ color: accent }}>{team.category.toUpperCase()}</span>
-            <span style={{ color: "#9aa0a6" }}>
+            <span style={{ color: "var(--fg-muted)" }}>
               {"  ·  "}{team.agents.length} agents
               {"  ·  "}{team.edges.length} connections
               {"  ·  "}
@@ -592,14 +592,14 @@ function TeamDetailPanel({
 
       {/* Description */}
       {team.description && (
-        <div style={{ color: "#cbd2e0", fontSize: 12, lineHeight: 1.6 }}>
+        <div style={{ color: "var(--fg)", fontSize: 12, lineHeight: 1.6 }}>
           {team.description}
         </div>
       )}
 
       {/* AGENTS */}
       <div style={{
-        color: "#9aa0a6", fontSize: 10, letterSpacing: 1,
+        color: "var(--fg-muted)", fontSize: 10, letterSpacing: 1,
         paddingTop: 6, fontWeight: 700,
       }}>AGENTS</div>
       <div style={{
@@ -614,13 +614,13 @@ function TeamDetailPanel({
       {team.edges.length > 0 && (
         <>
           <div style={{
-            color: "#9aa0a6", fontSize: 10, letterSpacing: 1,
+            color: "var(--fg-muted)", fontSize: 10, letterSpacing: 1,
             paddingTop: 6, fontWeight: 700,
           }}>ROUTING</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             {team.edges.map((e, i) => (
               <div key={i} style={{
-                color: "#bbc1cc",
+                color: "var(--fg-muted)",
                 fontFamily: "'Consolas','JetBrains Mono',monospace",
                 fontSize: 11,
               }}>
@@ -635,7 +635,7 @@ function TeamDetailPanel({
       {team.requiredMcp.length > 0 && (
         <>
           <div style={{
-            color: "#9aa0a6", fontSize: 10, letterSpacing: 1,
+            color: "var(--fg-muted)", fontSize: 10, letterSpacing: 1,
             paddingTop: 6, fontWeight: 700,
           }}>MCP NEEDED</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -662,7 +662,7 @@ function TeamDetailPanel({
               onClick={() => onEditTemplate(team.name)}
               style={{
                 minHeight: 34,
-                background: "rgba(255,255,255,0.05)", color: "#dadcdf",
+                background: "var(--bg-surface)", color: "var(--fg)",
                 border: "none", borderRadius: 8, padding: "0 14px",
                 cursor: "pointer", fontSize: 12,
               }}
@@ -671,7 +671,7 @@ function TeamDetailPanel({
               onClick={() => onDuplicateTemplate(team.name)}
               style={{
                 minHeight: 34,
-                background: "rgba(255,255,255,0.05)", color: "#dadcdf",
+                background: "var(--bg-surface)", color: "var(--fg)",
                 border: "none", borderRadius: 8, padding: "0 14px",
                 cursor: "pointer", fontSize: 12,
               }}
@@ -693,7 +693,7 @@ function TeamDetailPanel({
             onClick={() => onDuplicateTemplate(team.name)}
             style={{
               minHeight: 34,
-              background: "rgba(255,255,255,0.05)", color: "#dadcdf",
+              background: "var(--bg-surface)", color: "var(--fg)",
               border: "none", borderRadius: 8, padding: "0 14px",
               cursor: "pointer", fontSize: 12,
             }}
@@ -704,7 +704,7 @@ function TeamDetailPanel({
           onClick={() => onCreateProject(team.name)}
           style={{
             minHeight: 38,
-            background: "#4a6cff", color: "#fff",
+            background: "#4a6cff", color: "var(--fg-strong)",
             border: "none", borderRadius: 9, padding: "0 16px",
             fontWeight: 600, fontSize: 12, cursor: "pointer",
           }}
@@ -756,7 +756,7 @@ function AgentCard({
       <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <div style={{
-            color: "#fff", fontSize: 14, fontWeight: 700,
+            color: "var(--fg-strong)", fontSize: 14, fontWeight: 700,
             overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
           }}>{displayLabel(agent.name)}</div>
           {agent.builtIn && (
@@ -782,7 +782,7 @@ function AgentCard({
           )}
         </div>
         <div style={{
-          color: "#9aa0a6", fontSize: 12, lineHeight: 1.4,
+          color: "var(--fg-muted)", fontSize: 12, lineHeight: 1.4,
           maxHeight: 40,
           display: "-webkit-box",
           WebkitLineClamp: 2,
@@ -824,10 +824,10 @@ function ChipRow({ chips, empty, allText, accent }: {
     display: "inline-flex", alignItems: "center", gap: 4,
   });
   if (chips.kind === "all") {
-    return <div style={{ fontSize: 12, color: "#9aa0a6", fontStyle: "italic" }}>{allText}</div>;
+    return <div style={{ fontSize: 12, color: "var(--fg-muted)", fontStyle: "italic" }}>{allText}</div>;
   }
   if (chips.kind === "empty") {
-    return <div style={{ fontSize: 12, color: "#9aa0a6", fontStyle: "italic" }}>{empty}</div>;
+    return <div style={{ fontSize: 12, color: "var(--fg-muted)", fontStyle: "italic" }}>{empty}</div>;
   }
   return (
     <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -849,14 +849,14 @@ function hexToRgb(hex: string): string {
 function SmallStat({ label, value }: { label: string; value: string }) {
   return (
     <div style={{
-      background: "rgba(255,255,255,0.04)",
-      border: "1px solid rgba(255,255,255,0.06)",
+      background: "var(--bg-surface)",
+      border: "1px solid var(--border)",
       borderRadius: 8, padding: "8px 10px",
       minWidth: 0,
     }}>
-      <div style={{ fontSize: 10, color: "#9aa0a6", letterSpacing: 0.6, textTransform: "uppercase" }}>{label}</div>
+      <div style={{ fontSize: 10, color: "var(--fg-muted)", letterSpacing: 0.6, textTransform: "uppercase" }}>{label}</div>
       <div style={{
-        fontSize: 12, color: "#dadcdf", marginTop: 4,
+        fontSize: 12, color: "var(--fg)", marginTop: 4,
         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
       }}>{value}</div>
     </div>
@@ -883,10 +883,10 @@ function AgentDetailPanel({
     return (
       <div style={{
         flex: 1,
-        background: "#0f1218",
-        border: "1px solid rgba(255,255,255,0.04)",
+        background: "var(--bg-elevated)",
+        border: "1px solid var(--border)",
         borderRadius: 12, padding: 24,
-        color: "#6c7280", fontSize: 12,
+        color: "var(--fg-subtle)", fontSize: 12,
         display: "flex", alignItems: "center", justifyContent: "center",
         textAlign: "center",
       }}>
@@ -898,8 +898,8 @@ function AgentDetailPanel({
   return (
     <div style={{
       flex: 1,
-      background: "#0f1218",
-      border: "1px solid rgba(255,255,255,0.04)",
+      background: "var(--bg-elevated)",
+      border: "1px solid var(--border)",
       borderRadius: 12, padding: 20,
       display: "flex", flexDirection: "column", gap: 14,
       overflow: "auto",
@@ -908,31 +908,31 @@ function AgentDetailPanel({
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start" }}>
         <div style={{
           width: 200, height: 200, flexShrink: 0,
-          background: "rgba(255,255,255,0.10)",
-          border: "1px solid rgba(255,255,255,0.12)",
+          background: "var(--bg-surface-hover)",
+          border: "1px solid var(--border-strong)",
           borderRadius: 18,
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>
           <img src={owlSrc(agent.icon)} style={{ width: 180, height: 180, objectFit: "contain" }} />
         </div>
         <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
-          <div style={{ color: "#9aa0a6", fontSize: 13 }}>Name</div>
+          <div style={{ color: "var(--fg-muted)", fontSize: 13 }}>Name</div>
           <input
             defaultValue={displayLabel(agent.name)}
             disabled={!editable}
             style={{
-              background: "rgba(255,255,255,0.04)",
-              border: "1px solid rgba(255,255,255,0.06)",
+              background: "var(--bg-surface)",
+              border: "1px solid var(--border)",
               color: editable ? "#fff" : "#888",
               borderRadius: 8, padding: "0 12px",
               minHeight: 40, fontSize: 15,
             }}
           />
-          <div style={{ color: "#9aa0a6", fontSize: 13, marginTop: 4 }}>Default model</div>
+          <div style={{ color: "var(--fg-muted)", fontSize: 13, marginTop: 4 }}>Default model</div>
           <div style={{
-            background: "rgba(255,255,255,0.04)",
-            border: "1px solid rgba(255,255,255,0.06)",
-            color: "#dadcdf",
+            background: "var(--bg-surface)",
+            border: "1px solid var(--border)",
+            color: "var(--fg)",
             borderRadius: 8, padding: "10px 12px", fontSize: 13,
           }}>Auto (per-task selection)</div>
         </div>
@@ -958,13 +958,13 @@ function AgentDetailPanel({
       )}
 
       <div style={{
-        color: "#9aa0a6", fontSize: 13, fontWeight: 600,
+        color: "var(--fg-muted)", fontSize: 13, fontWeight: 600,
         letterSpacing: 0.6, textTransform: "uppercase", marginTop: 4,
       }}>Job description</div>
       <div style={{
-        background: "rgba(255,255,255,0.04)",
-        border: "1px solid rgba(255,255,255,0.06)",
-        color: "#dadcdf",
+        background: "var(--bg-surface)",
+        border: "1px solid var(--border)",
+        color: "var(--fg)",
         borderRadius: 8, padding: "10px 12px", fontSize: 13,
       }}>{agent.description || "(no description)"}</div>
 
@@ -972,18 +972,18 @@ function AgentDetailPanel({
           paints these as chip rows under the "Permissions" section
           of the editor (agent_studio_page.py ~line 1280). */}
       <div style={{
-        color: "#9aa0a6", fontSize: 13, fontWeight: 600,
+        color: "var(--fg-muted)", fontSize: 13, fontWeight: 600,
         letterSpacing: 0.6, textTransform: "uppercase", marginTop: 4,
       }}>Built-in tools</div>
       <ChipRow
         chips={chipsFromAllowlist(agent.tools)}
         empty="No built-in tools assigned."
         allText="All built-in tools (no restriction)."
-        accent="#7fdfff"
+        accent="var(--accent)"
       />
 
       <div style={{
-        color: "#9aa0a6", fontSize: 13, fontWeight: 600,
+        color: "var(--fg-muted)", fontSize: 13, fontWeight: 600,
         letterSpacing: 0.6, textTransform: "uppercase", marginTop: 4,
       }}>MCP tools</div>
       <ChipRow
@@ -1005,24 +1005,24 @@ function AgentDetailPanel({
       {agent.systemPrompt ? (
         <details style={{
           background: "rgba(255,255,255,0.03)",
-          border: "1px solid rgba(255,255,255,0.06)",
+          border: "1px solid var(--border)",
           borderRadius: 8, padding: "8px 12px",
         }}>
           <summary style={{
             cursor: "pointer", fontSize: 12, fontWeight: 600,
-            color: "#9aa0a6", letterSpacing: 0.6, textTransform: "uppercase",
+            color: "var(--fg-muted)", letterSpacing: 0.6, textTransform: "uppercase",
           }}>System prompt ({agent.systemPrompt.length.toLocaleString()} chars)</summary>
           <pre style={{
             margin: "8px 0 0", whiteSpace: "pre-wrap",
             fontFamily: "Consolas, monospace", fontSize: 11,
-            color: "#cbd2e0", maxHeight: 280, overflow: "auto",
+            color: "var(--fg)", maxHeight: 280, overflow: "auto",
             lineHeight: 1.5,
           }}>{agent.systemPrompt}</pre>
         </details>
       ) : null}
 
       {agent.path ? (
-        <div style={{ fontSize: 11, color: "#6c7280", fontFamily: "Consolas, monospace", wordBreak: "break-all" }}>
+        <div style={{ fontSize: 11, color: "var(--fg-subtle)", fontFamily: "Consolas, monospace", wordBreak: "break-all" }}>
           📁 {agent.path}
         </div>
       ) : null}
@@ -1046,7 +1046,7 @@ function AgentDetailPanel({
           onClick={onDuplicate}
           style={{
             minHeight: 42,
-            background: "rgba(255,255,255,0.05)", color: "#dadcdf",
+            background: "var(--bg-surface)", color: "var(--fg)",
             border: "none", borderRadius: 8, padding: "0 14px",
             cursor: "pointer",
           }}
@@ -1279,11 +1279,11 @@ export default function StudioPage() {
       flexDirection: "column",
       gap: 12,
       overflow: "hidden",
-      background: "#0e1117",  // page background per style notes
+      background: "var(--bg-panel)",  // page background per style notes
     }}>
-      <div style={{ fontSize: 22, fontWeight: 800, color: "#fff" }}>Studio</div>
+      <div style={{ fontSize: 22, fontWeight: 800, color: "var(--fg-strong)" }}>Studio</div>
       <ViewToggle view={view} onChange={setView} />
-      <div style={{ color: "#9aa0a6", fontSize: 12 }} dangerouslySetInnerHTML={{ __html: subLabel }} />
+      <div style={{ color: "var(--fg-muted)", fontSize: 12 }} dangerouslySetInnerHTML={{ __html: subLabel }} />
       {bannerVisible && (
         <OnboardingBanner
           onOpen={handleOpenSkillLibrary}
@@ -1330,7 +1330,7 @@ export default function StudioPage() {
               onClick={handleNewAgent}
               style={{
                 minHeight: 34,
-                background: "#4a6cff", color: "#fff",
+                background: "#4a6cff", color: "var(--fg-strong)",
                 border: "none", borderRadius: 8, padding: "0 16px",
                 fontWeight: 600, cursor: "pointer", fontSize: 12,
               }}
@@ -1340,7 +1340,7 @@ export default function StudioPage() {
               title="Browse SKILL.md packs (Anthropic helpers + anything installed under LLM/data/skills/)"
               style={{
                 minHeight: 34,
-                background: skillsOnly ? "rgba(122,211,255,0.18)" : "rgba(255,255,255,0.05)",
+                background: skillsOnly ? "rgba(122,211,255,0.18)" : "var(--bg-surface)",
                 color: skillsOnly ? "#7ad3ff" : "#dadcdf",
                 border: skillsOnly ? "1px solid rgba(122,211,255,0.5)" : "none",
                 borderRadius: 8, padding: "0 14px",
@@ -1353,8 +1353,8 @@ export default function StudioPage() {
                 title="Clear the skills-only filter"
                 style={{
                   minHeight: 34,
-                  background: "transparent", color: "#9aa0a6",
-                  border: "1px solid rgba(255,255,255,0.10)",
+                  background: "transparent", color: "var(--fg-muted)",
+                  border: "1px solid var(--border-strong)",
                   borderRadius: 8, padding: "0 12px",
                   cursor: "pointer", fontSize: 12,
                 }}

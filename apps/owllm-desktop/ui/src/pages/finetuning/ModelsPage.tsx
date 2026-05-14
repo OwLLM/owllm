@@ -1,4 +1,4 @@
-// ModelsPage — browses every GGUF found under LLM/models/ via the
+﻿// ModelsPage — browses every GGUF found under LLM/models/ via the
 // native list_models scanner. Read-only for now: each row shows the
 // model id, size, port the server would bind, and the full path. A
 // Start button hands the model off to server_start so the user
@@ -114,8 +114,8 @@ export default function ModelsPage() {
       display: "flex",
       flexDirection: "column",
       gap: 12,
-      background: "#0e1117",
-      color: "#dadcdf",
+      background: "var(--bg-panel)",
+      color: "var(--fg)",
       minHeight: 0,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -124,7 +124,7 @@ export default function ModelsPage() {
           alt=""
           style={{ width: 32, height: 32, objectFit: "contain" }}
         />
-        <div style={{ fontSize: 24, fontWeight: 800, color: "#fff" }}>📦 Models</div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: "var(--fg-strong)" }}>📦 Models</div>
         <div style={{ flex: 1 }} />
         <input
           placeholder="Filter…"
@@ -132,8 +132,8 @@ export default function ModelsPage() {
           onChange={e => setFilter(e.target.value)}
           style={{
             height: 30, padding: "0 10px", borderRadius: 6,
-            border: "1px solid rgba(255,255,255,0.10)",
-            background: "#0a0d14", color: "#dadcdf", fontSize: 12,
+            border: "1px solid var(--border-strong)",
+            background: "var(--bg-elevated)", color: "var(--fg)", fontSize: 12,
             minWidth: 220,
           }}
         />
@@ -147,7 +147,7 @@ export default function ModelsPage() {
             style={{
               height: 30, padding: "0 14px", borderRadius: 6,
               background: "linear-gradient(180deg, #f44336, #d32f2f)",
-              color: "#fff", border: "none",
+              color: "var(--fg-strong)", border: "none",
               fontSize: 12, fontWeight: 700, cursor: "pointer",
             }}
             title="Stop the running model server."
@@ -155,9 +155,9 @@ export default function ModelsPage() {
         ) : null}
       </div>
 
-      <div style={{ fontSize: 12, color: "#9aa0a6" }}>
+      <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
         {models.length} GGUF{models.length === 1 ? "" : "s"} discovered under{" "}
-        <code style={{ color: "#7fdfff" }}>LLM/models/</code>
+        <code style={{ color: "var(--accent)" }}>LLM/models/</code>
         {status.running ? (
           <> · Active: <span style={{ color: "#a0e88a", fontWeight: 700 }}>{status.model_id}</span> on port {status.port}</>
         ) : null}
@@ -175,8 +175,8 @@ export default function ModelsPage() {
 
       <div style={{
         flex: 1, minHeight: 0, overflowY: "auto",
-        border: "1px solid rgba(255,255,255,0.08)",
-        borderRadius: 8, background: "#0a0d14",
+        border: "1px solid var(--border)",
+        borderRadius: 8, background: "var(--bg-elevated)",
       }}>
         {visible.length === 0 ? (
           <div style={{ padding: 24, fontSize: 12, color: "#7a7f87", textAlign: "center" }}>
@@ -192,9 +192,9 @@ export default function ModelsPage() {
           }}>
             <thead>
               <tr style={{
-                fontSize: 11, color: "#9aa0a6", textAlign: "left",
-                borderBottom: "1px solid rgba(255,255,255,0.10)",
-                background: "#0e1117",
+                fontSize: 11, color: "var(--fg-muted)", textAlign: "left",
+                borderBottom: "1px solid var(--border-strong)",
+                background: "var(--bg-panel)",
               }}>
                 <th style={{ padding: "8px 12px", fontWeight: 600 }}>Model ID</th>
                 <th style={{ padding: "8px 12px", fontWeight: 600, width: 110 }}>Size</th>
@@ -214,13 +214,13 @@ export default function ModelsPage() {
                       ? "rgba(127,223,255,0.06)"
                       : (i % 2 === 1 ? "rgba(255,255,255,0.015)" : "transparent"),
                   }}>
-                    <td style={{ padding: "8px 12px", color: isRunning ? "#7fdfff" : "#dadcdf", fontWeight: isRunning ? 700 : 400 }}>
+                    <td style={{ padding: "8px 12px", color: isRunning ? "var(--accent)" : "#dadcdf", fontWeight: isRunning ? 700 : 400 }}>
                       {isRunning ? "▶ " : ""}{m.model_id}
                     </td>
-                    <td style={{ padding: "8px 12px", color: "#9aa0a6", whiteSpace: "nowrap" }}>
+                    <td style={{ padding: "8px 12px", color: "var(--fg-muted)", whiteSpace: "nowrap" }}>
                       {formatSize(m.size_mib)}
                     </td>
-                    <td style={{ padding: "8px 12px", color: "#9aa0a6" }}>
+                    <td style={{ padding: "8px 12px", color: "var(--fg-muted)" }}>
                       {m.port ?? "—"}
                     </td>
                     <td style={{
@@ -245,7 +245,7 @@ export default function ModelsPage() {
                           style={{
                             height: 26, padding: "0 12px", borderRadius: 5,
                             background: "linear-gradient(180deg, #f44336, #d32f2f)",
-                            color: "#fff", border: "none",
+                            color: "var(--fg-strong)", border: "none",
                             fontSize: 11, fontWeight: 700, cursor: "pointer",
                           }}
                         >⏹ Stop</button>
@@ -258,7 +258,7 @@ export default function ModelsPage() {
                             background: startBusy
                               ? "rgba(127,223,255,0.20)"
                               : "linear-gradient(180deg, #4CAF50, #388E3C)",
-                            color: "#fff", border: "none",
+                            color: "var(--fg-strong)", border: "none",
                             fontSize: 11, fontWeight: 700,
                             cursor: busy ? "not-allowed" : "pointer",
                             opacity: busy && !startBusy ? 0.5 : 1,

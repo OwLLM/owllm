@@ -1,4 +1,4 @@
-import StubPage from "../../core/StubPage";
+﻿import StubPage from "../../core/StubPage";
 
 // Qt: LLM/desktop_app/pages/characters_3d_page.py. Avatar editor +
 // persona dataset for the agent stack. Uses a Three.js viewport

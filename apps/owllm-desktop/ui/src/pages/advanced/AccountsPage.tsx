@@ -1,4 +1,4 @@
-// AccountsPage — ported from LLM/desktop_app/pages/accounts_page.py
+﻿// AccountsPage — ported from LLM/desktop_app/pages/accounts_page.py
 // (AccountsPage._build_ui, line 403). 2x2 grid of brand cards, one
 // per cloud route: Claude (subscription), Codex (subscription),
 // Anthropic API (key), OpenAI API (key).
@@ -18,7 +18,7 @@
 // same value here so cards visually dissolve into the page.
 import { useEffect, useRef, useState } from "react";
 
-const PAGE_BG = "#0e1117"; // matches palette(base) used by Qt gradient stops 0.6 + 1
+const PAGE_BG = "var(--bg-panel)"; // matches palette(base) used by Qt gradient stops 0.6 + 1
 
 type BrandSpec = {
   key: string;
@@ -175,7 +175,7 @@ function ApiKeyDialog({
           boxShadow: "0 18px 60px rgba(0,0,0,0.6)",
         }}
       >
-        <div style={{ color: "#fff", fontSize: 14, fontWeight: 700 }}>
+        <div style={{ color: "var(--fg-strong)", fontSize: 14, fontWeight: 700 }}>
           {/* Qt setWindowTitle(f"Set {env_name}") line 322 */}
           Set {envName}
         </div>
@@ -184,11 +184,11 @@ function ApiKeyDialog({
           // Prose verbatim from Qt accounts_page.py:331-335.
         >
           Paste your <b>{envName}</b> below. It will be stored in{" "}
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "1px 4px", borderRadius: 3 }}>
+          <code style={{ background: "var(--bg-surface)", padding: "1px 4px", borderRadius: 3 }}>
             LLM/data/owllm_agent_secrets.json
           </code>{" "}
           on this machine and applied to{" "}
-          <code style={{ background: "rgba(255,255,255,0.06)", padding: "1px 4px", borderRadius: 3 }}>
+          <code style={{ background: "var(--bg-surface)", padding: "1px 4px", borderRadius: 3 }}>
             os.environ
           </code>{" "}
           at startup. Shell-exported env vars take precedence.
@@ -207,9 +207,9 @@ function ApiKeyDialog({
             minHeight: 34, // Qt setMinimumHeight(34), line 343
             padding: "0 12px",
             borderRadius: 8,
-            border: "1px solid rgba(255,255,255,0.10)",
+            border: "1px solid var(--border-strong)",
             background: "rgba(0,0,0,0.30)",
-            color: "#dadcdf",
+            color: "var(--fg)",
             fontSize: 12,
             fontFamily: "ui-monospace, Menlo, Consolas, monospace",
           }}
@@ -219,7 +219,7 @@ function ApiKeyDialog({
           style={{
             // Qt toggle styled as text-decoration:underline (line 348-351).
             background: "transparent",
-            color: "#aaa",
+            color: "var(--fg-muted)",
             border: "none",
             textDecoration: "underline",
             fontSize: 11,
@@ -236,7 +236,7 @@ function ApiKeyDialog({
             style={{
               minHeight: 30,
               padding: "0 14px",
-              background: "rgba(255,255,255,0.06)",
+              background: "var(--bg-surface)",
               color: "#ddd",
               border: "none",
               borderRadius: 6,
@@ -253,7 +253,7 @@ function ApiKeyDialog({
               minHeight: 30,
               padding: "0 14px",
               background: value.trim() ? "#3b82f6" : "rgba(59,130,246,0.30)",
-              color: "#fff",
+              color: "var(--fg-strong)",
               border: "none",
               borderRadius: 6,
               fontSize: 12,
@@ -355,7 +355,7 @@ function BrandCard({
           >
             {spec.name}
           </div>
-          <div style={{ color: "#9aa0a6", fontSize: 11, background: "transparent" }}>
+          <div style={{ color: "var(--fg-muted)", fontSize: 11, background: "transparent" }}>
             {/* Qt color:#9aa0a6; font-size:11px (line 194) */}
             {spec.tagline}
           </div>
@@ -415,7 +415,7 @@ function BrandCard({
             background:
               !state.connected || state.testing
                 ? "rgba(255,255,255,0.03)" // Qt :disabled bg line 236
-                : "rgba(255,255,255,0.06)", // Qt normal bg line 230
+                : "var(--bg-surface)", // Qt normal bg line 230
             color: !state.connected || state.testing ? "#555" : "#ddd", // Qt line 236 / 231
             border: "none",
             borderRadius: 8,
@@ -529,9 +529,9 @@ export default function AccountsPage() {
       }}
     >
       {/* Title — Qt QFont().setPointSize(22).setBold(True) lines 411-412 */}
-      <div style={{ fontSize: 22, fontWeight: 800, color: "#fff" }}>Accounts</div>
+      <div style={{ fontSize: 22, fontWeight: 800, color: "var(--fg-strong)" }}>Accounts</div>
       {/* Subtitle — verbatim Qt accounts_page.py:418, color #9aa0a6 12px (line 420) */}
-      <div style={{ fontSize: 12, color: "#9aa0a6" }}>
+      <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
         Connect each provider once. Test verifies credentials end-to-end.
       </div>
 

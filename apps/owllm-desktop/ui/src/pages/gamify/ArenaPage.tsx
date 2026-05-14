@@ -1,4 +1,4 @@
-import StubPage from "../../core/StubPage";
+﻿import StubPage from "../../core/StubPage";
 
 // Qt: main.py::_build_arena_sub_tab (line 20103). Model-vs-model
 // arena — two loaded servers side by side, same prompt fed to both,

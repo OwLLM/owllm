@@ -1,4 +1,4 @@
-// Generic "Not yet ported" page used by stubs for tabs whose React
+﻿// Generic "Not yet ported" page used by stubs for tabs whose React
 // implementations haven't landed yet. Faithful in shape (HybridFrame
 // inner background, owl PNG, brief description) but explicit about
 // what it is so we never confuse a stub for a real implementation.
@@ -19,8 +19,8 @@ export default function StubPage({ spec }: { spec: StubSpec }) {
       display: "flex",
       flexDirection: "column",
       gap: 18,
-      background: "#0e1117",
-      color: "#dadcdf",
+      background: "var(--bg-panel)",
+      color: "var(--fg)",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
         {spec.ownlPng && (
@@ -30,7 +30,7 @@ export default function StubPage({ spec }: { spec: StubSpec }) {
             style={{ width: 44, height: 44, objectFit: "contain" }}
           />
         )}
-        <div style={{ fontSize: 24, fontWeight: 800, color: "#fff" }}>
+        <div style={{ fontSize: 24, fontWeight: 800, color: "var(--fg-strong)" }}>
           {spec.icon} {spec.title}
         </div>
       </div>
@@ -43,12 +43,12 @@ export default function StubPage({ spec }: { spec: StubSpec }) {
         fontSize: 13,
         lineHeight: 1.55,
       }}>
-        <div style={{ fontWeight: 700, color: "#7fdfff", marginBottom: 6 }}>
+        <div style={{ fontWeight: 700, color: "var(--accent)", marginBottom: 6 }}>
           Page not ported yet
         </div>
         <div>{spec.blurb}</div>
         {spec.qtRef && (
-          <div style={{ marginTop: 10, fontSize: 11, color: "#7888a8", fontFamily: "Consolas, monospace" }}>
+          <div style={{ marginTop: 10, fontSize: 11, color: "var(--fg-muted)", fontFamily: "Consolas, monospace" }}>
             Qt source: {spec.qtRef}
           </div>
         )}

@@ -1,4 +1,4 @@
-import StubPage from "../../core/StubPage";
+﻿import StubPage from "../../core/StubPage";
 
 // Qt: main.py::_build_logs_tab (line 27594). Aggregated log viewer
 // (app.log, freeze_diag.log, install_errors.log, training session

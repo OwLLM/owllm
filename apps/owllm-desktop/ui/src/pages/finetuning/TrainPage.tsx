@@ -1,4 +1,4 @@
-import StubPage from "../../core/StubPage";
+﻿import StubPage from "../../core/StubPage";
 
 // Qt: main.py::_build_train_tab (line 14511). Fine-tuning dashboard:
 // pick dataset, choose base model, LoRA params, watch loss curve,

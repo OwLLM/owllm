@@ -1,4 +1,4 @@
-// ChatPage — real chat against whatever model is running. Hits the
+﻿// ChatPage — real chat against whatever model is running. Hits the
 // local llama-server's OpenAI-compatible /v1/chat/completions
 // endpoint directly from React; no Rust proxy needed.
 //
@@ -166,13 +166,13 @@ export default function ChatPage() {
       display: "flex",
       flexDirection: "column",
       gap: 10,
-      background: "#0e1117",
-      color: "#dadcdf",
+      background: "var(--bg-panel)",
+      color: "var(--fg)",
       minHeight: 0,
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <img src={`${ICONS}/owl_chat.png`} alt="" style={{ width: 32, height: 32, objectFit: "contain" }} />
-        <div style={{ fontSize: 24, fontWeight: 800, color: "#fff" }}>💬 Chat</div>
+        <div style={{ fontSize: 24, fontWeight: 800, color: "var(--fg-strong)" }}>💬 Chat</div>
         <div style={{ flex: 1 }} />
         <span
           className="status-dot"
@@ -181,7 +181,7 @@ export default function ChatPage() {
             color: status.running ? "#22c55e" : "#888",
           }}
         />
-        <div style={{ fontSize: 12, color: "#9aa0a6" }}>
+        <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
           {status.running
             ? `Server: ${status.model_id ?? "?"}${status.port ? ` · port ${status.port}` : ""}`
             : "Server: stopped"}
@@ -190,17 +190,17 @@ export default function ChatPage() {
 
       <div style={{
         display: "flex", gap: 8, alignItems: "center",
-        background: "#0a0d14",
+        background: "var(--bg-elevated)",
         border: "1px solid rgba(127,223,255,0.20)",
         borderRadius: 8, padding: "6px 10px",
       }}>
-        <span style={{ fontSize: 12, color: "#9aa0a6", whiteSpace: "nowrap" }}>System:</span>
+        <span style={{ fontSize: 12, color: "var(--fg-muted)", whiteSpace: "nowrap" }}>System:</span>
         <input
           value={system}
           onChange={e => setSystem(e.target.value)}
           style={{
             flex: 1, height: 28, background: "transparent",
-            border: "none", color: "#dadcdf", fontSize: 12, outline: "none",
+            border: "none", color: "var(--fg)", fontSize: 12, outline: "none",
           }}
           placeholder="System prompt (applied at the start of every conversation)"
         />
@@ -213,8 +213,8 @@ export default function ChatPage() {
         ref={transcriptRef}
         style={{
           flex: 1, overflowY: "auto", minHeight: 0,
-          background: "#0a0d14",
-          border: "1px solid rgba(255,255,255,0.08)",
+          background: "var(--bg-elevated)",
+          border: "1px solid var(--border)",
           borderRadius: 8, padding: 14,
           display: "flex", flexDirection: "column", gap: 12,
           fontSize: 13, lineHeight: 1.55,
@@ -230,11 +230,11 @@ export default function ChatPage() {
           <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             <div style={{
               fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
-              color: m.role === "user" ? "#7fdfff" : "#a0e88a",
+              color: m.role === "user" ? "var(--accent)" : "#a0e88a",
             }}>
               {m.role === "user" ? "YOU" : "ASSISTANT"}
             </div>
-            <div style={{ whiteSpace: "pre-wrap", color: "#dadcdf" }}>
+            <div style={{ whiteSpace: "pre-wrap", color: "var(--fg)" }}>
               {m.content || (busy && i === messages.length - 1 ? "▍" : "")}
             </div>
           </div>
@@ -267,9 +267,9 @@ export default function ChatPage() {
             flex: 1, minHeight: 70, maxHeight: 200,
             resize: "vertical",
             padding: 10, borderRadius: 8,
-            background: "#0a0d14",
-            color: "#dadcdf",
-            border: "1px solid rgba(255,255,255,0.10)",
+            background: "var(--bg-elevated)",
+            color: "var(--fg)",
+            border: "1px solid var(--border-strong)",
             fontFamily: "inherit", fontSize: 13, lineHeight: 1.5,
             outline: "none",
           }}
@@ -280,7 +280,7 @@ export default function ChatPage() {
             style={{
               height: 70, padding: "0 18px",
               background: "linear-gradient(180deg, #f44336, #d32f2f)",
-              color: "#fff", border: "none", borderRadius: 8,
+              color: "var(--fg-strong)", border: "none", borderRadius: 8,
               fontSize: 13, fontWeight: 700, cursor: "pointer",
             }}
             title="Abort the in-flight stream."

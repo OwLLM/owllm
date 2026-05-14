@@ -17,8 +17,20 @@
 // palette(base) for the gradient's bottom stop — we hard-code the
 // same value here so cards visually dissolve into the page.
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 const PAGE_BG = "var(--bg-panel)"; // matches palette(base) used by Qt gradient stops 0.6 + 1
+
+// Backend status shape — mirrors AccountsStatus in src-tauri/src/accounts.rs.
+// Each flag is a presence check; we never see the secret values themselves.
+type AccountsStatus = {
+  anthropic_api_key: boolean;
+  openai_api_key: boolean;
+  claude_cli: boolean;
+  codex_cli: boolean;
+};
+
+type ProbeResult = { ok: boolean; detail: string; elapsed_ms: number };
 
 type BrandSpec = {
   key: string;
@@ -443,16 +455,48 @@ export default function AccountsPage() {
   // API card. Qt opens a modal QDialog (line 473).
   const [dialogFor, setDialogFor] = useState<BrandSpec | null>(null);
 
-  // Qt AccountsPage._timer at 3000 ms (line 387) polls
-  // agent_runtime_manager.status() and reconciles each card. We keep the
-  // poll loop wired up; the actual status fetch is a placeholder until the
-  // Tauri command exists.
+  // Poll the Rust accounts_status command and reconcile each card's
+  // `connected` flag against what's actually saved on disk / detected
+  // on the system. Runs once on mount + every 3s after, mirroring the
+  // legacy Qt 3000ms timer (accounts_page.py:387). Each card's
+  // testText/testOk are LOCAL (not derived from backend) so the probe
+  // line survives across polls.
+  function reconcile(status: AccountsStatus) {
+    setCards(prev => {
+      const next = { ...prev };
+      const flag = (key: string, connected: boolean) => {
+        const cur = next[key];
+        if (!cur) return;
+        if (cur.connected !== connected) {
+          // When backend flips us to disconnected, clear stale test line.
+          next[key] = {
+            ...cur,
+            connected,
+            ...(connected ? {} : { testText: "", testOk: null }),
+          };
+        }
+      };
+      flag("anthropic_api", status.anthropic_api_key);
+      flag("openai_api",    status.openai_api_key);
+      flag("claude_subscription", status.claude_cli);
+      flag("codex_subscription",  status.codex_cli);
+      return next;
+    });
+  }
+
   useEffect(() => {
-    const id = window.setInterval(() => {
-      // Placeholder: agent_runtime_manager.status() bridge not yet wired.
-      // Future: invoke<TauriStatus>("accounts_status").then(reconcile).
-    }, 3000);
-    return () => window.clearInterval(id);
+    let dead = false;
+    const tick = async () => {
+      try {
+        const s = await invoke<AccountsStatus>("accounts_status");
+        if (!dead) reconcile(s);
+      } catch (e) {
+        console.error("accounts_status failed", e);
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 3000);
+    return () => { dead = true; window.clearInterval(id); };
   }, []);
 
   function setCardState(key: string, patch: Partial<CardState>) {
@@ -461,56 +505,71 @@ export default function AccountsPage() {
 
   function handleConnect(spec: BrandSpec) {
     if (spec.kind === "subscription") {
-      // Qt: launches claude /login or codex /login in a console, then
-      // shows an info dialog (lines 459-471). We surface the same
-      // user-facing message; the real OAuth handoff is a Tauri TODO.
+      // Subscription routes need an OAuth handoff to the corresponding
+      // CLI (claude login / codex login). The PySide6 app shelled out
+      // to a console; the Tauri rewrite hasn't wired that yet — until
+      // it does, point the user at the manual command so they can get
+      // unblocked. The 3-second poll picks up the credentials file
+      // automatically once the CLI finishes its OAuth flow.
+      const cmd = spec.backend === "claude_cli" ? "claude /login" : "codex login";
       window.alert(
-        `A console window opened for ${spec.name}'s OAuth flow.\n` +
-          `Complete it in your browser. The card flips to green once ` +
-          `the credentials file appears.`,
+        `Run this in a terminal to sign in:\n\n  ${cmd}\n\n` +
+        `The card will flip to green within 3 seconds after the CLI saves its credentials.`
       );
-      // Optimistic flip — real flow waits for _refresh polling.
-      setCardState(spec.key, { connected: true, testText: "", testOk: null });
     } else {
       setDialogFor(spec);
     }
   }
 
-  function handleDisconnect(spec: BrandSpec) {
-    // Qt: agent_runtime_manager.claude_logout / codex_logout /
-    // delete_stored_secret depending on kind (lines 485-491).
-    setCardState(spec.key, { connected: false, testText: "", testOk: null });
+  async function handleDisconnect(spec: BrandSpec) {
+    try {
+      if (spec.kind === "api" && spec.envName) {
+        await invoke("accounts_delete_secret", { name: spec.envName });
+      } else {
+        // Subscription disconnect — we don't auto-delete the CLI
+        // credentials file (that's the user's CLI to manage). Just
+        // surface what they need to do manually.
+        const cmd = spec.backend === "claude_cli" ? "claude /logout" : "codex logout";
+        window.alert(`Run this in a terminal to sign out:\n\n  ${cmd}`);
+        return;
+      }
+      // Optimistic flip — next poll confirms.
+      setCardState(spec.key, { connected: false, testText: "", testOk: null });
+    } catch (e: any) {
+      window.alert(`Disconnect failed: ${e?.message ?? e}`);
+    }
   }
 
-  function handleDialogSave(_value: string) {
+  async function handleDialogSave(value: string) {
     if (!dialogFor) return;
-    // Qt: agent_runtime_manager.save_stored_secret(env_name, value)
-    // (line 475). _value is already trimmed inside ApiKeyDialog and
-    // will be persisted once the native save command lands.
-    setCardState(dialogFor.key, { connected: true, testText: "", testOk: null });
+    if (!dialogFor.envName) { setDialogFor(null); return; }
+    try {
+      await invoke("accounts_save_api_key", { name: dialogFor.envName, value });
+      // Optimistic flip — the 3s poll will confirm.
+      setCardState(dialogFor.key, { connected: true, testText: "", testOk: null });
+    } catch (e: any) {
+      window.alert(`Save failed: ${e?.message ?? e}`);
+    }
     setDialogFor(null);
   }
 
-  function handleTest(spec: BrandSpec) {
-    // Qt: AccountsPage._test starts a daemon thread that calls
-    // quick_test(backend_name) and re-emits via _TestResultBridge
-    // (lines 494-504). Front-end visible state-machine: testing=True ⇒
-    // "Running probe…" with #dcb0ff, then ok/fail result line.
+  async function handleTest(spec: BrandSpec) {
     setCardState(spec.key, { testing: true, testText: "", testOk: null });
-    window.setTimeout(() => {
-      // Placeholder probe — real backend returns { ok, detail, elapsed_ms }.
-      const elapsed = 300 + Math.floor(Math.random() * 500);
-      const ok = true;
-      const detail = ok ? "Round-trip OK" : "Auth failed";
-      const prefix = ok ? "✓" : "✗";
-      // Qt format: f"{prefix}  {detail}  ·  {elapsed_ms} ms" (line 297) —
-      // note the double space after the prefix.
+    try {
+      const r = await invoke<ProbeResult>("accounts_test_probe", { backend: spec.backend });
+      const prefix = r.ok ? "✓" : "✗";
       setCardState(spec.key, {
         testing: false,
-        testText: `${prefix}  ${detail}  ·  ${elapsed} ms`,
-        testOk: ok,
+        testText: `${prefix}  ${r.detail}  ·  ${r.elapsed_ms} ms`,
+        testOk: r.ok,
       });
-    }, 600);
+    } catch (e: any) {
+      setCardState(spec.key, {
+        testing: false,
+        testText: `✗  ${String(e?.message ?? e)}`,
+        testOk: false,
+      });
+    }
   }
 
   return (

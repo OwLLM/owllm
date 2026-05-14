@@ -14,6 +14,7 @@
 // port       = deterministic 10500 + sorted index, so the same set of
 //              files always assigns the same ports across runs.
 
+use crate::accounts;
 use crate::paths;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -26,44 +27,85 @@ pub struct ModelInfo {
     /// Size of the GGUF in MiB. Useful for the Models page so the
     /// user can sort by disk footprint without a separate stat call.
     pub size_mib: Option<u64>,
+    /// Which backend serves this model. "local" → llama-server.exe
+    /// on the assigned port; "anthropic" → api.anthropic.com (needs
+    /// ANTHROPIC_API_KEY); "openai" → api.openai.com (needs
+    /// OPENAI_API_KEY). The React dispatch loop branches on this to
+    /// choose the right endpoint + request shape.
+    #[serde(default)]
+    pub provider: String,
 }
 
 #[tauri::command]
 pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
-    let root = match paths::llm_root() {
-        Some(r) => r,
-        None => return Ok(Vec::new()),
-    };
-    let models_dir = root.join("models");
-    if !models_dir.is_dir() {
-        return Ok(Vec::new());
+    let mut out: Vec<ModelInfo> = Vec::new();
+
+    // Local GGUFs first — these are what the running server actually
+    // ships today. The Server tab can start any of them.
+    if let Some(root) = paths::llm_root() {
+        let models_dir = root.join("models");
+        if models_dir.is_dir() {
+            let mut found: Vec<PathBuf> = Vec::new();
+            walk_gguf(&models_dir, &mut found, 0);
+            found.sort();
+            let base_port: u16 = 10500;
+            for (i, path) in found.into_iter().enumerate() {
+                let id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let size_mib = std::fs::metadata(&path)
+                    .ok()
+                    .map(|m| m.len() / 1024 / 1024);
+                out.push(ModelInfo {
+                    model_id: id,
+                    port: Some(base_port.saturating_add(i as u16)),
+                    base_model: Some(path.to_string_lossy().into_owned()),
+                    size_mib,
+                    provider: "local".to_string(),
+                });
+            }
+        }
     }
 
-    let mut found: Vec<PathBuf> = Vec::new();
-    walk_gguf(&models_dir, &mut found, 0);
+    // Cloud models — gated on the matching API key being saved on this
+    // machine. Without the key the dispatch loop can't authenticate, so
+    // showing the option would be a footgun.
+    let status = accounts::accounts_status();
+    if status.anthropic_api_key {
+        for id in [
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5-20251001",
+        ] {
+            out.push(ModelInfo {
+                model_id: id.to_string(),
+                port: None,
+                base_model: None,
+                size_mib: None,
+                provider: "anthropic".to_string(),
+            });
+        }
+    }
+    if status.openai_api_key {
+        for id in [
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-4.1",
+            "gpt-4o",
+            "gpt-4o-mini",
+        ] {
+            out.push(ModelInfo {
+                model_id: id.to_string(),
+                port: None,
+                base_model: None,
+                size_mib: None,
+                provider: "openai".to_string(),
+            });
+        }
+    }
 
-    found.sort();
-    let base_port: u16 = 10500;
-    let out = found
-        .into_iter()
-        .enumerate()
-        .map(|(i, path)| {
-            let id = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("unknown")
-                .to_string();
-            let size_mib = std::fs::metadata(&path)
-                .ok()
-                .map(|m| m.len() / 1024 / 1024);
-            ModelInfo {
-                model_id: id,
-                port: Some(base_port.saturating_add(i as u16)),
-                base_model: Some(path.to_string_lossy().into_owned()),
-                size_mib,
-            }
-        })
-        .collect();
     Ok(out)
 }
 

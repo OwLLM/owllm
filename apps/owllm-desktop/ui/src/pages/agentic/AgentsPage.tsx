@@ -32,6 +32,9 @@ type ModelInfo = {
   port: number | null;
   base_model: string | null;
   size_mib: number | null;
+  /// "local" | "anthropic" | "openai". Drives which endpoint the
+  /// dispatch loop hits for this model.
+  provider: string;
 };
 
 // ---------- Domain types ----------
@@ -469,11 +472,17 @@ function TeamInfoCard({
             ? `(use server model · ${serverModelId})`
             : "(use server model — start one on the Server tab)"}
         </option>
-        {models.map(m => (
-          <option key={m.model_id} value={m.model_id}>
-            {m.model_id}{m.size_mib != null ? `  ·  ${Math.round(m.size_mib / 100) / 10} GiB` : ""}
-          </option>
-        ))}
+        {models.map(m => {
+          const tag = m.provider === "anthropic" ? "  ·  Anthropic"
+                    : m.provider === "openai"    ? "  ·  OpenAI"
+                    : m.size_mib != null         ? `  ·  ${Math.round(m.size_mib / 100) / 10} GiB`
+                    : "  ·  local";
+          return (
+            <option key={`${m.provider}:${m.model_id}`} value={m.model_id}>
+              {m.model_id}{tag}
+            </option>
+          );
+        })}
       </select>
     </div>
   );
@@ -1245,11 +1254,17 @@ function OrchestratorPane({
               ? `(use team / server model · ${serverState.model_id})`
               : "(use team / server model — none running)"}
           </option>
-          {models.map(m => (
-            <option key={m.model_id} value={m.model_id}>
-              {m.model_id}{m.size_mib != null ? `  ·  ${Math.round(m.size_mib / 100) / 10} GiB` : ""}
-            </option>
-          ))}
+          {models.map(m => {
+            const tag = m.provider === "anthropic" ? "  ·  Anthropic"
+                      : m.provider === "openai"    ? "  ·  OpenAI"
+                      : m.size_mib != null         ? `  ·  ${Math.round(m.size_mib / 100) / 10} GiB`
+                      : "  ·  local";
+            return (
+              <option key={`${m.provider}:${m.model_id}`} value={m.model_id}>
+                {m.model_id}{tag}
+              </option>
+            );
+          })}
         </select>
       </div>
       <div data-ui="VoiceHost" style={{ padding:"0 12px 8px", display:"flex", alignItems:"center", gap:8 }}>
@@ -1427,15 +1442,27 @@ function parseDispatches(text: string, team: Team, exclude: string): Dispatch[] 
 
 type StreamHandler = (delta: string) => void;
 
+/// Route the SSE chat-completion to whichever backend serves the
+/// model. The signature stays the same so the dispatch loop doesn't
+/// care which provider it's talking to — only the resolver layer
+/// (modelFor + provider lookup) does.
 async function streamChatCompletion(
   port: number,
   modelId: string,
+  provider: string,
   systemPrompt: string,
   userMessage: string,
   temperature: number,
   signal: AbortSignal,
   onDelta: StreamHandler,
 ): Promise<string> {
+  if (provider === "anthropic") {
+    return streamAnthropic(modelId, systemPrompt, userMessage, temperature, signal, onDelta);
+  }
+  if (provider === "openai") {
+    return streamOpenAI(modelId, systemPrompt, userMessage, temperature, signal, onDelta);
+  }
+  // Local llama-server. OpenAI-compatible SSE.
   const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1450,6 +1477,106 @@ async function streamChatCompletion(
     }),
     signal,
   });
+  return consumeOpenAISse(resp, onDelta);
+}
+
+/// Anthropic Messages API streaming. Format:
+///   event: content_block_delta
+///   data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"…"}}
+/// We only care about text_delta entries; everything else (ping, stop
+/// events) is ignored for plain-text streaming.
+async function streamAnthropic(
+  modelId: string,
+  systemPrompt: string,
+  userMessage: string,
+  temperature: number,
+  signal: AbortSignal,
+  onDelta: StreamHandler,
+): Promise<string> {
+  const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
+  if (!key) throw new Error("No ANTHROPIC_API_KEY saved — set it on the Accounts page.");
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({
+      model: modelId,
+      max_tokens: 4096,
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }],
+      stream: true,
+      temperature,
+    }),
+    signal,
+  });
+  if (!resp.ok || !resp.body) {
+    throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
+  }
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let acc = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).replace(/\r$/, "");
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const body = line.slice(5).trim();
+      if (!body) continue;
+      try {
+        const j = JSON.parse(body);
+        if (j?.type === "content_block_delta") {
+          const txt: string | undefined = j?.delta?.text;
+          if (typeof txt === "string" && txt) { acc += txt; onDelta(txt); }
+        }
+      } catch { /* skip malformed chunk */ }
+    }
+  }
+  return acc;
+}
+
+/// OpenAI chat-completions streaming. Same SSE shape as llama-server.
+async function streamOpenAI(
+  modelId: string,
+  systemPrompt: string,
+  userMessage: string,
+  temperature: number,
+  signal: AbortSignal,
+  onDelta: StreamHandler,
+): Promise<string> {
+  const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
+  if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
+  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      stream: true,
+      temperature,
+    }),
+    signal,
+  });
+  return consumeOpenAISse(resp, onDelta);
+}
+
+/// Shared SSE consumer for OpenAI-compatible endpoints (llama-server,
+/// api.openai.com). Both emit `data: { choices: [{ delta: { content } }] }`.
+async function consumeOpenAISse(resp: Response, onDelta: StreamHandler): Promise<string> {
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
   }
@@ -1861,9 +1988,12 @@ export default function AgentsPage() {
       const sys = activeTeam
         ? `You are the orchestrator of '${activeTeam.display}'. Answer the user concisely.`
         : "You are the team's orchestrator.";
+      const supModelId = effectiveTeamModel.trim() || (serverState.model_id ?? "local");
+      const supProvider = providerFor(supModelId);
       await streamChatCompletion(
         serverState.port,
-        serverState.model_id ?? "local",
+        supModelId,
+        supProvider,
         sys,
         text,
         0.5,
@@ -1918,6 +2048,16 @@ export default function AgentsPage() {
     setPerAgentModel(new Map());
   };
 
+  // Look up the provider for a resolved model id. Local llama-server
+  // models always serve themselves; cloud models match by id. Returns
+  // "local" for anything we don't recognize so the dispatch loop falls
+  // back to the localhost path instead of trying to call a cloud
+  // endpoint we have no key for.
+  const providerFor = (modelId: string): string => {
+    const m = models.find(x => x.model_id === modelId);
+    return m?.provider || "local";
+  };
+
   const bridgeOn = useMemo(() => {
     if (!selectedProject) return false;
     const t = bridges.telegram;
@@ -1938,8 +2078,14 @@ export default function AgentsPage() {
     setRunError(null);
     const text = goal.trim();
     if (!text) return;
-    if (!serverState.running || !serverState.port) {
-      setRunError("No model server is running. Go to the Server tab and start a model first.");
+    // Require the local server only when the orchestrator (or any
+    // dispatched specialist) actually resolves to a local model. Cloud-
+    // only teams should run without one.
+    const orchModelId = activeTeam ? modelFor(findOrchestratorSpec(activeTeam)!.name) : "";
+    const needsLocal = providerFor(orchModelId) === "local"
+      || (activeTeam?.agents ?? []).some(a => providerFor(modelFor(a.name)) === "local");
+    if (needsLocal && (!serverState.running || !serverState.port)) {
+      setRunError("This team uses local model(s) but no local server is running. Start one on the Server tab.");
       return;
     }
     if (!activeTeam || activeTeam.agents.length === 0) {
@@ -1957,7 +2103,8 @@ export default function AgentsPage() {
     abortRef.current = ctrl;
 
     const orch = findOrchestratorSpec(activeTeam)!;
-    const port = serverState.port;
+    // Cloud calls don't need a port; only the local fallback does.
+    const port = serverState.port ?? 0;
 
     // Anchor the goal in the user log first.
     appendLog("you", { role: "you", color: "#9ad9ff", text });
@@ -1973,8 +2120,10 @@ export default function AgentsPage() {
       setActiveAgent(orch.name);
       const orchPrompt = buildOrchestratorPrompt(activeTeam, roleByName, orch);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+      const orchModel = modelFor(orch.name);
       const orchReply = await streamChatCompletion(
-        port, modelFor(orch.name), orchPrompt, text, tempFor(orch, 0.4), ctrl.signal,
+        port, orchModel, providerFor(orchModel),
+        orchPrompt, text, tempFor(orch, 0.4), ctrl.signal,
         (delta) => streamLog(orch.name, delta),
       );
 
@@ -2010,8 +2159,10 @@ export default function AgentsPage() {
         // user can see what was asked of them.
         appendLog(spec.name, { role: "dispatch", color: "#9aa0a6", text: `📩 ${d.instruction}` });
         appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
+        const specModel = modelFor(spec.name);
         const specText = await streamChatCompletion(
-          port, modelFor(spec.name), specPrompt, d.instruction, tempFor(spec, 0.5), ctrl.signal,
+          port, specModel, providerFor(specModel),
+          specPrompt, d.instruction, tempFor(spec, 0.5), ctrl.signal,
           (delta) => streamLog(spec.name, delta),
         );
         specialistReplies.push({ name: spec.name, text: specText.trim() });
@@ -2035,8 +2186,11 @@ export default function AgentsPage() {
         "Now write the FINAL answer for the user. Be concise, structured, and quote the relevant specialist when useful. Do not dispatch again.",
       ].join("\n");
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+      const finalModel = modelFor(orch.name);
       const finalReply = await streamChatCompletion(
-        port, modelFor(orch.name), buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput, tempFor(orch, 0.4), ctrl.signal,
+        port, finalModel, providerFor(finalModel),
+        buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput,
+        tempFor(orch, 0.4), ctrl.signal,
         (delta) => streamLog(orch.name, delta),
       );
       setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim() }]);

@@ -11,6 +11,7 @@
 // Each command lives in its own module so this file stays a wiring
 // manifest and nothing more.
 
+mod accounts;
 mod agents;
 mod bridges;
 mod code;
@@ -47,6 +48,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            accounts::accounts_status,
+            accounts::accounts_save_api_key,
+            accounts::accounts_delete_secret,
+            accounts::accounts_get_secret,
+            accounts::accounts_test_probe,
             agents::list_team_templates,
             agents::list_agent_roles,
             agents::list_skill_packs,

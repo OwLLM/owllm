@@ -108,6 +108,18 @@ type AgentDef = {
   builtIn: boolean;
   isSkill?: boolean;
   canDispatch?: boolean;
+  /// Built-in tools the agent is allowed to call. `null` (or absent)
+  /// in the role yaml means "all builtins"; we map that to undefined
+  /// so the UI can render "All builtins".
+  tools?: string[] | null;
+  /// MCP tools (post-namespacing). Same null semantics as `tools`.
+  mcpTools?: string[] | null;
+  systemPrompt?: string;
+  temperature?: number;
+  defaultModelId?: string;
+  /// For SKILL.md packs: path on disk to the SKILL.md file so the
+  /// Studio "Reveal in Finder" affordance can resolve it.
+  path?: string;
 };
 const AGENTS_FALLBACK: AgentDef[] = [];   // populated at mount from list_agent_roles
 
@@ -768,6 +780,75 @@ function AgentCard({
   );
 }
 
+// Helpers for AgentDetailPanel — chip row + small stat tile.
+
+type ChipState =
+  | { kind: "all" }    // unrestricted (allowlist is null)
+  | { kind: "empty" }  // explicit []  (nothing granted)
+  | { kind: "list"; items: string[] };
+
+function chipsFromAllowlist(list: string[] | null | undefined): ChipState {
+  if (list === null || list === undefined) return { kind: "all" };
+  if (list.length === 0) return { kind: "empty" };
+  return { kind: "list", items: list };
+}
+
+function ChipRow({ chips, empty, allText, accent }: {
+  chips: ChipState;
+  empty: string;
+  allText: string;
+  accent: string;
+}) {
+  const text = (s: string, c: string) => ({
+    background: `rgba(${hexToRgb(accent)},0.10)`,
+    color: c,
+    border: `1px solid rgba(${hexToRgb(accent)},0.30)`,
+    borderRadius: 999,
+    padding: "3px 10px",
+    fontSize: 11, fontWeight: 600,
+    fontFamily: "Consolas, monospace",
+    display: "inline-flex", alignItems: "center", gap: 4,
+  });
+  if (chips.kind === "all") {
+    return <div style={{ fontSize: 12, color: "#9aa0a6", fontStyle: "italic" }}>{allText}</div>;
+  }
+  if (chips.kind === "empty") {
+    return <div style={{ fontSize: 12, color: "#9aa0a6", fontStyle: "italic" }}>{empty}</div>;
+  }
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {chips.items.map(t => (
+        <span key={t} style={text(t, accent)}>{t}</span>
+      ))}
+    </div>
+  );
+}
+
+function hexToRgb(hex: string): string {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `${r},${g},${b}`;
+}
+
+function SmallStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{
+      background: "rgba(255,255,255,0.04)",
+      border: "1px solid rgba(255,255,255,0.06)",
+      borderRadius: 8, padding: "8px 10px",
+      minWidth: 0,
+    }}>
+      <div style={{ fontSize: 10, color: "#9aa0a6", letterSpacing: 0.6, textTransform: "uppercase" }}>{label}</div>
+      <div style={{
+        fontSize: 12, color: "#dadcdf", marginTop: 4,
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+      }}>{value}</div>
+    </div>
+  );
+}
+
 // AgentDetailPanel â€” mirrors agent_studio_page.py:426 _EditorPanel
 // at a stub level. The full editor (name/desc/system-prompt/tools/
 // voice/MCP) needs /v1/agents endpoints to be useful; for now we
@@ -849,7 +930,16 @@ function AgentDetailPanel({
           background: "rgba(74,108,255,0.10)",
           borderRadius: 8, padding: "8px 12px", fontSize: 13,
         }}>
-          ðŸ”’  This is a built-in agent. To modify it, click <b>Duplicate</b> first.
+          🔒  Built-in role from LLM/core/agents/roles/. Click <b>Duplicate</b> first to make your own copy.
+        </div>
+      )}
+      {agent.isSkill && (
+        <div style={{
+          color: "#a0e88a",
+          background: "rgba(76,175,80,0.10)",
+          borderRadius: 8, padding: "8px 12px", fontSize: 13,
+        }}>
+          📚  SKILL.md pack from LLM/data/skills/. Body becomes the system prompt at runtime.
         </div>
       )}
 
@@ -862,7 +952,66 @@ function AgentDetailPanel({
         border: "1px solid rgba(255,255,255,0.06)",
         color: "#dadcdf",
         borderRadius: 8, padding: "10px 12px", fontSize: 13,
-      }}>{agent.description}</div>
+      }}>{agent.description || "(no description)"}</div>
+
+      {/* Skills row — tool_allowlist + mcp_allowlist. The Qt source
+          paints these as chip rows under the "Permissions" section
+          of the editor (agent_studio_page.py ~line 1280). */}
+      <div style={{
+        color: "#9aa0a6", fontSize: 13, fontWeight: 600,
+        letterSpacing: 0.6, textTransform: "uppercase", marginTop: 4,
+      }}>Built-in tools</div>
+      <ChipRow
+        chips={chipsFromAllowlist(agent.tools)}
+        empty="No built-in tools assigned."
+        allText="All built-in tools (no restriction)."
+        accent="#7fdfff"
+      />
+
+      <div style={{
+        color: "#9aa0a6", fontSize: 13, fontWeight: 600,
+        letterSpacing: 0.6, textTransform: "uppercase", marginTop: 4,
+      }}>MCP tools</div>
+      <ChipRow
+        chips={chipsFromAllowlist(agent.mcpTools)}
+        empty="No MCP tools assigned."
+        allText="All available MCP tools (no restriction)."
+        accent="#a0e88a"
+      />
+
+      <div style={{
+        display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
+        gap: 10, marginTop: 4,
+      }}>
+        <SmallStat label="Can dispatch" value={agent.canDispatch ? "Yes" : "No"} />
+        <SmallStat label="Temperature" value={agent.temperature != null ? agent.temperature.toFixed(2) : "auto"} />
+        <SmallStat label="Default model" value={agent.defaultModelId || "auto"} />
+      </div>
+
+      {agent.systemPrompt ? (
+        <details style={{
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.06)",
+          borderRadius: 8, padding: "8px 12px",
+        }}>
+          <summary style={{
+            cursor: "pointer", fontSize: 12, fontWeight: 600,
+            color: "#9aa0a6", letterSpacing: 0.6, textTransform: "uppercase",
+          }}>System prompt ({agent.systemPrompt.length.toLocaleString()} chars)</summary>
+          <pre style={{
+            margin: "8px 0 0", whiteSpace: "pre-wrap",
+            fontFamily: "Consolas, monospace", fontSize: 11,
+            color: "#cbd2e0", maxHeight: 280, overflow: "auto",
+            lineHeight: 1.5,
+          }}>{agent.systemPrompt}</pre>
+        </details>
+      ) : null}
+
+      {agent.path ? (
+        <div style={{ fontSize: 11, color: "#6c7280", fontFamily: "Consolas, monospace", wordBreak: "break-all" }}>
+          📁 {agent.path}
+        </div>
+      ) : null}
 
       <div style={{ flex: 1 }} />
 
@@ -907,9 +1056,10 @@ function AgentDetailPanel({
 // ---------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------
-// Backend shapes — match Rust agents::TeamTemplate / AgentRole.
+// Backend shapes — match Rust agents::TeamTemplate / AgentRole / SkillPack.
 type TeamTemplateBackend = { id: string; path: string; built_in: boolean; data: any };
 type AgentRoleBackend     = { id: string; path: string; built_in: boolean; data: any };
+type SkillPackBackend     = { id: string; path: string; dir: string; frontmatter: any; body: string };
 
 function toTeam(t: TeamTemplateBackend): Team {
   const d = t.data ?? {};
@@ -931,12 +1081,50 @@ function toTeam(t: TeamTemplateBackend): Team {
 }
 function toAgentDef(r: AgentRoleBackend): AgentDef {
   const d = r.data ?? {};
+  // tool_allowlist / mcp_allowlist are arrays in the yaml; absent
+  // means "no restriction". My yaml_lite parser leaves the field out
+  // entirely when the source yaml omits it, so we preserve `null`
+  // (= unrestricted) vs `[]` (= no tools).
+  const tools = Array.isArray(d.tool_allowlist) ? d.tool_allowlist : (d.tool_allowlist === undefined ? null : []);
+  const mcp   = Array.isArray(d.mcp_allowlist)  ? d.mcp_allowlist  : (d.mcp_allowlist  === undefined ? null : []);
   return {
     name: d.name ?? r.id,
     icon: d.icon ?? "owl:owl_asssitant",
     description: d.description ?? "",
     builtIn: r.built_in,
     canDispatch: d.can_dispatch === true,
+    tools,
+    mcpTools: mcp,
+    systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
+    temperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
+    defaultModelId: typeof d.default_model_id === "string" ? d.default_model_id : undefined,
+    path: r.path,
+  };
+}
+
+function skillToAgentDef(s: SkillPackBackend): AgentDef {
+  const fm = s.frontmatter ?? {};
+  // SKILL.md "tools:" is an Anthropic-style list (CamelCase). We
+  // surface them as-is — the runtime alias map (skill_sources.py)
+  // happens server-side.
+  const tools = Array.isArray(fm.tools) ? fm.tools.map(String) : [];
+  const mcp   = Array.isArray(fm.mcp_tools) ? fm.mcp_tools.map(String) : [];
+  // No iconography in SKILL.md frontmatter usually; fall back to the
+  // generic skill emoji rendered inline if no owl: ref is present.
+  const icon = typeof fm.icon === "string" && fm.icon.length > 0 ? fm.icon : "owl:owl_asssitant";
+  return {
+    name: fm.name ?? s.id,
+    icon,
+    description: fm.description ?? "",
+    builtIn: false,         // skills live in user-writable data/
+    isSkill: true,
+    canDispatch: fm.leader === true,
+    tools,
+    mcpTools: mcp,
+    systemPrompt: s.body,   // the markdown body IS the system prompt
+    temperature: typeof fm.temperature === "number" ? fm.temperature : undefined,
+    defaultModelId: typeof fm.model === "string" ? fm.model : undefined,
+    path: s.path,
   };
 }
 
@@ -955,13 +1143,21 @@ export default function StudioPage() {
     let dead = false;
     (async () => {
       try {
-        const [rawTeams, rawAgents] = await Promise.all([
+        const [rawTeams, rawAgents, rawSkills] = await Promise.all([
           invoke<TeamTemplateBackend[]>("list_team_templates"),
           invoke<AgentRoleBackend[]>("list_agent_roles"),
+          invoke<SkillPackBackend[]>("list_skill_packs"),
         ]);
         if (dead) return;
         setTeams(rawTeams.map(toTeam));
-        setAgents(rawAgents.map(toAgentDef));
+        // Roles + SKILL.md packs both surface as agent cards. Roles
+        // come first (built-in identities), skills follow (user-
+        // installed capabilities). Each carries its own provenance
+        // flags so the AgentDetailPanel can label them.
+        setAgents([
+          ...rawAgents.map(toAgentDef),
+          ...rawSkills.map(skillToAgentDef),
+        ]);
       } catch (e) {
         if (!dead) setLoadError(String(e));
       }

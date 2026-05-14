@@ -41,8 +41,27 @@ pub struct AgentRole {
     pub path: String,
     pub built_in: bool,
     /// Full parsed YAML as JSON (Value). Same opacity rationale as
-    /// TeamTemplate.data.
+    /// TeamTemplate.data — Studio reads the shape directly.
     pub data: JsonValue,
+}
+
+/// SKILL.md-style agent definition (OpenClaw / Anthropic Claude
+/// Skills format). Lives in `LLM/data/skills/<pack>/SKILL.md`. Parses
+/// YAML frontmatter + Markdown body — the body becomes the system
+/// prompt; the frontmatter carries name, description, tools[],
+/// mcp_tools[], icon, model, temperature, leader.
+#[derive(Serialize, Clone)]
+pub struct SkillPack {
+    /// Directory name on disk (e.g. `anthropics__pdf`).
+    pub id: String,
+    /// Full path to the SKILL.md file.
+    pub path: String,
+    /// Path to the pack directory (contains SKILL.md + resources).
+    pub dir: String,
+    /// The frontmatter fields, opaque JSON for the UI side.
+    pub frontmatter: JsonValue,
+    /// Markdown body (the system prompt). May be long.
+    pub body: String,
 }
 
 #[tauri::command]
@@ -58,6 +77,58 @@ pub async fn list_team_templates() -> Result<Vec<TeamTemplate>, String> {
     // Stable order so the UI's category grouping is deterministic.
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
+}
+
+#[tauri::command]
+pub async fn list_skill_packs() -> Result<Vec<SkillPack>, String> {
+    let Some(root) = paths::llm_root() else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    let skills_root = root.join("data").join("skills");
+    let Ok(read) = std::fs::read_dir(&skills_root) else { return Ok(Vec::new()) };
+    for entry in read.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() { continue; }
+        // The shallow clone of upstream repos lives under
+        // data/skills/_remote/ — skip that container since the
+        // individual skills are listed at the top level.
+        if dir.file_name().and_then(|n| n.to_str()) == Some("_remote") { continue; }
+        let md = dir.join("SKILL.md");
+        if !md.is_file() { continue; }
+        let raw = match std::fs::read_to_string(&md) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let (frontmatter, body) = split_skill_md(&raw);
+        let id = dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+        out.push(SkillPack {
+            id,
+            path: md.to_string_lossy().into_owned(),
+            dir: dir.to_string_lossy().into_owned(),
+            frontmatter,
+            body,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+/// Split a SKILL.md document into its YAML frontmatter (as JSON) and
+/// the markdown body. Frontmatter is enclosed in `---` lines at the
+/// top of the file. Returns an empty object + the whole file as body
+/// when no frontmatter is found.
+fn split_skill_md(raw: &str) -> (JsonValue, String) {
+    let trimmed = raw.trim_start_matches('\u{feff}'); // strip BOM
+    if let Some(rest) = trimmed.strip_prefix("---") {
+        // find the next `---` line
+        if let Some(end) = rest.find("\n---") {
+            let fm = &rest[..end].trim_start_matches('\n');
+            let after = &rest[end + 4..]; // skip "\n---"
+            let body = after.trim_start_matches('\n').to_string();
+            let parsed = yaml_lite_to_json(fm);
+            return (parsed, body);
+        }
+    }
+    (JsonValue::Object(Default::default()), raw.to_string())
 }
 
 #[tauri::command]

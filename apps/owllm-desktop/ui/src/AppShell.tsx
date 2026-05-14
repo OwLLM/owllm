@@ -15,6 +15,7 @@
 // modules.ts plus a directory under pages/.
 import React, { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ALL_MODULES,
   ADVANCED,
@@ -23,6 +24,76 @@ import {
   ModeId,
   PageDef,
 } from "./core/modules";
+
+// Frameless window — `decorations: false` in tauri.conf.json. We
+// paint our own drag region (the ModeBar) and our own min/max/close
+// + 8 resize hot regions. Mouse handlers call Tauri's APIs directly
+// — relying on the `data-tauri-drag-region` attribute alone has
+// been unreliable across rebuilds, so we wire the handlers
+// explicitly and trust nothing else.
+
+function startDrag(e: React.MouseEvent) {
+  if (e.button !== 0) return;
+  // Don't drag when clicking a button / interactive element.
+  if ((e.target as HTMLElement).closest("button, input, select, textarea, a")) return;
+  e.preventDefault();
+  getCurrentWindow().startDragging().catch(() => { /* not in Tauri ctx */ });
+}
+
+type ResizeDir =
+  | "North" | "South" | "East" | "West"
+  | "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
+
+function ResizeEdges() {
+  const start = (dir: ResizeDir) => (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    (getCurrentWindow() as any).startResizeDragging(dir).catch?.(() => {});
+  };
+  const T = 6;   // thickness of edge bands
+  const C = 14;  // size of corner squares
+  // position:fixed anchors directly to the viewport instead of
+  // depending on a parent wrapper that might be sized wrong. Very
+  // high z-index so nothing in the page can ever cover the handles.
+  const base: React.CSSProperties = { position: "fixed", zIndex: 10000, background: "transparent" };
+  return (
+    <>
+      <div onMouseDown={start("North")}      style={{ ...base, top: 0, left: C, right: C, height: T, cursor: "ns-resize" }} />
+      <div onMouseDown={start("South")}      style={{ ...base, bottom: 0, left: C, right: C, height: T, cursor: "ns-resize" }} />
+      <div onMouseDown={start("West")}       style={{ ...base, left: 0, top: C, bottom: C, width: T, cursor: "ew-resize" }} />
+      <div onMouseDown={start("East")}       style={{ ...base, right: 0, top: C, bottom: C, width: T, cursor: "ew-resize" }} />
+      <div onMouseDown={start("NorthWest")}  style={{ ...base, top: 0, left: 0,  width: C, height: C, cursor: "nwse-resize" }} />
+      <div onMouseDown={start("NorthEast")}  style={{ ...base, top: 0, right: 0, width: C, height: C, cursor: "nesw-resize" }} />
+      <div onMouseDown={start("SouthWest")}  style={{ ...base, bottom: 0, left: 0,  width: C, height: C, cursor: "nesw-resize" }} />
+      <div onMouseDown={start("SouthEast")}  style={{ ...base, bottom: 0, right: 0, width: C, height: C, cursor: "nwse-resize" }} />
+    </>
+  );
+}
+
+function WindowControls() {
+  const w = getCurrentWindow();
+  const btn: React.CSSProperties = {
+    width: 38, height: 28, border: "none",
+    background: "transparent", color: "#dadcdf",
+    fontSize: 14, cursor: "pointer", userSelect: "none",
+    display: "flex", alignItems: "center", justifyContent: "center",
+  };
+  // position:fixed top-right — anchored to viewport regardless of
+  // what HybridFrame is doing underneath. z-index 10001 so it sits
+  // above the resize corner (which has 10000).
+  return (
+    <div style={{
+      position: "fixed", top: 6, right: 12, zIndex: 10001,
+      display: "flex", gap: 2,
+      background: "rgba(28,34,68,0.85)",
+      borderRadius: 6, padding: "2px 4px",
+    }}>
+      <button title="Minimize" style={btn} onClick={() => w.minimize()}>—</button>
+      <button title="Maximize" style={btn} onClick={() => w.toggleMaximize()}>▢</button>
+      <button title="Close" style={{ ...btn, color: "#ff8080" }} onClick={() => w.close()}>✕</button>
+    </div>
+  );
+}
 
 // Live state shown in the header SysInfoBlock — polled every 2s
 // from the same Rust commands the ServerPage uses, so the two views
@@ -225,11 +296,16 @@ function ModeBar({
   const visibleToggles = TOGGLES.filter(t => installed.includes(t.id as ModeId));
 
   return (
-    <div data-ui="AppHeader" style={{
+    <div data-ui="AppHeader" onMouseDown={startDrag} style={{
       height: 80,
       display: "grid", gridTemplateColumns: "auto 1fr auto",
-      alignItems: "center", padding: "10px 50px 10px 20px", gap: 16,
+      alignItems: "center", padding: "10px 70px 10px 20px", gap: 16,
       background: "#1c2244",
+      // The ModeBar is the visible drag handle — onMouseDown above
+      // delegates to startDragging() unless the click lands on a
+      // button/select. padding-right 70 leaves room for the
+      // window-controls strip in the top-right corner.
+      cursor: "default",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <div data-ui="DarkModeBtn" style={{
@@ -440,24 +516,31 @@ export default function AppShell() {
   const vp = useViewportSize();
 
   return (
-    <HybridFrame outerW={vp.w} outerH={vp.h}>
-      <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-        <ModeBar
-          mode={mode}
-          setMode={handleSetMode}
-          advancedOpen={advancedOpen}
-          setAdvancedOpen={handleSetAdvanced}
-          installed={installed}
-        />
-        <SubTabs
-          pages={visiblePages}
-          activeKey={activeKey}
-          onChange={setActiveKey}
-        />
-        <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
-          {PageBody ? <PageBody /> : null}
+    <>
+      {/* WindowControls + ResizeEdges are position:fixed and anchored
+          to the viewport — sit on top of every page regardless of
+          what HybridFrame does. */}
+      <WindowControls />
+      <ResizeEdges />
+      <HybridFrame outerW={vp.w} outerH={vp.h}>
+        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+          <ModeBar
+            mode={mode}
+            setMode={handleSetMode}
+            advancedOpen={advancedOpen}
+            setAdvancedOpen={handleSetAdvanced}
+            installed={installed}
+          />
+          <SubTabs
+            pages={visiblePages}
+            activeKey={activeKey}
+            onChange={setActiveKey}
+          />
+          <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
+            {PageBody ? <PageBody /> : null}
+          </div>
         </div>
-      </div>
-    </HybridFrame>
+      </HybridFrame>
+    </>
   );
 }

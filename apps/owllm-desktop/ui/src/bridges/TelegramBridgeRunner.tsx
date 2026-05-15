@@ -440,6 +440,43 @@ export default function TelegramBridgeRunner() {
     };
   }, [started, cfg?.bot_token, cfg?.project_id, (cfg?.allowed_chat_ids ?? []).join(",")]);
 
+  // Desktop → Telegram mirror. When the agentic tab dispatches a
+  // chat-appended event with source=desktop for the bound project,
+  // forward the ASSISTANT messages (skip the user's own typing — it
+  // already left their phone) to every chat on the allow-list. Keeps
+  // the phone-side conversation in sync with the desktop sends so the
+  // user sees the full thread on both screens.
+  useEffect(() => {
+    if (!started) return;
+    if (!cfg?.bot_token) return;
+    const allow = Array.isArray(cfg.allowed_chat_ids) ? cfg.allowed_chat_ids : [];
+    if (allow.length === 0) return;
+
+    const handler = async (e: Event) => {
+      const detail = (e as CustomEvent<{ projectId: string; messages: GoalMsg[]; source?: string }>).detail;
+      if (!detail || detail.source !== "desktop") return;
+      if (detail.projectId !== cfg.project_id) return;
+      const msgs = Array.isArray(detail.messages) ? detail.messages : [];
+      for (const m of msgs) {
+        if (!m || !m.text || !m.text.trim()) continue;
+        if (m.role === "you") continue; // user typed on desktop — their phone already has the prompt
+        for (const chatId of allow) {
+          try {
+            await invoke("telegram_send_message", {
+              token: cfg.bot_token,
+              chatId,
+              text: m.text,
+            });
+          } catch (err) {
+            console.error("[telegram] forward desktop reply failed", err);
+          }
+        }
+      }
+    };
+    window.addEventListener("owllm:chat:appended", handler as EventListener);
+    return () => window.removeEventListener("owllm:chat:appended", handler as EventListener);
+  }, [started, cfg?.bot_token, cfg?.project_id, (cfg?.allowed_chat_ids ?? []).join(",")]);
+
   // The component renders nothing visible — it's a pure side-effect
   // host. AppShell mounts it once.
   return null;

@@ -234,7 +234,13 @@ pub async fn claude_cli_complete(
         let mut cmd = Command::new(&exe);
         cmd.arg("--print");
         if auto_approve.unwrap_or(false) {
-            cmd.arg("--dangerously-skip-permissions");
+            // `--permission-mode bypassPermissions` is the canonical
+            // modern flag (see `claude --help`). Older `--dangerously-
+            // skip-permissions` requires a one-time interactive
+            // acknowledgement that --print mode never gets to perform,
+            // so it ends up not applying. permission-mode just sets
+            // the session mode and skips every prompt for this run.
+            cmd.arg("--permission-mode").arg("bypassPermissions");
         }
         if !system_prompt.trim().is_empty() {
             cmd.arg("--append-system-prompt").arg(&system_prompt);

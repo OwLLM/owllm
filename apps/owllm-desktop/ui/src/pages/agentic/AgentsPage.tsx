@@ -2182,11 +2182,35 @@ export default function AgentsPage() {
   const [nodePositions, setNodePositions] = useState<GraphPos | null>(null);
 
   // Super User card chat (separate from the Run/Goal stream so users
-  // can chat alongside a running plan). Auto-approve flag is local-
-  // only for now; the runtime tool-call gate lands when agent
-  // execution does.
+  // can chat alongside a running plan).
   const [supChat, setSupChat] = useState<GoalMsg[]>([]);
-  const [autoApprove, setAutoApprove] = useState<boolean>(false);
+  // Auto-approve flag — persisted per project to localStorage so a
+  // user who checks "auto-approve every tool call" doesn't have to
+  // re-check it after every app restart (which would otherwise
+  // silently revert and the next bot run would stall on permission
+  // prompts).
+  const autoApproveKey = selectedProjectId ? `owllm:autoapprove:${selectedProjectId}` : "";
+  const autoApproveKeyRef = useRef(autoApproveKey);
+  autoApproveKeyRef.current = autoApproveKey;
+  const [autoApprove, setAutoApproveState] = useState<boolean>(() => {
+    if (!autoApproveKey) return false;
+    try { return localStorage.getItem(autoApproveKey) === "1"; } catch { return false; }
+  });
+  useEffect(() => {
+    if (!autoApproveKey) { setAutoApproveState(false); return; }
+    try { setAutoApproveState(localStorage.getItem(autoApproveKey) === "1"); }
+    catch { setAutoApproveState(false); }
+  }, [autoApproveKey]);
+  const setAutoApprove = (v: boolean | ((prev: boolean) => boolean)) => {
+    setAutoApproveState(prev => {
+      const next = typeof v === "function" ? (v as (p: boolean) => boolean)(prev) : v;
+      const k = autoApproveKeyRef.current;
+      if (k) {
+        try { localStorage.setItem(k, next ? "1" : "0"); } catch {}
+      }
+      return next;
+    });
+  };
 
   async function onBrowseProjectFolder() {
     try {
@@ -2627,6 +2651,10 @@ export default function AgentsPage() {
     appendLog(orchKey, replyMsg);
     // Active state — drives the per-node pulse in the canvas.
     setActiveAgent(orchKey);
+    // Track the streamed reply so we can forward it to Telegram once
+    // the stream completes (desktop → phone mirror, opposite direction
+    // of the Telegram → desktop mirror the bridge already does).
+    let streamedReply = "";
     try {
       const sys = activeTeam
         ? `You are the orchestrator of '${activeTeam.display}'. Answer the user concisely.`
@@ -2640,6 +2668,7 @@ export default function AgentsPage() {
         0.5,
         new AbortController().signal,
         (delta) => {
+          streamedReply += delta;
           setSupChat(curr => {
             const out = curr.slice();
             const last = out[out.length - 1];
@@ -2661,6 +2690,22 @@ export default function AgentsPage() {
       appendLog("system", errMsg);
     } finally {
       setActiveAgent(null);
+    }
+    // Dispatch a chat-appended event with source=desktop so the
+    // top-level TelegramBridgeRunner can forward the assistant reply
+    // back to the user's phone. The bridge's listener filters on
+    // source=desktop; AgentsPage's own listener skips it to avoid
+    // double-merging into supChat.
+    if (streamedReply.trim()) {
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+          detail: {
+            projectId: selectedProjectId,
+            messages: [userMsg, { role: orchKey, color: "#ffd97a", text: streamedReply }],
+            source: "desktop",
+          },
+        }));
+      } catch { /* event dispatch failed — desktop UI already shows it, only phone misses */ }
     }
   };
 
@@ -2949,10 +2994,15 @@ export default function AgentsPage() {
   // without waiting for a project reload. The runner has already
   // persisted to chat_json, so the supChat persist effect's next
   // write is just an idempotent round-trip.
+  //
+  // Only handles source=telegram events. Desktop sends are handled
+  // inline by onSupSend / dispatchGoal; dispatching an event for them
+  // and letting THIS listener re-merge would duplicate every reply.
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ projectId: string; messages: GoalMsg[] }>).detail;
+      const detail = (e as CustomEvent<{ projectId: string; messages: GoalMsg[]; source?: string }>).detail;
       if (!detail) return;
+      if (detail.source === "desktop") return;
       if (detail.projectId !== selectedProjectId) return;
       const msgs = Array.isArray(detail.messages) ? detail.messages : [];
       if (msgs.length === 0) return;

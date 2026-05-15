@@ -937,15 +937,76 @@ function TeamCanvas({ width, height, team, roleByName, activeAgent, selectedNode
             />
           );
         })}
-        {nodes.map((n,i) => (
-          <circle key={"h"+i} cx={n.x} cy={n.y} r={n.active?52:38} fill={n.active?"url(#haloActive)":"url(#halo)"} />
-        ))}
-        {nodes.map((n,i) => (
-          <circle key={"d"+i} cx={n.x} cy={n.y} r={22} fill="#3b4a7a" stroke={n.active?"var(--accent)":"rgba(120,220,255,0.6)"} strokeWidth={n.active?2.4:1.6} />
-        ))}
-        {nodes.filter(n=>n.active).map((n,i) => (
-          <circle key={"r"+i} cx={n.x} cy={n.y} r={28} fill="none" stroke="rgba(127,223,255,0.7)" strokeWidth="1.4" />
-        ))}
+        {/* Per-agent halo, tinted by the agent's layer colour so the
+            ring colour the user sees radiating around a disc matches
+            the orbit it sits on. */}
+        {nodes.map((n,i) => {
+          const col = LAYER_COLORS[n.depth % LAYER_COLORS.length];
+          // Active halo is bigger AND pulses with arcPhase so the
+          // currently-working agent visibly "lights up" against its
+          // idle siblings (sin-wave pulse, ~0.7s period).
+          const haloPulse = 0.5 + 0.5 * Math.sin((arcPhase * Math.PI) / 180 * 3);
+          const haloR = n.active ? 46 + 12 * haloPulse : 38;
+          return (
+            <circle
+              key={"h" + i}
+              cx={n.x}
+              cy={n.y}
+              r={haloR}
+              fill="none"
+              stroke={col}
+              strokeOpacity={n.active ? 0.55 + 0.35 * haloPulse : 0.18}
+              strokeWidth={n.active ? 3.2 : 1.4}
+            />
+          );
+        })}
+        {/* Disc + outline coloured by layer. Active agents get a
+            brighter fill (mix toward white) and the layer colour as
+            the outline so "this one is working" reads at a glance. */}
+        {nodes.map((n,i) => {
+          const col = LAYER_COLORS[n.depth % LAYER_COLORS.length];
+          return (
+            <circle
+              key={"d" + i}
+              cx={n.x}
+              cy={n.y}
+              r={22}
+              fill={n.active ? col : "#1a2030"}
+              fillOpacity={n.active ? 0.92 : 1}
+              stroke={col}
+              strokeOpacity={n.active ? 1 : 0.78}
+              strokeWidth={n.active ? 3 : 1.8}
+            />
+          );
+        })}
+        {/* Extra rotating arc on the active agent — same idea as the
+            orchestrator's halo but scoped per-node so the user sees
+            exactly which specialist is on stage right now. */}
+        {nodes.filter(n=>n.active).map((n,i) => {
+          const col = LAYER_COLORS[n.depth % LAYER_COLORS.length];
+          // 3 short arcs spaced 120° apart, rotating with arcPhase.
+          const arcs = [0, 120, 240].map(off => {
+            const a0 = ((arcPhase + off) * Math.PI) / 180;
+            const a1 = ((arcPhase + off + 50) * Math.PI) / 180;
+            const r = 34;
+            const sx = n.x + r * Math.cos(a0);
+            const sy = n.y + r * Math.sin(a0);
+            const ex = n.x + r * Math.cos(a1);
+            const ey = n.y + r * Math.sin(a1);
+            return `M ${sx} ${sy} A ${r} ${r} 0 0 1 ${ex} ${ey}`;
+          }).join(" ");
+          return (
+            <path
+              key={"r" + i}
+              d={arcs}
+              stroke={col}
+              strokeWidth={2.4}
+              strokeLinecap="round"
+              fill="none"
+              opacity={0.95}
+            />
+          );
+        })}
         <circle cx={cx} cy={cy} r={orchestrator_r * 3.0} fill="url(#orchHalo)" />
         <circle cx={cx} cy={cy} r={orchestrator_r * 1.5} fill="url(#orchCore)" stroke="rgba(255,200,100,0.55)" strokeWidth="1.6" />
         {[0, 130, 240].map((off, i) => (
@@ -957,27 +1018,55 @@ function TeamCanvas({ width, height, team, roleByName, activeAgent, selectedNode
       </svg>
       <img src={`${ICONS}/owl_agentic.png`} style={{ position:"absolute", left:cx - orchestrator_r * 1.12, top:cy - orchestrator_r * 1.12, width:orchestrator_r * 2.24, height:orchestrator_r * 2.24, pointerEvents:"none", filter:"drop-shadow(0 0 16px rgba(255,200,100,0.55)) drop-shadow(0 0 28px rgba(255,180,80,0.35))" }} />
       <div style={{ position:"absolute", left:cx-60, top:cy + orchestrator_r * 1.6, width:120, textAlign:"center", fontSize:11, fontWeight:700, color:"#ffd97a", textTransform:"uppercase", letterSpacing:0.8, textShadow:"0 1px 3px rgba(0,0,0,0.9)", pointerEvents:"none" }}>Orchestrator</div>
-      {nodes.map((n,i) => (
-        <img
-          key={"i"+i}
-          src={owlSrc(n.iconRef)}
-          style={{
-            position: "absolute",
-            left: n.x - NODE_R,
-            top:  n.y - NODE_R,
-            width:  NODE_R * 2,
-            height: NODE_R * 2,
-            objectFit: "contain",
-            pointerEvents: "none",
-            filter: n.active
-              ? "drop-shadow(0 0 6px rgba(127,223,255,0.85))"
-              : "drop-shadow(0 1px 2px rgba(0,0,0,0.5))",
-          }}
-        />
-      ))}
-      {nodes.map((n,i) => (
-        <div key={"l"+i} style={{ position:"absolute", left:n.x - 60, top:n.y + 30, width:120, textAlign:"center", fontSize:12, fontWeight:600, color:n.active?"#ffffff":"#e6e8eb", letterSpacing:0.4, pointerEvents:"none", textShadow:"0 1px 3px rgba(0,0,0,0.9)" }}>{n.label}</div>
-      ))}
+      {nodes.map((n,i) => {
+        const col = LAYER_COLORS[n.depth % LAYER_COLORS.length];
+        // Pulsing glow on the active agent — same phase that drives
+        // the orbiting arcs above, so the whole thing reads as one
+        // animation. Idle agents get a tiny tinted drop-shadow so
+        // their layer colour leaks onto the icon too.
+        const pulse = 0.5 + 0.5 * Math.sin((arcPhase * Math.PI) / 180 * 3);
+        const glow = n.active ? 12 + 10 * pulse : 4;
+        return (
+          <img
+            key={"i" + i}
+            src={owlSrc(n.iconRef)}
+            style={{
+              position: "absolute",
+              left: n.x - NODE_R,
+              top:  n.y - NODE_R,
+              width:  NODE_R * 2,
+              height: NODE_R * 2,
+              objectFit: "contain",
+              pointerEvents: "none",
+              filter: `drop-shadow(0 0 ${glow}px ${col}${n.active ? "ee" : "55"})`,
+            }}
+          />
+        );
+      })}
+      {nodes.map((n,i) => {
+        const col = LAYER_COLORS[n.depth % LAYER_COLORS.length];
+        return (
+          <div
+            key={"l" + i}
+            style={{
+              position: "absolute",
+              left: n.x - 60,
+              top:  n.y + 30,
+              width: 120,
+              textAlign: "center",
+              fontSize: 12,
+              fontWeight: 700,
+              // Active = layer colour; idle = tinted-towards-fg.
+              color: n.active ? col : "#e6e8eb",
+              letterSpacing: 0.4,
+              pointerEvents: "none",
+              textShadow: "0 1px 3px rgba(0,0,0,0.9)",
+            }}
+          >
+            {n.label}
+          </div>
+        );
+      })}
       {/* Clickable hit-targets — transparent circles centred on each node
           + the orchestrator disc. Sit ABOVE the imgs (which have
           pointerEvents:none) so clicks register cleanly. Stops bubbling

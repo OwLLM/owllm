@@ -50,6 +50,7 @@ pub fn run() {
             dialog::pick_file,
             hardware::hardware_info,
             hardware::vram_status,
+            hardware::set_gpu_selection,
             models::list_models,
             projects::list_projects,
             projects::create_project,

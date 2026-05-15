@@ -19,7 +19,13 @@
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-type GpuInfo = { index: number; name: string; vram_gb: number };
+type GpuInfo = {
+  index: number;
+  name: string;
+  vram_gb: number;
+  uuid: string;
+  selected: boolean;
+};
 type HardwareInfo = {
   cpu_name: string;
   cpu_cores: number;
@@ -181,8 +187,18 @@ function StatusList({ rows }: { rows: StatusRow[] }) {
 }
 
 // Per-GPU detail row used inside the System Status panel — mirrors
-// main.py:7641-7693 (GPU N: <name>  ........  💾 <memory>).
-function GpuRow({ index, name, memory }: { index: number; name: string; memory: string }) {
+// main.py:7641-7693 (GPU N: <name>  ........  💾 <memory>) PLUS a
+// trailing checkbox that controls whether this GPU is part of the
+// runtime selection (legacy parity).
+function GpuRow({
+  index, name, memory, selected, onToggle,
+}: {
+  index: number;
+  name: string;
+  memory: string;
+  selected: boolean;
+  onToggle: () => void;
+}) {
   return (
     <div style={{
       display: "flex",
@@ -198,6 +214,15 @@ function GpuRow({ index, name, memory }: { index: number; name: string; memory: 
       <span style={{ color: "var(--fg)" }}>
         💾 <b>{memory}</b>
       </span>
+      <input
+        type="checkbox"
+        checked={selected}
+        onChange={onToggle}
+        title={selected
+          ? "Selected for inference — uncheck to skip this GPU"
+          : "Click to enable this GPU for inference"}
+        style={{ width: 16, height: 16, accentColor: "var(--accent)", cursor: "pointer", marginLeft: 4 }}
+      />
     </div>
   );
 }
@@ -311,18 +336,41 @@ export default function HomePage() {
 
   // Qt format: "✅ N GPUs detected" + per-GPU rows (main.py:7621-7693)
   // or "⚠️ No GPUs detected" + "Training will use CPU (slower)" when
-  // none found (main.py:7695-7706). Format VRAM as integer GB to match
-  // Qt's "💾 N GB" rendering.
+  // none found (main.py:7695-7706). Format VRAM as MiB / GiB to mirror
+  // the old app — which displays "23028 MiB" rather than "23 GB" so
+  // the user can see the exact per-card capacity.
   const gpus = (hw?.gpus ?? []).map(g => ({
+    uuid: g.uuid,
     name: g.name,
-    memory: g.vram_gb > 0 ? `${Math.round(g.vram_gb)} GB` : "—",
+    memory: g.vram_gb > 0 ? `${Math.round(g.vram_gb * 1024)} MiB` : "—",
+    selected: g.selected,
   }));
   const gpuOk = gpus.length > 0;
+  const selectedCount = gpus.filter(g => g.selected).length;
 
-  // CPU row — Qt: "CPU: <cpu_name>" left, "<cores> cores | 💾 <ram> GB
-  // RAM" right (main.py:7715-7735).
+  const toggleGpu = (uuid: string) => {
+    if (!hw) return;
+    const next = hw.gpus.map(g =>
+      g.uuid === uuid ? { ...g, selected: !g.selected } : g,
+    );
+    // Optimistic UI update.
+    setHw({ ...hw, gpus: next });
+    const uuids = next.filter(g => g.selected).map(g => g.uuid);
+    invoke("set_gpu_selection", { uuids }).catch(e => {
+      console.error("set_gpu_selection failed", e);
+      // Revert on error.
+      refreshHw();
+    });
+  };
+
+  // CPU row — Qt: "CPU: <cpu_name>" left, "<threads> cores | 💾 <ram>
+  // GB RAM" right (main.py:7715-7735). The legacy app displays the
+  // logical-processor count and labels it "cores"; modern Rust
+  // `physical_core_count()` returns the smaller P+E figure (24 on the
+  // i9-13900KF) which doesn't match what the user expects to see.
+  // Keep parity with the legacy display.
   const cpuName = hw?.cpu_name || "—";
-  const cpuCores = hw?.cpu_cores || hw?.cpu_threads || 0;
+  const cpuCores = hw?.cpu_threads || hw?.cpu_cores || 0;
   const ramGb = hw ? Math.round(hw.ram_total_gb) : 0;
 
   // Software requirements — Qt builds exactly four rows:
@@ -388,10 +436,17 @@ export default function HomePage() {
             {gpuOk ? (
               <>
                 <div style={{ color: "#22c55e", fontWeight: 700, fontSize: 14 }}>
-                  ✅ {gpus.length} GPU{gpus.length > 1 ? "s" : ""} detected
+                  ✅ {selectedCount} of {gpus.length} GPU{gpus.length > 1 ? "s" : ""} selected
                 </div>
                 {gpus.map((g, i) => (
-                  <GpuRow key={i} index={i} name={g.name} memory={g.memory} />
+                  <GpuRow
+                    key={g.uuid || i}
+                    index={i}
+                    name={g.name}
+                    memory={g.memory}
+                    selected={g.selected}
+                    onToggle={() => toggleGpu(g.uuid)}
+                  />
                 ))}
               </>
             ) : (

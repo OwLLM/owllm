@@ -703,9 +703,13 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
 // gesture set in agent_team_canvas.py::wheelEvent. Click an agent to
 // select it (drives the top-left info card); click empty space to
 // deselect.
-function TeamCanvas({ width, height, team, roleByName, activeAgent, selectedNode, onSelectNode }: {
+function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNode, onSelectNode }: {
   width: number; height: number; team: Team | null; roleByName: Map<string, RoleData>;
-  activeAgent: string | null;
+  /// Set of currently-running agents (specialists run in parallel during
+  /// phase 2, so this can hold multiple names simultaneously). The
+  /// canvas pulses every member, so the user sees the team work as a
+  /// fan-out, not a serial conveyor.
+  activeAgents: Set<string>;
   selectedNode: string | null;
   onSelectNode: (name: string | null) => void;
 }) {
@@ -746,9 +750,9 @@ function TeamCanvas({ width, height, team, roleByName, activeAgent, selectedNode
         label: displayLabel(a.name),
         iconRef: agentIconRef(a, roleByName),
         depth: Math.max(1, depths.get(a.name) ?? 1),
-        active: a.name === activeAgent,
+        active: activeAgents.has(a.name),
       }));
-  }, [team, roleByName, activeAgent]);
+  }, [team, roleByName, activeAgents]);
 
   const depthMap = useMemo(() => {
     const m = new Map<number, RosterRow[]>();
@@ -1152,7 +1156,7 @@ type GraphPos = Map<string, { x: number; y: number }>;
 function GraphCanvas({
   width, height, team, roleByName,
   selectedNode, onSelectNode,
-  activeAgent,
+  activeAgents,
   edges, onEdgesChange,
   selectedEdgeIdx, onSelectEdge,
   positions, onPositionsChange,
@@ -1160,7 +1164,10 @@ function GraphCanvas({
   width: number; height: number;
   team: Team | null; roleByName: Map<string, RoleData>;
   selectedNode: string | null; onSelectNode: (name: string | null) => void;
-  activeAgent: string | null;
+  /// Set of agents currently working — node borders glow green for
+  /// every member, so a parallel fan-out shows all specialists at
+  /// once instead of one-at-a-time.
+  activeAgents: Set<string>;
   edges: Edge[]; onEdgesChange: (edges: Edge[]) => void;
   selectedEdgeIdx: number | null; onSelectEdge: (idx: number | null) => void;
   positions: GraphPos | null; onPositionsChange: (p: GraphPos) => void;
@@ -1374,7 +1381,7 @@ function GraphCanvas({
           const isOrch = n.name === orchName;
           const accent = isOrch ? "#ffd76a" : LAYER_COLORS[(n.depth + 1) % LAYER_COLORS.length];
           const sel = selectedNode === n.name;
-          const isActive = activeAgent === n.name;
+          const isActive = activeAgents.has(n.name);
           const isDragTarget = drag?.over === n.name;
           return (
             <div
@@ -2159,7 +2166,7 @@ export default function AgentsPage() {
 
   // Per-agent log buffers — keyed by agent.name (plus "you" for the
   // user goal echo and "system" for errors). OrchestratorPane filters
-  // these by selectedNode; canvas highlights `activeAgent`.
+  // these by selectedNode; canvas highlights members of `activeAgents`.
   const [agentLogs, setAgentLogs] = useState<Map<string, GoalMsg[]>>(new Map());
   // Thought buffers — parallel to agentLogs but holds the agent's
   // INTERNAL traffic instead of the conversational reply. Today's
@@ -2167,7 +2174,35 @@ export default function AgentsPage() {
   // OpenAI tool-calls + Anthropic thinking-block channels can slot in
   // later without touching the consumer-side UI.
   const [agentThoughts, setAgentThoughts] = useState<Map<string, GoalMsg[]>>(new Map());
-  const [activeAgent, setActiveAgent] = useState<string | null>(null);
+  // Active agents — a SET because specialists run in parallel during
+  // dispatch (orchestrator plan dispatches @A + @B + @C, all three
+  // light up at once and the canvas pulses every member). Started as
+  // a single string; the change is essential for the parallel flow.
+  const [activeAgents, setActiveAgents] = useState<Set<string>>(new Set());
+  const addActive = (name: string) => {
+    setActiveAgents(prev => {
+      if (prev.has(name)) return prev;
+      const next = new Set(prev);
+      next.add(name);
+      return next;
+    });
+  };
+  const removeActive = (name: string) => {
+    setActiveAgents(prev => {
+      if (!prev.has(name)) return prev;
+      const next = new Set(prev);
+      next.delete(name);
+      return next;
+    });
+  };
+  const clearActive = () => setActiveAgents(new Set());
+  // OrchestratorPane focus needs a single "primary" — pick whichever
+  // agent went active most recently (Sets preserve insertion order in
+  // modern JS, so .values().next() gives the oldest, but for the
+  // primary we want the newest — Array.from + last).
+  const activeAgent: string | null = activeAgents.size > 0
+    ? Array.from(activeAgents)[activeAgents.size - 1]
+    : null;
   const [phase, setPhase] = useState<DispatchPhase>("idle");
 
   // Diagram (orbital) ↔ Graph (top-down hierarchical) toggle. Mirrors
@@ -2650,7 +2685,7 @@ export default function AgentsPage() {
     setSupChat(prev => [...prev, replyMsg]);
     appendLog(orchKey, replyMsg);
     // Active state — drives the per-node pulse in the canvas.
-    setActiveAgent(orchKey);
+    addActive(orchKey);
     // Track the streamed reply so we can forward it to Telegram once
     // the stream completes (desktop → phone mirror, opposite direction
     // of the Telegram → desktop mirror the bridge already does).
@@ -2689,7 +2724,7 @@ export default function AgentsPage() {
       setSupChat(prev => [...prev, errMsg]);
       appendLog("system", errMsg);
     } finally {
-      setActiveAgent(null);
+      removeActive(orchKey);
     }
     // Dispatch a chat-appended event with source=desktop so the
     // top-level TelegramBridgeRunner can forward the assistant reply
@@ -2839,16 +2874,21 @@ export default function AgentsPage() {
 
     try {
       // ----- Phase 1: orchestrator plan + dispatches -----
-      setActiveAgent(orch.name);
+      addActive(orch.name);
       const orchPrompt = buildOrchestratorPrompt(activeTeam, roleByName, orch);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = modelFor(orch.name);
-      const orchReply = await streamChatCompletion(
-        port, orchModel, providerFor(orchModel),
-        orchPrompt, text, tempFor(orch, 0.4), ctrl.signal,
-        (delta) => streamLog(orch.name, delta),
-        projectCwd,
-      );
+      let orchReply: string;
+      try {
+        orchReply = await streamChatCompletion(
+          port, orchModel, providerFor(orchModel),
+          orchPrompt, text, tempFor(orch, 0.4), ctrl.signal,
+          (delta) => streamLog(orch.name, delta),
+          projectCwd,
+        );
+      } finally {
+        removeActive(orch.name);
+      }
 
       // Mirror to the SuperUserCard so the user-facing thread shows
       // the orchestrator's plan + (later) the integrated answer.
@@ -2878,42 +2918,54 @@ export default function AgentsPage() {
         const clean = stripDispatchDirectives(orchReply).trim();
         setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: clean || orchReply }]);
         setPhase("done");
-        setActiveAgent(null);
         return;
       }
 
+      // Dispatch every specialist IN PARALLEL — orchestrator-driven
+      // fan-out, matching the legacy Python agent_bus behaviour where
+      // every dispatched specialist runs concurrently. All N agents
+      // light up at once in the canvas (activeAgents is a Set), each
+      // streams into its own log, and Promise.allSettled means one
+      // failing specialist doesn't kill the others.
       setPhase("dispatching");
-      const specialistReplies: Array<{ name: string; text: string }> = [];
-      for (const d of dispatches) {
-        if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
+      if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
+      const settled = await Promise.allSettled(dispatches.map(async (d) => {
         const spec = activeTeam.agents.find(a => a.name === d.agentName);
-        if (!spec) continue;
-        setActiveAgent(spec.name);
+        if (!spec) return null;
+        addActive(spec.name);
         const specPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName);
-        // Anchor the dispatch instruction in the agent's THOUGHT log
-        // (it's the incoming task, not the user-facing reply) and
-        // also seed an empty reply slot for the streamed answer.
         appendThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${d.instruction}` });
         appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
         const specModel = modelFor(spec.name);
-        const specText = await streamChatCompletion(
-          port, specModel, providerFor(specModel),
-          specPrompt, d.instruction, tempFor(spec, 0.5), ctrl.signal,
-          (delta) => streamLog(spec.name, delta),
-          projectCwd,
-        );
-        specialistReplies.push({ name: spec.name, text: specText.trim() });
+        try {
+          const specText = await streamChatCompletion(
+            port, specModel, providerFor(specModel),
+            specPrompt, d.instruction, tempFor(spec, 0.5), ctrl.signal,
+            (delta) => streamLog(spec.name, delta),
+            projectCwd,
+          );
+          return { name: spec.name, text: specText.trim() };
+        } catch (e: any) {
+          const errMsg = `(error: ${String(e?.message ?? e)})`;
+          streamLog(spec.name, "\n\n" + errMsg);
+          return { name: spec.name, text: errMsg };
+        } finally {
+          removeActive(spec.name);
+        }
+      }));
+      const specialistReplies: Array<{ name: string; text: string }> = [];
+      for (const r of settled) {
+        if (r.status === "fulfilled" && r.value) specialistReplies.push(r.value);
       }
 
       if (specialistReplies.length === 0) {
         setPhase("done");
-        setActiveAgent(null);
         return;
       }
 
       // ----- Phase 3: orchestrator integration -----
       setPhase("integrating");
-      setActiveAgent(orch.name);
+      addActive(orch.name);
       const integrationInput = [
         `The user's original goal:\n${text}`,
         "",
@@ -2924,13 +2976,18 @@ export default function AgentsPage() {
       ].join("\n");
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const finalModel = modelFor(orch.name);
-      const finalReply = await streamChatCompletion(
-        port, finalModel, providerFor(finalModel),
-        buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput,
-        tempFor(orch, 0.4), ctrl.signal,
-        (delta) => streamLog(orch.name, delta),
-        projectCwd,
-      );
+      let finalReply: string;
+      try {
+        finalReply = await streamChatCompletion(
+          port, finalModel, providerFor(finalModel),
+          buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput,
+          tempFor(orch, 0.4), ctrl.signal,
+          (delta) => streamLog(orch.name, delta),
+          projectCwd,
+        );
+      } finally {
+        removeActive(orch.name);
+      }
       setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim() }]);
 
       setPhase("done");
@@ -2945,7 +3002,7 @@ export default function AgentsPage() {
       setPhase("idle");
     } finally {
       setBusy(false);
-      setActiveAgent(null);
+      clearActive();
       abortRef.current = null;
     }
   }
@@ -3034,12 +3091,13 @@ export default function AgentsPage() {
   // AppShell runner, so the local dispatchGoal / onSupSend setters
   // never run. Listen for an explicit event so the orbital pulse +
   // OrchestratorPane phase chip reflect "the bridge is thinking".
+  // Bridge fires `start` events to add an agent to the active set and
+  // `end` events to remove it; null agent + no action → clear all
+  // (back-compat for the old event shape).
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ agent: string | null; projectId?: string }>).detail;
+      const detail = (e as CustomEvent<{ agent: string | null; action?: "start" | "end"; projectId?: string }>).detail;
       if (!detail) return;
-      // Cross-project events shouldn't flicker the canvas of the
-      // project the user is currently viewing.
       if (detail.projectId && detail.projectId !== selectedProjectId) return;
       // Resolve the agent name through the local team so Telegram's
       // generic "orchestrator" label maps to whatever this team
@@ -3049,7 +3107,15 @@ export default function AgentsPage() {
         const spec = activeTeam.agents.find(a => a.name === resolved || a.base === resolved);
         if (spec) resolved = spec.name;
       }
-      setActiveAgent(resolved);
+      if (!resolved) {
+        clearActive();
+        return;
+      }
+      if (detail.action === "end") {
+        removeActive(resolved);
+      } else {
+        addActive(resolved);
+      }
     };
     window.addEventListener("owllm:agent:active", handler as EventListener);
     return () => window.removeEventListener("owllm:agent:active", handler as EventListener);
@@ -3150,7 +3216,7 @@ export default function AgentsPage() {
                 height={canvasSize.size.h || 600}
                 team={renderTeam}
                 roleByName={roleByName}
-                activeAgent={activeAgent}
+                activeAgents={activeAgents}
                 selectedNode={selectedNode}
                 onSelectNode={setSelectedNode}
               />
@@ -3162,7 +3228,7 @@ export default function AgentsPage() {
                 roleByName={roleByName}
                 selectedNode={selectedNode}
                 onSelectNode={setSelectedNode}
-                activeAgent={activeAgent}
+                activeAgents={activeAgents}
                 edges={currentEdges}
                 onEdgesChange={(es) => { setEditedEdges(es); setSelectedEdgeIdx(null); }}
                 selectedEdgeIdx={selectedEdgeIdx}
@@ -3182,7 +3248,7 @@ export default function AgentsPage() {
                     team={renderTeam}
                     spec={selectedAgentSpec}
                     roleByName={roleByName}
-                    status={activeAgent === selectedAgentSpec.name ? "active" : "idle"}
+                    status={activeAgents.has(selectedAgentSpec.name) ? "active" : "idle"}
                     models={models}
                     modelId={(perAgentModel.get(selectedAgentSpec.name) ?? "")}
                     onPickModel={(id) => onPickAgentModel(selectedAgentSpec.name, id)}

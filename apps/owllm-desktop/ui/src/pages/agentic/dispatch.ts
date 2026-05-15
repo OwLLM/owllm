@@ -510,9 +510,22 @@ async function consumeOpenAISse(resp: Response, onDelta: StreamHandler): Promise
 // callbacks. Both desktop and Telegram dispatches funnel through
 // here so the canvas, Thought tab, and per-agent log all see the
 // same vocabulary regardless of which path triggered the run.
+//
+// Specialists run in PARALLEL during phase 2 — the orchestrator
+// dispatches @agentA, @agentB, @agentC in one plan and all three
+// fire concurrently. The hooks are designed for that: onAgentStart
+// can be called from N tasks simultaneously, and onAgentEnd is
+// called from each task as it finishes. Consumers track the set of
+// currently-active agents (canvas pulse uses set-membership).
 export type DispatchHooks = {
   onPhase: (phase: DispatchPhase) => void;
-  onActiveAgent: (name: string | null) => void;
+  /// Agent has just started a turn (orchestrator plan / specialist
+  /// reply / orchestrator integration). May fire for multiple
+  /// agents concurrently while specialists run in parallel.
+  onAgentStart: (agent: string) => void;
+  /// Agent has finished its turn. Pair-matched with onAgentStart so
+  /// the consumer can maintain a Set<active>.
+  onAgentEnd: (agent: string) => void;
   onLog: (agent: string, msg: GoalMsg) => void;
   onLogDelta: (agent: string, delta: string) => void;
   onThought: (agent: string, msg: GoalMsg) => void;
@@ -540,21 +553,27 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
 
+  // ---- Phase 1: orchestrator plans ----
   hooks.onPhase("planning");
   const orch = findOrchestratorSpec(team);
   if (!orch) throw new Error("Team has no orchestrator (and no agents at all).");
-  hooks.onActiveAgent(orch.name);
+  hooks.onAgentStart(orch.name);
   hooks.onLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
 
   const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch);
   const orchModel = modelFor(orch.name);
   const orchProvider = providerFor(orchModel, models);
-  const orchReply = await streamChatCompletion(
-    port, orchModel, orchProvider,
-    orchPrompt, goal, tempFor(orch, 0.4), signal,
-    (delta) => hooks.onLogDelta(orch.name, delta),
-    projectCwd, history, autoApprove,
-  );
+  let orchReply: string;
+  try {
+    orchReply = await streamChatCompletion(
+      port, orchModel, orchProvider,
+      orchPrompt, goal, tempFor(orch, 0.4), signal,
+      (delta) => hooks.onLogDelta(orch.name, delta),
+      projectCwd, history, autoApprove,
+    );
+  } finally {
+    hooks.onAgentEnd(orch.name);
+  }
 
   // Push parsed dispatches into the orchestrator's Thought log so the
   // routing decision is visible separately from the user-facing reply.
@@ -573,18 +592,20 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     const clean = stripDispatchDirectives(orchReply).trim() || orchReply;
     hooks.onAgentReply(orch.name, clean);
     hooks.onPhase("done");
-    hooks.onActiveAgent(null);
     return clean;
   }
 
-  // ---- Phase 2: dispatch each specialist sequentially ----
+  // ---- Phase 2: dispatch every specialist IN PARALLEL ----
+  // Promise.allSettled so one specialist failing doesn't kill the
+  // others — partial results still get integrated. Each task pairs
+  // its own onAgentStart / onAgentEnd so the canvas can light up
+  // multiple agents simultaneously while they work concurrently.
   hooks.onPhase("dispatching");
-  const specialistReplies: Array<{ name: string; text: string }> = [];
-  for (const d of dispatches) {
-    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+  if (signal.aborted) throw new DOMException("aborted", "AbortError");
+  const settled = await Promise.allSettled(dispatches.map(async (d) => {
     const spec = team.agents.find(a => a.name === d.agentName);
-    if (!spec) continue;
-    hooks.onActiveAgent(spec.name);
+    if (!spec) return null;
+    hooks.onAgentStart(spec.name);
     hooks.onThought(spec.name, {
       role: "dispatch",
       color: "#a578ff",
@@ -594,26 +615,40 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     const specPrompt = buildSpecialistPrompt(team, spec, roleByName);
     const specModel = modelFor(spec.name);
     const specProvider = providerFor(specModel, models);
-    const specText = await streamChatCompletion(
-      port, specModel, specProvider,
-      specPrompt, d.instruction, tempFor(spec, 0.5), signal,
-      (delta) => hooks.onLogDelta(spec.name, delta),
-      projectCwd, [], autoApprove,
-    );
-    const cleaned = specText.trim();
-    specialistReplies.push({ name: spec.name, text: cleaned });
-    hooks.onAgentReply(spec.name, cleaned);
+    try {
+      const specText = await streamChatCompletion(
+        port, specModel, specProvider,
+        specPrompt, d.instruction, tempFor(spec, 0.5), signal,
+        (delta) => hooks.onLogDelta(spec.name, delta),
+        projectCwd, [], autoApprove,
+      );
+      const cleaned = specText.trim();
+      hooks.onAgentReply(spec.name, cleaned);
+      return { name: spec.name, text: cleaned };
+    } catch (e: any) {
+      // Surface the failure into the agent's own log so the user
+      // sees which specialist died.
+      const errMsg = `(error: ${String(e?.message ?? e)})`;
+      hooks.onLogDelta(spec.name, "\n\n" + errMsg);
+      hooks.onAgentReply(spec.name, errMsg);
+      return { name: spec.name, text: errMsg };
+    } finally {
+      hooks.onAgentEnd(spec.name);
+    }
+  }));
+  const specialistReplies: Array<{ name: string; text: string }> = [];
+  for (const r of settled) {
+    if (r.status === "fulfilled" && r.value) specialistReplies.push(r.value);
   }
 
   if (specialistReplies.length === 0) {
     hooks.onPhase("done");
-    hooks.onActiveAgent(null);
     return "(no specialist replied)";
   }
 
   // ---- Phase 3: orchestrator integrates the specialist replies ----
   hooks.onPhase("integrating");
-  hooks.onActiveAgent(orch.name);
+  hooks.onAgentStart(orch.name);
   const integrationInput = [
     `The user's original goal:\n${goal}`,
     "",
@@ -625,15 +660,19 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   hooks.onLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
   const finalModel = modelFor(orch.name);
   const finalProvider = providerFor(finalModel, models);
-  const finalReply = await streamChatCompletion(
-    port, finalModel, finalProvider,
-    orchPrompt, integrationInput, tempFor(orch, 0.4), signal,
-    (delta) => hooks.onLogDelta(orch.name, delta),
-    projectCwd, history, autoApprove,
-  );
+  let finalReply: string;
+  try {
+    finalReply = await streamChatCompletion(
+      port, finalModel, finalProvider,
+      orchPrompt, integrationInput, tempFor(orch, 0.4), signal,
+      (delta) => hooks.onLogDelta(orch.name, delta),
+      projectCwd, history, autoApprove,
+    );
+  } finally {
+    hooks.onAgentEnd(orch.name);
+  }
   const final = finalReply.trim();
   hooks.onAgentReply(orch.name, final);
   hooks.onPhase("done");
-  hooks.onActiveAgent(null);
   return final;
 }

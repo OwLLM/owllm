@@ -191,10 +191,28 @@ export default function TelegramBridgeRunner() {
     const projectCwd = (project?.location ?? "").trim();
     const auto = !!tgCfg.auto_approve;
 
-    const fireActive = (agent: string | null) => {
+    // Multi-active aware. Bridge runs specialists in PARALLEL during
+    // phase 2 of the dispatch loop, so the canvas needs to track each
+    // agent individually. Pair-matched start/end events let the
+    // listener maintain a Set<active>.
+    const fireAgentStart = (agent: string) => {
       try {
         window.dispatchEvent(new CustomEvent("owllm:agent:active", {
-          detail: { agent, projectId },
+          detail: { agent, action: "start", projectId },
+        }));
+      } catch {}
+    };
+    const fireAgentEnd = (agent: string) => {
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:agent:active", {
+          detail: { agent, action: "end", projectId },
+        }));
+      } catch {}
+    };
+    const fireActiveClear = () => {
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:agent:active", {
+          detail: { agent: null, projectId },
         }));
       } catch {}
     };
@@ -241,7 +259,8 @@ export default function TelegramBridgeRunner() {
         },
         {
           onPhase: (_phase: DispatchPhase) => { /* could mirror to Telegram if chatty */ },
-          onActiveAgent: fireActive,
+          onAgentStart: fireAgentStart,
+          onAgentEnd: fireAgentEnd,
           onLog: fireLog,
           onLogDelta: fireLogDelta,
           onThought: fireThought,
@@ -287,7 +306,7 @@ export default function TelegramBridgeRunner() {
       } catch {}
       if (projectId) await persistChat(projectId, [errMsg]);
       await sendTelegram(tgCfg.bot_token, chatId, errMsg.text);
-      fireActive(null);
+      fireActiveClear();
       return;
     }
 

@@ -472,18 +472,110 @@ function TeamInfoCard({
   );
 }
 
+// AgentInfoCard — mirrors agent_info_card.py::paint_agent_card. Shown
+// in place of TeamInfoCard when an agent is selected on the canvas
+// (orbital OR graph view). Status ribbon → name → portrait + desc →
+// model picker for that agent. Click the canvas background OR press X
+// here to deselect.
+function AgentInfoCard({
+  team, spec, roleByName, status,
+  models, modelId, onPickModel, accountsStatus, fallbackLabel,
+  onClose,
+}: {
+  team: Team | null;
+  spec: AgentSpec;
+  roleByName: Map<string, RoleData>;
+  status: "idle" | "active" | "pending" | "error";
+  models: ModelInfo[];
+  modelId: string;
+  onPickModel: (id: string) => void;
+  accountsStatus: AccountsStatusLite | null;
+  fallbackLabel: string;
+  onClose: () => void;
+}) {
+  const CARD_W = 320;
+  const CARD_H = 312;
+  const role = roleByName.get(spec.base);
+  const desc =
+    (spec.description && spec.description.trim()) ||
+    (role?.description && role.description.trim()) ||
+    "No description provided.";
+  const trimmed = desc.length > 200 ? desc.slice(0, 197) + "…" : desc;
+  const statusCol = status === "active" ? "#3cf26b" : status === "pending" ? "#ffc060" : status === "error" ? "#ff7878" : "#74a4ff";
+  const statusWord = status === "active" ? "● ACTIVE" : status === "pending" ? "● PENDING" : status === "error" ? "● ERROR" : "● STANDBY";
+  const pic_x = 14, pic_y = 38, pic_size = 100;
+  const info_x = pic_x + pic_size + 18;
+  const info_y = pic_y - 4;
+  const info_w = CARD_W - 14 - info_x;
+  const stat_y = pic_y + pic_size + 30;
+  const model_y = stat_y + 36;
+  return (
+    <div data-ui="AgentInfoCard" style={{ position:"relative", width:CARD_W, height:CARD_H, borderRadius:12, background:"linear-gradient(135deg, rgba(18,22,34,0.90) 0%, rgba(8,11,18,0.90) 100%)", border:"1.6px solid transparent", overflow:"hidden" }}>
+      <div style={{ position:"absolute", inset:0, borderRadius:12, padding:"1.6px", background:"linear-gradient(135deg, rgba(92,240,255,0.86) 0%, rgba(192,138,255,0.86) 100%)", WebkitMask:"linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)", WebkitMaskComposite:"xor", maskComposite:"exclude", pointerEvents:"none" }} />
+      <div data-ui="AgentRibbon" style={{ position:"absolute", left:8, top:8, width:CARD_W - 16, height:22, borderRadius:6, background:`linear-gradient(90deg, ${statusCol}3d 0%, ${statusCol}11 100%)`, border:`1px solid ${statusCol}77`, display:"flex", alignItems:"center", paddingLeft:10, fontSize:12, fontWeight:700, color:"var(--fg)", letterSpacing:0.2 }}>{statusWord}</div>
+      <button onClick={onClose} title="Close (or click empty canvas)" style={{ position:"absolute", right:8, top:8, width:22, height:22, padding:0, border:"none", background:"rgba(255,255,255,0.06)", color:"var(--fg)", borderRadius:6, fontSize:12, cursor:"pointer", zIndex:2 }}>✕</button>
+      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y - 6, width:pic_size + 12, height:pic_size + 12, borderRadius:"50%", background:`radial-gradient(circle, ${statusCol}55 0%, ${statusCol}00 100%)`, pointerEvents:"none" }} />
+      <div style={{ position:"absolute", left:pic_x, top:pic_y, width:pic_size, height:pic_size, borderRadius:"50%", background:"#1e2434", border:"1.4px solid rgba(230,240,255,0.78)", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden" }}>
+        <img src={owlSrc(agentIconRef(spec, roleByName))} style={{ width:pic_size * 0.85, height:pic_size * 0.85, objectFit:"contain" }} />
+      </div>
+      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y + pic_size + 6, width:pic_size + 12, height:20, textAlign:"center", fontSize:14, fontWeight:700, color:"var(--fg)", lineHeight:"20px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={displayLabel(spec.name)}>{displayLabel(spec.name)}</div>
+      <div style={{ position:"absolute", left:info_x, top:info_y, width:info_w, height:96, fontSize:12, color:"var(--fg)", lineHeight:1.35, overflow:"hidden" }}>
+        {trimmed}
+      </div>
+      <div style={{ position:"absolute", left:info_x, top:stat_y, width:info_w, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", letterSpacing:0.4 }}>
+        <span style={{ width:90 }}>BASE</span>
+        <span>TEMP</span>
+      </div>
+      <div style={{ position:"absolute", left:info_x, top:stat_y + 14, width:info_w, height:18, display:"flex", alignItems:"center", fontSize:13, fontWeight:700, color:"var(--fg)" }}>
+        <span style={{ width:90, textTransform:"capitalize" }}>{spec.base}</span>
+        <span>{(role?.defaultTemperature ?? 0.4).toFixed(2)}</span>
+      </div>
+      <div style={{ position:"absolute", left:14, top:model_y, width:CARD_W - 28, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", letterSpacing:0.4 }}>
+        <span style={{ flex:1 }}>MODEL · this agent only</span>
+      </div>
+      <div style={{ position:"absolute", left:14, top:model_y + 16, width:CARD_W - 28, display:"flex" }}>
+        <ModelPicker
+          value={modelId}
+          onChange={onPickModel}
+          models={models}
+          status={accountsStatus}
+          fallbackLabel={fallbackLabel}
+        />
+      </div>
+    </div>
+  );
+}
+
 // SuperUserCard — widgets/super_user_card.py::SuperUserCard. The chat
 // pane is empty by default (no fake "You: …" / "Team: …" prefill).
-function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAutoApprove }: {
+//
+// Draft persistence: AgentsPage unmounts whenever the user switches tabs
+// (Server, Studio, etc.), so the in-progress message in the input box
+// would otherwise be wiped. Keying by projectId so each project keeps
+// its own draft.
+function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAutoApprove, projectId }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
   chat: GoalMsg[];
   onSend: (text: string) => void;
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
+  projectId: string;
 }) {
   const peekAgents = (team?.agents ?? []).slice(0, 6);
-  const [draft, setDraft] = useState<string>("");
+  const draftKey = projectId ? `owllm:supdraft:${projectId}` : "";
+  const [draft, setDraft] = useState<string>(() => {
+    if (!draftKey) return "";
+    try { return localStorage.getItem(draftKey) ?? ""; } catch { return ""; }
+  });
+  useEffect(() => {
+    if (!draftKey) { setDraft(""); return; }
+    try { setDraft(localStorage.getItem(draftKey) ?? ""); } catch { setDraft(""); }
+  }, [draftKey]);
+  useEffect(() => {
+    if (!draftKey) return;
+    try { localStorage.setItem(draftKey, draft); } catch {}
+  }, [draft, draftKey]);
   const lastMessages = chat.slice(-4);  // most recent first-visible window
   const submit = () => {
     const t = draft.trim();
@@ -559,10 +651,23 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
 
 // TeamCanvas — agent_team_canvas.py's orbital diagram. Roster from
 // the active team, depth from the routing graph.
-function TeamCanvas({ width, height, team, roleByName, activeAgent }: {
+//
+// Pan + zoom: hold the mouse on empty space to drag the diagram around,
+// scroll-wheel to zoom in/out (0.4×..3.0×, ~10% per notch). Mirrors the
+// gesture set in agent_team_canvas.py::wheelEvent. Click an agent to
+// select it (drives the top-left info card); click empty space to
+// deselect.
+function TeamCanvas({ width, height, team, roleByName, activeAgent, selectedNode, onSelectNode }: {
   width: number; height: number; team: Team | null; roleByName: Map<string, RoleData>;
   activeAgent: string | null;
+  selectedNode: string | null;
+  onSelectNode: (name: string | null) => void;
 }) {
+  // Zoom + pan around the orbital layout. Reset whenever the team flips.
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [panDrag, setPanDrag] = useState<null | { sx: number; sy: number; ox: number; oy: number }>(null);
+  useEffect(() => { setZoom(1); setPan({ x: 0, y: 0 }); }, [team?.id]);
   const w = width, h = height;
   const card_reserve = Math.min(410, w * 0.35);
   const cx = card_reserve + (w - card_reserve) / 2;
@@ -675,9 +780,48 @@ function TeamCanvas({ width, height, team, roleByName, activeAgent }: {
     return `M ${sx} ${sy} A ${rad} ${rad} 0 ${large} 1 ${ex} ${ey}`;
   };
 
+  // Click an agent → select it; click background → deselect. Stops
+  // propagation on the node hit so the background handler doesn't fire.
+  // Drag detection: only suppress the deselect click when the cursor
+  // actually moved (>3px), so a plain click on empty space still works.
+  const dragMovedRef = useRef(false);
+  const onBgMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    dragMovedRef.current = false;
+    setPanDrag({ sx: e.clientX, sy: e.clientY, ox: pan.x, oy: pan.y });
+  };
+  const onBgMouseMove = (e: React.MouseEvent) => {
+    if (!panDrag) return;
+    const dx = e.clientX - panDrag.sx;
+    const dy = e.clientY - panDrag.sy;
+    if (!dragMovedRef.current && Math.hypot(dx, dy) > 3) dragMovedRef.current = true;
+    setPan({ x: panDrag.ox + dx, y: panDrag.oy + dy });
+  };
+  const endPan = () => { if (panDrag) setPanDrag(null); };
+  const onBgClick = (e: React.MouseEvent) => {
+    if (dragMovedRef.current) { dragMovedRef.current = false; return; }
+    onSelectNode(null);
+    e.stopPropagation();
+  };
+  const onWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    setZoom(z => Math.max(0.4, Math.min(3.0, z * factor)));
+  };
+
   return (
-    <div data-ui="AgentTeamCanvas" style={{ position:"relative", width:w, height:h, background:`radial-gradient(ellipse at ${w/2}px ${h/2}px, rgba(192,138,255,0.10) 0%, rgba(116,164,255,0.06) 30%, rgba(40,60,110,0.04) 60%, rgba(0,0,0,0) 85%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow:"hidden" }}>
-      <svg width={w} height={h} style={{ position:"absolute", left:0, top:0 }}>
+    <div
+      data-ui="AgentTeamCanvas"
+      onMouseDown={onBgMouseDown}
+      onMouseMove={onBgMouseMove}
+      onMouseUp={endPan}
+      onMouseLeave={endPan}
+      onClick={onBgClick}
+      onWheel={onWheel}
+      style={{ position:"relative", width:w, height:h, background:`radial-gradient(ellipse at ${w/2}px ${h/2}px, rgba(192,138,255,0.10) 0%, rgba(116,164,255,0.06) 30%, rgba(40,60,110,0.04) 60%, rgba(0,0,0,0) 85%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow:"hidden", cursor: panDrag ? "grabbing" : "grab", userSelect: "none" }}
+    >
+      <div style={{ position:"absolute", left:0, top:0, width:w, height:h, transform:`translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin:"0 0" }}>
+      <svg width={w} height={h} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
         <defs>
           <radialGradient id="halo" cx="50%" cy="50%" r="50%">
             <stop offset="0%" stopColor="rgba(120,220,255,0.85)" />
@@ -793,11 +937,68 @@ function TeamCanvas({ width, height, team, roleByName, activeAgent }: {
       {nodes.map((n,i) => (
         <div key={"l"+i} style={{ position:"absolute", left:n.x - 60, top:n.y + 30, width:120, textAlign:"center", fontSize:12, fontWeight:600, color:n.active?"#ffffff":"#e6e8eb", letterSpacing:0.4, pointerEvents:"none", textShadow:"0 1px 3px rgba(0,0,0,0.9)" }}>{n.label}</div>
       ))}
+      {/* Clickable hit-targets — transparent circles centred on each node
+          + the orchestrator disc. Sit ABOVE the imgs (which have
+          pointerEvents:none) so clicks register cleanly. Stops bubbling
+          to the background so a node click doesn't deselect. */}
+      {orchSpec && (
+        <div
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            const name = orchSpec.name;
+            onSelectNode(selectedNode === name ? null : name);
+          }}
+          title={displayLabel(orchSpec.name)}
+          style={{
+            position:"absolute",
+            left: cx - orchestrator_r * 1.12,
+            top:  cy - orchestrator_r * 1.12,
+            width:  orchestrator_r * 2.24,
+            height: orchestrator_r * 2.24,
+            borderRadius:"50%",
+            cursor:"pointer",
+            background:"transparent",
+            boxShadow: selectedNode === orchSpec.name ? "0 0 0 3px rgba(127,223,255,0.85)" : "none",
+          }}
+        />
+      )}
+      {nodes.map((n,i) => (
+        <div
+          key={"hit"+i}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectNode(selectedNode === n.name ? null : n.name);
+          }}
+          title={n.label}
+          style={{
+            position:"absolute",
+            left: n.x - NODE_R - 6,
+            top:  n.y - NODE_R - 6,
+            width: NODE_R * 2 + 12,
+            height: NODE_R * 2 + 12,
+            borderRadius:"50%",
+            cursor:"pointer",
+            background:"transparent",
+            boxShadow: selectedNode === n.name ? "0 0 0 3px rgba(127,223,255,0.85)" : "none",
+          }}
+        />
+      ))}
       {nodes.length === 0 && (
         <div style={{ position:"absolute", left:cx-180, top:cy + orchestrator_r * 2 + 20, width:360, textAlign:"center", fontSize:12, color:"var(--fg-subtle)", pointerEvents:"none" }}>
           No specialists on this team yet. Click <b>Team…</b> above to load a template.
         </div>
       )}
+      </div>
+      {/* Zoom HUD — top-right corner. Outside the transform layer so it
+          stays anchored regardless of pan / zoom. */}
+      <div style={{ position:"absolute", right:8, top:8, display:"flex", alignItems:"center", gap:4, background:"rgba(10,15,25,0.65)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:8, padding:"2px 4px", fontSize:11, color:"var(--fg-muted)" }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+        <button onClick={() => setZoom(z => Math.max(0.4, z / 1.15))} title="Zoom out" style={{ width:22, height:22, border:"none", background:"transparent", color:"var(--fg)", cursor:"pointer", fontSize:14 }}>−</button>
+        <span style={{ minWidth:34, textAlign:"center" }}>{Math.round(zoom * 100)}%</span>
+        <button onClick={() => setZoom(z => Math.min(3, z * 1.15))} title="Zoom in" style={{ width:22, height:22, border:"none", background:"transparent", color:"var(--fg)", cursor:"pointer", fontSize:14 }}>+</button>
+        <button onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} title="Reset zoom + pan" style={{ width:30, height:22, border:"none", background:"transparent", color:"var(--fg)", cursor:"pointer", fontSize:12 }}>⟲</button>
+      </div>
     </div>
   );
 }
@@ -2057,6 +2258,14 @@ export default function AgentsPage() {
   // Effective edges: edited copy if present, otherwise the template's.
   const currentEdges: Edge[] = editedEdges ?? (activeTeam?.edges ?? []);
 
+  // Selected agent (for the overlay info card). Resolved against the
+  // active team so a stale selection from a previous team doesn't
+  // surface a phantom card.
+  const selectedAgentSpec: AgentSpec | null = useMemo(() => {
+    if (!selectedNode || !activeTeam) return null;
+    return activeTeam.agents.find(a => a.name === selectedNode) ?? null;
+  }, [selectedNode, activeTeam]);
+
   // The activeTeam passed to canvases should reflect edge edits so the
   // diagram view's overlay arrows + the graph view's lines stay in sync.
   const renderTeam: Team | null = activeTeam
@@ -2378,6 +2587,113 @@ export default function AgentsPage() {
     abortRef.current?.abort();
   }
 
+  // ===== Telegram bridge — long-poll =====
+  // Active whenever the loaded bridge config has a token AND its
+  // project_id matches the currently-selected project. The legacy
+  // Python bridge requires the user to set both before it starts a
+  // thread (bridges_page.py / telegram_bridge.py); we keep the same
+  // gating here so the UX matches.
+  //
+  // Inbound text is treated as a SuperUser message: send a one-shot
+  // chat-completion through the active team's model, then mirror the
+  // reply back to the Telegram chat. allowed_chat_ids is enforced —
+  // an empty list means "nobody is allowed" (matches legacy semantics).
+  useEffect(() => {
+    const tg = bridges.telegram;
+    if (!tg?.bot_token) return;
+    if (!selectedProjectId || tg.project_id !== selectedProjectId) return;
+
+    let dead = false;
+    let offset = 0;
+    const ctrl = new AbortController();
+
+    const sleep = (ms: number) => new Promise(r => window.setTimeout(r, ms));
+
+    const sendTelegramReply = async (chatId: number, body: string) => {
+      try {
+        await fetch(`https://api.telegram.org/bot${tg.bot_token}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: body || "(empty)" }),
+        });
+      } catch (e) {
+        console.error("telegram sendMessage failed", e);
+      }
+    };
+
+    const handle = async (chatId: number, text: string) => {
+      // Echo into the SuperUser thread so the desktop user sees what
+      // their phone sent (mirrors agents_page.py messaging surface).
+      setSupChat(prev => [...prev, { role: "you", color: "#9ad9ff", text: `📱 [TG] ${text}` }]);
+
+      const modelId = effectiveTeamModel.trim() || (serverState.model_id ?? "local");
+      const provider = providerFor(modelId);
+      if (provider === "local" && (!serverState.running || !serverState.port)) {
+        const note = "(no local model running — start one on the Server tab.)";
+        setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: note }]);
+        await sendTelegramReply(chatId, note);
+        return;
+      }
+
+      let reply = "";
+      try {
+        const sys = activeTeam
+          ? `You are the orchestrator of '${activeTeam.display}'. Answer the user concisely.`
+          : "You are a helpful assistant.";
+        reply = await streamChatCompletion(
+          serverState.port ?? 0, modelId, provider, sys, text, 0.5,
+          new AbortController().signal, () => {},
+        );
+      } catch (e: any) {
+        reply = `(error: ${String(e?.message ?? e)})`;
+      }
+      setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: reply }]);
+      await sendTelegramReply(chatId, reply);
+    };
+
+    (async () => {
+      while (!dead) {
+        try {
+          const url = `https://api.telegram.org/bot${tg.bot_token}/getUpdates?timeout=20&offset=${offset}`;
+          const resp = await fetch(url, { signal: ctrl.signal });
+          if (!resp.ok) {
+            console.error("telegram getUpdates http", resp.status);
+            await sleep(5000);
+            continue;
+          }
+          const j: any = await resp.json();
+          if (!j?.ok) {
+            console.error("telegram getUpdates body", j);
+            await sleep(5000);
+            continue;
+          }
+          for (const upd of (j.result || [])) {
+            if (typeof upd.update_id === "number") {
+              offset = Math.max(offset, upd.update_id + 1);
+            }
+            const msg = upd.message;
+            const text: string | undefined = msg?.text;
+            const chatId: number | undefined = msg?.chat?.id;
+            if (!text || typeof chatId !== "number") continue;
+            // allowed_chat_ids gate — empty = nobody, per legacy spec.
+            if (!Array.isArray(tg.allowed_chat_ids) || !tg.allowed_chat_ids.includes(chatId)) {
+              console.warn(`Telegram message from disallowed chat ${chatId} ignored — add it to allowed_chat_ids on the Bridges page.`);
+              continue;
+            }
+            await handle(chatId, text);
+          }
+        } catch (e: any) {
+          if (e?.name === "AbortError") return;
+          console.error("telegram poll loop error", e);
+          await sleep(5000);
+        }
+      }
+    })();
+
+    return () => { dead = true; ctrl.abort(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bridges.telegram?.bot_token, bridges.telegram?.project_id, (bridges.telegram?.allowed_chat_ids ?? []).join(","), selectedProjectId, activeTeam?.id, effectiveTeamModel, serverState.running, serverState.port]);
+
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", minHeight:0 }}>
       <LocationRow
@@ -2417,35 +2733,15 @@ export default function AgentsPage() {
           />
           <div ref={canvasSize.ref} data-ui="CanvasStack" style={{ flex:1, minHeight:0, position:"relative" }}>
             {viewMode === "diagram" ? (
-              <>
-                <TeamCanvas
-                  width={canvasSize.size.w || 800}
-                  height={canvasSize.size.h || 600}
-                  team={renderTeam}
-                  roleByName={roleByName}
-                  activeAgent={activeAgent}
-                />
-                {/* Overlay only on the orbital diagram — the graph
-                    view needs the full canvas for its cards. */}
-                <div style={{ position:"absolute", top:8, left:8, width:360 }}>
-                  <TeamInfoCard
-                    team={renderTeam}
-                    models={models}
-                    teamModel={effectiveTeamModel}
-                    onChangeTeamModel={onPickTeamModel}
-                    serverModelId={serverState.model_id}
-                    accountsStatus={accountsStatus}
-                  />
-                  <SuperUserCard
-                    team={renderTeam}
-                    roleByName={roleByName}
-                    chat={supChat}
-                    onSend={onSupSend}
-                    autoApprove={autoApprove}
-                    onToggleAutoApprove={() => setAutoApprove(v => !v)}
-                  />
-                </div>
-              </>
+              <TeamCanvas
+                width={canvasSize.size.w || 800}
+                height={canvasSize.size.h || 600}
+                team={renderTeam}
+                roleByName={roleByName}
+                activeAgent={activeAgent}
+                selectedNode={selectedNode}
+                onSelectNode={setSelectedNode}
+              />
             ) : (
               <GraphCanvas
                 width={canvasSize.size.w || 800}
@@ -2463,6 +2759,52 @@ export default function AgentsPage() {
                 onPositionsChange={setNodePositions}
               />
             )}
+            {/* Info-card overlay — rendered in BOTH views so the page
+                stays consistent and selection state survives a view
+                toggle. When an agent is selected its info card replaces
+                the team card; the Super User chat sits below either way. */}
+            <div style={{ position:"absolute", top:8, left:8, width:360, pointerEvents:"none" }}>
+              <div style={{ pointerEvents:"auto" }}>
+                {selectedAgentSpec ? (
+                  <AgentInfoCard
+                    team={renderTeam}
+                    spec={selectedAgentSpec}
+                    roleByName={roleByName}
+                    status={activeAgent === selectedAgentSpec.name ? "active" : "idle"}
+                    models={models}
+                    modelId={(perAgentModel.get(selectedAgentSpec.name) ?? "")}
+                    onPickModel={(id) => onPickAgentModel(selectedAgentSpec.name, id)}
+                    accountsStatus={accountsStatus}
+                    fallbackLabel={
+                      effectiveTeamModel
+                        ? `(use team model · ${effectiveTeamModel})`
+                        : serverState.model_id
+                          ? `(use server model · ${serverState.model_id})`
+                          : "(use team / server fallback)"
+                    }
+                    onClose={() => setSelectedNode(null)}
+                  />
+                ) : (
+                  <TeamInfoCard
+                    team={renderTeam}
+                    models={models}
+                    teamModel={effectiveTeamModel}
+                    onChangeTeamModel={onPickTeamModel}
+                    serverModelId={serverState.model_id}
+                    accountsStatus={accountsStatus}
+                  />
+                )}
+                <SuperUserCard
+                  team={renderTeam}
+                  roleByName={roleByName}
+                  chat={supChat}
+                  onSend={onSupSend}
+                  autoApprove={autoApprove}
+                  onToggleAutoApprove={() => setAutoApprove(v => !v)}
+                  projectId={selectedProjectId}
+                />
+              </div>
+            </div>
           </div>
         </div>
         <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, flexShrink:0, background:"var(--bg-card)" }} />

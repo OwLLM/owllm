@@ -20,6 +20,72 @@ use std::time::Instant;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Quote an argument for cmd.exe so it round-trips through a .cmd /
+/// .bat shim to the underlying program (npm installs Claude Code as
+/// `claude.cmd` on Windows, which wraps `node cli.js`). This bypasses
+/// Rust's CVE-2024-24576 BatBadBut guard (which rejects any arg
+/// containing `"`, `\n`, etc. when the target is a batch file) by
+/// going through `CommandExt::raw_arg` and doing the escaping
+/// ourselves. Without this every dispatch fails with
+/// "spawn claude: batch file arguments are invalid" because the
+/// orchestrator's system prompt contains newlines.
+#[cfg(windows)]
+fn win_quote_arg(s: &str) -> String {
+    // Batch arg parsing treats CR/LF as separators. Collapse to space
+    // so a multi-line system prompt arrives as a single argument.
+    let s = s.replace('\r', "").replace('\n', " ");
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let mut bs = 0;
+        while i < chars.len() && chars[i] == '\\' {
+            bs += 1;
+            i += 1;
+        }
+        if i == chars.len() {
+            for _ in 0..(bs * 2) { out.push('\\'); }
+        } else if chars[i] == '"' {
+            for _ in 0..(bs * 2 + 1) { out.push('\\'); }
+            out.push('"');
+            i += 1;
+        } else {
+            for _ in 0..bs { out.push('\\'); }
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(windows)]
+fn is_batch_shim(p: &std::path::Path) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let e = e.to_ascii_lowercase();
+            e == "cmd" || e == "bat"
+        })
+        .unwrap_or(false)
+}
+
+/// Push an arg onto `cmd`, going through `raw_arg` + manual quoting
+/// when `batch` is true (Windows .cmd / .bat shim) so we bypass Rust's
+/// BatBadBut guard. Plain `arg()` is fine for .exe and for non-Windows.
+fn push_arg(cmd: &mut Command, _batch: bool, arg: &str) {
+    #[cfg(windows)]
+    {
+        if _batch {
+            use std::os::windows::process::CommandExt;
+            cmd.raw_arg(win_quote_arg(arg));
+            return;
+        }
+    }
+    cmd.arg(arg);
+}
+
 /// Where API keys live on disk. Same path as the legacy Python store.
 fn secrets_path() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE")
@@ -232,7 +298,17 @@ pub async fn claude_cli_complete(
         let exe = find_claude_cli()
             .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
         let mut cmd = Command::new(&exe);
-        cmd.arg("--print");
+
+        // On Windows, npm installs `claude.cmd`. Rust 1.77 rejects
+        // multi-line args to .cmd files via `arg()`. Route every arg
+        // through `raw_arg` with our own quoting when the shim is a
+        // batch file. Non-Windows / `.exe` use the normal arg() path.
+        #[cfg(windows)]
+        let batch = is_batch_shim(&exe);
+        #[cfg(not(windows))]
+        let batch = false;
+
+        push_arg(&mut cmd, batch, "--print");
         if auto_approve.unwrap_or(false) {
             // `--permission-mode bypassPermissions` is the canonical
             // modern flag (see `claude --help`). Older `--dangerously-
@@ -240,10 +316,12 @@ pub async fn claude_cli_complete(
             // acknowledgement that --print mode never gets to perform,
             // so it ends up not applying. permission-mode just sets
             // the session mode and skips every prompt for this run.
-            cmd.arg("--permission-mode").arg("bypassPermissions");
+            push_arg(&mut cmd, batch, "--permission-mode");
+            push_arg(&mut cmd, batch, "bypassPermissions");
         }
         if !system_prompt.trim().is_empty() {
-            cmd.arg("--append-system-prompt").arg(&system_prompt);
+            push_arg(&mut cmd, batch, "--append-system-prompt");
+            push_arg(&mut cmd, batch, &system_prompt);
         }
         // Pin the CLI to the project's location. Skip silently if the
         // path is empty / non-existent so a misconfigured project

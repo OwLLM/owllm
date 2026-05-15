@@ -36,7 +36,13 @@ type ProjectRow = {
   /// Claude Code CLI runs against the user's chosen repo, not the
   /// desktop app's install dir.
   location: string;
+  /// Existing SuperUser transcript — runner reads this to merge new
+  /// Telegram-driven messages, then writes back via update_project so
+  /// the agentic tab's history stays consistent.
+  chat_json: string;
 };
+
+type GoalMsg = { role: string; color: string; text: string };
 type ModelInfo = {
   model_id: string;
   provider: string; // "local" | "anthropic" | "openai"
@@ -276,6 +282,42 @@ export default function TelegramBridgeRunner() {
         reply = `(bridge error: ${String(e?.message ?? e)})`;
       }
       await sendReply(chatId, reply);
+
+      // Mirror into the project's chat history so the agentic tab
+      // shows what came in from the phone (next time it loads the
+      // project) AND so a currently-mounted AgentsPage can render it
+      // live via the dispatched event below. Without this the desktop
+      // UI has no idea the bridge replied — exactly the "no history"
+      // gap users hit after the bridge started working.
+      if (project) {
+        let chat: GoalMsg[] = [];
+        try {
+          if (project.chat_json) {
+            const parsed = JSON.parse(project.chat_json);
+            if (Array.isArray(parsed)) chat = parsed as GoalMsg[];
+          }
+        } catch { /* ignore corrupt blob */ }
+        const inMsg:  GoalMsg = { role: "you",          color: "#9ad9ff", text: `📱 [TG] ${text}` };
+        const outMsg: GoalMsg = { role: "orchestrator", color: "#ffd97a", text: reply };
+        const next = [...chat, inMsg, outMsg];
+        try {
+          await invoke("update_project", { input: { id: project.id, chat_json: JSON.stringify(next) } });
+          // Refresh local cache so the next inbound message merges
+          // against the up-to-date transcript instead of overwriting
+          // it with a stale base.
+          try {
+            const rows = await invoke<ProjectRow[]>("list_projects");
+            setProjects(rows);
+          } catch { /* keep last cache */ }
+        } catch (e) {
+          console.error("[telegram] persist chat_json failed", e);
+        }
+        try {
+          window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+            detail: { projectId: project.id, messages: [inMsg, outMsg] },
+          }));
+        } catch { /* dispatch failed — UI just won't refresh live */ }
+      }
     };
 
     (async () => {

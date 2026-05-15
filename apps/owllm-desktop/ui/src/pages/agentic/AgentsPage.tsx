@@ -2702,6 +2702,30 @@ export default function AgentsPage() {
   // (The actual long-poll lives in <TelegramBridgeRunner /> at
   // AppShell level so it survives this page unmounting.)
 
+  // Live mirror — when the AppShell runner dispatches a chat append
+  // event for the currently-selected project, splice the new messages
+  // into the SuperUser thread immediately so the desktop UI shows
+  // both the inbound text and the bot's reply without waiting for a
+  // project reload. The runner has already persisted to chat_json, so
+  // the supChat persist effect's next write is just an idempotent
+  // round-trip of the same content.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ projectId: string; messages: GoalMsg[] }>).detail;
+      if (!detail) return;
+      if (detail.projectId !== selectedProjectId) return;
+      const msgs = Array.isArray(detail.messages) ? detail.messages : [];
+      if (msgs.length === 0) return;
+      setSupChat(prev => [...prev, ...msgs]);
+      // Refresh the project cache so a future remount loads the same
+      // transcript the runner already persisted.
+      reloadProjects();
+    };
+    window.addEventListener("owllm:chat:appended", handler as EventListener);
+    return () => window.removeEventListener("owllm:chat:appended", handler as EventListener);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId]);
+
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", minHeight:0 }}>
       <LocationRow

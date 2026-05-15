@@ -564,18 +564,34 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
 }) {
   const peekAgents = (team?.agents ?? []).slice(0, 6);
   const draftKey = projectId ? `owllm:supdraft:${projectId}` : "";
-  const [draft, setDraft] = useState<string>(() => {
+  // Hold the storage key in a ref so the keystroke handler can write
+  // synchronously without going through a useEffect (the previous
+  // version had a race: when projectId arrived asynchronously, the
+  // load-effect and the write-effect both fired in the same render
+  // cycle and the write fired with the stale empty draft, wiping the
+  // saved value before the load-effect's setDraft re-rendered).
+  const draftKeyRef = useRef(draftKey);
+  draftKeyRef.current = draftKey;
+  const [draft, setDraftState] = useState<string>(() => {
     if (!draftKey) return "";
     try { return localStorage.getItem(draftKey) ?? ""; } catch { return ""; }
   });
+  // Reload draft when projectId changes (e.g., user picks a different
+  // project on the strip while the page is mounted). Pure load — no
+  // write side-effect, so no race with setDraft.
   useEffect(() => {
-    if (!draftKey) { setDraft(""); return; }
-    try { setDraft(localStorage.getItem(draftKey) ?? ""); } catch { setDraft(""); }
+    if (!draftKey) { setDraftState(""); return; }
+    try { setDraftState(localStorage.getItem(draftKey) ?? ""); } catch { setDraftState(""); }
   }, [draftKey]);
-  useEffect(() => {
-    if (!draftKey) return;
-    try { localStorage.setItem(draftKey, draft); } catch {}
-  }, [draft, draftKey]);
+  // Write through to localStorage on every keystroke — synchronous, no
+  // useEffect. Survives page navigation immediately.
+  const setDraft = (v: string) => {
+    setDraftState(v);
+    const k = draftKeyRef.current;
+    if (k) {
+      try { localStorage.setItem(k, v); } catch {}
+    }
+  };
   const lastMessages = chat.slice(-4);  // most recent first-visible window
   const submit = () => {
     const t = draft.trim();
@@ -2588,17 +2604,34 @@ export default function AgentsPage() {
   }
 
   // ===== Telegram bridge — long-poll =====
-  // Active whenever the loaded bridge config has a token AND its
-  // project_id matches the currently-selected project. The legacy
-  // Python bridge requires the user to set both before it starts a
-  // thread (bridges_page.py / telegram_bridge.py); we keep the same
-  // gating here so the UX matches.
-  //
-  // Inbound text is treated as a SuperUser message: send a one-shot
-  // chat-completion through the active team's model, then mirror the
-  // reply back to the Telegram chat. allowed_chat_ids is enforced —
-  // an empty list means "nobody is allowed" (matches legacy semantics).
+  // Gated on the persisted "started" flag (set by the Start button on
+  // BridgesPage) AND a valid config AND a matching project. Without
+  // an explicit Start click the bridge stays idle even when the
+  // token + project line up — matches the legacy "click Start to run"
+  // UX. The flag survives page navigation (localStorage).
+  const TELEGRAM_STARTED_KEY = "owllm:telegram:started";
+  const [tgStarted, setTgStarted] = useState<boolean>(() => {
+    try { return localStorage.getItem(TELEGRAM_STARTED_KEY) === "1"; }
+    catch { return false; }
+  });
   useEffect(() => {
+    const onStatus = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const running = detail === "running";
+      setTgStarted(running);
+      // Re-fetch bridge config from disk: the user just hit Save +
+      // Start on the Bridges page, the new token/project_id is on
+      // disk but our `bridges` state was loaded once on mount.
+      if (running) {
+        invoke<BridgeConfigs>("load_bridge_configs").then(c => setBridges(c)).catch(() => {});
+      }
+    };
+    window.addEventListener("owllm:telegram:status", onStatus as EventListener);
+    return () => window.removeEventListener("owllm:telegram:status", onStatus as EventListener);
+  }, []);
+
+  useEffect(() => {
+    if (!tgStarted) return;
     const tg = bridges.telegram;
     if (!tg?.bot_token) return;
     if (!selectedProjectId || tg.project_id !== selectedProjectId) return;
@@ -2692,7 +2725,7 @@ export default function AgentsPage() {
 
     return () => { dead = true; ctrl.abort(); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bridges.telegram?.bot_token, bridges.telegram?.project_id, (bridges.telegram?.allowed_chat_ids ?? []).join(","), selectedProjectId, activeTeam?.id, effectiveTeamModel, serverState.running, serverState.port]);
+  }, [tgStarted, bridges.telegram?.bot_token, bridges.telegram?.project_id, (bridges.telegram?.allowed_chat_ids ?? []).join(","), selectedProjectId, activeTeam?.id, effectiveTeamModel, serverState.running, serverState.port]);
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", minHeight:0 }}>

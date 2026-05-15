@@ -144,14 +144,43 @@ function stopButtonStyle(disabled: boolean): React.CSSProperties {
 // ---------------------------------------------------------------------
 // Telegram card — Qt _TelegramCard (bridges_page.py:80)
 // ---------------------------------------------------------------------
+// Shared localStorage key driving the live Telegram bridge in
+// AgentsPage. Persisted across tab navigations so the user's Start
+// click sticks. AgentsPage listens for `owllm:telegram:status` events
+// dispatched alongside writes here.
+const TELEGRAM_STARTED_KEY = "owllm:telegram:started";
+
+function isTelegramStartedFromStorage(): boolean {
+  try { return localStorage.getItem(TELEGRAM_STARTED_KEY) === "1"; }
+  catch { return false; }
+}
+
+function setTelegramStartedInStorage(running: boolean) {
+  try { localStorage.setItem(TELEGRAM_STARTED_KEY, running ? "1" : "0"); } catch {}
+  // Same-tab listeners don't get a "storage" event, so emit a custom
+  // event AgentsPage can subscribe to.
+  try {
+    window.dispatchEvent(new CustomEvent("owllm:telegram:status", { detail: running ? "running" : "stopped" }));
+  } catch {}
+}
+
+// Real project list, fetched on mount. Mirrors the SQLite-backed list
+// the agentic tab uses, so the bridge always binds to a real project id.
+type ProjectLite = { id: string; name: string };
+
 function TelegramCard() {
   const [token, setToken] = useState("");
   const [chatIds, setChatIds] = useState("");
   const [project, setProject] = useState("");
   const [autoApprove, setAutoApprove] = useState(false);
-  const [status, setStatus] = useState<BridgeStatus>("stopped");
+  // Initialize from persisted flag so navigating back to the page
+  // doesn't reset the "Started" indicator.
+  const [status, setStatus] = useState<BridgeStatus>(() =>
+    isTelegramStartedFromStorage() ? "running" : "stopped"
+  );
   const [savedFlash, setSavedFlash] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [projects, setProjects] = useState<ProjectLite[]>([]);
 
   // Load persisted config from ~/.owllm/bridge_config.json so user
   // doesn't re-enter the bot token every launch.
@@ -165,6 +194,10 @@ function TelegramCard() {
       setProject(t.project_id || "");
       setAutoApprove(!!t.auto_approve);
     }).catch(() => { /* keep blank defaults */ });
+    invoke<ProjectLite[]>("list_projects").then(rows => {
+      if (dead) return;
+      setProjects(rows.map(r => ({ id: r.id, name: r.name })));
+    }).catch(() => { /* keep empty */ });
     return () => { dead = true; };
   }, []);
 
@@ -295,12 +328,14 @@ function TelegramCard() {
         </div>
       )}
 
-      {/* Project (Qt 156-163). */}
+      {/* Project (Qt 156-163). Real list from list_projects so the
+          bridge binds to a project that actually exists. */}
       <SectionLabel text="Project" />
       <ProjectSelect value={project} onChange={e => setProject(e.target.value)}>
         <option value="">(no project)</option>
-        <option value="psm">Product Studio Test</option>
-        <option value="bug_hunter">Bug Hunter — esp-flash</option>
+        {projects.map(p => (
+          <option key={p.id} value={p.id}>{p.name}</option>
+        ))}
       </ProjectSelect>
 
       {/* Auto-approve — Qt label verbatim (line 167). */}
@@ -341,14 +376,22 @@ function TelegramCard() {
         <div style={{ flex: 1 }} />
         <button
           disabled={running}
-          onClick={() => setStatus("running")}
+          onClick={async () => {
+            // Save first so the bridge has fresh config to read.
+            await persist();
+            setStatus("running");
+            setTelegramStartedInStorage(true);
+          }}
           style={startButtonStyle(accent, "#62c4ff", running)}
         >
           Start
         </button>
         <button
           disabled={!running}
-          onClick={() => setStatus("stopped")}
+          onClick={() => {
+            setStatus("stopped");
+            setTelegramStartedInStorage(false);
+          }}
           style={stopButtonStyle(!running)}
         >
           Stop

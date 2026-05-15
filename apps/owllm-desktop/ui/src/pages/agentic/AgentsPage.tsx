@@ -8,6 +8,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import NewProjectDialog from "./NewProjectDialog";
+import ModelPicker, { AccountsStatusLite } from "./ModelPicker";
 
 const ICONS = "/Page_icons";
 
@@ -405,13 +406,14 @@ function FlowHeader({
 // assigns the model to EVERY agent on the team at once (clears per-
 // agent overrides so the team genuinely runs on one model again).
 function TeamInfoCard({
-  team, models, teamModel, onChangeTeamModel, serverModelId,
+  team, models, teamModel, onChangeTeamModel, serverModelId, accountsStatus,
 }: {
   team: Team | null;
   models: ModelInfo[];
   teamModel: string;
   onChangeTeamModel: (id: string) => void;
   serverModelId: string | null;
+  accountsStatus: AccountsStatusLite | null;
 }) {
   const CARD_W = 320;
   const CARD_H = 312; // bumped from 264 to fit the MODEL row below stats.
@@ -453,41 +455,19 @@ function TeamInfoCard({
       <div style={{ position:"absolute", left:14, top:model_y, width:CARD_W - 28, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", fontFamily:"Segoe UI", letterSpacing:0.4 }}>
         <span style={{ flex:1 }}>TEAM MODEL · assigns to every agent</span>
       </div>
-      <select
-        data-ui="TeamModelSelect"
-        value={teamModel}
-        onChange={e => onChangeTeamModel(e.target.value)}
-        title={teamModel
-          ? `Every agent on this team will use '${teamModel}'.`
-          : (serverModelId
-              ? `No team default — agents fall back to whatever model the Server tab is running ('${serverModelId}').`
-              : "No team default and no server running. Pick a model here OR start one on the Server tab.")
-        }
-        style={{
-          position:"absolute", left:14, top:model_y + 16, width:CARD_W - 28, height:30,
-          padding:"0 10px", borderRadius:8,
-          background:"var(--bg-input)", color:"var(--fg-strong)",
-          border:"1px solid var(--border)",
-          fontSize:12,
-        }}
-      >
-        <option value="">
-          {serverModelId
-            ? `(use server model · ${serverModelId})`
-            : "(use server model — start one on the Server tab)"}
-        </option>
-        {models.map(m => {
-          const tag = m.provider === "anthropic" ? "  ·  Anthropic"
-                    : m.provider === "openai"    ? "  ·  OpenAI"
-                    : m.size_mib != null         ? `  ·  ${Math.round(m.size_mib / 100) / 10} GiB`
-                    : "  ·  local";
-          return (
-            <option key={`${m.provider}:${m.model_id}`} value={m.model_id}>
-              {m.model_id}{tag}
-            </option>
-          );
-        })}
-      </select>
+      <div style={{ position:"absolute", left:14, top:model_y + 16, width:CARD_W - 28, display:"flex" }}>
+        <ModelPicker
+          value={teamModel}
+          onChange={onChangeTeamModel}
+          models={models}
+          status={accountsStatus}
+          fallbackLabel={
+            serverModelId
+              ? `(use server model · ${serverModelId})`
+              : "(use server model — start one on the Server tab)"
+          }
+        />
+      </div>
     </div>
   );
 }
@@ -1167,6 +1147,7 @@ function OrchestratorPane({
   selectedAgent, activeAgent,
   team, phase,
   models, modelFor, onPickAgentModel,
+  accountsStatus,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
   runError: string | null;
@@ -1180,6 +1161,8 @@ function OrchestratorPane({
   modelFor: (agentName: string) => string;
   /// Set the per-agent model override. Pass an empty string to clear.
   onPickAgentModel: (agentName: string, modelId: string) => void;
+  /// Account status drives sub/API enabled flags in ModelPicker.
+  accountsStatus: AccountsStatusLite | null;
 }) {
   const [activeTab, setActiveTab] = useState<"reply"|"thought">("reply");
   // Pick which buffer to show: explicit selection > currently-active
@@ -1236,40 +1219,18 @@ function OrchestratorPane({
       </div>
       <div data-ui="PickerHost" style={{ padding:"0 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Model</span>
-        <select
-          data-ui="AgentModelSelect"
+        <ModelPicker
           value={modelFor(focus)}
-          onChange={e => onPickAgentModel(focus, e.target.value)}
+          onChange={id => onPickAgentModel(focus, id)}
+          models={models}
+          status={accountsStatus}
           disabled={focus === "you" || focus === "system"}
-          title={
-            focus === "you" || focus === "system"
-              ? "Select an agent on the canvas to assign a model."
-              : `Override the model for ${displayLabel(focus)}. Falls back to the team's default, then the running server.`
-          }
-          style={{
-            flex:1, height:28, padding:"0 10px",
-            background:"var(--bg-surface)", color:"var(--fg)",
-            border:"1px solid var(--border)", borderRadius:6,
-            fontSize:12,
-          }}
-        >
-          <option value="">
-            {serverState.running && serverState.model_id
+          fallbackLabel={
+            serverState.running && serverState.model_id
               ? `(use team / server model · ${serverState.model_id})`
-              : "(use team / server model — none running)"}
-          </option>
-          {models.map(m => {
-            const tag = m.provider === "anthropic" ? "  ·  Anthropic"
-                      : m.provider === "openai"    ? "  ·  OpenAI"
-                      : m.size_mib != null         ? `  ·  ${Math.round(m.size_mib / 100) / 10} GiB`
-                      : "  ·  local";
-            return (
-              <option key={`${m.provider}:${m.model_id}`} value={m.model_id}>
-                {m.model_id}{tag}
-              </option>
-            );
-          })}
-        </select>
+              : "(use team / server model — none running)"
+          }
+        />
       </div>
       <div data-ui="VoiceHost" style={{ padding:"0 12px 8px", display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Voice</span>
@@ -1460,11 +1421,24 @@ async function streamChatCompletion(
   signal: AbortSignal,
   onDelta: StreamHandler,
 ): Promise<string> {
+  // Strip the optional route prefix encoded by the ModelPicker before
+  // handing the bare model id to the provider-specific call.
+  const forceSub = modelId.startsWith("sub/");
+  const forceApi = modelId.startsWith("api/");
+  const bareId = forceSub || forceApi || modelId.startsWith("auto/")
+    ? modelId.slice(modelId.indexOf("/") + 1)
+    : modelId;
+
+  if (provider === "auto") {
+    // Future slot. For now resolve to a local model when one exists,
+    // otherwise fail with an actionable message.
+    throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
+  }
   if (provider === "anthropic") {
-    return streamAnthropic(modelId, systemPrompt, userMessage, temperature, signal, onDelta);
+    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta);
   }
   if (provider === "openai") {
-    return streamOpenAI(modelId, systemPrompt, userMessage, temperature, signal, onDelta);
+    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta);
   }
   // Local llama-server. OpenAI-compatible SSE.
   const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
@@ -1496,17 +1470,33 @@ async function streamChatCompletion(
 /// the user paying for API credits — they use the same subscription
 /// that powers their normal Claude Code sessions. Trade-off: --print
 /// mode emits the full reply at the end (no token streaming).
+type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
+
 async function streamAnthropic(
   modelId: string,
+  route: CloudRoute,
   systemPrompt: string,
   userMessage: string,
   temperature: number,
   signal: AbortSignal,
   onDelta: StreamHandler,
 ): Promise<string> {
+  const wantSub = route.forceSub === true;
+  const wantApi = route.forceApi === true;
+  // forceSub: skip the API path entirely and go straight to the CLI.
+  if (wantSub) {
+    const status = await invoke<{ claude_cli: boolean }>("accounts_status");
+    if (!status?.claude_cli) {
+      throw new Error("Claude Code CLI not detected — run `claude /login` first.");
+    }
+    const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage });
+    if (reply) onDelta(reply);
+    return reply;
+  }
   const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
   if (!key) {
-    // No API key — try the Claude Code CLI subscription instead.
+    if (wantApi) throw new Error("No ANTHROPIC_API_KEY saved — set it on the Accounts page.");
+    // Default (unforced) path: try CLI subscription as a fallback.
     try {
       const status = await invoke<{ claude_cli: boolean }>("accounts_status");
       if (status?.claude_cli) {
@@ -1518,8 +1508,6 @@ async function streamAnthropic(
         return reply;
       }
     } catch (e) {
-      // fall through to the original error below so the user sees a
-      // single actionable message rather than two stacked errors.
       console.error("claude_cli_complete failed", e);
     }
     throw new Error(
@@ -1578,12 +1566,16 @@ async function streamAnthropic(
 /// OpenAI chat-completions streaming. Same SSE shape as llama-server.
 async function streamOpenAI(
   modelId: string,
+  _route: CloudRoute,
   systemPrompt: string,
   userMessage: string,
   temperature: number,
   signal: AbortSignal,
   onDelta: StreamHandler,
 ): Promise<string> {
+  // Codex CLI subscription support is a future slot — for now both
+  // forceSub and the default flow route through the API path, so this
+  // throws cleanly when no key is saved.
   const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
   if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -1683,6 +1675,10 @@ export default function AgentsPage() {
   /// refreshed when the user re-opens the Server tab (the registry
   /// itself is disk-backed and stable for a given session).
   const [models, setModels] = useState<ModelInfo[]>([]);
+  /// Account presence flags driving the ModelPicker's enabled / dimmed
+  /// states. Polled every 4s so the picker flips live when the user
+  /// saves / removes credentials on the Accounts page.
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
 
   const [goal, setGoal] = useState<string>("summarize the last commit and propose a follow-up");
   const [busy, setBusy] = useState<boolean>(false);
@@ -1827,6 +1823,22 @@ export default function AgentsPage() {
     };
     tick();
     const id = window.setInterval(tick, 3000);
+    return () => { dead = true; window.clearInterval(id); };
+  }, []);
+
+  // Poll Accounts presence — drives the ModelPicker's available /
+  // dimmed states for the (subscription) + (API) variants of each
+  // cloud model. 4s cadence: cheap and not latency-critical.
+  useEffect(() => {
+    let dead = false;
+    const tick = async () => {
+      try {
+        const s = await invoke<AccountsStatusLite>("accounts_status");
+        if (!dead) setAccountsStatus(s);
+      } catch { /* keep last good value */ }
+    };
+    tick();
+    const id = window.setInterval(tick, 4000);
     return () => { dead = true; window.clearInterval(id); };
   }, []);
 
@@ -2153,15 +2165,33 @@ export default function AgentsPage() {
     setPerAgentModel(new Map());
   };
 
-  // Look up the provider for a resolved model id. Local llama-server
-  // models always serve themselves; cloud models match by id. Returns
-  // "local" for anything we don't recognize so the dispatch loop falls
-  // back to the localhost path instead of trying to call a cloud
-  // endpoint we have no key for.
+  // Look up the provider for a resolved model id. The ModelPicker
+  // encodes routing as prefixes:
+  //   "sub/claude-..."  → anthropic, subscription only
+  //   "api/claude-..."  → anthropic, API only
+  //   "sub/gpt-..."     → openai, subscription only
+  //   "api/gpt-..."     → openai, API only
+  //   "auto/<flavour>"  → auto routing (resolved at dispatch time)
+  //   else              → local (or fall back when unrecognized)
   const providerFor = (modelId: string): string => {
-    const m = models.find(x => x.model_id === modelId);
+    if (!modelId) return "local";
+    if (modelId.startsWith("auto/")) return "auto";
+    const bareId = stripModelPrefix(modelId);
+    if (modelId.startsWith("sub/") || modelId.startsWith("api/")) {
+      // Pure cloud entries — decide between anthropic / openai by id.
+      if (bareId.startsWith("claude-")) return "anthropic";
+      if (bareId.startsWith("gpt-") || bareId === "o3") return "openai";
+    }
+    const m = models.find(x => x.model_id === bareId);
     return m?.provider || "local";
   };
+  // Encoded id → bare model id (strips sub/, api/, auto/ prefixes).
+  function stripModelPrefix(id: string): string {
+    for (const p of ["sub/", "api/", "auto/"]) {
+      if (id.startsWith(p)) return id.slice(p.length);
+    }
+    return id;
+  }
 
   const bridgeOn = useMemo(() => {
     if (!selectedProject) return false;
@@ -2379,6 +2409,7 @@ export default function AgentsPage() {
                     teamModel={effectiveTeamModel}
                     onChangeTeamModel={onPickTeamModel}
                     serverModelId={serverState.model_id}
+                    accountsStatus={accountsStatus}
                   />
                   <SuperUserCard
                     team={renderTeam}
@@ -2422,6 +2453,7 @@ export default function AgentsPage() {
             models={models}
             modelFor={modelFor}
             onPickAgentModel={onPickAgentModel}
+            accountsStatus={accountsStatus}
           />
         </div>
       </div>

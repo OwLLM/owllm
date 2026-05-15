@@ -1,22 +1,25 @@
 // TelegramBridgeRunner — top-level long-poll bridge.
 //
 // Lives directly inside AppShell so the loop survives page navigation;
-// AgentsPage used to host it, but the bridge would silently die the
-// moment the user clicked away to another tab. Polls Telegram with
-// `getUpdates?timeout=20`, gates inbound messages on the persisted
-// `owllm:telegram:started` flag (toggled by BridgesPage's Start/Stop),
-// matches them against the saved allowed_chat_ids, and forwards each
-// text to the bound project's team-default model. The reply travels
-// back via /sendMessage so the user's phone sees the answer.
-//
-// The bridge is deliberately simple: one shot of streamChatCompletion
-// per inbound message, no full orchestrator dispatch graph. The team's
-// `team_default_model_id` decides the provider (local llama-server,
-// Anthropic API, Anthropic CLI subscription, OpenAI). If that field is
-// blank we fall back to whatever's running on the local server.
+// AgentsPage used to host it, but the bridge died the moment the user
+// clicked away to another tab. Polls Telegram with `getUpdates?timeout=20`,
+// gates inbound messages on the persisted `owllm:telegram:started`
+// flag (toggled by BridgesPage Start/Stop), matches them against the
+// saved allowed_chat_ids, and dispatches each text through the same
+// orchestrator → specialists → integrate loop the desktop Run button
+// drives. Each phase pushes events the agentic tab can pick up live,
+// AND streams each agent's reply back to Telegram so the user sees
+// the team work on their phone the same way they would on the canvas.
 
 import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  GoalMsg, ModelInfo, ServerStatus, Team, RoleData,
+  ProjectRow, TeamTemplateBackend, AgentRoleBackend,
+  toTeam, projectToTeam, rolesFromBackend,
+  chatToHistory, findOrchestratorSpec, displayLabel,
+  runDispatchLoop, DispatchPhase,
+} from "../pages/agentic/dispatch";
 
 const STARTED_KEY = "owllm:telegram:started";
 
@@ -28,192 +31,7 @@ type TelegramConfig = {
 };
 type BridgeConfigs = { telegram: TelegramConfig; whatsapp: unknown };
 
-type ProjectRow = {
-  id: string;
-  name: string;
-  team_default_model_id: string;
-  /// Project working directory — fed into claude_cli_complete so the
-  /// Claude Code CLI runs against the user's chosen repo, not the
-  /// desktop app's install dir.
-  location: string;
-  /// Existing SuperUser transcript — runner reads this to merge new
-  /// Telegram-driven messages, then writes back via update_project so
-  /// the agentic tab's history stays consistent.
-  chat_json: string;
-};
-
-type GoalMsg = { role: string; color: string; text: string };
-type ModelInfo = {
-  model_id: string;
-  provider: string; // "local" | "anthropic" | "openai"
-};
-type ServerStatus = {
-  running: boolean;
-  model_id: string | null;
-  port: number | null;
-};
-
-// --- Provider routing copied from AgentsPage; the bridge runs without
-//     access to that file's local helpers, so it duplicates the small
-//     amount of logic it needs. The "sub/" prefix on cloud model ids
-//     forces the Claude CLI subscription path (free-with-claude-subscribe).
-function stripPrefix(id: string): string {
-  for (const p of ["sub/", "api/", "auto/"]) if (id.startsWith(p)) return id.slice(p.length);
-  return id;
-}
-function providerFor(modelId: string, models: ModelInfo[]): string {
-  if (!modelId) return "local";
-  if (modelId.startsWith("auto/")) return "auto";
-  const bare = stripPrefix(modelId);
-  if (modelId.startsWith("sub/") || modelId.startsWith("api/")) {
-    if (bare.startsWith("claude-")) return "anthropic";
-    if (bare.startsWith("gpt-") || bare === "o3") return "openai";
-  }
-  const m = models.find(x => x.model_id === bare);
-  return m?.provider || "local";
-}
-
-type HistoryItem = { role: "user" | "assistant"; content: string };
-
-// Convert the persisted GoalMsg transcript into the alternating
-// user/assistant turns the model APIs expect. System/error/dispatch
-// rows are excluded.
-function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
-  const out: HistoryItem[] = [];
-  for (const m of chat) {
-    if (!m || typeof m.text !== "string" || !m.text.trim()) continue;
-    if (m.role === "system" || m.role === "error" || m.role === "dispatch") continue;
-    out.push({ role: m.role === "you" ? "user" : "assistant", content: m.text });
-  }
-  return out;
-}
-
-// Claude --print is one-shot — no memory across calls. Fold the prior
-// turns into the user prompt so the CLI sees the full thread.
-function foldHistoryIntoPrompt(userMessage: string, history: HistoryItem[]): string {
-  if (history.length === 0) return userMessage;
-  const lines: string[] = ["--- Previous conversation ---"];
-  for (const h of history) {
-    lines.push(`${h.role === "user" ? "User" : "Assistant"}: ${h.content}`);
-    lines.push("");
-  }
-  lines.push("--- Current user message ---");
-  lines.push(userMessage);
-  return lines.join("\n");
-}
-
-async function streamOnce(
-  modelId: string,
-  systemPrompt: string,
-  userMessage: string,
-  models: ModelInfo[],
-  server: ServerStatus,
-  signal: AbortSignal,
-  cwd: string,
-  history: HistoryItem[],
-  autoApprove: boolean,
-): Promise<string> {
-  const provider = providerFor(modelId, models);
-  const forceSub = modelId.startsWith("sub/");
-  const forceApi = modelId.startsWith("api/");
-  const bareId = forceSub || forceApi || modelId.startsWith("auto/") ? stripPrefix(modelId) : modelId;
-  const cliPrompt = foldHistoryIntoPrompt(userMessage, history);
-
-  if (provider === "anthropic") {
-    // Subscription path: shell out to claude-code CLI.
-    if (forceSub) {
-      const status = await invoke<{ claude_cli: boolean }>("accounts_status");
-      if (!status?.claude_cli) throw new Error("Claude Code CLI not detected — run `claude /login` first.");
-      return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: cwd || null, autoApprove });
-    }
-    const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
-    if (!key) {
-      if (forceApi) throw new Error("No ANTHROPIC_API_KEY saved — set it on the Accounts page.");
-      // Default: prefer CLI if available.
-      try {
-        const status = await invoke<{ claude_cli: boolean }>("accounts_status");
-        if (status?.claude_cli) {
-          return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: cwd || null, autoApprove });
-        }
-      } catch { /* fall through */ }
-      throw new Error("No ANTHROPIC_API_KEY and no Claude CLI — Telegram bridge can't dispatch.");
-    }
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-      body: JSON.stringify({
-        model: bareId,
-        max_tokens: 4096,
-        system: systemPrompt,
-        messages: [
-          ...history.map(h => ({ role: h.role, content: h.content })),
-          { role: "user", content: userMessage },
-        ],
-        stream: false,
-      }),
-      signal,
-    });
-    if (!resp.ok) throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-    const j: any = await resp.json();
-    const blocks: any[] = Array.isArray(j?.content) ? j.content : [];
-    return blocks.filter(b => b?.type === "text").map(b => b.text).join("");
-  }
-
-  if (provider === "openai") {
-    const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
-    if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: bareId,
-        messages: [
-          { role: "system", content: systemPrompt },
-          ...history,
-          { role: "user", content: userMessage },
-        ],
-        stream: false,
-      }),
-      signal,
-    });
-    if (!resp.ok) throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-    const j: any = await resp.json();
-    return j?.choices?.[0]?.message?.content ?? "";
-  }
-
-  // Local llama-server path.
-  if (!server.running || !server.port) {
-    throw new Error("No local model server is running — start one on the Server tab.");
-  }
-  const resp = await fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: modelId || "local",
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...history,
-        { role: "user", content: userMessage },
-      ],
-      stream: false,
-    }),
-    signal,
-  });
-  if (!resp.ok) throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-  const j: any = await resp.json();
-  return j?.choices?.[0]?.message?.content ?? "";
-}
-
 export default function TelegramBridgeRunner() {
-  // Track the persisted "started" flag, the loaded config, projects,
-  // models, server state. Each lives in a ref-backed signal so the
-  // long-poll loop reads fresh data without React having to re-mount
-  // the loop on every state change.
   const [started, setStarted] = useState<boolean>(() => {
     try { return localStorage.getItem(STARTED_KEY) === "1"; } catch { return false; }
   });
@@ -221,15 +39,16 @@ export default function TelegramBridgeRunner() {
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [server, setServer] = useState<ServerStatus>({ running: false, model_id: null, port: null });
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [roleByName, setRoleByName] = useState<Map<string, RoleData>>(new Map());
 
   const projectsRef = useRef(projects); projectsRef.current = projects;
   const modelsRef = useRef(models); modelsRef.current = models;
   const serverRef = useRef(server); serverRef.current = server;
+  const teamsRef = useRef(teams); teamsRef.current = teams;
+  const roleByNameRef = useRef(roleByName); roleByNameRef.current = roleByName;
   const cfgRef = useRef(cfg); cfgRef.current = cfg;
 
-  // Listen for the BridgesPage Start/Stop event so we react immediately
-  // (no page reload needed). Also re-fetch the config on every status
-  // flip so the loop always has the freshly-saved token / project_id.
   useEffect(() => {
     const onStatus = (e: Event) => {
       const detail = (e as CustomEvent).detail;
@@ -248,156 +67,253 @@ export default function TelegramBridgeRunner() {
     invoke<BridgeConfigs>("load_bridge_configs").then(c => setCfg(c.telegram)).catch(() => {});
     invoke<ProjectRow[]>("list_projects").then(setProjects).catch(() => {});
     invoke<ModelInfo[]>("list_models").then(setModels).catch(() => {});
+    invoke<TeamTemplateBackend[]>("list_team_templates").then(rows => setTeams(rows.map(toTeam))).catch(() => {});
+    invoke<AgentRoleBackend[]>("list_agent_roles").then(rows => setRoleByName(rolesFromBackend(rows))).catch(() => {});
   }, []);
 
-  // Light periodic refresh — server status (for local fallback) and
-  // projects (in case the user creates / deletes one while the bridge
-  // is running). Keep the cadence quiet (every 5s) so it doesn't burn
-  // CPU when nothing's happening.
+  // Periodic refresh — server status + projects so the bridge sees a
+  // freshly-created project and so the merge below reads up-to-date
+  // chat_json even when the desktop's been writing in parallel.
   useEffect(() => {
     const tick = async () => {
-      try {
-        const s = await invoke<ServerStatus>("server_status");
-        setServer(s);
-      } catch { /* keep last */ }
-      try {
-        const ps = await invoke<ProjectRow[]>("list_projects");
-        setProjects(ps);
-      } catch { /* keep last */ }
+      try { setServer(await invoke<ServerStatus>("server_status")); } catch {}
+      try { setProjects(await invoke<ProjectRow[]>("list_projects")); } catch {}
     };
     tick();
     const id = window.setInterval(tick, 5000);
     return () => window.clearInterval(id);
   }, []);
 
-  // The long-poll loop itself. Gated on started + a usable config.
-  // Reads token from cfg directly (not via ref) so it re-mounts when
-  // the token / project_id actually changes.
+  // ---- Telegram helpers (HTTP via Rust, bypasses webview CORS) ----
+  const sendTelegram = async (token: string, chatId: number, body: string) => {
+    if (!body || !body.trim()) return;
+    try {
+      await invoke("telegram_send_message", { token, chatId, text: body });
+    } catch (e) {
+      console.error("telegram_send_message failed", e);
+    }
+  };
+
+  // Atomic merge — read fresh chat_json from DB, append, write back.
+  // The stale-cache version overwrote concurrent desktop edits, which
+  // was the "history disappears until reply arrives" bug.
+  const persistChat = async (projectId: string, toAppend: GoalMsg[]): Promise<void> => {
+    try {
+      const rows = await invoke<ProjectRow[]>("list_projects");
+      setProjects(rows);
+      const fresh = rows.find(p => p.id === projectId);
+      let chat: GoalMsg[] = [];
+      try {
+        if (fresh?.chat_json) {
+          const parsed = JSON.parse(fresh.chat_json);
+          if (Array.isArray(parsed)) chat = parsed as GoalMsg[];
+        }
+      } catch { /* fall back */ }
+      const next = [...chat, ...toAppend];
+      await invoke("update_project", { input: { id: projectId, chat_json: JSON.stringify(next) } });
+    } catch (e) {
+      console.error("[telegram] persistChat failed", e);
+    }
+  };
+
+  // Resolve the team for the bridge: prefer the project's own roster,
+  // fall back to the first template so the bridge still works on an
+  // empty project.
+  const resolveTeam = (project: ProjectRow | null): Team | null => {
+    if (project && Array.isArray(project.team) && project.team.length > 0) {
+      return projectToTeam(project);
+    }
+    if (teamsRef.current.length > 0) return teamsRef.current[0];
+    return null;
+  };
+
+  const handle = async (chatId: number, text: string) => {
+    const tgCfg = cfgRef.current;
+    if (!tgCfg) return;
+    const project = projectsRef.current.find(p => p.id === tgCfg.project_id) ?? null;
+    const projectId = project?.id ?? tgCfg.project_id ?? "";
+
+    // ---- 1. INBOUND VISIBLE IMMEDIATELY ----
+    // Fire the chat-append event right when the message arrives so
+    // the agentic tab shows the user's prompt instantly — not after
+    // the 30 s the orchestrator takes to think.
+    const inMsg: GoalMsg = { role: "you", color: "#9ad9ff", text: `📱 [TG] ${text}` };
+    try {
+      window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+        detail: { projectId, messages: [inMsg], source: "telegram" },
+      }));
+    } catch {}
+    if (projectId) {
+      // Persist the inbound on its own (atomic merge) so even if the
+      // dispatch crashes the message survives.
+      await persistChat(projectId, [inMsg]);
+    }
+
+    // ---- 2. Resolve team + history + dispatch ----
+    const team = resolveTeam(project);
+    if (!team || team.agents.length === 0) {
+      const note = "(no team configured for this project — set a team on the agentic tab)";
+      await sendTelegram(tgCfg.bot_token, chatId, note);
+      const sysMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: note };
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+          detail: { projectId, messages: [sysMsg], source: "telegram" },
+        }));
+      } catch {}
+      if (projectId) await persistChat(projectId, [sysMsg]);
+      return;
+    }
+
+    // Build the prior history from the project's persisted chat
+    // transcript so the bot has memory across app restarts.
+    let priorHistory = chatToHistory(
+      (() => {
+        try {
+          if (!project?.chat_json) return [];
+          const parsed = JSON.parse(project.chat_json);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch { return []; }
+      })()
+    );
+
+    const orch = findOrchestratorSpec(team);
+    const orchName = orch?.name ?? "orchestrator";
+
+    // Model resolution — project default → server fallback → "local"
+    const teamDefault = (project?.team_default_model_id || "").trim();
+    const serverFallback = serverRef.current.model_id ?? "local";
+    const baseModel = teamDefault || serverFallback;
+    const modelFor = (_agent: string) => baseModel;
+
+    // ---- 3. Hook events: every phase, dispatch, agent reply maps
+    //         to a CustomEvent the agentic tab subscribes to. The
+    //         persisted chat_json gets the user-facing turns only.
+    const projectCwd = (project?.location ?? "").trim();
+    const auto = !!tgCfg.auto_approve;
+
+    const fireActive = (agent: string | null) => {
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:agent:active", {
+          detail: { agent, projectId },
+        }));
+      } catch {}
+    };
+    const fireThought = (agent: string, msg: GoalMsg) => {
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:thought:appended", {
+          detail: { projectId, agent, message: msg, source: "telegram" },
+        }));
+      } catch {}
+    };
+    const fireLog = (agent: string, msg: GoalMsg) => {
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:log:appended", {
+          detail: { projectId, agent, message: msg, source: "telegram" },
+        }));
+      } catch {}
+    };
+    const fireLogDelta = (agent: string, delta: string) => {
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:log:delta", {
+          detail: { projectId, agent, delta, source: "telegram" },
+        }));
+      } catch {}
+    };
+
+    // Track the final orchestrator reply so we can send a clean wrap
+    // to Telegram once the dispatch finishes (the legacy bridge
+    // sent "✅ Done.\n\n<final>" — we match that vocabulary).
+    let finalForTelegram = "";
+
+    try {
+      const finalReply = await runDispatchLoop(
+        {
+          team,
+          roleByName: roleByNameRef.current,
+          goal: text,
+          modelFor,
+          models: modelsRef.current,
+          port: serverRef.current.port ?? 0,
+          projectCwd,
+          history: priorHistory,
+          autoApprove: auto,
+          signal: new AbortController().signal,
+        },
+        {
+          onPhase: (_phase: DispatchPhase) => { /* could mirror to Telegram if chatty */ },
+          onActiveAgent: fireActive,
+          onLog: fireLog,
+          onLogDelta: fireLogDelta,
+          onThought: fireThought,
+          // Every full reply from an agent (orchestrator's plan, each
+          // specialist's answer, the integrated final) lands here.
+          // Mirror to the SuperUserCard chat AND to Telegram so the
+          // phone sees each agent talking, matching legacy chatty mode.
+          onAgentReply: (agent: string, reply: string) => {
+            const isOrch = agent === orchName;
+            const msg: GoalMsg = {
+              role: isOrch ? orchName : agent,
+              color: isOrch ? "#ffd97a" : "#9ad9ff",
+              text: reply,
+            };
+            try {
+              window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+                detail: { projectId, messages: [msg], source: "telegram" },
+              }));
+            } catch {}
+            if (projectId) {
+              // Fire and forget — persist serially in the background
+              // so the dispatch doesn't block on SQLite round-trips.
+              persistChat(projectId, [msg]).catch(() => {});
+            }
+            // Phone mirror: prefix the agent's display name so the user
+            // can tell who's talking even when 3+ specialists chime in.
+            sendTelegram(tgCfg.bot_token, chatId, `💬 ${displayLabel(agent)}: ${reply}`);
+            if (isOrch) finalForTelegram = reply;
+          },
+        }
+      );
+      finalForTelegram = finalForTelegram || finalReply;
+    } catch (e: any) {
+      const errMsg: GoalMsg = {
+        role: "system",
+        color: "#ff8c8c",
+        text: `(dispatch error: ${String(e?.message ?? e)})`,
+      };
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+          detail: { projectId, messages: [errMsg], source: "telegram" },
+        }));
+      } catch {}
+      if (projectId) await persistChat(projectId, [errMsg]);
+      await sendTelegram(tgCfg.bot_token, chatId, errMsg.text);
+      fireActive(null);
+      return;
+    }
+
+    // ---- 4. Wrap with the legacy "✅ Done." sentinel so the user
+    //         knows the run finished, not that the assistant is
+    //         still streaming.
+    if (finalForTelegram.trim()) {
+      await sendTelegram(tgCfg.bot_token, chatId, `✅ Done.\n\n${finalForTelegram}`);
+    } else {
+      await sendTelegram(tgCfg.bot_token, chatId, "✅ Done.");
+    }
+    fireActive(null);
+  };
+
+  // ---- 5. Long-poll loop itself — gated on started + valid cfg ----
   useEffect(() => {
     if (!started) return;
     if (!cfg?.bot_token) return;
 
     let dead = false;
     let offset = 0;
-    const ctrl = new AbortController();
-
     const sleep = (ms: number) => new Promise(r => window.setTimeout(r, ms));
-
-    // All Telegram HTTP goes through Rust commands — api.telegram.org
-    // doesn't speak CORS, so fetch() from the webview is blocked by
-    // the browser engine before the request even leaves. invoke()
-    // sidesteps that by routing the call through reqwest on the
-    // backend.
-    const sendReply = async (chatId: number, body: string) => {
-      try {
-        await invoke("telegram_send_message", {
-          token: cfg.bot_token,
-          chatId: chatId,
-          text: body || "(empty)",
-        });
-      } catch (e) {
-        console.error("telegram_send_message failed", e);
-      }
-    };
-
-    const handle = async (chatId: number, text: string) => {
-      // Resolve the project + its team-default model. Falls back to
-      // the running local server's model if the project doesn't have
-      // one pinned. Empty model id → use "local" tag for the server.
-      const project = projectsRef.current.find(p => p.id === cfg.project_id) ?? null;
-      const fallback = serverRef.current.model_id ?? "local";
-      const modelId = (project?.team_default_model_id || "").trim() || fallback;
-      const sys = project
-        ? `You are the orchestrator of the '${project.name}' team. Reply concisely.`
-        : "You are a helpful assistant. Reply concisely.";
-
-      // Build the prior history from the project's persisted chat
-      // transcript so the bot has memory across app restarts (without
-      // this it forgets everything every launch and asks the user
-      // "what are we working on?" every time).
-      let priorHistory: HistoryItem[] = [];
-      if (project?.chat_json) {
-        try {
-          const parsed = JSON.parse(project.chat_json);
-          if (Array.isArray(parsed)) priorHistory = chatToHistory(parsed as GoalMsg[]);
-        } catch { /* corrupt blob — ignore */ }
-      }
-
-      // Light up the canvas pulse while the bridge is thinking.
-      const dispatchActive = (agent: string | null) => {
-        try {
-          window.dispatchEvent(new CustomEvent("owllm:agent:active", {
-            detail: { agent, projectId: project?.id ?? cfg.project_id },
-          }));
-        } catch { /* event dispatch failed — UI just won't pulse */ }
-      };
-      dispatchActive("orchestrator");
-
-      const projectCwd = (project?.location ?? "").trim();
-      // cfg.auto_approve is the "Auto-approve every tool call" checkbox
-      // from the Bridges page. When true we pass --dangerously-skip-
-      // permissions to Claude CLI so the bot doesn't stall waiting for
-      // a Y/N at the user's desktop — the user is on their phone and
-      // can't approve anyway.
-      const auto = !!cfg.auto_approve;
-      let reply = "";
-      try {
-        reply = await streamOnce(
-          modelId, sys, text,
-          modelsRef.current, serverRef.current,
-          new AbortController().signal, projectCwd, priorHistory, auto,
-        );
-      } catch (e: any) {
-        reply = `(bridge error: ${String(e?.message ?? e)})`;
-      } finally {
-        dispatchActive(null);
-      }
-      await sendReply(chatId, reply);
-
-      // Mirror into the project's chat history so the agentic tab
-      // shows what came in from the phone (next time it loads the
-      // project) AND so a currently-mounted AgentsPage can render it
-      // live via the dispatched event below. Without this the desktop
-      // UI has no idea the bridge replied — exactly the "no history"
-      // gap users hit after the bridge started working.
-      if (project) {
-        let chat: GoalMsg[] = [];
-        try {
-          if (project.chat_json) {
-            const parsed = JSON.parse(project.chat_json);
-            if (Array.isArray(parsed)) chat = parsed as GoalMsg[];
-          }
-        } catch { /* ignore corrupt blob */ }
-        const inMsg:  GoalMsg = { role: "you",          color: "#9ad9ff", text: `📱 [TG] ${text}` };
-        const outMsg: GoalMsg = { role: "orchestrator", color: "#ffd97a", text: reply };
-        const next = [...chat, inMsg, outMsg];
-        try {
-          await invoke("update_project", { input: { id: project.id, chat_json: JSON.stringify(next) } });
-          // Refresh local cache so the next inbound message merges
-          // against the up-to-date transcript instead of overwriting
-          // it with a stale base.
-          try {
-            const rows = await invoke<ProjectRow[]>("list_projects");
-            setProjects(rows);
-          } catch { /* keep last cache */ }
-        } catch (e) {
-          console.error("[telegram] persist chat_json failed", e);
-        }
-        try {
-          window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
-            detail: { projectId: project.id, messages: [inMsg, outMsg] },
-          }));
-        } catch { /* dispatch failed — UI just won't refresh live */ }
-      }
-    };
 
     (async () => {
       while (!dead) {
         try {
-          // Long-poll via the Rust command — bypasses webview CORS.
-          // The Rust side waits up to 20s + 10s buffer, so we don't
-          // need our own AbortController-driven cancellation for the
-          // hot loop; we just stop calling invoke when `dead` flips.
           const updates: Array<any> = await invoke("telegram_get_updates", {
             token: cfg.bot_token,
             offset,
@@ -412,17 +328,17 @@ export default function TelegramBridgeRunner() {
             const text: string | undefined = msg?.text;
             const chatId: number | undefined = msg?.chat?.id;
             if (!text || typeof chatId !== "number") continue;
-            // allow-list gate: empty list means "open to anyone" (we
-            // match the BridgesPage placeholder, not the original
-            // Python docstring — the placeholder is what the user
-            // actually reads when they leave the field blank).
             const allow = Array.isArray(cfg.allowed_chat_ids) ? cfg.allowed_chat_ids : [];
             if (allow.length > 0 && !allow.includes(chatId)) {
               console.warn(`[telegram] chat ${chatId} not on allow-list — ignored.`);
               continue;
             }
             console.log(`[telegram] inbound from ${chatId}: ${text.slice(0, 80)}`);
-            await handle(chatId, text);
+            // Don't await — kick off the dispatch in parallel so a
+            // long-running orchestrator turn doesn't block fetching
+            // the next inbound message (each chat queues on the
+            // server anyway, so polling-in-flight is safe).
+            handle(chatId, text).catch(e => console.error("[telegram] handle failed", e));
           }
         } catch (e: any) {
           console.error("[telegram] poll loop error", e);
@@ -435,17 +351,15 @@ export default function TelegramBridgeRunner() {
     console.log(`[telegram] bridge polling started for token …${cfg.bot_token.slice(-6)} project=${cfg.project_id || "(any)"}`);
     return () => {
       dead = true;
-      ctrl.abort();
       console.log("[telegram] bridge polling stopped");
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [started, cfg?.bot_token, cfg?.project_id, (cfg?.allowed_chat_ids ?? []).join(",")]);
 
-  // Desktop → Telegram mirror. When the agentic tab dispatches a
-  // chat-appended event with source=desktop for the bound project,
-  // forward the ASSISTANT messages (skip the user's own typing — it
-  // already left their phone) to every chat on the allow-list. Keeps
-  // the phone-side conversation in sync with the desktop sends so the
-  // user sees the full thread on both screens.
+  // ---- 6. Desktop → Telegram mirror — when AgentsPage fires a
+  //         chat-appended event with source=desktop, forward
+  //         assistant turns to every allowed chat so the phone sees
+  //         desktop sends too.
   useEffect(() => {
     if (!started) return;
     if (!cfg?.bot_token) return;
@@ -459,25 +373,16 @@ export default function TelegramBridgeRunner() {
       const msgs = Array.isArray(detail.messages) ? detail.messages : [];
       for (const m of msgs) {
         if (!m || !m.text || !m.text.trim()) continue;
-        if (m.role === "you") continue; // user typed on desktop — their phone already has the prompt
+        if (m.role === "you") continue;
         for (const chatId of allow) {
-          try {
-            await invoke("telegram_send_message", {
-              token: cfg.bot_token,
-              chatId,
-              text: m.text,
-            });
-          } catch (err) {
-            console.error("[telegram] forward desktop reply failed", err);
-          }
+          await sendTelegram(cfg.bot_token, chatId, m.text);
         }
       }
     };
     window.addEventListener("owllm:chat:appended", handler as EventListener);
     return () => window.removeEventListener("owllm:chat:appended", handler as EventListener);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [started, cfg?.bot_token, cfg?.project_id, (cfg?.allowed_chat_ids ?? []).join(",")]);
 
-  // The component renders nothing visible — it's a pure side-effect
-  // host. AppShell mounts it once.
   return null;
 }

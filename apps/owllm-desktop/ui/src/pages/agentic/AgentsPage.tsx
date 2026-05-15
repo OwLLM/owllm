@@ -3056,6 +3056,56 @@ export default function AgentsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId, activeTeam?.id]);
 
+  // Thought events — the bridge runner fires one per dispatch
+  // directive parsed from the orchestrator's plan, plus one per
+  // specialist's incoming task. Surfaces the routing decision in the
+  // Thought tab while the run is in flight.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ projectId: string; agent: string; message: GoalMsg }>).detail;
+      if (!detail || !detail.message) return;
+      if (detail.projectId !== selectedProjectId) return;
+      const agent = detail.agent || "orchestrator";
+      appendThought(agent, detail.message);
+    };
+    window.addEventListener("owllm:thought:appended", handler as EventListener);
+    return () => window.removeEventListener("owllm:thought:appended", handler as EventListener);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId]);
+
+  // Log events — bridge fires one per agent that gets seeded with an
+  // empty reply slot (so the OrchestratorPane Reply tab can stream
+  // tokens into it). Mirrors appendLog from the desktop dispatch.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ projectId: string; agent: string; message: GoalMsg }>).detail;
+      if (!detail || !detail.message) return;
+      if (detail.projectId !== selectedProjectId) return;
+      const agent = detail.agent || "orchestrator";
+      appendLog(agent, detail.message);
+    };
+    window.addEventListener("owllm:log:appended", handler as EventListener);
+    return () => window.removeEventListener("owllm:log:appended", handler as EventListener);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId]);
+
+  // Log-delta events — bridge fires one per streamed token. Append
+  // the delta into the last message of the agent's buffer so the
+  // OrchestratorPane Reply tab streams live, not "all at once" when
+  // the run finishes.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ projectId: string; agent: string; delta: string }>).detail;
+      if (!detail || typeof detail.delta !== "string") return;
+      if (detail.projectId !== selectedProjectId) return;
+      const agent = detail.agent || "orchestrator";
+      streamLog(agent, detail.delta);
+    };
+    window.addEventListener("owllm:log:delta", handler as EventListener);
+    return () => window.removeEventListener("owllm:log:delta", handler as EventListener);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId]);
+
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", minHeight:0 }}>
       <LocationRow

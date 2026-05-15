@@ -955,16 +955,45 @@ export default function ServerPage() {
   }
 
   return (
-    // Background #0e1117 matches the Tauri shell.
-    <div style={{
-      padding: "14px 18px",
+    // The Server page is presented as a centered popup card sitting on
+    // top of a dimmed app background — mirrors the legacy PySide6
+    // behaviour where the Server window pops over the rest of the UI.
+    // The cyan-glass frame visually echoes the main app's HybridFrame
+    // so the popup reads as part of the same window family.
+    <div data-ui="ServerPopupHost" style={{
+      position: "relative",
       height: "100%",
+      width: "100%",
       display: "flex",
-      flexDirection: "column",
-      gap: 12,
-      background: "var(--bg-panel)",
-      minHeight: 0,
+      alignItems: "center",
+      justifyContent: "center",
+      // Slight dim layer so the centered card pops against the rest of
+      // the AppShell behind it.
+      background: "rgba(8, 12, 24, 0.55)",
+      padding: 24,
+      boxSizing: "border-box",
+      overflow: "auto",
     }}>
+      <div data-ui="ServerPopupCard" style={{
+        position: "relative",
+        width: "min(1400px, 96%)",
+        height: "min(820px, 96%)",
+        padding: "16px 22px 18px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+        background: "var(--bg-panel)",
+        // Cyan-glass frame — matches the HybridFrame border colour
+        // / accent / shadow palette used by AppShell so the popup
+        // reads as "same window family".
+        border: "1.6px solid rgba(120,220,255,0.78)",
+        borderRadius: 16,
+        boxShadow:
+          "0 0 0 1px rgba(200,240,255,0.32) inset, " +
+          "0 24px 60px rgba(0,0,0,0.55), " +
+          "0 0 40px rgba(120,220,255,0.20)",
+        minHeight: 0,
+      }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         {/* Real owl_server.png — same asset family as CodePage / AgentsPage */}
         <img
@@ -1007,6 +1036,7 @@ export default function ServerPage() {
           appendLog={appendLog}
         />
         <LogColumn logs={logs} onClear={() => setLogs([])} />
+      </div>
       </div>
     </div>
   );

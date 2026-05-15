@@ -617,7 +617,9 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
       try { localStorage.setItem(k, v); } catch {}
     }
   };
-  const lastMessages = chat.slice(-4);  // most recent first-visible window
+  // Show the last 30 turns in the scroll pane so a long conversation
+  // still fits while extremely old turns get GC'd from the visible UI.
+  const lastMessages = chat.slice(-30);
   const submit = () => {
     const t = draft.trim();
     if (!t) return;
@@ -645,7 +647,10 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
           <div style={{ fontSize:10, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase", marginLeft:4 }}>{team?.agents.length ?? 0} agents on team</div>
         </div>
       )}
-      <div data-ui="suChat" style={{ height:80, background:"var(--bg-elevated)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:8, padding:"8px 10px", fontSize:12, lineHeight:1.45, overflow:"auto", display:"flex", flexDirection:"column", gap:4 }}>
+      {/* Chat pane — taller (was 80, now 200) AND no character cap so
+          the full assistant reply is visible without truncation. Auto-
+          scrolls; the user can still scroll up to read older context. */}
+      <div data-ui="suChat" style={{ height:200, background:"var(--bg-elevated)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:8, padding:"8px 10px", fontSize:12, lineHeight:1.45, overflow:"auto", display:"flex", flexDirection:"column", gap:6 }}>
         {chat.length === 0 ? (
           <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
             {team
@@ -655,7 +660,7 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
         ) : lastMessages.map((m, i) => (
           <div key={i}>
             <span style={{ color: m.color, fontWeight:700 }}>{m.role === "you" ? "You" : (m.role[0]?.toUpperCase() + m.role.slice(1))}:</span>{" "}
-            <span style={{ color:"var(--fg)" }}>{m.text.length > 200 ? m.text.slice(0, 197) + "…" : m.text}</span>
+            <span style={{ color:"var(--fg)", whiteSpace:"pre-wrap" }}>{m.text}</span>
           </div>
         ))}
       </div>
@@ -1737,6 +1742,26 @@ function parseDispatches(text: string, team: Team, exclude: string): Dispatch[] 
 }
 
 type StreamHandler = (delta: string) => void;
+type HistoryItem = { role: "user" | "assistant"; content: string };
+
+// Convert the SuperUser transcript (or project.chat_json) into the
+// alternating user/assistant turns every model API expects. Skips
+// system/error notes ("role: system") and empty messages so the
+// history stays clean. Used for both desktop SuperUser sends and the
+// Telegram bridge so a restarted app — or a fresh Telegram message —
+// can pick up where the previous turn left off.
+function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
+  const out: HistoryItem[] = [];
+  for (const m of chat) {
+    if (!m || typeof m.text !== "string" || !m.text.trim()) continue;
+    if (m.role === "system" || m.role === "error" || m.role === "dispatch") continue;
+    out.push({
+      role: m.role === "you" ? "user" : "assistant",
+      content: m.text,
+    });
+  }
+  return out;
+}
 
 /// Route the SSE chat-completion to whichever backend serves the
 /// model. The signature stays the same so the dispatch loop doesn't
@@ -1756,6 +1781,11 @@ async function streamChatCompletion(
   /// inherits the desktop app's install dir and ends up reasoning
   /// about the wrong tree.
   projectCwd?: string,
+  /// Prior conversation turns. For API paths this becomes the
+  /// `messages` array preceding the current user turn; for the
+  /// Claude CLI subscription path it's folded into the user prompt
+  /// (the CLI's --print mode is one-shot and has no inherent memory).
+  history?: HistoryItem[],
 ): Promise<string> {
   // Strip the optional route prefix encoded by the ModelPicker before
   // handing the bare model id to the provider-specific call.
@@ -1771,21 +1801,25 @@ async function streamChatCompletion(
     throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
   }
   if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd);
+    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd, history);
   }
   if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta);
+    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, history);
   }
-  // Local llama-server. OpenAI-compatible SSE.
+  // Local llama-server. OpenAI-compatible SSE. History (when present)
+  // becomes the alternating user/assistant turns preceding the new
+  // user message — gives the model continuity across restarts.
+  const messages: Array<{ role: string; content: string }> = [
+    { role: "system", content: systemPrompt },
+    ...(history ?? []),
+    { role: "user", content: userMessage },
+  ];
   const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: modelId || "local",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage },
-      ],
+      messages,
       stream: true,
       temperature,
     }),
@@ -1808,6 +1842,22 @@ async function streamChatCompletion(
 /// mode emits the full reply at the end (no token streaming).
 type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
 
+// Embed prior conversation turns into a single user prompt — used by
+// the Claude CLI subscription path because `claude --print` is one-shot
+// and has no native session/history input. Each turn is labelled so
+// the model knows who said what.
+function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem[]): string {
+  if (!history || history.length === 0) return userMessage;
+  const lines: string[] = ["--- Previous conversation ---"];
+  for (const h of history) {
+    lines.push(`${h.role === "user" ? "User" : "Assistant"}: ${h.content}`);
+    lines.push("");
+  }
+  lines.push("--- Current user message ---");
+  lines.push(userMessage);
+  return lines.join("\n");
+}
+
 async function streamAnthropic(
   modelId: string,
   route: CloudRoute,
@@ -1817,16 +1867,21 @@ async function streamAnthropic(
   signal: AbortSignal,
   onDelta: StreamHandler,
   projectCwd?: string,
+  history?: HistoryItem[],
 ): Promise<string> {
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
+  // Claude CLI's --print mode is one-shot — no inherent memory across
+  // calls — so fold the prior conversation into the user prompt the
+  // CLI sees. The CLI then has everything it needs to continue.
+  const cliPrompt = foldHistoryIntoPrompt(userMessage, history);
   // forceSub: skip the API path entirely and go straight to the CLI.
   if (wantSub) {
     const status = await invoke<{ claude_cli: boolean }>("accounts_status");
     if (!status?.claude_cli) {
       throw new Error("Claude Code CLI not detected — run `claude /login` first.");
     }
-    const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage, cwd: projectCwd ?? null });
+    const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null });
     if (reply) onDelta(reply);
     return reply;
   }
@@ -1839,7 +1894,7 @@ async function streamAnthropic(
       if (status?.claude_cli) {
         const reply = await invoke<string>("claude_cli_complete", {
           systemPrompt,
-          userMessage,
+          userMessage: cliPrompt,
           cwd: projectCwd ?? null,
         });
         if (reply) onDelta(reply);
@@ -1865,7 +1920,10 @@ async function streamAnthropic(
       model: modelId,
       max_tokens: 4096,
       system: systemPrompt,
-      messages: [{ role: "user", content: userMessage }],
+      messages: [
+        ...(history ?? []).map(h => ({ role: h.role, content: h.content })),
+        { role: "user", content: userMessage },
+      ],
       stream: true,
       temperature,
     }),
@@ -1910,6 +1968,7 @@ async function streamOpenAI(
   temperature: number,
   signal: AbortSignal,
   onDelta: StreamHandler,
+  history?: HistoryItem[],
 ): Promise<string> {
   // Codex CLI subscription support is a future slot — for now both
   // forceSub and the default flow route through the API path, so this
@@ -1926,6 +1985,7 @@ async function streamOpenAI(
       model: modelId,
       messages: [
         { role: "system", content: systemPrompt },
+        ...(history ?? []),
         { role: "user", content: userMessage },
       ],
       stream: true,
@@ -2478,6 +2538,11 @@ export default function AgentsPage() {
   // log buffer. The dispatch loop above handles the orchestrator-led
   // flow; this lets the user sneak in a side note without re-running.
   const onSupSend = async (text: string) => {
+    // Capture prior history BEFORE the new user message lands in
+    // supChat so the model gets continuity (otherwise the assistant
+    // forgets every restart, which is what users keep hitting).
+    const priorHistory = chatToHistory(supChat);
+
     const userMsg: GoalMsg = { role: "you", color: "#9ad9ff", text };
     setSupChat(prev => [...prev, userMsg]);
     appendLog("you", userMsg);
@@ -2495,9 +2560,17 @@ export default function AgentsPage() {
       return;
     }
 
-    const replyMsg: GoalMsg = { role: "orchestrator", color: "#ffd97a", text: "" };
+    // Resolve the orchestrator's actual agent-name (varies per team)
+    // so the OrchestratorPane / canvas pulse key off the same string
+    // we route the message through.
+    const orchSpec = activeTeam ? findOrchestratorSpec(activeTeam) : null;
+    const orchKey = orchSpec?.name ?? "orchestrator";
+
+    const replyMsg: GoalMsg = { role: orchKey, color: "#ffd97a", text: "" };
     setSupChat(prev => [...prev, replyMsg]);
-    appendLog("orchestrator", replyMsg);
+    appendLog(orchKey, replyMsg);
+    // Active state — drives the per-node pulse in the canvas.
+    setActiveAgent(orchKey);
     try {
       const sys = activeTeam
         ? `You are the orchestrator of '${activeTeam.display}'. Answer the user concisely.`
@@ -2517,17 +2590,20 @@ export default function AgentsPage() {
             if (last) out[out.length - 1] = { ...last, text: last.text + delta };
             return out;
           });
-          streamLog("orchestrator", delta);
+          streamLog(orchKey, delta);
         },
         // Pin the Claude CLI subscription path (and any future tool-
         // capable backend) to the user's project location instead of
         // letting it inherit the desktop install dir.
         (locationOverride || selectedProject?.location || "").trim(),
+        priorHistory,
       );
     } catch (e: any) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: String(e?.message ?? e) };
       setSupChat(prev => [...prev, errMsg]);
       appendLog("system", errMsg);
+    } finally {
+      setActiveAgent(null);
     }
   };
 
@@ -2793,11 +2869,11 @@ export default function AgentsPage() {
 
   // Live mirror — when the AppShell runner dispatches a chat append
   // event for the currently-selected project, splice the new messages
-  // into the SuperUser thread immediately so the desktop UI shows
-  // both the inbound text and the bot's reply without waiting for a
-  // project reload. The runner has already persisted to chat_json, so
-  // the supChat persist effect's next write is just an idempotent
-  // round-trip of the same content.
+  // into the SuperUser thread AND the per-agent OrchestratorPane logs
+  // so the desktop UI shows both the inbound text and the bot's reply
+  // without waiting for a project reload. The runner has already
+  // persisted to chat_json, so the supChat persist effect's next
+  // write is just an idempotent round-trip.
   useEffect(() => {
     const handler = (e: Event) => {
       const detail = (e as CustomEvent<{ projectId: string; messages: GoalMsg[] }>).detail;
@@ -2806,14 +2882,48 @@ export default function AgentsPage() {
       const msgs = Array.isArray(detail.messages) ? detail.messages : [];
       if (msgs.length === 0) return;
       setSupChat(prev => [...prev, ...msgs]);
-      // Refresh the project cache so a future remount loads the same
-      // transcript the runner already persisted.
+
+      // Mirror into agentLogs so the Reply tab on the right-hand
+      // OrchestratorPane shows the same content. "you" → user log,
+      // anything else → orchestrator log.
+      const orchSpec = activeTeam ? findOrchestratorSpec(activeTeam) : null;
+      const orchKey = orchSpec?.name ?? "orchestrator";
+      for (const m of msgs) {
+        const key = m.role === "you" ? "you" : orchKey;
+        appendLog(key, { ...m, role: m.role === "you" ? "you" : orchKey });
+      }
       reloadProjects();
     };
     window.addEventListener("owllm:chat:appended", handler as EventListener);
     return () => window.removeEventListener("owllm:chat:appended", handler as EventListener);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedProjectId]);
+  }, [selectedProjectId, activeTeam?.id]);
+
+  // Active-agent lighting — Telegram-driven dispatches fire from the
+  // AppShell runner, so the local dispatchGoal / onSupSend setters
+  // never run. Listen for an explicit event so the orbital pulse +
+  // OrchestratorPane phase chip reflect "the bridge is thinking".
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ agent: string | null; projectId?: string }>).detail;
+      if (!detail) return;
+      // Cross-project events shouldn't flicker the canvas of the
+      // project the user is currently viewing.
+      if (detail.projectId && detail.projectId !== selectedProjectId) return;
+      // Resolve the agent name through the local team so Telegram's
+      // generic "orchestrator" label maps to whatever this team
+      // actually named its orchestrator.
+      let resolved = detail.agent;
+      if (resolved && activeTeam) {
+        const spec = activeTeam.agents.find(a => a.name === resolved || a.base === resolved);
+        if (spec) resolved = spec.name;
+      }
+      setActiveAgent(resolved);
+    };
+    window.addEventListener("owllm:agent:active", handler as EventListener);
+    return () => window.removeEventListener("owllm:agent:active", handler as EventListener);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId, activeTeam?.id]);
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", minHeight:0 }}>

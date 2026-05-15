@@ -73,6 +73,35 @@ function providerFor(modelId: string, models: ModelInfo[]): string {
   return m?.provider || "local";
 }
 
+type HistoryItem = { role: "user" | "assistant"; content: string };
+
+// Convert the persisted GoalMsg transcript into the alternating
+// user/assistant turns the model APIs expect. System/error/dispatch
+// rows are excluded.
+function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
+  const out: HistoryItem[] = [];
+  for (const m of chat) {
+    if (!m || typeof m.text !== "string" || !m.text.trim()) continue;
+    if (m.role === "system" || m.role === "error" || m.role === "dispatch") continue;
+    out.push({ role: m.role === "you" ? "user" : "assistant", content: m.text });
+  }
+  return out;
+}
+
+// Claude --print is one-shot — no memory across calls. Fold the prior
+// turns into the user prompt so the CLI sees the full thread.
+function foldHistoryIntoPrompt(userMessage: string, history: HistoryItem[]): string {
+  if (history.length === 0) return userMessage;
+  const lines: string[] = ["--- Previous conversation ---"];
+  for (const h of history) {
+    lines.push(`${h.role === "user" ? "User" : "Assistant"}: ${h.content}`);
+    lines.push("");
+  }
+  lines.push("--- Current user message ---");
+  lines.push(userMessage);
+  return lines.join("\n");
+}
+
 async function streamOnce(
   modelId: string,
   systemPrompt: string,
@@ -81,18 +110,20 @@ async function streamOnce(
   server: ServerStatus,
   signal: AbortSignal,
   cwd: string,
+  history: HistoryItem[],
 ): Promise<string> {
   const provider = providerFor(modelId, models);
   const forceSub = modelId.startsWith("sub/");
   const forceApi = modelId.startsWith("api/");
   const bareId = forceSub || forceApi || modelId.startsWith("auto/") ? stripPrefix(modelId) : modelId;
+  const cliPrompt = foldHistoryIntoPrompt(userMessage, history);
 
   if (provider === "anthropic") {
     // Subscription path: shell out to claude-code CLI.
     if (forceSub) {
       const status = await invoke<{ claude_cli: boolean }>("accounts_status");
       if (!status?.claude_cli) throw new Error("Claude Code CLI not detected — run `claude /login` first.");
-      return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage, cwd: cwd || null });
+      return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: cwd || null });
     }
     const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
     if (!key) {
@@ -101,7 +132,7 @@ async function streamOnce(
       try {
         const status = await invoke<{ claude_cli: boolean }>("accounts_status");
         if (status?.claude_cli) {
-          return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage, cwd: cwd || null });
+          return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: cwd || null });
         }
       } catch { /* fall through */ }
       throw new Error("No ANTHROPIC_API_KEY and no Claude CLI — Telegram bridge can't dispatch.");
@@ -118,7 +149,10 @@ async function streamOnce(
         model: bareId,
         max_tokens: 4096,
         system: systemPrompt,
-        messages: [{ role: "user", content: userMessage }],
+        messages: [
+          ...history.map(h => ({ role: h.role, content: h.content })),
+          { role: "user", content: userMessage },
+        ],
         stream: false,
       }),
       signal,
@@ -139,6 +173,7 @@ async function streamOnce(
         model: bareId,
         messages: [
           { role: "system", content: systemPrompt },
+          ...history,
           { role: "user", content: userMessage },
         ],
         stream: false,
@@ -161,6 +196,7 @@ async function streamOnce(
       model: modelId || "local",
       messages: [
         { role: "system", content: systemPrompt },
+        ...history,
         { role: "user", content: userMessage },
       ],
       stream: false,
@@ -274,12 +310,40 @@ export default function TelegramBridgeRunner() {
         ? `You are the orchestrator of the '${project.name}' team. Reply concisely.`
         : "You are a helpful assistant. Reply concisely.";
 
+      // Build the prior history from the project's persisted chat
+      // transcript so the bot has memory across app restarts (without
+      // this it forgets everything every launch and asks the user
+      // "what are we working on?" every time).
+      let priorHistory: HistoryItem[] = [];
+      if (project?.chat_json) {
+        try {
+          const parsed = JSON.parse(project.chat_json);
+          if (Array.isArray(parsed)) priorHistory = chatToHistory(parsed as GoalMsg[]);
+        } catch { /* corrupt blob — ignore */ }
+      }
+
+      // Light up the canvas pulse while the bridge is thinking.
+      const dispatchActive = (agent: string | null) => {
+        try {
+          window.dispatchEvent(new CustomEvent("owllm:agent:active", {
+            detail: { agent, projectId: project?.id ?? cfg.project_id },
+          }));
+        } catch { /* event dispatch failed — UI just won't pulse */ }
+      };
+      dispatchActive("orchestrator");
+
       const projectCwd = (project?.location ?? "").trim();
       let reply = "";
       try {
-        reply = await streamOnce(modelId, sys, text, modelsRef.current, serverRef.current, new AbortController().signal, projectCwd);
+        reply = await streamOnce(
+          modelId, sys, text,
+          modelsRef.current, serverRef.current,
+          new AbortController().signal, projectCwd, priorHistory,
+        );
       } catch (e: any) {
         reply = `(bridge error: ${String(e?.message ?? e)})`;
+      } finally {
+        dispatchActive(null);
       }
       await sendReply(chatId, reply);
 

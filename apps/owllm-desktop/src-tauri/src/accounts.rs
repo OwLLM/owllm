@@ -228,6 +228,11 @@ pub async fn claude_cli_complete(
     cwd: Option<String>,
     auto_approve: Option<bool>,
 ) -> Result<String, String> {
+    // Hard cap on a single CLI run. Long agentic tasks under
+    // bypassPermissions can take minutes (lots of tool calls), so we
+    // give 10 minutes — enough for any realistic build/refactor —
+    // but bail out before the child wedges the bridge forever.
+    const CLI_TIMEOUT_SECS: u64 = 600;
     tokio::task::spawn_blocking(move || {
         let exe = find_claude_cli()
             .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
@@ -269,9 +274,32 @@ pub async fn claude_cli_complete(
                 .write_all(user_message.as_bytes())
                 .map_err(|e| format!("write stdin: {e}"))?;
         }
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("wait claude: {e}"))?;
+        // Poll the child every 250 ms so we can kill it on timeout
+        // without holding the runtime hostage on a blocking wait().
+        let start = Instant::now();
+        let timeout = std::time::Duration::from_secs(CLI_TIMEOUT_SECS);
+        let output = loop {
+            match child.try_wait().map_err(|e| format!("poll claude: {e}"))? {
+                Some(_status) => {
+                    break child
+                        .wait_with_output()
+                        .map_err(|e| format!("wait claude: {e}"))?;
+                }
+                None => {
+                    if start.elapsed() >= timeout {
+                        // Best-effort kill. If kill itself fails we
+                        // still surface the timeout to the caller.
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(format!(
+                            "claude CLI timed out after {}s — killed",
+                            CLI_TIMEOUT_SECS
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            }
+        };
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             return Err(format!(

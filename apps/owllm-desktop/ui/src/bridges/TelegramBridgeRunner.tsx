@@ -303,12 +303,23 @@ export default function TelegramBridgeRunner() {
   };
 
   // ---- 5. Long-poll loop itself — gated on started + valid cfg ----
+  //
+  // Message handling is strictly SERIAL: a chained handlerQueue
+  // promise ensures only one dispatch runs at a time, even when the
+  // user fires several messages in quick succession. Parallel
+  // handle() calls would each spawn their own `claude --print`
+  // subprocess (the user reported the app "crashed while coding" —
+  // we suspect resource exhaustion from N concurrent CLI children
+  // each doing heavy file IO under --permission-mode bypassPermissions).
+  // Telegram's getUpdates queues server-side, so we don't lose any
+  // inbound by serializing.
   useEffect(() => {
     if (!started) return;
     if (!cfg?.bot_token) return;
 
     let dead = false;
     let offset = 0;
+    let handlerQueue: Promise<void> = Promise.resolve();
     const sleep = (ms: number) => new Promise(r => window.setTimeout(r, ms));
 
     (async () => {
@@ -334,11 +345,12 @@ export default function TelegramBridgeRunner() {
               continue;
             }
             console.log(`[telegram] inbound from ${chatId}: ${text.slice(0, 80)}`);
-            // Don't await — kick off the dispatch in parallel so a
-            // long-running orchestrator turn doesn't block fetching
-            // the next inbound message (each chat queues on the
-            // server anyway, so polling-in-flight is safe).
-            handle(chatId, text).catch(e => console.error("[telegram] handle failed", e));
+            // Serialize: chain onto the queue. If a prior dispatch is
+            // still running, this one waits. catch() prevents one bad
+            // dispatch from breaking the chain for the next message.
+            handlerQueue = handlerQueue
+              .then(() => handle(chatId, text))
+              .catch(e => console.error("[telegram] handle failed", e));
           }
         } catch (e: any) {
           console.error("[telegram] poll loop error", e);

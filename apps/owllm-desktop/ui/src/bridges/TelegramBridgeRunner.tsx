@@ -235,15 +235,20 @@ export default function TelegramBridgeRunner() {
 
     const sleep = (ms: number) => new Promise(r => window.setTimeout(r, ms));
 
+    // All Telegram HTTP goes through Rust commands — api.telegram.org
+    // doesn't speak CORS, so fetch() from the webview is blocked by
+    // the browser engine before the request even leaves. invoke()
+    // sidesteps that by routing the call through reqwest on the
+    // backend.
     const sendReply = async (chatId: number, body: string) => {
       try {
-        await fetch(`https://api.telegram.org/bot${cfg.bot_token}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: body || "(empty)" }),
+        await invoke("telegram_send_message", {
+          token: cfg.bot_token,
+          chatId: chatId,
+          text: body || "(empty)",
         });
       } catch (e) {
-        console.error("telegram sendMessage failed", e);
+        console.error("telegram_send_message failed", e);
       }
     };
 
@@ -270,20 +275,17 @@ export default function TelegramBridgeRunner() {
     (async () => {
       while (!dead) {
         try {
-          const url = `https://api.telegram.org/bot${cfg.bot_token}/getUpdates?timeout=20&offset=${offset}`;
-          const resp = await fetch(url, { signal: ctrl.signal });
-          if (!resp.ok) {
-            console.error("[telegram] getUpdates HTTP", resp.status);
-            await sleep(5000);
-            continue;
-          }
-          const j: any = await resp.json();
-          if (!j?.ok) {
-            console.error("[telegram] getUpdates body", j);
-            await sleep(5000);
-            continue;
-          }
-          for (const upd of (j.result || [])) {
+          // Long-poll via the Rust command — bypasses webview CORS.
+          // The Rust side waits up to 20s + 10s buffer, so we don't
+          // need our own AbortController-driven cancellation for the
+          // hot loop; we just stop calling invoke when `dead` flips.
+          const updates: Array<any> = await invoke("telegram_get_updates", {
+            token: cfg.bot_token,
+            offset,
+            timeout: 20,
+          });
+          if (dead) return;
+          for (const upd of (updates || [])) {
             if (typeof upd.update_id === "number") {
               offset = Math.max(offset, upd.update_id + 1);
             }
@@ -304,8 +306,8 @@ export default function TelegramBridgeRunner() {
             await handle(chatId, text);
           }
         } catch (e: any) {
-          if (e?.name === "AbortError") return;
           console.error("[telegram] poll loop error", e);
+          if (dead) return;
           await sleep(5000);
         }
       }

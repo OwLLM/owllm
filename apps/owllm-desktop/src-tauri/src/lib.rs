@@ -22,6 +22,7 @@ mod paths;
 mod projects;
 mod server;
 mod skill_library;
+mod telegram;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -66,6 +67,8 @@ pub fn run() {
             skill_library::uninstall_skill,
             skill_library::list_installed_skill_folders,
             skill_library::read_skill_md,
+            telegram::telegram_get_updates,
+            telegram::telegram_send_message,
         ])
         .run(tauri::generate_context!())
         .expect("error while running OwLLM Desktop");

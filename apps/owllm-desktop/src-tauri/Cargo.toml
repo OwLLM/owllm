@@ -34,5 +34,12 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # config); rfd is a direct, no-plugin path that opens the system's
 # folder dialog on the same UI thread we already own.
 rfd = "0.15"
+# HTTP client for outbound calls to services that don't speak CORS
+# (Telegram Bot API in particular — fetch() from the webview gets
+# blocked because api.telegram.org doesn't send the relevant headers).
+# rustls-tls so we don't need OpenSSL on the build host. blocking
+# feature so the Tauri commands can stay synchronous-flavoured under
+# tokio's async runtime without ping-ponging through spawn_blocking.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 [dev-dependencies]
 tempfile = "3"

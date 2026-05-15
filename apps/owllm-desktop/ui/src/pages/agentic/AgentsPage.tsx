@@ -195,9 +195,21 @@ function projectToTeam(p: ProjectRow): Team {
   };
 }
 
-// BFS depth from orchestrator over the (undirected) routing graph.
-// Returns depth=0 for the orchestrator, depth=1 for everyone if there
-// are no edges. Unreachable agents land on max_depth+1.
+// Layered depth computation:
+//
+//   layer(orchestrator) = 0  — the hub sits at the centre and can
+//                              dispatch to anyone, so it doesn't
+//                              constrain anyone else's position.
+//   layer(X)            = 1 + max(layer of every specialist that
+//                                 feeds X via a directed edge)
+//                       = 1  when X has no specialist feeder (i.e. it
+//                            only receives work from the orchestrator).
+//
+// Edges from the orchestrator are deliberately IGNORED for layering —
+// otherwise every reachable agent would collapse to layer 1. What
+// actually matters is the chain of specialist→specialist hand-offs:
+// an agent that depends on another's output should sit one ring
+// further out, so the diagram reads like a real flow.
 function computeDepths(team: Team): Map<string, number> {
   const out = new Map<string, number>();
   if (!team.agents.length) return out;
@@ -206,30 +218,43 @@ function computeDepths(team: Team): Map<string, number> {
     team.agents.find(a => a.base === "orchestrator")?.name ??
     team.agents[0].name;
   out.set(orchName, 0);
-  if (team.edges.length === 0) {
-    for (const a of team.agents) if (a.name !== orchName) out.set(a.name, 1);
-    return out;
-  }
-  const adj = new Map<string, Set<string>>();
-  for (const a of team.agents) adj.set(a.name, new Set());
+
+  // Predecessor set per agent, EXCLUDING orchestrator-originated edges.
+  // (e.source === orchName) is skipped because the orchestrator is a
+  // universal source — it doesn't tell us where the target sits in the
+  // specialist-to-specialist flow.
+  const preds = new Map<string, Set<string>>();
+  for (const a of team.agents) preds.set(a.name, new Set());
   for (const e of team.edges) {
-    adj.get(e.source)?.add(e.target);
-    adj.get(e.target)?.add(e.source);
+    if (e.source === orchName) continue;
+    if (preds.has(e.target)) preds.get(e.target)!.add(e.source);
   }
-  const queue: string[] = [orchName];
-  while (queue.length) {
-    const u = queue.shift()!;
-    const du = out.get(u)!;
-    for (const v of adj.get(u) ?? []) {
-      if (!out.has(v)) {
-        out.set(v, du + 1);
-        queue.push(v);
+
+  // Seed every non-orchestrator at layer 1, then relax: layer of node
+  // = max(layer of predecessors) + 1. Bounded iteration so a cyclic
+  // routing graph (rare but legal) can't spin forever — N+5 passes
+  // is plenty to converge for any topology that fits on the canvas.
+  const specialists = team.agents.map(a => a.name).filter(n => n !== orchName);
+  for (const n of specialists) out.set(n, 1);
+  let changed = true;
+  let iter = 0;
+  while (changed && iter < specialists.length + 5) {
+    changed = false;
+    iter++;
+    for (const n of specialists) {
+      const ps = preds.get(n)!;
+      let maxPred = 0;
+      for (const p of ps) {
+        const pd = out.get(p) ?? 0;
+        if (pd > maxPred) maxPred = pd;
+      }
+      const wanted = maxPred + 1;
+      if (wanted > (out.get(n) ?? 1)) {
+        out.set(n, wanted);
+        changed = true;
       }
     }
   }
-  let maxKnown = 0;
-  for (const d of out.values()) if (d > maxKnown) maxKnown = d;
-  for (const a of team.agents) if (!out.has(a.name)) out.set(a.name, maxKnown + 1);
   return out;
 }
 
@@ -1922,7 +1947,31 @@ export default function AgentsPage() {
   /// saves / removes credentials on the Accounts page.
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
 
-  const [goal, setGoal] = useState<string>("summarize the last commit and propose a follow-up");
+  // Goal input — persisted per-project to localStorage so the text the
+  // user typed survives page navigation. Same pattern as the SuperUser
+  // draft (sync write through a ref, no useEffect race).
+  const GOAL_DEFAULT = "summarize the last commit and propose a follow-up";
+  const goalKey = selectedProjectId ? `owllm:goal:${selectedProjectId}` : "";
+  const goalKeyRef = useRef(goalKey);
+  goalKeyRef.current = goalKey;
+  const [goal, setGoalState] = useState<string>(() => {
+    if (!goalKey) return GOAL_DEFAULT;
+    try { return localStorage.getItem(goalKey) ?? GOAL_DEFAULT; } catch { return GOAL_DEFAULT; }
+  });
+  useEffect(() => {
+    if (!goalKey) { setGoalState(GOAL_DEFAULT); return; }
+    try {
+      const stored = localStorage.getItem(goalKey);
+      setGoalState(stored !== null ? stored : GOAL_DEFAULT);
+    } catch { setGoalState(GOAL_DEFAULT); }
+  }, [goalKey]);
+  const setGoal = (v: string) => {
+    setGoalState(v);
+    const k = goalKeyRef.current;
+    if (k) {
+      try { localStorage.setItem(k, v); } catch {}
+    }
+  };
   const [busy, setBusy] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);

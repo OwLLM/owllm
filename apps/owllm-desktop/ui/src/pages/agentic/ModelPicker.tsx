@@ -173,17 +173,43 @@ export default function ModelPicker({
   fallbackLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement | null>(null);
+  /// Trigger bounding rect captured at open time so the popover can
+  /// render with position:fixed and ESCAPE any parent overflow:hidden
+  /// (TeamInfoCard clips otherwise — that's the bug the user hit).
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const btnRef  = useRef<HTMLButtonElement | null>(null);
+  const popRef  = useRef<HTMLDivElement | null>(null);
 
-  // Close on outside click.
+  // Close on outside click — must check BOTH the wrapper (trigger) and
+  // the popover (rendered as a sibling via position:fixed, so it's not
+  // a child of the wrapper any more).
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (!ref.current) return;
-      if (!ref.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (wrapRef.current?.contains(t)) return;
+      if (popRef.current?.contains(t)) return;
+      setOpen(false);
     };
     window.addEventListener("mousedown", onDoc);
     return () => window.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  // Re-measure if the user scrolls or resizes the window while the
+  // popover is open. Cheaper than re-rendering every frame.
+  useEffect(() => {
+    if (!open) return;
+    const remeasure = () => {
+      const r = btnRef.current?.getBoundingClientRect();
+      if (r) setRect(r);
+    };
+    window.addEventListener("resize", remeasure);
+    window.addEventListener("scroll", remeasure, true);
+    return () => {
+      window.removeEventListener("resize", remeasure);
+      window.removeEventListener("scroll", remeasure, true);
+    };
   }, [open]);
 
   const entries = buildEntries(models, status);
@@ -193,12 +219,52 @@ export default function ModelPicker({
     ? displayForId(value, entries)
     : (fallbackLabel || placeholder || "(pick a model)");
 
+  const togglePopover = () => {
+    if (!open) {
+      const r = btnRef.current?.getBoundingClientRect();
+      if (r) setRect(r);
+    }
+    setOpen(v => !v);
+  };
+
+  // Compute popover geometry. Width = trigger width (so it lines up
+  // visually and the user sees the full row width without scrolling).
+  // Clamp to a sensible minimum so a tight trigger still shows enough.
+  // Vertical: open downward by default; flip upward if the popover
+  // wouldn't fit below the trigger.
+  let popStyle: React.CSSProperties = { display: "none" };
+  if (open && !disabled && rect) {
+    const desiredWidth = Math.max(rect.width, 320);
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - desiredWidth - 8));
+    const maxBelow = window.innerHeight - rect.bottom - 16;
+    const maxAbove = rect.top - 16;
+    const openUpward = maxBelow < 280 && maxAbove > maxBelow;
+    const maxHeight = openUpward ? maxAbove : maxBelow;
+    popStyle = {
+      position: "fixed",
+      left,
+      width: desiredWidth,
+      maxHeight: Math.max(220, Math.min(640, maxHeight)),
+      [openUpward ? "bottom" : "top"]: openUpward
+        ? (window.innerHeight - rect.top + 4)
+        : (rect.bottom + 4),
+      background: "var(--bg-panel)",
+      border: "1px solid var(--border-strong)",
+      borderRadius: 10,
+      boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
+      zIndex: 10000,
+      overflow: "auto",
+      padding: "10px 0",
+    };
+  }
+
   return (
-    <div ref={ref} style={{ position: "relative", flex: 1, minWidth: 0 }}>
+    <div ref={wrapRef} style={{ position: "relative", flex: 1, minWidth: 0 }}>
       <button
+        ref={btnRef}
         type="button"
         disabled={disabled}
-        onClick={() => setOpen(v => !v)}
+        onClick={togglePopover}
         title={triggerLabel}
         style={{
           width: "100%", height: 30, padding: "0 10px",
@@ -215,20 +281,8 @@ export default function ModelPicker({
         </span>
         <span style={{ color: "var(--fg-muted)", fontSize: 10 }}>▾</span>
       </button>
-      {open && !disabled && (
-        <div
-          style={{
-            position: "absolute", top: "100%", left: 0, marginTop: 4,
-            width: "min(560px, 92vw)", maxHeight: "min(70vh, 640px)",
-            background: "var(--bg-panel)",
-            border: "1px solid var(--border-strong)",
-            borderRadius: 10,
-            boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
-            zIndex: 1000,
-            overflow: "auto",
-            padding: "10px 0",
-          }}
-        >
+      {open && !disabled && rect && (
+        <div ref={popRef} style={popStyle}>
           {sections.map(sec => {
             const meta = SECTION_META[sec];
             const items = entries.filter(e => e.section === sec);

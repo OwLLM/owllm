@@ -1643,8 +1643,33 @@ function stripDispatchDirectives(text: string): string {
 // disable Run, show the activity hint, light up the busy spinner.
 type DispatchPhase = "idle" | "planning" | "dispatching" | "integrating" | "done";
 
+// Hook: track a ref'd element's rendered width + height via
+// ResizeObserver. Used to feed dynamic dimensions into the SVG-based
+// TeamCanvas / GraphCanvas, which can't compute their own layout
+// from CSS.
+function useElementSize<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+  const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(entries => {
+      for (const e of entries) {
+        const rect = e.contentRect;
+        setSize({ w: Math.floor(rect.width), h: Math.floor(rect.height) });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return { ref, size };
+}
+
 export default function AgentsPage() {
-  const LEFT_W = 1014, RIGHT_W = 532, SPLITTER_W = 8;
+  const SPLITTER_W = 8;
+  /// Live size of the canvas container — fed into TeamCanvas /
+  /// GraphCanvas so the SVG layouts scale with the window.
+  const canvasSize = useElementSize<HTMLDivElement>();
 
   const [serverState, setServerState] = useState<ServerStatus>({ running: false, model_id: null, port: null, message: "" });
 
@@ -2354,7 +2379,7 @@ export default function AgentsPage() {
   }
 
   return (
-    <>
+    <div style={{ display:"flex", flexDirection:"column", height:"100%", minHeight:0 }}>
       <LocationRow
         projects={projects}
         selectedId={selectedProjectId}
@@ -2380,8 +2405,8 @@ export default function AgentsPage() {
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
       />
       <GoalRow goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy} />
-      <div data-ui="WorkspaceStack" style={{ height:665, width:1554, margin:"0 23px", display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0 }}>
-        <div data-ui="RosterLeft" style={{ width:LEFT_W, display:"flex", flexDirection:"column", background:"var(--bg-elevated)" }}>
+      <div data-ui="WorkspaceStack" style={{ flex:1, minHeight:0, margin:"0 23px", display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0 }}>
+        <div data-ui="RosterLeft" style={{ flex:"2 1 0", minWidth:0, display:"flex", flexDirection:"column", background:"var(--bg-elevated)" }}>
           <FlowHeader
             viewMode={viewMode}
             onToggleView={() => setViewMode(v => v === "diagram" ? "graph" : "diagram")}
@@ -2390,12 +2415,12 @@ export default function AgentsPage() {
             onReverseEdge={reverseSelectedEdge}
             onResetLayout={resetGraphLayout}
           />
-          <div data-ui="CanvasStack" style={{ height:607, position:"relative" }}>
+          <div ref={canvasSize.ref} data-ui="CanvasStack" style={{ flex:1, minHeight:0, position:"relative" }}>
             {viewMode === "diagram" ? (
               <>
                 <TeamCanvas
-                  width={LEFT_W}
-                  height={607}
+                  width={canvasSize.size.w || 800}
+                  height={canvasSize.size.h || 600}
                   team={renderTeam}
                   roleByName={roleByName}
                   activeAgent={activeAgent}
@@ -2423,8 +2448,8 @@ export default function AgentsPage() {
               </>
             ) : (
               <GraphCanvas
-                width={LEFT_W}
-                height={607}
+                width={canvasSize.size.w || 800}
+                height={canvasSize.size.h || 600}
                 team={renderTeam}
                 roleByName={roleByName}
                 selectedNode={selectedNode}
@@ -2440,8 +2465,8 @@ export default function AgentsPage() {
             )}
           </div>
         </div>
-        <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, background:"var(--bg-card)" }} />
-        <div style={{ width:RIGHT_W }}>
+        <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, flexShrink:0, background:"var(--bg-card)" }} />
+        <div style={{ flex:"1 1 0", minWidth:360 }}>
           <OrchestratorPane
             agentLogs={agentLogs}
             runError={runError}
@@ -2457,6 +2482,6 @@ export default function AgentsPage() {
           />
         </div>
       </div>
-    </>
+    </div>
   );
 }

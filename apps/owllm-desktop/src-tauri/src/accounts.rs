@@ -213,17 +213,29 @@ fn which_in_path(name: &str) -> Result<PathBuf, ()> {
 /// app's install dir and ends up summarising the wrong tree (the bug
 /// users hit when they pointed Location at one folder but the bot
 /// reported on another).
+///
+/// `auto_approve` toggles `--dangerously-skip-permissions`. The user
+/// flips "auto-approve every tool call" on the SuperUserCard (or in
+/// the Telegram bridge config) when they're driving the agent
+/// unattended — without this flag the CLI prompts for every file
+/// write and the bridge stalls. The flag is intentionally namespaced
+/// `dangerously-` by the CLI; the runner only honours it when the
+/// user explicitly opts in.
 #[tauri::command]
 pub async fn claude_cli_complete(
     system_prompt: String,
     user_message: String,
     cwd: Option<String>,
+    auto_approve: Option<bool>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let exe = find_claude_cli()
             .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
         let mut cmd = Command::new(&exe);
         cmd.arg("--print");
+        if auto_approve.unwrap_or(false) {
+            cmd.arg("--dangerously-skip-permissions");
+        }
         if !system_prompt.trim().is_empty() {
             cmd.arg("--append-system-prompt").arg(&system_prompt);
         }

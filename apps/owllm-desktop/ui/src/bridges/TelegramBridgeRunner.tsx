@@ -111,6 +111,7 @@ async function streamOnce(
   signal: AbortSignal,
   cwd: string,
   history: HistoryItem[],
+  autoApprove: boolean,
 ): Promise<string> {
   const provider = providerFor(modelId, models);
   const forceSub = modelId.startsWith("sub/");
@@ -123,7 +124,7 @@ async function streamOnce(
     if (forceSub) {
       const status = await invoke<{ claude_cli: boolean }>("accounts_status");
       if (!status?.claude_cli) throw new Error("Claude Code CLI not detected — run `claude /login` first.");
-      return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: cwd || null });
+      return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: cwd || null, autoApprove });
     }
     const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
     if (!key) {
@@ -132,7 +133,7 @@ async function streamOnce(
       try {
         const status = await invoke<{ claude_cli: boolean }>("accounts_status");
         if (status?.claude_cli) {
-          return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: cwd || null });
+          return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: cwd || null, autoApprove });
         }
       } catch { /* fall through */ }
       throw new Error("No ANTHROPIC_API_KEY and no Claude CLI — Telegram bridge can't dispatch.");
@@ -333,12 +334,18 @@ export default function TelegramBridgeRunner() {
       dispatchActive("orchestrator");
 
       const projectCwd = (project?.location ?? "").trim();
+      // cfg.auto_approve is the "Auto-approve every tool call" checkbox
+      // from the Bridges page. When true we pass --dangerously-skip-
+      // permissions to Claude CLI so the bot doesn't stall waiting for
+      // a Y/N at the user's desktop — the user is on their phone and
+      // can't approve anyway.
+      const auto = !!cfg.auto_approve;
       let reply = "";
       try {
         reply = await streamOnce(
           modelId, sys, text,
           modelsRef.current, serverRef.current,
-          new AbortController().signal, projectCwd, priorHistory,
+          new AbortController().signal, projectCwd, priorHistory, auto,
         );
       } catch (e: any) {
         reply = `(bridge error: ${String(e?.message ?? e)})`;

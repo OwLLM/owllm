@@ -1479,13 +1479,14 @@ function GraphCanvas({
 // (default = whichever agent the dispatcher is currently driving,
 // fallback = orchestrator).
 function OrchestratorPane({
-  agentLogs, runError, serverState,
+  agentLogs, agentThoughts, runError, serverState,
   selectedAgent, activeAgent,
   team, phase,
   models, modelFor, onPickAgentModel,
   accountsStatus,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
+  agentThoughts: Map<string, GoalMsg[]>;
   runError: string | null;
   serverState: ServerStatus;
   selectedAgent: string | null;
@@ -1519,6 +1520,9 @@ function OrchestratorPane({
   // Filter the focused agent's messages. The "you" buffer always
   // contains just the user goal echo; useful as a sanity check.
   const messages = agentLogs.get(focus) ?? [];
+  // Per-agent thought traffic for the Thought tab (dispatches +
+  // future tool calls). Populated by appendThought in AgentsPage.
+  const thoughts = agentThoughts.get(focus) ?? [];
 
   // Phase indicator pill for the header.
   const phaseColor = phase === "idle" || phase === "done"
@@ -1601,8 +1605,21 @@ function OrchestratorPane({
             </div>
           ))}
         </div>
-        <div data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "block" : "none", margin:"8px 10px 0", padding:10, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"var(--fg)" }}>
-          <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>No thought traffic yet — tool calls, reasoning, and events land here while the team runs.</div>
+        <div data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)" }}>
+          {thoughts.length === 0 ? (
+            <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
+              No thought traffic for this agent yet — dispatches and tool
+              calls land here while the team runs.
+            </div>
+          ) : thoughts.map((t, i) => (
+            <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+              <div style={{ width:6, alignSelf:"stretch", borderRadius:3, background: t.color, opacity:0.85, flexShrink:0 }} />
+              <div style={{ flex:1, background:"var(--bg-surface)", borderRadius:6, padding:"4px 8px" }}>
+                <div style={{ fontSize:9, fontWeight:700, color:t.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:2, fontFamily:"Segoe UI, sans-serif" }}>{t.role}</div>
+                <div style={{ fontSize:12, color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Consolas, 'JetBrains Mono', monospace" }}>{t.text}</div>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
     </div>
@@ -1786,6 +1803,12 @@ async function streamChatCompletion(
   /// Claude CLI subscription path it's folded into the user prompt
   /// (the CLI's --print mode is one-shot and has no inherent memory).
   history?: HistoryItem[],
+  /// When true and the dispatch resolves to the Claude CLI sub path,
+  /// the CLI is invoked with --dangerously-skip-permissions so file
+  /// writes / bash runs don't stall on permission prompts. Honoured
+  /// only when the user has opted in via the SuperUserCard checkbox
+  /// or the Telegram bridge's auto_approve flag.
+  autoApprove?: boolean,
 ): Promise<string> {
   // Strip the optional route prefix encoded by the ModelPicker before
   // handing the bare model id to the provider-specific call.
@@ -1801,7 +1824,7 @@ async function streamChatCompletion(
     throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
   }
   if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd, history);
+    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd, history, autoApprove);
   }
   if (provider === "openai") {
     return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, history);
@@ -1868,6 +1891,7 @@ async function streamAnthropic(
   onDelta: StreamHandler,
   projectCwd?: string,
   history?: HistoryItem[],
+  autoApprove?: boolean,
 ): Promise<string> {
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
@@ -1881,7 +1905,7 @@ async function streamAnthropic(
     if (!status?.claude_cli) {
       throw new Error("Claude Code CLI not detected — run `claude /login` first.");
     }
-    const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null });
+    const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null, autoApprove: autoApprove ?? false });
     if (reply) onDelta(reply);
     return reply;
   }
@@ -1896,6 +1920,7 @@ async function streamAnthropic(
           systemPrompt,
           userMessage: cliPrompt,
           cwd: projectCwd ?? null,
+          autoApprove: autoApprove ?? false,
         });
         if (reply) onDelta(reply);
         return reply;
@@ -2136,6 +2161,12 @@ export default function AgentsPage() {
   // user goal echo and "system" for errors). OrchestratorPane filters
   // these by selectedNode; canvas highlights `activeAgent`.
   const [agentLogs, setAgentLogs] = useState<Map<string, GoalMsg[]>>(new Map());
+  // Thought buffers — parallel to agentLogs but holds the agent's
+  // INTERNAL traffic instead of the conversational reply. Today's
+  // populator is the orchestrator's @agent: dispatch directives; the
+  // OpenAI tool-calls + Anthropic thinking-block channels can slot in
+  // later without touching the consumer-side UI.
+  const [agentThoughts, setAgentThoughts] = useState<Map<string, GoalMsg[]>>(new Map());
   const [activeAgent, setActiveAgent] = useState<string | null>(null);
   const [phase, setPhase] = useState<DispatchPhase>("idle");
 
@@ -2323,6 +2354,11 @@ export default function AgentsPage() {
           setAgentLogs(new Map());
         }
       } catch { setAgentLogs(new Map()); }
+      // Thought traffic is ephemeral per-run (dispatches + tool calls
+      // from the active dispatch) — reset whenever the user switches
+      // project so stale @dispatch lines from a previous team don't
+      // bleed into the new project's pane.
+      setAgentThoughts(new Map());
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProject?.id]);
@@ -2533,6 +2569,18 @@ export default function AgentsPage() {
       return next;
     });
   };
+  // Append a thought entry — same shape as agentLogs but renders in
+  // the Thought tab of the OrchestratorPane. Today's populator is the
+  // orchestrator's dispatch directives; tool-call / extended-thinking
+  // channels can slot in later without changing the consumer.
+  const appendThought = (agent: string, msg: GoalMsg) => {
+    setAgentThoughts(prev => {
+      const next = new Map(prev);
+      const cur = next.get(agent) ?? [];
+      next.set(agent, [...cur, msg]);
+      return next;
+    });
+  };
 
   // SuperUserCard Send — drops a one-off message into the Super User
   // log buffer. The dispatch loop above handles the orchestrator-led
@@ -2552,6 +2600,14 @@ export default function AgentsPage() {
     // need llama-server running at all.
     const supModelId = effectiveTeamModel.trim() || (serverState.model_id ?? "local");
     const supProvider = providerFor(supModelId);
+
+    // Echo the user message into the orchestrator's buffer too so the
+    // right-pane Reply tab reads as a conversation thread, not just
+    // the assistant side.
+    {
+      const orchSpec = activeTeam ? findOrchestratorSpec(activeTeam) : null;
+      if (orchSpec) appendLog(orchSpec.name, userMsg);
+    }
 
     if (supProvider === "local" && (!serverState.running || !serverState.port)) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: "No model server is running — start one on the Server tab to dispatch this." };
@@ -2597,6 +2653,7 @@ export default function AgentsPage() {
         // letting it inherit the desktop install dir.
         (locationOverride || selectedProject?.location || "").trim(),
         priorHistory,
+        autoApprove,
       );
     } catch (e: any) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: String(e?.message ?? e) };
@@ -2706,6 +2763,7 @@ export default function AgentsPage() {
     // Wipe the per-run log buffers but keep the SuperUserCard chat
     // (which represents the user-facing thread of the conversation).
     setAgentLogs(new Map());
+    setAgentThoughts(new Map());
     setRunError(null);
     setBusy(true);
     setPhase("planning");
@@ -2716,8 +2774,12 @@ export default function AgentsPage() {
     // Cloud calls don't need a port; only the local fallback does.
     const port = serverState.port ?? 0;
 
-    // Anchor the goal in the user log first.
-    appendLog("you", { role: "you", color: "#9ad9ff", text });
+    // Anchor the goal in the user log AND the orchestrator's log so
+    // the Reply tab reads as a conversation thread when the user
+    // focuses on the orchestrator.
+    const goalMsg: GoalMsg = { role: "you", color: "#9ad9ff", text };
+    appendLog("you", goalMsg);
+    appendLog(orch.name, goalMsg);
 
     // Each role yaml ships a default_temperature; honour it instead of
     // a hardcoded 0.4/0.5 split. Orchestrator base = 0.3, specialists
@@ -2753,6 +2815,18 @@ export default function AgentsPage() {
       // ----- Phase 2: parse + dispatch -----
       const dispatches = parseDispatches(orchReply, activeTeam, orch.name);
 
+      // Drop the parsed directives into the orchestrator's THOUGHT
+      // log — that's the routing decision, not part of the user-
+      // facing reply. The Reply tab kept clean; Thought tab shows
+      // the plan.
+      for (const d of dispatches) {
+        appendThought(orch.name, {
+          role: "dispatch",
+          color: "#a578ff",
+          text: `📤 @${d.agentName}: ${d.instruction}`,
+        });
+      }
+
       // If the orchestrator didn't dispatch anything, its first reply
       // IS the final answer — surface it to the user and stop.
       if (dispatches.length === 0) {
@@ -2771,9 +2845,10 @@ export default function AgentsPage() {
         if (!spec) continue;
         setActiveAgent(spec.name);
         const specPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName);
-        // Anchor the dispatch instruction in the agent's log so the
-        // user can see what was asked of them.
-        appendLog(spec.name, { role: "dispatch", color: "#9aa0a6", text: `📩 ${d.instruction}` });
+        // Anchor the dispatch instruction in the agent's THOUGHT log
+        // (it's the incoming task, not the user-facing reply) and
+        // also seed an empty reply slot for the streamed answer.
+        appendThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${d.instruction}` });
         appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
         const specModel = modelFor(spec.name);
         const specText = await streamChatCompletion(
@@ -2884,13 +2959,19 @@ export default function AgentsPage() {
       setSupChat(prev => [...prev, ...msgs]);
 
       // Mirror into agentLogs so the Reply tab on the right-hand
-      // OrchestratorPane shows the same content. "you" → user log,
-      // anything else → orchestrator log.
+      // OrchestratorPane shows the same content. User messages get
+      // pushed to BOTH the "you" buffer AND the orchestrator's buffer
+      // so the orchestrator's Reply tab reads as a conversation
+      // thread (user → orchestrator → user → …), not just one side.
       const orchSpec = activeTeam ? findOrchestratorSpec(activeTeam) : null;
       const orchKey = orchSpec?.name ?? "orchestrator";
       for (const m of msgs) {
-        const key = m.role === "you" ? "you" : orchKey;
-        appendLog(key, { ...m, role: m.role === "you" ? "you" : orchKey });
+        if (m.role === "you") {
+          appendLog("you", m);
+          appendLog(orchKey, m);
+        } else {
+          appendLog(orchKey, { ...m, role: orchKey });
+        }
       }
       reloadProjects();
     };
@@ -3042,6 +3123,7 @@ export default function AgentsPage() {
         <div style={{ flex:"1 1 0", minWidth:360 }}>
           <OrchestratorPane
             agentLogs={agentLogs}
+            agentThoughts={agentThoughts}
             runError={runError}
             serverState={serverState}
             selectedAgent={selectedNode}

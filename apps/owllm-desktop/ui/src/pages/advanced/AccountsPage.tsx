@@ -313,8 +313,12 @@ function BrandCard({
   const isSub = spec.kind === "subscription";
   // Qt accounts_page.py:267 — exactly "Connect" / "Set key", no parenthetical.
   const actionLabel = state.connected ? "Disconnect" : isSub ? "Connect" : "Set key";
-  // Qt accounts_page.py:252/266 — both kinds use the same two strings.
-  const statusText = state.connected ? "Connected" : "Not connected";
+  // Subscription cards detect their CLI's credentials file; API cards
+  // detect a saved key. Spell that out so users don't think saving on
+  // one card transfers to the other.
+  const statusText = state.connected
+    ? (isSub ? "CLI logged in" : "API key saved")
+    : (isSub ? "CLI not logged in" : "No API key saved");
 
   function handleAction() {
     if (state.connected) {
@@ -592,6 +596,12 @@ export default function AccountsPage() {
       {/* Subtitle — verbatim Qt accounts_page.py:418, color #9aa0a6 12px (line 420) */}
       <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
         Connect each provider once. Test verifies credentials end-to-end.
+        <br />
+        <span style={{ color: "var(--fg-subtle)" }}>
+          The two CLI cards detect <code>claude</code> / <code>codex</code> logins on this machine.
+          The two API cards store keys in <code>~/.owllm/agent_secrets.json</code>.
+          Agents fall back to the CLI subscription automatically when no matching API key is saved.
+        </span>
       </div>
 
       {/* 2x2 grid — Qt QGridLayout h/v spacing 18 (lines 425-426), both

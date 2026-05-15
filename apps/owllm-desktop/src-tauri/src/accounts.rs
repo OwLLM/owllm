@@ -10,8 +10,15 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::time::Instant;
+
+/// Windows: prevent a flashing console window when we shell out to
+/// the claude / codex CLIs. 0x08000000 = CREATE_NO_WINDOW.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// Where API keys live on disk. Same path as the legacy Python store.
 fn secrets_path() -> Option<PathBuf> {
@@ -164,6 +171,88 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
         detail,
         elapsed_ms: start.elapsed().as_millis() as u64,
     }
+}
+
+// ---------------------------------------------------------------------
+// Subscription-CLI dispatch — runs `claude --print` non-interactively
+// so the agentic loop can use the user's Claude Code subscription
+// when no ANTHROPIC_API_KEY is saved.
+// ---------------------------------------------------------------------
+
+/// Locate the `claude` executable. Searches PATH for `claude.exe`,
+/// `claude.cmd`, then `claude`. Returns the resolved path or None.
+fn find_claude_cli() -> Option<PathBuf> {
+    // npm's Windows shim is `claude.cmd` (no extension on Unix).
+    for name in ["claude.exe", "claude.cmd", "claude"] {
+        if let Ok(path) = which_in_path(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn which_in_path(name: &str) -> Result<PathBuf, ()> {
+    let path_var = std::env::var_os("PATH").ok_or(())?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Err(())
+}
+
+/// One-shot completion via `claude --print`. Streams the user's
+/// system + user prompt on stdin and returns the full reply text on
+/// stdout. No token-level streaming — Claude Code's --print mode
+/// only emits the final response, not a token-by-token feed.
+///
+/// Used when the agent dispatch resolves to an Anthropic model but
+/// the user has only the Claude Code subscription (CLI logged in)
+/// rather than a paid ANTHROPIC_API_KEY.
+#[tauri::command]
+pub async fn claude_cli_complete(
+    system_prompt: String,
+    user_message: String,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let exe = find_claude_cli()
+            .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
+        let mut cmd = Command::new(&exe);
+        cmd.arg("--print");
+        if !system_prompt.trim().is_empty() {
+            cmd.arg("--append-system-prompt").arg(&system_prompt);
+        }
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(user_message.as_bytes())
+                .map_err(|e| format!("write stdin: {e}"))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("wait claude: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            return Err(format!(
+                "claude CLI exited {} — {}",
+                output.status.code().unwrap_or(-1),
+                if stderr.is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
+            ));
+        }
+        let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
+        Ok(stdout.trim().to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 // ---------------------------------------------------------------------

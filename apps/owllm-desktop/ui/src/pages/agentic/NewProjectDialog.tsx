@@ -23,6 +23,7 @@ type ProjectRow = {
   id: string; name: string; description: string; location: string;
   trust_writes: boolean; auto_approve_all: boolean;
   team: string[]; team_default_model_id: string; graph_json: string;
+  chat_json: string; agent_logs_json: string;
   updated_at: string;
 };
 

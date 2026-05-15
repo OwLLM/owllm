@@ -38,6 +38,7 @@ pub fn run() {
             accounts::accounts_delete_secret,
             accounts::accounts_get_secret,
             accounts::accounts_test_probe,
+            accounts::claude_cli_complete,
             agents::list_team_templates,
             agents::list_agent_roles,
             agents::list_skill_packs,

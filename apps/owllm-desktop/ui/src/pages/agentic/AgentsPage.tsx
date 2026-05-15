@@ -19,6 +19,10 @@ type ProjectRow = {
   /// Routing graph blob — `{"edges": [{"source":"x","target":"y"}]}`.
   /// Empty string when the project hasn't customised routing yet.
   graph_json: string;
+  /// Super User chat transcript (JSON array of GoalMsg). Empty = fresh.
+  chat_json: string;
+  /// Per-agent transcripts (JSON object keyed by agent name). Empty = fresh.
+  agent_logs_json: string;
   updated_at: string;
 };
 type TeamTemplateBackend = { id: string; path: string; built_in: boolean; data: any };
@@ -1485,6 +1489,13 @@ async function streamChatCompletion(
 ///   data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"…"}}
 /// We only care about text_delta entries; everything else (ping, stop
 /// events) is ignored for plain-text streaming.
+///
+/// Fallback: when no ANTHROPIC_API_KEY is saved but the user's Claude
+/// Code CLI subscription is connected, we shell out to `claude --print`
+/// instead of hitting api.anthropic.com directly. This works without
+/// the user paying for API credits — they use the same subscription
+/// that powers their normal Claude Code sessions. Trade-off: --print
+/// mode emits the full reply at the end (no token streaming).
 async function streamAnthropic(
   modelId: string,
   systemPrompt: string,
@@ -1494,7 +1505,28 @@ async function streamAnthropic(
   onDelta: StreamHandler,
 ): Promise<string> {
   const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
-  if (!key) throw new Error("No ANTHROPIC_API_KEY saved — set it on the Accounts page.");
+  if (!key) {
+    // No API key — try the Claude Code CLI subscription instead.
+    try {
+      const status = await invoke<{ claude_cli: boolean }>("accounts_status");
+      if (status?.claude_cli) {
+        const reply = await invoke<string>("claude_cli_complete", {
+          systemPrompt,
+          userMessage,
+        });
+        if (reply) onDelta(reply);
+        return reply;
+      }
+    } catch (e) {
+      // fall through to the original error below so the user sees a
+      // single actionable message rather than two stacked errors.
+      console.error("claude_cli_complete failed", e);
+    }
+    throw new Error(
+      "No ANTHROPIC_API_KEY saved and Claude Code CLI not detected. " +
+      "Either save a key on the Accounts page OR install + sign in to Claude Code (`claude /login`)."
+    );
+  }
   const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -1809,6 +1841,29 @@ export default function AgentsPage() {
       // Wipe per-agent model picks too — they belong to a single
       // project session, not across projects.
       setPerAgentModel(new Map());
+      // Restore saved chat + per-agent transcripts. Empty strings or
+      // malformed JSON fall back to a fresh chat for the project.
+      try {
+        const parsed = selectedProject.chat_json
+          ? JSON.parse(selectedProject.chat_json)
+          : [];
+        setSupChat(Array.isArray(parsed) ? parsed : []);
+      } catch { setSupChat([]); }
+      try {
+        const parsed = selectedProject.agent_logs_json
+          ? JSON.parse(selectedProject.agent_logs_json)
+          : {};
+        if (parsed && typeof parsed === "object") {
+          const m = new Map<string, GoalMsg[]>();
+          for (const k of Object.keys(parsed)) {
+            const v = (parsed as any)[k];
+            if (Array.isArray(v)) m.set(k, v);
+          }
+          setAgentLogs(m);
+        } else {
+          setAgentLogs(new Map());
+        }
+      } catch { setAgentLogs(new Map()); }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProject?.id]);
@@ -1897,6 +1952,50 @@ export default function AgentsPage() {
     return () => window.clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationOverride, selectedProject?.id]);
+
+  // Persist the Super User chat transcript when it changes. 800 ms
+  // debounce so a stream of tokens during a dispatch doesn't write
+  // SQLite on every character — only when the stream pauses.
+  useEffect(() => {
+    if (!selectedProject) return;
+    const next = JSON.stringify(supChat);
+    if (next === (selectedProject.chat_json || "[]")) return;
+    const id = window.setTimeout(async () => {
+      try {
+        await invoke("update_project", {
+          input: { id: selectedProject.id, chat_json: next },
+        });
+        await reloadProjects();
+      } catch (e) {
+        console.error("persist chat_json failed", e);
+      }
+    }, 800);
+    return () => window.clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supChat, selectedProject?.id]);
+
+  // Persist per-agent transcripts (agentLogs Map → JSON object). Same
+  // 800 ms debounce — and only when the snapshot actually differs from
+  // what's already on disk.
+  useEffect(() => {
+    if (!selectedProject) return;
+    const obj: Record<string, GoalMsg[]> = {};
+    for (const [k, v] of agentLogs) obj[k] = v;
+    const next = JSON.stringify(obj);
+    if (next === (selectedProject.agent_logs_json || "{}")) return;
+    const id = window.setTimeout(async () => {
+      try {
+        await invoke("update_project", {
+          input: { id: selectedProject.id, agent_logs_json: next },
+        });
+        await reloadProjects();
+      } catch (e) {
+        console.error("persist agent_logs_json failed", e);
+      }
+    }, 800);
+    return () => window.clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentLogs, selectedProject?.id]);
 
   // Persist the team default model id when the user picks one on the
   // TeamInfoCard. Same debounced shape as location/trust_writes.

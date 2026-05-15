@@ -37,6 +37,14 @@ pub struct ProjectRow {
     /// Routing graph as JSON — `{"edges": [{"source": "...", "target": "..."}, ...]}`.
     /// Empty string = use the team template's default routing.
     pub graph_json: String,
+    /// Super User chat transcript as JSON — array of GoalMsg objects
+    /// (`[{"role":"you","color":"#...","text":"..."}, ...]`). Empty
+    /// string = no saved chat (fresh project).
+    pub chat_json: String,
+    /// Per-agent transcripts as JSON — object keyed by agent name
+    /// (`{"orchestrator":[GoalMsg,...], "coder":[GoalMsg,...]}`). Empty
+    /// string = no saved logs.
+    pub agent_logs_json: String,
     pub updated_at: String,
 }
 
@@ -82,15 +90,28 @@ fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         [],
     )
     .map_err(|e| format!("create table: {e}"))?;
+    // Migrate older databases that pre-date the chat / per-agent log
+    // columns. ALTER TABLE … ADD COLUMN on SQLite has no `IF NOT
+    // EXISTS`, so we just attempt it and swallow the "duplicate column
+    // name" error path. Both fields hold JSON strings; '' = absent.
+    let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN chat_json TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN agent_logs_json TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     Ok(())
 }
 
 fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
-    let conn = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|e| format!("open {}: {e}", path.display()))?;
+    // Open read-write so we can run the idempotent migration that
+    // adds chat_json / agent_logs_json to pre-existing databases.
+    // Without that, this read would fail on older DBs the moment we
+    // SELECT the new columns.
+    let conn = rusqlite::Connection::open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
 
     let exists: i64 = conn
         .query_row(
@@ -102,11 +123,13 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
     if exists == 0 {
         return Ok(Vec::new());
     }
+    ensure_schema(&conn)?;
 
     let mut stmt = conn
         .prepare(
             "SELECT id, name, description, location, trust_writes, \
-             auto_approve_all, team_json, team_default_model_id, graph_json, updated_at \
+             auto_approve_all, team_json, team_default_model_id, graph_json, \
+             chat_json, agent_logs_json, updated_at \
              FROM agent_projects ORDER BY updated_at DESC",
         )
         .map_err(|e| format!("prepare: {e}"))?;
@@ -124,7 +147,9 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
                 team,
                 team_default_model_id: r.get::<_, String>(7).unwrap_or_default(),
                 graph_json: r.get::<_, String>(8).unwrap_or_default(),
-                updated_at: r.get::<_, String>(9).unwrap_or_default(),
+                chat_json: r.get::<_, String>(9).unwrap_or_default(),
+                agent_logs_json: r.get::<_, String>(10).unwrap_or_default(),
+                updated_at: r.get::<_, String>(11).unwrap_or_default(),
             })
         })
         .map_err(|e| format!("query: {e}"))?;
@@ -279,6 +304,8 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
             team: input.team,
             team_default_model_id: input.team_default_model_id,
             graph_json: input.graph_json,
+            chat_json: String::new(),
+            agent_logs_json: String::new(),
             updated_at: now,
         })
     })
@@ -299,6 +326,10 @@ pub struct UpdateProjectInput {
     pub team: Option<Vec<String>>,
     pub graph_json: Option<String>,
     pub team_default_model_id: Option<String>,
+    /// JSON-encoded array of Super User chat messages.
+    pub chat_json: Option<String>,
+    /// JSON-encoded object mapping agent name → array of messages.
+    pub agent_logs_json: Option<String>,
 }
 
 #[tauri::command]
@@ -346,6 +377,14 @@ pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
         }
         if let Some(v) = input.team_default_model_id {
             sets.push("team_default_model_id = ?");
+            params.push(Box::new(v));
+        }
+        if let Some(v) = input.chat_json {
+            sets.push("chat_json = ?");
+            params.push(Box::new(v));
+        }
+        if let Some(v) = input.agent_logs_json {
+            sets.push("agent_logs_json = ?");
             params.push(Box::new(v));
         }
         if sets.is_empty() {

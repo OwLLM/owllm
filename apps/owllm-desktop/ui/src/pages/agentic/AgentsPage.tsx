@@ -2653,11 +2653,12 @@ export default function AgentsPage() {
   }
 
   // ===== Telegram bridge — long-poll =====
-  // Gated on the persisted "started" flag (set by the Start button on
-  // BridgesPage) AND a valid config AND a matching project. Without
-  // an explicit Start click the bridge stays idle even when the
-  // token + project line up — matches the legacy "click Start to run"
-  // UX. The flag survives page navigation (localStorage).
+  // The actual long-poll loop runs at AppShell level via
+  // <TelegramBridgeRunner /> so it survives navigation away from this
+  // page. What stays here is the optional courtesy of echoing inbound
+  // text into the SuperUser chat WHEN the user is on the agentic tab,
+  // bound to the same project the bridge is configured for. The
+  // runner handles the actual reply path; this just adds local UX.
   const TELEGRAM_STARTED_KEY = "owllm:telegram:started";
   const [tgStarted, setTgStarted] = useState<boolean>(() => {
     try { return localStorage.getItem(TELEGRAM_STARTED_KEY) === "1"; }
@@ -2668,9 +2669,9 @@ export default function AgentsPage() {
       const detail = (e as CustomEvent).detail;
       const running = detail === "running";
       setTgStarted(running);
-      // Re-fetch bridge config from disk: the user just hit Save +
-      // Start on the Bridges page, the new token/project_id is on
-      // disk but our `bridges` state was loaded once on mount.
+      // Re-fetch bridge config from disk so the local echo gate picks
+      // up the new project_id when the user starts the bridge while
+      // the agentic tab is mounted.
       if (running) {
         invoke<BridgeConfigs>("load_bridge_configs").then(c => setBridges(c)).catch(() => {});
       }
@@ -2679,102 +2680,8 @@ export default function AgentsPage() {
     return () => window.removeEventListener("owllm:telegram:status", onStatus as EventListener);
   }, []);
 
-  useEffect(() => {
-    if (!tgStarted) return;
-    const tg = bridges.telegram;
-    if (!tg?.bot_token) return;
-    if (!selectedProjectId || tg.project_id !== selectedProjectId) return;
-
-    let dead = false;
-    let offset = 0;
-    const ctrl = new AbortController();
-
-    const sleep = (ms: number) => new Promise(r => window.setTimeout(r, ms));
-
-    const sendTelegramReply = async (chatId: number, body: string) => {
-      try {
-        await fetch(`https://api.telegram.org/bot${tg.bot_token}/sendMessage`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ chat_id: chatId, text: body || "(empty)" }),
-        });
-      } catch (e) {
-        console.error("telegram sendMessage failed", e);
-      }
-    };
-
-    const handle = async (chatId: number, text: string) => {
-      // Echo into the SuperUser thread so the desktop user sees what
-      // their phone sent (mirrors agents_page.py messaging surface).
-      setSupChat(prev => [...prev, { role: "you", color: "#9ad9ff", text: `📱 [TG] ${text}` }]);
-
-      const modelId = effectiveTeamModel.trim() || (serverState.model_id ?? "local");
-      const provider = providerFor(modelId);
-      if (provider === "local" && (!serverState.running || !serverState.port)) {
-        const note = "(no local model running — start one on the Server tab.)";
-        setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: note }]);
-        await sendTelegramReply(chatId, note);
-        return;
-      }
-
-      let reply = "";
-      try {
-        const sys = activeTeam
-          ? `You are the orchestrator of '${activeTeam.display}'. Answer the user concisely.`
-          : "You are a helpful assistant.";
-        reply = await streamChatCompletion(
-          serverState.port ?? 0, modelId, provider, sys, text, 0.5,
-          new AbortController().signal, () => {},
-        );
-      } catch (e: any) {
-        reply = `(error: ${String(e?.message ?? e)})`;
-      }
-      setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: reply }]);
-      await sendTelegramReply(chatId, reply);
-    };
-
-    (async () => {
-      while (!dead) {
-        try {
-          const url = `https://api.telegram.org/bot${tg.bot_token}/getUpdates?timeout=20&offset=${offset}`;
-          const resp = await fetch(url, { signal: ctrl.signal });
-          if (!resp.ok) {
-            console.error("telegram getUpdates http", resp.status);
-            await sleep(5000);
-            continue;
-          }
-          const j: any = await resp.json();
-          if (!j?.ok) {
-            console.error("telegram getUpdates body", j);
-            await sleep(5000);
-            continue;
-          }
-          for (const upd of (j.result || [])) {
-            if (typeof upd.update_id === "number") {
-              offset = Math.max(offset, upd.update_id + 1);
-            }
-            const msg = upd.message;
-            const text: string | undefined = msg?.text;
-            const chatId: number | undefined = msg?.chat?.id;
-            if (!text || typeof chatId !== "number") continue;
-            // allowed_chat_ids gate — empty = nobody, per legacy spec.
-            if (!Array.isArray(tg.allowed_chat_ids) || !tg.allowed_chat_ids.includes(chatId)) {
-              console.warn(`Telegram message from disallowed chat ${chatId} ignored — add it to allowed_chat_ids on the Bridges page.`);
-              continue;
-            }
-            await handle(chatId, text);
-          }
-        } catch (e: any) {
-          if (e?.name === "AbortError") return;
-          console.error("telegram poll loop error", e);
-          await sleep(5000);
-        }
-      }
-    })();
-
-    return () => { dead = true; ctrl.abort(); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tgStarted, bridges.telegram?.bot_token, bridges.telegram?.project_id, (bridges.telegram?.allowed_chat_ids ?? []).join(","), selectedProjectId, activeTeam?.id, effectiveTeamModel, serverState.running, serverState.port]);
+  // (The actual long-poll lives in <TelegramBridgeRunner /> at
+  // AppShell level so it survives this page unmounting.)
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", minHeight:0 }}>

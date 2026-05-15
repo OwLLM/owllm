@@ -1,0 +1,325 @@
+// TelegramBridgeRunner — top-level long-poll bridge.
+//
+// Lives directly inside AppShell so the loop survives page navigation;
+// AgentsPage used to host it, but the bridge would silently die the
+// moment the user clicked away to another tab. Polls Telegram with
+// `getUpdates?timeout=20`, gates inbound messages on the persisted
+// `owllm:telegram:started` flag (toggled by BridgesPage's Start/Stop),
+// matches them against the saved allowed_chat_ids, and forwards each
+// text to the bound project's team-default model. The reply travels
+// back via /sendMessage so the user's phone sees the answer.
+//
+// The bridge is deliberately simple: one shot of streamChatCompletion
+// per inbound message, no full orchestrator dispatch graph. The team's
+// `team_default_model_id` decides the provider (local llama-server,
+// Anthropic API, Anthropic CLI subscription, OpenAI). If that field is
+// blank we fall back to whatever's running on the local server.
+
+import React, { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
+const STARTED_KEY = "owllm:telegram:started";
+
+type TelegramConfig = {
+  bot_token: string;
+  allowed_chat_ids: number[];
+  project_id: string;
+  auto_approve: boolean;
+};
+type BridgeConfigs = { telegram: TelegramConfig; whatsapp: unknown };
+
+type ProjectRow = {
+  id: string;
+  name: string;
+  team_default_model_id: string;
+};
+type ModelInfo = {
+  model_id: string;
+  provider: string; // "local" | "anthropic" | "openai"
+};
+type ServerStatus = {
+  running: boolean;
+  model_id: string | null;
+  port: number | null;
+};
+
+// --- Provider routing copied from AgentsPage; the bridge runs without
+//     access to that file's local helpers, so it duplicates the small
+//     amount of logic it needs. The "sub/" prefix on cloud model ids
+//     forces the Claude CLI subscription path (free-with-claude-subscribe).
+function stripPrefix(id: string): string {
+  for (const p of ["sub/", "api/", "auto/"]) if (id.startsWith(p)) return id.slice(p.length);
+  return id;
+}
+function providerFor(modelId: string, models: ModelInfo[]): string {
+  if (!modelId) return "local";
+  if (modelId.startsWith("auto/")) return "auto";
+  const bare = stripPrefix(modelId);
+  if (modelId.startsWith("sub/") || modelId.startsWith("api/")) {
+    if (bare.startsWith("claude-")) return "anthropic";
+    if (bare.startsWith("gpt-") || bare === "o3") return "openai";
+  }
+  const m = models.find(x => x.model_id === bare);
+  return m?.provider || "local";
+}
+
+async function streamOnce(
+  modelId: string,
+  systemPrompt: string,
+  userMessage: string,
+  models: ModelInfo[],
+  server: ServerStatus,
+  signal: AbortSignal,
+): Promise<string> {
+  const provider = providerFor(modelId, models);
+  const forceSub = modelId.startsWith("sub/");
+  const forceApi = modelId.startsWith("api/");
+  const bareId = forceSub || forceApi || modelId.startsWith("auto/") ? stripPrefix(modelId) : modelId;
+
+  if (provider === "anthropic") {
+    // Subscription path: shell out to claude-code CLI.
+    if (forceSub) {
+      const status = await invoke<{ claude_cli: boolean }>("accounts_status");
+      if (!status?.claude_cli) throw new Error("Claude Code CLI not detected — run `claude /login` first.");
+      return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage });
+    }
+    const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
+    if (!key) {
+      if (forceApi) throw new Error("No ANTHROPIC_API_KEY saved — set it on the Accounts page.");
+      // Default: prefer CLI if available.
+      try {
+        const status = await invoke<{ claude_cli: boolean }>("accounts_status");
+        if (status?.claude_cli) {
+          return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage });
+        }
+      } catch { /* fall through */ }
+      throw new Error("No ANTHROPIC_API_KEY and no Claude CLI — Telegram bridge can't dispatch.");
+    }
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "anthropic-dangerous-direct-browser-access": "true",
+      },
+      body: JSON.stringify({
+        model: bareId,
+        max_tokens: 4096,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userMessage }],
+        stream: false,
+      }),
+      signal,
+    });
+    if (!resp.ok) throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
+    const j: any = await resp.json();
+    const blocks: any[] = Array.isArray(j?.content) ? j.content : [];
+    return blocks.filter(b => b?.type === "text").map(b => b.text).join("");
+  }
+
+  if (provider === "openai") {
+    const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
+    if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: bareId,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage },
+        ],
+        stream: false,
+      }),
+      signal,
+    });
+    if (!resp.ok) throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
+    const j: any = await resp.json();
+    return j?.choices?.[0]?.message?.content ?? "";
+  }
+
+  // Local llama-server path.
+  if (!server.running || !server.port) {
+    throw new Error("No local model server is running — start one on the Server tab.");
+  }
+  const resp = await fetch(`http://127.0.0.1:${server.port}/v1/chat/completions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: modelId || "local",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage },
+      ],
+      stream: false,
+    }),
+    signal,
+  });
+  if (!resp.ok) throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
+  const j: any = await resp.json();
+  return j?.choices?.[0]?.message?.content ?? "";
+}
+
+export default function TelegramBridgeRunner() {
+  // Track the persisted "started" flag, the loaded config, projects,
+  // models, server state. Each lives in a ref-backed signal so the
+  // long-poll loop reads fresh data without React having to re-mount
+  // the loop on every state change.
+  const [started, setStarted] = useState<boolean>(() => {
+    try { return localStorage.getItem(STARTED_KEY) === "1"; } catch { return false; }
+  });
+  const [cfg, setCfg] = useState<TelegramConfig | null>(null);
+  const [projects, setProjects] = useState<ProjectRow[]>([]);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [server, setServer] = useState<ServerStatus>({ running: false, model_id: null, port: null });
+
+  const projectsRef = useRef(projects); projectsRef.current = projects;
+  const modelsRef = useRef(models); modelsRef.current = models;
+  const serverRef = useRef(server); serverRef.current = server;
+  const cfgRef = useRef(cfg); cfgRef.current = cfg;
+
+  // Listen for the BridgesPage Start/Stop event so we react immediately
+  // (no page reload needed). Also re-fetch the config on every status
+  // flip so the loop always has the freshly-saved token / project_id.
+  useEffect(() => {
+    const onStatus = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      const running = detail === "running";
+      setStarted(running);
+      if (running) {
+        invoke<BridgeConfigs>("load_bridge_configs").then(c => setCfg(c.telegram)).catch(() => {});
+      }
+    };
+    window.addEventListener("owllm:telegram:status", onStatus as EventListener);
+    return () => window.removeEventListener("owllm:telegram:status", onStatus as EventListener);
+  }, []);
+
+  // Initial config + auxiliary data load on mount.
+  useEffect(() => {
+    invoke<BridgeConfigs>("load_bridge_configs").then(c => setCfg(c.telegram)).catch(() => {});
+    invoke<ProjectRow[]>("list_projects").then(setProjects).catch(() => {});
+    invoke<ModelInfo[]>("list_models").then(setModels).catch(() => {});
+  }, []);
+
+  // Light periodic refresh — server status (for local fallback) and
+  // projects (in case the user creates / deletes one while the bridge
+  // is running). Keep the cadence quiet (every 5s) so it doesn't burn
+  // CPU when nothing's happening.
+  useEffect(() => {
+    const tick = async () => {
+      try {
+        const s = await invoke<ServerStatus>("server_status");
+        setServer(s);
+      } catch { /* keep last */ }
+      try {
+        const ps = await invoke<ProjectRow[]>("list_projects");
+        setProjects(ps);
+      } catch { /* keep last */ }
+    };
+    tick();
+    const id = window.setInterval(tick, 5000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // The long-poll loop itself. Gated on started + a usable config.
+  // Reads token from cfg directly (not via ref) so it re-mounts when
+  // the token / project_id actually changes.
+  useEffect(() => {
+    if (!started) return;
+    if (!cfg?.bot_token) return;
+
+    let dead = false;
+    let offset = 0;
+    const ctrl = new AbortController();
+
+    const sleep = (ms: number) => new Promise(r => window.setTimeout(r, ms));
+
+    const sendReply = async (chatId: number, body: string) => {
+      try {
+        await fetch(`https://api.telegram.org/bot${cfg.bot_token}/sendMessage`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chat_id: chatId, text: body || "(empty)" }),
+        });
+      } catch (e) {
+        console.error("telegram sendMessage failed", e);
+      }
+    };
+
+    const handle = async (chatId: number, text: string) => {
+      // Resolve the project + its team-default model. Falls back to
+      // the running local server's model if the project doesn't have
+      // one pinned. Empty model id → use "local" tag for the server.
+      const project = projectsRef.current.find(p => p.id === cfg.project_id) ?? null;
+      const fallback = serverRef.current.model_id ?? "local";
+      const modelId = (project?.team_default_model_id || "").trim() || fallback;
+      const sys = project
+        ? `You are the orchestrator of the '${project.name}' team. Reply concisely.`
+        : "You are a helpful assistant. Reply concisely.";
+
+      let reply = "";
+      try {
+        reply = await streamOnce(modelId, sys, text, modelsRef.current, serverRef.current, new AbortController().signal);
+      } catch (e: any) {
+        reply = `(bridge error: ${String(e?.message ?? e)})`;
+      }
+      await sendReply(chatId, reply);
+    };
+
+    (async () => {
+      while (!dead) {
+        try {
+          const url = `https://api.telegram.org/bot${cfg.bot_token}/getUpdates?timeout=20&offset=${offset}`;
+          const resp = await fetch(url, { signal: ctrl.signal });
+          if (!resp.ok) {
+            console.error("[telegram] getUpdates HTTP", resp.status);
+            await sleep(5000);
+            continue;
+          }
+          const j: any = await resp.json();
+          if (!j?.ok) {
+            console.error("[telegram] getUpdates body", j);
+            await sleep(5000);
+            continue;
+          }
+          for (const upd of (j.result || [])) {
+            if (typeof upd.update_id === "number") {
+              offset = Math.max(offset, upd.update_id + 1);
+            }
+            const msg = upd.message;
+            const text: string | undefined = msg?.text;
+            const chatId: number | undefined = msg?.chat?.id;
+            if (!text || typeof chatId !== "number") continue;
+            // allow-list gate: empty list means "open to anyone" (we
+            // match the BridgesPage placeholder, not the original
+            // Python docstring — the placeholder is what the user
+            // actually reads when they leave the field blank).
+            const allow = Array.isArray(cfg.allowed_chat_ids) ? cfg.allowed_chat_ids : [];
+            if (allow.length > 0 && !allow.includes(chatId)) {
+              console.warn(`[telegram] chat ${chatId} not on allow-list — ignored.`);
+              continue;
+            }
+            console.log(`[telegram] inbound from ${chatId}: ${text.slice(0, 80)}`);
+            await handle(chatId, text);
+          }
+        } catch (e: any) {
+          if (e?.name === "AbortError") return;
+          console.error("[telegram] poll loop error", e);
+          await sleep(5000);
+        }
+      }
+    })();
+
+    console.log(`[telegram] bridge polling started for token …${cfg.bot_token.slice(-6)} project=${cfg.project_id || "(any)"}`);
+    return () => {
+      dead = true;
+      ctrl.abort();
+      console.log("[telegram] bridge polling stopped");
+    };
+  }, [started, cfg?.bot_token, cfg?.project_id, (cfg?.allowed_chat_ids ?? []).join(",")]);
+
+  // The component renders nothing visible — it's a pure side-effect
+  // host. AppShell mounts it once.
+  return null;
+}

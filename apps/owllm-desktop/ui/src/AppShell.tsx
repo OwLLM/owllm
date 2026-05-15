@@ -25,6 +25,7 @@ import {
   PageDef,
 } from "./core/modules";
 import { ACCENTS, AccentKey, Mode, useTheme } from "./theme";
+import TelegramBridgeRunner from "./bridges/TelegramBridgeRunner";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -616,6 +617,7 @@ export default function AppShell() {
 
   return (
     <>
+      <TelegramBridgeRunner />
       <ResizeEdges />
       <HybridFrame outerW={vp.w} outerH={vp.h}>
         <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>

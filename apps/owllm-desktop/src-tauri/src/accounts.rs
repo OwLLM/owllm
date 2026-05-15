@@ -207,13 +207,17 @@ fn which_in_path(name: &str) -> Result<PathBuf, ()> {
 /// stdout. No token-level streaming — Claude Code's --print mode
 /// only emits the final response, not a token-by-token feed.
 ///
-/// Used when the agent dispatch resolves to an Anthropic model but
-/// the user has only the Claude Code subscription (CLI logged in)
-/// rather than a paid ANTHROPIC_API_KEY.
+/// `cwd`, when supplied, is set as the child process working directory
+/// so the CLI's repo / project context matches what the user picked on
+/// the agentic LocationRow. Without this the CLI inherits the desktop
+/// app's install dir and ends up summarising the wrong tree (the bug
+/// users hit when they pointed Location at one folder but the bot
+/// reported on another).
 #[tauri::command]
 pub async fn claude_cli_complete(
     system_prompt: String,
     user_message: String,
+    cwd: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let exe = find_claude_cli()
@@ -222,6 +226,16 @@ pub async fn claude_cli_complete(
         cmd.arg("--print");
         if !system_prompt.trim().is_empty() {
             cmd.arg("--append-system-prompt").arg(&system_prompt);
+        }
+        // Pin the CLI to the project's location. Skip silently if the
+        // path is empty / non-existent so a misconfigured project
+        // falls back to the inherited cwd instead of failing the
+        // dispatch outright.
+        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let p = std::path::Path::new(dir);
+            if p.is_dir() {
+                cmd.current_dir(p);
+            }
         }
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());

@@ -32,6 +32,10 @@ type ProjectRow = {
   id: string;
   name: string;
   team_default_model_id: string;
+  /// Project working directory — fed into claude_cli_complete so the
+  /// Claude Code CLI runs against the user's chosen repo, not the
+  /// desktop app's install dir.
+  location: string;
 };
 type ModelInfo = {
   model_id: string;
@@ -70,6 +74,7 @@ async function streamOnce(
   models: ModelInfo[],
   server: ServerStatus,
   signal: AbortSignal,
+  cwd: string,
 ): Promise<string> {
   const provider = providerFor(modelId, models);
   const forceSub = modelId.startsWith("sub/");
@@ -81,7 +86,7 @@ async function streamOnce(
     if (forceSub) {
       const status = await invoke<{ claude_cli: boolean }>("accounts_status");
       if (!status?.claude_cli) throw new Error("Claude Code CLI not detected — run `claude /login` first.");
-      return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage });
+      return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage, cwd: cwd || null });
     }
     const key = await invoke<string | null>("accounts_get_secret", { name: "ANTHROPIC_API_KEY" });
     if (!key) {
@@ -90,7 +95,7 @@ async function streamOnce(
       try {
         const status = await invoke<{ claude_cli: boolean }>("accounts_status");
         if (status?.claude_cli) {
-          return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage });
+          return await invoke<string>("claude_cli_complete", { systemPrompt, userMessage, cwd: cwd || null });
         }
       } catch { /* fall through */ }
       throw new Error("No ANTHROPIC_API_KEY and no Claude CLI — Telegram bridge can't dispatch.");
@@ -263,9 +268,10 @@ export default function TelegramBridgeRunner() {
         ? `You are the orchestrator of the '${project.name}' team. Reply concisely.`
         : "You are a helpful assistant. Reply concisely.";
 
+      const projectCwd = (project?.location ?? "").trim();
       let reply = "";
       try {
-        reply = await streamOnce(modelId, sys, text, modelsRef.current, serverRef.current, new AbortController().signal);
+        reply = await streamOnce(modelId, sys, text, modelsRef.current, serverRef.current, new AbortController().signal, projectCwd);
       } catch (e: any) {
         reply = `(bridge error: ${String(e?.message ?? e)})`;
       }

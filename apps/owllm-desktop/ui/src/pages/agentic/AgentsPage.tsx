@@ -1662,6 +1662,11 @@ async function streamChatCompletion(
   temperature: number,
   signal: AbortSignal,
   onDelta: StreamHandler,
+  /// Project location, threaded into the Claude Code CLI when the
+  /// dispatch resolves to the subscription path. Without it the CLI
+  /// inherits the desktop app's install dir and ends up reasoning
+  /// about the wrong tree.
+  projectCwd?: string,
 ): Promise<string> {
   // Strip the optional route prefix encoded by the ModelPicker before
   // handing the bare model id to the provider-specific call.
@@ -1677,7 +1682,7 @@ async function streamChatCompletion(
     throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
   }
   if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta);
+    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd);
   }
   if (provider === "openai") {
     return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta);
@@ -1722,6 +1727,7 @@ async function streamAnthropic(
   temperature: number,
   signal: AbortSignal,
   onDelta: StreamHandler,
+  projectCwd?: string,
 ): Promise<string> {
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
@@ -1731,7 +1737,7 @@ async function streamAnthropic(
     if (!status?.claude_cli) {
       throw new Error("Claude Code CLI not detected — run `claude /login` first.");
     }
-    const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage });
+    const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage, cwd: projectCwd ?? null });
     if (reply) onDelta(reply);
     return reply;
   }
@@ -1745,6 +1751,7 @@ async function streamAnthropic(
         const reply = await invoke<string>("claude_cli_complete", {
           systemPrompt,
           userMessage,
+          cwd: projectCwd ?? null,
         });
         if (reply) onDelta(reply);
         return reply;
@@ -2423,6 +2430,10 @@ export default function AgentsPage() {
           });
           streamLog("orchestrator", delta);
         },
+        // Pin the Claude CLI subscription path (and any future tool-
+        // capable backend) to the user's project location instead of
+        // letting it inherit the desktop install dir.
+        (locationOverride || selectedProject?.location || "").trim(),
       );
     } catch (e: any) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: String(e?.message ?? e) };
@@ -2549,6 +2560,11 @@ export default function AgentsPage() {
     const tempFor = (spec: AgentSpec, fallback: number) =>
       roleByName.get(spec.base)?.defaultTemperature ?? fallback;
 
+    // Project location feeds the Claude CLI's --cwd so the bot runs
+    // against the directory the user picked in the LocationRow, not
+    // the desktop app's install dir. Empty / unset → CLI inherits cwd.
+    const projectCwd = (locationOverride || selectedProject?.location || "").trim();
+
     try {
       // ----- Phase 1: orchestrator plan + dispatches -----
       setActiveAgent(orch.name);
@@ -2559,6 +2575,7 @@ export default function AgentsPage() {
         port, orchModel, providerFor(orchModel),
         orchPrompt, text, tempFor(orch, 0.4), ctrl.signal,
         (delta) => streamLog(orch.name, delta),
+        projectCwd,
       );
 
       // Mirror to the SuperUserCard so the user-facing thread shows
@@ -2598,6 +2615,7 @@ export default function AgentsPage() {
           port, specModel, providerFor(specModel),
           specPrompt, d.instruction, tempFor(spec, 0.5), ctrl.signal,
           (delta) => streamLog(spec.name, delta),
+          projectCwd,
         );
         specialistReplies.push({ name: spec.name, text: specText.trim() });
       }
@@ -2626,6 +2644,7 @@ export default function AgentsPage() {
         buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput,
         tempFor(orch, 0.4), ctrl.signal,
         (delta) => streamLog(orch.name, delta),
+        projectCwd,
       );
       setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim() }]);
 

@@ -9,10 +9,96 @@
 // caller supplies hook callbacks (onLog, onThought, onActiveAgent,
 // onPhase) so each consumer plugs its own state machine in.
 
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
+
+// Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
+// off `kind`; the field name comes from #[serde(tag = "kind")] on the
+// Rust enum.
+type ClaudeStreamEvent =
+  | { kind: "text"; delta: string }
+  | { kind: "thinking"; delta: string }
+  | { kind: "toolUse"; toolUseId: string; name: string; input: string }
+  | { kind: "toolResult"; toolUseId: string; content: string }
+  | { kind: "error"; message: string };
+
+// Run claude --print --output-format stream-json and route events to
+// the user-facing reply (onDelta) + Thought tab (onThought). Returns
+// the assembled assistant text on completion. Used whenever the
+// Anthropic dispatch falls through to the Claude Code subscription
+// path AND the caller cares about thinking / tool surfacing — i.e.
+// the AgentsPage Thought tab. Falls back to claude_cli_complete (one
+// final blob) when no onThought handler is supplied.
+async function runClaudeCliStream(args: {
+  systemPrompt: string;
+  userMessage: string;
+  cwd?: string | null;
+  autoApprove?: boolean;
+  allowedTools?: string[];
+  onDelta: (delta: string) => void;
+  onThought: (channel: string, role: string, delta: string) => void;
+}): Promise<string> {
+  const ch = new Channel<ClaudeStreamEvent>();
+  ch.onmessage = (msg) => {
+    switch (msg.kind) {
+      case "text":
+        args.onDelta(msg.delta);
+        break;
+      case "thinking":
+        args.onThought("thinking", "🧠 thinking", msg.delta);
+        break;
+      case "toolUse": {
+        // One Thought entry per tool invocation. Channel id encodes
+        // the tool name + its tool_use_id so a follow-up tool_result
+        // can land under the same block (see toolResult below).
+        const channel = `tool:${msg.name}:${msg.toolUseId}`;
+        const body = msg.input ? `${msg.input}` : "";
+        args.onThought(channel, `🛠 ${msg.name}`, body);
+        break;
+      }
+      case "toolResult": {
+        // Surface the result under a sibling channel so the user sees
+        // both request and outcome — but truncate giant outputs (file
+        // dumps, full repo trees) to keep the panel readable.
+        const channel = `tool-result:${msg.toolUseId}`;
+        const snippet = msg.content.length > 800
+          ? msg.content.slice(0, 800) + "\n…(truncated)"
+          : msg.content;
+        args.onThought(channel, "↩ result", snippet);
+        break;
+      }
+      case "error":
+        args.onThought("cli-error", "⚠ cli", msg.message);
+        break;
+    }
+  };
+  return await invoke<string>("claude_cli_stream", {
+    systemPrompt: args.systemPrompt,
+    userMessage: args.userMessage,
+    cwd: args.cwd ?? null,
+    autoApprove: args.autoApprove ?? false,
+    allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+    onEvent: ch,
+  });
+}
 
 // ---------- Domain types (mirrors AgentsPage.tsx) ----------
-export type GoalMsg = { role: string; color: string; text: string };
+export type GoalMsg = {
+  role: string;
+  color: string;
+  text: string;
+  /// Renderer hint: "thinking" italic, "tool" monospace command block,
+  /// "dispatch" / undefined → default reply look. See AgentsPage for
+  /// exact styling.
+  kind?: "thinking" | "tool" | "dispatch";
+  /// Stable per-(agent, stream) id used to coalesce successive deltas
+  /// into one entry rather than spawning a new line per chunk.
+  channelKey?: string;
+  /// Monotonic per-creation id stamped by AgentsPage so the Full Chat
+  /// tab can interleave reply + thought streams in arrival order. Set
+  /// on receipt of cross-process events too (bridge runner → window
+  /// events) so chronological ordering survives the IPC boundary.
+  seq?: number;
+};
 export type HistoryItem = { role: "user" | "assistant"; content: string };
 export type AgentSpec = {
   name: string;
@@ -39,6 +125,10 @@ export type RoleData = {
   systemPrompt?: string;
   canDispatch?: boolean;
   defaultTemperature?: number;
+  /// OWLLM tool names this role is allowed to use (read_file, shell,
+  /// edit_file, …). Passed to the Claude CLI as --allowedTools after
+  /// translation in accounts.rs. ["all"] / undefined / [] → unrestricted.
+  toolAllowlist?: string[];
 };
 export type ModelInfo = {
   model_id: string;
@@ -70,6 +160,48 @@ export type ProjectRow = {
 
 // ---------- Helpers ----------
 const _ACRONYMS = new Set(["ux","ui","api","mcp","gpu","be","fe","qa","cli","sql","db"]);
+// Mirror of Rust `Directive` (src-tauri/src/directives.rs). Loaded from
+// SQLite per-project; injected into every agent's system prompt so the
+// orchestrator, specialists, AND the critic all see the same rules.
+// `kind` drives the framing ("MUST", "Prefer", "Avoid") and the colour
+// chip in the React panel.
+export type Directive = {
+  id: string;
+  project_id: string;
+  kind: "must" | "prefer" | "avoid";
+  text: string;
+  source: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/// Render the directive list as a system-prompt block. Returns "" when
+/// the project has no directives so the prompt stays clean. Grouping by
+/// kind so a single read of the block produces the right mental model
+/// for the agent ("things I cannot violate" / "preferences" / "things
+/// to avoid").
+export function formatDirectivesBlock(directives: Directive[] | null | undefined): string {
+  if (!directives || directives.length === 0) return "";
+  const must = directives.filter(d => d.kind === "must");
+  const prefer = directives.filter(d => d.kind === "prefer");
+  const avoid = directives.filter(d => d.kind === "avoid");
+  const lines: string[] = ["", "--- PROJECT RULES (set by the user — apply to every turn) ---"];
+  if (must.length > 0) {
+    lines.push("MUST:");
+    must.forEach(d => lines.push(`  - ${d.text}`));
+  }
+  if (prefer.length > 0) {
+    lines.push("PREFER:");
+    prefer.forEach(d => lines.push(`  - ${d.text}`));
+  }
+  if (avoid.length > 0) {
+    lines.push("AVOID:");
+    avoid.forEach(d => lines.push(`  - ${d.text}`));
+  }
+  lines.push("--- END PROJECT RULES ---", "");
+  return lines.join("\n");
+}
+
 export function displayLabel(fullName: string): string {
   const short = fullName.includes(".") ? fullName.split(".").pop()! : fullName;
   if (!short) return fullName;
@@ -165,13 +297,22 @@ export function rolesFromBackend(rows: AgentRoleBackend[]): Map<string, RoleData
       systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
       canDispatch: d.can_dispatch === true,
       defaultTemperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
+      toolAllowlist: Array.isArray(d.tool_allowlist)
+        ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
+        : undefined,
     });
   }
   return m;
 }
 
 // ---------- Prompt builders ----------
-export function buildOrchestratorPrompt(team: Team, roleByName: Map<string, RoleData>, orch: AgentSpec): string {
+export function buildOrchestratorPrompt(
+  team: Team,
+  roleByName: Map<string, RoleData>,
+  orch: AgentSpec,
+  directives?: Directive[],
+  directorMode?: boolean,
+): string {
   const specialists = team.agents.filter(a => a.name !== orch.name);
   const roster = specialists.map(a => {
     const desc = a.description ?? roleByName.get(a.base)?.description ?? "";
@@ -185,25 +326,65 @@ export function buildOrchestratorPrompt(team: Team, roleByName: Map<string, Role
   const orchSystemPrompt = orch.extraPrompt
     ? `${orchBase}\n\n--- TEAM-SPECIFIC GUIDANCE ---\n${orch.extraPrompt}`
     : orchBase;
+  // Pick one specialist to use as a worked example so the dispatch
+  // format is unambiguous. Falls back to a generic "@coder" stub when
+  // no specialists are configured (solo team).
+  const exampleAgent = specialists[0]?.name ?? "coder";
+  const directivesBlock = formatDirectivesBlock(directives);
+  // Director-mode framing: when the user has appointed a Critic agent
+  // to stand in for them, the orchestrator should KNOW that "asking the
+  // user" still gets a real answer (from the critic) so it should ask
+  // when uncertain instead of guessing. The dispatch runtime intercepts
+  // [NEED_USER_INPUT] markers and routes them to the critic.
+  const directorBlock = directorMode
+    ? [
+        "",
+        "--- DIRECTOR MODE: A Critic agent stands in for the user ---",
+        "If you need a decision that is normally the user's call (scope, naming, business logic, tradeoffs),",
+        "emit a line that begins with `[NEED_USER_INPUT]` followed by your question on the same line.",
+        "Example:",
+        "    [NEED_USER_INPUT] Should the new endpoint require auth? My instinct is yes.",
+        "The runtime will route that to the Critic, who answers in the user's voice from the project rules.",
+        "Their reply will be folded back into your context and you'll resume.",
+        "Use this sparingly — once or twice per dispatch at most.",
+        "--- END DIRECTOR MODE ---",
+      ].join("\n")
+    : "";
   return [
     `You are the orchestrator of the '${team.display}' team.`,
     "",
     orchSystemPrompt,
+    directivesBlock,
+    directorBlock,
     "",
-    `YOUR SPECIALISTS (use their EXACT names when dispatching):`,
+    `YOUR SPECIALISTS (use their EXACT names when dispatching — copy/paste from this list):`,
     roster || "  (none — solo)",
     "",
-    "HOW TO RESPOND:",
-    "1. Start with a short paragraph that restates the user's goal in your own words.",
-    "2. Sketch a brief plan (2-5 bullet points).",
-    "3. Dispatch tasks using EXACTLY this format, ONE per line, ONE specialist per line:",
-    "      @<agent_name>: <clear, specific instruction>",
-    "4. Dispatch only the agents you actually need. Skip dispatches if the goal is trivial enough to answer yourself.",
-    "5. After dispatches run, you'll be invoked again with the specialists' replies — produce the final answer for the user then.",
+    "HOW TO RESPOND — READ CAREFULLY:",
+    "  1. Restate the user's goal in one sentence.",
+    "  2. Sketch a brief plan (2-5 bullets).",
+    "  3. Emit one `@<agent_name>: <instruction>` line PER specialist you want to run. They run IN PARALLEL — dispatch every relevant agent in this same reply, do not wait.",
+    "  4. After your reply ends the runtime runs the specialists, then invokes you AGAIN with their replies. That second turn is when you write the user-facing answer — not now.",
+    "",
+    "DISPATCH FORMAT — exact, case-sensitive:",
+    "    @<agent_name>: <one clear, specific instruction>",
+    "",
+    "Example for this team (mirror this pattern with as many @-lines as you need):",
+    `    @${exampleAgent}: <a concrete, scoped task for ${exampleAgent} — what to read, what to change, what success looks like>`,
+    "",
+    "DO NOT:",
+    "  - Try to do the work yourself. Your tools are read-only on purpose.",
+    "  - Ask the user clarifying questions in this turn — dispatch your best-guess plan; you can refine in the integration turn.",
+    "  - Reply without any @<agent>: lines unless the goal is a pure no-edit, no-shell, no-external-call question. If you do, the user sees zero specialist activity and that is almost always wrong.",
   ].join("\n");
 }
 
-export function buildSpecialistPrompt(team: Team, spec: AgentSpec, roleByName: Map<string, RoleData>): string {
+export function buildSpecialistPrompt(
+  team: Team,
+  spec: AgentSpec,
+  roleByName: Map<string, RoleData>,
+  directives?: Directive[],
+): string {
   const role = roleByName.get(spec.base);
   const layers: string[] = [
     `You are ${displayLabel(spec.name)} (${spec.base}) on the '${team.display}' team.`,
@@ -222,9 +403,38 @@ export function buildSpecialistPrompt(team: Team, spec: AgentSpec, roleByName: M
     layers.push(spec.extraPrompt);
     layers.push("");
   }
+  const directivesBlock = formatDirectivesBlock(directives);
+  if (directivesBlock) {
+    layers.push(directivesBlock);
+  }
   layers.push("The orchestrator has dispatched the task below. Reply concisely and directly with your work.");
   layers.push("Do NOT dispatch further — only the orchestrator may dispatch. Stay in your role.");
   return layers.join("\n");
+}
+
+/// Build the Critic agent's system prompt. The Critic answers in the
+/// user's voice when the orchestrator emits [NEED_USER_INPUT]. It
+/// leans heavily on the directive list because that IS the user's
+/// distilled judgment for this project. No team roster — the Critic
+/// is not part of the team, just a voice-of-user side-channel.
+export function buildCriticPrompt(
+  team: Team,
+  directives?: Directive[],
+): string {
+  const directivesBlock = formatDirectivesBlock(directives);
+  return [
+    `You are the Critic — the user's voice-of-self for the '${team.display}' project.`,
+    "",
+    "The user has stepped away. The orchestrator hit a decision point that's normally the user's call and asked for input. Your job is to answer AS THE USER WOULD, grounded in the project rules below.",
+    directivesBlock || "(The user hasn't set any project rules yet — fall back to your best judgment of standard production-quality engineering practice.)",
+    "",
+    "HOW TO RESPOND:",
+    "  - Give a short, direct, decisive answer (1-3 sentences max).",
+    "  - Don't hedge or list options. Pick. The orchestrator needs a directive, not a discussion.",
+    "  - When the question conflicts with a project rule, cite the rule briefly: `(rule: never mock data)`.",
+    "  - When the question is outside the rules, use the rules' spirit + production-engineering common sense.",
+    "  - Do NOT preface with 'As the user, …' or 'Speaking for the user …'. Just answer.",
+  ].join("\n");
 }
 
 // ---------- Dispatch parser ----------
@@ -296,6 +506,11 @@ export function providerFor(modelId: string, models: ModelInfo[]): string {
 
 // ---------- Stream functions ----------
 type StreamHandler = (delta: string) => void;
+// Channel-keyed thought/tool stream. `channel` is a stable id so the
+// consumer can route deltas to the right open block (e.g. "thinking",
+// "tool:Write:abc123"). `role` is the human label shown on first append
+// ("thinking", "🛠 Write", etc.). `delta` is the text chunk.
+export type ThoughtHandler = (channel: string, role: string, delta: string) => void;
 type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
 
 export async function streamChatCompletion(
@@ -310,6 +525,11 @@ export async function streamChatCompletion(
   projectCwd?: string,
   history?: HistoryItem[],
   autoApprove?: boolean,
+  onThought?: ThoughtHandler,
+  /// Per-role tool gate (OWLLM names). Only meaningful when the
+  /// dispatch resolves to the Claude CLI subscription path; ignored
+  /// for API + local llama-server paths (those don't expose tools).
+  allowedTools?: string[],
 ): Promise<string> {
   const forceSub = modelId.startsWith("sub/");
   const forceApi = modelId.startsWith("api/");
@@ -321,10 +541,10 @@ export async function streamChatCompletion(
     throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
   }
   if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd, history, autoApprove);
+    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools);
   }
   if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, history);
+    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, history, onThought);
   }
   const messages: Array<{ role: string; content: string }> = [
     { role: "system", content: systemPrompt },
@@ -342,7 +562,9 @@ export async function streamChatCompletion(
     }),
     signal,
   });
-  return consumeOpenAISse(resp, onDelta);
+  // Local llama-server is OpenAI-compatible; route through the same
+  // parser so reasoning_content + <think> tag stripping works for it too.
+  return consumeOpenAISse(resp, onDelta, onThought);
 }
 
 async function streamAnthropic(
@@ -356,6 +578,8 @@ async function streamAnthropic(
   projectCwd?: string,
   history?: HistoryItem[],
   autoApprove?: boolean,
+  onThought?: ThoughtHandler,
+  allowedTools?: string[],
 ): Promise<string> {
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
@@ -364,6 +588,16 @@ async function streamAnthropic(
     const status = await invoke<{ claude_cli: boolean }>("accounts_status");
     if (!status?.claude_cli) {
       throw new Error("Claude Code CLI not detected — run `claude /login` first.");
+    }
+    // Stream when the consumer wants thought traffic (AgentsPage); fall
+    // back to one-shot --print blob otherwise (the bridge runner that
+    // doesn't display a Thought tab).
+    if (onThought) {
+      return await runClaudeCliStream({
+        systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+        autoApprove: autoApprove ?? false, allowedTools,
+        onDelta, onThought,
+      });
     }
     const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null, autoApprove: autoApprove ?? false });
     if (reply) onDelta(reply);
@@ -375,7 +609,17 @@ async function streamAnthropic(
     try {
       const status = await invoke<{ claude_cli: boolean }>("accounts_status");
       if (status?.claude_cli) {
-        const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null, autoApprove: autoApprove ?? false });
+        if (onThought) {
+          return await runClaudeCliStream({
+            systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+            autoApprove: autoApprove ?? false, allowedTools,
+            onDelta, onThought,
+          });
+        }
+        const reply = await invoke<string>("claude_cli_complete", {
+          systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+          autoApprove: autoApprove ?? false,
+        });
         if (reply) onDelta(reply);
         return reply;
       }
@@ -411,10 +655,28 @@ async function streamAnthropic(
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
   }
-  const reader = resp.body.getReader();
+  return consumeAnthropicSse(resp, onDelta, onThought);
+}
+
+// Anthropic Messages SSE consumer. Splits the stream into three
+// channels:
+//   - text deltas → onDelta (the user-facing reply)
+//   - thinking deltas → onThought("thinking", …) (extended-thinking blocks)
+//   - tool_use blocks → onThought("tool:<name>:<id>", "🛠 <name>", …)
+//     (the model calling a tool — name + JSON input streamed as the
+//     model produces it)
+async function consumeAnthropicSse(
+  resp: Response,
+  onDelta: StreamHandler,
+  onThought?: ThoughtHandler,
+): Promise<string> {
+  const reader = resp.body!.getReader();
   const dec = new TextDecoder();
   let buf = "";
   let acc = "";
+  // Indexed by content block index; tracks what kind each block is so
+  // the matching content_block_delta can be routed correctly.
+  const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; channel: string; role: string }>();
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -428,9 +690,36 @@ async function streamAnthropic(
       if (!body) continue;
       try {
         const j = JSON.parse(body);
-        if (j?.type === "content_block_delta") {
-          const txt: string | undefined = j?.delta?.text;
-          if (typeof txt === "string" && txt) { acc += txt; onDelta(txt); }
+        if (j?.type === "content_block_start") {
+          const idx: number = j.index;
+          const block = j.content_block;
+          if (block?.type === "thinking") {
+            blocks.set(idx, { kind: "thinking", channel: `thinking:${idx}`, role: "🧠 thinking" });
+          } else if (block?.type === "tool_use") {
+            const name = String(block?.name ?? "tool");
+            const id = String(block?.id ?? idx);
+            const channel = `tool:${name}:${id}`;
+            blocks.set(idx, { kind: "tool", channel, role: `🛠 ${name}` });
+            // Emit the tool name + opening brace so the user immediately
+            // sees which tool is being invoked, even if the JSON input
+            // hasn't started streaming yet.
+            onThought?.(channel, `🛠 ${name}`, "");
+          } else {
+            blocks.set(idx, { kind: "text", channel: "", role: "" });
+          }
+        } else if (j?.type === "content_block_delta") {
+          const idx: number = j.index;
+          const meta = blocks.get(idx);
+          const delta = j.delta;
+          if (meta?.kind === "thinking" && typeof delta?.thinking === "string") {
+            onThought?.(meta.channel, meta.role, delta.thinking);
+          } else if (meta?.kind === "tool" && typeof delta?.partial_json === "string") {
+            onThought?.(meta.channel, meta.role, delta.partial_json);
+          } else if (typeof delta?.text === "string" && delta.text) {
+            // Default text stream — the user-facing reply.
+            acc += delta.text;
+            onDelta(delta.text);
+          }
         }
       } catch { /* skip malformed chunk */ }
     }
@@ -447,6 +736,7 @@ async function streamOpenAI(
   signal: AbortSignal,
   onDelta: StreamHandler,
   history?: HistoryItem[],
+  onThought?: ThoughtHandler,
 ): Promise<string> {
   const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
   if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
@@ -468,10 +758,20 @@ async function streamOpenAI(
     }),
     signal,
   });
-  return consumeOpenAISse(resp, onDelta);
+  return consumeOpenAISse(resp, onDelta, onThought);
 }
 
-async function consumeOpenAISse(resp: Response, onDelta: StreamHandler): Promise<string> {
+// OpenAI-compatible SSE consumer (api.openai.com + llama-server).
+// Routes:
+//   - delta.content (with <think>/<thinking> stripped) → onDelta
+//   - text inside <think>/<thinking> tags → onThought("thinking", …)
+//   - delta.reasoning_content (DeepSeek-R1 / o-series) → onThought("thinking", …)
+//   - delta.tool_calls[] → onThought("tool:<name>:<i>", "🛠 <name>", …)
+async function consumeOpenAISse(
+  resp: Response,
+  onDelta: StreamHandler,
+  onThought?: ThoughtHandler,
+): Promise<string> {
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
   }
@@ -479,6 +779,11 @@ async function consumeOpenAISse(resp: Response, onDelta: StreamHandler): Promise
   const dec = new TextDecoder();
   let buf = "";
   let acc = "";
+  // Track <think> tag state across deltas — content can split across chunks.
+  let inThink = false;
+  // Per-tool-call-index → resolved tool name; the model streams the
+  // function name in the first chunk(s) and arguments in later ones.
+  const toolNames = new Map<number, string>();
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -492,15 +797,78 @@ async function consumeOpenAISse(resp: Response, onDelta: StreamHandler): Promise
       if (!body || body === "[DONE]") continue;
       try {
         const j = JSON.parse(body);
-        const delta: string | undefined = j?.choices?.[0]?.delta?.content;
-        if (typeof delta === "string" && delta) {
-          acc += delta;
-          onDelta(delta);
+        const delta = j?.choices?.[0]?.delta;
+        if (!delta) continue;
+        // DeepSeek-R1 / o-series reasoning channel — separate field.
+        const reasoning: string | undefined = delta?.reasoning_content ?? delta?.reasoning;
+        if (typeof reasoning === "string" && reasoning) {
+          onThought?.("thinking", "🧠 thinking", reasoning);
+        }
+        // Tool-calls channel — function name + arguments stream in chunks.
+        const toolCalls: any[] | undefined = delta?.tool_calls;
+        if (Array.isArray(toolCalls)) {
+          for (const tc of toolCalls) {
+            const idx: number = typeof tc?.index === "number" ? tc.index : 0;
+            const fn = tc?.function ?? {};
+            if (typeof fn?.name === "string" && fn.name) {
+              toolNames.set(idx, fn.name);
+              const channel = `tool:${fn.name}:${idx}`;
+              onThought?.(channel, `🛠 ${fn.name}`, "");
+            }
+            if (typeof fn?.arguments === "string" && fn.arguments) {
+              const name = toolNames.get(idx) ?? "tool";
+              const channel = `tool:${name}:${idx}`;
+              onThought?.(channel, `🛠 ${name}`, fn.arguments);
+            }
+          }
+        }
+        // Main content stream — also strip <think>/<thinking> tags and
+        // route their interior to the thinking channel. Local thinking
+        // models (DeepSeek-R1 distills, QwQ, etc.) emit reasoning that
+        // way when they don't have a separate reasoning_content field.
+        const content: string | undefined = delta?.content;
+        if (typeof content === "string" && content) {
+          const { reply, thought, inThink: nextInThink } = splitThinkTags(content, inThink);
+          inThink = nextInThink;
+          if (thought) onThought?.("thinking", "🧠 thinking", thought);
+          if (reply)   { acc += reply; onDelta(reply); }
         }
       } catch { /* skip malformed chunk */ }
     }
   }
   return acc;
+}
+
+// Streaming-safe <think> / <thinking> tag splitter. Takes a chunk and
+// the prior in-think state, returns the user-facing reply text, the
+// thinking text, and the new in-think state for the next chunk. Tags
+// can split across chunk boundaries; we handle the common case where
+// the FULL tag arrives in one chunk (true >99 % of the time for these
+// models). Partial-tag splits fall through as literal text — fine
+// because the user just sees one stray "<thi" in the reply.
+function splitThinkTags(chunk: string, inThink: boolean): { reply: string; thought: string; inThink: boolean } {
+  let reply = "";
+  let thought = "";
+  let i = 0;
+  const open = /<think(?:ing)?>/i;
+  const close = /<\/think(?:ing)?>/i;
+  while (i < chunk.length) {
+    const rest = chunk.slice(i);
+    if (inThink) {
+      const m = rest.match(close);
+      if (!m) { thought += rest; break; }
+      thought += rest.slice(0, m.index!);
+      i += m.index! + m[0].length;
+      inThink = false;
+    } else {
+      const m = rest.match(open);
+      if (!m) { reply += rest; break; }
+      reply += rest.slice(0, m.index!);
+      i += m.index! + m[0].length;
+      inThink = true;
+    }
+  }
+  return { reply, thought, inThink };
 }
 
 // ---------- The dispatch loop itself ----------
@@ -529,6 +897,12 @@ export type DispatchHooks = {
   onLog: (agent: string, msg: GoalMsg) => void;
   onLogDelta: (agent: string, delta: string) => void;
   onThought: (agent: string, msg: GoalMsg) => void;
+  /// Streaming thought / tool-call channel. `channel` is a stable id
+  /// per open block (e.g. "thinking", "tool:Write:abc"). The consumer
+  /// keeps a per-(agent,channel) cursor and appends deltas in place,
+  /// or starts a new entry on first delta. `role` is the human label
+  /// shown when a new entry is created.
+  onThoughtDelta: (agent: string, channel: string, role: string, delta: string) => void;
   /// Fires once per agent reply that the bridge / UI should mirror
   /// outbound (e.g. Telegram /sendMessage). For the desktop runner
   /// this is a no-op.
@@ -546,12 +920,79 @@ export type DispatchInput = {
   history: HistoryItem[];
   autoApprove: boolean;
   signal: AbortSignal;
+  /// Project rules — prepended to every agent's system prompt and used
+  /// heavily by the Critic. Empty / undefined = no rules block injected.
+  directives?: Directive[];
+  /// When true, [NEED_USER_INPUT] markers in orchestrator output get
+  /// intercepted and routed to the Critic instead of bubbling up to
+  /// the user. The Critic's reply gets folded back into the dispatch
+  /// as if the user had answered.
+  directorMode?: boolean;
 };
 
+const NEED_USER_INPUT_RE = /^\s*\[NEED_USER_INPUT\][\s:]+(.+?)\s*$/im;
+
+/// Parse [NEED_USER_INPUT] markers out of an orchestrator reply. We only
+/// honour the FIRST marker per turn — a single dispatch shouldn't spawn
+/// multiple critic calls (paralysis-by-committee). Returns the question
+/// text + the cleaned reply (marker line removed) so the orchestrator's
+/// own log doesn't show the marker verbatim.
+export function extractUserInputRequest(text: string): { question: string | null; cleaned: string } {
+  const m = text.match(NEED_USER_INPUT_RE);
+  if (!m) return { question: null, cleaned: text };
+  const question = m[1].trim();
+  const cleaned = text.replace(NEED_USER_INPUT_RE, "").trim();
+  return { question, cleaned };
+}
+
+/// Run a single Critic turn. Used by the dispatch loop when director
+/// mode is on and the orchestrator emits [NEED_USER_INPUT]. Returns the
+/// critic's answer (1-3 sentences in the user's voice). Failures
+/// surface as a short fallback string instead of throwing — the
+/// dispatch should keep moving rather than crash if the critic call
+/// fails for transient reasons.
+export async function runCriticDispatch(opts: {
+  team: Team;
+  question: string;
+  history: HistoryItem[];
+  directives?: Directive[];
+  modelFor: (agentName: string) => string;
+  models: ModelInfo[];
+  port: number;
+  projectCwd: string;
+  autoApprove: boolean;
+  signal: AbortSignal;
+  onDelta?: (delta: string) => void;
+}): Promise<string> {
+  const sys = buildCriticPrompt(opts.team, opts.directives);
+  // Use the same model the orchestrator uses so the critic's voice
+  // stays consistent in tone. (Could be made user-configurable later.)
+  const orch = findOrchestratorSpec(opts.team);
+  const modelId = orch ? opts.modelFor(orch.name) : opts.modelFor("critic");
+  const provider = providerFor(modelId, opts.models);
+  try {
+    const reply = await streamChatCompletion(
+      opts.port, modelId, provider,
+      sys, opts.question, 0.3, opts.signal,
+      opts.onDelta ?? (() => {}),
+      opts.projectCwd, opts.history, opts.autoApprove,
+      () => {},
+      undefined,
+    );
+    return reply.trim() || "(no answer)";
+  } catch (e: any) {
+    return `(critic error: ${String(e?.message ?? e)} — proceeding with best guess)`;
+  }
+}
+
 export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks): Promise<string> {
-  const { team, roleByName, goal, modelFor, models, port, projectCwd, history, autoApprove, signal } = opts;
+  const { team, roleByName, goal, modelFor, models, port, projectCwd, history, autoApprove, signal, directives, directorMode } = opts;
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
+  // Local mutable history — when the Critic answers a [NEED_USER_INPUT]
+  // we append (orchestrator_question, critic_answer) so the integration
+  // turn sees the resolved decision in context.
+  const liveHistory: HistoryItem[] = [...history];
 
   // ---- Phase 1: orchestrator plans ----
   hooks.onPhase("planning");
@@ -560,7 +1001,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   hooks.onAgentStart(orch.name);
   hooks.onLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
 
-  const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch);
+  const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch, directives, directorMode);
   const orchModel = modelFor(orch.name);
   const orchProvider = providerFor(orchModel, models);
   let orchReply: string;
@@ -569,10 +1010,66 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       port, orchModel, orchProvider,
       orchPrompt, goal, tempFor(orch, 0.4), signal,
       (delta) => hooks.onLogDelta(orch.name, delta),
-      projectCwd, history, autoApprove,
+      projectCwd, liveHistory, autoApprove,
+      (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
+      // Bridge dispatch uses tool gating now too — same per-role
+      // allowlist as the desktop path. (Worktree isolation on this
+      // path is a follow-up slice; bridge dispatches today are mostly
+      // single-agent so the contention risk is lower.)
+      roleByName.get(orch.base)?.toolAllowlist,
     );
   } finally {
     hooks.onAgentEnd(orch.name);
+  }
+
+  // Director-mode interception: if the orchestrator emitted a
+  // [NEED_USER_INPUT] marker, route the question to the Critic, fold
+  // the answer back into history as a user turn, and re-run the
+  // orchestrator so it can replan with the decision resolved. Only one
+  // hop — if the orchestrator emits another marker on the second pass
+  // we let it through (extracted but not satisfied) to avoid loops.
+  if (directorMode) {
+    const { question, cleaned } = extractUserInputRequest(orchReply);
+    if (question) {
+      // Visible on the canvas + Thought tab so the user sees the
+      // hand-off when reviewing the run after the fact.
+      hooks.onThought(orch.name, {
+        role: "dispatch",
+        color: "#ff9ad9",
+        text: `❓ → critic: ${question}`,
+      });
+      const CRITIC_NAME = "critic";
+      hooks.onAgentStart(CRITIC_NAME);
+      hooks.onLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
+      const criticReply = await runCriticDispatch({
+        team, question, history: liveHistory, directives,
+        modelFor, models, port, projectCwd, autoApprove, signal,
+        onDelta: (d) => hooks.onLogDelta(CRITIC_NAME, d),
+      });
+      hooks.onAgentEnd(CRITIC_NAME);
+      hooks.onAgentReply(CRITIC_NAME, criticReply);
+      // Fold the Q+A into history as a user turn so the orchestrator's
+      // replan sees a coherent conversation, not a dangling question.
+      liveHistory.push({ role: "assistant", content: cleaned });
+      liveHistory.push({ role: "user", content: `[critic, in your voice] ${criticReply}` });
+      // Replan with the resolved decision in context.
+      hooks.onAgentStart(orch.name);
+      hooks.onLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+      try {
+        orchReply = await streamChatCompletion(
+          port, orchModel, orchProvider,
+          orchPrompt,
+          `${goal}\n\n(the critic just answered "${criticReply}" to your "${question}" — incorporate this and dispatch now)`,
+          tempFor(orch, 0.4), signal,
+          (delta) => hooks.onLogDelta(orch.name, delta),
+          projectCwd, liveHistory, autoApprove,
+          (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
+          roleByName.get(orch.base)?.toolAllowlist,
+        );
+      } finally {
+        hooks.onAgentEnd(orch.name);
+      }
+    }
   }
 
   // Push parsed dispatches into the orchestrator's Thought log so the
@@ -612,7 +1109,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       text: `📩 ${d.instruction}`,
     });
     hooks.onLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
-    const specPrompt = buildSpecialistPrompt(team, spec, roleByName);
+    const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives);
     const specModel = modelFor(spec.name);
     const specProvider = providerFor(specModel, models);
     try {
@@ -621,6 +1118,8 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
         specPrompt, d.instruction, tempFor(spec, 0.5), signal,
         (delta) => hooks.onLogDelta(spec.name, delta),
         projectCwd, [], autoApprove,
+        (channel, role, delta) => hooks.onThoughtDelta(spec.name, channel, role, delta),
+        roleByName.get(spec.base)?.toolAllowlist,
       );
       const cleaned = specText.trim();
       hooks.onAgentReply(spec.name, cleaned);
@@ -666,7 +1165,9 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       port, finalModel, finalProvider,
       orchPrompt, integrationInput, tempFor(orch, 0.4), signal,
       (delta) => hooks.onLogDelta(orch.name, delta),
-      projectCwd, history, autoApprove,
+      projectCwd, liveHistory, autoApprove,
+      (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
+      roleByName.get(orch.base)?.toolAllowlist,
     );
   } finally {
     hooks.onAgentEnd(orch.name);

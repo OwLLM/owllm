@@ -191,6 +191,23 @@ export default function TelegramBridgeRunner() {
     const projectCwd = (project?.location ?? "").trim();
     const auto = !!tgCfg.auto_approve;
 
+    // Load directives + director_mode fresh per dispatch so changes
+    // made in the desktop DirectivesPanel take effect on the very next
+    // Telegram message without restarting the bridge. Both fetches are
+    // cheap (single SQLite query each) so per-dispatch is fine for v1.
+    let directives: any[] = [];
+    let directorMode = false;
+    try {
+      const [list, mode] = await Promise.all([
+        invoke<any[]>("directives_list", { projectId }),
+        invoke<boolean>("project_get_director_mode", { projectId }),
+      ]);
+      directives = list;
+      directorMode = mode;
+    } catch (e) {
+      console.warn("bridge: directives/director_mode load failed", e);
+    }
+
     // Multi-active aware. Bridge runs specialists in PARALLEL during
     // phase 2 of the dispatch loop, so the canvas needs to track each
     // agent individually. Pair-matched start/end events let the
@@ -256,6 +273,8 @@ export default function TelegramBridgeRunner() {
           history: priorHistory,
           autoApprove: auto,
           signal: new AbortController().signal,
+          directives,
+          directorMode,
         },
         {
           onPhase: (_phase: DispatchPhase) => { /* could mirror to Telegram if chatty */ },
@@ -264,6 +283,16 @@ export default function TelegramBridgeRunner() {
           onLog: fireLog,
           onLogDelta: fireLogDelta,
           onThought: fireThought,
+          // Streaming thought / tool-call channel — fire the same window
+          // event the desktop AgentsPage listens on. Frontend consumer
+          // keeps a per-(agent,channel) cursor and appends in place.
+          onThoughtDelta: (agent: string, channel: string, role: string, delta: string) => {
+            try {
+              window.dispatchEvent(new CustomEvent("owllm:thought:delta", {
+                detail: { projectId, agent, channel, role, delta, source: "telegram" },
+              }));
+            } catch {}
+          },
           // Every full reply from an agent (orchestrator's plan, each
           // specialist's answer, the integrated final) lands here.
           // Mirror to the SuperUserCard chat AND to Telegram so the
@@ -318,7 +347,7 @@ export default function TelegramBridgeRunner() {
     } else {
       await sendTelegram(tgCfg.bot_token, chatId, "✅ Done.");
     }
-    fireActive(null);
+    fireActiveClear();
   };
 
   // ---- 5. Long-poll loop itself — gated on started + valid cfg ----

@@ -5,10 +5,18 @@
 // All data is live: projects from list_projects (legacy SQLite), team
 // templates + role definitions from agents.rs, bridge config from
 // bridges.rs, server state via server_status. No hardcoded rosters.
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import NewProjectDialog from "./NewProjectDialog";
 import ModelPicker, { AccountsStatusLite } from "./ModelPicker";
+import {
+  type Directive,
+  formatDirectivesBlock,
+  buildCriticPrompt,
+  extractUserInputRequest,
+} from "./dispatch";
 
 const ICONS = "/Page_icons";
 
@@ -78,8 +86,34 @@ type RoleData = {
   /// Default sampling temperature from the yaml; used by the dispatch
   /// loop when an agent has no per-agent override.
   defaultTemperature?: number;
+  /// OWLLM tool names this role may call (read_file, shell, …). The
+  /// Claude CLI sub path translates these to --allowedTools so the
+  /// runtime hard-rejects anything outside the allowlist. ["all"] /
+  /// undefined / empty = unrestricted.
+  toolAllowlist?: string[];
 };
-type GoalMsg = { role: string; color: string; text: string };
+type GoalMsg = {
+  role: string;
+  color: string;
+  text: string;
+  /// Renderer hint. "thinking" → italic block, "tool" → monospace
+  /// command-style block, undefined / "dispatch" / etc. → default reply look.
+  kind?: "thinking" | "tool" | "dispatch";
+  /// Stable per-(agent, stream) id used by streamThought to coalesce
+  /// successive deltas into the same entry instead of appending a new
+  /// line for every chunk. Only set on entries created by streamThought.
+  channelKey?: string;
+  /// Monotonic per-creation id from nextSeq(). Lets the Full Chat tab
+  /// merge reply + thought streams in arrival order across two Maps.
+  /// Stamped at first creation only; streaming deltas don't re-stamp.
+  seq?: number;
+};
+
+// Module-scoped monotonic sequence — assigns a chronological id to
+// every entry so the Full Chat tab can interleave the reply + thought
+// streams in arrival order regardless of which Map they're stored in.
+let _entrySeq = 0;
+function nextSeq(): number { return ++_entrySeq; }
 
 // ---------- Icon + label helpers ----------
 // A handful of owl icons live in /Page_icons/ at the top level rather
@@ -578,7 +612,7 @@ function AgentInfoCard({
 // (Server, Studio, etc.), so the in-progress message in the input box
 // would otherwise be wiped. Keying by projectId so each project keeps
 // its own draft.
-function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAutoApprove, projectId }: {
+function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAutoApprove, projectId, directives, directorMode, onToggleDirectorMode, onOpenDirectives }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
   chat: GoalMsg[];
@@ -586,6 +620,10 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
   projectId: string;
+  directives: Directive[];
+  directorMode: boolean;
+  onToggleDirectorMode: () => void;
+  onOpenDirectives: () => void;
 }) {
   const peekAgents = (team?.agents ?? []).slice(0, 6);
   const draftKey = projectId ? `owllm:supdraft:${projectId}` : "";
@@ -620,6 +658,16 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
   // Show the last 30 turns in the scroll pane so a long conversation
   // still fits while extremely old turns get GC'd from the visible UI.
   const lastMessages = chat.slice(-30);
+  // Autoscroll the SuperUserCard chat pane to its bottom on every new
+  // message AND on each streamed delta (we hash the tail length so the
+  // effect re-fires per-chunk while the LLM is still producing). Also
+  // fires on project switch so the saved chat lands at its bottom.
+  const suChatRef = useRef<HTMLDivElement>(null);
+  const suTailSig = `${lastMessages.length}:${lastMessages[lastMessages.length - 1]?.text?.length ?? 0}`;
+  useLayoutEffect(() => {
+    const el = suChatRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [suTailSig, projectId]);
   const submit = () => {
     const t = draft.trim();
     if (!t) return;
@@ -649,20 +697,29 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
       )}
       {/* Chat pane — taller (was 80, now 200) AND no character cap so
           the full assistant reply is visible without truncation. Auto-
-          scrolls; the user can still scroll up to read older context. */}
-      <div data-ui="suChat" style={{ height:200, background:"var(--bg-elevated)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:8, padding:"8px 10px", fontSize:12, lineHeight:1.45, overflow:"auto", display:"flex", flexDirection:"column", gap:6 }}>
+          scrolls to bottom on every new message and on each streamed
+          chunk so the user follows the conversation without manually
+          scrolling. User text stays literal; agent text renders as
+          markdown so headings, lists, and code blocks read properly. */}
+      <div ref={suChatRef} data-ui="suChat" style={{ height:200, background:"var(--bg-elevated)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:8, padding:"8px 10px", fontSize:12, lineHeight:1.5, overflow:"auto", display:"flex", flexDirection:"column", gap:8 }}>
         {chat.length === 0 ? (
           <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
             {team
               ? `${team.display} is idle. Type a message below or use the goal bar to dispatch.`
               : "Pick a project or team template to begin."}
           </div>
-        ) : lastMessages.map((m, i) => (
-          <div key={i}>
-            <span style={{ color: m.color, fontWeight:700 }}>{m.role === "you" ? "You" : (m.role[0]?.toUpperCase() + m.role.slice(1))}:</span>{" "}
-            <span style={{ color:"var(--fg)", whiteSpace:"pre-wrap" }}>{m.text}</span>
-          </div>
-        ))}
+        ) : lastMessages.map((m, i) => {
+          const isUser = m.role === "you";
+          const label = isUser ? "You" : (m.role[0]?.toUpperCase() + m.role.slice(1));
+          return (
+            <div key={i}>
+              <div style={{ color: m.color, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:0.5, marginBottom:1 }}>{label}</div>
+              {isUser
+                ? <div style={{ color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Segoe UI, sans-serif" }}>{m.text}</div>
+                : <MarkdownBody text={m.text} />}
+            </div>
+          );
+        })}
       </div>
       <div data-ui="suInputRow" style={{ display:"flex", alignItems:"center", gap:8 }}>
         <input
@@ -691,6 +748,219 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
         <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
         <span>auto-approve tool requests</span>
       </label>
+      {/* Director Mode + Directives chip — both wire into the Critic
+          agent. Director Mode flips on the critic-as-user fallback so
+          the orchestrator's [NEED_USER_INPUT] questions resolve without
+          blocking. The chip shows the count of project rules and opens
+          a panel to add / edit / delete them. */}
+      <div data-ui="suDirectorRow" style={{ display:"flex", alignItems:"center", gap:8, justifyContent:"space-between" }}>
+        <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: directorMode ? "#9af0a8" : "#7888a8", cursor:"pointer" }}>
+          <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#60ff80" }} />
+          <span>director mode (critic stands in for me)</span>
+        </label>
+      </div>
+      <button
+        data-ui="suDirectivesChip"
+        onClick={onOpenDirectives}
+        title="Project rules the critic + every agent must follow"
+        style={{
+          alignSelf:"flex-start",
+          height:22, padding:"2px 10px", borderRadius:11,
+          background: directives.length > 0 ? "rgba(123, 92, 255, 0.18)" : "rgba(120,136,168,0.12)",
+          color: directives.length > 0 ? "#c0a8ff" : "#7888a8",
+          border: `1px solid ${directives.length > 0 ? "#7b5cff" : "#2a3148"}`,
+          fontSize:11, fontWeight:600, cursor:"pointer",
+          display:"flex", alignItems:"center", gap:6,
+        }}
+      >
+        <span>📋</span>
+        <span>{directives.length} project rule{directives.length === 1 ? "" : "s"}</span>
+        <span style={{ opacity: 0.6 }}>›</span>
+      </button>
+    </div>
+  );
+}
+
+/// Modal overlay listing the project's directives with inline add /
+/// edit / delete. Mounted once at the AgentsPage level via the open
+/// state held there; the SuperUserCard chip toggles that state.
+function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
+  projectId: string;
+  directives: Directive[];
+  onChanged: () => Promise<void> | void;
+  onClose: () => void;
+}) {
+  const [newKind, setNewKind] = useState<"must" | "prefer" | "avoid">("must");
+  const [newText, setNewText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+  const [editKind, setEditKind] = useState<"must" | "prefer" | "avoid">("must");
+
+  const submit = async () => {
+    const text = newText.trim();
+    if (!text || !projectId) return;
+    setBusy(true);
+    try {
+      await invoke("directives_add", { input: { projectId, kind: newKind, text } });
+      setNewText("");
+      await onChanged();
+    } catch (e) {
+      console.error("directives_add failed", e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const beginEdit = (d: Directive) => {
+    setEditingId(d.id);
+    setEditText(d.text);
+    setEditKind(d.kind);
+  };
+  const saveEdit = async () => {
+    if (!editingId) return;
+    setBusy(true);
+    try {
+      await invoke("directives_update", { input: { id: editingId, kind: editKind, text: editText } });
+      setEditingId(null);
+      await onChanged();
+    } catch (e) {
+      console.error("directives_update failed", e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const doDelete = async (id: string) => {
+    setBusy(true);
+    try {
+      await invoke("directives_delete", { id });
+      await onChanged();
+    } catch (e) {
+      console.error("directives_delete failed", e);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const kindColor = (k: string) =>
+    k === "must" ? "#ff8c8c" : k === "prefer" ? "#9af0a8" : "#ffd97a";
+  const kindLabel = (k: string) => k.toUpperCase();
+  const groups: Array<{ k: "must" | "prefer" | "avoid"; items: Directive[] }> = [
+    { k: "must", items: directives.filter(d => d.kind === "must") },
+    { k: "prefer", items: directives.filter(d => d.kind === "prefer") },
+    { k: "avoid", items: directives.filter(d => d.kind === "avoid") },
+  ];
+
+  return (
+    <div
+      data-ui="DirectivesPanelOverlay"
+      onClick={onClose}
+      style={{
+        position:"fixed", inset:0, background:"rgba(8,12,20,0.55)",
+        display:"flex", alignItems:"center", justifyContent:"center",
+        zIndex:1000,
+      }}
+    >
+      <div
+        data-ui="DirectivesPanel"
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: 560, maxHeight: "80vh", overflow:"auto",
+          background:"var(--bg-elevated)", border:"1px solid var(--border)",
+          borderRadius:12, padding:"16px 18px",
+          display:"flex", flexDirection:"column", gap:12,
+          boxShadow:"0 12px 40px rgba(0,0,0,0.5)",
+        }}
+      >
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <div>
+            <div style={{ fontSize:16, fontWeight:700, color:"var(--fg)" }}>Project rules</div>
+            <div style={{ fontSize:11, color:"var(--fg-subtle)", marginTop:2 }}>
+              Applied to every agent's system prompt + the critic when director mode is on.
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{ width:28, height:28, padding:0, borderRadius:6, border:"1px solid #2a3148", background:"#1a2030", color:"var(--fg)", cursor:"pointer", fontSize:14 }}
+            title="Close"
+          >✕</button>
+        </div>
+
+        {/* Add row */}
+        <div style={{ display:"flex", gap:6, alignItems:"stretch" }}>
+          <select
+            value={newKind}
+            onChange={e => setNewKind(e.target.value as any)}
+            style={{ width:90, padding:"4px 6px", borderRadius:6, border:"1px solid #2a3148", background:"#0e1320", color:"var(--fg)", fontSize:12 }}
+          >
+            <option value="must">MUST</option>
+            <option value="prefer">PREFER</option>
+            <option value="avoid">AVOID</option>
+          </select>
+          <input
+            value={newText}
+            onChange={e => setNewText(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter") submit(); }}
+            placeholder="e.g. never mock data — always real DB calls"
+            style={{ flex:1, padding:"4px 8px", borderRadius:6, border:"1px solid #2a3148", background:"#0e1320", color:"var(--fg)", fontSize:13 }}
+          />
+          <button
+            onClick={submit}
+            disabled={busy || !newText.trim()}
+            style={{
+              padding:"4px 14px", borderRadius:6,
+              border:"1px solid #5cf0ff",
+              background: newText.trim() ? "var(--accent)" : "rgba(92,240,255,0.25)",
+              color: newText.trim() ? "var(--bg-elevated)" : "#7d8595",
+              fontSize:12, fontWeight:700,
+              cursor: newText.trim() ? "pointer" : "not-allowed",
+            }}
+          >Add</button>
+        </div>
+
+        {directives.length === 0 ? (
+          <div style={{ padding:"24px 8px", textAlign:"center", color:"var(--fg-subtle)", fontStyle:"italic", fontSize:13 }}>
+            No rules yet — add one above. Examples: "keep modules under 500 lines", "never use mocks in tests", "ship as production-ready, not prototype".
+          </div>
+        ) : (
+          groups.filter(g => g.items.length > 0).map(g => (
+            <div key={g.k} style={{ display:"flex", flexDirection:"column", gap:4 }}>
+              <div style={{ fontSize:10, fontWeight:700, color: kindColor(g.k), letterSpacing:0.6 }}>{kindLabel(g.k)}</div>
+              {g.items.map(d => (
+                <div key={d.id} style={{ display:"flex", gap:6, alignItems:"flex-start", padding:"6px 8px", borderRadius:6, background:"#0e1320", border:"1px solid #1c2333" }}>
+                  {editingId === d.id ? (
+                    <>
+                      <select
+                        value={editKind}
+                        onChange={e => setEditKind(e.target.value as any)}
+                        style={{ width:80, padding:"2px 4px", borderRadius:4, border:"1px solid #2a3148", background:"#0e1320", color:"var(--fg)", fontSize:11 }}
+                      >
+                        <option value="must">MUST</option>
+                        <option value="prefer">PREFER</option>
+                        <option value="avoid">AVOID</option>
+                      </select>
+                      <input
+                        value={editText}
+                        onChange={e => setEditText(e.target.value)}
+                        onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditingId(null); }}
+                        autoFocus
+                        style={{ flex:1, padding:"2px 6px", borderRadius:4, border:"1px solid #2a3148", background:"#0e1320", color:"var(--fg)", fontSize:13 }}
+                      />
+                      <button onClick={saveEdit} disabled={busy} style={{ padding:"2px 8px", fontSize:11, fontWeight:700, borderRadius:4, border:"1px solid #5cf0ff", background:"var(--accent)", color:"var(--bg-elevated)", cursor:"pointer" }}>Save</button>
+                      <button onClick={() => setEditingId(null)} disabled={busy} style={{ padding:"2px 6px", fontSize:11, borderRadius:4, border:"1px solid #2a3148", background:"#1a2030", color:"var(--fg)", cursor:"pointer" }}>Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <div style={{ flex:1, fontSize:13, color:"var(--fg)", lineHeight:1.4 }}>{d.text}</div>
+                      <button onClick={() => beginEdit(d)} title="Edit" style={{ width:24, height:22, padding:0, fontSize:11, borderRadius:4, border:"1px solid #2a3148", background:"#1a2030", color:"#9aa6c0", cursor:"pointer" }}>✎</button>
+                      <button onClick={() => doDelete(d.id)} title="Delete" style={{ width:24, height:22, padding:0, fontSize:11, borderRadius:4, border:"1px solid #2a3148", background:"#1a2030", color:"#ff8c8c", cursor:"pointer" }}>✕</button>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }
@@ -1481,6 +1751,146 @@ function GraphCanvas({
   );
 }
 
+// Mirror of fleet.rs Tauri command return shapes. The discriminator
+// is the `status` field (serde tag).
+type FleetCreateResult =
+  | { status: "ready"; path: string; branch: string; baseSha: string }
+  | { status: "notAGitRepo" }
+  | { status: "dirtyWorkingTree"; details: string }
+  | { status: "error"; message: string };
+type FleetFinalizeResult =
+  | { status: "committed"; commitSha: string; filesChanged: number; files: string[] }
+  | { status: "noChanges" }
+  | { status: "error"; message: string };
+type FleetMergeResult =
+  | { status: "merged"; commitSha: string; filesChanged: number }
+  | { status: "conflict"; files: string[] }
+  | { status: "noChanges" }
+  | { status: "error"; message: string };
+
+// File extensions the auto-doc trigger considers "code" — touching any
+// of these in a merged commit dispatches the documentation agent on
+// the way out. Markdown / config / images intentionally excluded so a
+// pure-docs run doesn't loop on itself.
+const _CODE_EXTS = new Set([
+  ".py", ".ts", ".tsx", ".js", ".jsx", ".rs", ".go", ".java", ".kt",
+  ".rb", ".cs", ".cpp", ".cc", ".h", ".hpp", ".swift", ".sh", ".ps1",
+  ".sql", ".vue", ".svelte",
+]);
+function isCodeFile(path: string): boolean {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) return false;
+  return _CODE_EXTS.has(path.slice(dot).toLowerCase());
+}
+
+// MarkdownBody — render an agent's text as proper markdown so headings,
+// lists, code blocks, tables, and inline code look like a chat client
+// instead of a notepad. Tool-call JSON keeps the plain monospace
+// renderer; this is for prose (replies + thinking blocks).
+function MarkdownBody({ text }: { text: string }) {
+  return (
+    <div className="md-body" style={{ fontFamily: "Segoe UI, sans-serif", fontSize: 13, lineHeight: 1.55, color: "var(--fg)" }}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          // Inline `code` → small monospace pill; fenced ```code``` →
+          // panel with optional language label across the top edge.
+          code({ className, children, ...props }: any) {
+            const match = /language-(\w+)/.exec(className || "");
+            const lang = match?.[1];
+            const isBlock = !!match || (typeof children === "string" && children.includes("\n"));
+            if (!isBlock) {
+              return (
+                <code style={{ background: "rgba(127,140,160,0.18)", padding: "0.12em 0.38em", borderRadius: 3, fontFamily: "Consolas, 'JetBrains Mono', monospace", fontSize: "0.92em" }} {...props}>{children}</code>
+              );
+            }
+            return (
+              <div style={{ background: "rgba(20,28,40,0.6)", border: "1px solid var(--border)", borderRadius: 6, margin: "8px 0", overflow: "hidden" }}>
+                {lang ? (
+                  <div style={{ padding: "3px 10px", fontSize: 10, color: "var(--fg-subtle)", fontFamily: "Segoe UI, sans-serif", borderBottom: "1px solid var(--border)", letterSpacing: 0.5, textTransform: "uppercase" }}>{lang}</div>
+                ) : null}
+                <pre style={{ margin: 0, padding: 10, fontFamily: "Consolas, 'JetBrains Mono', monospace", fontSize: 12, overflowX: "auto", color: "var(--fg)", lineHeight: 1.45 }}>
+                  <code className={className} {...props}>{children}</code>
+                </pre>
+              </div>
+            );
+          },
+          h1: (p) => <h2 style={{ fontSize: 18, fontWeight: 700, margin: "14px 0 6px", color: "var(--fg-strong)", borderBottom: "1px solid var(--border)", paddingBottom: 3 }} {...(p as any)} />,
+          h2: (p) => <h3 style={{ fontSize: 16, fontWeight: 700, margin: "12px 0 5px", color: "var(--fg-strong)" }} {...(p as any)} />,
+          h3: (p) => <h4 style={{ fontSize: 14, fontWeight: 700, margin: "10px 0 4px", color: "var(--fg-strong)" }} {...(p as any)} />,
+          h4: (p) => <h5 style={{ fontSize: 13, fontWeight: 700, margin: "8px 0 3px", color: "var(--fg-strong)" }} {...(p as any)} />,
+          p: (p) => <p style={{ margin: "6px 0" }} {...(p as any)} />,
+          ul: (p) => <ul style={{ margin: "6px 0", paddingLeft: 22 }} {...(p as any)} />,
+          ol: (p) => <ol style={{ margin: "6px 0", paddingLeft: 22 }} {...(p as any)} />,
+          li: (p) => <li style={{ margin: "2px 0" }} {...(p as any)} />,
+          a: (p) => <a style={{ color: "var(--accent)", textDecoration: "underline" }} target="_blank" rel="noopener noreferrer" {...(p as any)} />,
+          blockquote: (p) => <blockquote style={{ borderLeft: "3px solid var(--accent)", margin: "8px 0", padding: "2px 0 2px 12px", color: "var(--fg-muted)" }} {...(p as any)} />,
+          table: (p) => <div style={{ overflowX: "auto", margin: "8px 0" }}><table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }} {...(p as any)} /></div>,
+          th: (p) => <th style={{ border: "1px solid var(--border)", padding: "5px 9px", background: "var(--bg-surface)", textAlign: "left", fontWeight: 600 }} {...(p as any)} />,
+          td: (p) => <td style={{ border: "1px solid var(--border)", padding: "5px 9px" }} {...(p as any)} />,
+          hr: () => <hr style={{ border: 0, borderTop: "1px solid var(--border)", margin: "12px 0" }} />,
+          strong: (p) => <strong style={{ fontWeight: 700, color: "var(--fg-strong)" }} {...(p as any)} />,
+          em: (p) => <em style={{ fontStyle: "italic" }} {...(p as any)} />,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+// Render a reply-stream entry (avatar + role chip + body). Shared by
+// the Clear Chat tab and the reply slots inside Full Chat so a single
+// look is used everywhere.
+function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null) {
+  const isUser = m.role === "you";
+  const placeholder = m.role === focus || focus === orchName ? "…" : "";
+  return (
+    <div key={`r-${m.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+      <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d", fontFamily:"Segoe UI, sans-serif" }}>{(m.role[0] || "?").toUpperCase()}</div>
+      <div style={{ flex:1, background:"var(--bg-surface)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"6px 12px", minWidth:0 }}>
+        <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif" }}>{m.role}</div>
+        {m.text
+          // User messages stay literal — they just typed it, don't
+          // re-interpret '*' as italics.
+          ? (isUser
+            ? <div style={{ fontSize:13, color:"var(--fg)", lineHeight:1.5, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap" }}>{m.text}</div>
+            : <MarkdownBody text={m.text} />)
+          : <div style={{ fontSize:12, color:"var(--fg-subtle)" }}>{placeholder}</div>}
+      </div>
+    </div>
+  );
+}
+
+// Render a thought-stream entry (rail + role label + kind-styled body).
+// Same widget used by the Thought, Tool Calls, and Full Chat tabs so
+// styling stays consistent across the three views.
+function renderThoughtEntry(t: GoalMsg, i: number) {
+  const isThinking = t.kind === "thinking";
+  const isTool = t.kind === "tool";
+  return (
+    <div key={`t-${t.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+      <div style={{ width:6, alignSelf:"stretch", borderRadius:3, background: t.color, opacity:0.85, flexShrink:0 }} />
+      <div style={{ flex:1, background:"var(--bg-surface)", borderRadius:6, padding:"5px 10px", minWidth:0 }}>
+        <div style={{ fontSize:9, fontWeight:700, color:t.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif" }}>{t.role}</div>
+        {isThinking
+          // Thinking is prose — markdown gives lists, headings, code
+          // blocks. Wrap in italic outer style so the "I'm reasoning"
+          // signal stays.
+          ? (t.text ? <div style={{ fontStyle:"italic", color:"var(--fg-muted)" }}><MarkdownBody text={t.text} /></div> : <div style={{ fontSize:12, color:"var(--fg-subtle)" }}>…</div>)
+          : isTool
+            // Tool calls / results are raw JSON or shell output — keep
+            // monospace verbatim, never markdown (curly braces would
+            // mangle).
+            ? <div style={{ fontSize:12, color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Consolas, 'JetBrains Mono', monospace", lineHeight:1.4, background:"rgba(127,240,197,0.06)", padding:"4px 6px", borderRadius:4 }}>{t.text || "…"}</div>
+            // Dispatches / fleet status / system → plain mono (short)
+            : <div style={{ fontSize:12, color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Consolas, 'JetBrains Mono', monospace" }}>{t.text}</div>
+        }
+      </div>
+    </div>
+  );
+}
+
 // OrchestratorPane — RIGHT pane. Now driven by the active agent's
 // per-agent log buffer; click a node on the canvas to view its log
 // (default = whichever agent the dispatcher is currently driving,
@@ -1508,7 +1918,7 @@ function OrchestratorPane({
   /// Account status drives sub/API enabled flags in ModelPicker.
   accountsStatus: AccountsStatusLite | null;
 }) {
-  const [activeTab, setActiveTab] = useState<"reply"|"thought">("reply");
+  const [activeTab, setActiveTab] = useState<"reply"|"thought"|"tools"|"full">("reply");
   // Pick which buffer to show: explicit selection > currently-active
   // agent > orchestrator (so the user sees the plan even if nothing
   // is selected yet) > "you" (which holds the goal echo).
@@ -1527,9 +1937,46 @@ function OrchestratorPane({
   // Filter the focused agent's messages. The "you" buffer always
   // contains just the user goal echo; useful as a sanity check.
   const messages = agentLogs.get(focus) ?? [];
-  // Per-agent thought traffic for the Thought tab (dispatches +
-  // future tool calls). Populated by appendThought in AgentsPage.
-  const thoughts = agentThoughts.get(focus) ?? [];
+  // All thought-tab traffic for this agent (thinking + tool calls +
+  // tool results + dispatch directives). Split per-tab below.
+  const allThoughts = agentThoughts.get(focus) ?? [];
+  // Clear Chat = the reply stream as-is. Thought = reasoning + routing
+  // decisions (drop tool entries — those have their own tab). Tools =
+  // tool_use + tool_result. Full = everything merged in chronological
+  // arrival order via the per-entry `seq` stamp.
+  const thoughts = allThoughts.filter(t => t.kind !== "tool");
+  const toolCalls = allThoughts.filter(t => t.kind === "tool");
+  const fullChat: GoalMsg[] = [...messages, ...allThoughts]
+    .slice()
+    .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+
+  // Autoscroll-to-bottom — one ref per tab. Triggered on:
+  //   1. tab switch (scroll the freshly-shown tab to bottom)
+  //   2. content change (new entry OR last entry's text grew during a
+  //      stream — we hash the tail length so the effect re-fires per
+  //      character chunk while the LLM is mid-reply)
+  //   3. focus change (jumping to a different agent's pane)
+  // useLayoutEffect runs before paint so the user never sees the
+  // scroll jump.
+  const replyRef = useRef<HTMLDivElement>(null);
+  const thoughtRef = useRef<HTMLDivElement>(null);
+  const toolsRef = useRef<HTMLDivElement>(null);
+  const fullRef = useRef<HTMLDivElement>(null);
+  const tailSig = (
+    `${messages.length}:${messages[messages.length - 1]?.text?.length ?? 0}|` +
+    `${thoughts.length}:${thoughts[thoughts.length - 1]?.text?.length ?? 0}|` +
+    `${toolCalls.length}:${toolCalls[toolCalls.length - 1]?.text?.length ?? 0}|` +
+    `${fullChat.length}:${fullChat[fullChat.length - 1]?.text?.length ?? 0}`
+  );
+  useLayoutEffect(() => {
+    const ref =
+      activeTab === "reply"   ? replyRef   :
+      activeTab === "thought" ? thoughtRef :
+      activeTab === "tools"   ? toolsRef   :
+                                fullRef;
+    const el = ref.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [activeTab, focus, tailSig]);
 
   // Phase indicator pill for the header.
   const phaseColor = phase === "idle" || phase === "done"
@@ -1589,11 +2036,36 @@ function OrchestratorPane({
       </div>
       <div data-ui="OrchestratorLogTabs" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:"0 0 8px" }}>
         <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)" }}>
-          <button onClick={() => setActiveTab("reply")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "reply" ? "var(--accent)" : "var(--fg-muted)", fontSize:13, fontWeight:500, borderBottom: activeTab === "reply" ? "1.5px solid var(--accent)" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>💬 Reply</button>
-          <button onClick={() => setActiveTab("thought")} style={{ padding:"8px 14px", border:"none", background:"transparent", color: activeTab === "thought" ? "#dcb0ff" : "var(--fg-muted)", fontSize:13, fontWeight:500, borderBottom: activeTab === "thought" ? "1.5px solid #dcb0ff" : "1.5px solid transparent", display:"inline-flex", alignItems:"center", gap:4 }}>🧠 Thought</button>
+          {([
+            { id:"reply",   label:"💬 Clear Chat", accent:"var(--accent)", count: messages.length },
+            { id:"thought", label:"🧠 Thought",    accent:"#dcb0ff",       count: thoughts.length },
+            { id:"tools",   label:"🛠 Tool Calls", accent:"#7ff0c5",       count: toolCalls.length },
+            { id:"full",    label:"📜 Full Chat",  accent:"#ffd97a",       count: fullChat.length },
+          ] as const).map(tab => {
+            const active = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                style={{
+                  padding:"8px 14px", border:"none", background:"transparent",
+                  color: active ? tab.accent : "var(--fg-muted)",
+                  fontSize:13, fontWeight:500,
+                  borderBottom: active ? `1.5px solid ${tab.accent}` : "1.5px solid transparent",
+                  display:"inline-flex", alignItems:"center", gap:6,
+                }}
+              >
+                {tab.label}
+                {tab.count > 0 ? (
+                  <span style={{ fontSize:10, fontWeight:700, opacity:0.7, background:"var(--bg-surface)", borderRadius:8, padding:"1px 6px" }}>{tab.count}</span>
+                ) : null}
+              </button>
+            );
+          })}
           <div style={{ flex:1 }} />
         </div>
-        <div data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:14, lineHeight:1.5, color:"var(--fg)" }}>
+        {/* Clear Chat — the user-facing reply stream only, nothing else. */}
+        <div ref={replyRef} data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)" }}>
           {runError ? (<div style={{ border:"1px solid #ff9f9f", background:"rgba(255,80,80,0.10)", color:"#ffb0b0", borderRadius:6, padding:8, fontSize:12 }}>{runError}</div>) : null}
           {messages.length === 0 && !runError ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:12 }}>
@@ -1602,31 +2074,40 @@ function OrchestratorPane({
                 : "Start a model on the Server tab first, then type a goal above and click Run."}
             </div>
           ) : null}
-          {messages.map((m, i) => (
-            <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
-              <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d", fontFamily:"Segoe UI, sans-serif" }}>{(m.role[0] || "?").toUpperCase()}</div>
-              <div style={{ flex:1, background:"var(--bg-surface)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"4px 10px" }}>
-                <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:2, fontFamily:"Segoe UI, sans-serif" }}>{m.role}</div>
-                <div style={{ fontSize:12, color:"var(--fg)", lineHeight:1.4, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap" }}>{m.text || (m.role === focus || focus === orchName ? "…" : "")}</div>
-              </div>
-            </div>
-          ))}
+          {messages.map((m, i) => renderReplyEntry(m, i, focus, orchName))}
         </div>
-        <div data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)" }}>
+        {/* Thought — reasoning + dispatch directives. Tool entries excluded. */}
+        <div ref={thoughtRef} data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)" }}>
           {thoughts.length === 0 ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
-              No thought traffic for this agent yet — dispatches and tool
-              calls land here while the team runs.
+              No reasoning yet — the model's thinking blocks land here
+              while the team runs.
             </div>
-          ) : thoughts.map((t, i) => (
-            <div key={i} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
-              <div style={{ width:6, alignSelf:"stretch", borderRadius:3, background: t.color, opacity:0.85, flexShrink:0 }} />
-              <div style={{ flex:1, background:"var(--bg-surface)", borderRadius:6, padding:"4px 8px" }}>
-                <div style={{ fontSize:9, fontWeight:700, color:t.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:2, fontFamily:"Segoe UI, sans-serif" }}>{t.role}</div>
-                <div style={{ fontSize:12, color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Consolas, 'JetBrains Mono', monospace" }}>{t.text}</div>
-              </div>
+          ) : thoughts.map((t, i) => renderThoughtEntry(t, i))}
+        </div>
+        {/* Tool Calls — every command the agent ran + its result. */}
+        <div ref={toolsRef} data-ui="OrchestratorToolsView" style={{ flex:1, display: activeTab === "tools" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)" }}>
+          {toolCalls.length === 0 ? (
+            <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
+              No tool calls yet — every command the agent runs (Bash,
+              Read, Write, Edit, etc.) appears here with its arguments
+              and the result it returned.
             </div>
-          ))}
+          ) : toolCalls.map((t, i) => renderThoughtEntry(t, i))}
+        </div>
+        {/* Full Chat — replies + thoughts + tools, interleaved by arrival. */}
+        <div ref={fullRef} data-ui="OrchestratorFullView" style={{ flex:1, display: activeTab === "full" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)" }}>
+          {fullChat.length === 0 ? (
+            <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
+              Empty — replies, reasoning, and tool calls will all appear
+              here in chronological order once the team runs.
+            </div>
+          ) : fullChat.map((m, i) =>
+            // Reply entries (no `kind`) get the avatar-style render,
+            // everything else uses the thought renderer. Same chrono
+            // order either way thanks to the `seq` stamp.
+            m.kind ? renderThoughtEntry(m, i) : renderReplyEntry(m, i, focus, orchName)
+          )}
         </div>
       </div>
     </div>
@@ -1673,6 +2154,8 @@ function buildOrchestratorPrompt(
   team: Team,
   roleByName: Map<string, RoleData>,
   orch: AgentSpec,
+  directives?: Directive[],
+  directorMode?: boolean,
 ): string {
   const specialists = team.agents.filter(a => a.name !== orch.name);
   // Prefer the spec's own description (team JSON, agent-specific) over
@@ -1694,10 +2177,25 @@ function buildOrchestratorPrompt(
   const orchSystemPrompt = orch.extraPrompt
     ? `${orchBase}\n\n--- TEAM-SPECIFIC GUIDANCE ---\n${orch.extraPrompt}`
     : orchBase;
+  const directivesBlock = formatDirectivesBlock(directives);
+  const directorBlock = directorMode
+    ? [
+        "",
+        "--- DIRECTOR MODE: A Critic agent stands in for the user ---",
+        "If you need a decision normally reserved for the user (scope, naming, business logic, tradeoffs),",
+        "emit a line beginning with `[NEED_USER_INPUT]` followed by your question on the same line.",
+        "Example:  [NEED_USER_INPUT] Should the new endpoint require auth?",
+        "The runtime will route that to the Critic, who answers in the user's voice from the project rules,",
+        "and re-invoke you with the answer folded in. Use sparingly — once or twice per dispatch at most.",
+        "--- END DIRECTOR MODE ---",
+      ].join("\n")
+    : "";
   return [
     `You are the orchestrator of the '${team.display}' team.`,
     "",
     orchSystemPrompt,
+    directivesBlock,
+    directorBlock,
     "",
     `YOUR SPECIALISTS (use their EXACT names when dispatching):`,
     roster || "  (none — solo)",
@@ -1716,6 +2214,7 @@ function buildSpecialistPrompt(
   team: Team,
   spec: AgentSpec,
   roleByName: Map<string, RoleData>,
+  directives?: Directive[],
 ): string {
   const role = roleByName.get(spec.base);
   // Layer: role base prompt (from yaml) + team-specific spec
@@ -1740,6 +2239,10 @@ function buildSpecialistPrompt(
   if (spec.extraPrompt) {
     layers.push(spec.extraPrompt);
     layers.push("");
+  }
+  const directivesBlock = formatDirectivesBlock(directives);
+  if (directivesBlock) {
+    layers.push(directivesBlock);
   }
   layers.push("The orchestrator has dispatched the task below. Reply concisely and directly with your work.");
   layers.push("Do NOT dispatch further — only the orchestrator may dispatch. Stay in your role.");
@@ -1791,6 +2294,79 @@ function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
 /// model. The signature stays the same so the dispatch loop doesn't
 /// care which provider it's talking to — only the resolver layer
 /// (modelFor + provider lookup) does.
+// Channel-keyed thinking/tool stream. Mirrors dispatch.ts ThoughtHandler.
+// `channel` is a stable per-block id ("thinking", "tool:Write:abc"),
+// `role` is the human label ("🧠 thinking", "🛠 Write"), `delta` the chunk.
+type ThoughtHandler = (channel: string, role: string, delta: string) => void;
+
+// Mirror of accounts.rs ClaudeStreamEvent (Tauri ipc::Channel payload).
+type ClaudeStreamEvent =
+  | { kind: "text"; delta: string }
+  | { kind: "thinking"; delta: string }
+  | { kind: "toolUse"; toolUseId: string; name: string; input: string }
+  | { kind: "toolResult"; toolUseId: string; content: string }
+  | { kind: "error"; message: string };
+
+// Streaming variant of claude_cli_complete — uses claude --print
+// --output-format stream-json --verbose so the Thought tab gets live
+// thinking blocks + tool_use commands as the CLI emits them. Returns
+// the assembled assistant text.
+async function runClaudeCliStream(args: {
+  systemPrompt: string;
+  userMessage: string;
+  cwd?: string | null;
+  autoApprove?: boolean;
+  /// Per-role tool allowlist (OWLLM-style names — read_file, shell,
+  /// edit_file, …). Forwarded to the CLI as --allowedTools after the
+  /// Rust side translates to Claude tool names. Omit / pass empty to
+  /// run unrestricted (operator behaviour).
+  allowedTools?: string[];
+  onDelta: (delta: string) => void;
+  onThought: ThoughtHandler;
+}): Promise<string> {
+  const ch = new Channel<ClaudeStreamEvent>();
+  ch.onmessage = (msg) => {
+    switch (msg.kind) {
+      case "text":
+        args.onDelta(msg.delta);
+        break;
+      case "thinking":
+        args.onThought("thinking", "🧠 thinking", msg.delta);
+        break;
+      case "toolUse": {
+        const channel = `tool:${msg.name}:${msg.toolUseId}`;
+        args.onThought(channel, `🛠 ${msg.name}`, msg.input || "");
+        break;
+      }
+      case "toolResult": {
+        const channel = `tool-result:${msg.toolUseId}`;
+        const snippet = msg.content.length > 800
+          ? msg.content.slice(0, 800) + "\n…(truncated)"
+          : msg.content;
+        args.onThought(channel, "↩ result", snippet);
+        break;
+      }
+      case "error":
+        args.onThought("cli-error", "⚠ cli", msg.message);
+        break;
+    }
+  };
+  return await invoke<string>("claude_cli_stream", {
+    systemPrompt: args.systemPrompt,
+    userMessage: args.userMessage,
+    cwd: args.cwd ?? null,
+    autoApprove: args.autoApprove ?? false,
+    allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+    onEvent: ch,
+  });
+}
+
+// Per-role tool allowlist (OWLLM-style names) forwarded into the
+// Claude CLI subscription path as --allowedTools. See accounts.rs::
+// map_owllm_tool_to_cli for the name translation. Optional on every
+// layer so non-CLI providers (OpenAI / local) ignore it.
+type AllowedTools = string[] | undefined;
+
 async function streamChatCompletion(
   port: number,
   modelId: string,
@@ -1816,6 +2392,14 @@ async function streamChatCompletion(
   /// only when the user has opted in via the SuperUserCard checkbox
   /// or the Telegram bridge's auto_approve flag.
   autoApprove?: boolean,
+  /// Streaming reasoning + tool-call channel. Fires for Anthropic
+  /// thinking / tool_use blocks, OpenAI reasoning_content + tool_calls,
+  /// and local <think>/<thinking> tag content. Skipped for the Claude
+  /// CLI subscription path (--print mode emits one final blob — see TODO).
+  onThought?: ThoughtHandler,
+  /// Per-role tool allowlist. Only meaningful on the Claude CLI sub
+  /// path; ignored elsewhere.
+  allowedTools?: AllowedTools,
 ): Promise<string> {
   // Strip the optional route prefix encoded by the ModelPicker before
   // handing the bare model id to the provider-specific call.
@@ -1831,10 +2415,10 @@ async function streamChatCompletion(
     throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
   }
   if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd, history, autoApprove);
+    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools);
   }
   if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, history);
+    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, history, onThought);
   }
   // Local llama-server. OpenAI-compatible SSE. History (when present)
   // becomes the alternating user/assistant turns preceding the new
@@ -1855,7 +2439,7 @@ async function streamChatCompletion(
     }),
     signal,
   });
-  return consumeOpenAISse(resp, onDelta);
+  return consumeOpenAISse(resp, onDelta, onThought);
 }
 
 /// Anthropic Messages API streaming. Format:
@@ -1899,6 +2483,8 @@ async function streamAnthropic(
   projectCwd?: string,
   history?: HistoryItem[],
   autoApprove?: boolean,
+  onThought?: ThoughtHandler,
+  allowedTools?: AllowedTools,
 ): Promise<string> {
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
@@ -1912,6 +2498,16 @@ async function streamAnthropic(
     if (!status?.claude_cli) {
       throw new Error("Claude Code CLI not detected — run `claude /login` first.");
     }
+    // Stream via claude_cli_stream when the consumer wants live
+    // thought traffic (AgentsPage Thought tab); fall back to one-shot
+    // --print blob otherwise.
+    if (onThought) {
+      return await runClaudeCliStream({
+        systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+        autoApprove: autoApprove ?? false, allowedTools,
+        onDelta, onThought,
+      });
+    }
     const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null, autoApprove: autoApprove ?? false });
     if (reply) onDelta(reply);
     return reply;
@@ -1923,6 +2519,13 @@ async function streamAnthropic(
     try {
       const status = await invoke<{ claude_cli: boolean }>("accounts_status");
       if (status?.claude_cli) {
+        if (onThought) {
+          return await runClaudeCliStream({
+            systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+            autoApprove: autoApprove ?? false, allowedTools,
+            onDelta, onThought,
+          });
+        }
         const reply = await invoke<string>("claude_cli_complete", {
           systemPrompt,
           userMessage: cliPrompt,
@@ -1964,10 +2567,22 @@ async function streamAnthropic(
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
   }
-  const reader = resp.body.getReader();
+  return consumeAnthropicSse(resp, onDelta, onThought);
+}
+
+// Anthropic Messages SSE consumer — splits the stream into three
+// channels: text deltas → onDelta, thinking deltas → onThought
+// ("thinking:<idx>"), tool_use blocks → onThought("tool:<name>:<id>").
+async function consumeAnthropicSse(
+  resp: Response,
+  onDelta: StreamHandler,
+  onThought?: ThoughtHandler,
+): Promise<string> {
+  const reader = resp.body!.getReader();
   const dec = new TextDecoder();
   let buf = "";
   let acc = "";
+  const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; channel: string; role: string }>();
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -1981,9 +2596,32 @@ async function streamAnthropic(
       if (!body) continue;
       try {
         const j = JSON.parse(body);
-        if (j?.type === "content_block_delta") {
-          const txt: string | undefined = j?.delta?.text;
-          if (typeof txt === "string" && txt) { acc += txt; onDelta(txt); }
+        if (j?.type === "content_block_start") {
+          const idx: number = j.index;
+          const block = j.content_block;
+          if (block?.type === "thinking") {
+            blocks.set(idx, { kind: "thinking", channel: `thinking:${idx}`, role: "🧠 thinking" });
+          } else if (block?.type === "tool_use") {
+            const name = String(block?.name ?? "tool");
+            const id = String(block?.id ?? idx);
+            const channel = `tool:${name}:${id}`;
+            blocks.set(idx, { kind: "tool", channel, role: `🛠 ${name}` });
+            onThought?.(channel, `🛠 ${name}`, "");
+          } else {
+            blocks.set(idx, { kind: "text", channel: "", role: "" });
+          }
+        } else if (j?.type === "content_block_delta") {
+          const idx: number = j.index;
+          const meta = blocks.get(idx);
+          const delta = j.delta;
+          if (meta?.kind === "thinking" && typeof delta?.thinking === "string") {
+            onThought?.(meta.channel, meta.role, delta.thinking);
+          } else if (meta?.kind === "tool" && typeof delta?.partial_json === "string") {
+            onThought?.(meta.channel, meta.role, delta.partial_json);
+          } else if (typeof delta?.text === "string" && delta.text) {
+            acc += delta.text;
+            onDelta(delta.text);
+          }
         }
       } catch { /* skip malformed chunk */ }
     }
@@ -2001,6 +2639,7 @@ async function streamOpenAI(
   signal: AbortSignal,
   onDelta: StreamHandler,
   history?: HistoryItem[],
+  onThought?: ThoughtHandler,
 ): Promise<string> {
   // Codex CLI subscription support is a future slot — for now both
   // forceSub and the default flow route through the API path, so this
@@ -2025,12 +2664,20 @@ async function streamOpenAI(
     }),
     signal,
   });
-  return consumeOpenAISse(resp, onDelta);
+  return consumeOpenAISse(resp, onDelta, onThought);
 }
 
 /// Shared SSE consumer for OpenAI-compatible endpoints (llama-server,
-/// api.openai.com). Both emit `data: { choices: [{ delta: { content } }] }`.
-async function consumeOpenAISse(resp: Response, onDelta: StreamHandler): Promise<string> {
+/// api.openai.com). Routes:
+///   - delta.content (with <think>/<thinking> stripped) → onDelta
+///   - text inside <think> tags → onThought("thinking", …)
+///   - delta.reasoning_content (DeepSeek-R1, o-series) → onThought("thinking", …)
+///   - delta.tool_calls[] → onThought("tool:<name>:<i>", "🛠 <name>", …)
+async function consumeOpenAISse(
+  resp: Response,
+  onDelta: StreamHandler,
+  onThought?: ThoughtHandler,
+): Promise<string> {
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
   }
@@ -2038,6 +2685,8 @@ async function consumeOpenAISse(resp: Response, onDelta: StreamHandler): Promise
   const dec = new TextDecoder();
   let buf = "";
   let acc = "";
+  let inThink = false;
+  const toolNames = new Map<number, string>();
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -2051,15 +2700,68 @@ async function consumeOpenAISse(resp: Response, onDelta: StreamHandler): Promise
       if (!body || body === "[DONE]") continue;
       try {
         const j = JSON.parse(body);
-        const delta: string | undefined = j?.choices?.[0]?.delta?.content;
-        if (typeof delta === "string" && delta) {
-          acc += delta;
-          onDelta(delta);
+        const delta = j?.choices?.[0]?.delta;
+        if (!delta) continue;
+        const reasoning: string | undefined = delta?.reasoning_content ?? delta?.reasoning;
+        if (typeof reasoning === "string" && reasoning) {
+          onThought?.("thinking", "🧠 thinking", reasoning);
+        }
+        const toolCalls: any[] | undefined = delta?.tool_calls;
+        if (Array.isArray(toolCalls)) {
+          for (const tc of toolCalls) {
+            const idx: number = typeof tc?.index === "number" ? tc.index : 0;
+            const fn = tc?.function ?? {};
+            if (typeof fn?.name === "string" && fn.name) {
+              toolNames.set(idx, fn.name);
+              const channel = `tool:${fn.name}:${idx}`;
+              onThought?.(channel, `🛠 ${fn.name}`, "");
+            }
+            if (typeof fn?.arguments === "string" && fn.arguments) {
+              const name = toolNames.get(idx) ?? "tool";
+              const channel = `tool:${name}:${idx}`;
+              onThought?.(channel, `🛠 ${name}`, fn.arguments);
+            }
+          }
+        }
+        const content: string | undefined = delta?.content;
+        if (typeof content === "string" && content) {
+          const split = splitThinkTags(content, inThink);
+          inThink = split.inThink;
+          if (split.thought) onThought?.("thinking", "🧠 thinking", split.thought);
+          if (split.reply)   { acc += split.reply; onDelta(split.reply); }
         }
       } catch { /* skip malformed chunk */ }
     }
   }
   return acc;
+}
+
+// Streaming-safe <think> / <thinking> tag splitter — see dispatch.ts
+// for the full notes. Tags split across chunks fall through as literal
+// text; full-tag-in-one-chunk (the common case) routes correctly.
+function splitThinkTags(chunk: string, inThink: boolean): { reply: string; thought: string; inThink: boolean } {
+  let reply = "";
+  let thought = "";
+  let i = 0;
+  const open = /<think(?:ing)?>/i;
+  const close = /<\/think(?:ing)?>/i;
+  while (i < chunk.length) {
+    const rest = chunk.slice(i);
+    if (inThink) {
+      const m = rest.match(close);
+      if (!m) { thought += rest; break; }
+      thought += rest.slice(0, m.index!);
+      i += m.index! + m[0].length;
+      inThink = false;
+    } else {
+      const m = rest.match(open);
+      if (!m) { reply += rest; break; }
+      reply += rest.slice(0, m.index!);
+      i += m.index! + m[0].length;
+      inThink = true;
+    }
+  }
+  return { reply, thought, inThink };
 }
 
 // Strip any `@agent: …` directive lines from the orchestrator's reply
@@ -2247,6 +2949,61 @@ export default function AgentsPage() {
     });
   };
 
+  // ---------- Directives + Director Mode ----------
+  // Directives = project-scoped natural-language rules ("never mock
+  // data", "keep modules under 500 lines", …). Persisted server-side
+  // via the directives_* Tauri commands; loaded once per project and
+  // refetched whenever the user adds / edits / deletes one via the
+  // DirectivesPanel.
+  //
+  // Director Mode = a flag on the SuperUserCard. When ON, orchestrator
+  // [NEED_USER_INPUT] markers route to the Critic agent (voice-of-user)
+  // instead of stalling. Persisted on agent_projects.director_mode so
+  // it survives restarts.
+  const [directives, setDirectives] = useState<Directive[]>([]);
+  const [directorMode, setDirectorModeState] = useState<boolean>(false);
+  const [directivesPanelOpen, setDirectivesPanelOpen] = useState(false);
+  // Reload directives + director_mode whenever the active project
+  // changes. Both fetches run in parallel; errors fall back to empty /
+  // false so a fresh DB before the table exists doesn't break the UI.
+  useEffect(() => {
+    if (!selectedProjectId) { setDirectives([]); setDirectorModeState(false); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [list, mode] = await Promise.all([
+          invoke<Directive[]>("directives_list", { projectId: selectedProjectId }),
+          invoke<boolean>("project_get_director_mode", { projectId: selectedProjectId }),
+        ]);
+        if (cancelled) return;
+        setDirectives(list);
+        setDirectorModeState(mode);
+      } catch (e) {
+        if (cancelled) return;
+        console.warn("directives load failed", e);
+        setDirectives([]);
+        setDirectorModeState(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedProjectId]);
+  const reloadDirectives = async () => {
+    if (!selectedProjectId) return;
+    try {
+      const list = await invoke<Directive[]>("directives_list", { projectId: selectedProjectId });
+      setDirectives(list);
+    } catch (e) { console.warn("directives reload failed", e); }
+  };
+  const setDirectorMode = async (v: boolean) => {
+    setDirectorModeState(v);
+    if (!selectedProjectId) return;
+    try {
+      await invoke("project_set_director_mode", { projectId: selectedProjectId, enabled: v });
+    } catch (e) {
+      console.warn("set director_mode failed", e);
+    }
+  };
+
   async function onBrowseProjectFolder() {
     try {
       const picked = await invoke<string | null>("pick_folder", { title: "Pick a project folder" });
@@ -2341,6 +3098,9 @@ export default function AgentsPage() {
           systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
           canDispatch: d.can_dispatch === true,
           defaultTemperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
+          toolAllowlist: Array.isArray(d.tool_allowlist)
+            ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
+            : undefined,
         });
       }
       setRoleByName(m);
@@ -2610,7 +3370,7 @@ export default function AgentsPage() {
     setAgentLogs(prev => {
       const next = new Map(prev);
       const cur = next.get(agent) ?? [];
-      next.set(agent, [...cur, msg]);
+      next.set(agent, [...cur, { ...msg, seq: msg.seq ?? nextSeq() }]);
       return next;
     });
   };
@@ -2636,7 +3396,45 @@ export default function AgentsPage() {
     setAgentThoughts(prev => {
       const next = new Map(prev);
       const cur = next.get(agent) ?? [];
-      next.set(agent, [...cur, msg]);
+      next.set(agent, [...cur, { ...msg, seq: msg.seq ?? nextSeq() }]);
+      return next;
+    });
+  };
+
+  // Streaming thought / tool-call append. Looks for the latest entry
+  // tagged with the same channelKey and appends the delta into it; if
+  // none exists yet (first chunk), creates a new entry with the
+  // role-derived kind. Lets the Anthropic thinking + tool_use streams
+  // and OpenAI tool_calls land as growing blocks instead of one log
+  // line per delta.
+  const streamThought = (agent: string, channel: string, role: string, delta: string) => {
+    // Tool-use AND tool-result entries both belong to the Tools tab —
+    // the result is the response to the call, conceptually part of the
+    // same "command" stream. The 🛠 / ↩ prefixes are how the streamers
+    // signal which is which without us threading kind through.
+    const kind: "thinking" | "tool" =
+      (role.startsWith("🛠") || role.startsWith("↩")) ? "tool" : "thinking";
+    const color = kind === "tool" ? "#7ff0c5" : "#dcb0ff";
+    setAgentThoughts(prev => {
+      const next = new Map(prev);
+      const cur = next.get(agent) ?? [];
+      // Find an existing open entry with the same channel key and grow
+      // it in place. Without this every SSE chunk would spawn a new
+      // entry and the panel would flood with single-token rows.
+      const lastIdx = (() => {
+        for (let i = cur.length - 1; i >= 0; i--) {
+          if (cur[i].channelKey === channel) return i;
+        }
+        return -1;
+      })();
+      if (lastIdx >= 0) {
+        const updated = [...cur];
+        const prevMsg = updated[lastIdx];
+        updated[lastIdx] = { ...prevMsg, text: prevMsg.text + delta };
+        next.set(agent, updated);
+      } else {
+        next.set(agent, [...cur, { role, color, text: delta, kind, channelKey: channel, seq: nextSeq() }]);
+      }
       return next;
     });
   };
@@ -2718,6 +3516,11 @@ export default function AgentsPage() {
         (locationOverride || selectedProject?.location || "").trim(),
         priorHistory,
         autoApprove,
+        // Surface thinking + tool-call deltas to the right-pane Thought
+        // tab so the user can see the orchestrator reasoning + the
+        // commands it asks tools to run (Anthropic API thinking blocks
+        // & tool_use, OpenAI tool_calls, local <think> tags).
+        (channel, role, delta) => streamThought(orchKey, channel, role, delta),
       );
     } catch (e: any) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: String(e?.message ?? e) };
@@ -2875,7 +3678,7 @@ export default function AgentsPage() {
     try {
       // ----- Phase 1: orchestrator plan + dispatches -----
       addActive(orch.name);
-      const orchPrompt = buildOrchestratorPrompt(activeTeam, roleByName, orch);
+      const orchPrompt = buildOrchestratorPrompt(activeTeam, roleByName, orch, directives, directorMode);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = modelFor(orch.name);
       let orchReply: string;
@@ -2885,9 +3688,69 @@ export default function AgentsPage() {
           orchPrompt, text, tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
+          undefined, undefined,
+          (channel, role, delta) => streamThought(orch.name, channel, role, delta),
         );
       } finally {
         removeActive(orch.name);
+      }
+
+      // Director-mode interception: if the orchestrator asked the user
+      // a question ([NEED_USER_INPUT] marker), route it to the Critic
+      // (voice-of-user), fold the answer back into context, and re-run
+      // the orchestrator. Only one hop per dispatch to avoid loops.
+      if (directorMode) {
+        const { question, cleaned } = extractUserInputRequest(orchReply);
+        if (question) {
+          appendThought(orch.name, {
+            role: "dispatch", color: "#ff9ad9",
+            text: `❓ → critic: ${question}`,
+          });
+          const CRITIC_NAME = "critic";
+          addActive(CRITIC_NAME);
+          appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
+          let criticReply = "";
+          try {
+            const criticSys = buildCriticPrompt(activeTeam, directives);
+            criticReply = await streamChatCompletion(
+              port, orchModel, providerFor(orchModel),
+              criticSys, question, 0.3, ctrl.signal,
+              (delta) => { criticReply += delta; streamLog(CRITIC_NAME, delta); },
+              projectCwd,
+              undefined, undefined,
+              () => {},
+            );
+            criticReply = (criticReply || "(no answer)").trim();
+          } catch (e: any) {
+            criticReply = `(critic error: ${String(e?.message ?? e)} — proceeding with best guess)`;
+            appendLog(CRITIC_NAME, { role: "system", color: "#ff8c8c", text: criticReply });
+          } finally {
+            removeActive(CRITIC_NAME);
+          }
+          // Replan with the resolved decision in context. The cleaned
+          // first reply + critic answer get pushed into the user-input
+          // explicitly so the orchestrator sees a coherent thread.
+          addActive(orch.name);
+          appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+          try {
+            orchReply = await streamChatCompletion(
+              port, orchModel, providerFor(orchModel),
+              orchPrompt,
+              `${text}\n\n(the critic just answered "${criticReply}" to your "${question}" — incorporate this and dispatch now)`,
+              tempFor(orch, 0.4), ctrl.signal,
+              (delta) => streamLog(orch.name, delta),
+              projectCwd,
+              undefined, undefined,
+              (channel, role, delta) => streamThought(orch.name, channel, role, delta),
+            );
+          } finally {
+            removeActive(orch.name);
+          }
+          // Silence unused-warning for cleaned in non-debug builds —
+          // we intentionally don't surface it (the cleaned plan is
+          // already in the orchestrator's log via streamLog deltas).
+          void cleaned;
+        }
       }
 
       // Mirror to the SuperUserCard so the user-facing thread shows
@@ -2912,58 +3775,177 @@ export default function AgentsPage() {
         });
       }
 
+      // Surface a "📤 N dispatches parsed" header so the user sees
+      // the routing decision at a glance — distinguishes "orchestrator
+      // dispatched 3 specialists" from "orchestrator answered alone".
+      appendThought(orch.name, {
+        role: "dispatch", color: "#a578ff",
+        text: `📊 ${dispatches.length} dispatch${dispatches.length === 1 ? "" : "es"} parsed → ${dispatches.map(d => "@" + d.agentName).join(", ") || "none"}`,
+      });
+
       // If the orchestrator didn't dispatch anything, its first reply
-      // IS the final answer — surface it to the user and stop.
+      // IS the final answer. This is usually the WRONG outcome (Claude
+      // answered solo instead of routing to specialists) so make it
+      // loudly visible everywhere — Thought tab, system log AND user
+      // chat — instead of silently treating it as "done".
       if (dispatches.length === 0) {
         const clean = stripDispatchDirectives(orchReply).trim();
-        setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: clean || orchReply }]);
+        const noteText = "🚫 0 dispatches parsed — orchestrator answered solo. Specialists DID NOT run. If you expected the team to fan out, the orchestrator's reply is missing `@<agent>: instruction` lines (check the Reply tab). Try rephrasing with an explicit goal that requires file edits / shell / external systems.";
+        appendThought(orch.name, { role: "system", color: "#ff8c8c", text: noteText });
+        appendLog("system", { role: "system", color: "#ff8c8c", text: noteText });
+        setSupChat(prev => [
+          ...prev,
+          { role: "system", color: "#ff8c8c", text: "⚠ Specialists did not run — orchestrator answered solo. See system log." },
+          { role: "orchestrator", color: "#ffd97a", text: clean || orchReply },
+        ]);
         setPhase("done");
         return;
       }
 
-      // Dispatch every specialist IN PARALLEL — orchestrator-driven
-      // fan-out, matching the legacy Python agent_bus behaviour where
-      // every dispatched specialist runs concurrently. All N agents
-      // light up at once in the canvas (activeAgents is a Set), each
-      // streams into its own log, and Promise.allSettled means one
-      // failing specialist doesn't kill the others.
+      // Short, sortable run id used by fleet.rs to bucket per-agent
+      // worktrees under <fleet_root>/<repo>/<run_id>/<agent>. Visible
+      // in the system thought entries so the user can correlate
+      // worktrees on disk back to a specific dispatch.
+      const runId = Date.now().toString(36).slice(-6);
+
+      // ----- Phase 2a: pre-create one git worktree per specialist -----
+      // Serial loop on purpose — concurrent `git worktree add` from the
+      // same source repo can race on `.git/worktrees/` index. After
+      // this loop every dispatch.agent has either: a per-agent worktree
+      // path to use as cwd (isolated), or null (fall back to projectCwd
+      // — happens when projectCwd isn't a git repo at all, e.g.
+      // research-only teams against a plain folder).
       setPhase("dispatching");
       if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
-      const settled = await Promise.allSettled(dispatches.map(async (d) => {
+      type WorktreeBinding = { path: string; branch: string; baseSha: string };
+      const worktreeBySpec = new Map<string, WorktreeBinding | null>();
+      // Surface a "🗂 isolated" or "🗂 shared" line in the orchestrator's
+      // Thought tab per dispatch so the user can see what happened.
+      for (const d of dispatches) {
+        const spec = activeTeam.agents.find(a => a.name === d.agentName);
+        if (!spec) continue;
+        let res: FleetCreateResult;
+        try {
+          res = await invoke<FleetCreateResult>("fleet_worktree_create", {
+            projectCwd, agentName: spec.name, runId,
+          });
+        } catch (e: any) {
+          res = { status: "error", message: String(e?.message ?? e) };
+        }
+        if (res.status === "ready") {
+          worktreeBySpec.set(spec.name, { path: res.path, branch: res.branch, baseSha: res.baseSha });
+          appendThought(orch.name, {
+            role: "fleet", color: "#7ff0c5",
+            text: `🗂 ${spec.name} → ${res.branch}\n   ${res.path}`,
+          });
+        } else if (res.status === "notAGitRepo") {
+          worktreeBySpec.set(spec.name, null);
+          appendThought(orch.name, {
+            role: "fleet", color: "#8a92a3",
+            text: `🗂 ${spec.name}: project is not a git repo — running shared in ${projectCwd || "(no cwd)"}`,
+          });
+        } else if (res.status === "dirtyWorkingTree") {
+          // Abort the whole run with a clear, fixable error rather than
+          // silently giving the agent a stale base. The user can commit
+          // / stash and re-run.
+          throw new Error(
+            `Project has uncommitted changes — commit or stash before running a multi-agent dispatch so each agent works from a clean base.\n\n${res.details}`
+          );
+        } else {
+          worktreeBySpec.set(spec.name, null);
+          appendThought(orch.name, {
+            role: "fleet", color: "#ff8c8c",
+            text: `🗂 ${spec.name}: worktree creation failed — ${res.message}. Falling back to shared cwd.`,
+          });
+        }
+      }
+
+      // ----- Phase 2b: parallel specialist dispatch -----
+      // Each task runs the CLI in its own worktree path (or the shared
+      // projectCwd if none was created), then finalizes (commits) any
+      // edits the agent made before resolving.
+      type SpecOutcome = {
+        name: string;
+        spec: AgentSpec;
+        text: string;
+        ok: boolean;
+        worktree: WorktreeBinding | null;
+        finalize: FleetFinalizeResult | null;
+      };
+      const settled = await Promise.allSettled<SpecOutcome | null>(dispatches.map(async (d) => {
         const spec = activeTeam.agents.find(a => a.name === d.agentName);
         if (!spec) return null;
         addActive(spec.name);
-        const specPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName);
+        const specPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName, directives);
         appendThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${d.instruction}` });
         appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
         const specModel = modelFor(spec.name);
+        const wt = worktreeBySpec.get(spec.name) ?? null;
+        const specCwd = wt ? wt.path : projectCwd;
+        // Per-role tool allowlist from the loaded role yaml.
+        const allowed = roleByName.get(spec.base)?.toolAllowlist;
+        let ok = false;
+        let specText = "";
         try {
-          const specText = await streamChatCompletion(
+          specText = (await streamChatCompletion(
             port, specModel, providerFor(specModel),
             specPrompt, d.instruction, tempFor(spec, 0.5), ctrl.signal,
             (delta) => streamLog(spec.name, delta),
-            projectCwd,
-          );
-          return { name: spec.name, text: specText.trim() };
+            specCwd,
+            undefined, undefined,
+            (channel, role, delta) => streamThought(spec.name, channel, role, delta),
+            allowed,
+          )).trim();
+          ok = true;
         } catch (e: any) {
           const errMsg = `(error: ${String(e?.message ?? e)})`;
           streamLog(spec.name, "\n\n" + errMsg);
-          return { name: spec.name, text: errMsg };
-        } finally {
-          removeActive(spec.name);
+          specText = errMsg;
         }
+        // Finalize: commit anything the agent wrote in its worktree.
+        // Skip when there's no worktree (non-git project — shared cwd
+        // path, no isolation, no commit boundary either).
+        let finalize: FleetFinalizeResult | null = null;
+        if (wt) {
+          try {
+            finalize = await invoke<FleetFinalizeResult>("fleet_worktree_finalize", {
+              worktreePath: wt.path, agentName: spec.name, summary: d.instruction,
+            });
+            if (finalize.status === "committed") {
+              appendThought(spec.name, {
+                role: "fleet", color: "#7ff0c5",
+                text: `📦 committed ${finalize.commitSha.slice(0,7)} · ${finalize.filesChanged} file${finalize.filesChanged === 1 ? "" : "s"}\n${finalize.files.slice(0, 12).join("\n")}`,
+              });
+            } else if (finalize.status === "noChanges") {
+              appendThought(spec.name, { role: "fleet", color: "#8a92a3", text: "📦 no changes to commit" });
+            } else {
+              appendThought(spec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize failed: ${finalize.message}` });
+            }
+          } catch (e: any) {
+            finalize = { status: "error", message: String(e?.message ?? e) };
+            appendThought(spec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize errored: ${String(e?.message ?? e)}` });
+          }
+        }
+        removeActive(spec.name);
+        return { name: spec.name, spec, text: specText, ok, worktree: wt, finalize };
       }));
-      const specialistReplies: Array<{ name: string; text: string }> = [];
+      const outcomes: SpecOutcome[] = [];
       for (const r of settled) {
-        if (r.status === "fulfilled" && r.value) specialistReplies.push(r.value);
+        if (r.status === "fulfilled" && r.value) outcomes.push(r.value);
       }
+      const specialistReplies = outcomes.map(o => ({ name: o.name, text: o.text }));
 
       if (specialistReplies.length === 0) {
+        // Cleanup any worktrees we did create even though no spec ran.
+        for (const wt of worktreeBySpec.values()) {
+          if (!wt) continue;
+          try { await invoke("fleet_worktree_remove", { args: { projectCwd, worktreePath: wt.path, branch: wt.branch, keep: false } }); } catch { /* best-effort */ }
+        }
         setPhase("done");
         return;
       }
 
-      // ----- Phase 3: orchestrator integration -----
+      // ----- Phase 3: orchestrator integration (text only, unchanged) -----
       setPhase("integrating");
       addActive(orch.name);
       const integrationInput = [
@@ -2980,15 +3962,144 @@ export default function AgentsPage() {
       try {
         finalReply = await streamChatCompletion(
           port, finalModel, providerFor(finalModel),
-          buildOrchestratorPrompt(activeTeam, roleByName, orch), integrationInput,
+          buildOrchestratorPrompt(activeTeam, roleByName, orch, directives, directorMode), integrationInput,
           tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
+          undefined, undefined,
+          (channel, role, delta) => streamThought(orch.name, channel, role, delta),
         );
       } finally {
         removeActive(orch.name);
       }
       setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim() }]);
+
+      // ----- Phase 4: serial squash-merge each committed branch back -----
+      // Conflicts here are real (two agents touched the same file) —
+      // we abort that branch's merge, KEEP its worktree on disk, and
+      // surface the conflict path so the user can resolve manually.
+      const codeFilesChanged = new Set<string>();
+      const keepOnDisk = new Set<string>();
+      for (const o of outcomes) {
+        if (!o.worktree || !o.finalize || o.finalize.status !== "committed") continue;
+        let merge: FleetMergeResult;
+        try {
+          merge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
+            projectCwd, agentName: o.name, branch: o.worktree.branch,
+          });
+        } catch (e: any) {
+          merge = { status: "error", message: String(e?.message ?? e) };
+        }
+        if (merge.status === "merged") {
+          appendThought(orch.name, {
+            role: "fleet", color: "#7ff0c5",
+            text: `🔀 merged ${o.name} → ${merge.commitSha.slice(0,7)} · ${merge.filesChanged} file${merge.filesChanged === 1 ? "" : "s"}`,
+          });
+          for (const f of o.finalize.files) {
+            // files entries are "STATUS\tpath" — take the path part.
+            const tab = f.indexOf("\t");
+            const p = tab >= 0 ? f.slice(tab + 1).trim() : f.trim();
+            if (isCodeFile(p)) codeFilesChanged.add(p);
+          }
+        } else if (merge.status === "conflict") {
+          keepOnDisk.add(o.name);
+          appendThought(orch.name, {
+            role: "fleet", color: "#ffb86c",
+            text: `⚠ conflict merging ${o.name} (branch ${o.worktree.branch} kept on disk for resolution):\n${merge.files.join("\n")}`,
+          });
+        } else if (merge.status === "noChanges") {
+          appendThought(orch.name, { role: "fleet", color: "#8a92a3", text: `🔀 ${o.name}: nothing to merge` });
+        } else {
+          keepOnDisk.add(o.name);
+          appendThought(orch.name, { role: "fleet", color: "#ff8c8c", text: `⚠ merge ${o.name} failed: ${merge.message}` });
+        }
+      }
+
+      // ----- Phase 5: auto-doc — if code changed AND team has docs -----
+      const docSpec = activeTeam.agents.find(
+        a => a.base === "documentation" || a.name === "documentation" || a.base === "docs" || a.name === "docs"
+      );
+      if (docSpec && codeFilesChanged.size > 0 && !ctrl.signal.aborted) {
+        appendThought(docSpec.name, {
+          role: "fleet", color: "#7ff0c5",
+          text: `📚 auto-dispatch: ${codeFilesChanged.size} code file${codeFilesChanged.size === 1 ? "" : "s"} changed — updating docs`,
+        });
+        addActive(docSpec.name);
+        appendLog(docSpec.name, { role: docSpec.name, color: colorForAgent(docSpec), text: "" });
+        const docInstruction = [
+          "The team just landed these code changes. Read each file, decide what user-facing documentation needs to be added or updated (README sections, changelog, docstrings), and make the edits.",
+          "",
+          "Files changed in this dispatch:",
+          ...Array.from(codeFilesChanged).map(f => `  - ${f}`),
+        ].join("\n");
+        // Doc agent runs in its OWN worktree so its edits get the same
+        // commit-and-merge attribution as the code specialists.
+        let docWt: WorktreeBinding | null = null;
+        try {
+          const wtRes = await invoke<FleetCreateResult>("fleet_worktree_create", {
+            projectCwd, agentName: docSpec.name, runId: `${runId}-docs`,
+          });
+          if (wtRes.status === "ready") {
+            docWt = { path: wtRes.path, branch: wtRes.branch, baseSha: wtRes.baseSha };
+            appendThought(docSpec.name, { role: "fleet", color: "#7ff0c5", text: `🗂 ${docSpec.name} → ${wtRes.branch}` });
+          }
+        } catch { /* fall back to shared cwd */ }
+        const docCwd = docWt ? docWt.path : projectCwd;
+        const docAllowed = roleByName.get(docSpec.base)?.toolAllowlist;
+        try {
+          await streamChatCompletion(
+            port, modelFor(docSpec.name), providerFor(modelFor(docSpec.name)),
+            buildSpecialistPrompt(activeTeam, docSpec, roleByName, directives),
+            docInstruction, tempFor(docSpec, 0.3), ctrl.signal,
+            (delta) => streamLog(docSpec.name, delta),
+            docCwd,
+            undefined, undefined,
+            (channel, role, delta) => streamThought(docSpec.name, channel, role, delta),
+            docAllowed,
+          );
+          if (docWt) {
+            const docFinalize = await invoke<FleetFinalizeResult>("fleet_worktree_finalize", {
+              worktreePath: docWt.path, agentName: docSpec.name, summary: "auto-doc after merge",
+            });
+            if (docFinalize.status === "committed") {
+              appendThought(docSpec.name, {
+                role: "fleet", color: "#7ff0c5",
+                text: `📦 committed ${docFinalize.commitSha.slice(0,7)} · ${docFinalize.filesChanged} file${docFinalize.filesChanged === 1 ? "" : "s"}`,
+              });
+              const docMerge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
+                projectCwd, agentName: docSpec.name, branch: docWt.branch,
+              });
+              if (docMerge.status === "merged") {
+                appendThought(orch.name, {
+                  role: "fleet", color: "#7ff0c5",
+                  text: `🔀 merged ${docSpec.name} → ${docMerge.commitSha.slice(0,7)} · ${docMerge.filesChanged} file${docMerge.filesChanged === 1 ? "" : "s"}`,
+                });
+              } else if (docMerge.status === "conflict") {
+                keepOnDisk.add(docSpec.name);
+                appendThought(orch.name, { role: "fleet", color: "#ffb86c", text: `⚠ docs merge conflict — branch ${docWt.branch} kept` });
+              }
+            }
+          }
+        } catch (e: any) {
+          appendThought(docSpec.name, { role: "fleet", color: "#ff8c8c", text: `📚 auto-doc errored: ${String(e?.message ?? e)}` });
+        } finally {
+          removeActive(docSpec.name);
+          if (docWt) {
+            try { await invoke("fleet_worktree_remove", { args: { projectCwd, worktreePath: docWt.path, branch: docWt.branch, keep: keepOnDisk.has(docSpec.name) } }); } catch { /* best-effort */ }
+          }
+        }
+      }
+
+      // ----- Cleanup: drop the per-spec worktrees (keep conflicted ones) -----
+      for (const o of outcomes) {
+        if (!o.worktree) continue;
+        const keep = keepOnDisk.has(o.name);
+        try {
+          await invoke("fleet_worktree_remove", {
+            args: { projectCwd, worktreePath: o.worktree.path, branch: o.worktree.branch, keep },
+          });
+        } catch { /* best-effort — worktree is recoverable on disk */ }
+      }
 
       setPhase("done");
     } catch (e: any) {
@@ -3139,6 +4250,23 @@ export default function AgentsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId]);
 
+  // Streaming thought / tool-call deltas — fired by the Telegram bridge
+  // dispatch loop for every Anthropic thinking / tool_use chunk and
+  // every OpenAI tool_calls / reasoning chunk. Coalesce per (agent,
+  // channel) into one growing entry, same as the desktop streamThought.
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent<{ projectId: string; agent: string; channel: string; role: string; delta: string }>).detail;
+      if (!detail || typeof detail.delta !== "string") return;
+      if (detail.projectId !== selectedProjectId) return;
+      const agent = detail.agent || "orchestrator";
+      streamThought(agent, detail.channel || "thinking", detail.role || "🧠 thinking", detail.delta);
+    };
+    window.addEventListener("owllm:thought:delta", handler as EventListener);
+    return () => window.removeEventListener("owllm:thought:delta", handler as EventListener);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId]);
+
   // Log events — bridge fires one per agent that gets seeded with an
   // empty reply slot (so the OrchestratorPane Reply tab can stream
   // tokens into it). Mirrors appendLog from the desktop dispatch.
@@ -3174,6 +4302,14 @@ export default function AgentsPage() {
 
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", minHeight:0 }}>
+      {directivesPanelOpen && selectedProjectId && (
+        <DirectivesPanel
+          projectId={selectedProjectId}
+          directives={directives}
+          onChanged={reloadDirectives}
+          onClose={() => setDirectivesPanelOpen(false)}
+        />
+      )}
       <LocationRow
         projects={projects}
         selectedId={selectedProjectId}
@@ -3280,6 +4416,10 @@ export default function AgentsPage() {
                   autoApprove={autoApprove}
                   onToggleAutoApprove={() => setAutoApprove(v => !v)}
                   projectId={selectedProjectId}
+                  directives={directives}
+                  directorMode={directorMode}
+                  onToggleDirectorMode={() => setDirectorMode(!directorMode)}
+                  onOpenDirectives={() => setDirectivesPanelOpen(true)}
                 />
               </div>
             </div>

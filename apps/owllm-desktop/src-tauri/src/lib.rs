@@ -16,6 +16,8 @@ mod agents;
 mod bridges;
 mod code;
 mod dialog;
+mod directives;
+mod fleet;
 mod hardware;
 mod models;
 mod paths;
@@ -40,6 +42,7 @@ pub fn run() {
             accounts::accounts_get_secret,
             accounts::accounts_test_probe,
             accounts::claude_cli_complete,
+            accounts::claude_cli_stream,
             agents::list_team_templates,
             agents::list_agent_roles,
             agents::list_skill_packs,
@@ -49,6 +52,18 @@ pub fn run() {
             code::launch_external_editor,
             dialog::pick_folder,
             dialog::pick_file,
+            directives::directives_list,
+            directives::directives_add,
+            directives::directives_update,
+            directives::directives_delete,
+            directives::project_set_director_mode,
+            directives::project_get_director_mode,
+            fleet::fleet_worktree_create,
+            fleet::fleet_worktree_finalize,
+            fleet::fleet_worktree_diff,
+            fleet::fleet_worktree_merge,
+            fleet::fleet_worktree_remove,
+            fleet::fleet_head_files,
             hardware::hardware_info,
             hardware::vram_status,
             hardware::set_gpu_selection,

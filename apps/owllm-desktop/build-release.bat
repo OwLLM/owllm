@@ -2,8 +2,16 @@
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
-set "PATH=%USERPROFILE%\.cargo\bin;C:\mingw64\bin;%PATH%"
-set "RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-gnu"
+rem 2026-05-17: switched from GNU/mingw to MSVC. The GNU toolchain on
+rem Windows kept producing non-deterministic toolchain failures: gcc
+rem 13.2.0 ICE in the IRA pass compiling sqlite3.c, rustc segfaulting
+rem with STATUS_ACCESS_VIOLATION on our lib, LTO bitcode corruption
+rem after partial builds. MSVC is the path Microsoft actually
+rem maintains and is significantly more stable. Requires "Visual
+rem Studio Build Tools 2022" with the "Desktop development with C++"
+rem workload, OR a Visual Studio install.
+set "PATH=%USERPROFILE%\.cargo\bin;%PATH%"
+set "RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc"
 
 where cargo >nul 2>nul
 if errorlevel 1 (
@@ -12,27 +20,31 @@ if errorlevel 1 (
   exit /b 1
 )
 
-where x86_64-w64-mingw32-gcc >nul 2>nul
+where cl >nul 2>nul
 if errorlevel 1 (
-  echo [owllm-desktop] MinGW GCC is not on PATH.
-  echo Expected: C:\mingw64\bin\x86_64-w64-mingw32-gcc.exe
+  echo [owllm-desktop] MSVC C++ compiler ^(cl.exe^) not on PATH.
+  echo Install "Visual Studio Build Tools 2022" with the
+  echo "Desktop development with C++" workload, then run this from a
+  echo "x64 Native Tools Command Prompt for VS 2022", OR run vcvars64
+  echo first:
+  echo    "C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
   exit /b 1
 )
 
-rustup toolchain install stable-x86_64-pc-windows-gnu
+rustup toolchain install stable-x86_64-pc-windows-msvc
 if errorlevel 1 exit /b 1
 
 echo [owllm-desktop] Building web UI...
 call npm run build
 if errorlevel 1 exit /b 1
 
-echo [owllm-desktop] Building Tauri release with GNU toolchain ^(this can take several minutes on first run^)...
-call npm run tauri -- build --target x86_64-pc-windows-gnu
+echo [owllm-desktop] Building Tauri release with MSVC toolchain ^(this can take several minutes on first run^)...
+call npm run tauri -- build --target x86_64-pc-windows-msvc
 if errorlevel 1 exit /b 1
 
 echo.
 echo [owllm-desktop] Done.
-set "RELEASE=%cd%\src-tauri\target\x86_64-pc-windows-gnu\release"
+set "RELEASE=%cd%\src-tauri\target\x86_64-pc-windows-msvc\release"
 set "DIST=%cd%\dist"
 if not exist "%DIST%" mkdir "%DIST%"
 copy /Y "%RELEASE%\owllm-desktop.exe" "%cd%\OwLLM Desktop.exe" >nul

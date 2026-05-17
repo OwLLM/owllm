@@ -10,10 +10,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Instant;
+use tauri::ipc::Channel;
 
 /// Windows: prevent a flashing console window when we shell out to
 /// the claude / codex CLIs. 0x08000000 = CREATE_NO_WINDOW.
@@ -368,6 +369,325 @@ pub async fn claude_cli_complete(
         }
         let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
         Ok(stdout.trim().to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+// ---------------------------------------------------------------------
+// Streaming Claude CLI dispatch — runs `claude --print --output-format
+// stream-json --verbose` so the agentic UI can see thinking content
+// blocks and tool_use calls as the CLI emits them, instead of waiting
+// for one final blob from --print.
+// ---------------------------------------------------------------------
+
+/// One streaming event from the Claude CLI. Frontend receives these on
+/// a Tauri Channel and routes text → reply pane, thinking → Thought
+/// tab (italic), tool_use → Thought tab (monospace), tool_result →
+/// Thought tab (under the matching tool's id).
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ClaudeStreamEvent {
+    /// User-facing reply text. Multiple events accumulate into the
+    /// final message in the Reply pane.
+    Text { delta: String },
+    /// Extended-thinking content. Streamed as the CLI emits assistant
+    /// messages with `thinking` content blocks.
+    Thinking { delta: String },
+    /// The CLI is invoking a tool. `input` is the JSON arguments,
+    /// pretty-printed; `tool_use_id` lets us match the matching
+    /// `tool_result` back to this call.
+    ToolUse { tool_use_id: String, name: String, input: String },
+    /// The result of a tool call (file contents, command output, etc.).
+    /// Surfaced under the same Thought block as the matching tool_use
+    /// so the user sees both the request and its outcome.
+    ToolResult { tool_use_id: String, content: String },
+    /// Non-fatal error during stream parsing — surfaced so the user
+    /// knows the dispatch had partial trouble, but the CLI keeps
+    /// running.
+    Error { message: String },
+}
+
+/// Streaming completion via `claude --print --output-format stream-json
+/// --verbose`. Each line of CLI stdout is one JSON event; we parse it
+/// and forward the relevant pieces over the supplied Channel. Returns
+/// the assembled assistant text on completion.
+///
+/// `cwd` and `auto_approve` behave identically to claude_cli_complete.
+/// Map an OWLLM-style role tool name (read_file, edit_file, shell, …)
+/// to the corresponding Claude Code CLI tool name. Returns None for
+/// OWLLM-only tools that have no Claude CLI equivalent (dispatch,
+/// verify, ssh_*) — they're silently dropped so the role still works
+/// when the dispatch resolves to the CLI subscription.
+fn map_owllm_tool_to_cli(name: &str) -> Option<&'static str> {
+    match name {
+        "read_file" => Some("Read"),
+        "edit_file" => Some("Edit"),
+        "write_file_with_diff" => Some("Write"),
+        "list_dir" | "glob_files" => Some("Glob"),
+        "grep" => Some("Grep"),
+        "shell" => Some("Bash"),
+        "todo_write" => Some("TodoWrite"),
+        "http_get" => Some("WebFetch"),
+        // OWLLM-internal control tools — no CLI counterpart.
+        "dispatch" | "verify" | "ssh_exec" | "ssh_upload" | "ssh_download" => None,
+        _ => None,
+    }
+}
+
+#[tauri::command]
+pub async fn claude_cli_stream(
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    auto_approve: Option<bool>,
+    // Optional per-role tool gate. When supplied, gets translated to
+    // `--allowedTools "<Tool> <Tool> …"` so the CLI hard-rejects any
+    // other tool the model tries. None / empty / containing "all"
+    // passes through unrestricted (operator role behaviour).
+    allowed_tools: Option<Vec<String>>,
+    on_event: Channel<ClaudeStreamEvent>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let exe = find_claude_cli()
+            .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
+        let mut cmd = Command::new(&exe);
+
+        #[cfg(windows)]
+        let batch = is_batch_shim(&exe);
+        #[cfg(not(windows))]
+        let batch = false;
+
+        push_arg(&mut cmd, batch, "--print");
+        // stream-json + --verbose: the CLI emits one NDJSON event per
+        // line. Without --verbose, stream-json suppresses assistant
+        // messages and only the final result event is produced —
+        // exactly what we don't want.
+        push_arg(&mut cmd, batch, "--output-format");
+        push_arg(&mut cmd, batch, "stream-json");
+        push_arg(&mut cmd, batch, "--verbose");
+        if auto_approve.unwrap_or(false) {
+            push_arg(&mut cmd, batch, "--permission-mode");
+            push_arg(&mut cmd, batch, "bypassPermissions");
+        }
+        // Hard tool gate: each agent role declares a tool_allowlist
+        // (read_file, shell, …). Translate to CLI tool names and pass
+        // as --allowedTools so the CLI rejects anything outside the
+        // allowed set. The `operator` role uses ["all"] → skip the
+        // flag so it gets the full CLI surface.
+        if let Some(allowed) = allowed_tools.as_ref() {
+            let wants_all = allowed.iter().any(|t| t == "all");
+            if !wants_all && !allowed.is_empty() {
+                let cli_tools: Vec<&str> = allowed
+                    .iter()
+                    .filter_map(|t| map_owllm_tool_to_cli(t))
+                    .collect();
+                if !cli_tools.is_empty() {
+                    push_arg(&mut cmd, batch, "--allowedTools");
+                    push_arg(&mut cmd, batch, &cli_tools.join(" "));
+                }
+            }
+        }
+        if !system_prompt.trim().is_empty() {
+            push_arg(&mut cmd, batch, "--append-system-prompt");
+            push_arg(&mut cmd, batch, &system_prompt);
+        }
+        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let p = std::path::Path::new(dir);
+            if p.is_dir() {
+                cmd.current_dir(p);
+            }
+        }
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(user_message.as_bytes())
+                .map_err(|e| format!("write stdin: {e}"))?;
+            // Closing stdin signals EOF — without this the CLI sits
+            // waiting for more input and never emits anything.
+            drop(stdin);
+        }
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "no stdout pipe".to_string())?;
+        let reader = BufReader::new(stdout);
+        let mut assembled = String::new();
+        for line_res in reader.lines() {
+            let line = match line_res {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = on_event.send(ClaudeStreamEvent::Error {
+                        message: format!("read stdout: {e}"),
+                    });
+                    continue;
+                }
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Parse the NDJSON line. Skip malformed lines silently —
+            // the CLI sometimes interleaves a non-JSON warning before
+            // the first event when, e.g., a config file is missing.
+            let v: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let event_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match event_type {
+                "assistant" => {
+                    // Each assistant event is one full message with a
+                    // content array. Walk the blocks and emit per-block
+                    // events so the frontend can route each to the
+                    // right pane (text → reply, thinking → italic,
+                    // tool_use → monospace command block).
+                    if let Some(content) = v
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                    {
+                        for block in content {
+                            let bkind =
+                                block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match bkind {
+                                "text" => {
+                                    if let Some(t) =
+                                        block.get("text").and_then(|t| t.as_str())
+                                    {
+                                        assembled.push_str(t);
+                                        let _ = on_event.send(ClaudeStreamEvent::Text {
+                                            delta: t.to_string(),
+                                        });
+                                    }
+                                }
+                                "thinking" => {
+                                    if let Some(t) =
+                                        block.get("thinking").and_then(|t| t.as_str())
+                                    {
+                                        let _ = on_event.send(ClaudeStreamEvent::Thinking {
+                                            delta: t.to_string(),
+                                        });
+                                    }
+                                }
+                                "tool_use" => {
+                                    let id = block
+                                        .get("id")
+                                        .and_then(|i| i.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let name = block
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("tool")
+                                        .to_string();
+                                    // Pretty-print the JSON input so a
+                                    // multi-line shell command stays
+                                    // readable in the Thought tab.
+                                    let input = block
+                                        .get("input")
+                                        .map(|i| {
+                                            serde_json::to_string_pretty(i)
+                                                .unwrap_or_else(|_| i.to_string())
+                                        })
+                                        .unwrap_or_default();
+                                    let _ = on_event.send(ClaudeStreamEvent::ToolUse {
+                                        tool_use_id: id,
+                                        name,
+                                        input,
+                                    });
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                "user" => {
+                    // Tool result blocks come back wrapped in a user
+                    // event — the CLI is showing what the tool did.
+                    if let Some(content) = v
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                    {
+                        for block in content {
+                            if block.get("type").and_then(|t| t.as_str())
+                                == Some("tool_result")
+                            {
+                                let id = block
+                                    .get("tool_use_id")
+                                    .and_then(|i| i.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let content_str = match block.get("content") {
+                                    Some(c) if c.is_string() => {
+                                        c.as_str().unwrap_or("").to_string()
+                                    }
+                                    Some(c) if c.is_array() => c
+                                        .as_array()
+                                        .unwrap()
+                                        .iter()
+                                        .filter_map(|p| {
+                                            p.get("text")
+                                                .and_then(|t| t.as_str())
+                                                .map(|s| s.to_string())
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n"),
+                                    _ => String::new(),
+                                };
+                                let _ = on_event.send(ClaudeStreamEvent::ToolResult {
+                                    tool_use_id: id,
+                                    content: content_str,
+                                });
+                            }
+                        }
+                    }
+                }
+                "result" => {
+                    // Final summary event — carries the full assistant
+                    // text in the `result` field. We've already streamed
+                    // it via assistant text blocks, but if no assistant
+                    // event ever fired (ultra-fast result), surface this
+                    // as the reply.
+                    if let Some(t) = v.get("result").and_then(|r| r.as_str()) {
+                        if assembled.is_empty() && !t.is_empty() {
+                            assembled.push_str(t);
+                            let _ = on_event.send(ClaudeStreamEvent::Text {
+                                delta: t.to_string(),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let status = child.wait().map_err(|e| format!("wait claude: {e}"))?;
+        if !status.success() {
+            // Drain stderr after exit to surface the failure reason.
+            let mut stderr_buf = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut stderr_buf);
+            }
+            return Err(format!(
+                "claude CLI exited {} — {}",
+                status.code().unwrap_or(-1),
+                if stderr_buf.is_empty() {
+                    "no stderr".to_string()
+                } else {
+                    stderr_buf.trim().to_string()
+                }
+            ));
+        }
+        Ok(assembled.trim().to_string())
     })
     .await
     .map_err(|e| format!("join error: {e}"))?

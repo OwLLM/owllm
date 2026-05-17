@@ -43,3 +43,24 @@ rfd = "0.15"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 [dev-dependencies]
 tempfile = "3"
+
+# Release profile tuned to keep rustc alive on the GNU/mingw Windows
+# toolchain. The defaults (opt-level=3, codegen-units=16, no LTO) hit
+# STATUS_ACCESS_VIOLATION + LTO bitcode corruption on this machine. The
+# settings below trade ~10% binary size for build reliability:
+#   - opt-level=2  : same speed in practice; dodges the LLVM passes
+#                    that crash at -O3 on Windows-GNU
+#   - lto=false    : explicitly off so partial builds can't leave a
+#                    poisoned bitcode artifact behind
+#   - codegen-units=256 : maximum parallelism of small units → each
+#                    rustc subprocess works on a smaller graph and
+#                    stays under the heap pressure threshold
+#   - incremental=false : release builds should be reproducible; also
+#                    disables the incremental cache that has
+#                    occasionally corrupted between failed runs
+[profile.release]
+opt-level = 2
+lto = false
+codegen-units = 256
+incremental = false
+strip = "debuginfo"

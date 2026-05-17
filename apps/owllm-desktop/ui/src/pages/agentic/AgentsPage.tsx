@@ -160,6 +160,16 @@ function agentIconRef(spec: AgentSpec, roleByName: Map<string, RoleData>): strin
 }
 
 const _ACRONYMS = new Set(["ux","ui","api","mcp","gpu","be","fe","qa","cli","sql","db"]);
+/// Display label with a special case for the design-team Product Owner,
+/// who appears in the canvas as "Team Leader (Design Team)" instead of
+/// the bare role name. Falls through to displayLabel for everything
+/// else, including the design Product Owner of a non-design team
+/// (unlikely but handled — the group classifier guards it).
+function teamMemberLabel(name: string, group: TeamGroup): string {
+  const short = name.includes(".") ? name.split(".").pop()! : name;
+  if (group === "design" && short === "product_owner") return "Team Leader (Design Team)";
+  return displayLabel(name);
+}
 function displayLabel(fullName: string): string {
   const short = fullName.includes(".") ? fullName.split(".").pop()! : fullName;
   if (!short) return fullName;
@@ -256,8 +266,8 @@ function computeDepths(team: Team): Map<string, number> {
   // the same layer as the orchestrator. They are peers: the critic
   // reviews orchestrator output and stands in for the user when
   // Director Mode is on, so it never depends on a specialist.
-  if (team.agents.some(a => a.name === "critic" && a.name !== orchName)) {
-    out.set("critic", 0);
+  if (team.agents.some(a => a.name === CRITIC_AGENT_NAME && a.name !== orchName)) {
+    out.set(CRITIC_AGENT_NAME, 0);
   }
 
   // Predecessor set per agent, EXCLUDING orchestrator-originated edges.
@@ -277,7 +287,7 @@ function computeDepths(team: Team): Map<string, number> {
   // cyclic routing graph (rare but legal) can't spin forever — N+5
   // passes is plenty to converge for any topology that fits on the
   // canvas.
-  const specialists = team.agents.map(a => a.name).filter(n => n !== orchName && n !== "critic");
+  const specialists = team.agents.map(a => a.name).filter(n => n !== orchName && n !== CRITIC_AGENT_NAME);
   for (const n of specialists) out.set(n, 1);
   let changed = true;
   let iter = 0;
@@ -596,12 +606,11 @@ function AgentInfoCard({
       {tint.badge && (
         <div data-ui="AgentGroupBadge" style={{
           position:"absolute", top:34, right:8, zIndex:3,
-          background: group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(40, 40, 50, 0.85)",
-          color: group === "design" ? "#0a1208" : "#ffe14c",
+          background: group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(58, 120, 220, 0.95)",
+          color: "#0a1208",
           fontSize: 9, fontWeight: 800, letterSpacing: 0.4,
           padding: "2px 7px", borderRadius: 8,
           pointerEvents:"none", textTransform:"uppercase", whiteSpace:"nowrap",
-          border: group === "critic" ? "1px solid rgba(255,225,76,0.5)" : "none",
         }}>{tint.badge}</div>
       )}
       <div data-ui="AgentRibbon" style={{ position:"absolute", left:8, top:8, width:CARD_W - 16, height:22, borderRadius:6, background:`linear-gradient(90deg, ${statusCol}3d 0%, ${statusCol}11 100%)`, border:`1px solid ${statusCol}77`, display:"flex", alignItems:"center", paddingLeft:10, fontSize:12, fontWeight:700, color:"var(--fg)", letterSpacing:0.2 }}>{statusWord}</div>
@@ -610,7 +619,7 @@ function AgentInfoCard({
       <div style={{ position:"absolute", left:pic_x, top:pic_y, width:pic_size, height:pic_size, borderRadius:"50%", background:"#1e2434", border:"1.4px solid rgba(230,240,255,0.78)", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden" }}>
         <img src={owlSrc(agentIconRef(spec, roleByName))} style={{ width:pic_size * 0.85, height:pic_size * 0.85, objectFit:"contain" }} />
       </div>
-      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y + pic_size + 6, width:pic_size + 12, height:20, textAlign:"center", fontSize:14, fontWeight:700, color:"var(--fg)", lineHeight:"20px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={displayLabel(spec.name)}>{displayLabel(spec.name)}</div>
+      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y + pic_size + 6, width:pic_size + 12, height:20, textAlign:"center", fontSize:14, fontWeight:700, color:"var(--fg)", lineHeight:"20px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={teamMemberLabel(spec.name, group)}>{teamMemberLabel(spec.name, group)}</div>
       <div style={{ position:"absolute", left:info_x, top:info_y, width:info_w, height:96, fontSize:12, color:"var(--fg)", lineHeight:1.35, overflow:"hidden" }}>
         {trimmed}
       </div>
@@ -1051,14 +1060,17 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
       // synthetic critic (rendered as a peer next to the orchestrator,
       // not on a specialist arc).
       .filter(a => a.name !== "orchestrator" && a.base !== "orchestrator" && a.name !== CRITIC_AGENT_NAME)
-      .map(a => ({
-        name: a.name,
-        label: displayLabel(a.name),
-        iconRef: agentIconRef(a, roleByName),
-        depth: Math.max(1, depths.get(a.name) ?? 1),
-        active: activeAgents.has(a.name),
-        group: groupForAgent(a),
-      }));
+      .map(a => {
+        const group = groupForAgent(a);
+        return {
+          name: a.name,
+          label: teamMemberLabel(a.name, group),
+          iconRef: agentIconRef(a, roleByName),
+          depth: Math.max(1, depths.get(a.name) ?? 1),
+          active: activeAgents.has(a.name),
+          group,
+        };
+      });
   }, [team, roleByName, activeAgents]);
   // Separate critic ref so the renderer can place it at depth-0 next
   // to the orchestrator (peer position, not on a specialist arc).
@@ -1073,6 +1085,22 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
       if (!m.has(r.depth)) m.set(r.depth, []);
       m.get(r.depth)!.push(r);
     }
+    // Same ordering as GraphCanvas: Design first (Product Owner leading),
+    // then Build, then Critic — so the orbital arc reads with the
+    // design cluster swept around the top-right of the ring.
+    const GORDER: Record<TeamGroup, number> = { design: 0, build: 1, critic: 2 };
+    for (const row of m.values()) {
+      row.sort((a, b) => {
+        if (a.group !== b.group) return GORDER[a.group] - GORDER[b.group];
+        if (a.group === "design") {
+          const sa = a.name.includes(".") ? a.name.split(".").pop()! : a.name;
+          const sb = b.name.includes(".") ? b.name.split(".").pop()! : b.name;
+          if (sa === "product_owner" && sb !== "product_owner") return -1;
+          if (sb === "product_owner" && sa !== "product_owner") return 1;
+        }
+        return 0;
+      });
+    }
     return m;
   }, [roster]);
   const sortedDepths = Array.from(depthMap.keys()).sort((a, b) => a - b);
@@ -1085,6 +1113,12 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   if (step < 90) step = 90;
   const ring_radii = sortedDepths.map(d => inner_offset + step * d);
   const arc_span = (Math.PI * 2) * (340 / 360);
+  // Orchestrator hub size — hoisted up here (was below) so the Critic
+  // node can position itself OUTSIDE the hub artwork. The owl image is
+  // drawn at orchestrator_r * 1.12 from centre; placing the critic at
+  // orchestrator_r * 1.6 puts it clearly past the hub edge.
+  const NODE_R = 22;
+  const orchestrator_r = Math.max(48, Math.min(w, h) * 0.10);
 
   type Node = { name: string; x: number; y: number; label: string; iconRef: string; active: boolean; depth: number; group: TeamGroup };
   const nodes: Node[] = [];
@@ -1108,12 +1142,12 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
     }
   }
   // Place the synthetic Critic as a peer of the orchestrator: same
-  // depth (0), positioned to the right of centre at roughly half the
-  // first-ring radius so it reads as "next to" the hub, not as a
-  // specialist. Renderer-side; not on any arc.
+  // depth (0), positioned PAST the orchestrator's owl hub artwork on
+  // the right so it doesn't disappear under the owl image. Scales with
+  // orchestrator_r so it stays outside the hub at any canvas size.
   const criticNode: Node | null = criticSpec ? {
     name: criticSpec.name,
-    x: cx + Math.max(110, inner_offset * 0.75),
+    x: cx + orchestrator_r * 1.6,
     y: cy,
     label: displayLabel(criticSpec.name),
     iconRef: agentIconRef(criticSpec, roleByName),
@@ -1139,8 +1173,6 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
     nodeByName.has(e.source) &&
     nodeByName.has(e.target)
   );
-  const NODE_R = 22;
-  const orchestrator_r = Math.max(48, Math.min(w, h) * 0.10);
   const arc_r_out = orchestrator_r * 1.7;
   const arc_r_in  = orchestrator_r * 1.2;
   const pulse = 0.5 + 0.5 * Math.sin((arcPhase * Math.PI) / 180);
@@ -1362,28 +1394,45 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
         const glow = n.active ? 12 + 10 * pulse : 4;
         const tint = tintForGroup(n.group);
         const isCritic = n.group === "critic";
-        // Critic gets a rainbow conic-gradient ring so it visually
-        // stands apart from layer-colour halos. Other groups get a
-        // semi-transparent tinted disc behind the icon.
+        // Critic gets a SHARP rainbow ring around the icon — full
+        // opacity, no blur. The previous blurred 0.55-opacity disc
+        // disappeared into the background; this version uses a
+        // conic-gradient circle masked with a radial-gradient to carve
+        // out the centre, leaving a crisp rainbow annulus. Other groups
+        // get a semi-transparent tinted disc behind the icon as before.
+        const RING_PAD = 9;
         return (
           <React.Fragment key={"node" + i}>
-            <div
-              style={{
-                position: "absolute",
-                left: n.x - NODE_R - 6,
-                top:  n.y - NODE_R - 6,
-                width:  NODE_R * 2 + 12,
-                height: NODE_R * 2 + 12,
-                borderRadius: "50%",
-                pointerEvents: "none",
-                background: isCritic
-                  ? "conic-gradient(from 0deg, #ff5e7e, #ffb84c, #ffe14c, #6cff5e, #5ec6ff, #b86cff, #ff5e7e)"
-                  : tint.bg,
-                border: `1.5px solid ${tint.border}`,
-                opacity: isCritic ? 0.55 : 1,
-                filter: isCritic ? "blur(2px)" : "none",
-              }}
-            />
+            {isCritic ? (
+              <div
+                style={{
+                  position: "absolute",
+                  left: n.x - NODE_R - RING_PAD,
+                  top:  n.y - NODE_R - RING_PAD,
+                  width:  (NODE_R + RING_PAD) * 2,
+                  height: (NODE_R + RING_PAD) * 2,
+                  borderRadius: "50%",
+                  pointerEvents: "none",
+                  background: "conic-gradient(from 0deg, #ff5e7e, #ffb84c, #ffe14c, #6cff5e, #5ec6ff, #b86cff, #ff5e7e)",
+                  WebkitMask: `radial-gradient(circle, transparent ${(NODE_R + 1) / (NODE_R + RING_PAD) * 100}%, #000 ${(NODE_R + 3) / (NODE_R + RING_PAD) * 100}%)`,
+                  mask: `radial-gradient(circle, transparent ${(NODE_R + 1) / (NODE_R + RING_PAD) * 100}%, #000 ${(NODE_R + 3) / (NODE_R + RING_PAD) * 100}%)`,
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  position: "absolute",
+                  left: n.x - NODE_R - 6,
+                  top:  n.y - NODE_R - 6,
+                  width:  NODE_R * 2 + 12,
+                  height: NODE_R * 2 + 12,
+                  borderRadius: "50%",
+                  pointerEvents: "none",
+                  background: tint.bg,
+                  border: `1.5px solid ${tint.border}`,
+                }}
+              />
+            )}
             <img
               src={owlSrc(n.iconRef)}
               style={{
@@ -1571,6 +1620,10 @@ function GraphCanvas({
       if (!byDepth.has(d)) byDepth.set(d, []);
       byDepth.get(d)!.push(a);
     }
+    // Sort each row so Design cluster leads (with Product Owner first)
+    // and Build cluster follows. Stable for equal entries — keeps the
+    // team JSON's intra-cluster authoring order.
+    for (const row of byDepth.values()) row.sort(rosterCompare);
     const sortedDepths = Array.from(byDepth.keys()).sort((a, b) => a - b);
     const availW = w - SIDE_PAD * 2;
     const perRow = Math.max(1, Math.floor((availW + COL_GAP) / (NODE_W + COL_GAP)));
@@ -1742,6 +1795,48 @@ function GraphCanvas({
             );
           })()}
         </svg>
+        {/* Cluster bounding regions — translucent backdrops behind the
+            Design and Build cards so each group reads as one block. Goes
+            before the cards so it sits underneath in stacking order. */}
+        {(() => {
+          const byGroup: Record<TeamGroup, GNode[]> = { design: [], build: [], critic: [] };
+          for (const n of placed) {
+            if (n.name === orchName) continue;
+            byGroup[groupForAgent(n.spec)].push(n);
+          }
+          const PAD = 18;
+          const LABEL_TOP = 22;
+          const regions: Array<{ group: TeamGroup; nodes: GNode[]; label: string }> = [];
+          if (byGroup.design.length > 0) regions.push({ group: "design", nodes: byGroup.design, label: "Design Team" });
+          if (byGroup.build.length  > 0) regions.push({ group: "build",  nodes: byGroup.build,  label: "Build Team" });
+          return regions.map(r => {
+            const minX = Math.min(...r.nodes.map(n => n.x)) - PAD;
+            const minY = Math.min(...r.nodes.map(n => n.y)) - PAD - LABEL_TOP;
+            const maxX = Math.max(...r.nodes.map(n => n.x + NODE_W)) + PAD;
+            const maxY = Math.max(...r.nodes.map(n => n.y + NODE_H)) + PAD;
+            const t = tintForGroup(r.group);
+            const labelBg = r.group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(58, 120, 220, 0.95)";
+            return (
+              <div key={"cluster-" + r.group} data-ui={`Cluster-${r.group}`} style={{
+                position: "absolute",
+                left: minX, top: minY,
+                width: maxX - minX, height: maxY - minY,
+                borderRadius: 18,
+                background: t.bg,
+                border: `1.5px dashed ${t.border}`,
+                pointerEvents: "none",
+                zIndex: 0,
+              }}>
+                <div style={{
+                  position: "absolute", top: -11, left: 16, padding: "2px 10px",
+                  background: labelBg, color: "#0a1208",
+                  fontSize: 11, fontWeight: 800, letterSpacing: 0.7,
+                  borderRadius: 7, textTransform: "uppercase",
+                }}>{r.label}</div>
+              </div>
+            );
+          });
+        })()}
         {placed.map(n => {
           const isOrch = n.name === orchName;
           const accent = isOrch ? "#ffd76a" : LAYER_COLORS[(n.depth + 1) % LAYER_COLORS.length];
@@ -1756,7 +1851,13 @@ function GraphCanvas({
           // reads at a glance. Critic gets a rainbow conic-gradient
           // border layered on top of the regular border.
           const baseBg = `linear-gradient(180deg, ${tint.bg} 0%, rgba(17,21,30,0.92) 100%)`;
-          const borderColor = isActive ? "#3cf26b" : sel ? accent : isDragTarget ? "var(--accent)" : tint.border;
+          // Critic: solid border is transparent so the rainbow overlay
+          // (rendered as a mask-border ON TOP of the card) is the only
+          // visible border. Selection/active state is shown via box-shadow
+          // ring OUTSIDE the rainbow instead of by recolouring the border.
+          const borderColor = isCritic
+            ? "transparent"
+            : isActive ? "#3cf26b" : sel ? accent : isDragTarget ? "var(--accent)" : tint.border;
           return (
             <div
               key={n.name}
@@ -1790,24 +1891,30 @@ function GraphCanvas({
                 userSelect: "none",
               }}
             >
-              {/* Rainbow rim for the critic — sits behind the card body via inset shadow */}
+              {/* Sharp rainbow mask-border for the Critical Thinker.
+                  ON TOP of the card (zIndex 3) so neither the card body
+                  nor the per-state border can hide it. Uses the
+                  composite-mask trick to carve out the centre, leaving
+                  only the 3px outer ring with the conic gradient. */}
               {isCritic && (
                 <div style={{
-                  position:"absolute", inset:-3, borderRadius:16, pointerEvents:"none",
+                  position: "absolute", inset: -2, borderRadius: 16,
+                  padding: 3, pointerEvents: "none", zIndex: 3,
                   background: "conic-gradient(from 0deg, #ff5e7e, #ffb84c, #ffe14c, #6cff5e, #5ec6ff, #b86cff, #ff5e7e)",
-                  filter: "blur(3px)", opacity: 0.55, zIndex: -1,
+                  WebkitMask: "linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)",
+                  WebkitMaskComposite: "xor",
+                  maskComposite: "exclude",
                 }} />
               )}
-              {/* Group badge — top-right corner, only when the group has one (design / critic) */}
+              {/* Group badge — top-right corner. Design = green, Build = blue. */}
               {tint.badge && (
                 <div style={{
-                  position:"absolute", top:6, right:6,
-                  background: group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(40, 40, 50, 0.85)",
-                  color: group === "design" ? "#0a1208" : "#ffe14c",
+                  position:"absolute", top:6, right:6, zIndex:4,
+                  background: group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(58, 120, 220, 0.95)",
+                  color: "#0a1208",
                   fontSize: 9, fontWeight: 800, letterSpacing: 0.4,
                   padding: "2px 7px", borderRadius: 8,
                   pointerEvents:"none", textTransform:"uppercase", whiteSpace:"nowrap",
-                  border: group === "critic" ? "1px solid rgba(255,225,76,0.5)" : "none",
                 }}>{tint.badge}</div>
               )}
               {/* Big icon row — mirrors Qt's ~180×180 top-of-card icon. */}
@@ -1815,7 +1922,7 @@ function GraphCanvas({
                 <img src={owlSrc(agentIconRef(n.spec, roleByName))} style={{ width:96, height:96, objectFit:"contain" }} />
               </div>
               <div style={{ color:"var(--fg-strong)", fontSize:13, fontWeight:700, textAlign:"center", lineHeight:1.2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                {displayLabel(n.name)}
+                {teamMemberLabel(n.name, group)}
               </div>
               <div style={{ color: accent, fontSize:10, fontWeight:600, textAlign:"center", letterSpacing:0.6, textTransform:"uppercase" }}>
                 {n.spec.base}
@@ -2274,15 +2381,15 @@ function colorForAgent(spec: AgentSpec): string {
 //   "critic"  — the synthetic Director-Mode Critic. Always rendered at
 //               orchestrator's row, never stored in the team's agent
 //               list (so it stays orthogonal to team yamls). Rainbow.
-//   "normal"  — everyone else (orchestrator + Phase-2 / generic
-//               specialists). Blue tint.
+//   "build"   — Phase-2 / generic specialists (coders, docs, code
+//               critic). Blue tint, "Build Team" badge top-right.
 //
 // Classification is by base role. The product_studio yaml lists
 // `product_owner / ux_designer / backend_arch / whitepaper_writer /
 // design_critic` as its Phase-1 roster, so those are the design
 // signature. Keep this in sync with any new design-phase roles teams
 // add to LLM/core/agents/teams/*.json.
-export type TeamGroup = "design" | "critic" | "normal";
+export type TeamGroup = "design" | "critic" | "build";
 const DESIGN_TEAM_BASES = new Set<string>([
   "product_owner",
   "ux_designer",
@@ -2290,10 +2397,35 @@ const DESIGN_TEAM_BASES = new Set<string>([
   "whitepaper_writer",
   "design_critic",
 ]);
+/// Stable comparator for ordering agents WITHIN a depth row. Drives both
+/// the orbital arc position and the graph-row horizontal slot. Design
+/// cluster leads (with product_owner first as the team leader), build
+/// cluster follows, critic sits at the tail. Returning 0 for equal
+/// groups preserves the team's authored order as a stable tie-breaker.
+export function rosterCompare(a: AgentSpec, b: AgentSpec): number {
+  const GORDER: Record<TeamGroup, number> = { design: 0, build: 1, critic: 2 };
+  const ga = groupForAgent(a);
+  const gb = groupForAgent(b);
+  if (ga !== gb) return GORDER[ga] - GORDER[gb];
+  if (ga === "design") {
+    const sa = a.name.includes(".") ? a.name.split(".").pop()! : a.name;
+    const sb = b.name.includes(".") ? b.name.split(".").pop()! : b.name;
+    if (sa === "product_owner" && sb !== "product_owner") return -1;
+    if (sb === "product_owner" && sa !== "product_owner") return 1;
+  }
+  return 0;
+}
+
 function groupForAgent(spec: AgentSpec): TeamGroup {
   if (spec.name === CRITIC_AGENT_NAME) return "critic";
-  if (DESIGN_TEAM_BASES.has(spec.base) || DESIGN_TEAM_BASES.has(spec.name)) return "design";
-  return "normal";
+  // Team JSONs use fully-qualified ids like "product_studio.product_owner";
+  // DESIGN_TEAM_BASES has bare role names. Strip the dotted prefix on
+  // both spec fields before checking, or every design member silently
+  // falls through to "build" and the design tint/badge never renders.
+  const shortName = spec.name.includes(".") ? spec.name.split(".").pop()! : spec.name;
+  const shortBase = spec.base.includes(".") ? spec.base.split(".").pop()! : spec.base;
+  if (DESIGN_TEAM_BASES.has(shortBase) || DESIGN_TEAM_BASES.has(shortName)) return "design";
+  return "build";
 }
 /// Background tint + border colour for a group. Semi-transparent so the
 /// existing card chrome (#1a2030 base) still reads. The "critic" tint
@@ -2302,12 +2434,21 @@ function groupForAgent(spec: AgentSpec): TeamGroup {
 export function tintForGroup(group: TeamGroup): { bg: string; border: string; badge?: string } {
   switch (group) {
     case "design":
-      return { bg: "rgba(122, 224, 168, 0.13)", border: "rgba(122, 224, 168, 0.55)", badge: "Design Team" };
+      // Bumped from 0.13 → 0.22 fill + 0.85 border. Below the 0.20
+      // floor the design tint was washed out next to the build tint and
+      // the two clusters read as the same colour.
+      return { bg: "rgba(122, 224, 168, 0.22)", border: "rgba(122, 224, 168, 0.85)", badge: "Design Team" };
     case "critic":
-      return { bg: "rgba(255, 240, 200, 0.10)", border: "rgba(255, 220, 120, 0.55)", badge: "Critic" };
-    case "normal":
+      // No badge — the rainbow border IS the visual identity for the
+      // Critical Thinker node. Card body stays neutral so the rainbow
+      // ring around it doesn't have to fight a coloured fill.
+      return { bg: "rgba(255, 240, 200, 0.10)", border: "rgba(255, 220, 120, 0.55)" };
+    case "build":
     default:
-      return { bg: "rgba(120, 180, 255, 0.10)", border: "rgba(120, 180, 255, 0.40)" };
+      // Bumped from 0.10 → 0.22 to match the design cluster opacity so
+      // the two read as equally-strong visual groups instead of the
+      // build cluster looking like the "default / unclassified" cards.
+      return { bg: "rgba(120, 180, 255, 0.22)", border: "rgba(120, 180, 255, 0.70)", badge: "Build Team" };
   }
 }
 
@@ -2320,10 +2461,17 @@ export function tintForGroup(group: TeamGroup): { bg: string; border: string; ba
 // time whenever a team has an orchestrator. Its name is reserved —
 // no real team agent may use `critic` as its `name` (only as `base`),
 // so the synthetic node stays unambiguous.
-export const CRITIC_AGENT_NAME = "critic";
+// Internal agent id for the synthetic Critic node. The visible label
+// ("Critical Thinker") comes from displayLabel(name) — keep this id
+// snake_case so that helper produces the right display string.
+export const CRITIC_AGENT_NAME = "critical_thinker";
 const CRITIC_SYNTHETIC_SPEC: AgentSpec = {
   name: CRITIC_AGENT_NAME,
-  base: "critic",
+  // Base matches the agent id so the small base-role text on the card
+  // ("CRITICAL_THINKER") matches the displayed name. No role yaml is
+  // required — roleByName.get() falls through and the spec's inline
+  // description is used.
+  base: "critical_thinker",
   description: "Voice of the user. Reviews the orchestrator's plan, answers [NEED_USER_INPUT] when Director Mode is on.",
   icon: "owl:owl_critic",
 };
@@ -3906,7 +4054,7 @@ export default function AgentsPage() {
             role: "dispatch", color: "#ff9ad9",
             text: `❓ → critic: ${question}`,
           });
-          const CRITIC_NAME = "critic";
+          const CRITIC_NAME = CRITIC_AGENT_NAME;
           addActive(CRITIC_NAME);
           appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
           let criticReply = "";

@@ -968,7 +968,7 @@ export async function runCriticDispatch(opts: {
   // Use the same model the orchestrator uses so the critic's voice
   // stays consistent in tone. (Could be made user-configurable later.)
   const orch = findOrchestratorSpec(opts.team);
-  const modelId = orch ? opts.modelFor(orch.name) : opts.modelFor("critic");
+  const modelId = orch ? opts.modelFor(orch.name) : opts.modelFor("critical_thinker");
   const provider = providerFor(modelId, opts.models);
   try {
     const reply = await streamChatCompletion(
@@ -1038,7 +1038,9 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
         color: "#ff9ad9",
         text: `❓ → critic: ${question}`,
       });
-      const CRITIC_NAME = "critic";
+      // Must match CRITIC_AGENT_NAME in AgentsPage.tsx — these hooks
+      // key into the same per-agent UI state (active set, log buffer).
+      const CRITIC_NAME = "critical_thinker";
       hooks.onAgentStart(CRITIC_NAME);
       hooks.onLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
       const criticReply = await runCriticDispatch({

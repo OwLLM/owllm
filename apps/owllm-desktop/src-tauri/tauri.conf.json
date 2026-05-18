@@ -42,9 +42,7 @@
         "maximized": true,
         "decorations": false,
         "transparent": true,
-        "center": true,
-        "visible": false,
-        "backgroundColor": "#06080d"
+        "center": true
       }
     ]
   },

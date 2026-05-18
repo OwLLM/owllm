@@ -1592,8 +1592,22 @@ function GraphCanvas({
   // port. Null when no drag is in flight.
   const [drag, setDrag] = useState<null | { from: string; x: number; y: number; over: string | null }>(null);
   // Live node-drag offset (anchor = mouse position when the body was
-  // grabbed). null when no body drag is in flight.
+  // grabbed). null when no body drag is in flight. We mirror it into a
+  // ref so the document-level listener registered below can read the
+  // latest value without re-binding on every state change.
   const [bodyDrag, setBodyDrag] = useState<null | { name: string; dx: number; dy: number }>(null);
+  const bodyDragRef = useRef(bodyDrag);
+  useEffect(() => { bodyDragRef.current = bodyDrag; }, [bodyDrag]);
+
+  // Pan + zoom — replaces the previous `overflow:auto` scroll. The inner
+  // content div is `transform: translate(pan) scale(zoom)`-ed. Wheel +
+  // ctrl zooms around the cursor; plain wheel pans; middle-mouse drag
+  // pans freely. Defaults to identity (no zoom, origin at top-left).
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  // Live middle-mouse pan-drag state. When set we update pan on every
+  // mousemove using the start offset.
+  const panDragRef = useRef<null | { startClientX: number; startClientY: number; startPan: { x: number; y: number } }>(null);
 
   const LAYER_COLORS = [
     "#f1c44a", "#48d486", "#3aa0ff", "#ee5b5b",
@@ -1647,30 +1661,136 @@ function GraphCanvas({
   // Effective positions: parent-supplied map overrides; otherwise auto-layout.
   const effective: GraphPos = positions && positions.size > 0 ? positions : autoLayout;
 
-  // Drag handlers — listen on the container so we keep tracking the
-  // cursor even when it leaves the source node body.
-  const onContainerMove = (e: React.MouseEvent) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left + containerRef.current.scrollLeft;
-    const y = e.clientY - rect.top + containerRef.current.scrollTop;
-    if (drag) {
-      // Find the topmost node the cursor sits over (cheap O(n) hit-test).
-      let over: string | null = null;
-      for (const [name, p] of effective.entries()) {
-        if (name === drag.from) continue;
-        if (x >= p.x && x <= p.x + NODE_W && y >= p.y && y <= p.y + NODE_H) {
-          over = name;
-          break;
-        }
-      }
-      setDrag({ ...drag, x, y, over });
-    }
-    if (bodyDrag) {
+  // Convert a client-space (mouse event) coordinate to inner-content
+  // coordinates accounting for pan + zoom. Used by every interaction
+  // that needs to know "what content point is the cursor over".
+  const clientToContent = (clientX: number, clientY: number) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return {
+      x: (clientX - rect.left - pan.x) / zoom,
+      y: (clientY - rect.top - pan.y) / zoom,
+    };
+  };
+
+  // BODY DRAG — listens on the DOCUMENT, not the container. Cursor can
+  // leave the canvas, sweep over the title bar, anything; the drag
+  // survives until mouseup. Previously the container's onMouseLeave
+  // cancelled the drag the moment the cursor crossed an edge.
+  useEffect(() => {
+    if (!bodyDrag) return;
+    const onMove = (e: MouseEvent) => {
+      const bd = bodyDragRef.current;
+      if (!bd) return;
+      const c = clientToContent(e.clientX, e.clientY);
       const next: GraphPos = new Map(effective);
-      next.set(bodyDrag.name, { x: x - bodyDrag.dx, y: y - bodyDrag.dy });
+      next.set(bd.name, { x: c.x - bd.dx, y: c.y - bd.dy });
       onPositionsChange(next);
+    };
+    const onUp = () => setBodyDrag(null);
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    return () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+  // We deliberately depend on `bodyDrag` truthiness only — the latest
+  // `effective`/`pan`/`zoom` are read at event time via closures that
+  // are recreated each render anyway. effective is recomputed every
+  // render so closing over it captures the freshest map.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bodyDrag, pan.x, pan.y, zoom]);
+
+  // panDragTick — bumped whenever we (re)start a pan drag so the effect
+  // below re-binds its document listeners. Must be declared BEFORE the
+  // effect that references it in its deps array (TDZ otherwise).
+  const [panDragTick, setPanTick] = useState(0);
+
+  // PAN DRAG — middle mouse button (button === 1). Right-click is
+  // reserved for the OS context menu; left-click is for node selection
+  // / port drag. Document-level listeners so panning survives at the
+  // edges of the canvas. The ref check at the top short-circuits when
+  // no pan is actually in flight (we still want the effect to be
+  // active so onUp can clean up).
+  useEffect(() => {
+    if (!panDragRef.current) return;
+    const onMove = (e: MouseEvent) => {
+      const pd = panDragRef.current;
+      if (!pd) return;
+      setPan({
+        x: pd.startPan.x + (e.clientX - pd.startClientX),
+        y: pd.startPan.y + (e.clientY - pd.startClientY),
+      });
+    };
+    const onUp = () => { panDragRef.current = null; setPanTick(t => t + 1); };
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+    return () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panDragTick]);
+
+  // Container interactions:
+  //   - middle-mouse down → start a pan-drag
+  //   - left-click on empty area → clear selection (existing behaviour)
+  //   - wheel → zoom (ctrl) or pan (plain)
+  const onContainerMouseDown = (e: React.MouseEvent) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      panDragRef.current = {
+        startClientX: e.clientX, startClientY: e.clientY,
+        startPan: { x: pan.x, y: pan.y },
+      };
+      setPanTick(t => t + 1);
     }
+  };
+
+  const onContainerWheel = (e: React.WheelEvent) => {
+    if (e.ctrlKey || e.metaKey) {
+      // Zoom around the cursor: keep the content point under the cursor
+      // anchored as zoom changes.
+      e.preventDefault();
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const factor = e.deltaY > 0 ? 1 / 1.12 : 1.12;
+      const newZoom = Math.max(0.25, Math.min(3, zoom * factor));
+      // Content point currently under the cursor (before zoom change).
+      const cx = (e.clientX - rect.left - pan.x) / zoom;
+      const cy = (e.clientY - rect.top - pan.y) / zoom;
+      // After zoom, adjust pan so the same content point stays under the cursor.
+      setPan({
+        x: e.clientX - rect.left - cx * newZoom,
+        y: e.clientY - rect.top - cy * newZoom,
+      });
+      setZoom(newZoom);
+    } else {
+      // Plain wheel = pan vertically; shift+wheel = pan horizontally.
+      // Sensitivity unchanged from native scroll feel.
+      if (e.shiftKey) {
+        setPan(p => ({ x: p.x - e.deltaY, y: p.y }));
+      } else {
+        setPan(p => ({ x: p.x - e.deltaX, y: p.y - e.deltaY }));
+      }
+    }
+  };
+
+  // PORT DRAG — rubber-band edge while dragging from a node's output
+  // port. Container-level move/up because the rubber band needs canvas
+  // coords, and a port drag is short — no edge-of-window issues.
+  const onContainerMove = (e: React.MouseEvent) => {
+    if (!drag) return;
+    const c = clientToContent(e.clientX, e.clientY);
+    let over: string | null = null;
+    for (const [name, p] of effective.entries()) {
+      if (name === drag.from) continue;
+      if (c.x >= p.x && c.x <= p.x + NODE_W && c.y >= p.y && c.y <= p.y + NODE_H) {
+        over = name;
+        break;
+      }
+    }
+    setDrag({ ...drag, x: c.x, y: c.y, over });
   };
 
   const onContainerUp = () => {
@@ -1680,7 +1800,6 @@ function GraphCanvas({
       }
       setDrag(null);
     }
-    if (bodyDrag) setBodyDrag(null);
   };
 
   if (!team || team.agents.length === 0) {
@@ -1714,8 +1833,19 @@ function GraphCanvas({
   const canvasH = Math.max(h, contentBottom);
   const canvasW = Math.max(w, contentRight);
 
-  // Resolve edges into endpoints (skip stale references).
-  const liveEdges = edges.filter(e => effective.has(e.source) && effective.has(e.target));
+  // Resolve edges into endpoints (skip stale references). The synthetic
+  // Critical Thinker isn't in the project's team_json, so persisted edges
+  // can't reference it — we inject a virtual orchestrator ↔ critical_thinker
+  // pair here whenever both are present. Marked `synthetic: true` so the
+  // click/delete/reverse code paths in the parent never try to persist
+  // these to graph_json (they'd just round-trip get filtered out).
+  const hasSyntheticCritic = effective.has(CRITIC_AGENT_NAME);
+  const baseLive = edges.filter(e => effective.has(e.source) && effective.has(e.target));
+  const liveEdges: (Edge & { synthetic?: boolean })[] = hasSyntheticCritic && effective.has(orchName)
+    ? [...baseLive,
+       { source: orchName, target: CRITIC_AGENT_NAME, synthetic: true } as any,
+       { source: CRITIC_AGENT_NAME, target: orchName, synthetic: true } as any]
+    : baseLive;
 
   // Output port (right edge centre) + input port (left edge centre).
   const outPort = (p: { x: number; y: number }) => ({ x: p.x + NODE_W, y: p.y + NODE_H / 2 });
@@ -1735,10 +1865,28 @@ function GraphCanvas({
       onClick={() => { onSelectNode(null); onSelectEdge(null); }}
       onMouseMove={onContainerMove}
       onMouseUp={onContainerUp}
-      onMouseLeave={() => { if (drag) setDrag(null); if (bodyDrag) setBodyDrag(null); }}
-      style={{ position:"relative", width:w, height:h, background:"linear-gradient(180deg, #101522 0%, #06080d 100%)", overflow:"auto" }}
+      onMouseDown={onContainerMouseDown}
+      onWheel={onContainerWheel}
+      onContextMenu={(e) => e.preventDefault()}
+      style={{
+        position:"relative", width:w, height:h,
+        background:"linear-gradient(180deg, #101522 0%, #06080d 100%)",
+        overflow:"hidden",
+        // Middle-click on Windows triggers an "auto-scroll" wheel cursor.
+        // Suppress that so our pan handler is the only consumer.
+        userSelect: "none",
+        cursor: panDragRef.current ? "grabbing" : "default",
+      }}
     >
-      <div style={{ position:"relative", width:canvasW, height:canvasH }}>
+      {/* Pan + zoom wrapper. The whole inner canvas (SVG edges, cluster
+          regions, cards) lives inside this transform so a single
+          translate(pan)·scale(zoom) drives the view. */}
+      <div style={{
+        position: "absolute", left: 0, top: 0,
+        width: canvasW, height: canvasH,
+        transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+        transformOrigin: "0 0",
+      }}>
         <svg width={canvasW} height={canvasH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
           <defs>
             <marker id="graphArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
@@ -1748,26 +1896,33 @@ function GraphCanvas({
               <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)" />
             </marker>
           </defs>
-          {/* Existing edges */}
+          {/* Existing edges. Synthetic edges (orchestrator ↔ critical_thinker)
+              get a softer dashed style and are NOT clickable — they aren't
+              in the project's graph_json, so selecting them for delete/reverse
+              would either no-op or corrupt the index mapping for real edges. */}
           {liveEdges.map((e, i) => {
             const s = effective.get(e.source)!;
             const t = effective.get(e.target)!;
-            const sel = selectedEdgeIdx === i;
+            const synthetic = (e as any).synthetic === true;
+            const sel = !synthetic && selectedEdgeIdx === i;
             return (
               <g key={"ge"+i}>
-                {/* Fat invisible hit-target so click is forgiving */}
+                {!synthetic && (
+                  /* Fat invisible hit-target so click is forgiving. */
+                  <path
+                    d={edgePath(s, t)}
+                    stroke="rgba(0,0,0,0)"
+                    strokeWidth={14}
+                    fill="none"
+                    style={{ pointerEvents:"stroke", cursor:"pointer" }}
+                    onClick={(ev) => { ev.stopPropagation(); onSelectEdge(i); onSelectNode(null); }}
+                  />
+                )}
                 <path
                   d={edgePath(s, t)}
-                  stroke="rgba(0,0,0,0)"
-                  strokeWidth={14}
-                  fill="none"
-                  style={{ pointerEvents:"stroke", cursor:"pointer" }}
-                  onClick={(ev) => { ev.stopPropagation(); onSelectEdge(i); onSelectNode(null); }}
-                />
-                <path
-                  d={edgePath(s, t)}
-                  stroke={sel ? "var(--accent)" : "rgba(120,220,255,0.55)"}
-                  strokeWidth={sel ? 2.6 : 1.6}
+                  stroke={sel ? "var(--accent)" : synthetic ? "rgba(200,180,255,0.55)" : "rgba(120,220,255,0.55)"}
+                  strokeWidth={sel ? 2.6 : synthetic ? 1.4 : 1.6}
+                  strokeDasharray={synthetic ? "5 4" : undefined}
                   fill="none"
                   markerEnd={sel ? "url(#graphArrowSel)" : "url(#graphArrow)"}
                 />
@@ -1864,11 +2019,8 @@ function GraphCanvas({
               onMouseDown={(e) => {
                 if (e.button !== 0) return;
                 e.stopPropagation();
-                if (!containerRef.current) return;
-                const rect = containerRef.current.getBoundingClientRect();
-                const x = e.clientX - rect.left + containerRef.current.scrollLeft;
-                const y = e.clientY - rect.top + containerRef.current.scrollTop;
-                setBodyDrag({ name: n.name, dx: x - n.x, dy: y - n.y });
+                const c = clientToContent(e.clientX, e.clientY);
+                setBodyDrag({ name: n.name, dx: c.x - n.x, dy: c.y - n.y });
               }}
               onClick={(e) => { e.stopPropagation(); onSelectNode(n.name); onSelectEdge(null); }}
               style={{
@@ -1952,11 +2104,8 @@ function GraphCanvas({
                   if (e.button !== 0) return;
                   e.stopPropagation();
                   e.preventDefault();
-                  if (!containerRef.current) return;
-                  const rect = containerRef.current.getBoundingClientRect();
-                  const x = e.clientX - rect.left + containerRef.current.scrollLeft;
-                  const y = e.clientY - rect.top + containerRef.current.scrollTop;
-                  setDrag({ from: n.name, x, y, over: null });
+                  const c = clientToContent(e.clientX, e.clientY);
+                  setDrag({ from: n.name, x: c.x, y: c.y, over: null });
                 }}
                 style={{
                   position:"absolute", left: NODE_W - PORT_R, top: NODE_H/2 - PORT_R,

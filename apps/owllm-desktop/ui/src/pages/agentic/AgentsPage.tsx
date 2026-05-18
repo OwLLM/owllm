@@ -309,31 +309,42 @@ function computeDepths(team: Team): Map<string, number> {
     }
   }
 
-  // Visual flattening — the user wants design-team specialists and
-  // build-team specialists on the SAME visual row regardless of the
-  // critic-chains that bump some depths to 3+. We keep depth 0 (orch +
-  // synthetic critic) and depth 1 (team leaders only) intact, then
-  // collapse every deeper specialist to depth 2 so all critics + all
-  // specialists share one ring. Without this, a `design_critic` whose
-  // predecessors include the design team specialists ends up at depth
-  // 3 — visually "below" the build team — even though semantically
-  // they're peers reviewing the same level of work.
+  // Layered post-processing — 4 fixed rows:
+  //   0: orchestrator + synthetic Critical Thinker (peers at the top)
+  //   1: team leader (product_owner) — alone on this row
+  //   2: non-critic specialists from any team (design + build)
+  //   3: critics (design_critic, code_critic) — one layer below the
+  //      specialists whose work they review
+  // The natural predecessor chain already handles row 3 (a critic
+  // whose predecessors are at depth 2 lands at depth 3). What we need
+  // to fix is the build-team direct reports who'd naturally land at
+  // depth 1 (under the orchestrator) but should sit visually at the
+  // specialist row alongside the design team. So we pin EVERY
+  // non-leader, non-critic agent to depth 2.
+  const isCriticBase = (base: string): boolean => {
+    const short = base.includes(".") ? base.split(".").pop()! : base;
+    return short === "design_critic" || short === "code_critic" || short === "critic";
+  };
   for (const a of team.agents) {
     const name = a.name;
     if (name === orchName) continue;
     if (name === CRITIC_AGENT_NAME) continue;
-    const d = out.get(name) ?? 1;
     const shortBase = a.base.includes(".") ? a.base.split(".").pop()! : a.base;
     const shortName = name.includes(".") ? name.split(".").pop()! : name;
     const isTeamLeader = shortBase === "product_owner" || shortName === "product_owner";
     if (isTeamLeader) {
       out.set(name, 1);
-    } else if (d > 2) {
-      out.set(name, 2);
-    } else if (d < 2) {
-      // Direct reports of the orchestrator (depth 1) that ARE specialists
-      // (not the team leader). User wants them at the same visual layer
-      // as the design specialists — depth 2.
+    } else if (isCriticBase(a.base) || isCriticBase(name)) {
+      // Critic: keep its natural depth from the predecessor chain (so
+      // a design_critic whose inputs are at depth 2 ends up at 3). If
+      // it somehow has no predecessors, default to 3.
+      const natural = out.get(name) ?? 1;
+      out.set(name, Math.max(natural, 3));
+    } else {
+      // Every other specialist sits on row 2, regardless of whether
+      // its team has a leader or it reports directly to the
+      // orchestrator. This is what makes design and build specialists
+      // share a row.
       out.set(name, 2);
     }
   }
@@ -1705,8 +1716,18 @@ function GraphCanvas({
     return out;
   }, [team, w]);
 
-  // Effective positions: parent-supplied map overrides; otherwise auto-layout.
-  const effective: GraphPos = positions && positions.size > 0 ? positions : autoLayout;
+  // Effective positions. Parent-supplied positions WIN where present;
+  // any agent missing from `positions` (notably the synthetic Critical
+  // Thinker, which can't be persisted to graph_json because it isn't
+  // in team_json) falls back to its auto-layout slot. Without this
+  // merge, the rainbow critic would silently disappear whenever the
+  // user has manually placed any other card.
+  const effective: GraphPos = (() => {
+    if (!positions || positions.size === 0) return autoLayout;
+    const out = new Map(autoLayout);
+    for (const [k, v] of positions.entries()) out.set(k, v);
+    return out;
+  })();
 
   // Convert a client-space (mouse event) coordinate to inner-content
   // coordinates accounting for pan + zoom. Used by every interaction
@@ -1795,32 +1816,22 @@ function GraphCanvas({
   };
 
   const onContainerWheel = (e: React.WheelEvent) => {
-    if (e.ctrlKey || e.metaKey) {
-      // Zoom around the cursor: keep the content point under the cursor
-      // anchored as zoom changes.
-      e.preventDefault();
-      const rect = containerRef.current?.getBoundingClientRect();
-      if (!rect) return;
-      const factor = e.deltaY > 0 ? 1 / 1.12 : 1.12;
-      const newZoom = Math.max(0.25, Math.min(3, zoom * factor));
-      // Content point currently under the cursor (before zoom change).
-      const cx = (e.clientX - rect.left - pan.x) / zoom;
-      const cy = (e.clientY - rect.top - pan.y) / zoom;
-      // After zoom, adjust pan so the same content point stays under the cursor.
-      setPan({
-        x: e.clientX - rect.left - cx * newZoom,
-        y: e.clientY - rect.top - cy * newZoom,
-      });
-      setZoom(newZoom);
-    } else {
-      // Plain wheel = pan vertically; shift+wheel = pan horizontally.
-      // Sensitivity unchanged from native scroll feel.
-      if (e.shiftKey) {
-        setPan(p => ({ x: p.x - e.deltaY, y: p.y }));
-      } else {
-        setPan(p => ({ x: p.x - e.deltaX, y: p.y - e.deltaY }));
-      }
-    }
+    // Plain wheel = zoom (matching the orbital diagram view's wheel
+    // behaviour so the two canvas modes feel consistent). Zoom centres
+    // on the cursor: the content point under the pointer stays anchored
+    // as the scale changes. Pan via middle-mouse drag instead.
+    e.preventDefault();
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const factor = e.deltaY > 0 ? 1 / 1.12 : 1.12;
+    const newZoom = Math.max(0.25, Math.min(3, zoom * factor));
+    const cx = (e.clientX - rect.left - pan.x) / zoom;
+    const cy = (e.clientY - rect.top - pan.y) / zoom;
+    setPan({
+      x: e.clientX - rect.left - cx * newZoom,
+      y: e.clientY - rect.top - cy * newZoom,
+    });
+    setZoom(newZoom);
   };
 
   // PORT DRAG — rubber-band edge while dragging from a node's output
@@ -1894,24 +1905,23 @@ function GraphCanvas({
        { source: CRITIC_AGENT_NAME, target: orchName, synthetic: true } as any]
     : baseLive;
 
-  // Port geometry depends on the agent: orchestrator + critical_thinker
-  // use horizontal ports (output right, input left); every other agent
-  // uses vertical ports (output bottom, input top). Routing must mirror
-  // the visual port positions or arrows visibly miss their targets.
-  const horizontalPortsFor = (name: string): boolean => {
-    if (name === orchName) return true;
-    if (name === CRITIC_AGENT_NAME) return true;
-    return false;
-  };
+  // Port geometry:
+  //   - Orchestrator + synthetic Critical Thinker: output on BOTTOM
+  //     (matches every other card so dispatch flows visibly down) and
+  //     input on the RIGHT side (per 2026-05-19 spec: the peer side
+  //     where orch ↔ critic exchanges happen).
+  //   - Every other specialist: input on TOP, output on BOTTOM so
+  //     dispatch reads top-to-bottom through the tree.
+  const isPeerNode = (name: string): boolean =>
+    name === orchName || name === CRITIC_AGENT_NAME;
   type PortSide = "left" | "right" | "top" | "bottom";
   type Port = { x: number; y: number; side: PortSide };
-  const outPortFor = (name: string, p: { x: number; y: number }): Port =>
-    horizontalPortsFor(name)
-      ? { x: p.x + NODE_W,     y: p.y + NODE_H / 2, side: "right" }
-      : { x: p.x + NODE_W / 2, y: p.y + NODE_H,     side: "bottom" };
+  const outPortFor = (_name: string, p: { x: number; y: number }): Port =>
+    // Output is bottom for everyone (orch+critic included).
+    ({ x: p.x + NODE_W / 2, y: p.y + NODE_H, side: "bottom" });
   const inPortFor  = (name: string, p: { x: number; y: number }): Port =>
-    horizontalPortsFor(name)
-      ? { x: p.x,              y: p.y + NODE_H / 2, side: "left" }
+    isPeerNode(name)
+      ? { x: p.x + NODE_W,     y: p.y + NODE_H / 2, side: "right" }
       : { x: p.x + NODE_W / 2, y: p.y,              side: "top" };
 
   // Cubic Bezier between two ports, with control points pulled in the
@@ -2161,18 +2171,19 @@ function GraphCanvas({
                 </div>
               )}
 
-              {/* Ports. Orchestrator + Critical Thinker keep the original
-                  left/right layout because they're peers (the synthetic
-                  critic talks to the orchestrator side-to-side). Every
-                  other specialist gets input on TOP / output on BOTTOM
-                  so the hierarchy reads vertically: dispatch flows down
-                  from the leader, replies flow back up. */}
+              {/* Ports.
+                  - Every card has its OUTPUT on the BOTTOM so dispatch
+                    flows visibly down the tree.
+                  - Specialists have INPUT on TOP (parent dispatches in).
+                  - Orchestrator + Critical Thinker (peers) have INPUT
+                    on the RIGHT — the side where the orch ↔ critic
+                    exchange happens visually. */}
               {(() => {
-                const horizontalPorts = isOrch || isCritic;
-                const inX  = horizontalPorts ? -PORT_R              : NODE_W / 2 - PORT_R;
-                const inY  = horizontalPorts ? NODE_H / 2 - PORT_R  : -PORT_R;
-                const outX = horizontalPorts ? NODE_W - PORT_R      : NODE_W / 2 - PORT_R;
-                const outY = horizontalPorts ? NODE_H / 2 - PORT_R  : NODE_H - PORT_R;
+                const isPeer = isOrch || isCritic;
+                const inX  = isPeer ? NODE_W - PORT_R      : NODE_W / 2 - PORT_R;
+                const inY  = isPeer ? NODE_H / 2 - PORT_R  : -PORT_R;
+                const outX = NODE_W / 2 - PORT_R;
+                const outY = NODE_H - PORT_R;
                 return (
                   <>
                     <div

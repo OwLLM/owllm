@@ -85,8 +85,28 @@ pub fn run() {
             telegram::telegram_get_updates,
             telegram::telegram_send_message,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running OwLLM Desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building OwLLM Desktop")
+        .run(|_app, event| {
+            // Reap every spawned llama-server when the app is asked
+            // to exit OR is actually exiting. ExitRequested fires
+            // before windows are torn down; Exit fires when the
+            // process is about to leave. Calling on both is
+            // idempotent (sysinfo + kill_by_name) and covers
+            // user-close, force-close, panic-on-shutdown, and OS
+            // signal paths. Tokio's kill_on_drop is NOT enough — it
+            // doesn't run if the runtime is force-killed before the
+            // Child is dropped.
+            match event {
+                tauri::RunEvent::ExitRequested { .. } => {
+                    server::kill_all_llama_servers("exit-requested");
+                }
+                tauri::RunEvent::Exit => {
+                    server::kill_all_llama_servers("exit");
+                }
+                _ => {}
+            }
+        });
 }
 
 // All custom Win32 window-style manipulation removed. tauri.conf.json

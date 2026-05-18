@@ -210,6 +210,40 @@ pub async fn server_stop(
 /// Convenience: install ServerState in a Tauri builder. Keeps the
 /// `.manage(ServerState::default())` call out of lib.rs's wiring
 /// manifest — module-local concerns stay in the module.
+///
+/// Also kills any leftover llama-server processes from a previous
+/// session. The user has been bitten by this: kill_on_drop(true) on
+/// tokio's Command isn't guaranteed to fire if the app is
+/// force-killed, panics during shutdown, or the OS reaps the parent
+/// before drop runs. Wiping orphans at startup gives the user a
+/// reliably-clean slate every launch — and matches the UI's
+/// expectation (header says "Stopped" the moment the app starts).
 pub fn install<R: tauri::Runtime>(app: &tauri::App<R>) {
     app.manage(ServerState::default());
+    kill_all_llama_servers("startup");
+}
+
+/// Walk the OS process table and kill every llama-server process by
+/// name. Idempotent — safe to call multiple times. Called on
+/// startup AND on app-exit so the user never accumulates orphans.
+///
+/// The `reason` string is just for the eprintln so we can see in the
+/// log which path triggered the cleanup.
+pub fn kill_all_llama_servers(reason: &str) {
+    use sysinfo::System;
+    let target_lc = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let mut sys = System::new();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+    let mut killed = 0usize;
+    for process in sys.processes().values() {
+        let name = process.name().to_string_lossy();
+        if name.eq_ignore_ascii_case(target_lc) {
+            if process.kill() {
+                killed += 1;
+            }
+        }
+    }
+    if killed > 0 {
+        eprintln!("[supervisor] {reason}: killed {killed} stray llama-server process(es)");
+    }
 }

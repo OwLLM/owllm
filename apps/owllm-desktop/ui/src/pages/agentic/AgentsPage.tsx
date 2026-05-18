@@ -308,6 +308,35 @@ function computeDepths(team: Team): Map<string, number> {
       }
     }
   }
+
+  // Visual flattening — the user wants design-team specialists and
+  // build-team specialists on the SAME visual row regardless of the
+  // critic-chains that bump some depths to 3+. We keep depth 0 (orch +
+  // synthetic critic) and depth 1 (team leaders only) intact, then
+  // collapse every deeper specialist to depth 2 so all critics + all
+  // specialists share one ring. Without this, a `design_critic` whose
+  // predecessors include the design team specialists ends up at depth
+  // 3 — visually "below" the build team — even though semantically
+  // they're peers reviewing the same level of work.
+  for (const a of team.agents) {
+    const name = a.name;
+    if (name === orchName) continue;
+    if (name === CRITIC_AGENT_NAME) continue;
+    const d = out.get(name) ?? 1;
+    const shortBase = a.base.includes(".") ? a.base.split(".").pop()! : a.base;
+    const shortName = name.includes(".") ? name.split(".").pop()! : name;
+    const isTeamLeader = shortBase === "product_owner" || shortName === "product_owner";
+    if (isTeamLeader) {
+      out.set(name, 1);
+    } else if (d > 2) {
+      out.set(name, 2);
+    } else if (d < 2) {
+      // Direct reports of the orchestrator (depth 1) that ARE specialists
+      // (not the team leader). User wants them at the same visual layer
+      // as the design specialists — depth 2.
+      out.set(name, 2);
+    }
+  }
   return out;
 }
 
@@ -737,32 +766,29 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
           <div style={{ fontSize:10, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase", marginLeft:4 }}>{team?.agents.length ?? 0} agents on team</div>
         </div>
       )}
-      {/* Chat pane — taller (was 80, now 200) AND no character cap so
-          the full assistant reply is visible without truncation. Auto-
-          scrolls to bottom on every new message and on each streamed
-          chunk so the user follows the conversation without manually
-          scrolling. User text stays literal; agent text renders as
-          markdown so headings, lists, and code blocks read properly. */}
-      <div ref={suChatRef} data-ui="suChat" style={{ height:200, background:"var(--bg-elevated)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:8, padding:"8px 10px", fontSize:12, lineHeight:1.5, overflow:"auto", display:"flex", flexDirection:"column", gap:8 }}>
-        {chat.length === 0 ? (
-          <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
-            {team
-              ? `${team.display} is idle. Type a message below or use the goal bar to dispatch.`
-              : "Pick a project or team template to begin."}
+      {/* Sent-by-you log — replies from the orchestrator/agents are NOT
+          shown here (user spec 2026-05-18). The card is just for SENDING
+          input now; replies are visible elsewhere (the agent info panel,
+          the Run log). Empty filter result yields a brief idle hint so
+          the card doesn't collapse to zero height. */}
+      {(() => {
+        const sentByMe = lastMessages.filter(m => m.role === "you");
+        return (
+          <div ref={suChatRef} data-ui="suChat" style={{ height: 120, background:"var(--bg-elevated)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:8, padding:"8px 10px", fontSize:13, lineHeight:1.5, overflow:"auto", display:"flex", flexDirection:"column", gap:6 }}>
+            {sentByMe.length === 0 ? (
+              <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
+                {team
+                  ? "Type below — your input lands here. Replies appear in the agent panel."
+                  : "Pick a project or team template to begin."}
+              </div>
+            ) : sentByMe.map((m, i) => (
+              <div key={i} style={{ color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Segoe UI, sans-serif" }}>
+                {m.text}
+              </div>
+            ))}
           </div>
-        ) : lastMessages.map((m, i) => {
-          const isUser = m.role === "you";
-          const label = isUser ? "You" : (m.role[0]?.toUpperCase() + m.role.slice(1));
-          return (
-            <div key={i}>
-              <div style={{ color: m.color, fontWeight:700, fontSize:10, textTransform:"uppercase", letterSpacing:0.5, marginBottom:1 }}>{label}</div>
-              {isUser
-                ? <div style={{ color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Segoe UI, sans-serif" }}>{m.text}</div>
-                : <MarkdownBody text={m.text} />}
-            </div>
-          );
-        })}
-      </div>
+        );
+      })()}
       <div data-ui="suInputRow" style={{ display:"flex", alignItems:"center", gap:8 }}>
         <input
           data-ui="suReply"
@@ -1031,8 +1057,12 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   const [panDrag, setPanDrag] = useState<null | { sx: number; sy: number; ox: number; oy: number }>(null);
   useEffect(() => { setZoom(1); setPan({ x: 0, y: 0 }); }, [team?.id]);
   const w = width, h = height;
+  // Reserve space for the info-card overlay on the RIGHT side of the
+  // canvas (used to be left). The orbital diagram then centres in the
+  // left portion. Mirrors the page-layout change that pushed the
+  // info/super-user cards from left-of-canvas to right-of-canvas.
   const card_reserve = Math.min(410, w * 0.35);
-  const cx = card_reserve + (w - card_reserve) / 2;
+  const cx = (w - card_reserve) / 2;
   const cy = h / 2;
   const [arcPhase, setArcPhase] = useState(0);
   useEffect(() => {
@@ -1106,8 +1136,18 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   const sortedDepths = Array.from(depthMap.keys()).sort((a, b) => a - b);
   const max_depth = sortedDepths.length ? sortedDepths[sortedDepths.length - 1] : 1;
 
-  const canvas_cap = Math.min(w - card_reserve, h) * 0.45;
-  const max_radius = Math.min(canvas_cap, Math.min(w, h) * 0.45);
+  // Outer ring needs room for: node disc (r=22) + active halo (≈58
+  // radius at full pulse) + label below (drops 30px + ~16px text =
+  // ~46px). Subtract those from the half-canvas so a max-depth node
+  // doesn't clip the edges of the available area. Previous formula
+  // (0.45 × min(canvas size)) ignored label width entirely and the
+  // outer ring slid off-screen on smaller windows.
+  const HALF_LABEL_W = 70;          // labels are 120px wide, centered
+  const HALO_R = 58;                // active-pulse halo extent
+  const LABEL_DROP = 46;            // label baseline below node centre
+  const avail_w = (w - card_reserve) - HALF_LABEL_W * 2;
+  const avail_h = h - HALO_R - LABEL_DROP - 40;
+  const max_radius = Math.max(120, Math.min(avail_w / 2, avail_h / 2));
   const inner_offset = 130;
   let step = (max_radius - inner_offset) / Math.max(1, max_depth);
   if (step < 90) step = 90;
@@ -1473,17 +1513,19 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
             key={"l" + i}
             style={{
               position: "absolute",
-              left: n.x - 60,
+              left: n.x - 70,
               top:  n.y + 30,
-              width: 120,
+              width: 140,
               textAlign: "center",
-              fontSize: 12,
+              fontSize: 14, // +2 (was 12) to match the graph-view bump
               fontWeight: 700,
-              // Active = layer colour; idle = tinted-towards-fg.
               color: n.active ? col : "#e6e8eb",
               letterSpacing: 0.4,
               pointerEvents: "none",
               textShadow: "0 1px 3px rgba(0,0,0,0.9)",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
             }}
           >
             {n.label}
@@ -1614,13 +1656,18 @@ function GraphCanvas({
     "#ff9a3a", "#9aa3b2", "#a578ff", "#ff79c4",
   ];
 
-  const NODE_W = 180;
-  const NODE_H = 220;
-  const ROW_GAP = 60;
-  const COL_GAP = 28;
-  const TOP_PAD = 32;
+  // Card geometry — smaller than before (was 180x220) so more of the
+  // team fits on one screen without scrolling. Removed the third text
+  // row (the base-role identifier) so the card can be shorter without
+  // squeezing legibility. Name + team-leader sub-label stay, both at
+  // a larger font size.
+  const NODE_W = 130;
+  const NODE_H = 150;
+  const ROW_GAP = 70;
+  const COL_GAP = 22;
+  const TOP_PAD = 36;
   const SIDE_PAD = 24;
-  const PORT_R = 9;
+  const PORT_R = 8;
 
   // Compute auto-layout (BFS row-by-row, wrap rows that overflow).
   // Used both for the default placement and for the ⟲ Layout button.
@@ -1847,15 +1894,43 @@ function GraphCanvas({
        { source: CRITIC_AGENT_NAME, target: orchName, synthetic: true } as any]
     : baseLive;
 
-  // Output port (right edge centre) + input port (left edge centre).
-  const outPort = (p: { x: number; y: number }) => ({ x: p.x + NODE_W, y: p.y + NODE_H / 2 });
-  const inPort  = (p: { x: number; y: number }) => ({ x: p.x, y: p.y + NODE_H / 2 });
+  // Port geometry depends on the agent: orchestrator + critical_thinker
+  // use horizontal ports (output right, input left); every other agent
+  // uses vertical ports (output bottom, input top). Routing must mirror
+  // the visual port positions or arrows visibly miss their targets.
+  const horizontalPortsFor = (name: string): boolean => {
+    if (name === orchName) return true;
+    if (name === CRITIC_AGENT_NAME) return true;
+    return false;
+  };
+  type PortSide = "left" | "right" | "top" | "bottom";
+  type Port = { x: number; y: number; side: PortSide };
+  const outPortFor = (name: string, p: { x: number; y: number }): Port =>
+    horizontalPortsFor(name)
+      ? { x: p.x + NODE_W,     y: p.y + NODE_H / 2, side: "right" }
+      : { x: p.x + NODE_W / 2, y: p.y + NODE_H,     side: "bottom" };
+  const inPortFor  = (name: string, p: { x: number; y: number }): Port =>
+    horizontalPortsFor(name)
+      ? { x: p.x,              y: p.y + NODE_H / 2, side: "left" }
+      : { x: p.x + NODE_W / 2, y: p.y,              side: "top" };
 
-  const edgePath = (s: { x: number; y: number }, t: { x: number; y: number }) => {
-    const sP = outPort(s);
-    const tP = inPort(t);
-    const dx = Math.max(60, Math.abs(tP.x - sP.x) * 0.5);
-    return `M ${sP.x} ${sP.y} C ${sP.x + dx} ${sP.y}, ${tP.x - dx} ${tP.y}, ${tP.x} ${tP.y}`;
+  // Cubic Bezier between two ports, with control points pulled in the
+  // direction the port faces so the curve leaves/enters perpendicular
+  // to the card edge. Mixed orientations (e.g., bottom → top) look
+  // natural this way; everything-horizontal cases reduce to the old
+  // path the file used to draw.
+  const ctlFor = (p: Port, other: Port, k: number): { x: number; y: number } => {
+    if (p.side === "right")  return { x: p.x + Math.max(40, Math.abs(other.x - p.x) * k), y: p.y };
+    if (p.side === "left")   return { x: p.x - Math.max(40, Math.abs(other.x - p.x) * k), y: p.y };
+    if (p.side === "bottom") return { x: p.x, y: p.y + Math.max(40, Math.abs(other.y - p.y) * k) };
+    return                          { x: p.x, y: p.y - Math.max(40, Math.abs(other.y - p.y) * k) };
+  };
+  const edgePath = (sName: string, tName: string, s: { x: number; y: number }, t: { x: number; y: number }) => {
+    const sP = outPortFor(sName, s);
+    const tP = inPortFor(tName, t);
+    const sCtl = ctlFor(sP, tP, 0.55);
+    const tCtl = ctlFor(tP, sP, 0.55);
+    return `M ${sP.x} ${sP.y} C ${sCtl.x} ${sCtl.y}, ${tCtl.x} ${tCtl.y}, ${tP.x} ${tP.y}`;
   };
 
   return (
@@ -1910,7 +1985,7 @@ function GraphCanvas({
                 {!synthetic && (
                   /* Fat invisible hit-target so click is forgiving. */
                   <path
-                    d={edgePath(s, t)}
+                    d={edgePath(e.source, e.target, s, t)}
                     stroke="rgba(0,0,0,0)"
                     strokeWidth={14}
                     fill="none"
@@ -1919,7 +1994,7 @@ function GraphCanvas({
                   />
                 )}
                 <path
-                  d={edgePath(s, t)}
+                  d={edgePath(e.source, e.target, s, t)}
                   stroke={sel ? "var(--accent)" : synthetic ? "rgba(200,180,255,0.55)" : "rgba(120,220,255,0.55)"}
                   strokeWidth={sel ? 2.6 : synthetic ? 1.4 : 1.6}
                   strokeDasharray={synthetic ? "5 4" : undefined}
@@ -1933,7 +2008,7 @@ function GraphCanvas({
           {drag && (() => {
             const src = effective.get(drag.from);
             if (!src) return null;
-            const sP = outPort(src);
+            const sP = outPortFor(drag.from, src);
             const tx = drag.x, ty = drag.y;
             const dx = Math.max(40, Math.abs(tx - sP.x) * 0.5);
             return (
@@ -2058,63 +2133,78 @@ function GraphCanvas({
                   maskComposite: "exclude",
                 }} />
               )}
-              {/* Group badge — top-right corner. Design = green, Build = blue. */}
+              {/* Group badge — top-right corner. Design = green, Build = blue.
+                  Font bumped to 11 (+2 from 9) to match the bigger name above. */}
               {tint.badge && (
                 <div style={{
                   position:"absolute", top:6, right:6, zIndex:4,
                   background: group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(58, 120, 220, 0.95)",
                   color: "#0a1208",
-                  fontSize: 9, fontWeight: 800, letterSpacing: 0.4,
+                  fontSize: 11, fontWeight: 800, letterSpacing: 0.4,
                   padding: "2px 7px", borderRadius: 8,
                   pointerEvents:"none", textTransform:"uppercase", whiteSpace:"nowrap",
                 }}>{tint.badge}</div>
               )}
-              {/* Big icon row — mirrors Qt's ~180×180 top-of-card icon. */}
-              <div style={{ width:"100%", height:120, display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:10 }}>
-                <img src={owlSrc(agentIconRef(n.spec, roleByName))} style={{ width:96, height:96, objectFit:"contain" }} />
+              {/* Icon row — smaller now that the card is 130x150. */}
+              <div style={{ width:"100%", flex:1, minHeight:0, display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:10 }}>
+                <img src={owlSrc(agentIconRef(n.spec, roleByName))} style={{ width:64, height:64, objectFit:"contain" }} />
               </div>
-              <div style={{ color:"var(--fg-strong)", fontSize:13, fontWeight:700, textAlign:"center", lineHeight:1.2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+              {/* Name (was 13px, now 15px = +2 as requested). The base-role
+                  line was removed — it duplicated info already visible in
+                  the team-group badge + the info panel on the right. */}
+              <div style={{ color:"var(--fg-strong)", fontSize:15, fontWeight:700, textAlign:"center", lineHeight:1.2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                 {teamMemberLabel(n.name, group)}
               </div>
-              <div style={{ color: accent, fontSize:10, fontWeight:600, textAlign:"center", letterSpacing:0.6, textTransform:"uppercase" }}>
-                {n.spec.base}
-              </div>
-              <div style={{ display:"flex", alignItems:"center", justifyContent:"center", gap:6, marginTop:"auto" }}>
-                {isOrch && (
-                  <span style={{ color: accent, background: "rgba(255,215,106,0.12)", border: `1px solid ${accent}55`, borderRadius: 5, padding: "1px 7px", fontSize: 9, letterSpacing: 0.5, fontWeight: 700 }}>LEADER</span>
-                )}
-                <span style={{ color: "var(--fg-muted)", fontSize: 9, fontWeight: 600, letterSpacing: 0.4 }}>DEPTH {n.depth}</span>
-              </div>
+              {isOrch && (
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"center", marginTop: 2 }}>
+                  <span style={{ color: accent, background: "rgba(255,215,106,0.12)", border: `1px solid ${accent}55`, borderRadius: 5, padding: "1px 7px", fontSize: 10, letterSpacing: 0.5, fontWeight: 700 }}>LEADER</span>
+                </div>
+              )}
 
-              {/* INPUT port — left edge centre, orange. Click target for incoming edges. */}
-              <div
-                title="Incoming connections land here"
-                style={{
-                  position:"absolute", left:-PORT_R, top: NODE_H/2 - PORT_R,
-                  width: PORT_R * 2, height: PORT_R * 2, borderRadius:"50%",
-                  background:"#ff9a3a", border:"2px solid #11151e",
-                  boxShadow: isDragTarget ? "0 0 0 4px rgba(255,154,58,0.40)" : "0 0 8px rgba(255,154,58,0.55)",
-                  pointerEvents:"none",
-                }}
-              />
-              {/* OUTPUT port — right edge centre, blue. Drag from here to wire a new edge. */}
-              <div
-                title="Drag to another agent to create a dispatch edge"
-                onMouseDown={(e) => {
-                  if (e.button !== 0) return;
-                  e.stopPropagation();
-                  e.preventDefault();
-                  const c = clientToContent(e.clientX, e.clientY);
-                  setDrag({ from: n.name, x: c.x, y: c.y, over: null });
-                }}
-                style={{
-                  position:"absolute", left: NODE_W - PORT_R, top: NODE_H/2 - PORT_R,
-                  width: PORT_R * 2, height: PORT_R * 2, borderRadius:"50%",
-                  background:"#3aa0ff", border:"2px solid #11151e",
-                  boxShadow:"0 0 10px rgba(58,160,255,0.70)",
-                  cursor:"crosshair",
-                }}
-              />
+              {/* Ports. Orchestrator + Critical Thinker keep the original
+                  left/right layout because they're peers (the synthetic
+                  critic talks to the orchestrator side-to-side). Every
+                  other specialist gets input on TOP / output on BOTTOM
+                  so the hierarchy reads vertically: dispatch flows down
+                  from the leader, replies flow back up. */}
+              {(() => {
+                const horizontalPorts = isOrch || isCritic;
+                const inX  = horizontalPorts ? -PORT_R              : NODE_W / 2 - PORT_R;
+                const inY  = horizontalPorts ? NODE_H / 2 - PORT_R  : -PORT_R;
+                const outX = horizontalPorts ? NODE_W - PORT_R      : NODE_W / 2 - PORT_R;
+                const outY = horizontalPorts ? NODE_H / 2 - PORT_R  : NODE_H - PORT_R;
+                return (
+                  <>
+                    <div
+                      title="Incoming connections land here"
+                      style={{
+                        position:"absolute", left: inX, top: inY,
+                        width: PORT_R * 2, height: PORT_R * 2, borderRadius:"50%",
+                        background:"#ff9a3a", border:"2px solid #11151e",
+                        boxShadow: isDragTarget ? "0 0 0 4px rgba(255,154,58,0.40)" : "0 0 8px rgba(255,154,58,0.55)",
+                        pointerEvents:"none",
+                      }}
+                    />
+                    <div
+                      title="Drag to another agent to create a dispatch edge"
+                      onMouseDown={(e) => {
+                        if (e.button !== 0) return;
+                        e.stopPropagation();
+                        e.preventDefault();
+                        const c = clientToContent(e.clientX, e.clientY);
+                        setDrag({ from: n.name, x: c.x, y: c.y, over: null });
+                      }}
+                      style={{
+                        position:"absolute", left: outX, top: outY,
+                        width: PORT_R * 2, height: PORT_R * 2, borderRadius:"50%",
+                        background:"#3aa0ff", border:"2px solid #11151e",
+                        boxShadow:"0 0 10px rgba(58,160,255,0.70)",
+                        cursor:"crosshair",
+                      }}
+                    />
+                  </>
+                );
+              })()}
             </div>
           );
         })}
@@ -4870,11 +4960,12 @@ export default function AgentsPage() {
                 onPositionsChange={setNodePositions}
               />
             )}
-            {/* Info-card overlay — rendered in BOTH views so the page
+            {/* Info-card overlay — moved from left to RIGHT side (user
+                spec 2026-05-18). Rendered in BOTH views so the page
                 stays consistent and selection state survives a view
                 toggle. When an agent is selected its info card replaces
-                the team card; the Super User chat sits below either way. */}
-            <div style={{ position:"absolute", top:8, left:8, width:360, pointerEvents:"none" }}>
+                the team card; the Super User input sits below either way. */}
+            <div style={{ position:"absolute", top:8, right:8, width:360, pointerEvents:"none" }}>
               <div style={{ pointerEvents:"auto" }}>
                 {selectedAgentSpec ? (
                   <AgentInfoCard

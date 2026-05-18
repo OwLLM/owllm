@@ -44,23 +44,13 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 [dev-dependencies]
 tempfile = "3"
 
-# Release profile tuned to keep rustc alive on the GNU/mingw Windows
-# toolchain. The defaults (opt-level=3, codegen-units=16, no LTO) hit
-# STATUS_ACCESS_VIOLATION + LTO bitcode corruption on this machine. The
-# settings below trade ~10% binary size for build reliability:
-#   - opt-level=2  : same speed in practice; dodges the LLVM passes
-#                    that crash at -O3 on Windows-GNU
-#   - lto=false    : explicitly off so partial builds can't leave a
-#                    poisoned bitcode artifact behind
-#   - codegen-units=256 : maximum parallelism of small units → each
-#                    rustc subprocess works on a smaller graph and
-#                    stays under the heap pressure threshold
-#   - incremental=false : release builds should be reproducible; also
-#                    disables the incremental cache that has
-#                    occasionally corrupted between failed runs
+# Release profile: use Cargo defaults (opt-level=3, codegen-units=16)
+# plus LTO for the smallest, fastest binary. The previous override
+# (opt-level=2, codegen-units=256, lto=false) existed only to dodge
+# GNU rustc heap-corruption on the local machine — on the MSVC CI
+# toolchain it pessimized the binary so much that Tauri startup grew
+# from <1s to ~2s with a visible WebView2 white flash. We don't build
+# GNU anymore, so let the optimizer do its job.
 [profile.release]
-opt-level = 2
-lto = false
-codegen-units = 256
-incremental = false
+lto = "thin"
 strip = "debuginfo"

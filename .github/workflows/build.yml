@@ -117,3 +117,113 @@ jobs:
           path: apps/owllm-desktop/stage/WebView2Loader.dll
           if-no-files-found: warn
           retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Parallel GNU/mingw build — A/B test against MSVC to find out whether the
+  # 1-second WebView2 white-flash on cold start is a property of the MSVC
+  # toolchain (different process-startup + DLL-load profile, unsigned-exe
+  # SmartScreen pause) or something else entirely. The user reported pre-MSVC
+  # GNU builds were sub-1s to usable; this job rebuilds the same source under
+  # GNU on a healthy CI runner so the toolchains can be compared apples-to-
+  # apples, without the local i9-13900KF TLB-error noise.
+  # ---------------------------------------------------------------------------
+  windows-release-gnu:
+    name: Build Windows GNU/mingw exe (A/B comparison)
+    runs-on: windows-latest
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20 + cache npm
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/owllm-desktop/package-lock.json
+
+      - name: Set up Rust (GNU) + cargo cache
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Cache cargo registry + target/
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/owllm-desktop/src-tauri
+          shared-key: owllm-desktop-gnu
+
+      # windows-latest ships mingw-w64 pre-installed but not always on PATH
+      # for the Rust GNU target's linker. Make sure x86_64-w64-mingw32-gcc
+      # resolves before cargo runs.
+      - name: Ensure mingw-w64 on PATH
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "C:\msys64\mingw64\bin",
+            "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin"
+          )
+          foreach ($p in $candidates) {
+            if (Test-Path "$p\x86_64-w64-mingw32-gcc.exe") {
+              echo $p >> $env:GITHUB_PATH
+              "Added $p to PATH" | Out-Host
+            }
+          }
+          # Verify
+          where.exe x86_64-w64-mingw32-gcc
+
+      - name: Install UI deps
+        working-directory: apps/owllm-desktop
+        run: npm ci
+
+      - name: Build the Vite UI (TypeScript → dist/)
+        working-directory: apps/owllm-desktop
+        run: npm run build
+
+      - name: Build Tauri release (GNU)
+        working-directory: apps/owllm-desktop
+        # Cargo defaults apply (no [profile.release] override anymore).
+        # The CFLAGS=-O1 workaround for the local gcc 13.2 IRA ICE on
+        # sqlite3.c is NOT applied here — CI mingw is a different version
+        # and shouldn't hit that bug. If it does, we'll add it back.
+        run: npm run tauri -- build --target x86_64-pc-windows-gnu
+
+      - name: Stage GNU release artifacts
+        working-directory: apps/owllm-desktop
+        shell: pwsh
+        run: |
+          $rel = "src-tauri\target\x86_64-pc-windows-gnu\release"
+          $bundle = "$rel\bundle\nsis"
+          New-Item -ItemType Directory -Force -Path "stage-gnu" | Out-Null
+          Copy-Item "$rel\owllm-desktop.exe" "stage-gnu\OwLLM Desktop (GNU).exe" -Force
+          $setup = Get-ChildItem -Path $bundle -Filter "*x64-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($setup) { Copy-Item $setup.FullName "stage-gnu\OwLLM Desktop Setup (GNU).exe" -Force }
+          if (Test-Path "$rel\WebView2Loader.dll") {
+            Copy-Item "$rel\WebView2Loader.dll" "stage-gnu\WebView2Loader.dll" -Force
+          }
+          Get-ChildItem stage-gnu | Format-Table Name,Length,LastWriteTime
+
+      - name: Upload GNU portable exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: OwLLM-Desktop-portable-gnu
+          path: apps/owllm-desktop/stage-gnu/OwLLM Desktop (GNU).exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload GNU NSIS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: OwLLM-Desktop-installer-gnu
+          path: apps/owllm-desktop/stage-gnu/OwLLM Desktop Setup (GNU).exe
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload GNU WebView2Loader.dll
+        uses: actions/upload-artifact@v4
+        with:
+          name: OwLLM-Desktop-webview2loader-gnu
+          path: apps/owllm-desktop/stage-gnu/WebView2Loader.dll
+          if-no-files-found: warn
+          retention-days: 30

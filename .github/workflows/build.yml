@@ -156,7 +156,7 @@ jobs:
 
       # windows-latest ships mingw-w64 pre-installed but not always on PATH
       # for the Rust GNU target's linker. Make sure x86_64-w64-mingw32-gcc
-      # resolves before cargo runs.
+      # AND x86_64-w64-mingw32-windres resolve before cargo runs.
       - name: Ensure mingw-w64 on PATH
         shell: pwsh
         run: |
@@ -170,8 +170,27 @@ jobs:
               "Added $p to PATH" | Out-Host
             }
           }
-          # Verify
           where.exe x86_64-w64-mingw32-gcc
+          where.exe x86_64-w64-mingw32-windres
+
+      # Tauri's resource compilation goes through the `winresource` crate.
+      # On windows-latest both MSVC's rc.exe AND mingw's windres are
+      # available, and winresource picks rc.exe first — which produces an
+      # MSVC-format resource.lib that the GNU linker can't read
+      # ("file format not recognized"). Forcing the GNU-targeted env vars
+      # below makes cc-rs / winresource use the mingw toolchain end-to-end.
+      - name: Force GNU toolchain env (linker + windres)
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc" >> $env:GITHUB_ENV
+          "CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc"                  >> $env:GITHUB_ENV
+          "CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++"                 >> $env:GITHUB_ENV
+          "AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar"                   >> $env:GITHUB_ENV
+          "WINDRES_x86_64_pc_windows_gnu=x86_64-w64-mingw32-windres"         >> $env:GITHUB_ENV
+          # winresource crate uses these directly when compiling resources
+          # for the target — falling back to rc.exe is what trips us up.
+          "RC=x86_64-w64-mingw32-windres"                                    >> $env:GITHUB_ENV
+          "WINDRES=x86_64-w64-mingw32-windres"                               >> $env:GITHUB_ENV
 
       - name: Install UI deps
         working-directory: apps/owllm-desktop

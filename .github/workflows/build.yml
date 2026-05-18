@@ -154,43 +154,56 @@ jobs:
           workspaces: apps/owllm-desktop/src-tauri
           shared-key: owllm-desktop-gnu
 
-      # windows-latest ships mingw-w64 pre-installed but not always on PATH
-      # for the Rust GNU target's linker. Make sure x86_64-w64-mingw32-gcc
-      # AND x86_64-w64-mingw32-windres resolve before cargo runs.
-      - name: Ensure mingw-w64 on PATH
+      # windows-latest has mingw-w64 in multiple places (C:\mingw64,
+      # Strawberry Perl's bundle, msys64 sometimes). Discover gcc + windres
+      # paths and set GitHub env so subsequent steps use them. Tolerant of
+      # different file-naming conventions (some distros ship windres.exe
+      # without the cross-prefix).
+      - name: Discover mingw-w64 toolchain
         shell: pwsh
         run: |
-          $candidates = @(
+          $bins = @(
+            "C:\mingw64\bin",
+            "C:\Strawberry\c\bin",
             "C:\msys64\mingw64\bin",
             "C:\ProgramData\chocolatey\lib\mingw\tools\install\mingw64\bin"
-          )
-          foreach ($p in $candidates) {
-            if (Test-Path "$p\x86_64-w64-mingw32-gcc.exe") {
-              echo $p >> $env:GITHUB_PATH
-              "Added $p to PATH" | Out-Host
+          ) | Where-Object { Test-Path $_ }
+
+          $gcc     = $null
+          $windres = $null
+          foreach ($b in $bins) {
+            if (-not $gcc) {
+              foreach ($n in 'x86_64-w64-mingw32-gcc.exe', 'gcc.exe') {
+                $p = Join-Path $b $n
+                if (Test-Path $p) { $gcc = $p; break }
+              }
+            }
+            if (-not $windres) {
+              foreach ($n in 'x86_64-w64-mingw32-windres.exe', 'windres.exe') {
+                $p = Join-Path $b $n
+                if (Test-Path $p) { $windres = $p; break }
+              }
             }
           }
-          where.exe x86_64-w64-mingw32-gcc
-          where.exe x86_64-w64-mingw32-windres
 
-      # Tauri's resource compilation goes through the `winresource` crate.
-      # On windows-latest both MSVC's rc.exe AND mingw's windres are
-      # available, and winresource picks rc.exe first — which produces an
-      # MSVC-format resource.lib that the GNU linker can't read
-      # ("file format not recognized"). Forcing the GNU-targeted env vars
-      # below makes cc-rs / winresource use the mingw toolchain end-to-end.
-      - name: Force GNU toolchain env (linker + windres)
-        shell: pwsh
-        run: |
-          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc" >> $env:GITHUB_ENV
-          "CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc"                  >> $env:GITHUB_ENV
-          "CXX_x86_64_pc_windows_gnu=x86_64-w64-mingw32-g++"                 >> $env:GITHUB_ENV
-          "AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar"                   >> $env:GITHUB_ENV
-          "WINDRES_x86_64_pc_windows_gnu=x86_64-w64-mingw32-windres"         >> $env:GITHUB_ENV
-          # winresource crate uses these directly when compiling resources
-          # for the target — falling back to rc.exe is what trips us up.
-          "RC=x86_64-w64-mingw32-windres"                                    >> $env:GITHUB_ENV
-          "WINDRES=x86_64-w64-mingw32-windres"                               >> $env:GITHUB_ENV
+          if (-not $gcc)     { throw "x86_64-w64-mingw32-gcc not found in any candidate path" }
+          if (-not $windres) { throw "windres not found in any candidate path" }
+
+          "Found gcc:     $gcc"     | Out-Host
+          "Found windres: $windres" | Out-Host
+
+          # Prepend mingw bin to PATH so cargo can find the linker.
+          (Split-Path $gcc) >> $env:GITHUB_PATH
+
+          # Tell winresource / cc-rs to use the GNU toolchain end-to-end
+          # (otherwise winresource picks MSVC rc.exe, which produces a
+          # resource.lib mingw ld can't read — "file format not recognized").
+          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$gcc"   >> $env:GITHUB_ENV
+          "CC_x86_64_pc_windows_gnu=$gcc"                    >> $env:GITHUB_ENV
+          "AR_x86_64_pc_windows_gnu=$(Join-Path (Split-Path $gcc) 'ar.exe')" >> $env:GITHUB_ENV
+          "WINDRES_x86_64_pc_windows_gnu=$windres"           >> $env:GITHUB_ENV
+          "RC=$windres"                                      >> $env:GITHUB_ENV
+          "WINDRES=$windres"                                 >> $env:GITHUB_ENV
 
       - name: Install UI deps
         working-directory: apps/owllm-desktop

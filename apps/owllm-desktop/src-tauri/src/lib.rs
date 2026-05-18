@@ -11,6 +11,8 @@
 // Each command lives in its own module so this file stays a wiring
 // manifest and nothing more.
 
+use tauri::Manager;
+
 mod accounts;
 mod agents;
 mod bridges;

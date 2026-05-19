@@ -1066,6 +1066,7 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [panDrag, setPanDrag] = useState<null | { sx: number; sy: number; ox: number; oy: number }>(null);
+  const canvasRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => { setZoom(1); setPan({ x: 0, y: 0 }); }, [team?.id]);
   const w = width, h = height;
   // Reserve space for the info-card overlay on the RIGHT side of the
@@ -1103,11 +1104,20 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
       .filter(a => a.name !== "orchestrator" && a.base !== "orchestrator" && a.name !== CRITIC_AGENT_NAME)
       .map(a => {
         const group = groupForAgent(a);
+        // Orbital depth is capped at 2. The orbital diagram is a
+        // hub-and-spokes composition — leader on the inner ring, every
+        // other specialist on the outer ring. Deeper graph layers
+        // (e.g. critics at depth 3) collapse onto the outer ring here;
+        // their real depth chain still shows in GraphCanvas. Without
+        // this cap, a depth-3 ring overruns max_radius once `step` hits
+        // its 90-px floor, and edges pointing at those nodes shoot off
+        // the canvas into empty space (the purple-arrow bug).
+        const rawDepth = Math.max(1, depths.get(a.name) ?? 1);
         return {
           name: a.name,
           label: teamMemberLabel(a.name, group),
           iconRef: agentIconRef(a, roleByName),
-          depth: Math.max(1, depths.get(a.name) ?? 1),
+          depth: Math.min(2, rawDepth),
           active: activeAgents.has(a.name),
           group,
         };
@@ -1266,14 +1276,29 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
     e.stopPropagation();
   };
   const onWheel = (e: React.WheelEvent) => {
+    // Cursor-anchored zoom so "focus on this node" works: the content
+    // point under the pointer stays put as the canvas scales. Matches
+    // GraphCanvas's wheel behaviour. Without this the diagram zooms
+    // from (0,0), so zooming in pushes the thing you're looking at off
+    // the side of the screen.
     e.preventDefault();
+    const rect = canvasRef.current?.getBoundingClientRect();
     const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    setZoom(z => Math.max(0.4, Math.min(3.0, z * factor)));
+    const newZoom = Math.max(0.4, Math.min(3.0, zoom * factor));
+    if (!rect) { setZoom(newZoom); return; }
+    const cx0 = (e.clientX - rect.left - pan.x) / zoom;
+    const cy0 = (e.clientY - rect.top - pan.y) / zoom;
+    setPan({
+      x: e.clientX - rect.left - cx0 * newZoom,
+      y: e.clientY - rect.top - cy0 * newZoom,
+    });
+    setZoom(newZoom);
   };
 
   return (
     <div
       data-ui="AgentTeamCanvas"
+      ref={canvasRef}
       onMouseDown={onBgMouseDown}
       onMouseMove={onBgMouseMove}
       onMouseUp={endPan}

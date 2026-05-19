@@ -1164,6 +1164,88 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
 //
 // Pan + zoom: hold the mouse on empty space to drag the diagram around,
 // scroll-wheel to zoom in/out (0.4×..3.0×, ~10% per notch). Mirrors the
+// Shared canvas gesture model — used by BOTH the orbital diagram and
+// the editable graph so pan/zoom feel identical across the two views.
+//
+// Bindings:
+//   * Middle-mouse-button drag  → pan (anywhere on the canvas).
+//     Left-button is reserved for the consumer (node-drag in graph
+//     view, click-to-deselect in diagram view), so left-drag NEVER
+//     pans here. The mousemove listener lives on document, not on the
+//     container, so the drag survives the cursor leaving the canvas.
+//   * Plain wheel                → zoom anchored on the cursor (content
+//     point under the pointer stays put as the canvas scales).
+//
+// Returns ready-to-spread props + the transform string and pan/zoom
+// state so consumers can reset on team/data change.
+function useCanvasGestures(opts?: { minZoom?: number; maxZoom?: number; factor?: number }) {
+  const minZoom = opts?.minZoom ?? 0.25;
+  const maxZoom = opts?.maxZoom ?? 3.0;
+  const factor = opts?.factor ?? 1.12;
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<null | { sx: number; sy: number; ox: number; oy: number }>(null);
+  const [dragTick, setDragTick] = useState(0);
+
+  // Mousedown on the container. Middle-button = start pan. Left and
+  // right are passed through so the consumer's handlers (clicks,
+  // node-drag) keep working unmodified.
+  const onMouseDown = (e: React.MouseEvent) => {
+    if (e.button !== 1) return;
+    e.preventDefault();
+    dragRef.current = { sx: e.clientX, sy: e.clientY, ox: pan.x, oy: pan.y };
+    setDragTick(t => t + 1);
+  };
+
+  // Move + up listeners ride on document so leaving the canvas mid-
+  // drag doesn't freeze the pan. dragTick re-installs the listeners
+  // whenever a fresh drag starts so they capture the latest closure.
+  useEffect(() => {
+    const move = (e: MouseEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      setPan({ x: d.ox + (e.clientX - d.sx), y: d.oy + (e.clientY - d.sy) });
+    };
+    const up = () => {
+      if (!dragRef.current) return;
+      dragRef.current = null;
+      setDragTick(t => t + 1);
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mouseup", up);
+    return () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mouseup", up);
+    };
+  }, [dragTick]);
+
+  const onWheel = (e: React.WheelEvent) => {
+    e.preventDefault();
+    const rect = containerRef.current?.getBoundingClientRect();
+    const f = e.deltaY < 0 ? factor : 1 / factor;
+    const newZoom = Math.max(minZoom, Math.min(maxZoom, zoom * f));
+    if (!rect) { setZoom(newZoom); return; }
+    const cx = (e.clientX - rect.left - pan.x) / zoom;
+    const cy = (e.clientY - rect.top - pan.y) / zoom;
+    setPan({
+      x: e.clientX - rect.left - cx * newZoom,
+      y: e.clientY - rect.top - cy * newZoom,
+    });
+    setZoom(newZoom);
+  };
+
+  return {
+    pan, zoom,
+    setPan, setZoom,
+    panDragging: dragRef.current !== null,
+    containerRef,
+    onMouseDown,
+    onWheel,
+    transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+  };
+}
+
 // gesture set in agent_team_canvas.py::wheelEvent. Click an agent to
 // select it (drives the top-left info card); click empty space to
 // deselect.
@@ -1177,12 +1259,12 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   selectedNode: string | null;
   onSelectNode: (name: string | null) => void;
 }) {
-  // Zoom + pan around the orbital layout. Reset whenever the team flips.
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [panDrag, setPanDrag] = useState<null | { sx: number; sy: number; ox: number; oy: number }>(null);
-  const canvasRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => { setZoom(1); setPan({ x: 0, y: 0 }); }, [team?.id]);
+  // Pan + zoom via the shared gesture hook so the diagram and graph
+  // views behave IDENTICALLY: middle-mouse-drag pans, plain wheel
+  // zooms anchored on the cursor. Reset on team change.
+  const view = useCanvasGestures({ minZoom: 0.4, maxZoom: 3.0, factor: 1.1 });
+  const { pan, zoom, setPan, setZoom, panDragging, containerRef: canvasRef, onMouseDown: onCanvasMouseDown, onWheel } = view;
+  useEffect(() => { setZoom(1); setPan({ x: 0, y: 0 }); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [team?.id]);
   const w = width, h = height;
   // Reserve space for the info-card overlay on the RIGHT side of the
   // canvas (used to be left). The orbital diagram then centres in the
@@ -1367,60 +1449,23 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
     return `M ${sx} ${sy} A ${rad} ${rad} 0 ${large} 1 ${ex} ${ey}`;
   };
 
-  // Click an agent → select it; click background → deselect. Stops
-  // propagation on the node hit so the background handler doesn't fire.
-  // Drag detection: only suppress the deselect click when the cursor
-  // actually moved (>3px), so a plain click on empty space still works.
-  const dragMovedRef = useRef(false);
-  const onBgMouseDown = (e: React.MouseEvent) => {
-    if (e.button !== 0) return;
-    dragMovedRef.current = false;
-    setPanDrag({ sx: e.clientX, sy: e.clientY, ox: pan.x, oy: pan.y });
-  };
-  const onBgMouseMove = (e: React.MouseEvent) => {
-    if (!panDrag) return;
-    const dx = e.clientX - panDrag.sx;
-    const dy = e.clientY - panDrag.sy;
-    if (!dragMovedRef.current && Math.hypot(dx, dy) > 3) dragMovedRef.current = true;
-    setPan({ x: panDrag.ox + dx, y: panDrag.oy + dy });
-  };
-  const endPan = () => { if (panDrag) setPanDrag(null); };
+  // Click an agent → select it; click background → deselect. Pan is
+  // owned by the shared gesture hook (middle-mouse-drag), so left-
+  // button events are free for selection without pan-drag interference.
   const onBgClick = (e: React.MouseEvent) => {
-    if (dragMovedRef.current) { dragMovedRef.current = false; return; }
+    if (panDragging) return;
     onSelectNode(null);
     e.stopPropagation();
-  };
-  const onWheel = (e: React.WheelEvent) => {
-    // Cursor-anchored zoom so "focus on this node" works: the content
-    // point under the pointer stays put as the canvas scales. Matches
-    // GraphCanvas's wheel behaviour. Without this the diagram zooms
-    // from (0,0), so zooming in pushes the thing you're looking at off
-    // the side of the screen.
-    e.preventDefault();
-    const rect = canvasRef.current?.getBoundingClientRect();
-    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
-    const newZoom = Math.max(0.4, Math.min(3.0, zoom * factor));
-    if (!rect) { setZoom(newZoom); return; }
-    const cx0 = (e.clientX - rect.left - pan.x) / zoom;
-    const cy0 = (e.clientY - rect.top - pan.y) / zoom;
-    setPan({
-      x: e.clientX - rect.left - cx0 * newZoom,
-      y: e.clientY - rect.top - cy0 * newZoom,
-    });
-    setZoom(newZoom);
   };
 
   return (
     <div
       data-ui="AgentTeamCanvas"
       ref={canvasRef}
-      onMouseDown={onBgMouseDown}
-      onMouseMove={onBgMouseMove}
-      onMouseUp={endPan}
-      onMouseLeave={endPan}
+      onMouseDown={onCanvasMouseDown}
       onClick={onBgClick}
       onWheel={onWheel}
-      style={{ position:"relative", width:w, height:h, background:`radial-gradient(ellipse at ${w/2}px ${h/2}px, rgba(192,138,255,0.10) 0%, rgba(116,164,255,0.06) 30%, rgba(40,60,110,0.04) 60%, rgba(0,0,0,0) 85%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow:"hidden", cursor: panDrag ? "grabbing" : "grab", userSelect: "none" }}
+      style={{ position:"relative", width:w, height:h, background:`radial-gradient(ellipse at ${w/2}px ${h/2}px, rgba(192,138,255,0.10) 0%, rgba(116,164,255,0.06) 30%, rgba(40,60,110,0.04) 60%, rgba(0,0,0,0) 85%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow:"hidden", cursor: panDragging ? "grabbing" : "default", userSelect: "none" }}
     >
       <div style={{ position:"absolute", left:0, top:0, width:w, height:h, transform:`translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin:"0 0" }}>
       <svg width={w} height={h} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
@@ -1780,7 +1825,6 @@ function GraphCanvas({
   positions: GraphPos | null; onPositionsChange: (p: GraphPos) => void;
 }) {
   const w = width, h = height;
-  const containerRef = useRef<HTMLDivElement>(null);
   // Live mouse position for the rubber-band edge while dragging from a
   // port. Null when no drag is in flight.
   const [drag, setDrag] = useState<null | { from: string; x: number; y: number; over: string | null }>(null);
@@ -1792,15 +1836,13 @@ function GraphCanvas({
   const bodyDragRef = useRef(bodyDrag);
   useEffect(() => { bodyDragRef.current = bodyDrag; }, [bodyDrag]);
 
-  // Pan + zoom — replaces the previous `overflow:auto` scroll. The inner
-  // content div is `transform: translate(pan) scale(zoom)`-ed. Wheel +
-  // ctrl zooms around the cursor; plain wheel pans; middle-mouse drag
-  // pans freely. Defaults to identity (no zoom, origin at top-left).
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  // Live middle-mouse pan-drag state. When set we update pan on every
-  // mousemove using the start offset.
-  const panDragRef = useRef<null | { startClientX: number; startClientY: number; startPan: { x: number; y: number } }>(null);
+  // Pan + zoom via the shared gesture hook so the graph and diagram
+  // views behave IDENTICALLY: middle-mouse-drag pans, plain wheel
+  // zooms anchored on the cursor. Node-drag and port-rubber-band
+  // (below) still own left-button behaviour on their own elements via
+  // stopPropagation, so they don't fight with the hook.
+  const view = useCanvasGestures({ minZoom: 0.25, maxZoom: 3.0, factor: 1.12 });
+  const { pan, zoom, setPan, containerRef, onMouseDown: onContainerMouseDown, onWheel: onContainerWheel, panDragging } = view;
 
   const LAYER_COLORS = [
     "#f1c44a", "#48d486", "#3aa0ff", "#ee5b5b",
@@ -1908,71 +1950,6 @@ function GraphCanvas({
   // render so closing over it captures the freshest map.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bodyDrag, pan.x, pan.y, zoom]);
-
-  // panDragTick — bumped whenever we (re)start a pan drag so the effect
-  // below re-binds its document listeners. Must be declared BEFORE the
-  // effect that references it in its deps array (TDZ otherwise).
-  const [panDragTick, setPanTick] = useState(0);
-
-  // PAN DRAG — middle mouse button (button === 1). Right-click is
-  // reserved for the OS context menu; left-click is for node selection
-  // / port drag. Document-level listeners so panning survives at the
-  // edges of the canvas. The ref check at the top short-circuits when
-  // no pan is actually in flight (we still want the effect to be
-  // active so onUp can clean up).
-  useEffect(() => {
-    if (!panDragRef.current) return;
-    const onMove = (e: MouseEvent) => {
-      const pd = panDragRef.current;
-      if (!pd) return;
-      setPan({
-        x: pd.startPan.x + (e.clientX - pd.startClientX),
-        y: pd.startPan.y + (e.clientY - pd.startClientY),
-      });
-    };
-    const onUp = () => { panDragRef.current = null; setPanTick(t => t + 1); };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-    return () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [panDragTick]);
-
-  // Container interactions:
-  //   - middle-mouse down → start a pan-drag
-  //   - left-click on empty area → clear selection (existing behaviour)
-  //   - wheel → zoom (ctrl) or pan (plain)
-  const onContainerMouseDown = (e: React.MouseEvent) => {
-    if (e.button === 1) {
-      e.preventDefault();
-      panDragRef.current = {
-        startClientX: e.clientX, startClientY: e.clientY,
-        startPan: { x: pan.x, y: pan.y },
-      };
-      setPanTick(t => t + 1);
-    }
-  };
-
-  const onContainerWheel = (e: React.WheelEvent) => {
-    // Plain wheel = zoom (matching the orbital diagram view's wheel
-    // behaviour so the two canvas modes feel consistent). Zoom centres
-    // on the cursor: the content point under the pointer stays anchored
-    // as the scale changes. Pan via middle-mouse drag instead.
-    e.preventDefault();
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const factor = e.deltaY > 0 ? 1 / 1.12 : 1.12;
-    const newZoom = Math.max(0.25, Math.min(3, zoom * factor));
-    const cx = (e.clientX - rect.left - pan.x) / zoom;
-    const cy = (e.clientY - rect.top - pan.y) / zoom;
-    setPan({
-      x: e.clientX - rect.left - cx * newZoom,
-      y: e.clientY - rect.top - cy * newZoom,
-    });
-    setZoom(newZoom);
-  };
 
   // PORT DRAG — rubber-band edge while dragging from a node's output
   // port. Container-level move/up because the rubber band needs canvas
@@ -2100,7 +2077,7 @@ function GraphCanvas({
         // Middle-click on Windows triggers an "auto-scroll" wheel cursor.
         // Suppress that so our pan handler is the only consumer.
         userSelect: "none",
-        cursor: panDragRef.current ? "grabbing" : "default",
+        cursor: panDragging ? "grabbing" : "default",
       }}
     >
       {/* Pan + zoom wrapper. The whole inner canvas (SVG edges, cluster

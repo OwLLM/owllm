@@ -100,6 +100,25 @@ export type GoalMsg = {
   seq?: number;
 };
 export type HistoryItem = { role: "user" | "assistant"; content: string };
+
+// Multimodal attachment carrier. Raw bytes ride as base64 strings so
+// the same payload survives the JSON serialization on every provider
+// hop (OpenAI image_url data: URIs, Anthropic image.source.base64,
+// llama.cpp llava image_url). `mime` keeps the original content-type
+// so we can pick the right format hint per provider.
+//
+// Audio attachments NEVER reach the chat-completions wire. They get
+// transcribed via OpenAI Whisper up-front and the transcript is
+// folded into userMessage. That removes a pile of format-coupling
+// headaches (Telegram voice = ogg-opus, OpenAI input_audio = wav/mp3
+// only, Anthropic + llama-server have no audio path at all) and gives
+// every provider the same "I see the audio said X" experience.
+export type Attachment = {
+  kind: "image" | "audio";
+  mime: string;
+  data_b64: string;
+  filename?: string;
+};
 export type AgentSpec = {
   name: string;
   base: string;
@@ -513,6 +532,109 @@ type StreamHandler = (delta: string) => void;
 export type ThoughtHandler = (channel: string, role: string, delta: string) => void;
 type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
 
+// ---------- Attachment helpers ----------
+
+export function imageAttachments(atts?: Attachment[]): Attachment[] {
+  return (atts ?? []).filter(a => a.kind === "image");
+}
+export function audioAttachments(atts?: Attachment[]): Attachment[] {
+  return (atts ?? []).filter(a => a.kind === "audio");
+}
+
+/// Transcribe every audio attachment via OpenAI Whisper and fold the
+/// transcripts into the user message. Returns the rewritten user
+/// message (unchanged when there are no audio parts). Requires
+/// OPENAI_API_KEY — there is no provider-agnostic local fallback. If
+/// no key is saved the audio parts are surfaced as a `[no transcript]`
+/// note so the model still knows audio was attached, and dispatch
+/// continues.
+export async function transcribeAudioAttachments(
+  userMessage: string,
+  attachments: Attachment[] | undefined,
+): Promise<string> {
+  const auds = audioAttachments(attachments);
+  if (auds.length === 0) return userMessage;
+  const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
+  if (!key) {
+    const note = auds.map(a => `[Audio attached: ${a.filename ?? a.mime} — no transcript: save OPENAI_API_KEY on the Accounts page to enable Whisper.]`).join("\n");
+    return userMessage ? `${userMessage}\n\n${note}` : note;
+  }
+  const transcripts: string[] = [];
+  for (const a of auds) {
+    try {
+      const bin = base64ToBytes(a.data_b64);
+      // Slice into a fresh ArrayBuffer copy — Blob constructor's
+      // BlobPart type rejects Uint8Array<SharedArrayBuffer>, and TS
+      // can't prove our buffer is the non-shared variant.
+      const blob = new Blob([bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength) as ArrayBuffer], { type: a.mime });
+      const fd = new FormData();
+      const filename = a.filename ?? `audio.${extForMime(a.mime)}`;
+      fd.append("file", blob, filename);
+      fd.append("model", "whisper-1");
+      fd.append("response_format", "text");
+      const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${key}` },
+        body: fd,
+      });
+      if (!resp.ok) {
+        const err = await resp.text().catch(() => `HTTP ${resp.status}`);
+        transcripts.push(`[Audio "${filename}" — Whisper error: ${err.slice(0, 200)}]`);
+        continue;
+      }
+      const text = (await resp.text()).trim();
+      transcripts.push(`[Audio "${filename}" transcript]\n${text}`);
+    } catch (e: any) {
+      transcripts.push(`[Audio "${a.filename ?? a.mime}" — transcribe failed: ${String(e?.message ?? e).slice(0, 200)}]`);
+    }
+  }
+  const block = transcripts.join("\n\n");
+  return userMessage ? `${userMessage}\n\n${block}` : block;
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function extForMime(mime: string): string {
+  if (mime.includes("ogg")) return "ogg";
+  if (mime.includes("mpeg") || mime.includes("mp3")) return "mp3";
+  if (mime.includes("wav")) return "wav";
+  if (mime.includes("webm")) return "webm";
+  if (mime.includes("m4a") || mime.includes("aac")) return "m4a";
+  if (mime.includes("flac")) return "flac";
+  return "bin";
+}
+
+/// OpenAI-compatible user-message content: plain string if no images,
+/// otherwise an array of `text` + `image_url` parts. Used for both the
+/// public OpenAI API and the OpenAI-compatible local llama-server
+/// (llava-class models accept data: URIs in image_url).
+export function openaiUserContent(text: string, images: Attachment[]): unknown {
+  if (images.length === 0) return text;
+  const parts: any[] = [];
+  if (text) parts.push({ type: "text", text });
+  for (const img of images) {
+    parts.push({ type: "image_url", image_url: { url: `data:${img.mime};base64,${img.data_b64}` } });
+  }
+  return parts;
+}
+
+/// Anthropic Messages user content. Same idea as OpenAI but the part
+/// shape is different: `{type:"image", source:{type:"base64", media_type, data}}`.
+export function anthropicUserContent(text: string, images: Attachment[]): unknown {
+  if (images.length === 0) return text;
+  const parts: any[] = [];
+  for (const img of images) {
+    parts.push({ type: "image", source: { type: "base64", media_type: img.mime, data: img.data_b64 } });
+  }
+  if (text) parts.push({ type: "text", text });
+  return parts;
+}
+
 export async function streamChatCompletion(
   port: number,
   modelId: string,
@@ -530,6 +652,10 @@ export async function streamChatCompletion(
   /// dispatch resolves to the Claude CLI subscription path; ignored
   /// for API + local llama-server paths (those don't expose tools).
   allowedTools?: string[],
+  /// Multimodal attachments. Audio is transcribed up-front and folded
+  /// into userMessage so every provider sees the same text shape;
+  /// images ride to the provider's native image part shape.
+  attachments?: Attachment[],
 ): Promise<string> {
   const forceSub = modelId.startsWith("sub/");
   const forceApi = modelId.startsWith("api/");
@@ -537,19 +663,25 @@ export async function streamChatCompletion(
     ? modelId.slice(modelId.indexOf("/") + 1)
     : modelId;
 
+  // Transcribe any audio parts first (Whisper, one-shot). After this,
+  // `effectiveText` carries the original prompt + transcript blocks
+  // and we only need to worry about image parts per provider.
+  const effectiveText = await transcribeAudioAttachments(userMessage, attachments);
+  const images = imageAttachments(attachments);
+
   if (provider === "auto") {
     throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
   }
   if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools);
+    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images);
   }
   if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, history, onThought);
+    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
   }
-  const messages: Array<{ role: string; content: string }> = [
+  const messages: Array<{ role: string; content: unknown }> = [
     { role: "system", content: systemPrompt },
     ...(history ?? []),
-    { role: "user", content: userMessage },
+    { role: "user", content: openaiUserContent(effectiveText, images) },
   ];
   const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
     method: "POST",
@@ -580,10 +712,23 @@ async function streamAnthropic(
   autoApprove?: boolean,
   onThought?: ThoughtHandler,
   allowedTools?: string[],
+  /// Image attachments only — audio has already been transcribed in
+  /// streamChatCompletion. When the call resolves to the Claude CLI
+  /// subscription path images are NOT forwarded (the CLI binding is
+  /// text-only); we prefix the user message with a note so the user
+  /// understands why an attached image didn't reach the model.
+  images?: Attachment[],
 ): Promise<string> {
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
-  const cliPrompt = foldHistoryIntoPrompt(userMessage, history);
+  const imgList = images ?? [];
+  // The Claude CLI binding is text-only. When the user routed via the
+  // subscription path AND attached images, prefix a note so they're
+  // not silently dropped. Users on the API path get full inline images.
+  const cliUserMessage = imgList.length > 0
+    ? `${userMessage}\n\n[${imgList.length} image attachment(s) dropped — switch to the API row to send images to Claude.]`
+    : userMessage;
+  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history);
   if (wantSub) {
     const status = await invoke<{ claude_cli: boolean }>("accounts_status");
     if (!status?.claude_cli) {
@@ -645,7 +790,7 @@ async function streamAnthropic(
       system: systemPrompt,
       messages: [
         ...(history ?? []).map(h => ({ role: h.role, content: h.content })),
-        { role: "user", content: userMessage },
+        { role: "user", content: anthropicUserContent(userMessage, imgList) },
       ],
       stream: true,
       temperature,
@@ -737,6 +882,8 @@ async function streamOpenAI(
   onDelta: StreamHandler,
   history?: HistoryItem[],
   onThought?: ThoughtHandler,
+  /// Image attachments only — audio is transcribed in streamChatCompletion.
+  images?: Attachment[],
 ): Promise<string> {
   // ModelPicker encodes reasoning-effort variants as "<id>:<level>"
   // (e.g. "gpt-5.5:high"). Split it back out here so the wire model id
@@ -761,7 +908,7 @@ async function streamOpenAI(
       messages: [
         { role: "system", content: systemPrompt },
         ...(history ?? []),
-        { role: "user", content: userMessage },
+        { role: "user", content: openaiUserContent(userMessage, images ?? []) },
       ],
       stream: true,
       temperature,
@@ -938,6 +1085,11 @@ export type DispatchInput = {
   /// the user. The Critic's reply gets folded back into the dispatch
   /// as if the user had answered.
   directorMode?: boolean;
+  /// Inbound images / audio attached to the user goal. The bridge
+  /// runner downloads them via telegram_download_file and threads
+  /// them through here; specialists receive only the orchestrator's
+  /// text reply so the bytes ride to the orchestrator turn only.
+  attachments?: Attachment[];
 };
 
 const NEED_USER_INPUT_RE = /^\s*\[NEED_USER_INPUT\][\s:]+(.+?)\s*$/im;
@@ -996,7 +1148,7 @@ export async function runCriticDispatch(opts: {
 }
 
 export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks): Promise<string> {
-  const { team, roleByName, goal, modelFor, models, port, projectCwd, history, autoApprove, signal, directives, directorMode } = opts;
+  const { team, roleByName, goal, modelFor, models, port, projectCwd, history, autoApprove, signal, directives, directorMode, attachments } = opts;
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
   // Local mutable history — when the Critic answers a [NEED_USER_INPUT]
@@ -1027,6 +1179,10 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       // path is a follow-up slice; bridge dispatches today are mostly
       // single-agent so the contention risk is lower.)
       roleByName.get(orch.base)?.toolAllowlist,
+      // Inbound images/audio attached via Telegram. Audio gets
+      // transcribed up-front (Whisper), images embed natively; both
+      // ride only to the orchestrator turn.
+      attachments && attachments.length > 0 ? attachments : undefined,
     );
   } finally {
     hooks.onAgentEnd(orch.name);

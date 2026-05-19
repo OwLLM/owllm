@@ -19,7 +19,52 @@ import {
   toTeam, projectToTeam, rolesFromBackend,
   chatToHistory, findOrchestratorSpec, displayLabel,
   runDispatchLoop, DispatchPhase,
+  type Attachment,
 } from "../pages/agentic/dispatch";
+
+/// Shape returned by the Rust telegram_download_file command. Mirrors
+/// telegram::TelegramFileDownload on the Rust side.
+type TelegramFileDownload = { mime: string; data_b64: string; size: number };
+
+/// Pick the largest photo size Telegram offered and resolve it to an
+/// Attachment by downloading the bytes. Returns null on failure so a
+/// busted attachment doesn't blow up the whole inbound message.
+async function downloadPhoto(token: string, photos: Array<{ file_id: string; file_size?: number }>): Promise<Attachment | null> {
+  if (!photos.length) return null;
+  const sorted = [...photos].sort((a, b) => (b.file_size ?? 0) - (a.file_size ?? 0));
+  const pick = sorted[0];
+  try {
+    const dl = await invoke<TelegramFileDownload>("telegram_download_file", { token, fileId: pick.file_id, expectedMime: null });
+    return { kind: "image", mime: dl.mime, data_b64: dl.data_b64, filename: `photo.${dl.mime.split("/")[1] || "jpg"}` };
+  } catch (e) {
+    console.error("[telegram] photo download failed", e);
+    return null;
+  }
+}
+
+/// Download an audio-like attachment (voice / audio / audio document).
+async function downloadAudio(token: string, fileId: string, mimeHint: string | null, filename?: string): Promise<Attachment | null> {
+  try {
+    const dl = await invoke<TelegramFileDownload>("telegram_download_file", { token, fileId, expectedMime: mimeHint });
+    return { kind: "audio", mime: dl.mime, data_b64: dl.data_b64, filename: filename ?? `audio.${dl.mime.split("/")[1] || "ogg"}` };
+  } catch (e) {
+    console.error("[telegram] audio download failed", e);
+    return null;
+  }
+}
+
+/// Download an image-as-document. We only call this when mime_type
+/// starts with "image/" — Telegram routes original-quality photos here
+/// instead of `photo` to skip its server-side compression.
+async function downloadImageDocument(token: string, fileId: string, mime: string, filename?: string): Promise<Attachment | null> {
+  try {
+    const dl = await invoke<TelegramFileDownload>("telegram_download_file", { token, fileId, expectedMime: mime });
+    return { kind: "image", mime: dl.mime, data_b64: dl.data_b64, filename: filename ?? `image.${dl.mime.split("/")[1] || "bin"}` };
+  } catch (e) {
+    console.error("[telegram] document download failed", e);
+    return null;
+  }
+}
 
 const STARTED_KEY = "owllm:telegram:started";
 
@@ -127,7 +172,7 @@ export default function TelegramBridgeRunner() {
     return null;
   };
 
-  const handle = async (chatId: number, text: string) => {
+  const handle = async (chatId: number, text: string, attachments: Attachment[] = []) => {
     const tgCfg = cfgRef.current;
     if (!tgCfg) return;
     const project = projectsRef.current.find(p => p.id === tgCfg.project_id) ?? null;
@@ -136,8 +181,12 @@ export default function TelegramBridgeRunner() {
     // ---- 1. INBOUND VISIBLE IMMEDIATELY ----
     // Fire the chat-append event right when the message arrives so
     // the agentic tab shows the user's prompt instantly — not after
-    // the 30 s the orchestrator takes to think.
-    const inMsg: GoalMsg = { role: "you", color: "#9ad9ff", text: `📱 [TG] ${text}` };
+    // the 30 s the orchestrator takes to think. Tag the chip count
+    // so the canvas reader knows media rode in too.
+    const attachTag = attachments.length > 0
+      ? ` [+${attachments.filter(a => a.kind === "image").length}🖼 ${attachments.filter(a => a.kind === "audio").length}🎵]`
+      : "";
+    const inMsg: GoalMsg = { role: "you", color: "#9ad9ff", text: `📱 [TG] ${text || "(media only)"}${attachTag}` };
     try {
       window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
         detail: { projectId, messages: [inMsg], source: "telegram" },
@@ -265,7 +314,10 @@ export default function TelegramBridgeRunner() {
         {
           team,
           roleByName: roleByNameRef.current,
-          goal: text,
+          // Empty text + media-only message: substitute a minimal goal
+          // so the orchestrator still has something to plan against.
+          // Without this the model sees "" and refuses to act.
+          goal: text || "(see attached media)",
           modelFor,
           models: modelsRef.current,
           port: serverRef.current.port ?? 0,
@@ -275,6 +327,7 @@ export default function TelegramBridgeRunner() {
           signal: new AbortController().signal,
           directives,
           directorMode,
+          attachments: attachments.length > 0 ? attachments : undefined,
         },
         {
           onPhase: (_phase: DispatchPhase) => { /* could mirror to Telegram if chatty */ },
@@ -384,20 +437,66 @@ export default function TelegramBridgeRunner() {
               offset = Math.max(offset, upd.update_id + 1);
             }
             const msg = upd.message;
-            const text: string | undefined = msg?.text;
             const chatId: number | undefined = msg?.chat?.id;
-            if (!text || typeof chatId !== "number") continue;
+            if (typeof chatId !== "number") continue;
             const allow = Array.isArray(cfg.allowed_chat_ids) ? cfg.allowed_chat_ids : [];
             if (allow.length > 0 && !allow.includes(chatId)) {
               console.warn(`[telegram] chat ${chatId} not on allow-list — ignored.`);
               continue;
             }
-            console.log(`[telegram] inbound from ${chatId}: ${text.slice(0, 80)}`);
-            // Serialize: chain onto the queue. If a prior dispatch is
-            // still running, this one waits. catch() prevents one bad
-            // dispatch from breaking the chain for the next message.
+            // Accept either text OR media. `text` is the plain-message
+            // field; `caption` rides alongside photo/voice/document.
+            // Drop only when there's truly nothing actionable.
+            const text: string = msg?.text || msg?.caption || "";
+            const hasPhoto = Array.isArray(msg?.photo) && msg.photo.length > 0;
+            const hasVoice = !!msg?.voice?.file_id;
+            const hasAudio = !!msg?.audio?.file_id;
+            const docMime: string = msg?.document?.mime_type || "";
+            const docIsImage = !!msg?.document?.file_id && docMime.startsWith("image/");
+            const docIsAudio = !!msg?.document?.file_id && docMime.startsWith("audio/");
+            const hasMedia = hasPhoto || hasVoice || hasAudio || docIsImage || docIsAudio;
+            if (!text && !hasMedia) continue;
+            console.log(`[telegram] inbound from ${chatId}: text="${text.slice(0, 60)}" photo=${hasPhoto} voice=${hasVoice} audio=${hasAudio} doc=${docMime || "-"}`);
+
+            // Snapshot the file_ids + mime hints NOW (msg ref will be
+            // out of scope by the time the queued task runs). Downloads
+            // themselves happen inside the queued task so they're
+            // serialized too — keeps Telegram from rate-limiting and
+            // matches the existing "one dispatch at a time" semantics.
+            const photoArr = hasPhoto ? msg.photo : [];
+            const voiceId = hasVoice ? msg.voice.file_id : null;
+            const voiceMime = hasVoice ? (msg.voice.mime_type || null) : null;
+            const audioId = hasAudio ? msg.audio.file_id : null;
+            const audioMime = hasAudio ? (msg.audio.mime_type || null) : null;
+            const audioName = hasAudio ? (msg.audio.file_name || undefined) : undefined;
+            const docId = (docIsImage || docIsAudio) ? msg.document.file_id : null;
+            const docName = (docIsImage || docIsAudio) ? (msg.document.file_name || undefined) : undefined;
+
             handlerQueue = handlerQueue
-              .then(() => handle(chatId, text))
+              .then(async () => {
+                const attachments: Attachment[] = [];
+                if (photoArr.length > 0) {
+                  const a = await downloadPhoto(cfg.bot_token, photoArr);
+                  if (a) attachments.push(a);
+                }
+                if (voiceId) {
+                  const a = await downloadAudio(cfg.bot_token, voiceId, voiceMime, "voice.ogg");
+                  if (a) attachments.push(a);
+                }
+                if (audioId) {
+                  const a = await downloadAudio(cfg.bot_token, audioId, audioMime, audioName);
+                  if (a) attachments.push(a);
+                }
+                if (docId && docIsImage) {
+                  const a = await downloadImageDocument(cfg.bot_token, docId, docMime, docName);
+                  if (a) attachments.push(a);
+                }
+                if (docId && docIsAudio) {
+                  const a = await downloadAudio(cfg.bot_token, docId, docMime, docName);
+                  if (a) attachments.push(a);
+                }
+                await handle(chatId, text, attachments);
+              })
               .catch(e => console.error("[telegram] handle failed", e));
           }
         } catch (e: any) {

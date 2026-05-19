@@ -12,10 +12,15 @@ import remarkGfm from "remark-gfm";
 import NewProjectDialog from "./NewProjectDialog";
 import ModelPicker, { AccountsStatusLite } from "./ModelPicker";
 import {
+  type Attachment,
   type Directive,
   formatDirectivesBlock,
   buildCriticPrompt,
   extractUserInputRequest,
+  transcribeAudioAttachments,
+  imageAttachments,
+  openaiUserContent,
+  anthropicUserContent,
 } from "./dispatch";
 
 const ICONS = "/Page_icons";
@@ -430,34 +435,144 @@ function LocationRow({
 }
 
 // GoalRow — agents_page.py:1757-1910. 📎 attach, goal input, Run,
-// Cancel, 📊 telemetry, 🔊 voice with ▾ menu caret.
-function GoalRow({ goal, setGoal, onRun, onCancel, busy }: {
+// Cancel, 📊 telemetry, 🔊 voice with ▾ menu caret. Images + audio
+// can be attached via the 📎 button (file picker) or dropped onto the
+// input. Each attachment becomes a chip rendered just under the row.
+
+const MAX_ATTACH_BYTES = 20 * 1024 * 1024; // 20 MB per file, in-memory base64
+
+/// Browser File -> Attachment. Reads as base64 via FileReader. Throws
+/// when the MIME isn't image/* or audio/*, or when the file exceeds
+/// MAX_ATTACH_BYTES (would balloon the request body unmanageably).
+async function fileToAttachment(file: File): Promise<Attachment> {
+  if (file.size > MAX_ATTACH_BYTES) {
+    throw new Error(`${file.name} is ${(file.size / 1024 / 1024).toFixed(1)} MB — limit is ${MAX_ATTACH_BYTES / 1024 / 1024} MB.`);
+  }
+  const mime = file.type || "application/octet-stream";
+  const kind: "image" | "audio" =
+    mime.startsWith("image/") ? "image"
+    : mime.startsWith("audio/") ? "audio"
+    : (() => { throw new Error(`Unsupported file type: ${mime || "(unknown)"} — pick an image or audio file.`); })();
+  // FileReader.readAsDataURL → "data:<mime>;base64,<payload>". We only
+  // want the base64 payload so the carrier stays uniform across
+  // browser-attached files and Telegram-downloaded bytes.
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result));
+    fr.onerror = () => reject(fr.error ?? new Error("read failed"));
+    fr.readAsDataURL(file);
+  });
+  const comma = dataUrl.indexOf(",");
+  const data_b64 = comma >= 0 ? dataUrl.slice(comma + 1) : "";
+  return { kind, mime, data_b64, filename: file.name };
+}
+
+function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachments }: {
   goal: string; setGoal: (g: string) => void;
   onRun: () => void; onCancel: () => void; busy: boolean;
+  attachments: Attachment[]; setAttachments: (a: Attachment[]) => void;
 }) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  const [attachError, setAttachError] = useState<string | null>(null);
+
+  const addFiles = async (files: FileList | File[] | null | undefined) => {
+    if (!files || (Array.isArray(files) ? files.length : files.length) === 0) return;
+    setAttachError(null);
+    const arr = Array.isArray(files) ? files : Array.from(files);
+    const next: Attachment[] = [];
+    for (const f of arr) {
+      try {
+        next.push(await fileToAttachment(f));
+      } catch (e: any) {
+        setAttachError(String(e?.message ?? e));
+      }
+    }
+    if (next.length > 0) setAttachments([...attachments, ...next]);
+  };
+
+  const onPickClick = () => fileInputRef.current?.click();
+  const onPickChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    addFiles(e.target.files);
+    // Reset value so picking the same file twice still fires onChange.
+    e.target.value = "";
+  };
+  const onDragOver = (e: React.DragEvent) => { e.preventDefault(); setDragOver(true); };
+  const onDragLeave = () => setDragOver(false);
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    addFiles(e.dataTransfer?.files);
+  };
+  const removeAttachment = (i: number) => {
+    const next = attachments.slice();
+    next.splice(i, 1);
+    setAttachments(next);
+  };
+
   return (
-    <div style={{ height:38, padding:"0 23px", margin:"12px 0", background:"transparent", display:"flex", alignItems:"center", gap:10 }}>
-      <button data-ui="GoalAttachBtn" title="Attach an image or audio file" style={{ height:38, minWidth:44, padding:"0 10px", border:"none", borderRadius:10, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16 }}>📎</button>
-      <input data-ui="GoalInput"
-        value={goal}
-        onChange={e => setGoal(e.target.value)}
-        onKeyDown={e => { if (e.key === "Enter" && !busy) onRun(); }}
-        placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up' (drop an image / audio here)"
-        style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"var(--bg-input)", color:"var(--fg-strong)", border:"none" }} />
-      <button data-ui="GoalRunBtn" disabled={busy || !goal.trim()} onClick={onRun}
-        style={{ height:38, padding:"0 24px", borderRadius:10, border:"none",
-                 background: busy || !goal.trim() ? "rgba(74,108,255,0.25)" : "#4a6cff",
-                 color: busy || !goal.trim() ? "#9aa0a6" : "#fff", fontWeight:600, fontSize:14,
-                 cursor: busy || !goal.trim() ? "not-allowed" : "pointer" }}>
-        {busy ? "Running…" : "Run"}
-      </button>
-      <button data-ui="GoalCancelBtn" disabled={!busy} onClick={onCancel}
-        style={{ height:38, padding:"0 18px", borderRadius:10, border:"none",
-                 background: busy ? "rgba(255,140,140,0.20)" : "rgba(255,140,140,0.10)",
-                 color: busy ? "#ff8c8c" : "#555", fontWeight:600, fontSize:14,
-                 cursor: busy ? "pointer" : "not-allowed" }}>Cancel</button>
-      <button data-ui="GoalTelemetryBtn" title="Open the tool-call telemetry panel" style={{ height:38, width:44, padding:0, border:"none", borderRadius:8, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16 }}>📊</button>
-      <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(92,240,255,0.18)", color:"var(--accent)", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
+    <div style={{ padding:"0 23px", margin:"12px 0", background:"transparent" }}>
+      <div style={{ height:38, display:"flex", alignItems:"center", gap:10 }}>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*,audio/*"
+          multiple
+          style={{ display:"none" }}
+          onChange={onPickChange}
+        />
+        <button
+          data-ui="GoalAttachBtn"
+          onClick={onPickClick}
+          title="Attach images or audio (also: drop files onto the input)"
+          style={{ height:38, minWidth:44, padding:"0 10px", border:"none", borderRadius:10, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16, cursor:"pointer" }}
+        >📎</button>
+        <input data-ui="GoalInput"
+          value={goal}
+          onChange={e => setGoal(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter" && !busy) onRun(); }}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up' (drop an image / audio here)"
+          style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"var(--bg-input)", color:"var(--fg-strong)", border: dragOver ? "1px dashed rgba(124,196,255,0.85)" : "1px solid transparent" }} />
+        <button data-ui="GoalRunBtn" disabled={busy || !goal.trim()} onClick={onRun}
+          style={{ height:38, padding:"0 24px", borderRadius:10, border:"none",
+                   background: busy || !goal.trim() ? "rgba(74,108,255,0.25)" : "#4a6cff",
+                   color: busy || !goal.trim() ? "#9aa0a6" : "#fff", fontWeight:600, fontSize:14,
+                   cursor: busy || !goal.trim() ? "not-allowed" : "pointer" }}>
+          {busy ? "Running…" : "Run"}
+        </button>
+        <button data-ui="GoalCancelBtn" disabled={!busy} onClick={onCancel}
+          style={{ height:38, padding:"0 18px", borderRadius:10, border:"none",
+                   background: busy ? "rgba(255,140,140,0.20)" : "rgba(255,140,140,0.10)",
+                   color: busy ? "#ff8c8c" : "#555", fontWeight:600, fontSize:14,
+                   cursor: busy ? "pointer" : "not-allowed" }}>Cancel</button>
+        <button data-ui="GoalTelemetryBtn" title="Open the tool-call telemetry panel" style={{ height:38, width:44, padding:0, border:"none", borderRadius:8, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16 }}>📊</button>
+        <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(92,240,255,0.18)", color:"var(--accent)", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
+      </div>
+      {(attachments.length > 0 || attachError) && (
+        <div data-ui="GoalAttachStrip" style={{ marginTop:6, display:"flex", flexWrap:"wrap", gap:6 }}>
+          {attachments.map((a, i) => (
+            <span
+              key={i}
+              title={`${a.mime} · ${Math.round(a.data_b64.length * 3 / 4 / 1024)} KB`}
+              style={{ display:"inline-flex", alignItems:"center", gap:6, padding:"2px 6px 2px 8px", borderRadius:14, fontSize:11, background:"rgba(124,196,255,0.12)", color:"var(--fg-strong)", border:"1px solid rgba(124,196,255,0.30)" }}
+            >
+              <span style={{ opacity:0.7 }}>{a.kind === "image" ? "🖼" : "🎵"}</span>
+              <span style={{ maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{a.filename ?? a.mime}</span>
+              <button
+                onClick={() => removeAttachment(i)}
+                title="Remove"
+                style={{ border:"none", background:"transparent", color:"var(--fg-muted)", cursor:"pointer", padding:0, lineHeight:1, fontSize:14 }}
+              >×</button>
+            </span>
+          ))}
+          {attachError && (
+            <span style={{ fontSize:11, color:"#ff8c8c" }}>{attachError}</span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -3019,6 +3134,9 @@ async function streamChatCompletion(
   /// Per-role tool allowlist. Only meaningful on the Claude CLI sub
   /// path; ignored elsewhere.
   allowedTools?: AllowedTools,
+  /// Multimodal attachments. Audio is transcribed up-front (Whisper);
+  /// images ride to the provider's native image part shape.
+  attachments?: Attachment[],
 ): Promise<string> {
   // Strip the optional route prefix encoded by the ModelPicker before
   // handing the bare model id to the provider-specific call.
@@ -3028,24 +3146,29 @@ async function streamChatCompletion(
     ? modelId.slice(modelId.indexOf("/") + 1)
     : modelId;
 
+  // Audio attachments collapse into the user message via Whisper.
+  // Images stay on the side and get a provider-specific encoding.
+  const effectiveText = await transcribeAudioAttachments(userMessage, attachments);
+  const images = imageAttachments(attachments);
+
   if (provider === "auto") {
     // Future slot. For now resolve to a local model when one exists,
     // otherwise fail with an actionable message.
     throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
   }
   if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools);
+    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images);
   }
   if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, userMessage, temperature, signal, onDelta, history, onThought);
+    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
   }
   // Local llama-server. OpenAI-compatible SSE. History (when present)
   // becomes the alternating user/assistant turns preceding the new
   // user message — gives the model continuity across restarts.
-  const messages: Array<{ role: string; content: string }> = [
+  const messages: Array<{ role: string; content: unknown }> = [
     { role: "system", content: systemPrompt },
     ...(history ?? []),
-    { role: "user", content: userMessage },
+    { role: "user", content: openaiUserContent(effectiveText, images) },
   ];
   const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
     method: "POST",
@@ -3104,13 +3227,21 @@ async function streamAnthropic(
   autoApprove?: boolean,
   onThought?: ThoughtHandler,
   allowedTools?: AllowedTools,
+  /// Image attachments only — audio was transcribed in streamChatCompletion.
+  /// API path embeds images natively. CLI subscription path is text-only;
+  /// we surface a note so silently-dropped attachments don't confuse the user.
+  images?: Attachment[],
 ): Promise<string> {
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
+  const imgList = images ?? [];
+  const cliUserMessage = imgList.length > 0
+    ? `${userMessage}\n\n[${imgList.length} image attachment(s) dropped — switch to the API row to send images to Claude.]`
+    : userMessage;
   // Claude CLI's --print mode is one-shot — no inherent memory across
   // calls — so fold the prior conversation into the user prompt the
   // CLI sees. The CLI then has everything it needs to continue.
-  const cliPrompt = foldHistoryIntoPrompt(userMessage, history);
+  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history);
   // forceSub: skip the API path entirely and go straight to the CLI.
   if (wantSub) {
     const status = await invoke<{ claude_cli: boolean }>("accounts_status");
@@ -3176,7 +3307,7 @@ async function streamAnthropic(
       system: systemPrompt,
       messages: [
         ...(history ?? []).map(h => ({ role: h.role, content: h.content })),
-        { role: "user", content: userMessage },
+        { role: "user", content: anthropicUserContent(userMessage, imgList) },
       ],
       stream: true,
       temperature,
@@ -3259,6 +3390,8 @@ async function streamOpenAI(
   onDelta: StreamHandler,
   history?: HistoryItem[],
   onThought?: ThoughtHandler,
+  /// Image attachments only — audio was transcribed in streamChatCompletion.
+  images?: Attachment[],
 ): Promise<string> {
   // Codex CLI subscription support is a future slot — for now both
   // forceSub and the default flow route through the API path, so this
@@ -3276,7 +3409,7 @@ async function streamOpenAI(
       messages: [
         { role: "system", content: systemPrompt },
         ...(history ?? []),
-        { role: "user", content: userMessage },
+        { role: "user", content: openaiUserContent(userMessage, images ?? []) },
       ],
       stream: true,
       temperature,
@@ -3484,6 +3617,11 @@ export default function AgentsPage() {
   const [busy, setBusy] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Multimodal attachments queued against the next Run. Cleared the
+  // moment dispatchGoal kicks off — once the orchestrator has them in
+  // its context, the user's chip strip should empty so the next prompt
+  // is unencumbered. In-memory only (base64); not persisted.
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
 
   // Per-agent log buffers — keyed by agent.name (plus "you" for the
   // user goal echo and "system" for errors). OrchestratorPane filters
@@ -4273,6 +4411,10 @@ export default function AgentsPage() {
     setRunError(null);
     setBusy(true);
     setPhase("planning");
+    // Snapshot + clear the chip strip now. The orchestrator owns these
+    // bytes for the rest of the run; the UI strip should feel "spent".
+    const runAttachments = attachments;
+    if (attachments.length > 0) setAttachments([]);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
@@ -4313,6 +4455,11 @@ export default function AgentsPage() {
           projectCwd,
           undefined, undefined,
           (channel, role, delta) => streamThought(orch.name, channel, role, delta),
+          undefined,
+          // User-attached images/audio ride with the orchestrator only.
+          // Specialists receive the orchestrator's reply (text), so they
+          // don't need the raw bytes.
+          runAttachments.length > 0 ? runAttachments : undefined,
         );
       } finally {
         removeActive(orch.name);
@@ -4957,7 +5104,7 @@ export default function AgentsPage() {
         teams={teams}
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
       />
-      <GoalRow goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy} />
+      <GoalRow goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy} attachments={attachments} setAttachments={setAttachments} />
       <div data-ui="WorkspaceStack" style={{ flex:1, minHeight:0, margin:"0 23px", display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0 }}>
         <div data-ui="RosterLeft" style={{ flex:"2 1 0", minWidth:0, display:"flex", flexDirection:"column", background:"var(--bg-elevated)" }}>
           <FlowHeader

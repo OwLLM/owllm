@@ -41,6 +41,10 @@ rfd = "0.15"
 # feature so the Tauri commands can stay synchronous-flavoured under
 # tokio's async runtime without ping-ponging through spawn_blocking.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# Used by telegram::telegram_download_file to base64-encode media bytes
+# for the JS-side Attachment carrier. No-default-features keeps the dep
+# lean (we don't need the alloc/std features for this single helper).
+base64 = "0.22"
 [dev-dependencies]
 tempfile = "3"
 

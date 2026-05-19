@@ -100,6 +100,7 @@ pub fn run() {
             skill_library::read_skill_md,
             telegram::telegram_get_updates,
             telegram::telegram_send_message,
+            telegram::telegram_download_file,
         ])
         .build(tauri::generate_context!())
         .expect("error while building OwLLM Desktop")

@@ -1858,6 +1858,12 @@ function GraphCanvas({
   const NODE_H = 150;
   const ROW_GAP = 70;
   const COL_GAP = 22;
+  // Wider gap at group boundaries (design ↔ build ↔ critic) so the
+  // cluster bounding boxes drawn under the nodes don't overlap. With
+  // PAD=18 around each cluster, anything below ~40 still produces
+  // intersecting boxes — 80 gives a clear, readable channel between
+  // teams.
+  const CLUSTER_GAP = 80;
   const TOP_PAD = 36;
   const SIDE_PAD = 24;
   const PORT_R = 8;
@@ -1887,10 +1893,23 @@ function GraphCanvas({
       // Wrap groups that overflow into multiple sub-rows.
       for (let i = 0; i < agents.length; i += perRow) {
         const slice = agents.slice(i, i + perRow);
-        const totalW = slice.length * NODE_W + Math.max(0, slice.length - 1) * COL_GAP;
+        // Per-slot gap: COL_GAP normally, CLUSTER_GAP at the boundary
+        // between two different groups so the dashed cluster boxes
+        // drawn underneath stay disjoint. `gaps[j]` is the gap AFTER
+        // slot j (so length = slice.length - 1).
+        const gaps: number[] = [];
+        for (let j = 1; j < slice.length; j++) {
+          const prev = groupForAgent(slice[j - 1]);
+          const cur = groupForAgent(slice[j]);
+          gaps.push(prev !== cur ? CLUSTER_GAP : COL_GAP);
+        }
+        const totalGap = gaps.reduce((s, g) => s + g, 0);
+        const totalW = slice.length * NODE_W + totalGap;
         const startX = (w - totalW) / 2;
+        let x = startX;
         for (let j = 0; j < slice.length; j++) {
-          out.set(slice[j].name, { x: startX + j * (NODE_W + COL_GAP), y: curY });
+          out.set(slice[j].name, { x, y: curY });
+          if (j < slice.length - 1) x += NODE_W + gaps[j];
         }
         curY += NODE_H + ROW_GAP;
       }

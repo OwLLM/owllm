@@ -738,6 +738,15 @@ async function streamOpenAI(
   history?: HistoryItem[],
   onThought?: ThoughtHandler,
 ): Promise<string> {
+  // ModelPicker encodes reasoning-effort variants as "<id>:<level>"
+  // (e.g. "gpt-5.5:high"). Split it back out here so the wire model id
+  // stays clean and the level rides as reasoning_effort. "extra_high"
+  // is forwarded verbatim — it matches the VS Code Copilot Chat label
+  // the user is mirroring; if the API rejects it we want the rejection
+  // to surface, not be silently rewritten.
+  const sep = modelId.indexOf(":");
+  const wireModel = sep === -1 ? modelId : modelId.slice(0, sep);
+  const effort = sep === -1 ? null : modelId.slice(sep + 1);
   const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
   if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -747,7 +756,8 @@ async function streamOpenAI(
       "Authorization": `Bearer ${key}`,
     },
     body: JSON.stringify({
-      model: modelId,
+      model: wireModel,
+      ...(effort ? { reasoning_effort: effort } : {}),
       messages: [
         { role: "system", content: systemPrompt },
         ...(history ?? []),

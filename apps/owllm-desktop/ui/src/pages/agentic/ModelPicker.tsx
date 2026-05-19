@@ -63,13 +63,32 @@ const ANTHROPIC_MODELS = [
   { id: "claude-sonnet-4-6",       display: "Claude Sonnet 4.6" },
   { id: "claude-haiku-4-5-20251001", display: "Claude Haiku 4.5" },
 ];
-const OPENAI_MODELS = [
-  { id: "gpt-5",      display: "GPT-5" },
-  { id: "gpt-5-mini", display: "GPT-5 Codex" },
-  { id: "gpt-4.1",    display: "o3" },           // legacy display names
-  { id: "gpt-4o",     display: "GPT-4o" },
-  { id: "gpt-4o-mini",display: "GPT-4o mini" },
+// Per-model flags replace the legacy slice(0, 3) trick. `sub` = show under
+// "(subscription)" via Codex CLI; `api` = show under "(API)" via
+// OPENAI_API_KEY. `effort` = expose a reasoning-effort selector as one
+// row per level (matches the VS Code Copilot Chat dropdown). Encoded into
+// the id as `<id>:<level>` so dispatch can parse it back without a
+// separate UI control.
+type OpenAIModel = {
+  id: string;
+  display: string;
+  sub?: boolean;
+  api?: boolean;
+  effort?: readonly string[];
+};
+const OPENAI_MODELS: OpenAIModel[] = [
+  { id: "gpt-5",         display: "GPT-5",          sub: true, api: true },
+  { id: "gpt-5-mini",    display: "GPT-5 Codex",    sub: true, api: true },
+  { id: "gpt-5.5-codex", display: "GPT-5.5 Codex",  sub: true,
+    effort: ["low", "medium", "high", "extra_high"] },
+  { id: "gpt-5.5",       display: "GPT-5.5",        api: true,
+    effort: ["low", "medium", "high", "extra_high"] },
+  { id: "gpt-4o",        display: "GPT-4o",         api: true },
+  { id: "gpt-4o-mini",   display: "GPT-4o mini",    api: true },
 ];
+function displayEffort(level: string): string {
+  return level === "extra_high" ? "extra high" : level;
+}
 const AUTO_OPTIONS = [
   { id: "auto/cheapest",       display: "Auto · Cheapest" },
   { id: "auto/cheapest-local", display: "Auto · Cheapest Local" },
@@ -118,25 +137,20 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
 
   const codexSub = !!status?.codex_cli;
   const openaiApi = !!status?.openai_api_key;
-  for (const m of OPENAI_MODELS.slice(0, 3)) {
-    out.push({
-      id: `sub/${m.id}`,
-      label: `${m.display} (subscription)`,
-      section: "openai",
-      variant: "sub",
-      available: codexSub,
-      hint: codexSub ? undefined : "(codex login)",
-    });
-  }
+  const pushOpenAI = (m: OpenAIModel, variant: "sub" | "api", available: boolean, hint?: string) => {
+    const tag = variant === "sub" ? "subscription" : "API";
+    const levels: (string | null)[] = m.effort ? [...m.effort] : [null];
+    for (const lvl of levels) {
+      const id = lvl === null ? `${variant}/${m.id}` : `${variant}/${m.id}:${lvl}`;
+      const label = lvl === null
+        ? `${m.display} (${tag})`
+        : `${m.display} · ${displayEffort(lvl)} (${tag})`;
+      out.push({ id, label, section: "openai", variant, available, hint });
+    }
+  };
   for (const m of OPENAI_MODELS) {
-    out.push({
-      id: `api/${m.id}`,
-      label: `${m.display} (API)`,
-      section: "openai",
-      variant: "api",
-      available: openaiApi,
-      hint: openaiApi ? undefined : "(set OPENAI_API_KEY)",
-    });
+    if (m.sub) pushOpenAI(m, "sub", codexSub, codexSub ? undefined : "(codex login)");
+    if (m.api) pushOpenAI(m, "api", openaiApi, openaiApi ? undefined : "(set OPENAI_API_KEY)");
   }
 
   for (const a of AUTO_OPTIONS) {

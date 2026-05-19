@@ -1868,51 +1868,82 @@ function GraphCanvas({
   const SIDE_PAD = 24;
   const PORT_R = 8;
 
-  // Compute auto-layout (BFS row-by-row, wrap rows that overflow).
+  // Compute auto-layout. Two-column model: design members ride the
+  // left column, build members the right, separated by CLUSTER_GAP.
+  // The column widths are fixed globally from whichever row has the
+  // most members of each group, so a build critic landing in row 3
+  // CANNOT stretch the build cluster across the design column. The
+  // orchestrator and synthetic critical_thinker are "outside-team"
+  // and ride centred across the full canvas at their depth.
+  //
   // Used both for the default placement and for the ⟲ Layout button.
   const autoLayout = useMemo<GraphPos>(() => {
     const out: GraphPos = new Map();
     if (!team || team.agents.length === 0) return out;
     const depths = computeDepths(team);
+
+    // Outside-team predicate: orchestrator and the synthetic critical
+    // thinker don't belong to either design or build. They render with
+    // their own visual style and DO NOT participate in cluster boxes.
+    const isOutsideTeam = (a: AgentSpec): boolean => {
+      const name = a.name.includes(".") ? a.name.split(".").pop()! : a.name;
+      const base = a.base.includes(".") ? a.base.split(".").pop()! : a.base;
+      return base === "orchestrator" || name === "orchestrator" || name === CRITIC_AGENT_NAME;
+    };
+
     const byDepth = new Map<number, AgentSpec[]>();
     for (const a of team.agents) {
       const d = depths.get(a.name) ?? 0;
       if (!byDepth.has(d)) byDepth.set(d, []);
       byDepth.get(d)!.push(a);
     }
-    // Sort each row so Design cluster leads (with Product Owner first)
-    // and Build cluster follows. Stable for equal entries — keeps the
-    // team JSON's intra-cluster authoring order.
     for (const row of byDepth.values()) row.sort(rosterCompare);
     const sortedDepths = Array.from(byDepth.keys()).sort((a, b) => a - b);
-    const availW = w - SIDE_PAD * 2;
-    const perRow = Math.max(1, Math.floor((availW + COL_GAP) / (NODE_W + COL_GAP)));
+
+    // Determine the global column widths from the widest design row
+    // and the widest build row across the whole roster. Outside-team
+    // agents are excluded so a misclassified orchestrator can't pad
+    // either column.
+    let maxDesign = 0;
+    let maxBuild = 0;
+    for (const row of byDepth.values()) {
+      const teamMembers = row.filter(a => !isOutsideTeam(a));
+      const d = teamMembers.filter(a => groupForAgent(a) === "design").length;
+      const b = teamMembers.filter(a => groupForAgent(a) === "build").length;
+      if (d > maxDesign) maxDesign = d;
+      if (b > maxBuild) maxBuild = b;
+    }
+    const designColW = maxDesign > 0 ? maxDesign * NODE_W + (maxDesign - 1) * COL_GAP : 0;
+    const buildColW  = maxBuild  > 0 ? maxBuild  * NODE_W + (maxBuild  - 1) * COL_GAP : 0;
+    const interGap   = (designColW > 0 && buildColW > 0) ? CLUSTER_GAP : 0;
+    const totalColsW = designColW + interGap + buildColW;
+    const designStartX = (w - totalColsW) / 2;
+    const buildStartX  = designStartX + designColW + interGap;
+
+    /// Centre `members` horizontally within `[startX, startX+colW]` and
+    /// drop them at `y`. No-op when members is empty.
+    const placeRow = (members: AgentSpec[], startX: number, colW: number, y: number) => {
+      if (members.length === 0) return;
+      const rowW = members.length * NODE_W + Math.max(0, members.length - 1) * COL_GAP;
+      const offset = (colW - rowW) / 2;
+      for (let j = 0; j < members.length; j++) {
+        out.set(members[j].name, { x: startX + offset + j * (NODE_W + COL_GAP), y });
+      }
+    };
+
     let curY = TOP_PAD;
     for (const depth of sortedDepths) {
       const agents = byDepth.get(depth)!;
-      // Wrap groups that overflow into multiple sub-rows.
-      for (let i = 0; i < agents.length; i += perRow) {
-        const slice = agents.slice(i, i + perRow);
-        // Per-slot gap: COL_GAP normally, CLUSTER_GAP at the boundary
-        // between two different groups so the dashed cluster boxes
-        // drawn underneath stay disjoint. `gaps[j]` is the gap AFTER
-        // slot j (so length = slice.length - 1).
-        const gaps: number[] = [];
-        for (let j = 1; j < slice.length; j++) {
-          const prev = groupForAgent(slice[j - 1]);
-          const cur = groupForAgent(slice[j]);
-          gaps.push(prev !== cur ? CLUSTER_GAP : COL_GAP);
-        }
-        const totalGap = gaps.reduce((s, g) => s + g, 0);
-        const totalW = slice.length * NODE_W + totalGap;
-        const startX = (w - totalW) / 2;
-        let x = startX;
-        for (let j = 0; j < slice.length; j++) {
-          out.set(slice[j].name, { x, y: curY });
-          if (j < slice.length - 1) x += NODE_W + gaps[j];
-        }
-        curY += NODE_H + ROW_GAP;
-      }
+      const outsiders     = agents.filter(a => isOutsideTeam(a));
+      const designMembers = agents.filter(a => !isOutsideTeam(a) && groupForAgent(a) === "design");
+      const buildMembers  = agents.filter(a => !isOutsideTeam(a) && groupForAgent(a) === "build");
+      placeRow(designMembers, designStartX, designColW, curY);
+      placeRow(buildMembers,  buildStartX,  buildColW,  curY);
+      // Outsiders (orchestrator + critical_thinker) ride centred over
+      // the full canvas at the same depth so they read as "above the
+      // teams" instead of belonging to either column.
+      placeRow(outsiders, 0, w, curY);
+      curY += NODE_H + ROW_GAP;
     }
     return out;
   }, [team, w]);
@@ -2177,7 +2208,12 @@ function GraphCanvas({
         {(() => {
           const byGroup: Record<TeamGroup, GNode[]> = { design: [], build: [], critic: [] };
           for (const n of placed) {
+            // Outsiders (orchestrator + synthetic critic) sit ABOVE the
+            // teams — they're not part of either cluster, so excluding
+            // them keeps the bounding boxes tight.
             if (n.name === orchName) continue;
+            if (n.name === CRITIC_AGENT_NAME) continue;
+            if (n.spec.base === "orchestrator") continue;
             byGroup[groupForAgent(n.spec)].push(n);
           }
           const PAD = 18;
@@ -2222,6 +2258,15 @@ function GraphCanvas({
           const group = groupForAgent(n.spec);
           const tint = tintForGroup(group);
           const isCritic = group === "critic";
+          // Outsider agents (orchestrator + synthetic critical_thinker)
+          // sit ABOVE the design/build teams — they don't belong to
+          // either, so suppress the team badge to avoid the misleading
+          // "BUILD TEAM" tag on the orch card (which falls through to
+          // "build" by default in groupForAgent).
+          const isOutsider =
+            isOrch ||
+            n.name === CRITIC_AGENT_NAME ||
+            n.spec.base === "orchestrator";
           // Base background mixes the group tint into the existing
           // gradient so the card stays legible AND its team affiliation
           // reads at a glance. Critic gets a rainbow conic-gradient
@@ -2280,8 +2325,9 @@ function GraphCanvas({
                 }} />
               )}
               {/* Group badge — top-right corner. Design = green, Build = blue.
-                  Font bumped to 11 (+2 from 9) to match the bigger name above. */}
-              {tint.badge && (
+                  Skipped for outsider agents (orchestrator + critic) so
+                  they don't carry a misleading team tag. */}
+              {tint.badge && !isOutsider && (
                 <div style={{
                   position:"absolute", top:6, right:6, zIndex:4,
                   background: group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(58, 120, 220, 0.95)",

@@ -3343,23 +3343,56 @@ async function streamAnthropic(
       "anthropic-version": "2023-06-01",
       "anthropic-dangerous-direct-browser-access": "true",
     },
-    body: JSON.stringify({
-      model: modelId,
-      max_tokens: 4096,
-      system: systemPrompt,
-      messages: [
-        ...(history ?? []).map(h => ({ role: h.role, content: h.content })),
-        { role: "user", content: anthropicUserContent(userMessage, imgList) },
-      ],
-      stream: true,
-      temperature,
-    }),
+    body: JSON.stringify(buildAnthropicBody(modelId, systemPrompt, history, userMessage, imgList, temperature)),
     signal,
   });
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
   }
   return consumeAnthropicSse(resp, onDelta, onThought);
+}
+
+/// Parse the optional ":<effort>" suffix off the Anthropic model id
+/// (set by ModelPicker for Opus 4.7 / Sonnet 4.6) and translate the
+/// tier into extended-thinking parameters. Mirrors the same helper in
+/// dispatch.ts — kept in lockstep until the two streams collapse to
+/// one in a future refactor.
+///
+/// Tier → (budget_tokens, max_tokens, forced temperature):
+///   low (or none) → 0    / 4096  / caller's temp
+///   medium        → 4000 / 8192  / 1 (Anthropic mandates temp=1 with thinking)
+///   high          → 8000 / 16384 / 1
+///   extra_high    → 16000/ 24576 / 1
+function buildAnthropicBody(
+  modelId: string,
+  systemPrompt: string,
+  history: HistoryItem[] | undefined,
+  userMessage: string,
+  imgList: Attachment[],
+  temperature: number,
+): unknown {
+  const sep = modelId.indexOf(":");
+  const wireModel = sep === -1 ? modelId : modelId.slice(0, sep);
+  const effort = sep === -1 ? null : modelId.slice(sep + 1);
+  const budget = effort === "extra_high" ? 16000
+              : effort === "high" ? 8000
+              : effort === "medium" ? 4000
+              : 0;
+  const thinkingOn = budget > 0;
+  const maxTokens = thinkingOn ? budget + 4096 : 4096;
+  const reqTemp = thinkingOn ? 1 : temperature;
+  return {
+    model: wireModel,
+    max_tokens: maxTokens,
+    ...(thinkingOn ? { thinking: { type: "enabled", budget_tokens: budget } } : {}),
+    system: systemPrompt,
+    messages: [
+      ...(history ?? []).map(h => ({ role: h.role, content: h.content })),
+      { role: "user", content: anthropicUserContent(userMessage, imgList) },
+    ],
+    stream: true,
+    temperature: reqTemp,
+  };
 }
 
 // Anthropic Messages SSE consumer — splits the stream into three

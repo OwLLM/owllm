@@ -58,9 +58,24 @@ const SECTION_META: Record<Section, { label: string; color: string }> = {
 
 // Hardcoded cloud catalogue — keep small + curated rather than
 // trying to fetch a live list. Matches the legacy app's set.
-const ANTHROPIC_MODELS = [
-  { id: "claude-opus-4-7",         display: "Claude Opus 4.7" },
-  { id: "claude-sonnet-4-6",       display: "Claude Sonnet 4.6" },
+//
+// `effort` here = extended-thinking budget tier. Translation in
+// dispatch.ts streamAnthropic: low → no thinking (cheapest, fastest);
+// medium/high/extra_high → thinking.budget_tokens of 4k/8k/16k. Same
+// id-suffix encoding as the OpenAI side (`<id>:<level>`) so the
+// dispatch parser stays uniform across providers. Only Opus 4.7 and
+// Sonnet 4.6 expose the tier rows — Haiku 4.5 hasn't been validated
+// with extended thinking by the user yet, so it stays single-row.
+type AnthropicModel = {
+  id: string;
+  display: string;
+  effort?: readonly string[];
+};
+const ANTHROPIC_MODELS: AnthropicModel[] = [
+  { id: "claude-opus-4-7",   display: "Claude Opus 4.7",
+    effort: ["low", "medium", "high", "extra_high"] },
+  { id: "claude-sonnet-4-6", display: "Claude Sonnet 4.6",
+    effort: ["low", "medium", "high", "extra_high"] },
   { id: "claude-haiku-4-5-20251001", display: "Claude Haiku 4.5" },
 ];
 // Per-model flags replace the legacy slice(0, 3) trick. `sub` = show under
@@ -114,25 +129,22 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
 
   const claudeSub = !!status?.claude_cli;
   const claudeApi = !!status?.anthropic_api_key;
+  const pushAnthropic = (m: AnthropicModel, variant: "sub" | "api", available: boolean, hint?: string) => {
+    const tag = variant === "sub" ? "subscription" : "API";
+    const levels: (string | null)[] = m.effort ? [...m.effort] : [null];
+    for (const lvl of levels) {
+      const id = lvl === null ? `${variant}/${m.id}` : `${variant}/${m.id}:${lvl}`;
+      const label = lvl === null
+        ? `${m.display} (${tag})`
+        : `${m.display} · ${displayEffort(lvl)} (${tag})`;
+      out.push({ id, label, section: "anthropic", variant, available, hint });
+    }
+  };
   for (const m of ANTHROPIC_MODELS) {
-    out.push({
-      id: `sub/${m.id}`,
-      label: `${m.display} (subscription)`,
-      section: "anthropic",
-      variant: "sub",
-      available: claudeSub,
-      hint: claudeSub ? undefined : "(claude /login)",
-    });
+    pushAnthropic(m, "sub", claudeSub, claudeSub ? undefined : "(claude /login)");
   }
   for (const m of ANTHROPIC_MODELS) {
-    out.push({
-      id: `api/${m.id}`,
-      label: `${m.display} (API)`,
-      section: "anthropic",
-      variant: "api",
-      available: claudeApi,
-      hint: claudeApi ? undefined : "(set ANTHROPIC_API_KEY)",
-    });
+    pushAnthropic(m, "api", claudeApi, claudeApi ? undefined : "(set ANTHROPIC_API_KEY)");
   }
 
   const codexSub = !!status?.codex_cli;

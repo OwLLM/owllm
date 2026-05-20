@@ -16,16 +16,37 @@ import {
   StatusKind,
 } from "./widgets/TrainingWidgets";
 
+// Mirrors Rust TrainStatus (finetuning.rs). All numeric fields can be
+// null when the run hasn't reported them yet — every read site must
+// guard with `!= null` before calling .toFixed() etc.
 type TrainStatus = {
+  running: boolean;
   state: StatusKind;
-  step?: number;
-  totalSteps?: number;
-  loss?: number;
-  evalLoss?: number;
-  lr?: number;
-  vramUsed?: number;
-  elapsedSec?: number;
-  message?: string;
+  runName: string | null;
+  step: number | null;
+  totalSteps: number | null;
+  loss: number | null;
+  evalLoss: number | null;
+  learningRate: number | null;
+  vramUsedGb: number | null;
+  elapsedSec: number | null;
+  message: string | null;
+  lastLogTail: string[];
+};
+
+const EMPTY_STATUS: TrainStatus = {
+  running: false,
+  state: "idle",
+  runName: null,
+  step: null,
+  totalSteps: null,
+  loss: null,
+  evalLoss: null,
+  learningRate: null,
+  vramUsedGb: null,
+  elapsedSec: null,
+  message: null,
+  lastLogTail: [],
 };
 
 const cfgCard: React.CSSProperties = {
@@ -93,7 +114,7 @@ export default function TrainPage() {
   const [loraDropout, setLoraDropout] = React.useState(0.05);
   const [ckptEnabled, setCkptEnabled] = React.useState(true);
   const [ckptEvery, setCkptEvery] = React.useState(100);
-  const [status, setStatus] = React.useState<TrainStatus>({ state: "idle" });
+  const [status, setStatus] = React.useState<TrainStatus>(EMPTY_STATUS);
 
   // Poll training status every 1.5s while a run is in flight.
   React.useEffect(() => {
@@ -108,7 +129,7 @@ export default function TrainPage() {
   }, []);
 
   const start = async () => {
-    setStatus({ state: "running", message: "Starting…" });
+    setStatus({ ...EMPTY_STATUS, state: "running", running: true, message: "Starting…" });
     await tryInvoke<void>("train_start", {
       args: {
         baseModel, runName, datasetPath, mode,
@@ -121,7 +142,7 @@ export default function TrainPage() {
 
   const stop = async () => {
     await tryInvoke<void>("train_stop", {}, undefined);
-    setStatus((s) => ({ ...s, state: "idle" }));
+    setStatus((s) => ({ ...s, state: "idle", running: false }));
   };
 
   const useRecommended = () => {
@@ -154,13 +175,16 @@ export default function TrainPage() {
         gap: 12,
       }}
     >
-      {/* Live metrics strip — always present so users see what the run is doing. */}
+      {/* Live metrics strip — always present so users see what the run is doing.
+          Rust returns null for unset Option<f32>; use loose-equality null check
+          so both null and undefined render the em-dash placeholder instead of
+          crashing on .toFixed(). */}
       <div style={{ display: "flex", gap: 10 }}>
-        <MetricCard title="Step"      icon="🔁" value={status.step    !== undefined ? `${status.step} / ${status.totalSteps ?? "?"}` : "—"} />
-        <MetricCard title="Loss"      icon="📉" value={status.loss    !== undefined ? status.loss.toFixed(4)   : "—"} accent="#FF9800" />
-        <MetricCard title="Eval loss" icon="🎯" value={status.evalLoss !== undefined ? status.evalLoss.toFixed(4) : "—"} accent="#4CAF50" />
-        <MetricCard title="LR"        icon="⚡" value={status.lr      !== undefined ? status.lr.toExponential(2) : "—"} accent="#9C27B0" />
-        <MetricCard title="VRAM"      icon="🧠" value={status.vramUsed !== undefined ? `${status.vramUsed.toFixed(1)} GB` : "—"} accent="#00A4EF" />
+        <MetricCard title="Step"      icon="🔁" value={status.step      != null ? `${status.step} / ${status.totalSteps ?? "?"}` : "—"} />
+        <MetricCard title="Loss"      icon="📉" value={status.loss      != null ? status.loss.toFixed(4)            : "—"} accent="#FF9800" />
+        <MetricCard title="Eval loss" icon="🎯" value={status.evalLoss  != null ? status.evalLoss.toFixed(4)        : "—"} accent="#4CAF50" />
+        <MetricCard title="LR"        icon="⚡" value={status.learningRate != null ? status.learningRate.toExponential(2)  : "—"} accent="#9C27B0" />
+        <MetricCard title="VRAM"      icon="🧠" value={status.vramUsedGb   != null ? `${status.vramUsedGb.toFixed(1)} GB` : "—"} accent="#00A4EF" />
       </div>
 
       {/* Two-column form: model+dataset+mode on left, params on right. */}
@@ -245,7 +269,7 @@ export default function TrainPage() {
       </div>
 
       {/* Progress bar (only meaningful while running). */}
-      {(status.state === "running" || status.step !== undefined) && (
+      {(status.state === "running" || status.step != null) && (
         <div style={{ height: 8, background: "#0b1020", border: "1px solid #1c2434", borderRadius: 4, overflow: "hidden" }}>
           <div style={{
             height: "100%",

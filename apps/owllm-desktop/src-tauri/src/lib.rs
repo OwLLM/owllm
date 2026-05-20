@@ -19,8 +19,11 @@ mod bridges;
 mod code;
 mod dialog;
 mod directives;
+mod env_manager;
+mod finetuning;
 mod fleet;
 mod hardware;
+mod huggingface;
 mod models;
 mod paths;
 mod projects;
@@ -104,6 +107,18 @@ pub fn run() {
             telegram::telegram_get_updates,
             telegram::telegram_send_message,
             telegram::telegram_download_file,
+            huggingface::hf_search,
+            huggingface::hf_model_files,
+            huggingface::hf_download,
+            huggingface::list_tuned_adapters,
+            huggingface::models_list_downloaded,
+            env_manager::env_profiles_list,
+            env_manager::env_profile_status,
+            env_manager::env_profile_install,
+            env_manager::env_profile_uninstall,
+            finetuning::train_start,
+            finetuning::train_stop,
+            finetuning::train_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building OwLLM Desktop")

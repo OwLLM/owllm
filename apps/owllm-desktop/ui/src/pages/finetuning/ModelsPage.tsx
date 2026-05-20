@@ -35,26 +35,30 @@ type HfModelHit = {
   private: boolean;
 };
 
+// Mirrors Rust DownloadedModel — serde renames fields to camelCase
+// automatically via tauri::command's #[serde(rename_all="camelCase")]
+// on the underlying struct. The Rust struct uses snake_case (env_key,
+// is_incomplete) and they arrive here as envKey/isIncomplete.
 type DownloadedItem = {
   name: string;
   path: string;
   size?: string;
   icons?: string;
-  envKey?: string;
+  envKey?: string | null;
   isIncomplete?: boolean;
   onboarding?: "READY" | "BUILDING" | "BROKEN" | "NEW";
-  compat?: { color: "green" | "orange" | "red" | "gray"; text: string };
+  compat?: { color: "green" | "orange" | "red" | "gray"; text: string } | null;
 };
 
-type TunedItem = {
+// Mirrors Rust TunedAdapter — list_tuned_adapters returns {name, path,
+// sizeMib, modified, baseHint}. We map onto our TunedModelCard prop
+// shape below in the render path.
+type TunedAdapterRow = {
   name: string;
-  base: string;
   path: string;
-  format?: "lora" | "gguf";
-  size?: string;
-  steps?: number;
-  loss?: number;
-  createdAt?: string;
+  sizeMib: number;
+  modified: string | null;
+  baseHint: string | null;
 };
 
 // Format a downloads / likes count as 1.2K / 45.8K / 1.2M for display.
@@ -80,7 +84,7 @@ function iconsForTags(tags: string[]): string {
 export default function ModelsPage() {
   const [tab, setTab] = React.useState<SubTab>("browse");
   const [downloaded, setDownloaded] = React.useState<DownloadedItem[]>([]);
-  const [tuned, setTuned] = React.useState<TunedItem[]>([]);
+  const [tuned, setTuned] = React.useState<TunedAdapterRow[]>([]);
 
   // Browse-tab state (real HF search).
   const [query, setQuery] = React.useState("");
@@ -122,7 +126,7 @@ export default function ModelsPage() {
         .then(setDownloaded)
         .catch(() => setDownloaded([]));
     } else if (tab === "tuned") {
-      invoke<TunedItem[]>("models_list_tuned")
+      invoke<TunedAdapterRow[]>("list_tuned_adapters")
         .then(setTuned)
         .catch(() => setTuned([]));
     }
@@ -483,13 +487,11 @@ export default function ModelsPage() {
             <TunedModelCard
               key={t.path}
               adapterName={t.name}
-              baseModel={t.base}
+              baseModel={t.baseHint ?? "(base unknown)"}
               adapterPath={t.path}
-              format={t.format}
-              size={t.size}
-              steps={t.steps}
-              finalLoss={t.loss}
-              createdAt={t.createdAt}
+              format={t.path.toLowerCase().endsWith(".gguf") ? "gguf" : "lora"}
+              size={t.sizeMib >= 1024 ? `${(t.sizeMib / 1024).toFixed(1)} GB` : `${t.sizeMib} MB`}
+              createdAt={t.modified ?? undefined}
               selected={selectedPath === t.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
             />

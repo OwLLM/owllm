@@ -27,6 +27,7 @@ mod huggingface;
 mod models;
 mod paths;
 mod projects;
+mod recommendations;
 mod server;
 mod skill_library;
 mod telegram;
@@ -112,6 +113,7 @@ pub fn run() {
             huggingface::hf_download,
             huggingface::list_tuned_adapters,
             huggingface::models_list_downloaded,
+            recommendations::models_recommended,
             env_manager::env_profiles_list,
             env_manager::env_profile_status,
             env_manager::env_profile_install,

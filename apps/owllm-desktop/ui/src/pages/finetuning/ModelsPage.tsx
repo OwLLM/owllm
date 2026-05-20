@@ -35,6 +35,30 @@ type HfModelHit = {
   private: boolean;
 };
 
+// Mirrors Rust RecommendedModel in src-tauri/src/recommendations.rs.
+type RecommendedModel = {
+  id: string;
+  name: string;
+  family: string;
+  description: string;
+  paramsB: number;
+  inferenceGb: number;
+  loraTrainGb: number;
+  qloraGb: number;
+  downloads: number;
+  likes: number;
+  isNew: boolean;
+  gated: boolean;
+  tags: string[];
+  category: string;
+  compat: { color: "green" | "orange" | "red" | "gray"; text: string; tooltip: string } | null;
+};
+
+// Filter set IDs match the formatFilterContainer checkbox labels.
+type FilterKey =
+  | "trainable" | "gguf" | "instruct" | "chat"
+  | "adapter"   | "quantized" | "reasoning" | "vision";
+
 // Mirrors Rust DownloadedModel — serde renames fields to camelCase
 // automatically via tauri::command's #[serde(rename_all="camelCase")]
 // on the underlying struct. The Rust struct uses snake_case (env_key,
@@ -59,6 +83,16 @@ type TunedAdapterRow = {
   sizeMib: number;
   modified: string | null;
   baseHint: string | null;
+};
+
+const emptyState: React.CSSProperties = {
+  gridColumn: "1 / span 2",
+  padding: 40,
+  textAlign: "center",
+  color: "var(--fg-muted)",
+  border: "1px dashed #2a3242",
+  borderRadius: 8,
+  fontSize: 13,
 };
 
 // Format a downloads / likes count as 1.2K / 45.8K / 1.2M for display.
@@ -86,14 +120,44 @@ export default function ModelsPage() {
   const [downloaded, setDownloaded] = React.useState<DownloadedItem[]>([]);
   const [tuned, setTuned] = React.useState<TunedAdapterRow[]>([]);
 
-  // Browse-tab state (real HF search).
+  // Browse-tab state. Recommended = curated, hardware-aware. Hits =
+  // live HF search results when the user actually types a query.
   const [query, setQuery] = React.useState("");
+  const [recommended, setRecommended] = React.useState<RecommendedModel[]>([]);
+  const [loadingRecommended, setLoadingRecommended] = React.useState(false);
   const [hits, setHits] = React.useState<HfModelHit[]>([]);
   const [loadingHits, setLoadingHits] = React.useState(false);
   const [hfError, setHfError] = React.useState<string | null>(null);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const [downloading, setDownloading] = React.useState<Set<string>>(new Set());
+  const [filters, setFilters] = React.useState<Set<FilterKey>>(new Set());
+  const inSearchMode = query.trim().length > 0 && hits.length > 0;
+
+  // Filter predicate. An empty filter set means "show everything".
+  // Otherwise we OR-match across selected filters using tag heuristics.
+  const matchesFilters = React.useCallback(
+    (tags: string[], idOrName: string): boolean => {
+      if (filters.size === 0) return true;
+      const t = new Set(tags.map((x) => x.toLowerCase()));
+      const s = (idOrName || "").toLowerCase();
+      const has = (k: FilterKey): boolean => {
+        switch (k) {
+          case "trainable": return t.has("trainable") || (!s.includes(".gguf") && !s.includes("lora") && !s.includes("awq") && !s.includes("gptq"));
+          case "gguf":      return t.has("gguf") || s.includes("gguf");
+          case "instruct":  return t.has("instruct") || /instruct|-it\b/.test(s);
+          case "chat":      return t.has("chat") || /chat|dialog/.test(s);
+          case "adapter":   return t.has("lora") || t.has("adapter") || t.has("peft") || /lora|adapter|peft/.test(s);
+          case "quantized": return t.has("quantized") || /awq|gptq|q4|q5|q8/.test(s);
+          case "reasoning": return t.has("reasoning") || /r1|reasoning|thinking|qwq|deepseek-r/.test(s);
+          case "vision":    return t.has("vision") || /vl\b|llava|vision/.test(s);
+        }
+      };
+      for (const k of filters) if (has(k)) return true;
+      return false;
+    },
+    [filters]
+  );
 
   const runSearch = React.useCallback(async (q: string) => {
     setLoadingHits(true);
@@ -113,12 +177,16 @@ export default function ModelsPage() {
     }
   }, []);
 
-  // Initial load: empty search returns HF's "trending" set.
+  // Load the curated recommendations on first browse mount.
   React.useEffect(() => {
-    if (tab === "browse" && hits.length === 0 && !loadingHits) {
-      runSearch("text-generation");
+    if (tab === "browse" && recommended.length === 0 && !loadingRecommended) {
+      setLoadingRecommended(true);
+      invoke<RecommendedModel[]>("models_recommended")
+        .then((r) => setRecommended(r))
+        .catch((e) => setHfError(`Recommendations failed: ${e}`))
+        .finally(() => setLoadingRecommended(false));
     }
-  }, [tab, hits.length, loadingHits, runSearch]);
+  }, [tab, recommended.length, loadingRecommended]);
 
   React.useEffect(() => {
     if (tab === "downloaded") {
@@ -216,37 +284,47 @@ export default function ModelsPage() {
           flexShrink: 0,
         }}
       >
-        {[
-          { label: "✅ Trainable", tip: "transformers-format models with full weights — what the Train tab can fine-tune." },
-          { label: "📦 GGUF", tip: "llama.cpp / bundled-proxy inference format. Cannot be fine-tuned." },
-          { label: "💡 Instruct", tip: "Instruction-tuned base models (-instruct, -it). Follow direct task prompts." },
-          { label: "💬 Chat", tip: "Multi-turn chat / conversation tuned (-chat, -dialog, ChatML)." },
-          { label: "🧩 Adapter (LoRA)", tip: "PEFT / LoRA adapters — small overlays that need a base model to load." },
-          { label: "⚡ Quantized (AWQ / GPTQ)", tip: "Inference-only weight-quantized checkpoints (AWQ or GPTQ)." },
-          { label: "🧠 Reasoning", tip: "Chain-of-thought reasoning models (R1, o1-style, deepseek-r1, thinking)." },
-          { label: "👁️ Vision", tip: "Multimodal vision-language models (image input — VL, llava, vision)." },
-        ].map((f) => (
-          <label
-            key={f.label}
-            title={f.tip}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              color: "#dadcdf",
-              fontSize: "10pt",
-              background: "transparent",
-              cursor: "pointer",
-              userSelect: "none",
-            }}
-          >
-            <input
-              type="checkbox"
-              style={{ width: 14, height: 14, margin: 0, flexShrink: 0 }}
-            />
-            <span>{f.label}</span>
-          </label>
-        ))}
+        {([
+          { key: "trainable" as const, label: "✅ Trainable", tip: "transformers-format models with full weights — what the Train tab can fine-tune." },
+          { key: "gguf"      as const, label: "📦 GGUF",      tip: "llama.cpp / bundled-proxy inference format. Cannot be fine-tuned." },
+          { key: "instruct"  as const, label: "💡 Instruct",  tip: "Instruction-tuned base models (-instruct, -it). Follow direct task prompts." },
+          { key: "chat"      as const, label: "💬 Chat",      tip: "Multi-turn chat / conversation tuned (-chat, -dialog, ChatML)." },
+          { key: "adapter"   as const, label: "🧩 Adapter (LoRA)",        tip: "PEFT / LoRA adapters — small overlays that need a base model to load." },
+          { key: "quantized" as const, label: "⚡ Quantized (AWQ / GPTQ)", tip: "Inference-only weight-quantized checkpoints (AWQ or GPTQ)." },
+          { key: "reasoning" as const, label: "🧠 Reasoning", tip: "Chain-of-thought reasoning models (R1, o1-style, deepseek-r1, thinking)." },
+          { key: "vision"    as const, label: "👁️ Vision",    tip: "Multimodal vision-language models (image input — VL, llava, vision)." },
+        ]).map((f) => {
+          const on = filters.has(f.key);
+          return (
+            <label
+              key={f.key}
+              title={f.tip}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                color: on ? "#fff" : "#dadcdf",
+                fontWeight: on ? 700 : 400,
+                fontSize: "10pt",
+                background: "transparent",
+                cursor: "pointer",
+                userSelect: "none",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={on}
+                onChange={(e) => setFilters((curr) => {
+                  const next = new Set(curr);
+                  if (e.target.checked) next.add(f.key); else next.delete(f.key);
+                  return next;
+                })}
+                style={{ width: 14, height: 14, margin: 0, flexShrink: 0 }}
+              />
+              <span>{f.label}</span>
+            </label>
+          );
+        })}
       </div>
       <div
         data-ui="searchContainer"
@@ -376,56 +454,82 @@ export default function ModelsPage() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 280px", gap: 10 }}>
-        {loadingHits && hits.length === 0 ? (
-          <div style={{
-            gridColumn: "1 / span 2",
-            padding: 40,
-            textAlign: "center",
-            color: "var(--fg-muted)",
-            border: "1px dashed #2a3242",
-            borderRadius: 8,
-            fontSize: 13,
-          }}>
-            <div style={{ fontSize: 28, marginBottom: 8 }}>🔎</div>
-            Searching Hugging Face…
-          </div>
-        ) : hits.length === 0 ? (
-          <div style={{
-            gridColumn: "1 / span 2",
-            padding: 40,
-            textAlign: "center",
-            color: "var(--fg-muted)",
-            border: "1px dashed #2a3242",
-            borderRadius: 8,
-            fontSize: 13,
-          }}>
-            <div style={{ fontSize: 28, marginBottom: 8 }}>🤷</div>
-            No models matched "{query}". Try a broader query like "llama" or "qwen".
-          </div>
-        ) : hits.map((h) => {
-          const dl = downloading.has(h.id);
-          const isNew = h.lastModified
-            ? (Date.now() - new Date(h.lastModified).getTime()) < 14 * 24 * 3600 * 1000
-            : false;
-          return (
+        {(() => {
+          // Choose which list to render: live search results when the
+          // user has searched, otherwise the curated recommendations.
+          if (inSearchMode) {
+            const filtered = hits.filter((h) => matchesFilters(h.tags, h.id));
+            if (filtered.length === 0) {
+              return (
+                <div style={emptyState}>
+                  <div style={{ fontSize: 28, marginBottom: 8 }}>🤷</div>
+                  No models matched "{query}" with the current filters.
+                </div>
+              );
+            }
+            return filtered.map((h) => {
+              const dl = downloading.has(h.id);
+              const isNewFlag = h.lastModified
+                ? (Date.now() - new Date(h.lastModified).getTime()) < 14 * 24 * 3600 * 1000
+                : false;
+              return (
+                <ModelCard
+                  key={h.id}
+                  modelName={h.id.split("/").pop() ?? h.id}
+                  modelId={h.id}
+                  description={h.pipelineTag ? `Pipeline: ${h.pipelineTag}` : undefined}
+                  icons={iconsForTags(h.tags)}
+                  isNew={isNewFlag}
+                  downloads={fmtCount(h.downloads)}
+                  likes={fmtCount(h.likes)}
+                  requiresToken={h.gated || h.private}
+                  isDownloaded={false}
+                  downloadProgress={dl ? undefined : undefined}
+                  selected={selectedId === h.id}
+                  onClick={(id) => setSelectedId((curr) => curr === id ? null : id)}
+                  onDownload={(id) => startDownload(id)}
+                />
+              );
+            });
+          }
+
+          // Recommended mode.
+          if (loadingRecommended && recommended.length === 0) {
+            return (
+              <div style={emptyState}>
+                <div style={{ fontSize: 28, marginBottom: 8 }}>🔎</div>
+                Loading recommended models…
+              </div>
+            );
+          }
+          const filtered = recommended.filter((r) => matchesFilters(r.tags, r.id));
+          if (filtered.length === 0) {
+            return (
+              <div style={emptyState}>
+                <div style={{ fontSize: 28, marginBottom: 8 }}>🤷</div>
+                No recommended models match these filters. Clear them or run a search.
+              </div>
+            );
+          }
+          return filtered.map((r) => (
             <ModelCard
-              key={h.id}
-              modelName={h.id.split("/").pop() ?? h.id}
-              modelId={h.id}
-              description={h.pipelineTag ? `Pipeline: ${h.pipelineTag}` : undefined}
-              icons={iconsForTags(h.tags)}
-              isNew={isNew}
-              downloads={fmtCount(h.downloads)}
-              likes={fmtCount(h.likes)}
-              requiresToken={h.gated || h.private}
-              isDownloaded={false}
-              downloadProgress={dl ? undefined : undefined}
-              selected={selectedId === h.id}
+              key={r.id}
+              modelName={r.name}
+              modelId={r.id}
+              description={`${r.description}  ·  ${r.paramsB.toFixed(1)}B params · inference ≈${r.inferenceGb.toFixed(1)} GB · LoRA ≈${r.loraTrainGb.toFixed(1)} GB`}
+              size={`${r.paramsB.toFixed(1)}B params`}
+              icons={iconsForTags(r.tags)}
+              isNew={r.isNew}
+              downloads={fmtCount(r.downloads)}
+              likes={fmtCount(r.likes)}
+              requiresToken={r.gated}
+              compatibilityBadge={r.compat ?? undefined}
+              selected={selectedId === r.id}
               onClick={(id) => setSelectedId((curr) => curr === id ? null : id)}
               onDownload={(id) => startDownload(id)}
             />
-          );
-        })}
+          ));
+        })()}
 
         <AccessTokensPane />
       </div>

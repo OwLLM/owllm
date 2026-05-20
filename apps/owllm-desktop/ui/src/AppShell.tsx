@@ -163,15 +163,13 @@ const BADGE_H = 195;
 const BORDER_T = 18;
 const CORNER_OUTSET = 10;
 const SHIFT_OUT = BORDER_T / 2;
-// EXTRA_TOP matches Qt hybrid_frame_window.py which uses
-// `extra_top = badge_h // 2 = BADGE_H // 2`. With BADGE_H=195 that's
-// 97 px of headroom above the HybridFrame so the owl badge can peek
-// out at exactly the same y-coordinate Qt does. Previous value of 35
-// caused everything below the badge to render ~66 px higher than the
-// Qt source — TwinForge diff flagged every header element with
-// `pos off by (..., -66)`. EXTRA_RIGHT stays 0 so right padding stays
-// symmetric at 19 px.
-const EXTRA_TOP = BADGE_H / 2;
+// EXTRA_TOP bumps the top padding from the 19 px baseline (SHIFT_OUT
+// + CORNER_OUTSET) up to 54 px total — leaving 35 px of extra
+// breathing room above the HybridFrame for the peeking owl badge.
+// Do not raise this to match Qt's badge_h/2 (97 px) — that adds
+// visible empty chrome above the header that the user does not want
+// on the Tauri build. EXTRA_RIGHT stays 0 so right padding is symmetric.
+const EXTRA_TOP = 35;
 const EXTRA_RIGHT = 0;
 const CORNER_PNG_W = 160;
 const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);
@@ -441,10 +439,10 @@ function ModeBar({
           left: "50%",
           top: "50%",
           transform: "translate(-50%, -50%)",
-          width: 160,
-          height: 45,
-          fontSize: 29, fontWeight: 700, color: "#fff",
-          letterSpacing: 2, lineHeight: "45px",
+          width: 200,
+          height: 54,
+          fontSize: 35, fontWeight: 700, color: "#fff",
+          letterSpacing: 2, lineHeight: "54px",
           textAlign: "center",
           pointerEvents: "none",
         }}

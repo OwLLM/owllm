@@ -34,6 +34,16 @@ async function runClaudeCliStream(args: {
   cwd?: string | null;
   autoApprove?: boolean;
   allowedTools?: string[];
+  /// Bare Claude model id (no "sub/"/"api/" prefix, no ":effort"
+  /// suffix). Passes through to the CLI as `--model`.
+  model?: string | null;
+  /// Effort tier: "low"|"medium"|"high"|"xhigh"|"max". Passes as `--effort`.
+  effort?: string | null;
+  /// Persistent session UUID — same id across calls gives multi-turn memory.
+  sessionId?: string | null;
+  /// Enable SendUserMessage tool (--brief). The dispatch tap below
+  /// surfaces those questions to the user via onAskUser if supplied.
+  briefMode?: boolean;
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
@@ -77,8 +87,34 @@ async function runClaudeCliStream(args: {
     cwd: args.cwd ?? null,
     autoApprove: args.autoApprove ?? false,
     allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+    model: args.model ?? null,
+    effort: args.effort ?? null,
+    sessionId: args.sessionId ?? null,
+    briefMode: args.briefMode ?? false,
     onEvent: ch,
   });
+}
+
+/// Map the picker's effort label to the Claude CLI's `--effort` vocabulary.
+/// Picker uses "extra_high" for UI parity with the OpenAI side; the CLI
+/// wants "xhigh". Returns null for "low" (no flag → default fast mode)
+/// when callerWantsExplicitLow is false — the user only sees explicit
+/// effort tiers on the picker for Opus/Sonnet so "low" effectively
+/// means "don't pass --effort at all", which is fastest.
+export function mapClaudeEffort(uiLevel: string | null | undefined): string | null {
+  if (!uiLevel) return null;
+  if (uiLevel === "extra_high") return "xhigh";
+  if (["low", "medium", "high", "xhigh", "max"].includes(uiLevel)) return uiLevel;
+  return null;
+}
+
+/// Pull the "<bareModel>" and "<effort>" parts out of a model id like
+/// "claude-opus-4-7:high". Used by both the API and CLI subscription
+/// paths in streamAnthropic.
+export function parseClaudeModelId(modelId: string): { wireModel: string; effort: string | null } {
+  const sep = modelId.indexOf(":");
+  if (sep === -1) return { wireModel: modelId, effort: null };
+  return { wireModel: modelId.slice(0, sep), effort: modelId.slice(sep + 1) };
 }
 
 // ---------- Domain types (mirrors AgentsPage.tsx) ----------
@@ -722,6 +758,11 @@ async function streamAnthropic(
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
   const imgList = images ?? [];
+  // Picker encodes effort tier as ":high"/":xhigh"/etc on the model id.
+  // Split it out so both paths (CLI sub --effort, API thinking budget)
+  // receive the clean wire-name + a normalised effort label.
+  const { wireModel: cliModel, effort: cliEffort } = parseClaudeModelId(modelId);
+  const claudeEffort = mapClaudeEffort(cliEffort);
   // The Claude CLI binding is text-only. When the user routed via the
   // subscription path AND attached images, prefix a note so they're
   // not silently dropped. Users on the API path get full inline images.
@@ -741,10 +782,15 @@ async function streamAnthropic(
       return await runClaudeCliStream({
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false, allowedTools,
+        model: cliModel, effort: claudeEffort,
         onDelta, onThought,
       });
     }
-    const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null, autoApprove: autoApprove ?? false });
+    const reply = await invoke<string>("claude_cli_complete", {
+      systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+      autoApprove: autoApprove ?? false,
+      model: cliModel, effort: claudeEffort,
+    });
     if (reply) onDelta(reply);
     return reply;
   }
@@ -758,12 +804,14 @@ async function streamAnthropic(
           return await runClaudeCliStream({
             systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
+            model: cliModel, effort: claudeEffort,
             onDelta, onThought,
           });
         }
         const reply = await invoke<string>("claude_cli_complete", {
           systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
           autoApprove: autoApprove ?? false,
+          model: cliModel, effort: claudeEffort,
         });
         if (reply) onDelta(reply);
         return reply;

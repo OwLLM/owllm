@@ -21,6 +21,8 @@ import {
   imageAttachments,
   openaiUserContent,
   anthropicUserContent,
+  parseClaudeModelId,
+  mapClaudeEffort,
 } from "./dispatch";
 
 const ICONS = "/Page_icons";
@@ -3097,6 +3099,13 @@ async function runClaudeCliStream(args: {
   /// Rust side translates to Claude tool names. Omit / pass empty to
   /// run unrestricted (operator behaviour).
   allowedTools?: string[];
+  /// Bare Claude model id (no ":effort" suffix). Forwards as --model.
+  model?: string | null;
+  /// Effort tier: "low"|"medium"|"high"|"xhigh"|"max". Forwards as --effort.
+  effort?: string | null;
+  /// Persistent session UUID for multi-turn memory.
+  sessionId?: string | null;
+  briefMode?: boolean;
   onDelta: (delta: string) => void;
   onThought: ThoughtHandler;
 }): Promise<string> {
@@ -3133,6 +3142,10 @@ async function runClaudeCliStream(args: {
     cwd: args.cwd ?? null,
     autoApprove: args.autoApprove ?? false,
     allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+    model: args.model ?? null,
+    effort: args.effort ?? null,
+    sessionId: args.sessionId ?? null,
+    briefMode: args.briefMode ?? false,
     onEvent: ch,
   });
 }
@@ -3277,6 +3290,10 @@ async function streamAnthropic(
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
   const imgList = images ?? [];
+  // Split ":effort" off the model id so both the CLI (--model + --effort)
+  // and the API (thinking budget in buildAnthropicBody) get clean inputs.
+  const { wireModel: cliModel, effort: cliEffortRaw } = parseClaudeModelId(modelId);
+  const claudeEffort = mapClaudeEffort(cliEffortRaw);
   const cliUserMessage = imgList.length > 0
     ? `${userMessage}\n\n[${imgList.length} image attachment(s) dropped — switch to the API row to send images to Claude.]`
     : userMessage;
@@ -3297,10 +3314,15 @@ async function streamAnthropic(
       return await runClaudeCliStream({
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false, allowedTools,
+        model: cliModel, effort: claudeEffort,
         onDelta, onThought,
       });
     }
-    const reply = await invoke<string>("claude_cli_complete", { systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null, autoApprove: autoApprove ?? false });
+    const reply = await invoke<string>("claude_cli_complete", {
+      systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+      autoApprove: autoApprove ?? false,
+      model: cliModel, effort: claudeEffort,
+    });
     if (reply) onDelta(reply);
     return reply;
   }
@@ -3315,6 +3337,7 @@ async function streamAnthropic(
           return await runClaudeCliStream({
             systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
+            model: cliModel, effort: claudeEffort,
             onDelta, onThought,
           });
         }
@@ -3323,6 +3346,7 @@ async function streamAnthropic(
           userMessage: cliPrompt,
           cwd: projectCwd ?? null,
           autoApprove: autoApprove ?? false,
+          model: cliModel, effort: claudeEffort,
         });
         if (reply) onDelta(reply);
         return reply;

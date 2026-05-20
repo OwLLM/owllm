@@ -294,6 +294,21 @@ pub async fn claude_cli_complete(
     user_message: String,
     cwd: Option<String>,
     auto_approve: Option<bool>,
+    // Bare Claude model id ("claude-opus-4-7", "sonnet", etc). When
+    // supplied, passed as `--model <id>` so the picker's row choice
+    // actually steers the subscription. Without it the CLI uses its
+    // own default — which is why all the picker's sub rows used to
+    // behave identically.
+    model: Option<String>,
+    // Effort tier on the subscription path: "low" | "medium" | "high"
+    // | "xhigh" | "max". Passed verbatim as `--effort <level>`. Maps
+    // from the picker's "extra_high" UI label to the CLI's "xhigh"
+    // in the JS layer; this just forwards.
+    effort: Option<String>,
+    // Optional UUID for session persistence (Phase B). When the same
+    // id is reused across dispatches, the CLI loads the prior turn so
+    // the agent has memory without re-feeding history via prompt.
+    session_id: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let exe = find_claude_cli()
@@ -310,6 +325,18 @@ pub async fn claude_cli_complete(
         let batch = false;
 
         push_arg(&mut cmd, batch, "--print");
+        if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            push_arg(&mut cmd, batch, "--model");
+            push_arg(&mut cmd, batch, m);
+        }
+        if let Some(e) = effort.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            push_arg(&mut cmd, batch, "--effort");
+            push_arg(&mut cmd, batch, e);
+        }
+        if let Some(sid) = session_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            push_arg(&mut cmd, batch, "--session-id");
+            push_arg(&mut cmd, batch, sid);
+        }
         if auto_approve.unwrap_or(false) {
             // `--permission-mode bypassPermissions` is the canonical
             // modern flag (see `claude --help`). Older `--dangerously-
@@ -429,6 +456,7 @@ fn map_owllm_tool_to_cli(name: &str) -> Option<&'static str> {
         "shell" => Some("Bash"),
         "todo_write" => Some("TodoWrite"),
         "http_get" => Some("WebFetch"),
+        "web_search" | "search_web" => Some("WebSearch"),
         // OWLLM-internal control tools — no CLI counterpart.
         "dispatch" | "verify" | "ssh_exec" | "ssh_upload" | "ssh_download" => None,
         _ => None,
@@ -446,6 +474,17 @@ pub async fn claude_cli_stream(
     // other tool the model tries. None / empty / containing "all"
     // passes through unrestricted (operator role behaviour).
     allowed_tools: Option<Vec<String>>,
+    // Bare Claude model id; passes as `--model <id>`. See claude_cli_complete.
+    model: Option<String>,
+    // Effort tier: low/medium/high/xhigh/max. Passes as `--effort`.
+    effort: Option<String>,
+    // Optional UUID for session persistence — same id across calls
+    // gives the agent multi-turn memory.
+    session_id: Option<String>,
+    // When true, pass `--brief` so the SendUserMessage tool is
+    // enabled. The streaming consumer detects SendUserMessage tool
+    // calls and surfaces the agent's question to the UI (Phase C).
+    brief_mode: Option<bool>,
     on_event: Channel<ClaudeStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -459,6 +498,24 @@ pub async fn claude_cli_stream(
         let batch = false;
 
         push_arg(&mut cmd, batch, "--print");
+        if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            push_arg(&mut cmd, batch, "--model");
+            push_arg(&mut cmd, batch, m);
+        }
+        if let Some(e) = effort.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            push_arg(&mut cmd, batch, "--effort");
+            push_arg(&mut cmd, batch, e);
+        }
+        if let Some(sid) = session_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            push_arg(&mut cmd, batch, "--session-id");
+            push_arg(&mut cmd, batch, sid);
+        }
+        if brief_mode.unwrap_or(false) {
+            // --brief enables the SendUserMessage tool so the model
+            // can mid-turn ask the user a question. The streaming
+            // consumer below routes those to the UI as a prompt.
+            push_arg(&mut cmd, batch, "--brief");
+        }
         // stream-json + --verbose: the CLI emits one NDJSON event per
         // line. Without --verbose, stream-json suppresses assistant
         // messages and only the final result event is produced —

@@ -23,6 +23,8 @@ import {
   anthropicUserContent,
   parseClaudeModelId,
   mapClaudeEffort,
+  getClaudeSession,
+  resetClaudeSession,
 } from "./dispatch";
 
 const ICONS = "/Page_icons";
@@ -3192,6 +3194,9 @@ async function streamChatCompletion(
   /// Multimodal attachments. Audio is transcribed up-front (Whisper);
   /// images ride to the provider's native image part shape.
   attachments?: Attachment[],
+  /// Claude CLI session UUID for multi-turn memory (Phase B). Only
+  /// used by CLI subscription branches; OpenAI/local/API paths ignore.
+  sessionId?: string | null,
 ): Promise<string> {
   // Strip the optional route prefix encoded by the ModelPicker before
   // handing the bare model id to the provider-specific call.
@@ -3212,7 +3217,7 @@ async function streamChatCompletion(
     throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
   }
   if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images);
+    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
   }
   if (provider === "openai") {
     return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
@@ -3286,6 +3291,9 @@ async function streamAnthropic(
   /// API path embeds images natively. CLI subscription path is text-only;
   /// we surface a note so silently-dropped attachments don't confuse the user.
   images?: Attachment[],
+  /// Claude CLI session UUID for multi-turn memory (Phase B). Only
+  /// used by CLI subscription branches.
+  sessionId?: string | null,
 ): Promise<string> {
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
@@ -3314,14 +3322,14 @@ async function streamAnthropic(
       return await runClaudeCliStream({
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false, allowedTools,
-        model: cliModel, effort: claudeEffort,
+        model: cliModel, effort: claudeEffort, sessionId,
         onDelta, onThought,
       });
     }
     const reply = await invoke<string>("claude_cli_complete", {
       systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
       autoApprove: autoApprove ?? false,
-      model: cliModel, effort: claudeEffort,
+      model: cliModel, effort: claudeEffort, sessionId,
     });
     if (reply) onDelta(reply);
     return reply;
@@ -3337,7 +3345,7 @@ async function streamAnthropic(
           return await runClaudeCliStream({
             systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
-            model: cliModel, effort: claudeEffort,
+            model: cliModel, effort: claudeEffort, sessionId,
             onDelta, onThought,
           });
         }
@@ -3346,7 +3354,7 @@ async function streamAnthropic(
           userMessage: cliPrompt,
           cwd: projectCwd ?? null,
           autoApprove: autoApprove ?? false,
-          model: cliModel, effort: claudeEffort,
+          model: cliModel, effort: claudeEffort, sessionId,
         });
         if (reply) onDelta(reply);
         return reply;
@@ -4381,6 +4389,11 @@ export default function AgentsPage() {
         // commands it asks tools to run (Anthropic API thinking blocks
         // & tool_use, OpenAI tool_calls, local <think> tags).
         (channel, role, delta) => streamThought(orchKey, channel, role, delta),
+        undefined,
+        undefined,
+        // SuperUser orchestrator chat uses the same persistent session
+        // as the team-Run orchestrator — they're the same logical agent.
+        getClaudeSession(selectedProjectId, orchKey),
       );
     } catch (e: any) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: String(e?.message ?? e) };
@@ -4559,6 +4572,8 @@ export default function AgentsPage() {
           // Specialists receive the orchestrator's reply (text), so they
           // don't need the raw bytes.
           runAttachments.length > 0 ? runAttachments : undefined,
+          // Persistent CLI session for the orchestrator across dispatches.
+          getClaudeSession(selectedProjectId, orch.name),
         );
       } finally {
         removeActive(orch.name);
@@ -4611,6 +4626,9 @@ export default function AgentsPage() {
               projectCwd,
               undefined, undefined,
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
+              undefined,
+              undefined,
+              getClaudeSession(selectedProjectId, orch.name),
             );
           } finally {
             removeActive(orch.name);
@@ -4764,6 +4782,8 @@ export default function AgentsPage() {
             undefined, undefined,
             (channel, role, delta) => streamThought(spec.name, channel, role, delta),
             allowed,
+            undefined,
+            getClaudeSession(selectedProjectId, spec.name),
           )).trim();
           ok = true;
         } catch (e: any) {
@@ -4837,6 +4857,9 @@ export default function AgentsPage() {
           projectCwd,
           undefined, undefined,
           (channel, role, delta) => streamThought(orch.name, channel, role, delta),
+          undefined,
+          undefined,
+          getClaudeSession(selectedProjectId, orch.name),
         );
       } finally {
         removeActive(orch.name);
@@ -4925,6 +4948,8 @@ export default function AgentsPage() {
             undefined, undefined,
             (channel, role, delta) => streamThought(docSpec.name, channel, role, delta),
             docAllowed,
+            undefined,
+            getClaudeSession(selectedProjectId, docSpec.name),
           );
           if (docWt) {
             const docFinalize = await invoke<FleetFinalizeResult>("fleet_worktree_finalize", {

@@ -117,6 +117,77 @@ export function parseClaudeModelId(modelId: string): { wireModel: string; effort
   return { wireModel: modelId.slice(0, sep), effort: modelId.slice(sep + 1) };
 }
 
+// ---------- Claude CLI session management (Phase B) ----------
+//
+// Each (projectId, agentName) pair gets its own persistent CLI session
+// UUID. Reusing the same id across dispatches means the Claude Code
+// CLI loads the prior turn's context — the agent has real multi-turn
+// memory without us re-feeding everything through foldHistoryIntoPrompt.
+//
+// Mirrors the VS Code Claude Code session model: each agent role has
+// its own evolving conversation. Orchestrator remembers planning
+// history; coder remembers code history; etc. Bypasses the one-shot
+// nature of --print mode.
+//
+// Storage: localStorage when available (persists across app restarts);
+// in-memory Map otherwise (bridge runner, tests). The mem cache fronts
+// localStorage so we don't hammer it on every call.
+
+const SESSION_KEY_PREFIX = "owllm:claude_session:";
+const sessionMemCache = new Map<string, string>();
+
+function sessionKey(projectId: string, agentName: string): string {
+  return `${SESSION_KEY_PREFIX}${projectId}:${agentName}`;
+}
+
+/// Return (and create if missing) the Claude CLI session UUID for an
+/// (agent, project) pair. Returns null when either arg is empty so a
+/// caller without context just runs in stateless one-shot mode.
+export function getClaudeSession(
+  projectId: string | null | undefined,
+  agentName: string | null | undefined,
+): string | null {
+  if (!projectId || !agentName) return null;
+  const key = sessionKey(projectId, agentName);
+  const cached = sessionMemCache.get(key);
+  if (cached) return cached;
+  try {
+    const stored = localStorage.getItem(key);
+    if (stored) { sessionMemCache.set(key, stored); return stored; }
+  } catch { /* localStorage unavailable */ }
+  // crypto.randomUUID is available in every Tauri webview (Edge/Chromium).
+  const uuid = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
+  sessionMemCache.set(key, uuid);
+  try { localStorage.setItem(key, uuid); } catch {}
+  return uuid;
+}
+
+/// Clear the cached session id(s). Pass agentName to reset one agent;
+/// omit it to reset every agent in the project. Forces the next call
+/// to start a fresh CLI session — the agent forgets its prior turns.
+export function resetClaudeSession(projectId: string, agentName?: string): void {
+  if (agentName) {
+    const key = sessionKey(projectId, agentName);
+    sessionMemCache.delete(key);
+    try { localStorage.removeItem(key); } catch {}
+    return;
+  }
+  const prefix = `${SESSION_KEY_PREFIX}${projectId}:`;
+  for (const k of Array.from(sessionMemCache.keys())) {
+    if (k.startsWith(prefix)) sessionMemCache.delete(k);
+  }
+  try {
+    const toRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(prefix)) toRemove.push(k);
+    }
+    for (const k of toRemove) localStorage.removeItem(k);
+  } catch {}
+}
+
 // ---------- Domain types (mirrors AgentsPage.tsx) ----------
 export type GoalMsg = {
   role: string;
@@ -692,6 +763,10 @@ export async function streamChatCompletion(
   /// into userMessage so every provider sees the same text shape;
   /// images ride to the provider's native image part shape.
   attachments?: Attachment[],
+  /// Claude CLI session UUID for multi-turn memory. Computed by the
+  /// caller via getClaudeSession(projectId, agentName). Ignored on
+  /// non-Anthropic-CLI paths (OpenAI, local, Anthropic API).
+  sessionId?: string | null,
 ): Promise<string> {
   const forceSub = modelId.startsWith("sub/");
   const forceApi = modelId.startsWith("api/");
@@ -709,7 +784,7 @@ export async function streamChatCompletion(
     throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
   }
   if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images);
+    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
   }
   if (provider === "openai") {
     return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
@@ -754,6 +829,9 @@ async function streamAnthropic(
   /// text-only); we prefix the user message with a note so the user
   /// understands why an attached image didn't reach the model.
   images?: Attachment[],
+  /// Claude CLI session UUID for multi-turn memory (Phase B). Only
+  /// used by CLI subscription branches; API path ignores it.
+  sessionId?: string | null,
 ): Promise<string> {
   const wantSub = route.forceSub === true;
   const wantApi = route.forceApi === true;
@@ -782,14 +860,14 @@ async function streamAnthropic(
       return await runClaudeCliStream({
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false, allowedTools,
-        model: cliModel, effort: claudeEffort,
+        model: cliModel, effort: claudeEffort, sessionId,
         onDelta, onThought,
       });
     }
     const reply = await invoke<string>("claude_cli_complete", {
       systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
       autoApprove: autoApprove ?? false,
-      model: cliModel, effort: claudeEffort,
+      model: cliModel, effort: claudeEffort, sessionId,
     });
     if (reply) onDelta(reply);
     return reply;
@@ -804,14 +882,14 @@ async function streamAnthropic(
           return await runClaudeCliStream({
             systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
-            model: cliModel, effort: claudeEffort,
+            model: cliModel, effort: claudeEffort, sessionId,
             onDelta, onThought,
           });
         }
         const reply = await invoke<string>("claude_cli_complete", {
           systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
           autoApprove: autoApprove ?? false,
-          model: cliModel, effort: claudeEffort,
+          model: cliModel, effort: claudeEffort, sessionId,
         });
         if (reply) onDelta(reply);
         return reply;
@@ -1155,6 +1233,10 @@ export type DispatchInput = {
   models: ModelInfo[];
   port: number;
   projectCwd: string;
+  /// Project UUID. Used as the namespace for per-agent Claude CLI
+  /// session ids — multi-turn memory is scoped per (projectId, agent).
+  /// Empty/missing → session memory disabled (one-shot dispatches).
+  projectId?: string;
   history: HistoryItem[];
   autoApprove: boolean;
   signal: AbortSignal;
@@ -1229,7 +1311,7 @@ export async function runCriticDispatch(opts: {
 }
 
 export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks): Promise<string> {
-  const { team, roleByName, goal, modelFor, models, port, projectCwd, history, autoApprove, signal, directives, directorMode, attachments } = opts;
+  const { team, roleByName, goal, modelFor, models, port, projectCwd, projectId, history, autoApprove, signal, directives, directorMode, attachments } = opts;
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
   // Local mutable history — when the Critic answers a [NEED_USER_INPUT]
@@ -1264,6 +1346,9 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       // transcribed up-front (Whisper), images embed natively; both
       // ride only to the orchestrator turn.
       attachments && attachments.length > 0 ? attachments : undefined,
+      // Persistent CLI session for the orchestrator — memory accumulates
+      // across dispatches within the same project.
+      getClaudeSession(projectId, orch.name),
     );
   } finally {
     hooks.onAgentEnd(orch.name);
@@ -1314,6 +1399,8 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
           projectCwd, liveHistory, autoApprove,
           (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
           roleByName.get(orch.base)?.toolAllowlist,
+          undefined,
+          getClaudeSession(projectId, orch.name),
         );
       } finally {
         hooks.onAgentEnd(orch.name);
@@ -1369,6 +1456,8 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
         projectCwd, [], autoApprove,
         (channel, role, delta) => hooks.onThoughtDelta(spec.name, channel, role, delta),
         roleByName.get(spec.base)?.toolAllowlist,
+        undefined,
+        getClaudeSession(projectId, spec.name),
       );
       const cleaned = specText.trim();
       hooks.onAgentReply(spec.name, cleaned);
@@ -1417,6 +1506,8 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       projectCwd, liveHistory, autoApprove,
       (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
       roleByName.get(orch.base)?.toolAllowlist,
+      undefined,
+      getClaudeSession(projectId, orch.name),
     );
   } finally {
     hooks.onAgentEnd(orch.name);

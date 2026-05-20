@@ -322,6 +322,7 @@ export default function TelegramBridgeRunner() {
           models: modelsRef.current,
           port: serverRef.current.port ?? 0,
           projectCwd,
+          projectId,
           history: priorHistory,
           autoApprove: auto,
           signal: new AbortController().signal,

@@ -11,7 +11,7 @@
 // Each command lives in its own module so this file stays a wiring
 // manifest and nothing more.
 
-use tauri::Manager;
+use tauri::Emitter;
 
 mod accounts;
 mod agents;
@@ -35,21 +35,24 @@ pub fn run() {
             // Module-local state lives where the module lives; lib.rs
             // just kicks off the install.
             server::install(app);
-            // White-flash fix (Tauri 2.1 API, PR #11486 / issue #1564).
-            // WebView2's default fill color is opaque white; for the
-            // ~600-800ms while it spawns and reaches first paint, the
-            // user sees white through the otherwise-transparent Tauri
-            // window. Setting the webview's background color with
-            // alpha=0 tells WebView2 "draw transparent" from frame
-            // zero — the desktop wallpaper shows through briefly
-            // instead of opaque white, and the dark splash inlined
-            // into index.html covers it the instant HTML parses.
-            // Keeps tauri.conf.json's transparent:true intact, so the
-            // HybridFrame rounded-corner cutaway still works.
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_background_color(Some(tauri::webview::Color(0, 0, 0, 0)));
-            }
             Ok(())
+        })
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Finished
+            {
+                let window = webview.window();
+                let _ = window.maximize();
+                let show_window = window.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    let dispatch_window = show_window.clone();
+                    let _ = show_window.run_on_main_thread(move || {
+                        let _ = dispatch_window.show();
+                        let _ = dispatch_window.emit("owllm:shown", ());
+                    });
+                });
+            }
         })
         .invoke_handler(tauri::generate_handler![
             accounts::accounts_status,

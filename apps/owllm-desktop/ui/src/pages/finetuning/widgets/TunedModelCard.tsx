@@ -14,6 +14,7 @@ export type TunedModelCardProps = {
   createdAt?: string; // ISO date or human-readable
   steps?: number;
   finalLoss?: number;
+  selected?: boolean;
   onTest?: (path: string) => void;
   onExportGguf?: (path: string) => void;
   onDelete?: (path: string) => void;
@@ -24,6 +25,7 @@ export default function TunedModelCard(props: TunedModelCardProps) {
   const {
     adapterName, baseModel, adapterPath, size, format = "lora",
     createdAt, steps, finalLoss,
+    selected = false,
     onTest, onExportGguf, onDelete, onSelect,
   } = props;
 
@@ -58,12 +60,14 @@ export default function TunedModelCard(props: TunedModelCardProps) {
         minHeight: 220,
         padding: "15px 20px",
         background: `linear-gradient(180deg, ${hover ? "#262740" : "#1a1d2e"} 0%, ${hover ? "#1a2540" : "#16213e"} 100%)`,
-        border: `2px solid ${border}`,
+        border: `2px solid ${selected ? "#f3c34a" : border}`,
         borderRadius: 10,
         display: "flex", flexDirection: "column", gap: 8,
         cursor: "pointer",
         color: "#fafafa",
-        boxShadow: hover ? `0 6px 18px -6px ${border}55` : "0 1px 2px rgba(0,0,0,0.2)",
+        boxShadow: selected
+          ? `0 0 0 2px #f3c34a55, 0 8px 22px -6px #f3c34a55`
+          : hover ? `0 6px 18px -6px ${border}55` : "0 1px 2px rgba(0,0,0,0.2)",
         transition: "all 140ms ease",
       }}
     >

@@ -22,6 +22,19 @@ import { invoke } from "@tauri-apps/api/core";
 
 type SubTab = "browse" | "downloaded" | "tuned";
 
+// Mirrors Rust HfModelHit in src-tauri/src/huggingface.rs.
+type HfModelHit = {
+  id: string;
+  author: string | null;
+  downloads: number;
+  likes: number;
+  pipelineTag: string | null;
+  tags: string[];
+  lastModified: string | null;
+  gated: boolean;
+  private: boolean;
+};
+
 type DownloadedItem = {
   name: string;
   path: string;
@@ -44,14 +57,24 @@ type TunedItem = {
   createdAt?: string;
 };
 
-// Tauri-or-mock fallback: returns mock data when running under vite dev
-// without a Tauri runtime so the page still shows something useful.
-async function tryInvoke<T>(cmd: string, fallback: T): Promise<T> {
-  try {
-    return await invoke<T>(cmd);
-  } catch {
-    return fallback;
-  }
+// Format a downloads / likes count as 1.2K / 45.8K / 1.2M for display.
+function fmtCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000)     return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+// Derive a sensible icon set from HF tags so the cards aren't blank.
+function iconsForTags(tags: string[]): string {
+  const s = new Set(tags.map((t) => t.toLowerCase()));
+  const out: string[] = [];
+  if (s.has("conversational") || s.has("chat") || tags.some((t) => /chat|dialog/i.test(t))) out.push("💬");
+  if (tags.some((t) => /instruct/i.test(t))) out.push("💡");
+  if (tags.some((t) => /vision|llava|vl/i.test(t))) out.push("👁");
+  if (tags.some((t) => /reasoning|cot|thinking/i.test(t))) out.push("🧠");
+  if (tags.some((t) => /gguf/i.test(t))) out.push("📦");
+  if (tags.some((t) => /lora|adapter|peft/i.test(t))) out.push("🧩");
+  return out.join(" ");
 }
 
 export default function ModelsPage() {
@@ -59,22 +82,66 @@ export default function ModelsPage() {
   const [downloaded, setDownloaded] = React.useState<DownloadedItem[]>([]);
   const [tuned, setTuned] = React.useState<TunedItem[]>([]);
 
+  // Browse-tab state (real HF search).
+  const [query, setQuery] = React.useState("");
+  const [hits, setHits] = React.useState<HfModelHit[]>([]);
+  const [loadingHits, setLoadingHits] = React.useState(false);
+  const [hfError, setHfError] = React.useState<string | null>(null);
+  const [selectedId, setSelectedId] = React.useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
+  const [downloading, setDownloading] = React.useState<Set<string>>(new Set());
+
+  const runSearch = React.useCallback(async (q: string) => {
+    setLoadingHits(true);
+    setHfError(null);
+    try {
+      const r = await invoke<HfModelHit[]>("hf_search", {
+        query: q,
+        pipelineTag: null,
+        limit: 30,
+      });
+      setHits(r);
+    } catch (e) {
+      setHfError(String(e));
+      setHits([]);
+    } finally {
+      setLoadingHits(false);
+    }
+  }, []);
+
+  // Initial load: empty search returns HF's "trending" set.
+  React.useEffect(() => {
+    if (tab === "browse" && hits.length === 0 && !loadingHits) {
+      runSearch("text-generation");
+    }
+  }, [tab, hits.length, loadingHits, runSearch]);
+
   React.useEffect(() => {
     if (tab === "downloaded") {
-      tryInvoke<DownloadedItem[]>("models_list_downloaded", [
-        { name: "Llama-3.1-8B-Instruct", path: "models/Llama-3.1-8B-Instruct", size: "16.0 GB", icons: "💬 💡", envKey: "transformers-cu121", onboarding: "READY", compat: { color: "green", text: "Fits" } },
-        { name: "Qwen3-1.7B",            path: "models/Qwen3-1.7B",            size: "3.4 GB",  icons: "💡",     envKey: "transformers-cu121", onboarding: "NEW",   compat: { color: "green", text: "Fits" } },
-        { name: "Mistral-7B-v0.3",       path: "models/Mistral-7B-v0.3",       size: "14.5 GB", icons: "💡 🧩", envKey: "transformers-cu121", onboarding: "BUILDING", compat: { color: "green", text: "Fits" } },
-        { name: "Gemma-7B-IT (partial)", path: "models/gemma-7b-it",           size: "Downloading 6.2/16.8 GB", icons: "💎 💬", isIncomplete: true, onboarding: "BROKEN" },
-      ]).then(setDownloaded);
+      invoke<DownloadedItem[]>("models_list_downloaded")
+        .then(setDownloaded)
+        .catch(() => setDownloaded([]));
     } else if (tab === "tuned") {
-      tryInvoke<TunedItem[]>("models_list_tuned", [
-        { name: "llama-3.1-finetune-customer-support-v1", base: "meta-llama/Llama-3.1-8B-Instruct", path: "adapters/llama31-cs-v1", format: "lora", size: "120 MB", steps: 1200, loss: 0.4231, createdAt: "2026-05-12" },
-        { name: "qwen3-1p7b-summarizer",                  base: "Qwen/Qwen3-1.7B",                   path: "adapters/qwen3-summarizer", format: "lora", size: "62 MB",  steps: 800,  loss: 0.5874, createdAt: "2026-05-08" },
-        { name: "mistral7b-merged.Q4_K_M.gguf",           base: "mistralai/Mistral-7B-v0.3",         path: "adapters/mistral7b-Q4.gguf", format: "gguf", size: "4.3 GB", createdAt: "2026-05-15" },
-      ]).then(setTuned);
+      invoke<TunedItem[]>("models_list_tuned")
+        .then(setTuned)
+        .catch(() => setTuned([]));
     }
   }, [tab]);
+
+  const startDownload = async (modelId: string) => {
+    setDownloading((curr) => new Set(curr).add(modelId));
+    try {
+      await invoke("hf_download", { modelId, files: null });
+    } catch (e) {
+      setHfError(`Download failed: ${e}`);
+    } finally {
+      setDownloading((curr) => {
+        const next = new Set(curr);
+        next.delete(modelId);
+        return next;
+      });
+    }
+  };
 
   return (
     <div
@@ -190,6 +257,9 @@ export default function ModelsPage() {
       >
         <input
           placeholder="Search Hugging Face..."
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") runSearch(query); }}
           style={{
             flex: 1,
             minWidth: 0,
@@ -202,6 +272,8 @@ export default function ModelsPage() {
           }}
         />
         <button
+          title="Clear search"
+          onClick={() => { setQuery(""); runSearch(""); }}
           style={{
             padding: "6px 10px",
             background: "#162033",
@@ -209,11 +281,14 @@ export default function ModelsPage() {
             borderRadius: 6,
             color: "var(--fg)",
             fontSize: 12,
+            cursor: "pointer",
           }}
         >
-          +
+          ×
         </button>
         <button
+          onClick={() => runSearch(query)}
+          disabled={loadingHits}
           style={{
             padding: "6px 14px",
             background: "#1f6feb",
@@ -223,10 +298,24 @@ export default function ModelsPage() {
             fontSize: 12,
           }}
         >
-          Search
+          {loadingHits ? "…" : "Search"}
         </button>
       </div>
       </div>
+
+      {hfError && (
+        <div style={{
+          padding: "8px 12px",
+          marginBottom: 10,
+          background: "rgba(244,67,54,0.12)",
+          border: "1px solid rgba(244,67,54,0.4)",
+          borderRadius: 6,
+          color: "#ff8080",
+          fontSize: 12,
+        }}>
+          ⚠ {hfError}
+        </div>
+      )}
       {/* Qt main.py:8257-8289 — "📚 Recommended Models" at 16pt bold #667eea,
           followed inline (no stretch) by a 3-colour legend row. Dots are
           14pt; labels are 10pt #9aa0a6. legend_row contentsMargins (16,0,0,0)
@@ -283,27 +372,56 @@ export default function ModelsPage() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 280px", gap: 10 }}>
-        {([
-          { modelId: "nemotron-labs/diffustion-14b",         name: "Nemotron Labs DiffuStion 14B",  desc: "Diffusion-style text model from Nemotron Labs.",  size: "14B params", icons: "💡 🧠",   badge: { color: "orange" as const, text: "Tight fit" }, isNew: true,  downloads: "1.2K", likes: "84" },
-          { modelId: "meta-llama/Llama-3.1-8B-Instruct",     name: "Llama 3.1 8B Instruct",         desc: "Meta Llama 3.1 8B Instruct — general purpose chat.", size: "8B params", icons: "💬 💡",   badge: { color: "green" as const, text: "Fits" }, downloads: "45.8K", likes: "1.2K" },
-          { modelId: "webworld/webworld-8b",                 name: "WebWorld 8B",                   desc: "Web-tuned 8B model for browsing tasks.",          size: "8B params", icons: "🌐 💬",   badge: { color: "green" as const, text: "Fits" }, downloads: "812", likes: "42" },
-          { modelId: "Qwen/Qwen3-1.7B",                       name: "Qwen3 1.7B",                    desc: "Qwen3 small instruct variant.",                  size: "1.7B params", icons: "💡",     badge: { color: "gray" as const, text: "Unknown" }, downloads: "3.4K", likes: "210" },
-          { modelId: "nemotron-labs/nemotron-variant",       name: "Nemotron Labs ...",             desc: "Variant of Nemotron Labs model family.",         size: "70B params", icons: "🧠",      badge: { color: "red" as const, text: "Too large" } },
-          { modelId: "mistralai/Mistral-7B-v0.3",            name: "Mistral 7B v0.3",               desc: "Mistral 7B base model.",                         size: "7B params", icons: "💡 🧩",   badge: { color: "green" as const, text: "Fits" }, isNew: true, downloads: "28.1K", likes: "950" },
-        ]).map((m, i) => (
-          <ModelCard
-            key={m.modelId + ":" + i}
-            modelName={m.name}
-            modelId={m.modelId}
-            description={m.desc}
-            size={m.size}
-            icons={m.icons}
-            compatibilityBadge={m.badge}
-            isNew={m.isNew}
-            downloads={m.downloads}
-            likes={m.likes}
-          />
-        ))}
+        {loadingHits && hits.length === 0 ? (
+          <div style={{
+            gridColumn: "1 / span 2",
+            padding: 40,
+            textAlign: "center",
+            color: "var(--fg-muted)",
+            border: "1px dashed #2a3242",
+            borderRadius: 8,
+            fontSize: 13,
+          }}>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>🔎</div>
+            Searching Hugging Face…
+          </div>
+        ) : hits.length === 0 ? (
+          <div style={{
+            gridColumn: "1 / span 2",
+            padding: 40,
+            textAlign: "center",
+            color: "var(--fg-muted)",
+            border: "1px dashed #2a3242",
+            borderRadius: 8,
+            fontSize: 13,
+          }}>
+            <div style={{ fontSize: 28, marginBottom: 8 }}>🤷</div>
+            No models matched "{query}". Try a broader query like "llama" or "qwen".
+          </div>
+        ) : hits.map((h) => {
+          const dl = downloading.has(h.id);
+          const isNew = h.lastModified
+            ? (Date.now() - new Date(h.lastModified).getTime()) < 14 * 24 * 3600 * 1000
+            : false;
+          return (
+            <ModelCard
+              key={h.id}
+              modelName={h.id.split("/").pop() ?? h.id}
+              modelId={h.id}
+              description={h.pipelineTag ? `Pipeline: ${h.pipelineTag}` : undefined}
+              icons={iconsForTags(h.tags)}
+              isNew={isNew}
+              downloads={fmtCount(h.downloads)}
+              likes={fmtCount(h.likes)}
+              requiresToken={h.gated || h.private}
+              isDownloaded={false}
+              downloadProgress={dl ? undefined : undefined}
+              selected={selectedId === h.id}
+              onClick={(id) => setSelectedId((curr) => curr === id ? null : id)}
+              onDownload={(id) => startDownload(id)}
+            />
+          );
+        })}
 
         <AccessTokensPane />
       </div>
@@ -337,6 +455,8 @@ export default function ModelsPage() {
               isIncomplete={d.isIncomplete}
               onboardingStatus={d.onboarding}
               compatibilityBadge={d.compat}
+              selected={selectedPath === d.path}
+              onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
             />
           ))}
         </div>
@@ -370,6 +490,8 @@ export default function ModelsPage() {
               steps={t.steps}
               finalLoss={t.loss}
               createdAt={t.createdAt}
+              selected={selectedPath === t.path}
+              onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
             />
           ))}
         </div>

@@ -21,6 +21,8 @@ export type ModelCardProps = {
   compatibilityBadge?: CompatibilityBadge;
   requiresToken?: boolean;
   downloadProgress?: number; // 0–1, undefined = idle
+  /** True when the user has clicked the card. Adds a gold ring around the border. */
+  selected?: boolean;
   onDownload?: (modelId: string) => void;
   onClick?: (modelId: string) => void;
 };
@@ -46,7 +48,7 @@ export function ModelCard(props: ModelCardProps) {
     modelName, modelId, description, size, icons,
     isDownloaded = false, isNew = false,
     downloads, likes, compatibilityBadge, requiresToken = false,
-    downloadProgress, onDownload, onClick,
+    downloadProgress, selected = false, onDownload, onClick,
   } = props;
 
   const fam = familyIcon(modelId);
@@ -103,17 +105,19 @@ export function ModelCard(props: ModelCardProps) {
         minHeight: 220,
         padding: "15px 20px",
         background: `linear-gradient(180deg, ${bgStart} 0%, ${bgEnd} 100%)`,
-        border: `2px solid ${border}`,
+        border: `2px solid ${selected ? "#f3c34a" : border}`,
         borderRadius: 10,
         display: "flex",
         flexDirection: "column",
         gap: 8,
         cursor: "pointer",
         color: "#fafafa",
-        boxShadow: hover
-          ? `0 6px 18px -6px ${border}55, 0 2px 6px rgba(0,0,0,0.3)`
-          : "0 1px 2px rgba(0,0,0,0.2)",
-        transform: hover ? "translateY(-1px)" : "translateY(0)",
+        boxShadow: selected
+          ? `0 0 0 2px #f3c34a55, 0 8px 22px -6px #f3c34a55`
+          : hover
+            ? `0 6px 18px -6px ${border}55, 0 2px 6px rgba(0,0,0,0.3)`
+            : "0 1px 2px rgba(0,0,0,0.2)",
+        transform: hover || selected ? "translateY(-1px)" : "translateY(0)",
         transition: "background 140ms ease, box-shadow 140ms ease, transform 140ms ease, border-color 140ms ease",
       }}
     >

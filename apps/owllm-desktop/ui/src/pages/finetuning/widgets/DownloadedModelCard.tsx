@@ -20,6 +20,7 @@ export type DownloadedModelCardProps = {
   compatibilityBadge?: CompatibilityBadge;
   onboardingStatus?: OnboardingStatus;
   envKey?: string;
+  selected?: boolean;
   onSelect?: (path: string) => void;
   onDelete?: (path: string) => void;
   onRepair?: (path: string) => void;
@@ -50,6 +51,7 @@ export default function DownloadedModelCard(props: DownloadedModelCardProps) {
     modelName, modelPath, size, icons,
     isIncomplete = false, isActiveDownload = false,
     compatibilityBadge, onboardingStatus = "NEW", envKey,
+    selected = false,
     onSelect, onDelete, onRepair, onAddWeights, onDedicatedEnv,
   } = props;
 
@@ -96,14 +98,16 @@ export default function DownloadedModelCard(props: DownloadedModelCardProps) {
         minHeight: 220,
         padding: "15px 20px",
         background: `linear-gradient(180deg, ${hover ? "#262740" : "#1a1d2e"} 0%, ${hover ? "#1a2540" : "#16213e"} 100%)`,
-        border: `2px solid ${border}`,
+        border: `2px solid ${selected ? "#f3c34a" : border}`,
         borderRadius: 10,
         display: "flex",
         flexDirection: "column",
         gap: 8,
         cursor: "pointer",
         color: "#fafafa",
-        boxShadow: hover ? `0 6px 18px -6px ${border}55` : "0 1px 2px rgba(0,0,0,0.2)",
+        boxShadow: selected
+          ? `0 0 0 2px #f3c34a55, 0 8px 22px -6px #f3c34a55`
+          : hover ? `0 6px 18px -6px ${border}55` : "0 1px 2px rgba(0,0,0,0.2)",
         transition: "all 140ms ease",
       }}
     >

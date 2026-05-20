@@ -1,278 +1,248 @@
-﻿// ModelsPage — browses every GGUF found under LLM/models/ via the
-// native list_models scanner. Read-only for now: each row shows the
-// model id, size, port the server would bind, and the full path. A
-// Start button hands the model off to server_start so the user
-// doesn't have to bounce to the Server tab.
+// ModelsPage — skeleton for the TwinForge replication loop.
 //
-// Qt: main.py::_build_models_tab (line 7997) was a full catalog +
-// downloader. That's intentionally out of scope here — the value of
-// this first cut is making the discovered models visible and one-
-// click runnable.
+// HOW THIS FILE EVOLVES
+// =====================
+// The TwinForge loop compares this against the Qt Models tab
+// (`LLM/desktop_app/main.py:7997` `_build_models_tab`) and applies
+// Claude-Code patches per iteration. Anchors below match Qt
+// objectNames so the structural diff aligns regions:
+//
+//   data-ui="formatFilterContainer" → Qt filter grid frame
+//   data-ui="searchContainer"       → Qt search bar frame
+//   data-ui="browseTabBtn"          → Qt browse_tab_btn
+//   data-ui="downloadedTabBtn"      → Qt downloaded_tab_btn
+//   data-ui="tunedTabBtn"           → Qt tuned_tab_btn
 
-import { useEffect, useMemo, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-
-const ICONS = "/Page_icons";
-
-type ModelInfo = {
-  model_id: string;
-  port?: number | null;
-  base_model?: string | null;
-  size_mib?: number | null;
-};
-
-type ServerStatus = {
-  running: boolean;
-  model_id: string | null;
-  port: number | null;
-  message: string;
-};
-
-function formatSize(mib?: number | null): string {
-  if (mib == null) return "—";
-  if (mib < 1024) return `${mib} MiB`;
-  return `${(mib / 1024).toFixed(2)} GiB`;
-}
+import React from "react";
+import ModelCard from "./widgets/ModelCard";
+import AccessTokensPane from "./widgets/AccessTokensPane";
 
 export default function ModelsPage() {
-  const [models, setModels] = useState<ModelInfo[]>([]);
-  const [status, setStatus] = useState<ServerStatus>({
-    running: false, model_id: null, port: null, message: "",
-  });
-  const [filter, setFilter] = useState("");
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  async function refresh() {
-    setError(null);
-    setBusy("scanning");
-    try {
-      const [m, s] = await Promise.all([
-        invoke<ModelInfo[]>("list_models"),
-        invoke<ServerStatus>("server_status"),
-      ]);
-      setModels(m);
-      setStatus(s);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  useEffect(() => {
-    refresh();
-    // 5s status poll so the "RUNNING" highlight tracks reality
-    // even if the user starts/stops from another tab.
-    const id = window.setInterval(async () => {
-      try {
-        const s = await invoke<ServerStatus>("server_status");
-        setStatus(s);
-      } catch { /* ignore */ }
-    }, 5000);
-    return () => window.clearInterval(id);
-  }, []);
-
-  async function startModel(modelId: string) {
-    setError(null);
-    setBusy(`starting ${modelId}`);
-    try {
-      await invoke("server_start", { modelId });
-      const s = await invoke<ServerStatus>("server_status");
-      setStatus(s);
-    } catch (e) {
-      setError(`Start failed: ${e}`);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function stopServer() {
-    setError(null);
-    setBusy("stopping");
-    try {
-      await invoke("server_stop");
-      const s = await invoke<ServerStatus>("server_status");
-      setStatus(s);
-    } catch (e) {
-      setError(`Stop failed: ${e}`);
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  const visible = useMemo(() => {
-    const f = filter.trim().toLowerCase();
-    if (!f) return models;
-    return models.filter(m => m.model_id.toLowerCase().includes(f));
-  }, [models, filter]);
-
   return (
-    <div style={{
-      padding: "14px 18px",
-      height: "100%",
-      display: "flex",
-      flexDirection: "column",
-      gap: 12,
-      background: "var(--bg-panel)",
-      color: "var(--fg)",
-      minHeight: 0,
-    }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-        <img
-          src={`${ICONS}/owl_training.png`}
-          alt=""
-          style={{ width: 32, height: 32, objectFit: "contain" }}
-        />
-        <div style={{ fontSize: 24, fontWeight: 800, color: "var(--fg-strong)" }}>📦 Models</div>
-        <div style={{ flex: 1 }} />
-        <input
-          placeholder="Filter…"
-          value={filter}
-          onChange={e => setFilter(e.target.value)}
+    <div
+      data-ui="modelsPageRoot"
+      style={{
+        height: "100%",
+        padding: 14,
+        background: "var(--bg-panel)",
+        color: "var(--fg)",
+        overflow: "auto",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <button
+          data-ui="browseTabBtn"
           style={{
-            height: 30, padding: "0 10px", borderRadius: 6,
-            border: "1px solid var(--border-strong)",
-            background: "var(--bg-elevated)", color: "var(--fg)", fontSize: 12,
-            minWidth: 220,
+            padding: "6px 14px",
+            background: "#1f6feb",
+            color: "#fff",
+            border: "1px solid #1f6feb",
+            borderRadius: 6,
+            fontSize: 12,
+          }}
+        >
+          🚀 Browse Models
+        </button>
+        <button
+          data-ui="downloadedTabBtn"
+          style={{
+            padding: "6px 14px",
+            background: "transparent",
+            color: "var(--fg)",
+            border: "1px solid #2a3242",
+            borderRadius: 6,
+            fontSize: 12,
+          }}
+        >
+          💾 Downloaded
+        </button>
+        <button
+          data-ui="tunedTabBtn"
+          style={{
+            padding: "6px 14px",
+            background: "transparent",
+            color: "var(--fg)",
+            border: "1px solid #2a3242",
+            borderRadius: 6,
+            fontSize: 12,
+          }}
+        >
+          🎯 Tuned Models
+        </button>
+        <div style={{ marginLeft: "auto", display: "flex", gap: 16, fontSize: 11, color: "var(--fg-muted)" }}>
+          <span>0 Files Hosting</span>
+          <span>0 Free Models</span>
+          <span>0 Quantized (8bit / 4bit)</span>
+          <span>0 Other</span>
+        </div>
+      </div>
+      {/* formatFilterContainer + searchContainer — Qt puts these side-by-side
+          on the same row at y~275 (filter ~513 wide on left, search ~305
+          wide on right). Wrap both in a flex row so the React layout
+          matches Qt's geometry instead of stacking full-width strips. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+      <div
+        data-ui="formatFilterContainer"
+        style={{
+          width: 513,
+          height: 50,
+          padding: "4px 10px",
+          background: "rgba(102, 126, 234, 0.08)",
+          border: "1px solid rgba(102, 126, 234, 0.25)",
+          borderRadius: 8,
+          display: "grid",
+          gridTemplateColumns: "repeat(4, 1fr)",
+          gridTemplateRows: "1fr 1fr",
+          columnGap: 14,
+          rowGap: 0,
+          alignItems: "center",
+          flexShrink: 0,
+        }}
+      >
+        {[
+          { label: "✅ Trainable", tip: "transformers-format models with full weights — what the Train tab can fine-tune." },
+          { label: "📦 GGUF", tip: "llama.cpp / bundled-proxy inference format. Cannot be fine-tuned." },
+          { label: "💡 Instruct", tip: "Instruction-tuned base models (-instruct, -it). Follow direct task prompts." },
+          { label: "💬 Chat", tip: "Multi-turn chat / conversation tuned (-chat, -dialog, ChatML)." },
+          { label: "🧩 Adapter (LoRA)", tip: "PEFT / LoRA adapters — small overlays that need a base model to load." },
+          { label: "⚡ Quantized (AWQ / GPTQ)", tip: "Inference-only weight-quantized checkpoints (AWQ or GPTQ)." },
+          { label: "🧠 Reasoning", tip: "Chain-of-thought reasoning models (R1, o1-style, deepseek-r1, thinking)." },
+          { label: "👁️ Vision", tip: "Multimodal vision-language models (image input — VL, llava, vision)." },
+        ].map((f) => (
+          <label
+            key={f.label}
+            title={f.tip}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+              color: "#dadcdf",
+              fontSize: "10pt",
+              background: "transparent",
+              cursor: "pointer",
+              userSelect: "none",
+            }}
+          >
+            <input
+              type="checkbox"
+              style={{ width: 14, height: 14, margin: 0, flexShrink: 0 }}
+            />
+            <span>{f.label}</span>
+          </label>
+        ))}
+      </div>
+      <div
+        data-ui="searchContainer"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 6,
+          marginLeft: "auto",
+          width: 305,
+          flexShrink: 0,
+        }}
+      >
+        <input
+          placeholder="Search Hugging Face..."
+          style={{
+            flex: 1,
+            minWidth: 0,
+            padding: "6px 10px",
+            background: "#0b1020",
+            border: "1px solid #1c2434",
+            borderRadius: 6,
+            color: "var(--fg)",
+            fontSize: 12,
           }}
         />
-        <button className="ghost-btn" onClick={refresh} disabled={!!busy}>
-          {busy === "scanning" ? "Scanning…" : "🔄 Refresh"}
-        </button>
-        {status.running ? (
-          <button
-            onClick={stopServer}
-            disabled={!!busy}
-            style={{
-              height: 30, padding: "0 14px", borderRadius: 6,
-              background: "linear-gradient(180deg, #f44336, #d32f2f)",
-              color: "var(--fg-strong)", border: "none",
-              fontSize: 12, fontWeight: 700, cursor: "pointer",
-            }}
-            title="Stop the running model server."
-          >⏹ Stop server</button>
-        ) : null}
-      </div>
-
-      <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-        {models.length} GGUF{models.length === 1 ? "" : "s"} discovered under{" "}
-        <code style={{ color: "var(--accent)" }}>LLM/models/</code>
-        {status.running ? (
-          <> · Active: <span style={{ color: "#a0e88a", fontWeight: 700 }}>{status.model_id}</span> on port {status.port}</>
-        ) : null}
-      </div>
-
-      {error ? (
-        <div style={{
-          border: "1px solid #ff9f9f",
-          background: "rgba(255,80,80,0.10)",
-          color: "#ffb0b0",
-          borderRadius: 6, padding: 8,
-          fontSize: 12,
-        }}>{error}</div>
-      ) : null}
-
-      <div style={{
-        flex: 1, minHeight: 0, overflowY: "auto",
-        border: "1px solid var(--border)",
-        borderRadius: 8, background: "var(--bg-elevated)",
-      }}>
-        {visible.length === 0 ? (
-          <div style={{ padding: 24, fontSize: 12, color: "#7a7f87", textAlign: "center" }}>
-            {models.length === 0
-              ? "No GGUF files found under LLM/models/. Drop a model file there and click Refresh."
-              : "No models match the filter."}
-          </div>
-        ) : (
-          <table style={{
-            width: "100%",
-            borderCollapse: "collapse",
+        <button
+          style={{
+            padding: "6px 10px",
+            background: "#162033",
+            border: "1px solid #243044",
+            borderRadius: 6,
+            color: "var(--fg)",
             fontSize: 12,
-          }}>
-            <thead>
-              <tr style={{
-                fontSize: 11, color: "var(--fg-muted)", textAlign: "left",
-                borderBottom: "1px solid var(--border-strong)",
-                background: "var(--bg-panel)",
-              }}>
-                <th style={{ padding: "8px 12px", fontWeight: 600 }}>Model ID</th>
-                <th style={{ padding: "8px 12px", fontWeight: 600, width: 110 }}>Size</th>
-                <th style={{ padding: "8px 12px", fontWeight: 600, width: 80 }}>Port</th>
-                <th style={{ padding: "8px 12px", fontWeight: 600 }}>Path</th>
-                <th style={{ padding: "8px 12px", fontWeight: 600, width: 130 }}></th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map((m, i) => {
-                const isRunning = status.running && status.model_id === m.model_id;
-                const startBusy = busy === `starting ${m.model_id}`;
-                return (
-                  <tr key={m.model_id} style={{
-                    borderBottom: "1px solid rgba(255,255,255,0.05)",
-                    background: isRunning
-                      ? "rgba(127,223,255,0.06)"
-                      : (i % 2 === 1 ? "rgba(255,255,255,0.015)" : "transparent"),
-                  }}>
-                    <td style={{ padding: "8px 12px", color: isRunning ? "var(--accent)" : "#dadcdf", fontWeight: isRunning ? 700 : 400 }}>
-                      {isRunning ? "▶ " : ""}{m.model_id}
-                    </td>
-                    <td style={{ padding: "8px 12px", color: "var(--fg-muted)", whiteSpace: "nowrap" }}>
-                      {formatSize(m.size_mib)}
-                    </td>
-                    <td style={{ padding: "8px 12px", color: "var(--fg-muted)" }}>
-                      {m.port ?? "—"}
-                    </td>
-                    <td style={{
-                      padding: "8px 12px",
-                      color: "#7a7f87",
-                      fontFamily: "Consolas, monospace",
-                      fontSize: 11,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      maxWidth: 0,
-                    }}
-                      title={m.base_model ?? ""}
-                    >
-                      {m.base_model ?? "—"}
-                    </td>
-                    <td style={{ padding: "6px 12px", textAlign: "right" }}>
-                      {isRunning ? (
-                        <button
-                          onClick={stopServer}
-                          disabled={!!busy}
-                          style={{
-                            height: 26, padding: "0 12px", borderRadius: 5,
-                            background: "linear-gradient(180deg, #f44336, #d32f2f)",
-                            color: "var(--fg-strong)", border: "none",
-                            fontSize: 11, fontWeight: 700, cursor: "pointer",
-                          }}
-                        >⏹ Stop</button>
-                      ) : (
-                        <button
-                          onClick={() => startModel(m.model_id)}
-                          disabled={!!busy}
-                          style={{
-                            height: 26, padding: "0 12px", borderRadius: 5,
-                            background: startBusy
-                              ? "rgba(127,223,255,0.20)"
-                              : "linear-gradient(180deg, #4CAF50, #388E3C)",
-                            color: "var(--fg-strong)", border: "none",
-                            fontSize: 11, fontWeight: 700,
-                            cursor: busy ? "not-allowed" : "pointer",
-                            opacity: busy && !startBusy ? 0.5 : 1,
-                          }}
-                          title={`Start llama-server on ${m.base_model}`}
-                        >{startBusy ? "Starting…" : "▶ Start"}</button>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+          }}
+        >
+          +
+        </button>
+        <button
+          style={{
+            padding: "6px 14px",
+            background: "#1f6feb",
+            border: "1px solid #1f6feb",
+            borderRadius: 6,
+            color: "#fff",
+            fontSize: 12,
+          }}
+        >
+          Search
+        </button>
+      </div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+        <span style={{ color: "#f3c34a" }}>★</span>
+        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--fg)" }}>Recommended Models</span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 280px", gap: 10 }}>
+        {([
+          { modelId: "nemotron-labs/diffustion-14b",         name: "Nemotron Labs DiffuStion 14B",  desc: "Diffusion-style text model from Nemotron Labs.",  size: "14B params", icons: "💡 🧠",   badge: { color: "orange" as const, text: "Tight fit" }, isNew: true,  downloads: "1.2K", likes: "84" },
+          { modelId: "meta-llama/Llama-3.1-8B-Instruct",     name: "Llama 3.1 8B Instruct",         desc: "Meta Llama 3.1 8B Instruct — general purpose chat.", size: "8B params", icons: "💬 💡",   badge: { color: "green" as const, text: "Fits" }, downloads: "45.8K", likes: "1.2K" },
+          { modelId: "webworld/webworld-8b",                 name: "WebWorld 8B",                   desc: "Web-tuned 8B model for browsing tasks.",          size: "8B params", icons: "🌐 💬",   badge: { color: "green" as const, text: "Fits" }, downloads: "812", likes: "42" },
+          { modelId: "Qwen/Qwen3-1.7B",                       name: "Qwen3 1.7B",                    desc: "Qwen3 small instruct variant.",                  size: "1.7B params", icons: "💡",     badge: { color: "gray" as const, text: "Unknown" }, downloads: "3.4K", likes: "210" },
+          { modelId: "nemotron-labs/nemotron-variant",       name: "Nemotron Labs ...",             desc: "Variant of Nemotron Labs model family.",         size: "70B params", icons: "🧠",      badge: { color: "red" as const, text: "Too large" } },
+          { modelId: "mistralai/Mistral-7B-v0.3",            name: "Mistral 7B v0.3",               desc: "Mistral 7B base model.",                         size: "7B params", icons: "💡 🧩",   badge: { color: "green" as const, text: "Fits" }, isNew: true, downloads: "28.1K", likes: "950" },
+        ]).map((m, i) => (
+          <ModelCard
+            key={m.modelId + ":" + i}
+            modelName={m.name}
+            modelId={m.modelId}
+            description={m.desc}
+            size={m.size}
+            icons={m.icons}
+            compatibilityBadge={m.badge}
+            isNew={m.isNew}
+            downloads={m.downloads}
+            likes={m.likes}
+          />
+        ))}
+
+        <AccessTokensPane />
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          marginTop: 10,
+          padding: "6px 8px",
+          background: "#0e1320",
+          border: "1px solid #1c2434",
+          borderRadius: 6,
+          fontSize: 11,
+        }}
+      >
+        <label style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--fg)" }}>
+          <input type="checkbox" /> Change res VRAM
+        </label>
+        <span style={{ flex: 1, color: "var(--fg-muted)" }}>
+          ✓ Restart Memory Hugging Face — C:\Users\mc\.cache\huggingface
+        </span>
+        <button
+          style={{
+            padding: "4px 12px",
+            background: "#162033",
+            color: "var(--fg)",
+            border: "1px solid #243044",
+            borderRadius: 4,
+            fontSize: 11,
+          }}
+        >
+          Browse
+        </button>
       </div>
     </div>
   );

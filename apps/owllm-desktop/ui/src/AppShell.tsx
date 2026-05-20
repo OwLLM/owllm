@@ -26,15 +26,28 @@ import {
 } from "./core/modules";
 import { ACCENTS, AccentKey, Mode, useTheme } from "./theme";
 import TelegramBridgeRunner from "./bridges/TelegramBridgeRunner";
+import ServerPage from "./pages/core/ServerPage";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
 // HybridFrame corners cleanly. That means we own drag, resize, and
 // min/max/close ourselves.
 
+/// True when the page is loaded inside the actual Tauri webview
+/// (i.e. has __TAURI_INTERNALS__ injected). In plain Chromium under
+/// `vite dev` — including TwinForge's Playwright captures — every
+/// `getCurrentWindow()` / `invoke()` call would throw synchronously
+/// and crash the whole AppShell render. Callers gate on this.
+function isTauri(): boolean {
+  if (typeof window === "undefined") return false;
+  const w = window as any;
+  return Boolean(w.__TAURI_INTERNALS__ || w.__TAURI__ || w.__TAURI_METADATA__);
+}
+
 function startDrag(e: React.MouseEvent) {
   if (e.button !== 0) return;
   if ((e.target as HTMLElement).closest("button, input, select, textarea, a")) return;
+  if (!isTauri()) return; // dev / TwinForge: no native window to drag
   e.preventDefault();
   getCurrentWindow().startDragging().catch(() => { /* not in Tauri ctx */ });
 }
@@ -44,6 +57,7 @@ type ResizeDir =
   | "NorthEast" | "NorthWest" | "SouthEast" | "SouthWest";
 
 function ResizeEdges() {
+  if (!isTauri()) return null; // no native resize in vite dev / Playwright
   const start = (dir: ResizeDir) => (e: React.MouseEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -67,6 +81,10 @@ function ResizeEdges() {
 }
 
 function WindowControls() {
+  // Plain Chromium has no getCurrentWindow() — return early so the
+  // synchronous call doesn't throw and tank the whole AppShell render
+  // during TwinForge captures / vite dev sessions.
+  if (!isTauri()) return null;
   const w = getCurrentWindow();
   const btn: React.CSSProperties = {
     width: 36, height: 28, border: "none",
@@ -101,6 +119,7 @@ function useLiveSysInfo() {
   });
   const [vram, setVram] = useState<VramStatusLite>({ gpus: [] });
   useEffect(() => {
+    if (!isTauri()) return; // no invoke() in vite dev / Playwright
     let dead = false;
     const tick = async () => {
       try {
@@ -144,11 +163,15 @@ const BADGE_H = 195;
 const BORDER_T = 18;
 const CORNER_OUTSET = 10;
 const SHIFT_OUT = BORDER_T / 2;
-// EXTRA_TOP bumps the top padding from the 19 px baseline (SHIFT_OUT
-// + CORNER_OUTSET) up to 54 px total — leaving 35 px of extra
-// breathing room above the HybridFrame for the peeking owl badge.
-// EXTRA_RIGHT stays 0 so the right side keeps the symmetric 19 px.
-const EXTRA_TOP = 35;
+// EXTRA_TOP matches Qt hybrid_frame_window.py which uses
+// `extra_top = badge_h // 2 = BADGE_H // 2`. With BADGE_H=195 that's
+// 97 px of headroom above the HybridFrame so the owl badge can peek
+// out at exactly the same y-coordinate Qt does. Previous value of 35
+// caused everything below the badge to render ~66 px higher than the
+// Qt source — TwinForge diff flagged every header element with
+// `pos off by (..., -66)`. EXTRA_RIGHT stays 0 so right padding stays
+// symmetric at 19 px.
+const EXTRA_TOP = BADGE_H / 2;
 const EXTRA_RIGHT = 0;
 const CORNER_PNG_W = 160;
 const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);
@@ -267,7 +290,7 @@ type ActiveMode = "home" | "finetuning" | "agentic" | "gamify";
 
 function ModeBar({
   mode, setMode, advancedOpen, setAdvancedOpen, installed,
-  themeMode, onToggleThemeMode, accentKey, onPickAccent,
+  themeMode, onToggleThemeMode, accentKey, onPickAccent, onOpenServer,
 }: {
   mode: ActiveMode;
   setMode: (m: ActiveMode) => void;
@@ -278,6 +301,7 @@ function ModeBar({
   onToggleThemeMode: () => void;
   accentKey: AccentKey;
   onPickAccent: (k: AccentKey) => void;
+  onOpenServer: () => void;
 }) {
   // The header is always the dark blue band so the cyan frame +
   // OWLLM title read consistently across themes. Buttons therefore
@@ -307,11 +331,15 @@ function ModeBar({
   // group toggles. Each id is also a valid ModeId so `installed`
   // (ModeId[]) can include() them; narrow with a typed cast.
   type ToggleId = Exclude<ActiveMode, "home">;
-  type ToggleSpec = { id: ToggleId; emoji: string; label: string; width: number };
+  // dataUi values must match the Qt `setObjectName` calls verbatim so
+  // TwinForge's region-diff aligns these toggles instead of leaving
+  // them in the "unmatched" bucket. Qt: FineTuningToggle / AgenticTeamToggle
+  // / GamifyToggle (main.py:3191-3200).
+  type ToggleSpec = { id: ToggleId; dataUi: string; emoji: string; label: string; width: number };
   const TOGGLES: ToggleSpec[] = [
-    { id: "finetuning", emoji: "🛠",  label: "Fine Tuning", width: 129 },
-    { id: "agentic",    emoji: "🎭", label: "Agentic Team", width: 147 },
-    { id: "gamify",     emoji: "🎮", label: "Gamify",       width: 91  },
+    { id: "finetuning", dataUi: "FineTuningToggle",  emoji: "🛠",  label: "Fine Tuning", width: 129 },
+    { id: "agentic",    dataUi: "AgenticTeamToggle", emoji: "🎭", label: "Agentic Team", width: 147 },
+    { id: "gamify",     dataUi: "GamifyToggle",      emoji: "🎮", label: "Gamify",       width: 91  },
   ];
   const visibleToggles = TOGGLES.filter(t => installed.includes(t.id as ModeId));
 
@@ -388,7 +416,7 @@ function ModeBar({
         {visibleToggles.map(t => (
           <button
             key={t.id}
-            data-ui={`${t.id}-toggle`}
+            data-ui={t.dataUi}
             onClick={() => setMode(mode === t.id ? "home" : t.id)}
             style={{ ...(mode === t.id ? active : baseBtn), width: t.width }}
           >
@@ -422,7 +450,7 @@ function ModeBar({
         }}
       >OWLLM</div>
 
-      <SysInfoBlock />
+      <SysInfoBlock onOpenServer={onOpenServer} />
       <WindowControls />
     </div>
   );
@@ -431,12 +459,16 @@ function ModeBar({
 // Header right-block — live status. Replaces the hardcoded Qt
 // mock-up that pretended a "Quagenmed-K4" server was always
 // running and VRAM was "N/A".
-function SysInfoBlock() {
+// Clicking the block opens the Server modal (same trigger as the
+// "Server" tab) so the user can spin a model up/down from anywhere.
+function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
   const { server, vram } = useLiveSysInfo();
-  const dotColor = server.running ? "#22c55e" : "#888";
+  // Mirrors Qt main.py:28564/28573 — pluralised "Servers", count-based.
+  // Stopped → "🟢 Servers: 0"; running → "🟢 Servers: N (modelSummary)".
+  // ServerStatusLite carries only one server, so N is 0 or 1.
   const serverLine = server.running
-    ? `Server: ${server.model_id ?? "?"}${server.port ? `  ·  port ${server.port}` : ""}`
-    : "Server: stopped";
+    ? `🟢 Servers: 1 (${server.model_id ?? "?"})`
+    : "🟢 Servers: 0";
   const vramLine = vram.gpus.length === 0
     ? "VRAM: N/A"
     : vram.gpus
@@ -446,23 +478,28 @@ function SysInfoBlock() {
   // (server_page.py:1093). Real per-user keys land alongside the
   // Accounts page wiring.
   return (
-    <div data-ui="SysInfoBlock" style={{
-      maxWidth: 420, height: 60,
-      display: "flex", flexDirection: "column",
-      alignItems: "stretch", justifyContent: "center", gap: 3,
-      fontSize: 12, fontWeight: 700, color: "#fff", textAlign: "right",
-      // Trimmed from the Qt-port's hard 543px to free room for the
-      // inline WindowControls 4th grid column. overflow:hidden +
-      // text-overflow on the children below keeps long model ids
-      // from pushing the layout.
-      overflow: "hidden",
-    }}>
+    <div
+      data-ui="SysInfoBlock"
+      onClick={onOpenServer}
+      title="Open Server Control"
+      style={{
+        maxWidth: 420, height: 60,
+        display: "flex", flexDirection: "column",
+        alignItems: "stretch", justifyContent: "center", gap: 3,
+        fontSize: 12, fontWeight: 700, color: "#fff", textAlign: "right",
+        // Trimmed from the Qt-port's hard 543px to free room for the
+        // inline WindowControls 4th grid column. overflow:hidden +
+        // text-overflow on the children below keeps long model ids
+        // from pushing the layout.
+        overflow: "hidden",
+        cursor: "pointer",
+      }}
+    >
       <div data-ui="HeaderServersLabel">
-        <span className="status-dot" style={{ background: dotColor, color: dotColor }} />
         {serverLine}
       </div>
       <div data-ui="HeaderApiKeyLabel">
-        <span className="status-dot" style={{ background: "#22c55e", color: "#22c55e" }} />
+        <span style={{ marginRight: 4 }}>🔑</span>
         API key: owllm-local
       </div>
       <div data-ui="HeaderVramLabel" title={server.message || undefined}>
@@ -528,12 +565,124 @@ function SubTabs({
 }
 
 // ---------------------------------------------------------------------
+// ServerModal — popup wrapper around ServerPage. Replaces the old
+// "Server" SubTab: same content, but in a centered modal styled like
+// the app (cyan border, dark-blue title strip, panel body). Closes
+// on backdrop click, Esc, or the ✕ button.
+// ---------------------------------------------------------------------
+function ServerModal({ onClose }: { onClose: () => void }) {
+  // Esc to close — registered once on mount.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      data-ui="ServerModalBackdrop"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{
+        position: "fixed", inset: 0, zIndex: 9000,
+        background: "rgba(0,0,0,0.62)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}
+    >
+      <div
+        data-ui="ServerModal"
+        style={{
+          width: "92%", height: "88%",
+          background: "var(--bg-panel)",
+          // Same cyan accent the HybridFrame uses internally — keeps
+          // the modal visually consistent with the app chrome without
+          // duplicating corner PNGs etc.
+          border: "2px solid rgba(120,220,255,0.78)",
+          borderRadius: 14,
+          boxShadow: "0 24px 64px rgba(0,0,0,0.55)",
+          display: "flex", flexDirection: "column",
+          overflow: "hidden",
+        }}
+      >
+        {/* Title strip — same #1c2244 the ModeBar uses for chrome parity. */}
+        <div style={{
+          height: 56,
+          background: "#1c2244",
+          color: "#fff",
+          display: "flex", alignItems: "center",
+          padding: "0 20px",
+          borderBottom: "1px solid rgba(120,220,255,0.30)",
+        }}>
+          <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: 1 }}>
+            🖧 Server Control
+          </div>
+          <div style={{ flex: 1 }} />
+          <button
+            data-ui="ServerModalClose"
+            onClick={onClose}
+            title="Close (Esc)"
+            style={{
+              width: 36, height: 28, border: "none",
+              background: "rgba(244,67,54,0.18)",
+              color: "#ff8080",
+              fontSize: 13, cursor: "pointer",
+              borderRadius: 5,
+            }}
+          >✕</button>
+        </div>
+        {/* Body — full ServerPage, scrolls on its own. */}
+        <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
+          <ServerPage />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
 // AppShell — top-level state machine.
 // ---------------------------------------------------------------------
+// Deep-link helper — TwinForge points its web adapter at
+// `http://localhost:5173/?page=train` (or models / chat / agents) so it
+// can compare specific pages against the Qt original without simulating
+// clicks. Reads window.location.search once on mount; doesn't watch for
+// changes (the loop driver always opens a fresh tab per compare).
+function readPageFromUrl(): string | null {
+  if (typeof window === "undefined") return null;
+  const sp = new URLSearchParams(window.location.search);
+  const p = sp.get("page");
+  return p && p.trim() ? p.trim().toLowerCase() : null;
+}
+
+// Map a deep-link page key to (mode, activeTab). Returns null when the
+// key isn't recognised so AppShell falls back to the home default.
+function resolveDeepLink(key: string): { mode: ActiveMode; activeKey: string } | null {
+  for (const m of ALL_MODULES) {
+    const hit = m.pages.find(p => p.key === key);
+    if (!hit) continue;
+    if (m.id === "core") return { mode: "home", activeKey: key };
+    if (m.id === "finetuning" || m.id === "agentic" || m.id === "gamify") {
+      return { mode: m.id, activeKey: key };
+    }
+    if (m.id === "advanced") return { mode: "home", activeKey: key }; // caller flips advancedOpen
+  }
+  return null;
+}
+
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
-  const [mode, setMode] = useState<ActiveMode>("home");
-  const [advancedOpen, setAdvancedOpen] = useState<boolean>(false);
+  // Resolve the URL's ?page= once on mount so TwinForge can deep-link
+  // straight to the page it wants to diff (e.g. ?page=train).
+  const initialDeep = useMemo(() => {
+    const k = readPageFromUrl();
+    return k ? resolveDeepLink(k) : null;
+  }, []);
+  const initialAdvanced = useMemo(() => {
+    const k = readPageFromUrl();
+    if (!k) return false;
+    return ADVANCED.pages.some(p => p.key === k);
+  }, []);
+  const [mode, setMode] = useState<ActiveMode>(initialDeep?.mode ?? "home");
+  const [advancedOpen, setAdvancedOpen] = useState<boolean>(initialAdvanced);
+  const [serverModalOpen, setServerModalOpen] = useState<boolean>(false);
   const theme = useTheme();
 
   // Compose the visible page list: Core always, plus the active
@@ -565,7 +714,9 @@ export default function AppShell() {
     const mod = ALL_MODULES.find(x => x.id === m);
     return mod?.firstTab ?? CORE.firstTab;
   };
-  const [activeKey, setActiveKey] = useState<string>(() => defaultKeyForMode("home"));
+  const [activeKey, setActiveKey] = useState<string>(
+    () => initialDeep?.activeKey ?? defaultKeyForMode("home"),
+  );
 
   // Whenever mode changes, snap to that mode's first tab. (Qt
   // _activate_navbar_group does the same.)
@@ -593,6 +744,10 @@ export default function AppShell() {
       const detail = (e as CustomEvent<{ key?: string }>).detail;
       const key = detail?.key;
       if (typeof key !== "string") return;
+      // "server" is now a modal — intercept here so external nav
+      // requests open the popup instead of trying to switch to a
+      // (no-longer-rendered-inline) tab.
+      if (key === "server") { setServerModalOpen(true); return; }
       // Find which module owns this page key so we can light up the
       // matching ModeBar toggle alongside the SubTabs row.
       for (const m of ALL_MODULES) {
@@ -607,6 +762,14 @@ export default function AppShell() {
     window.addEventListener("owllm:navigate", handler as EventListener);
     return () => window.removeEventListener("owllm:navigate", handler as EventListener);
   }, []);
+
+  // SubTabs nav — intercept "server" so clicking the tab opens the
+  // popup instead of switching the inline page (the tab is kept in
+  // SubTabs as a visible affordance; we just override the action).
+  const handleTabChange = (key: string) => {
+    if (key === "server") { setServerModalOpen(true); return; }
+    setActiveKey(key);
+  };
 
   // Resolve the active page's component.
   const activePage = visiblePages.find(p => p.key === activeKey)
@@ -631,17 +794,19 @@ export default function AppShell() {
             onToggleThemeMode={theme.toggleMode}
             accentKey={theme.accentKey}
             onPickAccent={theme.setAccentKey}
+            onOpenServer={() => setServerModalOpen(true)}
           />
           <SubTabs
             pages={visiblePages}
             activeKey={activeKey}
-            onChange={setActiveKey}
+            onChange={handleTabChange}
           />
           <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
             {PageBody ? <PageBody /> : null}
           </div>
         </div>
       </HybridFrame>
+      {serverModalOpen && <ServerModal onClose={() => setServerModalOpen(false)} />}
     </>
   );
 }

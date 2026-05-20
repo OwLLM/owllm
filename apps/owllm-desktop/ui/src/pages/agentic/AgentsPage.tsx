@@ -3108,6 +3108,10 @@ async function runClaudeCliStream(args: {
   /// Persistent session UUID for multi-turn memory.
   sessionId?: string | null;
   briefMode?: boolean;
+  /// Called when the agent emits a SendUserMessage tool call. Caller
+  /// shows the question to the user (modal, inline prompt, chat
+  /// entry). Phase C v1: not yet wired to bidirectional reply.
+  onAskUser?: (question: string) => void;
   onDelta: (delta: string) => void;
   onThought: ThoughtHandler;
 }): Promise<string> {
@@ -3121,6 +3125,17 @@ async function runClaudeCliStream(args: {
         args.onThought("thinking", "🧠 thinking", msg.delta);
         break;
       case "toolUse": {
+        if (msg.name === "SendUserMessage") {
+          let q = msg.input || "";
+          try {
+            const parsed = JSON.parse(msg.input);
+            if (parsed && typeof parsed.message === "string") q = parsed.message;
+            else if (parsed && typeof parsed.text === "string") q = parsed.text;
+          } catch { /* raw input */ }
+          if (args.onAskUser) args.onAskUser(q);
+          args.onThought("ask-user", "❓ agent asks", q);
+          break;
+        }
         const channel = `tool:${msg.name}:${msg.toolUseId}`;
         args.onThought(channel, `🛠 ${msg.name}`, msg.input || "");
         break;
@@ -3147,7 +3162,10 @@ async function runClaudeCliStream(args: {
     model: args.model ?? null,
     effort: args.effort ?? null,
     sessionId: args.sessionId ?? null,
-    briefMode: args.briefMode ?? false,
+    // Default --brief on — matches VS Code Claude Code. The agent can
+    // always ask via SendUserMessage; question lands in the chat as a
+    // prominent "❓ agent asks" entry.
+    briefMode: args.briefMode ?? true,
     onEvent: ch,
   });
 }

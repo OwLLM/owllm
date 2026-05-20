@@ -42,8 +42,15 @@ async function runClaudeCliStream(args: {
   /// Persistent session UUID — same id across calls gives multi-turn memory.
   sessionId?: string | null;
   /// Enable SendUserMessage tool (--brief). The dispatch tap below
-  /// surfaces those questions to the user via onAskUser if supplied.
+  /// surfaces those questions to the user via onAskUser if supplied,
+  /// or falls back to a "❓ to user" entry in the Thought channel.
+  /// Defaults to TRUE — same default as VS Code's Claude Code session.
   briefMode?: boolean;
+  /// Called when the agent emits a SendUserMessage tool call. The
+  /// caller can show a modal/inline prompt and (later) feed the
+  /// answer back through stdin. For now (Phase C v1) we just route
+  /// the question to the chat thread so the user sees it next turn.
+  onAskUser?: (question: string) => void;
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
@@ -57,6 +64,17 @@ async function runClaudeCliStream(args: {
         args.onThought("thinking", "🧠 thinking", msg.delta);
         break;
       case "toolUse": {
+        // Special-case SendUserMessage — that's the agent asking the
+        // user a question (enabled by --brief). Route to onAskUser
+        // when the caller provides one; otherwise still surface it
+        // distinctly in the Thought tab so it doesn't blend into
+        // the generic 🛠 tool stream.
+        if (msg.name === "SendUserMessage") {
+          const question = parseUserMessageInput(msg.input);
+          if (args.onAskUser) args.onAskUser(question);
+          args.onThought("ask-user", "❓ agent asks", question);
+          break;
+        }
         // One Thought entry per tool invocation. Channel id encodes
         // the tool name + its tool_use_id so a follow-up tool_result
         // can land under the same block (see toolResult below).
@@ -90,9 +108,26 @@ async function runClaudeCliStream(args: {
     model: args.model ?? null,
     effort: args.effort ?? null,
     sessionId: args.sessionId ?? null,
-    briefMode: args.briefMode ?? false,
+    // Default ON — matches VS Code Claude Code where the agent can
+    // always ask the user a question mid-turn. Callers can pass false
+    // explicitly to disable when truly autonomous behaviour is wanted.
+    briefMode: args.briefMode ?? true,
     onEvent: ch,
   });
+}
+
+/// Best-effort extraction of the message text from a SendUserMessage
+/// tool call's input. The CLI stringifies the JSON input; the schema
+/// is `{ message: string }` for this tool. Falls back to the raw
+/// input when parsing fails so we never lose the question entirely.
+function parseUserMessageInput(input: string): string {
+  if (!input) return "(empty)";
+  try {
+    const parsed = JSON.parse(input);
+    if (parsed && typeof parsed.message === "string") return parsed.message;
+    if (parsed && typeof parsed.text === "string") return parsed.text;
+  } catch { /* not JSON, treat as raw */ }
+  return input;
 }
 
 /// Map the picker's effort label to the Claude CLI's `--effort` vocabulary.

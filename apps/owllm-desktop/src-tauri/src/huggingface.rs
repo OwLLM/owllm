@@ -136,6 +136,7 @@ pub async fn hf_search(
     query: String,
     pipeline_tag: Option<String>,
     limit: Option<u32>,
+    sort: Option<String>,
 ) -> Result<Vec<HfModelHit>, String> {
     let lim = limit.unwrap_or(40).min(100);
     let mut url = reqwest::Url::parse("https://huggingface.co/api/models")
@@ -148,6 +149,15 @@ pub async fn hf_search(
         if let Some(tag) = pipeline_tag.as_deref() {
             if !tag.trim().is_empty() {
                 q.append_pair("pipeline_tag", tag.trim());
+            }
+        }
+        // HF sort keys: "downloads", "likes", "lastModified", "createdAt", "trendingScore".
+        // direction=-1 puts highest first.
+        if let Some(s) = sort.as_deref() {
+            let s = s.trim();
+            if !s.is_empty() {
+                q.append_pair("sort", s);
+                q.append_pair("direction", "-1");
             }
         }
         q.append_pair("full", "true");

@@ -25,6 +25,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import ModelPicker, { type ModelInfo as PickerModelInfo } from "../agentic/ModelPicker";
 
 const LS_KEY = "owllm:chat:v3";
 
@@ -57,11 +58,7 @@ type ServerStatus = {
   message: string;
 };
 
-type ModelInfo = {
-  model_id: string;
-  port?: number | null;
-  base_model?: string | null;
-};
+type ModelInfo = PickerModelInfo;
 
 type Role = "user" | "assistant" | "system";
 type ChatMsg = { role: Role; content: string };
@@ -463,25 +460,15 @@ export default function ChatPage() {
                 {/* Per-column model selector — Qt main.py:18548-18557
                     adds a QComboBox (READY models from the Models tab)
                     immediately under each header. */}
-                <div style={{ padding: "6px 0 0 0" }}>
-                  <select
+                <div style={{ padding: "6px 0 0 0", display: "flex" }}>
+                  <ModelPicker
                     value={col.selectedModel}
-                    onChange={(e) => updateCol(col.id, { selectedModel: e.target.value })}
-                    style={{
-                      width: "100%",
-                      padding: "6px 8px",
-                      background: "#0b1020",
-                      border: "1px solid #1c2434",
-                      borderRadius: 4,
-                      color: "var(--fg)",
-                      fontSize: 12,
-                    }}
-                  >
-                    <option value="">— Select model —</option>
-                    {availableModels.map((m) => (
-                      <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
-                    ))}
-                  </select>
+                    onChange={(id) => updateCol(col.id, { selectedModel: id })}
+                    models={availableModels as PickerModelInfo[]}
+                    status={null}
+                    localOnly
+                    fallbackLabel="— Select model —"
+                  />
                 </div>
 
                 {/* Transcript */}

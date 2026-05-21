@@ -117,13 +117,16 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
   // LOCAL
   for (const m of models) {
     if (m.provider !== "local") continue;
+    const parts: string[] = [];
+    if (m.size_mib != null) parts.push(`${(m.size_mib / 1024).toFixed(1)} GiB`);
+    if (m.port != null) parts.push(`Port: ${m.port}`);
     out.push({
       id: m.model_id,
       label: m.model_id,
       section: "local",
       variant: "local",
       available: true,
-      hint: m.size_mib != null ? `${(m.size_mib / 1024).toFixed(1)} GiB` : undefined,
+      hint: parts.length > 0 ? parts.join(" · ") : undefined,
     });
   }
 
@@ -188,6 +191,7 @@ function displayForId(id: string, entries: Entry[]): string {
 
 export default function ModelPicker({
   value, onChange, models, status, placeholder, disabled, fallbackLabel,
+  localOnly,
 }: {
   value: string;
   onChange: (id: string) => void;
@@ -197,6 +201,10 @@ export default function ModelPicker({
   disabled?: boolean;
   /// What the trigger button shows when `value` is empty.
   fallbackLabel?: string;
+  /// Server / Chat surfaces back to a local llama-server only — they
+  /// cannot meaningfully target Anthropic / OpenAI / auto-routing.
+  /// Setting this to true hides everything except the LOCAL section.
+  localOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   /// Trigger bounding rect captured at open time so the popover can
@@ -238,8 +246,11 @@ export default function ModelPicker({
     };
   }, [open]);
 
-  const entries = buildEntries(models, status);
-  const sections: Section[] = ["local", "anthropic", "openai", "other"];
+  const entries = buildEntries(models, status)
+    .filter((e) => !localOnly || e.section === "local");
+  const sections: Section[] = localOnly
+    ? ["local"]
+    : ["local", "anthropic", "openai", "other"];
 
   const triggerLabel = value
     ? displayForId(value, entries)

@@ -151,6 +151,9 @@ export default function ModelsPage() {
   // Browse-tab state. Recommended = curated, hardware-aware. Hits =
   // live HF search results when the user actually types a query.
   const [query, setQuery] = React.useState("");
+  // Sort: matches HF API sort= keys for live searches AND drives the
+  // local sort of the curated recommendations list when not searching.
+  const [sortBy, setSortBy] = React.useState<"downloads" | "likes" | "lastModified">("downloads");
   const [recommended, setRecommended] = React.useState<RecommendedModel[]>([]);
   const [loadingRecommended, setLoadingRecommended] = React.useState(false);
   const [hits, setHits] = React.useState<HfModelHit[]>([]);
@@ -241,7 +244,7 @@ export default function ModelsPage() {
     [filters]
   );
 
-  const runSearch = React.useCallback(async (q: string) => {
+  const runSearch = React.useCallback(async (q: string, sort?: typeof sortBy) => {
     setLoadingHits(true);
     setHfError(null);
     try {
@@ -249,6 +252,7 @@ export default function ModelsPage() {
         query: q,
         pipelineTag: null,
         limit: 30,
+        sort: sort ?? sortBy,
       });
       setHits(r);
     } catch (e) {
@@ -257,7 +261,7 @@ export default function ModelsPage() {
     } finally {
       setLoadingHits(false);
     }
-  }, []);
+  }, [sortBy]);
 
   // Load the curated recommendations on first browse mount.
   React.useEffect(() => {
@@ -285,6 +289,19 @@ export default function ModelsPage() {
     const q = parts.join(" ");
     runSearch(q);
   }, [filters, tab, query, runSearch]);
+
+  // Re-run the active search whenever the sort key changes so the user
+  // gets fresh server-sorted results.
+  React.useEffect(() => {
+    if (tab !== "browse") return;
+    const q = query.trim();
+    if (q.length > 0 || filters.size > 0) {
+      const parts = q.length > 0
+        ? [q]
+        : [...filters].map((k) => FILTER_HF_QUERY[k]).filter(Boolean);
+      runSearch(parts.join(" "), sortBy);
+    }
+  }, [sortBy]); // intentionally only when sortBy flips
 
   React.useEffect(() => {
     if (tab === "downloaded") {
@@ -440,10 +457,29 @@ export default function ModelsPage() {
           alignItems: "center",
           gap: 6,
           marginLeft: "auto",
-          width: 305,
+          width: 430,
           flexShrink: 0,
         }}
       >
+        <select
+          data-ui="sortSelector"
+          value={sortBy}
+          onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+          title="Sort by"
+          style={{
+            padding: "6px 8px",
+            background: "#0b1020",
+            border: "1px solid #1c2434",
+            borderRadius: 6,
+            color: "var(--fg)",
+            fontSize: 12,
+            cursor: "pointer",
+          }}
+        >
+          <option value="downloads">↓ Downloads</option>
+          <option value="likes">❤ Likes</option>
+          <option value="lastModified">🕓 Uploaded</option>
+        </select>
         <input
           placeholder="Search Hugging Face..."
           value={query}
@@ -613,7 +649,14 @@ export default function ModelsPage() {
               </div>
             );
           }
-          const filtered = recommended.filter((r) => matchesFilters(r.tags, r.id));
+          const filtered = recommended
+            .filter((r) => matchesFilters(r.tags, r.id))
+            .slice()
+            .sort((a, b) => {
+              if (sortBy === "likes")        return b.likes - a.likes;
+              if (sortBy === "lastModified") return Number(b.isNew) - Number(a.isNew); // proxy
+              return b.downloads - a.downloads;
+            });
           if (filtered.length === 0) {
             return (
               <div style={emptyState}>

@@ -560,7 +560,7 @@ function SubTabs({
         key={p.key}
         onClick={() => onChange(p.key)}
         style={{
-          padding: "10px 16px",
+          padding: "5px 14px",
           background: active ? "var(--accent-soft)" : "transparent",
           color: active ? "var(--accent)" : "var(--fg-muted)",
           borderRadius: 8,
@@ -580,9 +580,9 @@ function SubTabs({
 
   return (
     <div style={{
-      height: 76, background: "var(--bg-card)",
+      height: 48, background: "var(--bg-card)",
       display: "flex", alignItems: "center",
-      padding: "0 24px", gap: 6, fontSize: 13, color: "var(--fg)",
+      padding: "0 24px", gap: 6, fontSize: 15, color: "var(--fg)",
       borderBottom: "1px solid var(--border)",
     }}>
       {leftTabs.map(renderTab)}

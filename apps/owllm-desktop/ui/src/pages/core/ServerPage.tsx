@@ -20,16 +20,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 
 // Real Page_icons PNG served by vite.config.ts middleware
 // (same pattern as AgentsPage.tsx / CodePage.tsx).
 const ICONS = "/Page_icons";
 
-type ModelInfo = {
-  model_id: string;
-  port?: number | null;
-  base_model?: string | null;
-};
+type ModelInfo = PickerModelInfo;
 type ServerStatus = {
   running: boolean;
   model_id: string | null;
@@ -577,27 +574,14 @@ function LLMServerColumn({
            title="Pick which downloaded model the inference server should serve.">
         Select Model:
       </div>
-      <select
+      <ModelPicker
         value={modelId}
-        onChange={e => setModelId(e.target.value)}
-        style={{
-          height: 32, padding: "0 10px", borderRadius: 6,
-          border: "1px solid var(--border-strong)",
-          background: "var(--bg-input)", color: "var(--fg-strong)", fontSize: 13,
-        }}
-      >
-        {models.length === 0 ? (
-          // Mirrors Qt fallbacks (server_page.py:1208 / 1443)
-          <option value="">(No READY models - run onboarding first)</option>
-        ) : (
-          models.map(m => (
-            // Qt pretty_server_label prepends "✓ " (server_page.py:1381)
-            <option key={m.model_id} value={m.model_id}>
-              {`✓ ${m.model_id}${m.port ? ` (Port: ${m.port})` : ""}`}
-            </option>
-          ))
-        )}
-      </select>
+        onChange={setModelId}
+        models={models}
+        status={null}
+        localOnly
+        fallbackLabel={models.length === 0 ? "(No READY models - run onboarding first)" : "(pick a model)"}
+      />
 
       <div style={{
         display: "grid",

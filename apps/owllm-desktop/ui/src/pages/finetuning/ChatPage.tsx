@@ -26,14 +26,42 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-const ICONS = "/Page_icons";
 const LS_KEY = "owllm:chat:v3";
+
+// Shared theme accent — Qt main.py:18545,18571,18590 builds every
+// column header from the same primary/secondary gradient, so column
+// identity is carried by the leading emoji ALONE.
+const ACCENT_PRIMARY = "#667eea";
+const ACCENT_SECONDARY = "#764ba2";
+const HEADER_GRADIENT = `linear-gradient(90deg, ${ACCENT_PRIMARY}, ${ACCENT_SECONDARY})`;
+
+// Per-column tint for the right-side settings panel only — mirrors
+// Qt's modelSettingsPage background (main.py:18737-18756): A=blue,
+// B=green, C=purple at 60% alpha.
+const PANEL_TINT: Record<"A" | "B" | "C", string> = {
+  A: "rgba(0, 100, 200, 0.6)",
+  B: "rgba(0, 200, 100, 0.6)",
+  C: "rgba(155, 89, 182, 0.6)",
+};
+
+// Column identity glyph — used for sender labels inside transcripts.
+const LABEL_TINT: Record<"A" | "B" | "C", string> = {
+  A: "#4a6cff",
+  B: "#22c55e",
+  C: "#9C27B0",
+};
 
 type ServerStatus = {
   running: boolean;
   model_id: string | null;
   port: number | null;
   message: string;
+};
+
+type ModelInfo = {
+  model_id: string;
+  port?: number | null;
+  base_model?: string | null;
 };
 
 type Role = "user" | "assistant" | "system";
@@ -43,31 +71,29 @@ type ChatMsg = { role: Role; content: string };
 // sampling params so the user can A/B without leaving the page.
 type Column = {
   id: "A" | "B" | "C";
-  color: string;        // header gradient + label tint
-  emoji: string;        // 🔵 🟢 🟣
+  emoji: string;            // 🔵 🟢 🟣
+  selectedModel: string;    // per-column model_id from list_models
   system: string;
   temperature: number;
   topP: number;
   maxTokens: number;
+  repetitionPenalty: number;
   messages: ChatMsg[];
   busy: boolean;
   error: string | null;
 };
 
 const DEFAULT_COL = (id: "A" | "B" | "C"): Column => {
-  const palettes = {
-    A: { color: "#4a6cff", emoji: "🔵" },
-    B: { color: "#22c55e", emoji: "🟢" },
-    C: { color: "#9C27B0", emoji: "🟣" },
-  };
+  const emojis = { A: "🔵", B: "🟢", C: "🟣" } as const;
   return {
     id,
-    color: palettes[id].color,
-    emoji: palettes[id].emoji,
-    system: "You are a helpful AI assistant.",
-    temperature: id === "A" ? 0.5 : id === "B" ? 0.9 : 1.2,
+    emoji: emojis[id],
+    selectedModel: "",
+    system: "",
+    temperature: 0.7,
     topP: 0.9,
     maxTokens: 1024,
+    repetitionPenalty: 1.0,
     messages: [],
     busy: false,
     error: null,
@@ -114,7 +140,13 @@ export default function ChatPage() {
   const [draft, setDraft] = useState("");
   const [converse, setConverse] = useState<boolean>(persisted.converse ?? false);
   const [maxTurns, setMaxTurns] = useState<number>(persisted.maxTurns ?? 20);
-  const [paramsOpenFor, setParamsOpenFor] = useState<"A" | "B" | "C" | null>(null);
+  // Right-side settings panel — Qt main.py:18667-18690 ships a
+  // QStackedWidget driven by A/B/C toggle buttons. We mirror that
+  // here so a single set of System Prompt / Generation Params
+  // controls reconfigures whichever column is currently selected.
+  const [activePanel, setActivePanel] = useState<"A" | "B" | "C">("A");
+  const [rightTab, setRightTab] = useState<"logs" | "unfiltered">("logs");
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const abortersRef = useRef<Map<"A" | "B" | "C", AbortController>>(new Map());
   const transcriptRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const m2mRunningRef = useRef(false);
@@ -136,6 +168,17 @@ export default function ChatPage() {
     tick();
     const id = window.setInterval(tick, 2000);
     return () => { dead = true; window.clearInterval(id); };
+  }, []);
+
+  // Load READY models for the per-column dropdowns. Same source the
+  // Server tab and Qt main.py:18548 use (`list_models` → READY
+  // downloads from the Models tab).
+  useEffect(() => {
+    let dead = false;
+    invoke<ModelInfo[]>("list_models")
+      .then((m) => { if (!dead) setAvailableModels(Array.isArray(m) ? m : []); })
+      .catch(() => { /* leave empty */ });
+    return () => { dead = true; };
   }, []);
 
   // Auto-scroll each column's transcript when new tokens land.
@@ -301,29 +344,7 @@ export default function ChatPage() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  function loadJson() {
-    const inp = document.createElement("input");
-    inp.type = "file";
-    inp.accept = "application/json,.json";
-    inp.onchange = async () => {
-      const f = inp.files?.[0];
-      if (!f) return;
-      try {
-        const text = await f.text();
-        const j = JSON.parse(text);
-        if (j.count) setCount(j.count);
-        if (Array.isArray(j.columns)) setColumns(j.columns);
-        if (typeof j.converse === "boolean") setConverse(j.converse);
-        if (typeof j.maxTurns === "number") setMaxTurns(j.maxTurns);
-      } catch { /* ignore */ }
-    };
-    inp.click();
-  }
-
   const anyBusy = columns.some((c) => c.busy);
-  const placeholder = status.running
-    ? `Ask the ${count > 1 ? `${count} models` : "model"} something… (Enter to send · Shift+Enter for newline)`
-    : "Start a server on the Server tab to enable chat.";
 
   return (
     <div style={{
@@ -336,27 +357,21 @@ export default function ChatPage() {
       color: "var(--fg)",
       minHeight: 0,
     }}>
-      {/* Header */}
+      {/* Header — Qt main.py:18414-18418 explicitly drops the page
+          title; the title_row starts directly with 'Number of chats:'. */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <img src={`${ICONS}/owl_chat.png`} alt="" style={{ width: 32, height: 32, objectFit: "contain" }} />
-        <div style={{ fontSize: 24, fontWeight: 800, color: "var(--fg-strong)" }}>💬 Chat</div>
-
-        <div style={{ marginLeft: 12, display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--fg-muted)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--fg-muted)" }}>
           <span>Number of chats:</span>
           {[1, 2, 3].map((n) => (
             <label key={n} style={{
-              display: "inline-flex", alignItems: "center", gap: 3,
-              padding: "3px 8px",
-              background: count === n ? "rgba(102,126,234,0.18)" : "transparent",
-              border: `1px solid ${count === n ? "rgba(102,126,234,0.5)" : "#2a3242"}`,
-              borderRadius: 4,
+              display: "inline-flex", alignItems: "center", gap: 4,
+              padding: "0 4px",
               cursor: "pointer",
               fontWeight: count === n ? 700 : 400,
               color: count === n ? "var(--fg)" : "var(--fg-muted)",
             }}>
               <input
-                type="radio"
-                name="chat-count"
+                type="checkbox"
                 checked={count === n}
                 onChange={() => setCount(n as 1 | 2 | 3)}
                 style={{ margin: 0 }}
@@ -397,243 +412,455 @@ export default function ChatPage() {
           </label>
         )}
 
+        {/* Server status + Save/Load/Clear were here in an earlier
+            iteration; Qt main.py:18414-18503 keeps the title row
+            uncluttered (chat-count + Models-talk + Max-turns only) and
+            relies on the global ModeBar SysInfoBlock for server state.
+            Save/Clear sit in the vertical button column under the
+            composer; Qt has no Load button so we dropped it. */}
         <div style={{ flex: 1 }} />
-        <span style={{
-          width: 8, height: 8, borderRadius: 4,
-          background: status.running ? "#22c55e" : "#888",
-          boxShadow: status.running ? "0 0 8px #22c55e" : "none",
-        }} />
-        <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-          {status.running
-            ? `Server: ${status.model_id ?? "?"}${status.port ? ` · port ${status.port}` : ""}`
-            : "Server: stopped"}
-        </div>
-        <button onClick={loadJson} style={btnGhost} title="Load chat JSON">📂</button>
-        <button onClick={saveJson} style={btnGhost} title="Save chat JSON">💾</button>
-        <button onClick={resetAll} style={btnGhost} title="Clear all transcripts">🗑</button>
       </div>
 
-      {/* Columns row */}
-      <div style={{
-        display: "grid",
-        gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))`,
-        gap: 10,
-        flex: 1,
-        minHeight: 0,
-      }}>
-        {columns.slice(0, count).map((col) => (
-          <div key={col.id} style={{
-            display: "flex", flexDirection: "column",
-            background: "#0e1320",
-            border: "1px solid #1c2434",
-            borderRadius: 8,
+      {/* Body — Qt main.py:_build_test_sub_tab splits the chat into a
+          LEFT widget (columns grid + composer) and a RIGHT widget
+          (~540px settings/templates/logs stack). Mirror that here. */}
+      <div style={{ display: "flex", gap: 12, flex: 1, minHeight: 0 }}>
+        {/* LEFT: columns grid + composer */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10, minWidth: 0, minHeight: 0 }}>
+          {/* Columns row */}
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))`,
+            gap: 6,
+            flex: 1,
             minHeight: 0,
-            overflow: "hidden",
           }}>
-            {/* Column header */}
-            <div style={{
-              padding: "10px 12px",
-              background: `linear-gradient(180deg, ${col.color}88, ${col.color}44)`,
-              borderBottom: `1px solid ${col.color}88`,
-              display: "flex", alignItems: "center", gap: 8,
-            }}>
-              <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>
-                {col.emoji} Model {col.id}
-              </div>
-              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.7)" }}>
-                {status.running ? `port ${status.port}` : "—"}
-              </span>
-              <span style={{ flex: 1 }} />
-              <button
-                onClick={() => setParamsOpenFor((curr) => curr === col.id ? null : col.id)}
-                style={{
-                  padding: "3px 8px",
-                  background: "rgba(0,0,0,0.25)",
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  borderRadius: 4,
-                  color: "#fff", fontSize: 11, cursor: "pointer",
-                }}
-                title="Per-column generation parameters"
-              >⚙ T={col.temperature.toFixed(1)}</button>
-            </div>
-
-            {/* Params drawer */}
-            {paramsOpenFor === col.id && (
-              <div style={{
-                padding: "10px 12px",
-                background: "#0b1020",
-                borderBottom: "1px solid #1c2434",
-                display: "flex", flexDirection: "column", gap: 8,
+            {columns.slice(0, count).map((col) => (
+              <div key={col.id} style={{
+                display: "flex", flexDirection: "column",
+                background: "#0e1320",
+                border: "1px solid #1c2434",
+                borderRadius: 8,
+                minHeight: 0,
+                overflow: "hidden",
               }}>
-                <select
-                  onChange={(e) => applyTemplate(col.id, e.target.value)}
+                {/* Column header — shared accent gradient
+                    (Qt main.py:18545,18571,18590 — all three columns
+                    use the same primary/secondary theme tuple; only
+                    the leading emoji differs). */}
+                <div style={{
+                  padding: 10,
+                  background: HEADER_GRADIENT,
+                  borderRadius: 6,
+                  display: "flex", alignItems: "center", gap: 6,
+                  color: "#fff",
+                }}>
+                  <span style={{ fontSize: 16, fontWeight: 700 }}>
+                    {col.emoji} Model {col.id}
+                  </span>
+                  <span style={{ fontSize: 16, color: "#000" }}>
+                    (Port: {status.port ?? "-"})
+                  </span>
+                </div>
+
+                {/* Per-column model selector — Qt main.py:18548-18557
+                    adds a QComboBox (READY models from the Models tab)
+                    immediately under each header. */}
+                <div style={{ padding: "6px 0 0 0" }}>
+                  <select
+                    value={col.selectedModel}
+                    onChange={(e) => updateCol(col.id, { selectedModel: e.target.value })}
+                    style={{
+                      width: "100%",
+                      padding: "6px 8px",
+                      background: "#0b1020",
+                      border: "1px solid #1c2434",
+                      borderRadius: 4,
+                      color: "var(--fg)",
+                      fontSize: 12,
+                    }}
+                  >
+                    <option value="">— Select model —</option>
+                    {availableModels.map((m) => (
+                      <option key={m.model_id} value={m.model_id}>{m.model_id}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Transcript */}
+                <div
+                  ref={(el) => { transcriptRefs.current[col.id] = el; }}
                   style={{
-                    background: "#162033", border: "1px solid #243044",
-                    color: "var(--fg)", fontSize: 11, padding: "4px 6px",
-                    borderRadius: 4,
+                    flex: 1, overflowY: "auto", minHeight: 0,
+                    padding: 12, marginTop: 6,
+                    display: "flex", flexDirection: "column", gap: 10,
+                    fontSize: 13, lineHeight: 1.5,
+                    background: "#0b1020",
+                    borderRadius: 6,
                   }}
                 >
-                  <option value="">— Pick a system-prompt template —</option>
-                  {TEMPLATES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
-                </select>
-                <textarea
-                  value={col.system}
-                  onChange={(e) => updateCol(col.id, { system: e.target.value })}
-                  placeholder="System prompt for this column"
-                  style={{
-                    minHeight: 50, padding: 6,
-                    background: "#0b1020", border: "1px solid #1c2434",
-                    borderRadius: 4, color: "var(--fg)", fontSize: 11,
-                    resize: "vertical", fontFamily: "inherit",
-                  }}
-                />
-                <Slider label="Temperature" value={col.temperature} min={0} max={2} step={0.05} onChange={(v) => updateCol(col.id, { temperature: v })} />
-                <Slider label="Top-p"       value={col.topP}        min={0.05} max={1} step={0.05} onChange={(v) => updateCol(col.id, { topP: v })} />
-                <NumberInput label="Max tokens" value={col.maxTokens} min={1} max={32768} step={64} onChange={(v) => updateCol(col.id, { maxTokens: v })} />
+                  {col.messages.length === 0 ? (
+                    <div style={{ fontSize: 11, color: "#7a7f87" }}>
+                      {status.running ? "Send a message below — this column will reply." : "Waiting for server."}
+                    </div>
+                  ) : col.messages.map((m, i) => (
+                    <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      <div style={{
+                        fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                        color: m.role === "user" ? "#7aa2ff" : LABEL_TINT[col.id],
+                      }}>
+                        {m.role === "user" ? "YOU" : `MODEL ${col.id}`}
+                      </div>
+                      <div style={{ whiteSpace: "pre-wrap", color: "var(--fg)" }}>
+                        {m.content || (col.busy && i === col.messages.length - 1 ? "▍" : "")}
+                      </div>
+                    </div>
+                  ))}
+                  {col.error && (
+                    <div style={{
+                      border: "1px solid #ff9f9f",
+                      background: "rgba(255,80,80,0.10)",
+                      color: "#ffb0b0",
+                      borderRadius: 6, padding: 8, fontSize: 11,
+                    }}>{col.error}</div>
+                  )}
+                </div>
               </div>
-            )}
+            ))}
+          </div>
 
-            {/* Transcript */}
-            <div
-              ref={(el) => { transcriptRefs.current[col.id] = el; }}
-              style={{
-                flex: 1, overflowY: "auto", minHeight: 0,
-                padding: 12,
-                display: "flex", flexDirection: "column", gap: 10,
-                fontSize: 13, lineHeight: 1.5,
+          {/* Composer label — Qt main.py:18615 prompt_label */}
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>
+            💬 Type your message:
+          </div>
+
+          {/* Composer row — textarea + vertical Send/Clear/Save stack
+              (Qt main.py:18632-18657 btn_column). */}
+          <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !anyBusy) {
+                  e.preventDefault();
+                  sendAll();
+                }
               }}
-            >
-              {col.messages.length === 0 ? (
-                <div style={{ fontSize: 11, color: "#7a7f87" }}>
-                  {status.running ? "Send a message below — this column will reply." : "Waiting for server."}
-                </div>
-              ) : col.messages.map((m, i) => (
-                <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                  <div style={{
-                    fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
-                    color: m.role === "user" ? "#7aa2ff" : col.color,
-                  }}>
-                    {m.role === "user" ? "YOU" : `MODEL ${col.id}`}
-                  </div>
-                  <div style={{ whiteSpace: "pre-wrap", color: "var(--fg)" }}>
-                    {m.content || (col.busy && i === col.messages.length - 1 ? "▍" : "")}
-                  </div>
-                </div>
-              ))}
-              {col.error && (
-                <div style={{
-                  border: "1px solid #ff9f9f",
-                  background: "rgba(255,80,80,0.10)",
-                  color: "#ffb0b0",
-                  borderRadius: 6, padding: 8, fontSize: 11,
-                }}>{col.error}</div>
+              placeholder="Type your message here..."
+              disabled={!status.running || anyBusy}
+              style={{
+                flex: 1, minHeight: 90, maxHeight: 90,
+                resize: "none",
+                padding: 10, borderRadius: 8,
+                background: "#0b1020",
+                color: "var(--fg)",
+                border: "1px solid #1c2434",
+                fontFamily: "inherit", fontSize: 13, lineHeight: 1.5,
+                outline: "none",
+              }}
+            />
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, width: 130 }}>
+              {anyBusy ? (
+                <button
+                  onClick={stopAll}
+                  style={{
+                    height: 40,
+                    background: "linear-gradient(180deg, #f44336, #d32f2f)",
+                    color: "#fff", border: "none", borderRadius: 8,
+                    fontSize: 12, fontWeight: 700, cursor: "pointer",
+                    boxShadow: "0 0 16px -4px #f4433688",
+                  }}
+                >⏹ Stop</button>
+              ) : (
+                <button
+                  onClick={sendAll}
+                  disabled={!status.running || !draft.trim()}
+                  style={{
+                    height: 40,
+                    background: "linear-gradient(180deg, #4a6cff, #3a55cc)",
+                    color: "#fff",
+                    border: "none", borderRadius: 8,
+                    fontSize: 12, fontWeight: 700,
+                    cursor: (!status.running || !draft.trim()) ? "not-allowed" : "pointer",
+                    opacity: (!status.running || !draft.trim()) ? 0.75 : 1,
+                    boxShadow: !status.running || !draft.trim() ? "none" : "0 0 16px -4px #4a6cff88",
+                  }}
+                >📤 Send</button>
               )}
+              <button
+                onClick={resetAll}
+                style={{
+                  height: 40,
+                  background: "#162033",
+                  border: "1px solid #243044",
+                  color: "var(--fg)",
+                  borderRadius: 8,
+                  fontSize: 12, fontWeight: 600,
+                  cursor: "pointer",
+                }}
+                title="Clear all transcripts"
+              >🗑️ Clear</button>
+              <button
+                onClick={saveJson}
+                style={{
+                  height: 40,
+                  background: "#162033",
+                  border: "1px solid #243044",
+                  color: "var(--fg)",
+                  borderRadius: 8,
+                  fontSize: 12, fontWeight: 600,
+                  cursor: "pointer",
+                }}
+                title="Save chat as JSON"
+              >💾 Save</button>
             </div>
           </div>
-        ))}
-      </div>
+        </div>
 
-      {/* Composer */}
-      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey && !anyBusy) {
-              e.preventDefault();
-              sendAll();
-            }
-          }}
-          placeholder={placeholder}
-          disabled={!status.running || anyBusy}
-          style={{
-            flex: 1, minHeight: 60, maxHeight: 180,
-            resize: "vertical",
-            padding: 10, borderRadius: 8,
-            background: "#0b1020",
-            color: "var(--fg)",
-            border: "1px solid #1c2434",
-            fontFamily: "inherit", fontSize: 13, lineHeight: 1.5,
-            outline: "none",
-          }}
-        />
-        {anyBusy ? (
-          <button
-            onClick={stopAll}
-            style={{
-              height: 60, padding: "0 18px",
-              background: "linear-gradient(180deg, #f44336, #d32f2f)",
-              color: "#fff", border: "none", borderRadius: 8,
-              fontSize: 13, fontWeight: 700, cursor: "pointer",
-              boxShadow: "0 0 16px -4px #f4433688",
-            }}
-          >⏹ Stop all</button>
-        ) : (
-          <button
-            onClick={sendAll}
-            disabled={!status.running || !draft.trim()}
-            style={{
-              height: 60, padding: "0 18px",
-              background: !status.running || !draft.trim()
-                ? "rgba(102,126,234,0.12)"
-                : "linear-gradient(180deg, #4a6cff, #3a55cc)",
-              color: !status.running || !draft.trim() ? "#7a7f87" : "#fff",
-              border: "none", borderRadius: 8,
-              fontSize: 13, fontWeight: 700,
-              cursor: (!status.running || !draft.trim()) ? "not-allowed" : "pointer",
-              opacity: (!status.running || !draft.trim()) ? 0.55 : 1,
-              boxShadow: !status.running || !draft.trim() ? "none" : "0 0 16px -4px #4a6cff88",
-            }}
-          >{converse && count >= 2 ? "▶ Start conversation" : count > 1 ? `▶ Send to all ${count}` : "▶ Send"}</button>
-        )}
+        {/* RIGHT: Instruction Templates / System Prompt / Generation
+            Params / Logs. Qt main.py:18666-19011 — min-width 540,
+            stacked per-model settings driven by A/B/C toggles. */}
+        <aside style={{
+          width: 540,
+          minWidth: 540,
+          display: "flex",
+          flexDirection: "column",
+          gap: 10,
+          minHeight: 0,
+        }}>
+          {/* A/B/C toggle buttons (Qt main.py:18676-18690) — Qt
+              QPushButtons have NO per-button color stylesheet, so all
+              three share the page's accent gradient. The active button
+              is distinguished by a brighter border; disabled C (when
+              chat-count < 3) is just opacity-dimmed. */}
+          <div style={{ display: "flex", gap: 5 }}>
+            {(["A", "B", "C"] as const).map((id) => {
+              const emoji = { A: "🔵", B: "🟢", C: "🟣" }[id];
+              const isActive = activePanel === id;
+              const disabled = (id === "C" && count < 3) || (id === "B" && count < 2);
+              return (
+                <button
+                  key={id}
+                  onClick={() => !disabled && setActivePanel(id)}
+                  disabled={disabled}
+                  style={{
+                    flex: 1, padding: "8px 12px",
+                    background: HEADER_GRADIENT,
+                    color: "#fff",
+                    border: `1px solid ${isActive ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.12)"}`,
+                    borderRadius: 6,
+                    fontSize: 13, fontWeight: 700,
+                    cursor: disabled ? "not-allowed" : "pointer",
+                    opacity: disabled ? 0.4 : 1,
+                    boxShadow: isActive ? "0 0 0 1px rgba(255,255,255,0.25) inset" : "none",
+                  }}
+                >{emoji} {id}</button>
+              );
+            })}
+          </div>
+
+          {/* Per-model settings page (background tint mirrors Qt
+              modelSettingsPage at 60% alpha). */}
+          <div style={{
+            flex: 1,
+            display: "flex", flexDirection: "column", gap: 10,
+            padding: 10,
+            background: PANEL_TINT[activePanel],
+            border: "1px solid rgba(255,255,255,0.18)",
+            borderRadius: 8,
+            minHeight: 0,
+            overflowY: "auto",
+          }}>
+            {(() => {
+              const col = columns.find((c) => c.id === activePanel)!;
+              return (
+                <>
+                  {/* Instruction Templates group (Qt main.py:18770-18795) */}
+                  <fieldset style={panelGroupStyle}>
+                    <legend style={panelLegendStyle}>📋 Instruction Templates</legend>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <select
+                        defaultValue=""
+                        onChange={(e) => { applyTemplate(col.id, e.target.value); e.currentTarget.value = ""; }}
+                        style={{
+                          flex: 1,
+                          background: "#0b1020",
+                          border: "1px solid #1c2434",
+                          color: "var(--fg)",
+                          borderRadius: 4,
+                          fontSize: 12, padding: "6px 8px",
+                        }}
+                      >
+                        <option value="">None</option>
+                        <option value="alpaca">Alpaca</option>
+                        <option value="vicuna">Vicuna</option>
+                        <option value="chatml">ChatML</option>
+                        <option value="llama2">Llama-2</option>
+                        <option value="custom">Custom</option>
+                        <option disabled>──────</option>
+                        {TEMPLATES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+                      </select>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4, width: 90 }}>
+                        <button style={smallActionBtn} title="Save current system prompt">💾 Save</button>
+                        <button style={smallActionBtn} title="Save as new template">Save as…</button>
+                      </div>
+                    </div>
+                  </fieldset>
+
+                  {/* System Prompt group (Qt main.py:18800-18807) */}
+                  <fieldset style={panelGroupStyle}>
+                    <legend style={panelLegendStyle}>📝 System Prompt</legend>
+                    <textarea
+                      value={col.system}
+                      onChange={(e) => updateCol(col.id, { system: e.target.value })}
+                      placeholder="Enter system instructions..."
+                      style={{
+                        width: "100%",
+                        minHeight: 200,
+                        maxHeight: 300,
+                        padding: 8,
+                        background: "#0b1020",
+                        border: "1px solid #1c2434",
+                        borderRadius: 4,
+                        color: "var(--fg)",
+                        fontSize: 12,
+                        resize: "vertical",
+                        fontFamily: "inherit",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </fieldset>
+
+                  {/* Generation Parameters group (Qt main.py:18809-18898) */}
+                  <fieldset style={panelGroupStyle}>
+                    <legend style={panelLegendStyle}>⚙️ Generation Parameters</legend>
+                    <ParamRow label="Temperature:"      value={col.temperature.toFixed(1)} >
+                      <input type="number" min={0} max={2} step={0.1} value={col.temperature}
+                        onChange={(e) => updateCol(col.id, { temperature: parseFloat(e.target.value) || 0 })}
+                        style={paramInputStyle} />
+                    </ParamRow>
+                    <ParamRow label="Max Tokens:"       value={formatMaxTokens(col.maxTokens)} >
+                      <input type="number" min={1} step={32} value={col.maxTokens}
+                        onChange={(e) => updateCol(col.id, { maxTokens: parseInt(e.target.value, 10) || 1 })}
+                        style={paramInputStyle} />
+                    </ParamRow>
+                    <ParamRow label="Top-p:"            value={col.topP.toFixed(2)} >
+                      <input type="number" min={0} max={1} step={0.05} value={col.topP}
+                        onChange={(e) => updateCol(col.id, { topP: parseFloat(e.target.value) || 0 })}
+                        style={paramInputStyle} />
+                    </ParamRow>
+                    <ParamRow label="Repetition Penalty:" value={col.repetitionPenalty.toFixed(1)} >
+                      <input type="number" min={0} max={2} step={0.1} value={col.repetitionPenalty}
+                        onChange={(e) => updateCol(col.id, { repetitionPenalty: parseFloat(e.target.value) || 0 })}
+                        style={paramInputStyle} />
+                    </ParamRow>
+                  </fieldset>
+
+                  <div style={{ fontSize: 10, color: "#bbb" }}>Tokens: 0</div>
+                </>
+              );
+            })()}
+          </div>
+
+          {/* Right-panel tabs: Logs / Unfiltered Answer
+              (Qt main.py:18948-19005). The "Right Panel" label above
+              the tab strip mirrors Qt main.py:18948-18951 — 11pt bold
+              white QLabel placed immediately before the tab widget. */}
+          <div style={{ display: "flex", flexDirection: "column", minHeight: 200 }}>
+            <div style={{ color: "#fff", fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
+              Right Panel
+            </div>
+            <div style={{ display: "flex", gap: 2 }}>
+              {(["logs", "unfiltered"] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setRightTab(t)}
+                  style={{
+                    padding: "8px 18px",
+                    background: rightTab === t ? "rgba(70,85,130,0.9)" : "rgba(30,35,50,0.9)",
+                    color: rightTab === t ? "#fff" : "#ccc",
+                    border: "none",
+                    borderTopLeftRadius: 6,
+                    borderTopRightRadius: 6,
+                    fontSize: 12, fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                >{t === "logs" ? "Logs" : "Unfiltered Answer"}</button>
+              ))}
+            </div>
+            <div style={{
+              padding: 10,
+              minHeight: 180,
+              maxHeight: 240,
+              overflowY: "auto",
+              background: rightTab === "logs" ? "rgba(20,20,30,0.8)" : "rgba(24,16,16,0.85)",
+              border: `1px solid ${rightTab === "logs" ? "rgba(102,126,234,0.3)" : "rgba(210,140,100,0.35)"}`,
+              borderRadius: 8,
+              color: rightTab === "logs" ? "#cccccc" : "#f0d0c0",
+              fontFamily: "Consolas, 'Courier New', monospace",
+              fontSize: 11,
+              whiteSpace: "pre-wrap",
+            }}>
+              {rightTab === "logs"
+                ? (status.message || "Server logs will appear here.")
+                : (columns.find((c) => c.id === activePanel)?.messages.filter((m) => m.role === "assistant").map((m) => m.content).join("\n\n") || "Raw model output will appear here.")}
+            </div>
+          </div>
+        </aside>
       </div>
     </div>
   );
 }
 
-const btnGhost: React.CSSProperties = {
-  padding: "4px 8px",
-  background: "#162033",
-  border: "1px solid #243044",
-  color: "var(--fg)",
-  borderRadius: 4,
+function formatMaxTokens(v: number): string {
+  if (v < 1000) return String(v);
+  if (v < 1_000_000) return v % 1000 === 0 ? `${v / 1000}K` : `${(v / 1000).toFixed(1).replace(/\.0$/, "")}K`;
+  return v % 1_000_000 === 0 ? `${v / 1_000_000}M` : `${(v / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+}
+
+const panelGroupStyle: React.CSSProperties = {
+  border: "1px solid rgba(255,255,255,0.18)",
+  borderRadius: 8,
+  padding: "12px 8px 8px 8px",
+  background: "rgba(0,0,0,0.18)",
+  color: "#fff",
+};
+
+const panelLegendStyle: React.CSSProperties = {
+  padding: "0 8px",
   fontSize: 12,
+  fontWeight: 700,
+  color: "#fff",
+};
+
+const smallActionBtn: React.CSSProperties = {
+  padding: "4px 6px",
+  background: "rgba(0,0,0,0.3)",
+  border: "1px solid rgba(255,255,255,0.2)",
+  color: "#fff",
+  borderRadius: 4,
+  fontSize: 10,
+  fontWeight: 600,
   cursor: "pointer",
 };
 
-function Slider(p: { label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void }) {
+const paramInputStyle: React.CSSProperties = {
+  width: 80,
+  padding: "3px 6px",
+  background: "#0b1020",
+  border: "1px solid #1c2434",
+  color: "var(--fg)",
+  borderRadius: 4,
+  fontSize: 11,
+};
+
+function ParamRow(p: { label: string; value: string; children: React.ReactNode }) {
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--fg-muted)" }}>
-        <span>{p.label}</span>
-        <span style={{ color: "var(--fg)", fontVariantNumeric: "tabular-nums" }}>{p.value.toFixed(2)}</span>
-      </div>
-      <input
-        type="range"
-        min={p.min} max={p.max} step={p.step}
-        value={p.value}
-        onChange={(e) => p.onChange(parseFloat(e.target.value))}
-        style={{ accentColor: "#667eea" }}
-      />
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, padding: "3px 0" }}>
+      <span style={{ fontSize: 11, color: "#fff" }}>{p.label}</span>
+      <span style={{ fontSize: 11, color: "#fff", minWidth: 40, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{p.value}</span>
+      {p.children}
     </div>
   );
 }
 
-function NumberInput(p: { label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void }) {
-  return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <span style={{ fontSize: 10, color: "var(--fg-muted)" }}>{p.label}</span>
-      <input
-        type="number"
-        min={p.min} max={p.max} step={p.step}
-        value={p.value}
-        onChange={(e) => p.onChange(parseInt(e.target.value, 10) || p.min)}
-        style={{
-          padding: "4px 6px",
-          background: "#0b1020", border: "1px solid #1c2434",
-          color: "var(--fg)", borderRadius: 4, fontSize: 11,
-        }}
-      />
-    </label>
-  );
-}

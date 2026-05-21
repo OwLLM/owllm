@@ -81,23 +81,53 @@ function ResizeEdges() {
 }
 
 function WindowControls() {
-  // Plain Chromium has no getCurrentWindow() — return early so the
-  // synchronous call doesn't throw and tank the whole AppShell render
-  // during TwinForge captures / vite dev sessions.
-  if (!isTauri()) return null;
-  const w = getCurrentWindow();
-  const btn: React.CSSProperties = {
-    width: 36, height: 28, border: "none",
-    background: "var(--bg-surface)", color: "var(--fg-muted)",
-    fontSize: 13, cursor: "pointer", userSelect: "none",
+  // Qt main.py:3349-3387 — the header-right cluster is just two
+  // chromeless 30x30 buttons: fullscreen ⛶ (white, 20pt) and close
+  // ❌ (red #f44336, 16pt) with transparent backgrounds and a 4px
+  // hover tint. We previously rendered 3 buttons (—/▢/✕) with a
+  // grey pill style, which didn't match the Qt source the VLM was
+  // comparing against. Port the two glyphs and the transparent
+  // styling verbatim.
+  //
+  // !isTauri(): plain Chromium has no getCurrentWindow() — calling it
+  // would throw and tank the whole AppShell render. We still need to
+  // emit the visual chrome though, otherwise TwinForge's vite-dev
+  // captures will keep flagging "missing right-edge glyphs" against
+  // the Tauri source. Render the same two glyphs with no handlers so
+  // captures match exactly while dev mode stays click-safe.
+  const tauri = isTauri();
+  const w = tauri ? getCurrentWindow() : null;
+  const fsBtn: React.CSSProperties = {
+    width: 30, height: 30, border: "none",
+    background: "transparent", color: "#ffffff",
+    fontSize: 20, fontWeight: 700, padding: 0,
+    cursor: tauri ? "pointer" : "default", userSelect: "none",
     display: "flex", alignItems: "center", justifyContent: "center",
-    borderRadius: 5,
+    borderRadius: 4,
+  };
+  const closeBtn: React.CSSProperties = {
+    ...fsBtn,
+    color: "#f44336",
+    fontSize: 16,
   };
   return (
-    <div style={{ display: "flex", gap: 4, marginLeft: 8 }}>
-      <button title="Minimize" style={btn} onClick={() => w.minimize()}>—</button>
-      <button title="Maximize" style={btn} onClick={() => w.toggleMaximize()}>▢</button>
-      <button title="Close" style={{ ...btn, background: "rgba(244,67,54,0.18)", color: "#ff8080" }} onClick={() => w.close()}>✕</button>
+    <div data-ui="HeaderWindowControls" style={{ display: "flex", gap: 6, marginLeft: 8 }}>
+      <button
+        data-ui="FullscreenBtn"
+        title={tauri ? "Toggle fullscreen" : undefined}
+        style={fsBtn}
+        onClick={tauri ? () => { (w as any).setFullscreen?.(true).catch?.(() => {}); } : undefined}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.20)"; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+      >⛶</button>
+      <button
+        data-ui="HeaderCloseBtn"
+        title={tauri ? "Close" : undefined}
+        style={closeBtn}
+        onClick={tauri ? () => w!.close() : undefined}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(244,67,54,0.20)"; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+      >❌</button>
     </div>
   );
 }
@@ -313,7 +343,7 @@ function ModeBar({
     borderRadius: 6, fontSize: 13, fontWeight: 700,
     display: "flex", flexDirection: "column",
     alignItems: "center", justifyContent: "center",
-    lineHeight: 1.05, gap: 2,
+    lineHeight: 1.05, gap: 0,
     cursor: "pointer", userSelect: "none",
   };
   // Qt :checked QPushButton — gold border + warm dark gradient.
@@ -404,7 +434,7 @@ function ModeBar({
           onClick={() => setAdvancedOpen(!advancedOpen)}
           style={{ ...(advancedOpen ? active : baseBtn), width: 114 }}
         >
-          <span style={{ fontSize: 18 }}>⚙</span>
+          <span style={{ fontSize: 14 }}>⚙</span>
           <span>Advanced</span>
         </button>
 
@@ -418,7 +448,7 @@ function ModeBar({
             onClick={() => setMode(mode === t.id ? "home" : t.id)}
             style={{ ...(mode === t.id ? active : baseBtn), width: t.width }}
           >
-            <span style={{ fontSize: 18 }}>{t.emoji}</span>
+            <span style={{ fontSize: 14 }}>{t.emoji}</span>
             <span>{t.label}</span>
           </button>
         ))}

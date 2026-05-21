@@ -14,6 +14,7 @@
 use tauri::Emitter;
 
 mod accounts;
+mod agent_tools;
 mod agents;
 mod bridges;
 mod code;
@@ -123,6 +124,11 @@ pub fn run() {
             finetuning::train_stop,
             finetuning::train_status,
             finetuning::dataset_check,
+            agent_tools::tool_read_file,
+            agent_tools::tool_write_file,
+            agent_tools::tool_list_dir,
+            agent_tools::tool_create_dir,
+            agent_tools::tool_shell_exec,
         ])
         .build(tauri::generate_context!())
         .expect("error while building OwLLM Desktop")

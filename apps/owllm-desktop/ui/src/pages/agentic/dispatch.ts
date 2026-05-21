@@ -10,6 +10,13 @@
 // onPhase) so each consumer plugs its own state machine in.
 
 import { Channel, invoke } from "@tauri-apps/api/core";
+import {
+  executeToolCall,
+  formatToolsForPrompt,
+  parseToolCalls,
+  renderToolResultsForModel,
+  type ToolExecResult,
+} from "./localTools";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
 // off `kind`; the field name comes from #[serde(tag = "kind")] on the
@@ -837,25 +844,58 @@ export async function streamChatCompletion(
   if (provider === "openai") {
     return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
   }
-  const messages: Array<{ role: string; content: unknown }> = [
-    { role: "system", content: systemPrompt },
+  // ---- Local llama-server path ----
+  // Port of the legacy Python tool-use loop (LLM/core/agents/agent.py):
+  // the system prompt teaches the model the XML <tool_call> protocol,
+  // each turn is parsed for tool_call blocks, results are fed back as
+  // a synthetic user turn, and the loop ends when the model produces
+  // a turn with no tool_call blocks. That last turn IS the final
+  // answer the caller receives.
+  const toolsBlock = formatToolsForPrompt(allowedTools);
+  const augmentedSystem = toolsBlock ? `${systemPrompt}\n${toolsBlock}` : systemPrompt;
+  const liveMessages: Array<{ role: string; content: unknown }> = [
+    { role: "system", content: augmentedSystem },
     ...(history ?? []),
     { role: "user", content: openaiUserContent(effectiveText, images) },
   ];
-  const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: modelId || "local",
-      messages,
-      stream: true,
-      temperature,
-    }),
-    signal,
-  });
-  // Local llama-server is OpenAI-compatible; route through the same
-  // parser so reasoning_content + <think> tag stripping works for it too.
-  return consumeOpenAISse(resp, onDelta, onThought);
+  const MAX_TOOL_TURNS = 8;
+  let lastReply = "";
+  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+    const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: modelId || "local",
+        messages: liveMessages,
+        stream: true,
+        temperature,
+      }),
+      signal,
+    });
+    // consumeOpenAISse calls onDelta for each visible token AND returns
+    // the full assembled assistant text. We capture the text here so we
+    // can parse it for tool_call blocks without losing the streaming
+    // UX in the canvas.
+    lastReply = await consumeOpenAISse(resp, onDelta, onThought);
+    if (!toolsBlock) break; // no tools wired → no need to parse
+    const calls = parseToolCalls(lastReply);
+    if (calls.length === 0) break; // model is done — final answer
+    // Run every emitted call (sequentially; matches Python loop's one-
+    // at-a-time semantics so each result lands in context before the
+    // next executes).
+    const results: ToolExecResult[] = [];
+    for (const c of calls) {
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
+      // eslint-disable-next-line no-await-in-loop
+      results.push(await executeToolCall(c, projectCwd ?? ""));
+    }
+    // Append the assistant turn + the synthetic user turn carrying
+    // tool results, then loop.
+    liveMessages.push({ role: "assistant", content: lastReply });
+    liveMessages.push({ role: "user", content: renderToolResultsForModel(calls, results) });
+  }
+  return lastReply;
 }
 
 async function streamAnthropic(

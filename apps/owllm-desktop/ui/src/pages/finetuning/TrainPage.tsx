@@ -732,16 +732,16 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
   const [running, setRunning] = React.useState(false);
   const [message, setMessage] = React.useState<string>("");
   const [showInfo, setShowInfo] = React.useState(false);
-  const [outputDir, setOutputDir] = React.useState<string>("");
-
-  // Derive a default output dir from the base model name. e.g.
-  //   unsloth/Qwen2.5-7B-Instruct-bnb-4bit
-  // → C:/Users/<user>/.owllm_studio/abliterated/unsloth__Qwen2.5-7B-Instruct-bnb-4bit__abliterated
-  React.useEffect(() => {
-    if (!baseModel) { setOutputDir(""); return; }
-    const safe = baseModel.replace(/\//g, "__").replace(/[^a-zA-Z0-9._-]/g, "_");
-    setOutputDir(`C:/Users/mc/.owllm_studio/abliterated/${safe}__abliterated`);
-  }, [baseModel]);
+  // Rust derives the default output dir as
+  //   <llm_root>/fine_tuned/<safe>__abliterated/
+  // so the result auto-appears in the Models page Tuned tab. Display
+  // the same shape here for clarity.
+  const safeBase = baseModel
+    ? baseModel.replace(/\//g, "__").replace(/[^a-zA-Z0-9._-]/g, "_")
+    : "";
+  const outputDir = safeBase
+    ? `LLM/fine_tuned/${safeBase}__abliterated/`
+    : "";
 
   const start = async () => {
     if (!baseModel) {
@@ -770,7 +770,7 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
     };
     try {
       await invoke<void>("abliterate_start", {
-        config: { model: baseModel, outputDir },
+        config: { model: baseModel },
         channel,
       });
     } catch (e) {

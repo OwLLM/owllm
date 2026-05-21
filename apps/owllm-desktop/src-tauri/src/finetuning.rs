@@ -481,8 +481,10 @@ pub async fn train_status() -> Result<TrainStatus, String> {
 pub struct AbliterateConfig {
     /// Transformers-format model directory or HuggingFace id.
     pub model: String,
-    /// Where the abliterated model dir gets written.
-    pub output_dir: String,
+    /// Where the abliterated model dir gets written. When omitted,
+    /// defaults to <llm_root>/fine_tuned/<safe_name>__abliterated/ so
+    /// the result auto-surfaces in the Tuned tab next to LoRA adapters.
+    pub output_dir: Option<String>,
     /// Env profile slug to source python.exe from. Defaults to the
     /// same tf-cu121 profile the Train page uses.
     pub env_profile: Option<String>,
@@ -553,7 +555,20 @@ pub async fn abliterate_start(
     let script = crate::paths::abliterate_script()
         .ok_or_else(|| "LLM/tools/abliterate.py not found — legacy tree may be incomplete".to_string())?;
 
-    let out_dir = std::path::PathBuf::from(&config.output_dir);
+    // Output dir — explicit user-provided OR auto-derive into
+    // <llm_root>/fine_tuned/ so list_tuned_adapters picks it up
+    // automatically and the result appears on the Tuned tab.
+    let out_dir = if let Some(d) = config.output_dir.as_deref().filter(|s| !s.is_empty()) {
+        std::path::PathBuf::from(d)
+    } else {
+        let safe = config
+            .model
+            .replace('/', "__")
+            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '.', "_");
+        let root = crate::paths::llm_root()
+            .ok_or_else(|| "could not resolve LLM root for default output_dir".to_string())?;
+        root.join("fine_tuned").join(format!("{safe}__abliterated"))
+    };
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| format!("mkdir output {}: {e}", out_dir.display()))?;
     let stop_file = out_dir.join(".stop");
@@ -661,4 +676,164 @@ fn on_abliterate_line(ch: &Channel<AbliterateEvent>, stream: &str, line: &str) {
         stream: stream.to_string(),
         line: line.to_string(),
     });
+}
+
+// ---------------------------------------------------------------------
+// GGUF export — runs llama.cpp's convert_hf_to_gguf.py against a
+// transformers-format directory (a fine-tuned LoRA-merged checkpoint,
+// an abliterated model, or any local HF dir) and writes a .gguf next
+// to it. Re-uses the AbliterateEvent shape since the UX is identical:
+// streaming progress lines + a final Finished/Failed.
+// ---------------------------------------------------------------------
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GgufExportConfig {
+    /// Transformers-format directory (the source).
+    pub source_dir: String,
+    /// Optional output .gguf path. When omitted, defaults to
+    /// <source_dir>/<basename>-f16.gguf so the user finds it next to
+    /// the original weights.
+    pub output_path: Option<String>,
+    /// Optional output dtype passed to convert_hf_to_gguf.py via
+    /// --outtype. Defaults to "f16" — lossless on most architectures.
+    pub outtype: Option<String>,
+}
+
+#[tauri::command]
+pub async fn export_gguf(
+    config: GgufExportConfig,
+    channel: Channel<AbliterateEvent>,
+) -> Result<(), String> {
+    let src = std::path::PathBuf::from(&config.source_dir);
+    if !src.is_dir() {
+        return Err(format!("source_dir not a directory: {}", src.display()));
+    }
+    // Find a llamacpp env python.exe — that's where convert_hf_to_gguf.py
+    // ships (bundled with the gguf pip package).
+    let root = crate::paths::llm_root()
+        .ok_or_else(|| "could not resolve LLM root".to_string())?;
+    let envs_dir = root.join(".envs");
+    let mut python_exe: Option<std::path::PathBuf> = None;
+    let mut convert_py: Option<std::path::PathBuf> = None;
+    if let Ok(entries) = std::fs::read_dir(&envs_dir) {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_dir() { continue; }
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name.contains("dedicated") { continue; }
+            if !name.starts_with("llamacpp") { continue; }
+            let venv_py = p.join(".venv").join("Scripts").join("python.exe");
+            if venv_py.is_file() {
+                candidates.push(venv_py);
+            }
+        }
+        candidates.sort_by(|a, b| b.cmp(a)); // stable > edge
+        if let Some(py) = candidates.first() {
+            // convert_hf_to_gguf.py lives under .venv/Lib/site-packages/bin/
+            let conv = py
+                .parent().and_then(|p| p.parent()) // .venv/
+                .map(|venv| venv.join("Lib").join("site-packages").join("bin").join("convert_hf_to_gguf.py"));
+            if let Some(c) = conv {
+                if c.is_file() {
+                    convert_py = Some(c);
+                    python_exe = Some(py.clone());
+                }
+            }
+        }
+    }
+    let python_exe = python_exe.ok_or_else(|| {
+        "No llamacpp env with convert_hf_to_gguf.py found. Install one via Server → Environment.".to_string()
+    })?;
+    let convert_py = convert_py.unwrap();
+
+    let outtype = config.outtype.unwrap_or_else(|| "f16".to_string());
+    let out_path = if let Some(p) = config.output_path.as_deref().filter(|s| !s.is_empty()) {
+        std::path::PathBuf::from(p)
+    } else {
+        let base = src
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("model");
+        src.join(format!("{base}-{outtype}.gguf"))
+    };
+
+    let argv: Vec<String> = vec![
+        convert_py.to_string_lossy().into_owned(),
+        src.to_string_lossy().into_owned(),
+        "--outfile".into(), out_path.to_string_lossy().into_owned(),
+        "--outtype".into(), outtype.clone(),
+    ];
+
+    let channel_for_task = channel.clone();
+    let out_path_for_task = out_path.clone();
+    tokio::spawn(async move {
+        let outcome = spawn_gguf_exporter(&python_exe.to_string_lossy(), &argv, &channel_for_task).await;
+        match outcome {
+            Ok(()) => {
+                let _ = channel_for_task.send(AbliterateEvent::Finished {
+                    output_dir: out_path_for_task.to_string_lossy().into_owned(),
+                });
+            }
+            Err(e) => {
+                let _ = channel_for_task.send(AbliterateEvent::Failed { error: e });
+            }
+        }
+    });
+
+    Ok(())
+}
+
+async fn spawn_gguf_exporter(
+    python_exe: &str,
+    argv: &[String],
+    channel: &Channel<AbliterateEvent>,
+) -> Result<(), String> {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut cmd = Command::new(python_exe);
+    cmd.args(argv)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+    cmd.env("PYTHONUNBUFFERED", "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("spawn python: {e}"))?;
+    let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
+    let stderr = child.stderr.take().ok_or_else(|| "no stderr".to_string())?;
+    // convert_hf_to_gguf.py logs to stderr (Python logging default).
+    // Forward both as Log events; the script doesn't emit JSON so we
+    // can't synthesize Progress here.
+    let ch_out = channel.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = ch_out.send(AbliterateEvent::Log { stream: "stdout".into(), line });
+        }
+    });
+    let ch_err = channel.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = ch_err.send(AbliterateEvent::Log { stream: "stderr".into(), line });
+        }
+    });
+    let status = child.wait().await.map_err(|e| format!("wait: {e}"))?;
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+    if !status.success() {
+        return Err(format!(
+            "gguf export exited with code {}",
+            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+        ));
+    }
+    Ok(())
 }

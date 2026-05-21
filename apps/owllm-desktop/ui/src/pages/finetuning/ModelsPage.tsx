@@ -19,7 +19,7 @@ import DownloadedModelCard from "./widgets/DownloadedModelCard";
 import TunedModelCard from "./widgets/TunedModelCard";
 import AccessTokensPane from "./widgets/AccessTokensPane";
 import WeightPickerDialog from "./widgets/WeightPickerDialog";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 
 type SubTab = "browse" | "downloaded" | "tuned";
 
@@ -141,6 +141,41 @@ function iconsForTags(tags: string[]): string {
   if (tags.some((t) => /gguf/i.test(t))) out.push("📦");
   if (tags.some((t) => /lora|adapter|peft/i.test(t))) out.push("🧩");
   return out.join(" ");
+}
+
+// Kick the Rust export_gguf command against a tuned transformers dir.
+// Lightweight wrapper: spawn, log progress to console + show the user
+// a banner via setError, refresh the tuned list on completion so the
+// new .gguf file appears as a sibling row.
+function exportTunedToGguf(
+  sourceDir: string,
+  setError: (msg: string | null) => void,
+  refreshTuned: () => void,
+) {
+  type Evt =
+    | { kind: "progress"; stage: string; step?: number; total?: number; detail?: string }
+    | { kind: "log"; stream: string; line: string }
+    | { kind: "finished"; outputDir: string }
+    | { kind: "failed"; error: string };
+  const channel = new Channel<Evt>();
+  setError(`📦 Exporting GGUF from ${sourceDir.split(/[\\/]/).pop()}…`);
+  channel.onmessage = (ev) => {
+    if (ev.kind === "log") {
+      // Surface only error-ish lines so the banner doesn't spam.
+      if (ev.line.toLowerCase().includes("error") || ev.line.toLowerCase().includes("traceback")) {
+        setError(`GGUF export: ${ev.line}`);
+      }
+    } else if (ev.kind === "finished") {
+      setError(`✅ GGUF written → ${ev.outputDir}`);
+      refreshTuned();
+    } else if (ev.kind === "failed") {
+      setError(`❌ GGUF export failed: ${ev.error}`);
+    }
+  };
+  invoke<void>("export_gguf", {
+    config: { sourceDir, outtype: "f16" },
+    channel,
+  }).catch((e) => setError(`GGUF export start failed: ${e}`));
 }
 
 export default function ModelsPage() {
@@ -314,6 +349,14 @@ export default function ModelsPage() {
         .catch(() => setTuned([]));
     }
   }, [tab]);
+
+  // Re-fetch the tuned list (called after a GGUF export finishes so
+  // the new .gguf file shows up immediately).
+  const refreshTuned = React.useCallback(() => {
+    invoke<TunedAdapterRow[]>("list_tuned_adapters")
+      .then(setTuned)
+      .catch(() => { /* keep prior */ });
+  }, []);
 
   // Step 1: clicking Download opens the WeightPickerDialog so the
   // user can choose which files to fetch (Q4/Q5/Q6/Q8 etc) instead of
@@ -772,6 +815,7 @@ export default function ModelsPage() {
               createdAt={t.modified ?? undefined}
               selected={selectedPath === t.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
+              onExportGguf={(path) => exportTunedToGguf(path, setHfError, refreshTuned)}
             />
           ))}
         </div>

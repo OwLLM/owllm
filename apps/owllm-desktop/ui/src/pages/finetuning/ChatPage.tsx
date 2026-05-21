@@ -28,23 +28,22 @@ import { invoke } from "@tauri-apps/api/core";
 
 const LS_KEY = "owllm:chat:v3";
 
-// Shared theme accent — Qt main.py:18545,18571,18590 builds every
-// column header from the same primary/secondary gradient, so column
-// identity is carried by the leading emoji ALONE.
-const ACCENT_PRIMARY = "#667eea";
-const ACCENT_SECONDARY = "#764ba2";
-const HEADER_GRADIENT = `linear-gradient(90deg, ${ACCENT_PRIMARY}, ${ACCENT_SECONDARY})`;
+// Per-column identity colors — A=blue, B=green, C=purple. Used by
+// the Model card header gradient, the A/B/C settings-tab button row,
+// the settings panel background (60% alpha tint), and the sender
+// label colour inside transcripts.
+const COLUMN_GRADIENT: Record<"A" | "B" | "C", string> = {
+  A: "linear-gradient(90deg, #4a6cff, #2547c9)",
+  B: "linear-gradient(90deg, #22c55e, #15803d)",
+  C: "linear-gradient(90deg, #9C27B0, #6a1b9a)",
+};
 
-// Per-column tint for the right-side settings panel only — mirrors
-// Qt's modelSettingsPage background (main.py:18737-18756): A=blue,
-// B=green, C=purple at 60% alpha.
 const PANEL_TINT: Record<"A" | "B" | "C", string> = {
   A: "rgba(0, 100, 200, 0.6)",
   B: "rgba(0, 200, 100, 0.6)",
   C: "rgba(155, 89, 182, 0.6)",
 };
 
-// Column identity glyph — used for sender labels inside transcripts.
 const LABEL_TINT: Record<"A" | "B" | "C", string> = {
   A: "#4a6cff",
   B: "#22c55e",
@@ -444,13 +443,11 @@ export default function ChatPage() {
                 minHeight: 0,
                 overflow: "hidden",
               }}>
-                {/* Column header — shared accent gradient
-                    (Qt main.py:18545,18571,18590 — all three columns
-                    use the same primary/secondary theme tuple; only
-                    the leading emoji differs). */}
+                {/* Column header — per-column identity gradient
+                    (A=blue, B=green, C=purple). */}
                 <div style={{
                   padding: 10,
-                  background: HEADER_GRADIENT,
+                  background: COLUMN_GRADIENT[col.id],
                   borderRadius: 6,
                   display: "flex", alignItems: "center", gap: 6,
                   color: "#fff",
@@ -630,9 +627,9 @@ export default function ChatPage() {
         }}>
           {/* A/B/C toggle buttons (Qt main.py:18676-18690) — Qt
               QPushButtons have NO per-button color stylesheet, so all
-              three share the page's accent gradient. The active button
-              is distinguished by a brighter border; disabled C (when
-              chat-count < 3) is just opacity-dimmed. */}
+              each one carries its own column identity colour. The
+              active button is distinguished by a brighter border;
+              disabled C (when chat-count < 3) is just opacity-dimmed. */}
           <div style={{ display: "flex", gap: 5 }}>
             {(["A", "B", "C"] as const).map((id) => {
               const emoji = { A: "🔵", B: "🟢", C: "🟣" }[id];
@@ -645,7 +642,7 @@ export default function ChatPage() {
                   disabled={disabled}
                   style={{
                     flex: 1, padding: "8px 12px",
-                    background: HEADER_GRADIENT,
+                    background: COLUMN_GRADIENT[id],
                     color: "#fff",
                     border: `1px solid ${isActive ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.12)"}`,
                     borderRadius: 6,

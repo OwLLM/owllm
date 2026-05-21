@@ -24,9 +24,15 @@
             "core:window:allow-start-dragging",
             "core:window:allow-start-resize-dragging",
             "core:window:allow-minimize",
+            "core:window:allow-unminimize",
             "core:window:allow-toggle-maximize",
+            "core:window:allow-maximize",
+            "core:window:allow-unmaximize",
+            "core:window:allow-is-maximized",
+            "core:window:allow-is-minimized",
             "core:window:allow-close",
-            "core:window:allow-show"
+            "core:window:allow-show",
+            "core:window:allow-set-skip-taskbar"
           ]
         }
       ]

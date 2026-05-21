@@ -113,29 +113,21 @@ function WindowControls() {
   const tinyBtn: React.CSSProperties = { ...fsBtn, fontSize: 16 };
   return (
     <div data-ui="HeaderWindowControls" style={{ display: "flex", gap: 6, marginLeft: 8 }}>
-      {/* ⬇ Hide-in-taskbar — minimizes to tray-style. Toggling
-          skipTaskbar lets the window keep running without occupying
-          a taskbar slot. Click again to restore visibility. */}
+      {/* ─ Minimize — standard "tuck away" button. Was missing on the
+          chromeless build (Tauri 2 default decorations stripped them).
+          Tray-hiding is a separate slice (would need a tray icon to
+          restore); meanwhile minimize covers the user's expected
+          'get this out of my way' action. */}
       <button
-        data-ui="HideTaskbarBtn"
-        title={tauri ? "Hide from taskbar (click again to show)" : undefined}
+        data-ui="MinimizeBtn"
+        title={tauri ? "Minimize" : undefined}
         style={tinyBtn}
         onClick={tauri ? async () => {
-          try {
-            const win = w as any;
-            const skipping = await win.isMinimized?.();
-            if (skipping) {
-              await win.unminimize?.();
-              await win.setSkipTaskbar?.(false);
-            } else {
-              await win.setSkipTaskbar?.(true);
-              await win.minimize?.();
-            }
-          } catch { /* swallow */ }
+          try { await (w as any).minimize?.(); } catch { /* swallow */ }
         } : undefined}
         onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.20)"; }}
         onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
-      >⬇</button>
+      >─</button>
       {/* ⛶ Maximize/restore — Tauri 2 toggleMaximize is the reliable
           path; setFullscreen() didn't survive across the chromeless
           window setup (user reported the button stopped working). */}

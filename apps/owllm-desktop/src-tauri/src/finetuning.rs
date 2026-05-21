@@ -506,22 +506,50 @@ pub async fn abliterate_start(
     config: AbliterateConfig,
     channel: Channel<AbliterateEvent>,
 ) -> Result<(), String> {
-    let env_profile = config
-        .env_profile
-        .clone()
-        .unwrap_or_else(|| "tf-cu121-t25-base-stable".to_string());
-    let env_state = crate::env_manager::env_profile_status(env_profile.clone())
-        .await
-        .map_err(|e| format!("env_profile_status: {e}"))?;
-    let python_exe = match env_state {
-        crate::env_manager::EnvProfileState::Ready { python_exe } => python_exe,
-        other => {
-            return Err(format!(
-                "env profile '{}' is not Ready (state: {:?}). Install it on the Train page first.",
-                env_profile, other
-            ));
+    // Resolve a usable Python:
+    //   1. If config.env_profile is set, try the registry (env_profiles.yaml).
+    //   2. Otherwise (or if the registry doesn't know it), scan
+    //      LLM/.envs/* for any venv whose python.exe exists. The legacy
+    //      app installed envs under names like 'tf-cu121-t25-base-stable'
+    //      that aren't in the registry — without the fallback the user
+    //      sees "no env profile named X" and is blocked.
+    let mut python_exe: Option<String> = None;
+    if let Some(name) = config.env_profile.as_deref() {
+        if let Ok(state) = crate::env_manager::env_profile_status(name.to_string()).await {
+            if let crate::env_manager::EnvProfileState::Ready { python_exe: p } = state {
+                python_exe = Some(p);
+            }
         }
-    };
+    }
+    if python_exe.is_none() {
+        if let Some(root) = crate::paths::llm_root() {
+            let envs_dir = root.join(".envs");
+            if let Ok(entries) = std::fs::read_dir(&envs_dir) {
+                // Prefer transformers-style envs (tf-*) over llama.cpp-only
+                // ones (llamacpp-*) since abliteration needs torch + HF.
+                let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+                for e in entries.flatten() {
+                    let p = e.path();
+                    if !p.is_dir() { continue; }
+                    let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                    if name.contains("dedicated") { continue; }
+                    if name.starts_with("llamacpp") { continue; }
+                    let venv_py = p.join(".venv").join("Scripts").join("python.exe");
+                    if venv_py.is_file() {
+                        candidates.push(venv_py);
+                    }
+                }
+                // Most-recent-name-first heuristic: -stable beats -edge,
+                // base beats bnb (we want pip-installed transformers).
+                candidates.sort_by(|a, b| b.cmp(a));
+                python_exe = candidates.first().map(|p| p.to_string_lossy().into_owned());
+            }
+        }
+    }
+    let python_exe = python_exe.ok_or_else(|| {
+        "No Python environment with torch + transformers found. Install one via the Train page Environment picker, \
+         or ensure an LLM/.envs/<name>/.venv/Scripts/python.exe exists.".to_string()
+    })?;
     let script = crate::paths::abliterate_script()
         .ok_or_else(|| "LLM/tools/abliterate.py not found — legacy tree may be incomplete".to_string())?;
 

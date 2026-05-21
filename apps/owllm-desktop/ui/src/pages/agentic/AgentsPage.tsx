@@ -1507,9 +1507,18 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   const [arcPhase, setArcPhase] = useState(0);
   useEffect(() => {
     let raf = 0;
+    let lastEmit = 0;
     const start = performance.now();
+    // Throttle re-renders to ~30 fps. The previous loop fired setState
+    // every frame (60 fps), which re-rendered the whole canvas — at
+    // 8-12 agents the orbital math + SVG layout took >16 ms and the
+    // animation visibly stuttered. 30 fps is plenty for a halo pulse
+    // and halves the React reconciliation cost.
     const tick = (now: number) => {
-      setArcPhase(((now - start) / 1000) * 36);
+      if (now - lastEmit >= 33) {
+        setArcPhase(((now - start) / 1000) * 36);
+        lastEmit = now;
+      }
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);

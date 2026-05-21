@@ -110,18 +110,49 @@ function WindowControls() {
     color: "#f44336",
     fontSize: 16,
   };
+  const tinyBtn: React.CSSProperties = { ...fsBtn, fontSize: 16 };
   return (
     <div data-ui="HeaderWindowControls" style={{ display: "flex", gap: 6, marginLeft: 8 }}>
+      {/* ⬇ Hide-in-taskbar — minimizes to tray-style. Toggling
+          skipTaskbar lets the window keep running without occupying
+          a taskbar slot. Click again to restore visibility. */}
+      <button
+        data-ui="HideTaskbarBtn"
+        title={tauri ? "Hide from taskbar (click again to show)" : undefined}
+        style={tinyBtn}
+        onClick={tauri ? async () => {
+          try {
+            const win = w as any;
+            const skipping = await win.isMinimized?.();
+            if (skipping) {
+              await win.unminimize?.();
+              await win.setSkipTaskbar?.(false);
+            } else {
+              await win.setSkipTaskbar?.(true);
+              await win.minimize?.();
+            }
+          } catch { /* swallow */ }
+        } : undefined}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.20)"; }}
+        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
+      >⬇</button>
+      {/* ⛶ Maximize/restore — Tauri 2 toggleMaximize is the reliable
+          path; setFullscreen() didn't survive across the chromeless
+          window setup (user reported the button stopped working). */}
       <button
         data-ui="FullscreenBtn"
-        title={tauri ? "Toggle fullscreen" : undefined}
+        title={tauri ? "Maximize / restore" : undefined}
         style={fsBtn}
         onClick={tauri ? async () => {
           try {
             const win = w as any;
-            const cur = await win.isFullscreen?.();
-            if (typeof cur === "boolean") await win.setFullscreen(!cur);
-            else await win.toggleMaximize?.();
+            if (typeof win.toggleMaximize === "function") {
+              await win.toggleMaximize();
+            } else {
+              const isMax = await win.isMaximized?.();
+              if (isMax) await win.unmaximize?.();
+              else await win.maximize?.();
+            }
           } catch { /* swallow */ }
         } : undefined}
         onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.20)"; }}
@@ -208,13 +239,11 @@ const SHIFT_OUT = BORDER_T / 2;
 // on the Tauri build. EXTRA_RIGHT stays 0 so right padding is symmetric.
 const EXTRA_TOP = 35;
 const EXTRA_RIGHT = 0;
-// EXTRA_BOTTOM reserves 11 px of clearance below outerB so the
-// bottom-corner PNGs (height ≈ CORNER_PNG_H_BR=153, offset by
-// CORNER_OUTSET+1) fit inside the viewport instead of poking 1 px
-// past it. Without this, the bottom cyan strip reads thinner/dimmer
-// than the source because the corner crest art is clipped flush
-// against the window edge.
-const EXTRA_BOTTOM = 11;
+// Bottom matches top padding behaviour — TwinForge had added 11 px
+// here to keep corner PNGs from clipping flush, but the user reads
+// the resulting band as "the bottom is longer now". Reverted to 0
+// so L/R/B are symmetric against the SHIFT_OUT + CORNER_OUTSET base.
+const EXTRA_BOTTOM = 0;
 const CORNER_PNG_W = 160;
 const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);
 const CORNER_PNG_H_TR = Math.round(CORNER_PNG_W * 484 / 516);

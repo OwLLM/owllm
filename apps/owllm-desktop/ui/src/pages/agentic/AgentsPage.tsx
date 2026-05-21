@@ -652,41 +652,65 @@ function TeamInfoCard({
   serverModelId: string | null;
   accountsStatus: AccountsStatusLite | null;
 }) {
-  const CARD_W = 320;
-  const CARD_H = 312; // bumped from 264 to fit the MODEL row below stats.
+  // +90 px wide / +100 px tall over the previous 320×312 — matches
+  // AgentInfoCard so the two variants swap in place without a layout
+  // shift (user spec 2026-05-20).
+  const CARD_W = 410;
+  const CARD_H = 412;
   if (!team) {
     return (
-      <div data-ui="TeamInfoCard" style={{ width:CARD_W, height:CARD_H, borderRadius:12, background:"var(--bg-panel)", border:"1px dashed rgba(255,255,255,0.10)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, textAlign:"center", color:"var(--fg-subtle)", fontSize:12 }}>
+      <div data-ui="TeamInfoCard" style={{ width:CARD_W, height:CARD_H, borderRadius:12, background:"var(--bg-panel)", border:"1px dashed rgba(255,220,90,0.20)", display:"flex", alignItems:"center", justifyContent:"center", padding:20, textAlign:"center", color:"var(--fg-subtle)", fontSize:12 }}>
         Pick a project on the strip, or click <b style={{ margin:"0 4px" }}>Team…</b> to load a template onto the canvas.
       </div>
     );
   }
-  const pic_x = 14, pic_y = 38, pic_size = 100;
+  const pic_x = 14, pic_y = 46, pic_size = 100;
   const info_x = pic_x + pic_size + 18;
   const info_y = pic_y - 4;
   const info_w = CARD_W - 14 - info_x;
-  const stat_y = pic_y + pic_size + 30;
-  const model_y = stat_y + 36;
+  // AGENTS / CONNECTIONS now live below the picture as full-width
+  // rows so they stay readable when long values appear (and to mirror
+  // the BASE/TEMP layout on AgentInfoCard).
+  const stat_y = pic_y + pic_size + 14;
+  const model_y = stat_y + 22 * 2 + 18;
   const desc = team.description.length > 200 ? team.description.slice(0, 197) + "…" : team.description;
+  // Original cyan→purple palette — yellow tones live on the SuperUserCard
+  // only (user clarified 2026-05-20).
+  const cardBg = "linear-gradient(135deg, rgba(18,22,34,0.90) 0%, rgba(8,11,18,0.90) 100%)";
+  const borderGrad = "linear-gradient(135deg, rgba(92,240,255,0.86) 0%, rgba(192,138,255,0.86) 100%)";
   return (
-    <div data-ui="TeamInfoCard" style={{ position:"relative", width:CARD_W, height:CARD_H, borderRadius:12, background:"linear-gradient(135deg, rgba(18,22,34,0.90) 0%, rgba(8,11,18,0.90) 100%)", border:"1.6px solid transparent", overflow:"hidden" }}>
-      <div style={{ position:"absolute", inset:0, borderRadius:12, padding:"1.6px", background:"linear-gradient(135deg, rgba(92,240,255,0.86) 0%, rgba(192,138,255,0.86) 100%)", WebkitMask:"linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)", WebkitMaskComposite:"xor", maskComposite:"exclude", pointerEvents:"none" }} />
-      <div data-ui="TeamRibbon" style={{ position:"absolute", left:8, top:8, width:CARD_W - 16, height:22, borderRadius:6, background:"linear-gradient(90deg, rgba(92,240,255,0.235) 0%, rgba(192,138,255,0.039) 100%)", border:"1px solid rgba(92,240,255,0.47)", display:"flex", alignItems:"center", paddingLeft:10, fontSize:12, fontWeight:700, color:"var(--fg)", fontFamily:"Segoe UI", letterSpacing:0.2 }}>● {team.category.toUpperCase()}</div>
+    <div data-ui="TeamInfoCard" style={{ position:"relative", width:CARD_W, height:CARD_H, borderRadius:12, background:cardBg, border:"1.6px solid transparent", overflow:"hidden" }}>
+      <div style={{ position:"absolute", inset:0, borderRadius:12, padding:"1.6px", background:borderGrad, WebkitMask:"linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)", WebkitMaskComposite:"xor", maskComposite:"exclude", pointerEvents:"none" }} />
+      {/* Header — team name in place of the old "● CATEGORY" ribbon
+          (user spec 2026-05-20). Category survives as a small cyan chip
+          inline so the user still sees what kind of team it is. */}
+      <div data-ui="TeamHeader" style={{ position:"absolute", left:8, top:8, width:CARD_W - 16, height:28, display:"flex", alignItems:"center", gap:8, paddingLeft:8, fontSize:14, fontWeight:700, color:"var(--fg)", overflow:"hidden" }}>
+        <span style={{ flex:"0 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={team.display}>{team.display}</span>
+        <span style={{
+          background: "rgba(92,240,255,0.18)",
+          color: "#a8e8ff",
+          border: "1px solid rgba(92,240,255,0.45)",
+          fontSize: 9, fontWeight: 800, letterSpacing: 0.4,
+          padding: "2px 7px", borderRadius: 8,
+          textTransform:"uppercase", whiteSpace:"nowrap", flexShrink:0,
+        }}>{team.category}</span>
+      </div>
       <div style={{ position:"absolute", left:pic_x - 6, top:pic_y - 6, width:pic_size + 12, height:pic_size + 12, borderRadius:"50%", background:"radial-gradient(circle, rgba(92,240,255,0.43) 0%, rgba(92,240,255,0) 100%)", pointerEvents:"none" }} />
       <div style={{ position:"absolute", left:pic_x, top:pic_y, width:pic_size, height:pic_size, borderRadius:"50%", background:"#1e2434", border:"1.4px solid rgba(230,240,255,0.78)", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden" }}>
         <img src={owlSrc(team.icon)} style={{ width:pic_size * 0.85, height:pic_size * 0.85, objectFit:"contain" }} />
       </div>
-      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y + pic_size + 6, width:pic_size + 12, height:20, textAlign:"center", fontSize:15, fontWeight:700, color:"var(--fg)", fontFamily:"Segoe UI", lineHeight:"20px" }}>{team.display}</div>
-      <div style={{ position:"absolute", left:info_x, top:info_y, width:info_w, height:96, fontSize:12, color:"var(--fg)", fontFamily:"Segoe UI", lineHeight:1.35, overflow:"hidden" }}>
+      <div style={{ position:"absolute", left:info_x, top:info_y, width:info_w, height:pic_size + 8, fontSize:12, color:"var(--fg)", fontFamily:"Segoe UI", lineHeight:1.35, overflow:"hidden" }}>
         {desc || <span style={{ color:"var(--fg-muted)" }}>(no description)</span>}
       </div>
-      <div style={{ position:"absolute", left:info_x, top:stat_y, width:info_w, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", fontFamily:"Segoe UI", letterSpacing:0.4 }}>
-        <span style={{ width:90 }}>AGENTS</span>
-        <span>CONNECTIONS</span>
+      {/* AGENTS row — full card width. */}
+      <div style={{ position:"absolute", left:14, top:stat_y, width:CARD_W - 28, height:22, display:"flex", alignItems:"center", gap:8, fontSize:13, color:"var(--fg)", fontFamily:"Segoe UI" }}>
+        <span style={{ fontSize:11, fontWeight:700, color:"var(--fg-muted)", letterSpacing:0.4, width:86 }}>AGENTS</span>
+        <span style={{ flex:1, fontWeight:700 }}>{team.agents.length}</span>
       </div>
-      <div style={{ position:"absolute", left:info_x, top:stat_y + 14, width:info_w, height:18, display:"flex", alignItems:"center", fontSize:15, fontWeight:700, color:"var(--fg)", fontFamily:"Segoe UI" }}>
-        <span style={{ width:90 }}>{team.agents.length}</span>
-        <span>{team.edges.length}</span>
+      {/* CONNECTIONS row — same shape, on its own line. */}
+      <div style={{ position:"absolute", left:14, top:stat_y + 22, width:CARD_W - 28, height:22, display:"flex", alignItems:"center", gap:8, fontSize:13, color:"var(--fg)", fontFamily:"Segoe UI" }}>
+        <span style={{ fontSize:11, fontWeight:700, color:"var(--fg-muted)", letterSpacing:0.4, width:86 }}>CONNECTIONS</span>
+        <span style={{ flex:1, fontWeight:700 }}>{team.edges.length}</span>
       </div>
       {/* MODEL row — applies to every agent on the team. */}
       <div style={{ position:"absolute", left:14, top:model_y, width:CARD_W - 28, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", fontFamily:"Segoe UI", letterSpacing:0.4 }}>
@@ -730,31 +754,43 @@ function AgentInfoCard({
   fallbackLabel: string;
   onClose: () => void;
 }) {
-  const CARD_W = 320;
-  const CARD_H = 312;
+  // +90 px over the previous 320 (user spec 2026-05-20) — more room
+  // for BASE values, description, and the model picker.
+  const CARD_W = 410;
+  // +100 px over the previous 312 (same spec). The extra vertical
+  // space lets BASE/TEMP live as full-width ROWS instead of two
+  // columns (where the BASE model id used to get truncated).
+  const CARD_H = 412;
   const role = roleByName.get(spec.base);
   const desc =
     (spec.description && spec.description.trim()) ||
     (role?.description && role.description.trim()) ||
     "No description provided.";
   const trimmed = desc.length > 200 ? desc.slice(0, 197) + "…" : desc;
-  const statusCol = status === "active" ? "#3cf26b" : status === "pending" ? "#ffc060" : status === "error" ? "#ff7878" : "#74a4ff";
-  const statusWord = status === "active" ? "● ACTIVE" : status === "pending" ? "● PENDING" : status === "error" ? "● ERROR" : "● STANDBY";
-  const pic_x = 14, pic_y = 38, pic_size = 100;
+  const statusDot = status === "active" ? "#3cf26b" : status === "pending" ? "#ffc060" : status === "error" ? "#ff7878" : "#9aa8c2";
+  const pic_x = 14, pic_y = 46, pic_size = 100;
   const info_x = pic_x + pic_size + 18;
   const info_y = pic_y - 4;
   const info_w = CARD_W - 14 - info_x;
-  const stat_y = pic_y + pic_size + 30;
-  const model_y = stat_y + 36;
+  // BASE / TEMP now live below the picture as full-width rows so long
+  // model ids don't get clipped. stat_y = below the picture; model_y =
+  // below the two rows. Each row is 22 px tall.
+  const stat_y = pic_y + pic_size + 14;
+  const model_y = stat_y + 22 * 2 + 18;
   const group = groupForAgent(spec);
   const tint = tintForGroup(group);
-  // Tint the card body subtly with the group colour. Critic gets a
-  // rainbow conic-gradient border overlay; the standard cyan→purple
-  // border only renders for non-critic groups (otherwise the rainbow
-  // would be hidden underneath).
+  // Card body picks up the agent's group tint so design / build /
+  // critic each read at a glance. Critic keeps its rainbow border
+  // overlay; the others get the original cyan→purple border gradient.
+  // (Yellow tones live on the SuperUserCard only — user clarified
+  // 2026-05-20.)
   const cardBg = group === "critic"
     ? "linear-gradient(135deg, rgba(18,22,34,0.90) 0%, rgba(8,11,18,0.90) 100%)"
     : `linear-gradient(135deg, ${tint.bg} 0%, rgba(8,11,18,0.90) 100%)`;
+  // teamMemberLabel was used both below the pic AND for the badge
+  // text — now the agent name lives in the top header strip, so the
+  // below-pic centred label is dropped to remove the duplicate.
+  const headerName = teamMemberLabel(spec.name, group);
   return (
     <div data-ui="AgentInfoCard" style={{ position:"relative", width:CARD_W, height:CARD_H, borderRadius:12, background:cardBg, border:"1.6px solid transparent", overflow:"hidden" }}>
       {group === "critic" ? (
@@ -762,33 +798,41 @@ function AgentInfoCard({
       ) : (
         <div style={{ position:"absolute", inset:0, borderRadius:12, padding:"1.6px", background:`linear-gradient(135deg, ${tint.border} 0%, rgba(192,138,255,0.50) 100%)`, WebkitMask:"linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)", WebkitMaskComposite:"xor", maskComposite:"exclude", pointerEvents:"none" }} />
       )}
-      {tint.badge && (
-        <div data-ui="AgentGroupBadge" style={{
-          position:"absolute", top:34, right:8, zIndex:3,
-          background: group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(58, 120, 220, 0.95)",
-          color: "#0a1208",
-          fontSize: 9, fontWeight: 800, letterSpacing: 0.4,
-          padding: "2px 7px", borderRadius: 8,
-          pointerEvents:"none", textTransform:"uppercase", whiteSpace:"nowrap",
-        }}>{tint.badge}</div>
-      )}
-      <div data-ui="AgentRibbon" style={{ position:"absolute", left:8, top:8, width:CARD_W - 16, height:22, borderRadius:6, background:`linear-gradient(90deg, ${statusCol}3d 0%, ${statusCol}11 100%)`, border:`1px solid ${statusCol}77`, display:"flex", alignItems:"center", paddingLeft:10, fontSize:12, fontWeight:700, color:"var(--fg)", letterSpacing:0.2 }}>{statusWord}</div>
+      {/* Header — agent name + team badge on one line. Replaces the
+          old "● STANDBY/ACTIVE/PENDING/ERROR" status ribbon (user spec
+          2026-05-20). Status survives as a small coloured dot tucked
+          to the right of the name; team badge sits inline next to it. */}
+      <div data-ui="AgentHeader" style={{ position:"absolute", left:8, top:8, width:CARD_W - 16 - 28, height:28, display:"flex", alignItems:"center", gap:6, paddingLeft:8, fontSize:14, fontWeight:700, color:"var(--fg)", overflow:"hidden" }}>
+        <span style={{ width:8, height:8, borderRadius:4, background:statusDot, flexShrink:0 }} title={status} />
+        <span style={{ flex:"0 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={headerName}>{headerName}</span>
+        {tint.badge && (
+          <span data-ui="AgentGroupBadge" style={{
+            background: group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(58, 120, 220, 0.95)",
+            color: "#0a1208",
+            fontSize: 9, fontWeight: 800, letterSpacing: 0.4,
+            padding: "2px 7px", borderRadius: 8,
+            textTransform:"uppercase", whiteSpace:"nowrap", flexShrink:0,
+          }}>{tint.badge}</span>
+        )}
+      </div>
       <button onClick={onClose} title="Close (or click empty canvas)" style={{ position:"absolute", right:8, top:8, width:22, height:22, padding:0, border:"none", background:"rgba(255,255,255,0.06)", color:"var(--fg)", borderRadius:6, fontSize:12, cursor:"pointer", zIndex:2 }}>✕</button>
-      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y - 6, width:pic_size + 12, height:pic_size + 12, borderRadius:"50%", background:`radial-gradient(circle, ${statusCol}55 0%, ${statusCol}00 100%)`, pointerEvents:"none" }} />
+      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y - 6, width:pic_size + 12, height:pic_size + 12, borderRadius:"50%", background:`radial-gradient(circle, ${statusDot}55 0%, ${statusDot}00 100%)`, pointerEvents:"none" }} />
       <div style={{ position:"absolute", left:pic_x, top:pic_y, width:pic_size, height:pic_size, borderRadius:"50%", background:"#1e2434", border:"1.4px solid rgba(230,240,255,0.78)", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden" }}>
         <img src={owlSrc(agentIconRef(spec, roleByName))} style={{ width:pic_size * 0.85, height:pic_size * 0.85, objectFit:"contain" }} />
       </div>
-      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y + pic_size + 6, width:pic_size + 12, height:20, textAlign:"center", fontSize:14, fontWeight:700, color:"var(--fg)", lineHeight:"20px", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={teamMemberLabel(spec.name, group)}>{teamMemberLabel(spec.name, group)}</div>
-      <div style={{ position:"absolute", left:info_x, top:info_y, width:info_w, height:96, fontSize:12, color:"var(--fg)", lineHeight:1.35, overflow:"hidden" }}>
+      <div style={{ position:"absolute", left:info_x, top:info_y, width:info_w, height:pic_size + 8, fontSize:12, color:"var(--fg)", lineHeight:1.35, overflow:"hidden" }}>
         {trimmed}
       </div>
-      <div style={{ position:"absolute", left:info_x, top:stat_y, width:info_w, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", letterSpacing:0.4 }}>
-        <span style={{ width:90 }}>BASE</span>
-        <span>TEMP</span>
+      {/* BASE row — full card width. Long model ids no longer get
+          clipped to the 90-px column they used to share with TEMP. */}
+      <div style={{ position:"absolute", left:14, top:stat_y, width:CARD_W - 28, height:22, display:"flex", alignItems:"center", gap:8, fontSize:13, color:"var(--fg)", fontFamily:"Segoe UI" }}>
+        <span style={{ fontSize:11, fontWeight:700, color:"var(--fg-muted)", letterSpacing:0.4, width:46 }}>BASE</span>
+        <span style={{ flex:1, fontWeight:700, textTransform:"capitalize", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{spec.base}</span>
       </div>
-      <div style={{ position:"absolute", left:info_x, top:stat_y + 14, width:info_w, height:18, display:"flex", alignItems:"center", fontSize:13, fontWeight:700, color:"var(--fg)" }}>
-        <span style={{ width:90, textTransform:"capitalize" }}>{spec.base}</span>
-        <span>{(role?.defaultTemperature ?? 0.4).toFixed(2)}</span>
+      {/* TEMP row — same shape, on its own line. */}
+      <div style={{ position:"absolute", left:14, top:stat_y + 22, width:CARD_W - 28, height:22, display:"flex", alignItems:"center", gap:8, fontSize:13, color:"var(--fg)", fontFamily:"Segoe UI" }}>
+        <span style={{ fontSize:11, fontWeight:700, color:"var(--fg-muted)", letterSpacing:0.4, width:46 }}>TEMP</span>
+        <span style={{ flex:1, fontWeight:700 }}>{(role?.defaultTemperature ?? 0.4).toFixed(2)}</span>
       </div>
       <div style={{ position:"absolute", left:14, top:model_y, width:CARD_W - 28, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", letterSpacing:0.4 }}>
         <span style={{ flex:1 }}>MODEL · this agent only</span>
@@ -813,7 +857,7 @@ function AgentInfoCard({
 // (Server, Studio, etc.), so the in-progress message in the input box
 // would otherwise be wiped. Keying by projectId so each project keeps
 // its own draft.
-function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAutoApprove, projectId, directives, directorMode, onToggleDirectorMode, onOpenDirectives }: {
+function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAutoApprove, projectId, directives, onDirectivesChanged, directorMode, onToggleDirectorMode }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
   chat: GoalMsg[];
@@ -822,9 +866,11 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
   onToggleAutoApprove: () => void;
   projectId: string;
   directives: Directive[];
+  /// Trigger a re-fetch of the project's rules after an inline add /
+  /// edit / delete so the list updates without remounting the card.
+  onDirectivesChanged: () => Promise<void> | void;
   directorMode: boolean;
   onToggleDirectorMode: () => void;
-  onOpenDirectives: () => void;
 }) {
   const peekAgents = (team?.agents ?? []).slice(0, 6);
   const draftKey = projectId ? `owllm:supdraft:${projectId}` : "";
@@ -875,18 +921,70 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
     onSend(t);
     setDraft("");
   };
+  // Two embedded "pages" inside the card (user spec 2026-05-20):
+  //   Chat  — the multi-line input + sent log
+  //   Rules — full inline add / edit / delete UI for project rules
+  // Default to Chat so the SEND-first ergonomics stay intact.
+  const [activeTab, setActiveTab] = useState<"chat" | "rules">("chat");
+  // Inline-rules state — ports the DirectivesPanel modal's add / edit
+  // logic into the card so the user never leaves the canvas to manage
+  // the project's rules (user spec 2026-05-20).
+  const [newKind, setNewKind] = useState<"must" | "prefer" | "avoid">("must");
+  const [newText, setNewText] = useState("");
+  const [rulesBusy, setRulesBusy] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+  const [editKind, setEditKind] = useState<"must" | "prefer" | "avoid">("must");
+  const addRule = async () => {
+    const text = newText.trim();
+    if (!text || !projectId) return;
+    setRulesBusy(true);
+    try {
+      await invoke("directives_add", { input: { projectId, kind: newKind, text } });
+      setNewText("");
+      await onDirectivesChanged();
+    } catch (e) { console.error("directives_add failed", e); }
+    finally { setRulesBusy(false); }
+  };
+  const beginEdit = (d: Directive) => {
+    setEditingId(d.id);
+    setEditText(d.text);
+    setEditKind(d.kind);
+  };
+  const saveEdit = async () => {
+    if (!editingId) return;
+    setRulesBusy(true);
+    try {
+      await invoke("directives_update", { input: { id: editingId, kind: editKind, text: editText } });
+      setEditingId(null);
+      await onDirectivesChanged();
+    } catch (e) { console.error("directives_update failed", e); }
+    finally { setRulesBusy(false); }
+  };
+  const deleteRule = async (id: string) => {
+    setRulesBusy(true);
+    try {
+      await invoke("directives_delete", { id });
+      await onDirectivesChanged();
+    } catch (e) { console.error("directives_delete failed", e); }
+    finally { setRulesBusy(false); }
+  };
   return (
-    <div data-ui="SuperUserCard" style={{ margin:"8px 10px", padding:"10px 12px", borderRadius:12, background:"var(--bg-elevated)", border:"1px solid var(--border)", width:320, minHeight:180, display:"flex", flexDirection:"column", gap:8 }}>
+    // Width:320 + margin:"8px 0 0 0" so the card lines up flush left
+    // with the info card above it (both sit at the container's left
+    // edge — user spec 2026-05-20). Yellow tones to match the info
+    // card; subtle amber border instead of the previous neutral one.
+    <div data-ui="SuperUserCard" style={{ margin:"8px 0 0 0", padding:"10px 12px", borderRadius:12, background:"linear-gradient(135deg, rgba(38,30,10,0.92) 0%, rgba(18,14,4,0.92) 100%)", border:"1px solid rgba(255,200,80,0.35)", width:410, minHeight:180, display:"flex", flexDirection:"column", gap:8 }}>
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-        <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:16, background:"#1a2030", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"var(--fg)" }}>👤</div>
+        <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:16, background:"#2a2410", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"var(--fg)" }}>👤</div>
         <div style={{ flex:1, minWidth:0 }}>
           <div data-ui="suName" style={{ fontSize:16, fontWeight:700, color:"var(--fg)", lineHeight:"22px" }}>Super User</div>
           <div data-ui="suHint" style={{ fontSize:12, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase", lineHeight:1.4 }}>
             {chat.length > 0 ? `${chat.length} message${chat.length === 1 ? "" : "s"} in this run` : "idle — team pings you here"}
           </div>
         </div>
-        <button data-ui="suIconBtn" title="Open chat in a side panel (4:5, full window height, docked right)" style={{ width:30, height:26, padding:0, background:"#1a2030", color:"var(--fg)", border:"1px solid #2a3148", borderRadius:6, fontSize:14, fontWeight:700 }}>⇱⇲</button>
-        <button data-ui="suIconBtn" title="Notification settings (Telegram, etc.)" style={{ width:26, height:26, padding:0, background:"#1a2030", color:"var(--fg)", border:"1px solid #2a3148", borderRadius:6, fontSize:16, fontWeight:700 }}>⚙</button>
+        <button data-ui="suIconBtn" title="Open chat in a side panel (4:5, full window height, docked right)" style={{ width:30, height:26, padding:0, background:"#2a2410", color:"var(--fg)", border:"1px solid #3a3018", borderRadius:6, fontSize:14, fontWeight:700 }}>⇱⇲</button>
+        <button data-ui="suIconBtn" title="Notification settings (Telegram, etc.)" style={{ width:26, height:26, padding:0, background:"#2a2410", color:"var(--fg)", border:"1px solid #3a3018", borderRadius:6, fontSize:16, fontWeight:700 }}>⚙</button>
       </div>
       {peekAgents.length > 0 && (
         <div data-ui="suTeamPeek" style={{ display:"flex", alignItems:"center", gap:4, padding:"0 2px" }}>
@@ -896,85 +994,214 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
           <div style={{ fontSize:10, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase", marginLeft:4 }}>{team?.agents.length ?? 0} agents on team</div>
         </div>
       )}
-      {/* Sent-by-you log — replies from the orchestrator/agents are NOT
-          shown here (user spec 2026-05-18). The card is just for SENDING
-          input now; replies are visible elsewhere (the agent info panel,
-          the Run log). Empty filter result yields a brief idle hint so
-          the card doesn't collapse to zero height. */}
-      {(() => {
-        const sentByMe = lastMessages.filter(m => m.role === "you");
-        return (
-          <div ref={suChatRef} data-ui="suChat" style={{ height: 120, background:"var(--bg-elevated)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:8, padding:"8px 10px", fontSize:13, lineHeight:1.5, overflow:"auto", display:"flex", flexDirection:"column", gap:6 }}>
-            {sentByMe.length === 0 ? (
-              <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
-                {team
-                  ? "Type below — your input lands here. Replies appear in the agent panel."
-                  : "Pick a project or team template to begin."}
+      {/* Tab strip — Chat / Rules. Always rendered so the user sees
+          the count of rules even without opening the tab. */}
+      <div data-ui="suTabs" style={{ display:"flex", gap:4, borderBottom:"1px solid rgba(255,200,80,0.22)" }}>
+        {([
+          { id: "chat" as const,  label: "💬 Chat" },
+          { id: "rules" as const, label: `📋 Rules (${directives.length})` },
+        ]).map(t => {
+          const on = activeTab === t.id;
+          return (
+            <button
+              key={t.id}
+              data-ui={`suTab-${t.id}`}
+              onClick={() => setActiveTab(t.id)}
+              style={{
+                flex:1, height:26, padding:"0 10px",
+                background: on ? "rgba(255,200,80,0.18)" : "transparent",
+                color: on ? "#ffd97a" : "var(--fg-muted)",
+                border: "none",
+                borderBottom: on ? "2px solid #ffd97a" : "2px solid transparent",
+                fontSize:12, fontWeight:700, cursor:"pointer",
+              }}
+            >{t.label}</button>
+          );
+        })}
+      </div>
+      {activeTab === "chat" ? (
+        <>
+          {/* Sent-by-you log — replies from the orchestrator/agents are NOT
+              shown here (user spec 2026-05-18). The card is just for SENDING
+              input now; replies are visible elsewhere (the agent info panel,
+              the Run log). Empty filter result yields a brief idle hint so
+              the card doesn't collapse to zero height. */}
+          {(() => {
+            const sentByMe = lastMessages.filter(m => m.role === "you");
+            return (
+              <div ref={suChatRef} data-ui="suChat" style={{ height: 120, background:"rgba(20,16,4,0.6)", color:"var(--fg)", border:"1px solid rgba(255,200,80,0.20)", borderRadius:8, padding:"8px 10px", fontSize:13, lineHeight:1.5, overflow:"auto", display:"flex", flexDirection:"column", gap:6 }}>
+                {sentByMe.length === 0 ? (
+                  <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
+                    {team
+                      ? "Type below — your input lands here. Replies appear in the agent panel."
+                      : "Pick a project or team template to begin."}
+                  </div>
+                ) : sentByMe.map((m, i) => (
+                  <div key={i} style={{ color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Segoe UI, sans-serif" }}>
+                    {m.text}
+                  </div>
+                ))}
               </div>
-            ) : sentByMe.map((m, i) => (
-              <div key={i} style={{ color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Segoe UI, sans-serif" }}>
-                {m.text}
-              </div>
-            ))}
+            );
+          })()}
+          {/* Multi-line input — textarea instead of input so long
+              prompts wrap and stay fully visible. Enter sends; Shift+
+              Enter inserts a newline. Vertical resize lets the user
+              expand if their prompt is huge; the default 3 rows + auto
+              overflow keeps short prompts compact. */}
+          <div data-ui="suInputRow" style={{ display:"flex", alignItems:"flex-end", gap:8 }}>
+            <textarea
+              data-ui="suReply"
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submit();
+                }
+              }}
+              placeholder="Reply to the team — Enter to send, Shift+Enter for new line"
+              rows={3}
+              style={{
+                flex:1, minHeight:64, maxHeight:200,
+                borderRadius:8, padding:"8px 10px",
+                background:"rgba(20,16,4,0.6)", color:"var(--fg)",
+                fontSize:14, lineHeight:1.4,
+                border:"1px solid rgba(255,200,80,0.25)",
+                resize:"vertical",
+                fontFamily:"Segoe UI, sans-serif",
+                outline:"none",
+              }}
+            />
+            <button
+              data-ui="suSend"
+              onClick={submit}
+              disabled={!draft.trim()}
+              style={{
+                height:32, padding:"6px 14px", borderRadius:8,
+                border:"1px solid #ffd97a",
+                background: draft.trim() ? "#ffd97a" : "rgba(255,217,122,0.25)",
+                color: draft.trim() ? "#1a1404" : "#7d6f4b",
+                fontSize:13, fontWeight:700,
+                cursor: draft.trim() ? "pointer" : "not-allowed",
+              }}
+            >Send</button>
           </div>
-        );
-      })()}
-      <div data-ui="suInputRow" style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <input
-          data-ui="suReply"
-          value={draft}
-          onChange={e => setDraft(e.target.value)}
-          onKeyDown={e => { if (e.key === "Enter") submit(); }}
-          placeholder="Reply to the team — Enter to send"
-          style={{ flex:1, height:32, borderRadius:8, padding:"6px 10px", background:"var(--bg-elevated)", color:"var(--fg)", fontSize:14, border:"1px solid #2a3148" }}
-        />
-        <button
-          data-ui="suSend"
-          onClick={submit}
-          disabled={!draft.trim()}
-          style={{
-            height:32, padding:"6px 14px", borderRadius:8,
-            border:"1px solid #5cf0ff",
-            background: draft.trim() ? "var(--accent)" : "rgba(92,240,255,0.25)",
-            color: draft.trim() ? "var(--bg-elevated)" : "#7d8595",
-            fontSize:13, fontWeight:700,
-            cursor: draft.trim() ? "pointer" : "not-allowed",
-          }}
-        >Send</button>
-      </div>
-      <label data-ui="suTrust" style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: autoApprove ? "#ff8c8c" : "#7888a8", cursor:"pointer" }}>
-        <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
-        <span>auto-approve tool requests</span>
-      </label>
-      {/* Director Mode + Directives chip — both wire into the Critic
-          agent. Director Mode flips on the critic-as-user fallback so
-          the orchestrator's [NEED_USER_INPUT] questions resolve without
-          blocking. The chip shows the count of project rules and opens
-          a panel to add / edit / delete them. */}
-      <div data-ui="suDirectorRow" style={{ display:"flex", alignItems:"center", gap:8, justifyContent:"space-between" }}>
-        <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: directorMode ? "#9af0a8" : "#7888a8", cursor:"pointer" }}>
-          <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#60ff80" }} />
-          <span>director mode (critic stands in for me)</span>
-        </label>
-      </div>
-      <button
-        data-ui="suDirectivesChip"
-        onClick={onOpenDirectives}
-        title="Project rules the critic + every agent must follow"
-        style={{
-          alignSelf:"flex-start",
-          height:22, padding:"2px 10px", borderRadius:11,
-          background: directives.length > 0 ? "rgba(123, 92, 255, 0.18)" : "rgba(120,136,168,0.12)",
-          color: directives.length > 0 ? "#c0a8ff" : "#7888a8",
-          border: `1px solid ${directives.length > 0 ? "#7b5cff" : "#2a3148"}`,
-          fontSize:11, fontWeight:600, cursor:"pointer",
-          display:"flex", alignItems:"center", gap:6,
-        }}
-      >
-        <span>📋</span>
-        <span>{directives.length} project rule{directives.length === 1 ? "" : "s"}</span>
-        <span style={{ opacity: 0.6 }}>›</span>
-      </button>
+          <label data-ui="suTrust" style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: autoApprove ? "#ff8c8c" : "#7888a8", cursor:"pointer" }}>
+            <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
+            <span>auto-approve tool requests</span>
+          </label>
+          {/* Director Mode lives here because it's a per-run toggle that
+              belongs next to the chat input. The full add/edit panel is
+              reachable from the Rules tab. */}
+          <div data-ui="suDirectorRow" style={{ display:"flex", alignItems:"center", gap:8, justifyContent:"space-between" }}>
+            <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: directorMode ? "#9af0a8" : "#7888a8", cursor:"pointer" }}>
+              <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#60ff80" }} />
+              <span>director mode (critic stands in for me)</span>
+            </label>
+          </div>
+        </>
+      ) : (
+        // Rules tab — full inline add / edit / delete UI. No more
+        // popup modal: the user manages project rules right inside
+        // the card (user spec 2026-05-20).
+        <div data-ui="suRules" style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {/* Add-rule row — kind dropdown + text input + + button. */}
+          <div data-ui="suRulesAdd" style={{ display:"flex", alignItems:"center", gap:6 }}>
+            <select
+              value={newKind}
+              onChange={e => setNewKind(e.target.value as any)}
+              disabled={rulesBusy || !projectId}
+              style={{
+                height:28, borderRadius:6, padding:"0 6px",
+                background:"rgba(20,16,4,0.6)", color:"var(--fg)",
+                border:"1px solid rgba(255,200,80,0.25)",
+                fontSize:11, fontWeight:700,
+              }}
+            >
+              <option value="must">MUST</option>
+              <option value="prefer">PREFER</option>
+              <option value="avoid">AVOID</option>
+            </select>
+            <input
+              value={newText}
+              onChange={e => setNewText(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && newText.trim()) addRule(); }}
+              placeholder={projectId ? "New rule — Enter to add" : "Pick a project first"}
+              disabled={rulesBusy || !projectId}
+              style={{
+                flex:1, height:28, borderRadius:6, padding:"0 8px",
+                background:"rgba(20,16,4,0.6)", color:"var(--fg)",
+                border:"1px solid rgba(255,200,80,0.25)",
+                fontSize:13,
+              }}
+            />
+            <button
+              onClick={addRule}
+              disabled={rulesBusy || !projectId || !newText.trim()}
+              title="Add rule"
+              style={{
+                width:28, height:28, borderRadius:6,
+                border:"1px solid #ffd97a",
+                background: newText.trim() && projectId ? "#ffd97a" : "rgba(255,217,122,0.25)",
+                color: newText.trim() && projectId ? "#1a1404" : "#7d6f4b",
+                fontSize:16, fontWeight:700,
+                cursor: newText.trim() && projectId ? "pointer" : "not-allowed",
+              }}
+            >+</button>
+          </div>
+          {/* Rule list — grouped by kind, each row has Edit + Delete
+              inline. While editing, the row swaps to inline form. */}
+          <div style={{ background:"rgba(20,16,4,0.6)", border:"1px solid rgba(255,200,80,0.20)", borderRadius:8, padding:"8px 10px", maxHeight:220, overflow:"auto", fontSize:12, color:"var(--fg)", display:"flex", flexDirection:"column", gap:6 }}>
+            {directives.length === 0 ? (
+              <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
+                No project rules yet — type one above to add.
+              </div>
+            ) : (
+              (["must", "prefer", "avoid"] as const).flatMap(kind => {
+                const items = directives.filter(d => d.kind === kind);
+                if (items.length === 0) return [];
+                const kc = kind === "must" ? "#ff8c8c" : kind === "prefer" ? "#9af0a8" : "#ffd97a";
+                return [
+                  <div key={`h-${kind}`} style={{ fontSize:10, fontWeight:800, letterSpacing:0.6, color:kc, textTransform:"uppercase", marginTop:4 }}>{kind}</div>,
+                  ...items.map(d => editingId === d.id ? (
+                    <div key={d.id} style={{ display:"flex", flexDirection:"column", gap:4, paddingLeft:8, borderLeft:`2px solid ${kc}` }}>
+                      <div style={{ display:"flex", gap:4 }}>
+                        <select
+                          value={editKind}
+                          onChange={e => setEditKind(e.target.value as any)}
+                          style={{ height:24, borderRadius:4, padding:"0 4px", background:"rgba(20,16,4,0.6)", color:"var(--fg)", border:"1px solid rgba(255,200,80,0.25)", fontSize:10, fontWeight:700 }}
+                        >
+                          <option value="must">MUST</option>
+                          <option value="prefer">PREFER</option>
+                          <option value="avoid">AVOID</option>
+                        </select>
+                        <input
+                          value={editText}
+                          onChange={e => setEditText(e.target.value)}
+                          onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditingId(null); }}
+                          autoFocus
+                          style={{ flex:1, height:24, borderRadius:4, padding:"0 6px", background:"rgba(20,16,4,0.6)", color:"var(--fg)", border:"1px solid rgba(255,200,80,0.25)", fontSize:12 }}
+                        />
+                      </div>
+                      <div style={{ display:"flex", gap:4, justifyContent:"flex-end" }}>
+                        <button onClick={() => setEditingId(null)} disabled={rulesBusy} style={{ height:22, padding:"0 8px", borderRadius:4, border:"1px solid rgba(255,255,255,0.15)", background:"transparent", color:"var(--fg-muted)", fontSize:10, cursor:"pointer" }}>Cancel</button>
+                        <button onClick={saveEdit} disabled={rulesBusy || !editText.trim()} style={{ height:22, padding:"0 10px", borderRadius:4, border:"1px solid #ffd97a", background:"#ffd97a", color:"#1a1404", fontSize:10, fontWeight:700, cursor:"pointer" }}>Save</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div key={d.id} style={{ display:"flex", alignItems:"flex-start", gap:6, paddingLeft:8, borderLeft:`2px solid ${kc}`, lineHeight:1.4 }}>
+                      <span style={{ flex:1 }}>{d.text}</span>
+                      <button onClick={() => beginEdit(d)} disabled={rulesBusy} title="Edit" style={{ width:22, height:22, padding:0, borderRadius:4, border:"none", background:"transparent", color:"var(--fg-muted)", fontSize:12, cursor:"pointer" }}>✏️</button>
+                      <button onClick={() => deleteRule(d.id)} disabled={rulesBusy} title="Delete" style={{ width:22, height:22, padding:0, borderRadius:4, border:"none", background:"transparent", color:"#ff8c8c", fontSize:12, cursor:"pointer" }}>🗑</button>
+                    </div>
+                  )),
+                ];
+              })
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1786,9 +2013,10 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
         </div>
       )}
       </div>
-      {/* Zoom HUD — top-right corner. Outside the transform layer so it
-          stays anchored regardless of pan / zoom. */}
-      <div style={{ position:"absolute", right:8, top:8, display:"flex", alignItems:"center", gap:4, background:"rgba(10,15,25,0.65)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:8, padding:"2px 4px", fontSize:11, color:"var(--fg-muted)" }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
+      {/* Zoom HUD — top-LEFT corner. Outside the transform layer so it
+          stays anchored regardless of pan / zoom. Lives on the left so
+          the right side stays free for the agent info card overlay. */}
+      <div style={{ position:"absolute", left:8, top:8, display:"flex", alignItems:"center", gap:4, background:"rgba(10,15,25,0.65)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:8, padding:"2px 4px", fontSize:11, color:"var(--fg-muted)" }} onMouseDown={(e) => e.stopPropagation()} onClick={(e) => e.stopPropagation()}>
         <button onClick={() => setZoom(z => Math.max(0.4, z / 1.15))} title="Zoom out" style={{ width:22, height:22, border:"none", background:"transparent", color:"var(--fg)", cursor:"pointer", fontSize:14 }}>−</button>
         <span style={{ minWidth:34, textAlign:"center" }}>{Math.round(zoom * 100)}%</span>
         <button onClick={() => setZoom(z => Math.min(3, z * 1.15))} title="Zoom in" style={{ width:22, height:22, border:"none", background:"transparent", color:"var(--fg)", cursor:"pointer", fontSize:14 }}>+</button>
@@ -4149,9 +4377,11 @@ export default function AgentsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationOverride, selectedProject?.id]);
 
-  // Persist the Super User chat transcript when it changes. 800 ms
-  // debounce so a stream of tokens during a dispatch doesn't write
-  // SQLite on every character — only when the stream pauses.
+  // Persist the Super User chat transcript when it changes. 200 ms
+  // debounce — short enough that closing the app right after a reply
+  // still saves the turn, long enough that we don't write SQLite on
+  // every token during a stream. Was 800 ms; user lost a conversation
+  // by closing within the debounce window.
   useEffect(() => {
     if (!selectedProject) return;
     const next = JSON.stringify(supChat);
@@ -4165,7 +4395,7 @@ export default function AgentsPage() {
       } catch (e) {
         console.error("persist chat_json failed", e);
       }
-    }, 800);
+    }, 200);
     return () => window.clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supChat, selectedProject?.id]);
@@ -4464,6 +4694,39 @@ export default function AgentsPage() {
       return next;
     });
   };
+  // Auto-start the local llama-server when the team model resolves to a
+  // local GGUF — mirrors ChatPage's column A behaviour so the user
+  // doesn't have to flip to the Server tab to launch a model they
+  // already picked here. Cloud models (sub/api/auto prefixes) and
+  // already-running matches are skipped. A different model running →
+  // swap (stop then start).
+  const [serverAutoStarting, setServerAutoStarting] = useState<string | null>(null);
+  useEffect(() => {
+    const wanted = effectiveTeamModel.trim();
+    if (!wanted) return;
+    // Cloud + auto routes never run on the local llama-server.
+    if (wanted.startsWith("sub/") || wanted.startsWith("api/") || wanted.startsWith("auto/")) return;
+    const m = models.find((x) => x.model_id === wanted);
+    if (!m || m.provider !== "local" || m.port == null) return; // non-GGUF (transformers dir) → can't serve
+    if (serverState.running && serverState.model_id === wanted) return;
+    if (serverAutoStarting === wanted) return;
+
+    let dead = false;
+    (async () => {
+      setServerAutoStarting(wanted);
+      try {
+        if (serverState.running) await invoke("server_stop").catch(() => {});
+        await invoke("server_start", { modelId: wanted });
+      } catch (e) {
+        if (!dead) console.warn("[agents] auto-start failed:", e);
+      } finally {
+        if (!dead) setServerAutoStarting(null);
+      }
+    })();
+    return () => { dead = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectiveTeamModel, serverState.running, serverState.model_id]);
+
   const onPickTeamModel = (modelId: string) => {
     setTeamModelOverride(modelId);
     // Picking a team-wide model implies "every agent uses this one" —
@@ -5290,7 +5553,7 @@ export default function AgentsPage() {
                 stays consistent and selection state survives a view
                 toggle. When an agent is selected its info card replaces
                 the team card; the Super User input sits below either way. */}
-            <div style={{ position:"absolute", top:8, right:8, width:360, pointerEvents:"none" }}>
+            <div style={{ position:"absolute", top:8, right:8, width:450, pointerEvents:"none" }}>
               <div style={{ pointerEvents:"auto" }}>
                 {selectedAgentSpec ? (
                   <AgentInfoCard
@@ -5330,9 +5593,9 @@ export default function AgentsPage() {
                   onToggleAutoApprove={() => setAutoApprove(v => !v)}
                   projectId={selectedProjectId}
                   directives={directives}
+                  onDirectivesChanged={reloadDirectives}
                   directorMode={directorMode}
                   onToggleDirectorMode={() => setDirectorMode(!directorMode)}
-                  onOpenDirectives={() => setDirectivesPanelOpen(true)}
                 />
               </div>
             </div>

@@ -7,7 +7,7 @@
 // defined in src-tauri/finetuning.rs.
 
 import React from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import {
   MetricCard,
   RunMode,
@@ -344,14 +344,57 @@ export default function TrainPage() {
 
   const start = async () => {
     setStatus({ ...EMPTY_STATUS, state: "running", running: true, message: "Starting…" });
-    await tryInvoke<void>("train_start", {
-      args: {
-        baseModel, runName, datasetPath, mode,
-        epochs, lr, maxSeq, batchSize, gradAccum, warmupSteps,
-        loraR, loraAlpha, loraDropout,
-        ckptEnabled, ckptEvery,
-      },
-    }, undefined);
+    // Open a Tauri Channel — finetuning::train_start sends TrainEvents
+    // (Started / Log / Metric / Finished / Failed) through it. Without
+    // this the call would fail invariant validation in Rust.
+    type TrainEvent =
+      | { kind: "started"; runName: string }
+      | { kind: "log"; stream: string; line: string }
+      | { kind: "metric"; step: number; loss: number; learningRate: number }
+      | { kind: "finished"; outputDir: string }
+      | { kind: "failed"; error: string };
+    const channel = new Channel<TrainEvent>();
+    channel.onmessage = (ev) => {
+      if (ev.kind === "log") {
+        setStatus((s) => ({
+          ...s,
+          lastLogTail: [...(s.lastLogTail ?? []), ev.line].slice(-30),
+        }));
+      } else if (ev.kind === "metric") {
+        setStatus((s) => ({
+          ...s,
+          step: ev.step,
+          loss: ev.loss,
+          learningRate: ev.learningRate,
+          lossHistory: [...(s.lossHistory ?? []), { step: ev.step, loss: ev.loss }].slice(-500),
+        }));
+      } else if (ev.kind === "finished") {
+        setStatus((s) => ({ ...s, running: false, state: "idle", message: `Finished → ${ev.outputDir}` }));
+      } else if (ev.kind === "failed") {
+        setStatus((s) => ({ ...s, running: false, state: "idle", message: `Failed: ${ev.error}` }));
+      }
+    };
+    try {
+      await invoke<void>("train_start", {
+        config: {
+          envProfile: "tf-cu121-t25-base-stable",
+          baseModel,
+          dataset: datasetPath,
+          outputDir,
+          runName: runName || `run_${Date.now()}`,
+          epochs,
+          learningRate: lr,
+          loraR,
+          maxSeqLen: maxSeq,
+          gpus: [],
+        },
+        channel,
+      });
+    } catch (e) {
+      // Surface the real error instead of swallowing — was masked by
+      // tryInvoke and looked like "nothing happens".
+      setStatus({ ...EMPTY_STATUS, state: "idle", running: false, message: `Start failed: ${e}` });
+    }
   };
 
   const stop = async () => {
@@ -383,10 +426,14 @@ export default function TrainPage() {
   const checkDataset = async () => {
     if (!datasetPath) { setDatasetStatus("No dataset loaded"); return; }
     setDatasetStatus("Checking…");
-    const res = await tryInvoke<{ count: number; format: string } | null>(
-      "dataset_check", { path: datasetPath }, null,
-    );
-    setDatasetStatus(res ? `${res.count} examples · ${res.format}` : "Could not parse dataset");
+    try {
+      const res = await invoke<{ count: number; format: string }>(
+        "dataset_check", { path: datasetPath },
+      );
+      setDatasetStatus(`${res.count} examples · ${res.format}`);
+    } catch (e) {
+      setDatasetStatus(`Could not parse: ${e}`);
+    }
   };
 
   const canStart = Boolean(baseModel && datasetPath);
@@ -618,6 +665,21 @@ export default function TrainPage() {
         <div style={{ fontSize: 16, fontWeight: 800, color: "#c08aff", textAlign: "center" }}>
           🚀 START TRAINING
         </div>
+        {status.message && (
+          <div style={{
+            padding: "8px 10px",
+            background: status.message.startsWith("Failed") || status.message.startsWith("Start failed")
+              ? "rgba(244,67,54,0.12)"
+              : "rgba(102,126,234,0.12)",
+            border: `1px solid ${status.message.startsWith("Failed") || status.message.startsWith("Start failed")
+              ? "rgba(244,67,54,0.4)"
+              : "rgba(102,126,234,0.4)"}`,
+            borderRadius: 6,
+            fontSize: 11,
+            color: status.message.startsWith("Failed") || status.message.startsWith("Start failed") ? "#ffb3b3" : "#cfd4e1",
+            wordBreak: "break-word",
+          }}>{status.message}</div>
+        )}
         <StartTrainingPanel
           status={status.state}
           canStart={canStart}

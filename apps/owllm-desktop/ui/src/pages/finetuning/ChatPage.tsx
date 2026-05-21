@@ -395,7 +395,7 @@ export default function ChatPage() {
       {/* Header — Qt main.py:18414-18418 explicitly drops the page
           title; the title_row starts directly with 'Number of chats:'. */}
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--fg-muted)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 14, color: "var(--fg-muted)" }}>
           <span>Number of chats:</span>
           {[1, 2, 3].map((n) => (
             <label key={n} style={{
@@ -418,7 +418,7 @@ export default function ChatPage() {
 
         <label style={{
           display: "inline-flex", alignItems: "center", gap: 4,
-          fontSize: 12, color: count < 2 ? "#555" : "var(--fg-muted)",
+          fontSize: 14, color: count < 2 ? "#555" : "var(--fg-muted)",
           opacity: count < 2 ? 0.5 : 1,
         }}>
           <input
@@ -430,7 +430,7 @@ export default function ChatPage() {
           🔄 Models talk to each other
         </label>
         {converse && (
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--fg-muted)" }}>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 14, color: "var(--fg-muted)" }}>
             Max turns:
             <input
               type="number"
@@ -441,7 +441,7 @@ export default function ChatPage() {
               style={{
                 width: 60, padding: "2px 6px",
                 background: "#0b1020", border: "1px solid #1c2434",
-                borderRadius: 4, color: "var(--fg)", fontSize: 12,
+                borderRadius: 4, color: "var(--fg)", fontSize: 14,
               }}
             />
           </label>

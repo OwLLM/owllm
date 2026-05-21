@@ -122,6 +122,7 @@ pub fn run() {
             finetuning::train_start,
             finetuning::train_stop,
             finetuning::train_status,
+            finetuning::dataset_check,
         ])
         .build(tauri::generate_context!())
         .expect("error while building OwLLM Desktop")

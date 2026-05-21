@@ -347,6 +347,71 @@ fn on_log_line(ch: &Channel<TrainEvent>, stream: &str, line: &str) {
     }
 }
 
+/// Sniff a dataset file: count rows + report a coarse format label.
+/// Supports the four shapes the Train page advertises: jsonl, json,
+/// csv, parquet. Parquet just reports the byte size since we don't
+/// want to pull arrow in for one tooltip.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatasetSummary {
+    pub count: u64,
+    pub format: String,
+}
+
+#[tauri::command]
+pub async fn dataset_check(path: String) -> Result<DatasetSummary, String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    let ext = p
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "jsonl" => {
+            let text = std::fs::read_to_string(&p).map_err(|e| format!("read {path}: {e}"))?;
+            let count = text.lines().filter(|l| !l.trim().is_empty()).count() as u64;
+            Ok(DatasetSummary { count, format: "jsonl".to_string() })
+        }
+        "json" => {
+            let text = std::fs::read_to_string(&p).map_err(|e| format!("read {path}: {e}"))?;
+            let v: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|e| format!("parse {path}: {e}"))?;
+            let count = match &v {
+                serde_json::Value::Array(arr) => arr.len() as u64,
+                serde_json::Value::Object(map) => {
+                    // Datasets-library shape: {"data": [...]}
+                    map.get("data")
+                        .and_then(|d| d.as_array())
+                        .map(|a| a.len() as u64)
+                        .unwrap_or(1)
+                }
+                _ => 1,
+            };
+            Ok(DatasetSummary { count, format: "json".to_string() })
+        }
+        "csv" => {
+            let text = std::fs::read_to_string(&p).map_err(|e| format!("read {path}: {e}"))?;
+            // Header + N rows → N examples.
+            let total_lines = text.lines().filter(|l| !l.trim().is_empty()).count() as u64;
+            let count = total_lines.saturating_sub(1);
+            Ok(DatasetSummary { count, format: "csv".to_string() })
+        }
+        "parquet" => {
+            let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            Ok(DatasetSummary {
+                count: 0,
+                format: format!("parquet · {:.1} MB", bytes as f64 / 1024.0 / 1024.0),
+            })
+        }
+        other => Err(format!(
+            "unsupported dataset extension '.{other}' — use jsonl, json, csv, or parquet"
+        )),
+    }
+}
+
 /// Ask the running trainer to stop at the next safe boundary.
 /// finetune.py polls the stop-file path so we just write the sentinel
 /// — the trainer commits the in-flight step and saves the partial

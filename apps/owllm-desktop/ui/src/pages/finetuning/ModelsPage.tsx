@@ -18,6 +18,7 @@ import ModelCard from "./widgets/ModelCard";
 import DownloadedModelCard from "./widgets/DownloadedModelCard";
 import TunedModelCard from "./widgets/TunedModelCard";
 import AccessTokensPane from "./widgets/AccessTokensPane";
+import WeightPickerDialog from "./widgets/WeightPickerDialog";
 import { invoke } from "@tauri-apps/api/core";
 
 type SubTab = "browse" | "downloaded" | "tuned";
@@ -149,6 +150,19 @@ export default function ModelsPage() {
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const [downloading, setDownloading] = React.useState<Set<string>>(new Set());
+  // Weight-picker modal: when set, opens for that model id.
+  const [pickerFor, setPickerFor] = React.useState<string | null>(null);
+  // Cached total VRAM in GB for picker color rules.
+  const [vramGb, setVramGb] = React.useState<number>(8);
+
+  React.useEffect(() => {
+    invoke<{ gpus: Array<{ totalMib: number }> }>("vram_status")
+      .then((s) => {
+        const max = Math.max(0, ...s.gpus.map((g) => g.totalMib));
+        if (max > 0) setVramGb(max / 1024);
+      })
+      .catch(() => { /* keep 8 GB fallback */ });
+  }, []);
   const [filters, setFilters] = React.useState<Set<FilterKey>>(new Set());
   // "search mode" = render `hits` instead of curated. We enter it when
   // the user types a query OR when at least one filter checkbox is on
@@ -275,10 +289,19 @@ export default function ModelsPage() {
     }
   }, [tab]);
 
-  const startDownload = async (modelId: string) => {
+  // Step 1: clicking Download opens the WeightPickerDialog so the
+  // user can choose which files to fetch (Q4/Q5/Q6/Q8 etc) instead of
+  // pulling every variant blindly.
+  const startDownload = (modelId: string) => {
+    setPickerFor(modelId);
+  };
+
+  // Step 2: picker resolves with a list. Empty = "download all".
+  const confirmDownload = async (modelId: string, files: string[]) => {
+    setPickerFor(null);
     setDownloading((curr) => new Set(curr).add(modelId));
     try {
-      await invoke("hf_download", { modelId, files: null });
+      await invoke("hf_download", { modelId, files: files.length > 0 ? files : null });
     } catch (e) {
       setHfError(`Download failed: ${e}`);
     } finally {
@@ -654,6 +677,14 @@ export default function ModelsPage() {
               compatibilityBadge={d.compat}
               selected={selectedPath === d.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
+              onAddWeights={() => {
+                // The dir name on disk is the HF repo's last segment.
+                // Best-effort reconstruct: if the cards are derived
+                // from HF browse, we'd carry the id; for now use the
+                // directory name as a fallback so the picker can list
+                // files for it.
+                setPickerFor(d.name);
+              }}
             />
           ))}
         </div>
@@ -725,6 +756,15 @@ export default function ModelsPage() {
           Browse
         </button>
       </div>
+      )}
+
+      {pickerFor && (
+        <WeightPickerDialog
+          modelId={pickerFor}
+          vramGb={vramGb}
+          onCancel={() => setPickerFor(null)}
+          onConfirm={(files) => confirmDownload(pickerFor, files)}
+        />
       )}
     </div>
   );

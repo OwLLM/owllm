@@ -48,6 +48,7 @@ pub struct HfModelHit {
 /// used by the React UI to populate the "pick file to download"
 /// row (e.g. user picks Q4_K_M.gguf out of 8 quantisation variants).
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct HfFile {
     pub path: String,
     pub size: Option<u64>,

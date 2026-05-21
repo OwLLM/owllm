@@ -1,12 +1,16 @@
-// DownloadedModelCard — port of LLM/desktop_app/model_card_widget.py
-// DownloadedModelCard. Same visual shell as ModelCard but with
-// onboarding status badge (READY / BUILDING / BROKEN / NEW), local-file
-// "💾 Downloaded" badge, env_key chip, model path with file:// link, and
-// repair/onboard/delete/add-weights/dedicated-env actions in the button
-// row when applicable.
+// DownloadedModelCard — local-models grid card. Same visual shell as
+// ModelCard via CardShell; adds:
+//   • onboarding status badge (Building/Broken/Ready/Incomplete)
+//   • environment chip (when an env is bound to the model)
+//   • file:// link to the model path
+//   • Repair / Finish-download / Env / Delete actions
+//   • diagonal green "READY" ribbon when onboarding === "READY"
+//     (mirrors LLM/desktop_app/model_card_widget.py RibbonWidget)
 
 import React from "react";
-import { familyIcon, CompatColor, CompatibilityBadge } from "./modelCardShared";
+import CardShell, { compatBg } from "./CardShell";
+import CornerRibbon from "./CornerRibbon";
+import type { CompatColor, CompatibilityBadge } from "./modelCardShared";
 
 export type OnboardingStatus = "READY" | "BUILDING" | "BROKEN" | "NEW";
 
@@ -19,7 +23,7 @@ export type DownloadedModelCardProps = {
   isActiveDownload?: boolean;
   compatibilityBadge?: CompatibilityBadge;
   onboardingStatus?: OnboardingStatus;
-  envKey?: string;
+  envKey?: string | null;
   selected?: boolean;
   onSelect?: (path: string) => void;
   onDelete?: (path: string) => void;
@@ -28,22 +32,12 @@ export type DownloadedModelCardProps = {
   onDedicatedEnv?: (path: string) => void;
 };
 
-function statusBadge(status: OnboardingStatus): { bg: string; text: string } {
+function statusBadge(status: OnboardingStatus): { bg: string; text: string } | null {
   switch (status) {
-    case "BUILDING": return { bg: "#FF9800", text: "⏳ Building..." };
+    case "BUILDING": return { bg: "#FF9800", text: "⏳ Building…" };
     case "BROKEN":   return { bg: "#f44336", text: "❌ Broken" };
-    case "READY":    return { bg: "#4CAF50", text: "✓ Ready" };
     case "NEW":      return { bg: "#888",    text: "⏬ Incomplete" };
-    default:         return { bg: "",        text: "" };
-  }
-}
-
-function compatBg(c: CompatColor): string {
-  switch (c) {
-    case "green":  return "#4CAF50";
-    case "orange": return "#FF9800";
-    case "red":    return "#f44336";
-    default:       return "#888";
+    case "READY":    return null;  // surfaced via the corner ribbon
   }
 }
 
@@ -56,11 +50,11 @@ export default function DownloadedModelCard(props: DownloadedModelCardProps) {
     onSelect, onDelete, onRepair, onAddWeights, onDedicatedEnv,
   } = props;
 
-  const fam = familyIcon(modelName);
   const status = isIncomplete && onboardingStatus === "READY" ? "BROKEN" : onboardingStatus;
-  const [hover, setHover] = React.useState(false);
+  const sb = statusBadge(status);
 
-  // Local status: Downloaded / Downloading / Incomplete
+  // Local-file status pill on the left (always present): Downloaded /
+  // Downloading / Incomplete.
   let local = { bg: "rgba(76,175,80,0.2)", fg: "#4CAF50", text: "💾 Downloaded" };
   if (isIncomplete) {
     if (size && (size.includes("Downloading") || size.includes("⏳"))) {
@@ -70,18 +64,11 @@ export default function DownloadedModelCard(props: DownloadedModelCardProps) {
     }
   }
 
-  const sb = statusBadge(status);
-  const border = isIncomplete ? "#f44336" : compatibilityBadge ? compatBg(compatibilityBadge.color) : "#667eea";
-
   const btn: React.CSSProperties = {
     background: "rgba(102,126,234,0.15)",
     border: "1px solid rgba(102,126,234,0.4)",
-    color: "white",
-    borderRadius: 6,
-    padding: "6px 15px",
-    fontWeight: "bold",
-    cursor: "pointer",
-    fontSize: 12,
+    color: "white", borderRadius: 6, padding: "6px 15px",
+    fontWeight: "bold", cursor: "pointer", fontSize: 12,
   };
   const dangerBtn: React.CSSProperties = {
     ...btn,
@@ -89,105 +76,90 @@ export default function DownloadedModelCard(props: DownloadedModelCardProps) {
     border: "1px solid rgba(244,67,54,0.4)",
   };
 
+  // Border color: red if incomplete, otherwise driven by compat badge.
+  const compatForBorder: CompatibilityBadge | undefined =
+    isIncomplete
+      ? { color: "red" as CompatColor, text: "Incomplete" }
+      : compatibilityBadge;
+
   return (
-    <div
-      data-ui="DownloadedModelCard"
-      onClick={() => onSelect?.(modelPath)}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        minHeight: 220,
-        padding: "15px 20px",
-        background: `linear-gradient(180deg, ${hover ? "#262740" : "#1a1d2e"} 0%, ${hover ? "#1a2540" : "#16213e"} 100%)`,
-        border: `2px solid ${selected ? "#f3c34a" : border}`,
-        borderRadius: 10,
-        display: "flex",
-        flexDirection: "column",
-        gap: 8,
-        cursor: "pointer",
-        color: "#fafafa",
-        boxShadow: selected
-          ? `0 0 0 2px #f3c34a55, 0 8px 22px -6px #f3c34a55`
-          : hover ? `0 6px 18px -6px ${border}55` : "0 1px 2px rgba(0,0,0,0.2)",
-        transition: "all 140ms ease",
-      }}
-    >
-      <div style={{ display: "flex", gap: 15 }}>
-        <div style={{
-          width: 50, height: 50, borderRadius: 25,
-          background: fam.bg, color: "white",
-          fontSize: 24, fontWeight: "bold",
-          border: "2px solid rgba(255,255,255,0.2)",
-          display: "flex", alignItems: "center", justifyContent: "center",
-          flexShrink: 0,
-        }}>{fam.icon}</div>
-
-        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 4 }}>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start" }}>
-            <div style={{ fontSize: 14, fontWeight: "bold", maxWidth: 350, wordBreak: "break-word" }}>{modelName}</div>
-            {compatibilityBadge && !isIncomplete && (
-              <span style={{
-                background: compatBg(compatibilityBadge.color),
-                color: "white", padding: "3px 8px", borderRadius: 4,
-                fontSize: 11, fontWeight: "bold",
-              }}>{compatibilityBadge.text}</span>
-            )}
-          </div>
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+    <CardShell
+      dataUi="DownloadedModelCard"
+      iconKey={modelName}
+      title={modelName}
+      titleBadges={<>
+        {compatibilityBadge && !isIncomplete && (
+          <span style={{
+            background: compatBg(compatibilityBadge.color),
+            color: "white", padding: "3px 8px", borderRadius: 4,
+            fontSize: 11, fontWeight: "bold",
+          }}>{compatibilityBadge.text}</span>
+        )}
+      </>}
+      subline={
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 4 }}>
+          <span style={{
+            background: local.bg, color: local.fg,
+            padding: "2px 6px", borderRadius: 3,
+            fontSize: 10, fontWeight: "bold",
+          }}>{local.text}</span>
+          {envKey && (
             <span style={{
-              background: local.bg, color: local.fg,
-              padding: "2px 6px", borderRadius: 3,
+              background: "rgba(102,126,234,0.3)", color: "#667eea",
+              padding: "2px 8px", borderRadius: 3,
               fontSize: 10, fontWeight: "bold",
-            }}>{local.text}</span>
-            {envKey && (
-              <span style={{
-                background: "rgba(102,126,234,0.3)", color: "#667eea",
-                padding: "2px 8px", borderRadius: 3,
-                fontSize: 10, fontWeight: "bold",
-              }}>🔧 {envKey}</span>
-            )}
-            {sb.text && (
-              <span style={{
-                background: sb.bg, color: "white",
-                padding: "4px 10px", borderRadius: 4,
-                fontSize: 11, fontWeight: "bold",
-              }}>{sb.text}</span>
-            )}
-          </div>
+            }}>🔧 {envKey}</span>
+          )}
+          {sb && (
+            <span style={{
+              background: sb.bg, color: "white",
+              padding: "4px 10px", borderRadius: 4,
+              fontSize: 11, fontWeight: "bold",
+            }}>{sb.text}</span>
+          )}
         </div>
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center" }}>
-        {size && <span style={{ fontSize: 13, color: isIncomplete ? "#ff6b6b" : "#fafafa", fontWeight: isIncomplete ? "bold" : "normal" }}>📦 {size}</span>}
-        <span style={{ flex: 1 }} />
-        {icons && <span style={{ fontSize: 18, letterSpacing: 2 }}>{icons}</span>}
-      </div>
-
-      <div style={{ fontSize: 11, color: "#9aa0aa", wordBreak: "break-all", lineHeight: 1.3 }}>
-        📂 <a
-          href={`file:///${modelPath.replace(/\\/g, "/")}`}
-          style={{ color: "#667eea", textDecoration: "none" }}
-          onClick={(e) => e.stopPropagation()}
-        >{modelPath}</a>
-      </div>
-
-      <div style={{ flex: 1 }} />
-
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        {isIncomplete && !isActiveDownload && (
-          <button style={btn} onClick={(e) => { e.stopPropagation(); onRepair?.(modelPath); }}>🔧 Repair</button>
-        )}
-        {/* Ready models surface the dedicated-env builder; "Onboard"
-            for incomplete-but-not-broken downloads finishes them. */}
-        {status === "NEW" && !isIncomplete && (
-          <button style={btn} onClick={(e) => { e.stopPropagation(); onAddWeights?.(modelPath); }}>🚀 Finish download</button>
-        )}
-        {envKey && (
-          <button style={btn} onClick={(e) => { e.stopPropagation(); onDedicatedEnv?.(modelPath); }}>🛠️ Env</button>
-        )}
-        <button style={dangerBtn} onClick={(e) => { e.stopPropagation(); onDelete?.(modelPath); }}>🗑️ Delete</button>
-      </div>
-    </div>
+      }
+      compat={compatForBorder}
+      selected={selected}
+      onClick={onSelect ? () => onSelect(modelPath) : undefined}
+      ribbon={status === "READY" ? <CornerRibbon text="READY" /> : null}
+      body={<>
+        <div style={{ display: "flex", alignItems: "center" }}>
+          {size && (
+            <span style={{
+              fontSize: 13,
+              color: isIncomplete ? "#ff6b6b" : "#fafafa",
+              fontWeight: isIncomplete ? "bold" : "normal",
+            }}>📦 {size}</span>
+          )}
+          <span style={{ flex: 1 }} />
+          {icons && <span style={{ fontSize: 18, letterSpacing: 2 }}>{icons}</span>}
+        </div>
+        <div style={{ fontSize: 11, color: "#9aa0aa", wordBreak: "break-all", lineHeight: 1.3 }}>
+          📂 <a
+            href={`file:///${modelPath.replace(/\\/g, "/")}`}
+            style={{ color: "#667eea", textDecoration: "none" }}
+            onClick={(e) => e.stopPropagation()}
+          >{modelPath}</a>
+        </div>
+      </>}
+      actions={
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {isIncomplete && !isActiveDownload && (
+            <button style={btn} onClick={(e) => { e.stopPropagation(); onRepair?.(modelPath); }}>🔧 Repair</button>
+          )}
+          {status === "NEW" && !isIncomplete && (
+            <button style={btn} onClick={(e) => { e.stopPropagation(); onAddWeights?.(modelPath); }}>🚀 Finish download</button>
+          )}
+          {status === "READY" && (
+            <button style={btn} onClick={(e) => { e.stopPropagation(); onAddWeights?.(modelPath); }}>➕ Edit weights</button>
+          )}
+          {envKey && (
+            <button style={btn} onClick={(e) => { e.stopPropagation(); onDedicatedEnv?.(modelPath); }}>🛠️ Env</button>
+          )}
+          <button style={dangerBtn} onClick={(e) => { e.stopPropagation(); onDelete?.(modelPath); }}>🗑️ Delete</button>
+        </div>
+      }
+    />
   );
 }

@@ -471,3 +471,166 @@ pub async fn train_status() -> Result<TrainStatus, String> {
         last_log_tail: st.log_tail.clone(),
     })
 }
+
+// ---------------------------------------------------------------------
+// Abliteration — FailSpy refusal-direction stripping via tools/abliterate.py
+// ---------------------------------------------------------------------
+
+#[derive(Deserialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct AbliterateConfig {
+    /// Transformers-format model directory or HuggingFace id.
+    pub model: String,
+    /// Where the abliterated model dir gets written.
+    pub output_dir: String,
+    /// Env profile slug to source python.exe from. Defaults to the
+    /// same tf-cu121 profile the Train page uses.
+    pub env_profile: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AbliterateEvent {
+    /// Raw JSON line emitted by abliterate.py — UI parses for nicer
+    /// rendering but always has the underlying string available.
+    Progress { stage: String, step: Option<u64>, total: Option<u64>, detail: Option<String> },
+    /// Anything that didn't decode as JSON. Forwarded verbatim to a
+    /// log tail so import errors surface to the user.
+    Log { stream: String, line: String },
+    Finished { output_dir: String },
+    Failed { error: String },
+}
+
+#[tauri::command]
+pub async fn abliterate_start(
+    config: AbliterateConfig,
+    channel: Channel<AbliterateEvent>,
+) -> Result<(), String> {
+    let env_profile = config
+        .env_profile
+        .clone()
+        .unwrap_or_else(|| "tf-cu121-t25-base-stable".to_string());
+    let env_state = crate::env_manager::env_profile_status(env_profile.clone())
+        .await
+        .map_err(|e| format!("env_profile_status: {e}"))?;
+    let python_exe = match env_state {
+        crate::env_manager::EnvProfileState::Ready { python_exe } => python_exe,
+        other => {
+            return Err(format!(
+                "env profile '{}' is not Ready (state: {:?}). Install it on the Train page first.",
+                env_profile, other
+            ));
+        }
+    };
+    let script = crate::paths::abliterate_script()
+        .ok_or_else(|| "LLM/tools/abliterate.py not found — legacy tree may be incomplete".to_string())?;
+
+    let out_dir = std::path::PathBuf::from(&config.output_dir);
+    std::fs::create_dir_all(&out_dir)
+        .map_err(|e| format!("mkdir output {}: {e}", out_dir.display()))?;
+    let stop_file = out_dir.join(".stop");
+
+    let argv: Vec<String> = vec![
+        script.to_string_lossy().into_owned(),
+        "--model".into(), config.model.clone(),
+        "--output-dir".into(), out_dir.to_string_lossy().into_owned(),
+        "--stop-file".into(), stop_file.to_string_lossy().into_owned(),
+    ];
+
+    let channel_for_task = channel.clone();
+    let out_dir_for_task = out_dir.clone();
+    tokio::spawn(async move {
+        let outcome = spawn_abliterator(&python_exe, &argv, &channel_for_task).await;
+        match outcome {
+            Ok(()) => {
+                let _ = channel_for_task.send(AbliterateEvent::Finished {
+                    output_dir: out_dir_for_task.to_string_lossy().into_owned(),
+                });
+            }
+            Err(e) => {
+                let _ = channel_for_task.send(AbliterateEvent::Failed { error: e });
+            }
+        }
+    });
+
+    Ok(())
+}
+
+async fn spawn_abliterator(
+    python_exe: &str,
+    argv: &[String],
+    channel: &Channel<AbliterateEvent>,
+) -> Result<(), String> {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let mut cmd = Command::new(python_exe);
+    cmd.args(argv)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+    cmd.env("PYTHONUNBUFFERED", "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("spawn python: {e}"))?;
+    let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
+    let stderr = child.stderr.take().ok_or_else(|| "no stderr".to_string())?;
+    let ch_out = channel.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            on_abliterate_line(&ch_out, "stdout", &line);
+        }
+    });
+    let ch_err = channel.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            on_abliterate_line(&ch_err, "stderr", &line);
+        }
+    });
+    let status = child.wait().await.map_err(|e| format!("wait: {e}"))?;
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+    if !status.success() {
+        return Err(format!(
+            "abliterate exited with code {}",
+            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+        ));
+    }
+    Ok(())
+}
+
+fn on_abliterate_line(ch: &Channel<AbliterateEvent>, stream: &str, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let stage = v.get("event").and_then(|e| e.as_str()).unwrap_or("?").to_string();
+            let step = v.get("step").and_then(|e| e.as_u64());
+            let total = v.get("total").and_then(|e| e.as_u64());
+            // Compose a short human-readable detail from the rest.
+            let detail = v
+                .as_object()
+                .map(|m| {
+                    let mut parts: Vec<String> = Vec::new();
+                    for (k, val) in m {
+                        if k == "event" || k == "step" || k == "total" { continue; }
+                        parts.push(format!("{k}={}", val));
+                    }
+                    parts.join(" ")
+                })
+                .filter(|s| !s.is_empty());
+            let _ = ch.send(AbliterateEvent::Progress { stage, step, total, detail });
+            return;
+        }
+    }
+    let _ = ch.send(AbliterateEvent::Log {
+        stream: stream.to_string(),
+        line: line.to_string(),
+    });
+}

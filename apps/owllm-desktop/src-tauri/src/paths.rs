@@ -143,3 +143,10 @@ pub fn finetune_script() -> Option<PathBuf> {
     let p = llm_root()?.join("finetune.py");
     if p.is_file() { Some(p) } else { None }
 }
+
+/// Path to the abliterate.py CLI — the FailSpy-recipe refusal-direction
+/// stripper invoked by the Train page's '🚫 Abliterate' action.
+pub fn abliterate_script() -> Option<PathBuf> {
+    let p = llm_root()?.join("tools").join("abliterate.py");
+    if p.is_file() { Some(p) } else { None }
+}

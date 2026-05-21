@@ -715,7 +715,215 @@ export default function TrainPage() {
             }}
           >⏹  Stop</button>
         </div>
+        <AbliterateSection baseModel={baseModel} />
         <TrainingHistory />
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────
+// AbliterateSection — single-button launcher for the FailSpy refusal-
+// direction stripping recipe (LLM/tools/abliterate.py). Renders an
+// info icon that pops up an explanation modal styled like the rest
+// of the app's dialogs (WeightPickerDialog).
+// ──────────────────────────────────────────────────────────────────
+function AbliterateSection({ baseModel }: { baseModel: string }) {
+  const [running, setRunning] = React.useState(false);
+  const [message, setMessage] = React.useState<string>("");
+  const [showInfo, setShowInfo] = React.useState(false);
+  const [outputDir, setOutputDir] = React.useState<string>("");
+
+  // Derive a default output dir from the base model name. e.g.
+  //   unsloth/Qwen2.5-7B-Instruct-bnb-4bit
+  // → C:/Users/<user>/.owllm_studio/abliterated/unsloth__Qwen2.5-7B-Instruct-bnb-4bit__abliterated
+  React.useEffect(() => {
+    if (!baseModel) { setOutputDir(""); return; }
+    const safe = baseModel.replace(/\//g, "__").replace(/[^a-zA-Z0-9._-]/g, "_");
+    setOutputDir(`C:/Users/mc/.owllm_studio/abliterated/${safe}__abliterated`);
+  }, [baseModel]);
+
+  const start = async () => {
+    if (!baseModel) {
+      setMessage("Pick a base model in the Base Model card above first.");
+      return;
+    }
+    setRunning(true);
+    setMessage("Starting…");
+    type Evt =
+      | { kind: "progress"; stage: string; step?: number; total?: number; detail?: string }
+      | { kind: "log"; stream: string; line: string }
+      | { kind: "finished"; outputDir: string }
+      | { kind: "failed"; error: string };
+    const channel = new Channel<Evt>();
+    channel.onmessage = (ev) => {
+      if (ev.kind === "progress") {
+        const pct = ev.total ? ` (${ev.step}/${ev.total})` : "";
+        setMessage(`${ev.stage}${pct}${ev.detail ? ` · ${ev.detail}` : ""}`);
+      } else if (ev.kind === "finished") {
+        setMessage(`✅ Done → ${ev.outputDir}`);
+        setRunning(false);
+      } else if (ev.kind === "failed") {
+        setMessage(`❌ ${ev.error}`);
+        setRunning(false);
+      }
+    };
+    try {
+      await invoke<void>("abliterate_start", {
+        config: { model: baseModel, outputDir },
+        channel,
+      });
+    } catch (e) {
+      setMessage(`Start failed: ${e}`);
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div style={{
+      ...cfgCard,
+      borderColor: "rgba(244,67,54,0.3)",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ ...cardTitle, color: "#ff8c8c", flex: 1 }}>🚫 ABLITERATE</div>
+        <button
+          onClick={() => setShowInfo(true)}
+          title="What is abliteration?"
+          style={{
+            width: 22, height: 22, borderRadius: 11,
+            background: "rgba(102,126,234,0.18)",
+            border: "1px solid rgba(102,126,234,0.4)",
+            color: "#9cc3ff",
+            fontSize: 12, fontWeight: 700,
+            cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: 0,
+          }}
+        >ⓘ</button>
+      </div>
+      <div style={{ fontSize: 11, color: "#9aa0aa", lineHeight: 1.4 }}>
+        Strip refusal directions from the base model above. Output goes
+        to a new transformers-format directory — quantize to GGUF or
+        run directly afterward.
+      </div>
+      <div style={{ fontSize: 10, color: "#8595ad", wordBreak: "break-all" }}>
+        Output: <span style={{ color: "#cfd4e1" }}>{outputDir || "(no model selected)"}</span>
+      </div>
+      <button
+        onClick={start}
+        disabled={running || !baseModel}
+        style={{
+          padding: "8px 16px",
+          background: running
+            ? "rgba(244,67,54,0.18)"
+            : "linear-gradient(180deg, #c84a4a 0%, #8c2828 100%)",
+          border: "1px solid rgba(244,67,54,0.5)",
+          color: "white",
+          borderRadius: 6,
+          fontSize: 13, fontWeight: 700,
+          cursor: running || !baseModel ? "not-allowed" : "pointer",
+          opacity: running || !baseModel ? 0.7 : 1,
+        }}
+      >{running ? "Abliterating…" : "🚫 Abliterate model"}</button>
+      {message && (
+        <div style={{
+          padding: "6px 8px",
+          background: message.startsWith("❌") ? "rgba(244,67,54,0.12)" : "rgba(102,126,234,0.10)",
+          border: `1px solid ${message.startsWith("❌") ? "rgba(244,67,54,0.4)" : "rgba(102,126,234,0.3)"}`,
+          borderRadius: 4,
+          fontSize: 10,
+          color: message.startsWith("❌") ? "#ffb3b3" : "#cfd4e1",
+          wordBreak: "break-word",
+        }}>{message}</div>
+      )}
+
+      {showInfo && <AbliterateInfoModal onClose={() => setShowInfo(false)} />}
+    </div>
+  );
+}
+
+function AbliterateInfoModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, zIndex: 1000,
+        background: "rgba(0,0,0,0.62)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        backdropFilter: "blur(2px)",
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 560, maxHeight: "85vh",
+          background: "linear-gradient(180deg, #1a1d2e 0%, #16213e 100%)",
+          border: "2px solid #c84a4a",
+          borderRadius: 12,
+          color: "#fafafa",
+          display: "flex", flexDirection: "column",
+          boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
+        }}
+      >
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid rgba(244,67,54,0.3)" }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>🚫 What is abliteration?</div>
+          <div style={{ fontSize: 11, color: "#9aa0aa", marginTop: 4 }}>
+            FailSpy's refusal-direction stripping recipe
+          </div>
+        </div>
+        <div style={{ padding: "14px 18px", overflowY: "auto", flex: 1, fontSize: 12.5, lineHeight: 1.55, color: "#d6d8de" }}>
+          <p>
+            Abliteration finds and deletes the single direction in the
+            model's residual stream that's most responsible for refusal
+            ("Sorry, I can't help with that") behaviour, without retraining.
+          </p>
+          <p style={{ fontWeight: 700, color: "#fafafa", marginTop: 12 }}>How it works:</p>
+          <ol style={{ paddingLeft: 22, margin: "6px 0" }}>
+            <li>Loads the target model in transformers (HF format, fp16 on CUDA).</li>
+            <li>Runs ~32 "harmful" + ~32 "harmless" prompts through it.</li>
+            <li>Extracts last-token hidden states at every layer; finds the
+              strongest activation-difference direction at the best layer
+              (the "refusal direction").</li>
+            <li>Orthogonalizes every <code>o_proj</code> + <code>down_proj</code> + <code>embed_tokens</code> weight matrix
+              against that direction.</li>
+            <li>Saves the modified weights to a fresh transformers
+              directory — runnable / quantizable / fine-tunable like any
+              other model.</li>
+          </ol>
+          <p style={{ fontWeight: 700, color: "#fafafa", marginTop: 12 }}>
+            Runtime (RTX 4090-class GPU):
+          </p>
+          <ul style={{ paddingLeft: 22, margin: "6px 0" }}>
+            <li>1-3B model: ~3-8 min</li>
+            <li>7-8B model: ~10-20 min</li>
+            <li>13B+ model: 30-60+ min (depends on VRAM headroom for fp16 forward passes)</li>
+          </ul>
+          <p style={{ marginTop: 12, color: "#9aa0aa" }}>
+            This is the same technique that produced models like
+            DavidAU's abliterated Gemma, NousResearch's variants, and
+            the "supergemma4-abliterated" entry in your downloaded list.
+          </p>
+          <p style={{ marginTop: 8, color: "#ffb3b3" }}>
+            Note: requires a transformers-format model directory (not
+            GGUF). If you only have GGUF, download the original HF
+            weights first via the Models page.
+          </p>
+        </div>
+        <div style={{
+          padding: "12px 18px",
+          borderTop: "1px solid rgba(244,67,54,0.3)",
+          display: "flex", justifyContent: "flex-end",
+        }}>
+          <button
+            onClick={onClose}
+            style={{
+              padding: "8px 18px",
+              background: "linear-gradient(180deg, #4a6cff 0%, #3a55cc 100%)",
+              border: "none", color: "#fff",
+              borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: "pointer",
+            }}
+          >Got it</button>
+        </div>
       </div>
     </div>
   );

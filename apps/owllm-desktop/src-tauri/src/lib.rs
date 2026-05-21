@@ -124,6 +124,7 @@ pub fn run() {
             finetuning::train_stop,
             finetuning::train_status,
             finetuning::dataset_check,
+            finetuning::abliterate_start,
             agent_tools::tool_read_file,
             agent_tools::tool_write_file,
             agent_tools::tool_list_dir,

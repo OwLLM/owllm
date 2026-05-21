@@ -58,7 +58,12 @@ pub struct HfFile {
 
 #[derive(Deserialize)]
 struct ApiModel {
-    #[serde(rename = "modelId", alias = "id")]
+    // HF returns BOTH `modelId` and `id` for the same repo string on
+    // /api/models. Serde's `rename + alias` combo errors on
+    // "duplicate field" when both appear, so we lock to `id` (always
+    // present) and ignore the duplicate via `deny_unknown_fields=false`
+    // which is serde's default for unrecognised keys.
+    #[serde(rename = "id")]
     model_id: String,
     author: Option<String>,
     #[serde(default)]

@@ -482,30 +482,44 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
             if path.is_dir() {
                 let (total, _) = dir_summary(&path);
                 let has_config = path.join("config.json").is_file();
-                let has_safetensors = std::fs::read_dir(&path)
-                    .map(|it| it.flatten().any(|e| {
-                        e.path().extension().map(|x| x == "safetensors" || x == "bin").unwrap_or(false)
-                    }))
-                    .unwrap_or(false);
-                // "incomplete" heuristic: config.json exists but no weight
-                // files yet, OR the dir has a .download / .lock marker.
+                // Three weight-format probes — a model is "usable" if
+                // it has *any* of these on disk:
+                //   safetensors  : HF transformers format (preferred)
+                //   bin          : legacy pytorch_model.bin / shards
+                //   gguf         : llama.cpp single-file format
+                // The previous heuristic only checked the first two,
+                // so GGUF-only directories (very common — e.g. any
+                // "<repo>-GGUF" mirror) fell through to NEW and
+                // surfaced as "⏬ Incomplete" even though they were
+                // actually ready to run.
+                let mut has_safetensors = false;
+                let mut has_gguf = false;
+                if let Ok(it) = std::fs::read_dir(&path) {
+                    for e in it.flatten() {
+                        let p = e.path();
+                        if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                            match ext.to_ascii_lowercase().as_str() {
+                                "safetensors" | "bin" => has_safetensors = true,
+                                "gguf" => has_gguf = true,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                let has_weights = has_safetensors || has_gguf;
                 let has_marker = path.join(".download").is_file()
                               || path.join(".incomplete").is_file();
-                let is_incomplete = has_marker || (has_config && !has_safetensors && total < 100 * 1024 * 1024);
-                // "Onboarded" semantics: if the model has both a
-                // config.json AND weight files on disk, it's usable
-                // for inference / fine-tuning RIGHT NOW. The legacy
-                // "NEW" state was for models that hadn't yet had their
-                // dedicated env built, but we don't auto-create envs
-                // here — usability is what the user actually cares
-                // about, so mark anything weight-complete as READY.
+                // GGUF mirrors typically have no config.json — that
+                // alone shouldn't flag them as incomplete. The
+                // incomplete heuristic now requires config.json + no
+                // weights (a real "stalled download" signature).
+                let is_incomplete = has_marker
+                    || (has_config && !has_weights && total < 100 * 1024 * 1024);
                 let onboarding = if is_incomplete {
                     "BROKEN"
-                } else if has_config && has_safetensors {
+                } else if has_weights {
+                    // Any usable weight format = READY.
                     "READY"
-                } else if has_safetensors {
-                    // Weights but no config — unusual; flag as broken.
-                    "BROKEN"
                 } else {
                     // No weights yet — still in flight or a partial
                     // clone. Show as NEW so the user can decide.

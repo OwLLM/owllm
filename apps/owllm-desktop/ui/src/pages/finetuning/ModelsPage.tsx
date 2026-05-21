@@ -678,12 +678,13 @@ export default function ModelsPage() {
               selected={selectedPath === d.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
               onAddWeights={() => {
-                // The dir name on disk is the HF repo's last segment.
-                // Best-effort reconstruct: if the cards are derived
-                // from HF browse, we'd carry the id; for now use the
-                // directory name as a fallback so the picker can list
-                // files for it.
-                setPickerFor(d.name);
+                // Local dir convention from huggingface-cli / hf_hub:
+                // <author>/<repo> becomes <author>__<repo> on disk
+                // because Windows can't have '/' in a folder name.
+                // Reverse the convention to recover the HF id so
+                // hf_model_files doesn't 404/401 on the picker open.
+                const hfId = d.name.replace(/__/g, "/");
+                setPickerFor(hfId);
               }}
             />
           ))}

@@ -25,7 +25,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import ModelPicker, { type ModelInfo as PickerModelInfo } from "../agentic/ModelPicker";
+import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 
 const LS_KEY = "owllm:chat:v3";
 
@@ -33,10 +33,13 @@ const LS_KEY = "owllm:chat:v3";
 // the Model card header gradient, the A/B/C settings-tab button row,
 // the settings panel background (60% alpha tint), and the sender
 // label colour inside transcripts.
+// Softer per-column gradients — desaturated mid-tone variants of the
+// original A=blue / B=green / C=purple palette so the headers no
+// longer scream against the dark chat body.
 const COLUMN_GRADIENT: Record<"A" | "B" | "C", string> = {
-  A: "linear-gradient(90deg, #4a6cff, #2547c9)",
-  B: "linear-gradient(90deg, #22c55e, #15803d)",
-  C: "linear-gradient(90deg, #9C27B0, #6a1b9a)",
+  A: "linear-gradient(90deg, #3d4f8c, #2d3b6b)",
+  B: "linear-gradient(90deg, #3d7a5a, #2b5c44)",
+  C: "linear-gradient(90deg, #6b3d8c, #4f2a6b)",
 };
 
 const PANEL_TINT: Record<"A" | "B" | "C", string> = {
@@ -143,6 +146,7 @@ export default function ChatPage() {
   const [activePanel, setActivePanel] = useState<"A" | "B" | "C">("A");
   const [rightTab, setRightTab] = useState<"logs" | "unfiltered">("logs");
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
   const abortersRef = useRef<Map<"A" | "B" | "C", AbortController>>(new Map());
   const transcriptRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const m2mRunningRef = useRef(false);
@@ -166,16 +170,51 @@ export default function ChatPage() {
     return () => { dead = true; window.clearInterval(id); };
   }, []);
 
-  // Load READY models for the per-column dropdowns. Same source the
-  // Server tab and Qt main.py:18548 use (`list_models` → READY
-  // downloads from the Models tab).
+  // Load READY models + accounts status for the per-column pickers.
+  // Same source the Agents page uses so the dropdown stays identical.
   useEffect(() => {
     let dead = false;
     invoke<ModelInfo[]>("list_models")
       .then((m) => { if (!dead) setAvailableModels(Array.isArray(m) ? m : []); })
       .catch(() => { /* leave empty */ });
+    invoke<AccountsStatusLite>("accounts_status")
+      .then((s) => { if (!dead) setAccountsStatus(s); })
+      .catch(() => { /* leave null */ });
     return () => { dead = true; };
   }, []);
+
+  // Auto-start the global llama-server when column A picks a local
+  // GGUF — server.rs holds one Child today, so we treat column A's
+  // selection as the active server's model. Cloud / non-GGUF
+  // entries (no port, provider != local-gguf) are skipped here and
+  // routed through dispatch.ts on send. If a different model is
+  // already running, swap (stop then start).
+  const [autoStarting, setAutoStarting] = useState<string | null>(null);
+  useEffect(() => {
+    const driver = columns[0]; // column A
+    if (!driver?.selectedModel) return;
+    // Only auto-start local GGUF entries (have a port, no prefix).
+    const m = availableModels.find((x) => x.model_id === driver.selectedModel);
+    if (!m || m.provider !== "local" || m.port == null) return;
+    if (status.running && status.model_id === driver.selectedModel) return;
+    if (autoStarting === driver.selectedModel) return;
+
+    let dead = false;
+    (async () => {
+      setAutoStarting(driver.selectedModel);
+      try {
+        if (status.running) {
+          await invoke("server_stop").catch(() => {});
+        }
+        await invoke("server_start", { modelId: driver.selectedModel });
+      } catch (e) {
+        if (!dead) updateCol("A", { error: `Failed to start server: ${e}` });
+      } finally {
+        if (!dead) setAutoStarting(null);
+      }
+    })();
+    return () => { dead = true; };
+  }, [columns[0]?.selectedModel, status.running, status.model_id, availableModels]);
 
   // Auto-scroll each column's transcript when new tokens land.
   useEffect(() => {
@@ -465,8 +504,7 @@ export default function ChatPage() {
                     value={col.selectedModel}
                     onChange={(id) => updateCol(col.id, { selectedModel: id })}
                     models={availableModels as PickerModelInfo[]}
-                    status={null}
-                    localOnly
+                    status={accountsStatus}
                     fallbackLabel="— Select model —"
                   />
                 </div>
@@ -485,7 +523,13 @@ export default function ChatPage() {
                 >
                   {col.messages.length === 0 ? (
                     <div style={{ fontSize: 11, color: "#7a7f87" }}>
-                      {status.running ? "Send a message below — this column will reply." : "Waiting for server."}
+                      {status.running
+                        ? "Send a message below — this column will reply."
+                        : autoStarting
+                          ? `Starting server (${autoStarting})…`
+                          : col.selectedModel
+                            ? "Selected — server will start when you pick model A."
+                            : "Pick a model above to start a server."}
                     </div>
                   ) : col.messages.map((m, i) => (
                     <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>

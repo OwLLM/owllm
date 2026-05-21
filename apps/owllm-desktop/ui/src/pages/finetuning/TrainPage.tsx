@@ -372,7 +372,11 @@ export default function TrainPage() {
   };
 
   const browseDataset = async () => {
-    const picked = await tryInvoke<string | null>("dialog_pick_file", { filters: ["jsonl", "json", "csv", "parquet"] }, null);
+    // dialog::pick_file(title, filters) — filters is Vec<(label, Vec<ext>)>.
+    const picked = await tryInvoke<string | null>("pick_file", {
+      title: "Pick a training dataset",
+      filters: [["Datasets", ["jsonl", "json", "csv", "parquet"]]],
+    }, null);
     if (picked) setDatasetPath(picked);
   };
 

@@ -116,7 +116,14 @@ function WindowControls() {
         data-ui="FullscreenBtn"
         title={tauri ? "Toggle fullscreen" : undefined}
         style={fsBtn}
-        onClick={tauri ? () => { (w as any).setFullscreen?.(true).catch?.(() => {}); } : undefined}
+        onClick={tauri ? async () => {
+          try {
+            const win = w as any;
+            const cur = await win.isFullscreen?.();
+            if (typeof cur === "boolean") await win.setFullscreen(!cur);
+            else await win.toggleMaximize?.();
+          } catch { /* swallow */ }
+        } : undefined}
         onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.20)"; }}
         onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
       >⛶</button>

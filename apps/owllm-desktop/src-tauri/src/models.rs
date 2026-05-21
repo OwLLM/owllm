@@ -48,6 +48,8 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
             walk_gguf(&models_dir, &mut found, 0);
             found.sort();
             let base_port: u16 = 10500;
+            let mut gguf_parent_dirs: std::collections::HashSet<PathBuf> =
+                std::collections::HashSet::new();
             for (i, path) in found.into_iter().enumerate() {
                 let id = path
                     .file_stem()
@@ -57,9 +59,37 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
                 let size_mib = std::fs::metadata(&path)
                     .ok()
                     .map(|m| m.len() / 1024 / 1024);
+                if let Some(parent) = path.parent() {
+                    gguf_parent_dirs.insert(parent.to_path_buf());
+                }
                 out.push(ModelInfo {
                     model_id: id,
                     port: Some(base_port.saturating_add(i as u16)),
+                    base_model: Some(path.to_string_lossy().into_owned()),
+                    size_mib,
+                    provider: "local".to_string(),
+                });
+            }
+
+            // Transformers / safetensors directories — onboarded models
+            // that are NOT GGUF. Surfacing them here so the Chat picker
+            // matches the Models page row count. They have no port
+            // because llama-server.exe can't serve them; the Chat send
+            // path will error clearly if the user picks one without a
+            // vLLM/transformers backend.
+            let mut hf_dirs: Vec<PathBuf> = Vec::new();
+            walk_transformers_dirs(&models_dir, &mut hf_dirs, 0, &gguf_parent_dirs);
+            hf_dirs.sort();
+            for path in hf_dirs {
+                let id = path
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
+                let size_mib = dir_weight_size_mib(&path);
+                out.push(ModelInfo {
+                    model_id: id,
+                    port: None,
                     base_model: Some(path.to_string_lossy().into_owned()),
                     size_mib,
                     provider: "local".to_string(),
@@ -133,6 +163,73 @@ fn walk_gguf(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
             out.push(path);
         }
     }
+}
+
+/// Walk for transformers-style model directories — any dir containing
+/// a `config.json` AND at least one .safetensors / .bin shard, that
+/// isn't already represented by a GGUF entry. Bounded depth like
+/// walk_gguf to keep the UI responsive.
+fn walk_transformers_dirs(
+    dir: &Path,
+    out: &mut Vec<PathBuf>,
+    depth: usize,
+    skip: &std::collections::HashSet<PathBuf>,
+) {
+    if depth > 6 {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else { return };
+    let mut has_config = false;
+    let mut has_weights = false;
+    for entry in read.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            if name == "config.json" {
+                has_config = true;
+            } else {
+                let lower = name.to_lowercase();
+                if lower.ends_with(".safetensors") || lower.ends_with(".bin") {
+                    has_weights = true;
+                }
+            }
+        }
+    }
+    if has_config && has_weights && !skip.contains(dir) {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    let Ok(read2) = std::fs::read_dir(dir) else { return };
+    for entry in read2.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_transformers_dirs(&path, out, depth + 1, skip);
+        }
+    }
+}
+
+/// Sum the *.safetensors / *.bin sizes in a directory (one level
+/// deep) so the picker can show a meaningful "GiB" hint.
+fn dir_weight_size_mib(dir: &Path) -> Option<u64> {
+    let read = std::fs::read_dir(dir).ok()?;
+    let mut total: u64 = 0;
+    for entry in read.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if name.ends_with(".safetensors") || name.ends_with(".bin") {
+            if let Ok(m) = std::fs::metadata(&path) {
+                total += m.len() / 1024 / 1024;
+            }
+        }
+    }
+    if total > 0 { Some(total) } else { None }
 }
 
 #[cfg(test)]

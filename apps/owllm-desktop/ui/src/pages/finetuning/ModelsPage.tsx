@@ -409,14 +409,14 @@ export default function ModelsPage() {
         }}
       >
         {([
-          { key: "trainable"   as const, label: "✅ Trainable",            tip: "Transformers-format models with full weights — what the Train tab can fine-tune. Checking pulls newest instruct models from Hugging Face." },
-          { key: "gguf"        as const, label: "📦 GGUF",                 tip: "llama.cpp inference format. Checking searches Hugging Face for newest popular GGUF builds." },
-          { key: "instruct"    as const, label: "💡 Instruct",             tip: "Instruction-tuned base models (-instruct, -it). Checking pulls newest instruct from Hugging Face." },
-          { key: "abliterated" as const, label: "🚫 Abliterated",          tip: "Refusal-stripped variants — checking searches Hugging Face for the newest abliterated/uncensored builds." },
-          { key: "adapter"     as const, label: "🧩 Adapter (LoRA)",       tip: "PEFT / LoRA adapters — small overlays that need a base model to load. Checking searches for popular adapters." },
-          { key: "quantized"   as const, label: "⚡ Quantized (AWQ / GPTQ)", tip: "Inference-only weight-quantized checkpoints. Checking searches for popular AWQ/GPTQ builds." },
-          { key: "reasoning"   as const, label: "🧠 Reasoning",            tip: "Chain-of-thought reasoning models (R1, o1-style, deepseek-r1, QwQ). Checking searches for newest reasoning models." },
-          { key: "vision"      as const, label: "👁️ Vision",               tip: "Multimodal vision-language models. Checking searches for newest vision-language builds." },
+          { key: "trainable"   as const, label: "✅ Trainable",   tip: "Transformers-format models with full weights — what the Train tab can fine-tune. Checking pulls newest instruct models from Hugging Face." },
+          { key: "gguf"        as const, label: "📦 GGUF",        tip: "llama.cpp inference format. Checking searches Hugging Face for newest popular GGUF builds." },
+          { key: "instruct"    as const, label: "💡 Instruct",    tip: "Instruction-tuned base models (-instruct, -it). Checking pulls newest instruct from Hugging Face." },
+          { key: "abliterated" as const, label: "🚫 Abliterated", tip: "Refusal-stripped variants — checking searches Hugging Face for the newest abliterated/uncensored builds." },
+          { key: "adapter"     as const, label: "🧩 LoRA",        tip: "PEFT / LoRA adapters — small overlays that need a base model to load. Checking searches for popular adapters." },
+          { key: "quantized"   as const, label: "⚡ Quantized",    tip: "Inference-only weight-quantized checkpoints (AWQ / GPTQ). Checking searches for popular AWQ/GPTQ builds." },
+          { key: "reasoning"   as const, label: "🧠 Reasoning",   tip: "Chain-of-thought reasoning models (R1, o1-style, deepseek-r1, QwQ). Checking searches for newest reasoning models." },
+          { key: "vision"      as const, label: "👁️ Vision",      tip: "Multimodal vision-language models. Checking searches for newest vision-language builds." },
         ]).map((f) => {
           const on = filters.has(f.key);
           return (
@@ -433,6 +433,8 @@ export default function ModelsPage() {
                 background: "transparent",
                 cursor: "pointer",
                 userSelect: "none",
+                minWidth: 0,
+                overflow: "hidden",
               }}
             >
               <input
@@ -445,7 +447,12 @@ export default function ModelsPage() {
                 })}
                 style={{ width: 14, height: 14, margin: 0, flexShrink: 0 }}
               />
-              <span>{f.label}</span>
+              <span style={{
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                minWidth: 0,
+              }}>{f.label}</span>
             </label>
           );
         })}

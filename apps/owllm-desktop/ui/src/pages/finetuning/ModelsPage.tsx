@@ -104,6 +104,15 @@ type TunedAdapterRow = {
   baseHint: string | null;
 };
 
+// Shared grid layout for every card-bearing surface (Browse,
+// Downloaded, Tuned). Auto-fill with minmax(290, 390) so cards cap at
+// 390 px wide and reflow on narrow viewports — same on every tab.
+const CARD_GRID: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fill, minmax(290px, 390px))",
+  gap: 10,
+};
+
 const emptyState: React.CSSProperties = {
   gridColumn: "1 / span 2",
   padding: 40,
@@ -555,13 +564,7 @@ export default function ModelsPage() {
       {/* Cards rail — auto-fills with cards capped at 390 px wide so
           they stay readable on wide screens (was 1fr 1fr giving ~615 px
           cards) and reflow on narrow ones. */}
-      <div style={{
-        flex: 1,
-        minWidth: 0,
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(290px, 390px))",
-        gap: 10,
-      }}>
+      <div style={{ ...CARD_GRID, flex: 1, minWidth: 0 }}>
         {(() => {
           // Choose which list to render: live search results when the
           // user has searched, otherwise the curated recommendations.
@@ -648,7 +651,7 @@ export default function ModelsPage() {
       </>}
 
       {tab === "downloaded" && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div style={CARD_GRID}>
           {downloaded.length === 0 ? (
             <div style={{
               gridColumn: "1 / -1",
@@ -692,7 +695,7 @@ export default function ModelsPage() {
       )}
 
       {tab === "tuned" && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <div style={CARD_GRID}>
           {tuned.length === 0 ? (
             <div style={{
               gridColumn: "1 / -1",

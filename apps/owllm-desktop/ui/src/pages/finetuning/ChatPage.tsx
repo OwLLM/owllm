@@ -1,25 +1,33 @@
-// ChatPage — full chat surface against the local llama-server.
+// ChatPage — multi-column chat surface, port of Qt _build_test_sub_tab
+// (LLM/desktop_app/main.py:18399).
 //
-// What's wired (all real, no mocks):
-//   • Streams /v1/chat/completions from the running llama-server using
-//     OpenAI SSE — same protocol Qt's test tab used.
-//   • Polls server_status every 2s so the page knows whether to enable
-//     the input and which model_id to send.
-//   • Generation params (temperature, max_tokens, top_p) are passed to
-//     the model on every send.
-//   • System prompt + canned templates (Helpful / Coder / Persona /
-//     Custom) so users don't have to re-type a system message every run.
-//   • Conversation history persisted to localStorage so reopening the
-//     tab restores the last conversation (matches Qt's auto-save).
-//   • Save-as-JSON / Load-from-JSON buttons that work via the browser's
-//     File picker so chats can be shared.
-//   • Stop button aborts the in-flight stream cleanly.
+// Layout:
+//   ┌──────────────────────────────────────────────────────────────┐
+//   │ Number of chats: ☐1 ☑2 ☐3  · 🔄 Models talk     ⚙ params │
+//   ├──────────────────────────────────────────────────────────────┤
+//   │ 🔵 Model A    │ 🟢 Model B    │ 🟣 Model C  (when 3 active)  │
+//   │ system: ...   │ system: ...   │ system: ...                 │
+//   │ [transcript]  │ [transcript]  │ [transcript]                │
+//   └──────────────────────────────────────────────────────────────┤
+//   │ [draft textarea]              [▶ Send to all]               │
+//   └──────────────────────────────────────────────────────────────┘
+//
+// All columns target the currently-running server (single-slot
+// backend). Each column has its own system prompt + temperature so the
+// user can A/B compare prompt or sampling variations of the same model
+// — useful even when only one server is up. When the backend lands
+// multi-server support, swap each column to its own port without
+// changing this file's structure.
+//
+// "Models talk to each other" (M2M) takes columns A and B, alternates
+// who speaks, feeds each model's output to the other as the next user
+// message, until max_turns or Stop.
 
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 const ICONS = "/Page_icons";
-const LS_KEY = "owllm:chat:v2";
+const LS_KEY = "owllm:chat:v3";
 
 type ServerStatus = {
   running: boolean;
@@ -31,40 +39,67 @@ type ServerStatus = {
 type Role = "user" | "assistant" | "system";
 type ChatMsg = { role: Role; content: string };
 
-type SavedState = {
+// One side-by-side column. Each carries its own system prompt and
+// sampling params so the user can A/B without leaving the page.
+type Column = {
+  id: "A" | "B" | "C";
+  color: string;        // header gradient + label tint
+  emoji: string;        // 🔵 🟢 🟣
   system: string;
-  messages: ChatMsg[];
   temperature: number;
-  maxTokens: number;
   topP: number;
+  maxTokens: number;
+  messages: ChatMsg[];
+  busy: boolean;
+  error: string | null;
 };
 
-// Templates that prefill the system prompt. Picked from the Qt Test
-// tab's quick-template menu.
+const DEFAULT_COL = (id: "A" | "B" | "C"): Column => {
+  const palettes = {
+    A: { color: "#4a6cff", emoji: "🔵" },
+    B: { color: "#22c55e", emoji: "🟢" },
+    C: { color: "#9C27B0", emoji: "🟣" },
+  };
+  return {
+    id,
+    color: palettes[id].color,
+    emoji: palettes[id].emoji,
+    system: "You are a helpful AI assistant.",
+    temperature: id === "A" ? 0.5 : id === "B" ? 0.9 : 1.2,
+    topP: 0.9,
+    maxTokens: 1024,
+    messages: [],
+    busy: false,
+    error: null,
+  };
+};
+
 const TEMPLATES: Array<{ key: string; label: string; system: string }> = [
-  { key: "helpful",   label: "🤖 Helpful assistant", system: "You are a helpful AI assistant. Answer directly and concisely." },
-  { key: "coder",     label: "💻 Coding assistant",   system: "You are an expert software engineer. Provide working code, brief explanations, and call out edge cases. Use the user's stated language." },
-  { key: "tutor",     label: "🎓 Patient tutor",      system: "You are a patient tutor. Break concepts into small steps, check understanding, and adapt your explanation to the user's level." },
-  { key: "analyst",   label: "📊 Data analyst",       system: "You are a data analyst. Reason from the data the user shares. Show your assumptions. Prefer tables and bullet lists over prose." },
-  { key: "writer",    label: "✍ Writing partner",     system: "You are a writing partner. Improve clarity, flow, and tone while preserving the user's voice. Suggest concrete edits." },
-  { key: "translator",label: "🌐 Translator",         system: "You translate accurately between languages the user specifies, preserving register and meaning. Note ambiguities when relevant." },
-  { key: "custom",    label: "✏ Custom",              system: "" },
+  { key: "helpful",   label: "🤖 Helpful assistant",  system: "You are a helpful AI assistant. Answer directly and concisely." },
+  { key: "coder",     label: "💻 Coding assistant",    system: "You are an expert software engineer. Provide working code, brief explanations, and call out edge cases." },
+  { key: "tutor",     label: "🎓 Patient tutor",       system: "You are a patient tutor. Break concepts into small steps, check understanding." },
+  { key: "analyst",   label: "📊 Data analyst",        system: "You are a data analyst. Reason from the data the user shares. Show your assumptions." },
+  { key: "writer",    label: "✍ Writing partner",      system: "You are a writing partner. Improve clarity, flow, and tone while preserving the user's voice." },
+  { key: "translator",label: "🌐 Translator",          system: "You translate accurately between languages the user specifies, preserving register and meaning." },
+  { key: "custom",    label: "✏ Custom",               system: "" },
 ];
 
-function loadState(): Partial<SavedState> {
+type Persisted = {
+  count: 1 | 2 | 3;
+  columns: Column[];
+  converse: boolean;
+  maxTurns: number;
+};
+
+function loadState(): Partial<Persisted> {
   try {
     const raw = localStorage.getItem(LS_KEY);
     if (!raw) return {};
     return JSON.parse(raw);
-  } catch {
-    return {};
-  }
+  } catch { return {}; }
 }
-
-function saveState(s: SavedState) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify(s));
-  } catch { /* localStorage might be full or denied */ }
+function saveState(s: Persisted) {
+  try { localStorage.setItem(LS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
 }
 
 export default function ChatPage() {
@@ -72,76 +107,87 @@ export default function ChatPage() {
   const [status, setStatus] = useState<ServerStatus>({
     running: false, model_id: null, port: null, message: "",
   });
-  const [system, setSystem] = useState(persisted.system ?? TEMPLATES[0].system);
-  const [templateKey, setTemplateKey] = useState<string>("helpful");
-  const [messages, setMessages] = useState<ChatMsg[]>(persisted.messages ?? []);
+  const [count, setCount] = useState<1 | 2 | 3>(persisted.count ?? 2);
+  const [columns, setColumns] = useState<Column[]>(
+    persisted.columns ?? [DEFAULT_COL("A"), DEFAULT_COL("B"), DEFAULT_COL("C")]
+  );
   const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [temperature, setTemperature] = useState<number>(persisted.temperature ?? 0.7);
-  const [maxTokens, setMaxTokens]     = useState<number>(persisted.maxTokens   ?? 1024);
-  const [topP, setTopP]               = useState<number>(persisted.topP        ?? 0.9);
-  const [paramsOpen, setParamsOpen] = useState(true);
-  const abortRef = useRef<AbortController | null>(null);
-  const transcriptRef = useRef<HTMLDivElement | null>(null);
+  const [converse, setConverse] = useState<boolean>(persisted.converse ?? false);
+  const [maxTurns, setMaxTurns] = useState<number>(persisted.maxTurns ?? 20);
+  const [paramsOpenFor, setParamsOpenFor] = useState<"A" | "B" | "C" | null>(null);
+  const abortersRef = useRef<Map<"A" | "B" | "C", AbortController>>(new Map());
+  const transcriptRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const m2mRunningRef = useRef(false);
 
-  // Persist on any meaningful change.
+  // Persist on meaningful change.
   useEffect(() => {
-    saveState({ system, messages, temperature, maxTokens, topP });
-  }, [system, messages, temperature, maxTokens, topP]);
+    saveState({ count, columns, converse, maxTurns });
+  }, [count, columns, converse, maxTurns]);
 
-  // Poll the running server so we know which port + model to target.
+  // Poll server status every 2 s.
   useEffect(() => {
     let dead = false;
     const tick = async () => {
       try {
         const s = await invoke<ServerStatus>("server_status");
         if (!dead) setStatus(s);
-      } catch { /* keep last good values */ }
+      } catch { /* keep last */ }
     };
     tick();
     const id = window.setInterval(tick, 2000);
     return () => { dead = true; window.clearInterval(id); };
   }, []);
 
-  // Auto-scroll the transcript to the bottom when new tokens land.
+  // Auto-scroll each column's transcript when new tokens land.
   useEffect(() => {
-    const el = transcriptRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, busy]);
-
-  async function send() {
-    setError(null);
-    const text = draft.trim();
-    if (!text) return;
-    if (!status.running || !status.port) {
-      setError("No server is running. Go to the Server tab and start a model first.");
-      return;
+    for (const col of columns) {
+      const el = transcriptRefs.current[col.id];
+      if (el) el.scrollTop = el.scrollHeight;
     }
-    const userMsg: ChatMsg = { role: "user", content: text };
-    const next = [...messages, userMsg];
-    setMessages(next);
-    setDraft("");
-    setBusy(true);
+  }, [columns]);
+
+  const updateCol = (id: "A" | "B" | "C", patch: Partial<Column>) =>
+    setColumns((curr) => curr.map((c) => c.id === id ? { ...c, ...patch } : c));
+
+  const appendAssistant = (id: "A" | "B" | "C", delta: string) =>
+    setColumns((curr) => curr.map((c) => {
+      if (c.id !== id) return c;
+      const out = c.messages.slice();
+      const last = out[out.length - 1];
+      if (last && last.role === "assistant") {
+        out[out.length - 1] = { ...last, content: last.content + delta };
+      }
+      return { ...c, messages: out };
+    }));
+
+  // Send the same user text to one column. Returns the assistant
+  // reply when the stream completes (used by the M2M loop).
+  async function sendOne(col: Column, userText: string): Promise<string> {
+    if (!status.running || !status.port) {
+      updateCol(col.id, { error: "No server running. Start one on the Server tab." });
+      return "";
+    }
+    const userMsg: ChatMsg = { role: "user", content: userText };
+    const next = [...col.messages, userMsg];
+    updateCol(col.id, {
+      messages: [...next, { role: "assistant", content: "" }],
+      busy: true, error: null,
+    });
 
     const ctrl = new AbortController();
-    abortRef.current = ctrl;
+    abortersRef.current.set(col.id, ctrl);
 
     const payload = {
       model: status.model_id ?? "local",
-      messages: [
-        { role: "system" as const, content: system },
-        ...next,
-      ],
+      messages: [{ role: "system" as const, content: col.system }, ...next],
       stream: true,
-      temperature,
-      max_tokens: maxTokens,
-      top_p: topP,
+      temperature: col.temperature,
+      top_p: col.topP,
+      max_tokens: col.maxTokens,
     };
 
+    let reply = "";
     let buffer = "";
-    setMessages(curr => [...curr, { role: "assistant", content: "" }]);
-
     try {
       const resp = await fetch(`http://127.0.0.1:${status.port}/v1/chat/completions`, {
         method: "POST",
@@ -150,8 +196,7 @@ export default function ChatPage() {
         signal: ctrl.signal,
       });
       if (!resp.ok || !resp.body) {
-        const errText = await resp.text().catch(() => `HTTP ${resp.status}`);
-        throw new Error(errText);
+        throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
       }
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
@@ -170,47 +215,82 @@ export default function ChatPage() {
             const j = JSON.parse(body);
             const delta = j?.choices?.[0]?.delta?.content;
             if (typeof delta === "string" && delta) {
-              setMessages(curr => {
-                const out = curr.slice();
-                const last = out[out.length - 1];
-                if (last && last.role === "assistant") {
-                  out[out.length - 1] = { ...last, content: last.content + delta };
-                }
-                return out;
-              });
+              reply += delta;
+              appendAssistant(col.id, delta);
             }
-          } catch { /* malformed chunk — skip */ }
+          } catch { /* skip malformed */ }
         }
       }
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
-      if (err.name === "AbortError") {
-        setError("Stopped.");
-      } else {
-        setError(String(err.message ?? e));
+      if (err.name !== "AbortError") {
+        updateCol(col.id, { error: String(err.message ?? e) });
       }
     } finally {
-      setBusy(false);
-      abortRef.current = null;
+      updateCol(col.id, { busy: false });
+      abortersRef.current.delete(col.id);
     }
+    return reply;
   }
 
-  function stop() { abortRef.current?.abort(); }
-  function reset() {
-    abortRef.current?.abort();
-    setMessages([]);
-    setError(null);
+  async function sendAll() {
+    setColumns((curr) => curr.map((c) => ({ ...c, error: null })));
+    const text = draft.trim();
+    if (!text) return;
+    setDraft("");
+    if (converse && count >= 2) {
+      // Start the M2M loop instead of broadcasting to all columns.
+      void runConverse(text);
+      return;
+    }
+    const active = columns.slice(0, count);
+    // Fire all columns concurrently. We snapshot the current
+    // columns array (not state-after-setColumns) so each parallel call
+    // starts from the same baseline.
+    await Promise.all(active.map((c) => sendOne(c, text)));
   }
 
-  function pickTemplate(key: string) {
-    setTemplateKey(key);
+  // M2M: alternate A and B. C is ignored even when count===3 because
+  // the legacy Qt M2M only used the first two columns.
+  async function runConverse(opening: string) {
+    if (m2mRunningRef.current) return;
+    m2mRunningRef.current = true;
+    let speaker: "A" | "B" = "A";
+    let lastReply = opening;
+    let turns = 0;
+    while (turns < maxTurns && m2mRunningRef.current) {
+      const col = columns.find((c) => c.id === speaker);
+      if (!col) break;
+      const reply = await sendOne(col, lastReply);
+      if (!reply) break;
+      lastReply = reply;
+      speaker = speaker === "A" ? "B" : "A";
+      turns += 1;
+    }
+    m2mRunningRef.current = false;
+  }
+
+  function stopAll() {
+    m2mRunningRef.current = false;
+    for (const a of abortersRef.current.values()) a.abort();
+    abortersRef.current.clear();
+    setColumns((curr) => curr.map((c) => ({ ...c, busy: false })));
+  }
+
+  function resetAll() {
+    stopAll();
+    setColumns((curr) => curr.map((c) => ({ ...c, messages: [], error: null })));
+  }
+
+  function applyTemplate(colId: "A" | "B" | "C", key: string) {
     const t = TEMPLATES.find((x) => x.key === key);
-    if (t && key !== "custom") setSystem(t.system);
+    if (!t || key === "custom") return;
+    updateCol(colId, { system: t.system });
   }
 
   function saveJson() {
     const blob = new Blob(
-      [JSON.stringify({ system, messages, temperature, maxTokens, topP }, null, 2)],
+      [JSON.stringify({ count, columns, converse, maxTurns }, null, 2)],
       { type: "application/json" }
     );
     const url = URL.createObjectURL(blob);
@@ -231,20 +311,18 @@ export default function ChatPage() {
       try {
         const text = await f.text();
         const j = JSON.parse(text);
-        if (typeof j.system === "string") setSystem(j.system);
-        if (Array.isArray(j.messages)) setMessages(j.messages);
-        if (typeof j.temperature === "number") setTemperature(j.temperature);
-        if (typeof j.maxTokens === "number") setMaxTokens(j.maxTokens);
-        if (typeof j.topP === "number") setTopP(j.topP);
-      } catch (e) {
-        setError(`Load failed: ${String(e)}`);
-      }
+        if (j.count) setCount(j.count);
+        if (Array.isArray(j.columns)) setColumns(j.columns);
+        if (typeof j.converse === "boolean") setConverse(j.converse);
+        if (typeof j.maxTurns === "number") setMaxTurns(j.maxTurns);
+      } catch { /* ignore */ }
     };
     inp.click();
   }
 
+  const anyBusy = columns.some((c) => c.busy);
   const placeholder = status.running
-    ? `Ask ${status.model_id ?? "the model"} something…  (Enter to send · Shift+Enter for newline)`
+    ? `Ask the ${count > 1 ? `${count} models` : "model"} something… (Enter to send · Shift+Enter for newline)`
     : "Start a server on the Server tab to enable chat.";
 
   return (
@@ -259,9 +337,66 @@ export default function ChatPage() {
       minHeight: 0,
     }}>
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <img src={`${ICONS}/owl_chat.png`} alt="" style={{ width: 32, height: 32, objectFit: "contain" }} />
         <div style={{ fontSize: 24, fontWeight: 800, color: "var(--fg-strong)" }}>💬 Chat</div>
+
+        <div style={{ marginLeft: 12, display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--fg-muted)" }}>
+          <span>Number of chats:</span>
+          {[1, 2, 3].map((n) => (
+            <label key={n} style={{
+              display: "inline-flex", alignItems: "center", gap: 3,
+              padding: "3px 8px",
+              background: count === n ? "rgba(102,126,234,0.18)" : "transparent",
+              border: `1px solid ${count === n ? "rgba(102,126,234,0.5)" : "#2a3242"}`,
+              borderRadius: 4,
+              cursor: "pointer",
+              fontWeight: count === n ? 700 : 400,
+              color: count === n ? "var(--fg)" : "var(--fg-muted)",
+            }}>
+              <input
+                type="radio"
+                name="chat-count"
+                checked={count === n}
+                onChange={() => setCount(n as 1 | 2 | 3)}
+                style={{ margin: 0 }}
+              />
+              {n}
+            </label>
+          ))}
+        </div>
+
+        <label style={{
+          display: "inline-flex", alignItems: "center", gap: 4,
+          fontSize: 12, color: count < 2 ? "#555" : "var(--fg-muted)",
+          opacity: count < 2 ? 0.5 : 1,
+        }}>
+          <input
+            type="checkbox"
+            checked={converse}
+            disabled={count < 2}
+            onChange={(e) => setConverse(e.target.checked)}
+          />
+          🔄 Models talk to each other
+        </label>
+        {converse && (
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 12, color: "var(--fg-muted)" }}>
+            Max turns:
+            <input
+              type="number"
+              value={maxTurns}
+              min={1}
+              max={200}
+              onChange={(e) => setMaxTurns(Number(e.target.value) || 1)}
+              style={{
+                width: 60, padding: "2px 6px",
+                background: "#0b1020", border: "1px solid #1c2434",
+                borderRadius: 4, color: "var(--fg)", fontSize: 12,
+              }}
+            />
+          </label>
+        )}
+
         <div style={{ flex: 1 }} />
         <span style={{
           width: 8, height: 8, borderRadius: 4,
@@ -273,207 +408,203 @@ export default function ChatPage() {
             ? `Server: ${status.model_id ?? "?"}${status.port ? ` · port ${status.port}` : ""}`
             : "Server: stopped"}
         </div>
+        <button onClick={loadJson} style={btnGhost} title="Load chat JSON">📂</button>
+        <button onClick={saveJson} style={btnGhost} title="Save chat JSON">💾</button>
+        <button onClick={resetAll} style={btnGhost} title="Clear all transcripts">🗑</button>
       </div>
 
-      {/* Two-column body: chat on left, params on right */}
-      <div style={{ display: "grid", gridTemplateColumns: paramsOpen ? "1fr 280px" : "1fr 36px", gap: 10, flex: 1, minHeight: 0 }}>
-        {/* Chat column */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, minHeight: 0 }}>
-          {/* System + template row */}
-          <div style={{
-            display: "flex", gap: 8, alignItems: "center",
+      {/* Columns row */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))`,
+        gap: 10,
+        flex: 1,
+        minHeight: 0,
+      }}>
+        {columns.slice(0, count).map((col) => (
+          <div key={col.id} style={{
+            display: "flex", flexDirection: "column",
             background: "#0e1320",
             border: "1px solid #1c2434",
-            borderRadius: 8, padding: "6px 10px",
-            flexWrap: "wrap",
+            borderRadius: 8,
+            minHeight: 0,
+            overflow: "hidden",
           }}>
-            <select
-              value={templateKey}
-              onChange={(e) => pickTemplate(e.target.value)}
+            {/* Column header */}
+            <div style={{
+              padding: "10px 12px",
+              background: `linear-gradient(180deg, ${col.color}88, ${col.color}44)`,
+              borderBottom: `1px solid ${col.color}88`,
+              display: "flex", alignItems: "center", gap: 8,
+            }}>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>
+                {col.emoji} Model {col.id}
+              </div>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.7)" }}>
+                {status.running ? `port ${status.port}` : "—"}
+              </span>
+              <span style={{ flex: 1 }} />
+              <button
+                onClick={() => setParamsOpenFor((curr) => curr === col.id ? null : col.id)}
+                style={{
+                  padding: "3px 8px",
+                  background: "rgba(0,0,0,0.25)",
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  borderRadius: 4,
+                  color: "#fff", fontSize: 11, cursor: "pointer",
+                }}
+                title="Per-column generation parameters"
+              >⚙ T={col.temperature.toFixed(1)}</button>
+            </div>
+
+            {/* Params drawer */}
+            {paramsOpenFor === col.id && (
+              <div style={{
+                padding: "10px 12px",
+                background: "#0b1020",
+                borderBottom: "1px solid #1c2434",
+                display: "flex", flexDirection: "column", gap: 8,
+              }}>
+                <select
+                  onChange={(e) => applyTemplate(col.id, e.target.value)}
+                  style={{
+                    background: "#162033", border: "1px solid #243044",
+                    color: "var(--fg)", fontSize: 11, padding: "4px 6px",
+                    borderRadius: 4,
+                  }}
+                >
+                  <option value="">— Pick a system-prompt template —</option>
+                  {TEMPLATES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+                </select>
+                <textarea
+                  value={col.system}
+                  onChange={(e) => updateCol(col.id, { system: e.target.value })}
+                  placeholder="System prompt for this column"
+                  style={{
+                    minHeight: 50, padding: 6,
+                    background: "#0b1020", border: "1px solid #1c2434",
+                    borderRadius: 4, color: "var(--fg)", fontSize: 11,
+                    resize: "vertical", fontFamily: "inherit",
+                  }}
+                />
+                <Slider label="Temperature" value={col.temperature} min={0} max={2} step={0.05} onChange={(v) => updateCol(col.id, { temperature: v })} />
+                <Slider label="Top-p"       value={col.topP}        min={0.05} max={1} step={0.05} onChange={(v) => updateCol(col.id, { topP: v })} />
+                <NumberInput label="Max tokens" value={col.maxTokens} min={1} max={32768} step={64} onChange={(v) => updateCol(col.id, { maxTokens: v })} />
+              </div>
+            )}
+
+            {/* Transcript */}
+            <div
+              ref={(el) => { transcriptRefs.current[col.id] = el; }}
               style={{
-                background: "#162033", border: "1px solid #243044",
-                color: "var(--fg)", fontSize: 12, padding: "4px 6px",
-                borderRadius: 4,
+                flex: 1, overflowY: "auto", minHeight: 0,
+                padding: 12,
+                display: "flex", flexDirection: "column", gap: 10,
+                fontSize: 13, lineHeight: 1.5,
               }}
             >
-              {TEMPLATES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
-            </select>
-            <input
-              value={system}
-              onChange={e => { setSystem(e.target.value); setTemplateKey("custom"); }}
-              style={{
-                flex: 1, minWidth: 180, height: 26, background: "#0b1020",
-                border: "1px solid #1c2434", color: "var(--fg)", fontSize: 12,
-                padding: "0 8px", borderRadius: 4, outline: "none",
-              }}
-              placeholder="System prompt (applied to every conversation)"
-            />
-            <button onClick={loadJson} style={btnGhost} title="Load a chat from a JSON file.">📂 Load</button>
-            <button onClick={saveJson} style={btnGhost} title="Download the current chat as JSON.">💾 Save</button>
-            <button onClick={reset}    style={btnGhost} title="Clear and start fresh.">🗑 New</button>
-          </div>
-
-          {/* Transcript */}
-          <div
-            ref={transcriptRef}
-            style={{
-              flex: 1, overflowY: "auto", minHeight: 0,
-              background: "#0e1320",
-              border: "1px solid #1c2434",
-              borderRadius: 8, padding: 14,
-              display: "flex", flexDirection: "column", gap: 12,
-              fontSize: 13, lineHeight: 1.55,
-            }}
-          >
-            {messages.length === 0 ? (
-              <div style={{ fontSize: 12, color: "#7a7f87" }}>
-                {status.running
-                  ? "Type a message below to start the conversation."
-                  : "Start a server on the Server tab first, then come back here."}
-              </div>
-            ) : messages.map((m, i) => (
-              <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                <div style={{
-                  fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
-                  color: m.role === "user" ? "#7aa2ff" : "#a0e88a",
-                }}>
-                  {m.role === "user" ? "YOU" : "ASSISTANT"}
+              {col.messages.length === 0 ? (
+                <div style={{ fontSize: 11, color: "#7a7f87" }}>
+                  {status.running ? "Send a message below — this column will reply." : "Waiting for server."}
                 </div>
-                <div style={{ whiteSpace: "pre-wrap", color: "var(--fg)" }}>
-                  {m.content || (busy && i === messages.length - 1 ? "▍" : "")}
-                </div>
-              </div>
-            ))}
-            {error ? (
-              <div style={{
-                border: "1px solid #ff9f9f",
-                background: "rgba(255,80,80,0.10)",
-                color: "#ffb0b0",
-                borderRadius: 6, padding: 8,
-                fontSize: 12,
-              }}>{error}</div>
-            ) : null}
-          </div>
-
-          {/* Composer */}
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-            <textarea
-              value={draft}
-              onChange={e => setDraft(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === "Enter" && !e.shiftKey && !busy) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              placeholder={placeholder}
-              disabled={!status.running || busy}
-              style={{
-                flex: 1, minHeight: 70, maxHeight: 200,
-                resize: "vertical",
-                padding: 10, borderRadius: 8,
-                background: "#0b1020",
-                color: "var(--fg)",
-                border: "1px solid #1c2434",
-                fontFamily: "inherit", fontSize: 13, lineHeight: 1.5,
-                outline: "none",
-              }}
-            />
-            {busy ? (
-              <button
-                onClick={stop}
-                style={{
-                  height: 70, padding: "0 18px",
-                  background: "linear-gradient(180deg, #f44336, #d32f2f)",
-                  color: "#fff", border: "none", borderRadius: 8,
-                  fontSize: 13, fontWeight: 700, cursor: "pointer",
-                  boxShadow: "0 0 16px -4px #f4433688",
-                }}
-                title="Abort the in-flight stream."
-              >⏹ Stop</button>
-            ) : (
-              <button
-                onClick={send}
-                disabled={!status.running || !draft.trim()}
-                style={{
-                  height: 70, padding: "0 18px",
-                  background: !status.running || !draft.trim()
-                    ? "rgba(102,126,234,0.12)"
-                    : "linear-gradient(180deg, #4a6cff, #3a55cc)",
-                  color: !status.running || !draft.trim() ? "#7a7f87" : "#fff",
-                  border: "none", borderRadius: 8,
-                  fontSize: 13, fontWeight: 700,
-                  cursor: (!status.running || !draft.trim()) ? "not-allowed" : "pointer",
-                  opacity: (!status.running || !draft.trim()) ? 0.55 : 1,
-                  boxShadow: !status.running || !draft.trim() ? "none" : "0 0 16px -4px #4a6cff88",
-                }}
-                title="Send the message (Enter, or Shift+Enter for a newline)."
-              >Send ▶</button>
-            )}
-          </div>
-        </div>
-
-        {/* Params sidebar */}
-        <div style={{
-          background: "#0e1320",
-          border: "1px solid #1c2434",
-          borderRadius: 8,
-          padding: paramsOpen ? 12 : 6,
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-          minHeight: 0,
-        }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <button
-              onClick={() => setParamsOpen((v) => !v)}
-              style={{ ...btnGhost, padding: "2px 6px", fontSize: 14 }}
-              title={paramsOpen ? "Collapse parameters" : "Expand parameters"}
-            >{paramsOpen ? "›" : "‹"}</button>
-            {paramsOpen && <div style={{ fontWeight: 700, fontSize: 13, color: "#667eea" }}>⚙ Generation</div>}
-          </div>
-
-          {paramsOpen && (
-            <>
-              <RangeField label="Temperature"   value={temperature} min={0} max={2} step={0.05} onChange={setTemperature} help="Higher = more random. 0 = deterministic; 0.7 = balanced; 1.2 = creative." />
-              <RangeField label="Top-p"         value={topP}        min={0.05} max={1} step={0.05} onChange={setTopP}     help="Nucleus sampling cutoff. 0.9 picks from the top 90% probability mass." />
-              <NumField   label="Max tokens"    value={maxTokens}   min={1} max={32768} step={64}  onChange={setMaxTokens} help="Hard cap on the response length. 1024 ≈ 750 English words." />
-
-              <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid #1c2434" }}>
-                <div style={{ fontWeight: 700, fontSize: 13, color: "#667eea", marginBottom: 6 }}>📋 Conversation</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 4, fontSize: 11 }}>
-                  <div style={{ color: "var(--fg-muted)" }}>Turns</div>
-                  <div style={{ color: "var(--fg)" }}>{messages.length}</div>
-                  <div style={{ color: "var(--fg-muted)" }}>Chars</div>
-                  <div style={{ color: "var(--fg)" }}>{messages.reduce((n, m) => n + m.content.length, 0).toLocaleString()}</div>
-                  <div style={{ color: "var(--fg-muted)" }}>Model</div>
-                  <div style={{ color: "var(--fg)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={status.model_id ?? ""}>
-                    {status.model_id ?? "—"}
+              ) : col.messages.map((m, i) => (
+                <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
+                    color: m.role === "user" ? "#7aa2ff" : col.color,
+                  }}>
+                    {m.role === "user" ? "YOU" : `MODEL ${col.id}`}
+                  </div>
+                  <div style={{ whiteSpace: "pre-wrap", color: "var(--fg)" }}>
+                    {m.content || (col.busy && i === col.messages.length - 1 ? "▍" : "")}
                   </div>
                 </div>
-              </div>
-            </>
-          )}
-        </div>
+              ))}
+              {col.error && (
+                <div style={{
+                  border: "1px solid #ff9f9f",
+                  background: "rgba(255,80,80,0.10)",
+                  color: "#ffb0b0",
+                  borderRadius: 6, padding: 8, fontSize: 11,
+                }}>{col.error}</div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Composer */}
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey && !anyBusy) {
+              e.preventDefault();
+              sendAll();
+            }
+          }}
+          placeholder={placeholder}
+          disabled={!status.running || anyBusy}
+          style={{
+            flex: 1, minHeight: 60, maxHeight: 180,
+            resize: "vertical",
+            padding: 10, borderRadius: 8,
+            background: "#0b1020",
+            color: "var(--fg)",
+            border: "1px solid #1c2434",
+            fontFamily: "inherit", fontSize: 13, lineHeight: 1.5,
+            outline: "none",
+          }}
+        />
+        {anyBusy ? (
+          <button
+            onClick={stopAll}
+            style={{
+              height: 60, padding: "0 18px",
+              background: "linear-gradient(180deg, #f44336, #d32f2f)",
+              color: "#fff", border: "none", borderRadius: 8,
+              fontSize: 13, fontWeight: 700, cursor: "pointer",
+              boxShadow: "0 0 16px -4px #f4433688",
+            }}
+          >⏹ Stop all</button>
+        ) : (
+          <button
+            onClick={sendAll}
+            disabled={!status.running || !draft.trim()}
+            style={{
+              height: 60, padding: "0 18px",
+              background: !status.running || !draft.trim()
+                ? "rgba(102,126,234,0.12)"
+                : "linear-gradient(180deg, #4a6cff, #3a55cc)",
+              color: !status.running || !draft.trim() ? "#7a7f87" : "#fff",
+              border: "none", borderRadius: 8,
+              fontSize: 13, fontWeight: 700,
+              cursor: (!status.running || !draft.trim()) ? "not-allowed" : "pointer",
+              opacity: (!status.running || !draft.trim()) ? 0.55 : 1,
+              boxShadow: !status.running || !draft.trim() ? "none" : "0 0 16px -4px #4a6cff88",
+            }}
+          >{converse && count >= 2 ? "▶ Start conversation" : count > 1 ? `▶ Send to all ${count}` : "▶ Send"}</button>
+        )}
       </div>
     </div>
   );
 }
 
 const btnGhost: React.CSSProperties = {
-  padding: "4px 10px",
+  padding: "4px 8px",
   background: "#162033",
   border: "1px solid #243044",
   color: "var(--fg)",
   borderRadius: 4,
-  fontSize: 11,
+  fontSize: 12,
   cursor: "pointer",
 };
 
-function RangeField(p: { label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void; help?: string }) {
+function Slider(p: { label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void }) {
   return (
-    <div title={p.help} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--fg-muted)" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "var(--fg-muted)" }}>
         <span>{p.label}</span>
         <span style={{ color: "var(--fg)", fontVariantNumeric: "tabular-nums" }}>{p.value.toFixed(2)}</span>
       </div>
@@ -488,22 +619,19 @@ function RangeField(p: { label: string; value: number; min: number; max: number;
   );
 }
 
-function NumField(p: { label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void; help?: string }) {
+function NumberInput(p: { label: string; value: number; min: number; max: number; step: number; onChange: (v: number) => void }) {
   return (
-    <label title={p.help} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{p.label}</span>
+    <label style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      <span style={{ fontSize: 10, color: "var(--fg-muted)" }}>{p.label}</span>
       <input
         type="number"
         min={p.min} max={p.max} step={p.step}
         value={p.value}
         onChange={(e) => p.onChange(parseInt(e.target.value, 10) || p.min)}
         style={{
-          padding: "5px 8px",
-          background: "#0b1020",
-          border: "1px solid #1c2434",
-          color: "var(--fg)",
-          borderRadius: 4,
-          fontSize: 12,
+          padding: "4px 6px",
+          background: "#0b1020", border: "1px solid #1c2434",
+          color: "var(--fg)", borderRadius: 4, fontSize: 11,
         }}
       />
     </label>

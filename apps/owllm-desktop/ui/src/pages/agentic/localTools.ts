@@ -68,10 +68,19 @@ export function parseToolCalls(text: string): ToolCall[] {
 /// block. Matches the format parseToolCalls reads, with one worked
 /// example so the model has a tight reference + example in one place.
 /// Mirrors format_for_prompt in LLM/core/agents/tools/parser.py:69.
+///
+/// If `allowed` is given but doesn't overlap our registry (e.g. the
+/// legacy yaml lists tools we haven't ported yet), fall through to
+/// the full registry rather than emitting nothing — otherwise the
+/// model sees zero tools and silently degrades to text-only answers.
 export function formatToolsForPrompt(allowed?: string[]): string {
-  const tools = LOCAL_TOOL_SPECS.filter(
-    (t) => !allowed || allowed.length === 0 || allowed.includes(t.name),
-  );
+  let tools = LOCAL_TOOL_SPECS;
+  if (allowed && allowed.length > 0) {
+    const filtered = LOCAL_TOOL_SPECS.filter((t) => allowed.includes(t.name));
+    if (filtered.length > 0) tools = filtered;
+    // else: fall through to all tools — allowlist names didn't match
+    // any port. Better to expose extra than nothing.
+  }
   if (tools.length === 0) return "";
   const lines: string[] = [
     "",
@@ -105,9 +114,10 @@ export function formatToolsForPrompt(allowed?: string[]): string {
 type ToolArg = { name: string; required: boolean; description: string };
 type ToolSpec = { name: string; description: string; args: ToolArg[] };
 
-/// Minimum set the agent loop ships. Mirrors the legacy Python
-/// builtin_registry — read_file / write_file / list_dir / create_dir /
-/// shell. Each maps to a Tauri command in src-tauri/src/agent_tools.rs.
+/// Tool spec the system prompt advertises. Names match the legacy
+/// Python builtin_registry (LLM/core/agents/tools/builtin.py) so any
+/// role yaml's tool_allowlist filter resolves correctly. Each entry
+/// maps to a Tauri command in src-tauri/src/agent_tools.rs.
 export const LOCAL_TOOL_SPECS: ToolSpec[] = [
   {
     name: "read_file",
@@ -115,14 +125,26 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     args: [{ name: "path", required: true, description: "Absolute or project-relative file path." }],
   },
   {
-    name: "write_file",
+    name: "write_file_with_diff",
     description:
-      "Write UTF-8 text to a file, creating parent directories as needed. " +
-      "Overwrites any existing file at that path. Use for creating new code, " +
-      "configs, READMEs etc.",
+      "Create a NEW file or fully rewrite an existing one. Parent dirs are " +
+      "created automatically. Use this when writing fresh code / configs / " +
+      "READMEs that don't exist yet.",
     args: [
       { name: "path", required: true, description: "Absolute or project-relative file path." },
       { name: "content", required: true, description: "The full file contents to write." },
+    ],
+  },
+  {
+    name: "edit_file",
+    description:
+      "Modify an EXISTING file by replacing an exact substring with new " +
+      "content. Use for surgical edits — preserves the rest of the file. " +
+      "old_string must match the file byte-for-byte (whitespace included).",
+    args: [
+      { name: "path", required: true, description: "Absolute or project-relative file path." },
+      { name: "old_string", required: true, description: "Exact text to find and replace." },
+      { name: "new_string", required: true, description: "Replacement text." },
     ],
   },
   {
@@ -136,10 +158,11 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     args: [{ name: "path", required: true, description: "Absolute or project-relative directory path." }],
   },
   {
-    name: "shell_exec",
+    name: "shell",
     description:
       "Run a shell command. On Windows uses cmd.exe /c, elsewhere sh -c. " +
-      "Returns stdout, stderr, exit_code. Use for git, npm install, etc.",
+      "Returns stdout, stderr, exit_code. Use for git, npm install, python " +
+      "scripts, etc.",
     args: [{ name: "command", required: true, description: "The shell command line to run." }],
   },
 ];
@@ -161,13 +184,28 @@ export async function executeToolCall(call: ToolCall, projectCwd: string): Promi
         const text = await invoke<string>("tool_read_file", { path: call.args.path, cwd });
         return { ok: true, output: truncate(text, 8000) };
       }
-      case "write_file": {
+      case "write_file_with_diff":
+      case "write_file": { // accept legacy alias too
         await invoke("tool_write_file", {
           path: call.args.path,
           content: call.args.content ?? "",
           cwd,
         });
         return { ok: true, output: `wrote ${call.args.path}` };
+      }
+      case "edit_file": {
+        // String-replace semantics: read, replace exact old_string with
+        // new_string, write back. Matches the legacy edit_file tool.
+        const text = await invoke<string>("tool_read_file", { path: call.args.path, cwd });
+        const old_s = call.args.old_string ?? "";
+        const new_s = call.args.new_string ?? "";
+        if (!old_s) return { ok: false, output: "edit_file: old_string is required" };
+        if (!text.includes(old_s)) {
+          return { ok: false, output: `edit_file: old_string not found in ${call.args.path}` };
+        }
+        const updated = text.replace(old_s, new_s);
+        await invoke("tool_write_file", { path: call.args.path, content: updated, cwd });
+        return { ok: true, output: `edited ${call.args.path}` };
       }
       case "list_dir": {
         const entries = await invoke<Array<{ name: string; kind: string; size?: number }>>(
@@ -182,7 +220,8 @@ export async function executeToolCall(call: ToolCall, projectCwd: string): Promi
         await invoke("tool_create_dir", { path: call.args.path, cwd });
         return { ok: true, output: `created ${call.args.path}` };
       }
-      case "shell_exec": {
+      case "shell":
+      case "shell_exec": { // accept legacy alias too
         const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
           "tool_shell_exec", { command: call.args.command, cwd },
         );

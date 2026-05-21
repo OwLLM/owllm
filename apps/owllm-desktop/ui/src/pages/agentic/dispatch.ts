@@ -398,6 +398,19 @@ export function findOrchestratorSpec(team: Team): AgentSpec | undefined {
   );
 }
 
+/// Locate the Critic on the team, if present. Used by the brainstorm
+/// phase that runs between the orchestrator's first plan and the
+/// specialist dispatch — the critic reviews the plan and feeds back
+/// before any work is delegated.
+export function findCriticSpec(team: Team): AgentSpec | undefined {
+  return (
+    team.agents.find(a => a.name === "critical_thinker") ??
+    team.agents.find(a => a.base === "critical_thinker") ??
+    team.agents.find(a => a.name === "critic") ??
+    team.agents.find(a => a.base === "critic")
+  );
+}
+
 export function toTeam(t: TeamTemplateBackend): Team {
   const d = t.data ?? {};
   const agents: AgentSpec[] = Array.isArray(d.agents)
@@ -1429,6 +1442,95 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
           port, orchModel, orchProvider,
           orchPrompt,
           `${goal}\n\n(the critic just answered "${criticReply}" to your "${question}" — incorporate this and dispatch now)`,
+          tempFor(orch, 0.4), signal,
+          (delta) => hooks.onLogDelta(orch.name, delta),
+          projectCwd, liveHistory, autoApprove,
+          (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
+          roleByName.get(orch.base)?.toolAllowlist,
+          undefined,
+          getClaudeSession(projectId, orch.name),
+        );
+      } finally {
+        hooks.onAgentEnd(orch.name);
+      }
+    }
+  }
+
+  // ---- Phase 1.5: BRAINSTORM with the critic before dispatching ----
+  // If the team includes a critical_thinker (and director mode's
+  // question-handshake didn't already fire above), have them review
+  // the orchestrator's plan and feed back BEFORE work is delegated to
+  // specialists. This is the "brainstorm" the user expects — not a
+  // post-hoc review of the final synthesis, but a peer pass on the
+  // plan itself. We re-run the orchestrator once with the critic's
+  // notes folded in so the dispatch the specialists actually receive
+  // reflects the joint thinking.
+  const critic = findCriticSpec(team);
+  const skipBrainstorm = directorMode && extractUserInputRequest(orchReply).question !== null;
+  if (critic && critic.name !== orch.name && !skipBrainstorm) {
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+    hooks.onThought(orch.name, {
+      role: "dispatch",
+      color: "#a578ff",
+      text: `🧠 brainstorm → ${critic.name}`,
+    });
+    hooks.onAgentStart(critic.name);
+    hooks.onLog(critic.name, { role: critic.name, color: "#ff9ad9", text: "" });
+    const criticRole = roleByName.get(critic.base);
+    const criticSysPrompt =
+      criticRole?.systemPrompt ??
+      criticRole?.description ??
+      "You are the critical thinker. Briefly review the orchestrator's plan: flag missing edge cases, scope creep, missing roles, or alternative approaches. Be terse — 3-6 bullets max. Do not propose a different team; only critique the plan.";
+    const criticBrainstormInput = [
+      "The user's goal:",
+      goal,
+      "",
+      "The orchestrator's proposed plan:",
+      orchReply,
+      "",
+      "Review this plan. What is missing, risky, or worth challenging before specialists start work? 3-6 bullets max.",
+    ].join("\n");
+    const criticModelId = modelFor(critic.name);
+    const criticProvider = providerFor(criticModelId, models);
+    let criticBrainstormReply = "";
+    try {
+      criticBrainstormReply = await streamChatCompletion(
+        port, criticModelId, criticProvider,
+        criticSysPrompt, criticBrainstormInput,
+        tempFor(critic, 0.3), signal,
+        (delta) => hooks.onLogDelta(critic.name, delta),
+        projectCwd, liveHistory, autoApprove,
+        (channel, role, delta) => hooks.onThoughtDelta(critic.name, channel, role, delta),
+        roleByName.get(critic.base)?.toolAllowlist,
+        undefined,
+        getClaudeSession(projectId, critic.name),
+      );
+    } catch (e) {
+      // Brainstorm failure is non-fatal — continue with the original
+      // plan rather than killing the whole dispatch.
+      console.warn("[dispatch] brainstorm critic call failed:", e);
+    } finally {
+      hooks.onAgentEnd(critic.name);
+    }
+
+    if (criticBrainstormReply.trim()) {
+      hooks.onAgentReply(critic.name, criticBrainstormReply);
+      // Fold the critique into history and ask the orchestrator to
+      // revise its plan. Only ONE revision pass — keeps the cost
+      // bounded and avoids infinite back-and-forth.
+      liveHistory.push({ role: "assistant", content: orchReply });
+      liveHistory.push({
+        role: "user",
+        content: `[critical_thinker brainstorm — incorporate before dispatching]\n${criticBrainstormReply}`,
+      });
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
+      hooks.onAgentStart(orch.name);
+      hooks.onLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+      try {
+        orchReply = await streamChatCompletion(
+          port, orchModel, orchProvider,
+          orchPrompt,
+          `${goal}\n\n(the critic raised these points — incorporate any that hold up, then dispatch)\n${criticBrainstormReply}`,
           tempFor(orch, 0.4), signal,
           (delta) => hooks.onLogDelta(orch.name, delta),
           projectCwd, liveHistory, autoApprove,

@@ -349,8 +349,13 @@ export default function TelegramBridgeRunner() {
           },
           // Every full reply from an agent (orchestrator's plan, each
           // specialist's answer, the integrated final) lands here.
-          // Mirror to the SuperUserCard chat AND to Telegram so the
-          // phone sees each agent talking, matching legacy chatty mode.
+          // We mirror to the SuperUserCard chat (the desktop canvas
+          // still shows every agent talking) but DO NOT push to
+          // Telegram per-agent — the user wants ONE clean message on
+          // their phone, not a stream of mid-stream replies that get
+          // rate-limited and arrive as half-messages. The final
+          // orchestrator reply is captured here and sent ONCE below
+          // in the "✅ Done." wrap.
           onAgentReply: (agent: string, reply: string) => {
             const isOrch = agent === orchName;
             const msg: GoalMsg = {
@@ -368,9 +373,8 @@ export default function TelegramBridgeRunner() {
               // so the dispatch doesn't block on SQLite round-trips.
               persistChat(projectId, [msg]).catch(() => {});
             }
-            // Phone mirror: prefix the agent's display name so the user
-            // can tell who's talking even when 3+ specialists chime in.
-            sendTelegram(tgCfg.bot_token, chatId, `💬 ${displayLabel(agent)}: ${reply}`);
+            // Capture the orchestrator's last reply so we know what to
+            // send. Specialists are not relayed to the phone.
             if (isOrch) finalForTelegram = reply;
           },
         }
@@ -393,11 +397,15 @@ export default function TelegramBridgeRunner() {
       return;
     }
 
-    // ---- 4. Wrap with the legacy "✅ Done." sentinel so the user
-    //         knows the run finished, not that the assistant is
-    //         still streaming.
-    if (finalForTelegram.trim()) {
-      await sendTelegram(tgCfg.bot_token, chatId, `✅ Done.\n\n${finalForTelegram}`);
+    // ---- 4. Send ONE summary message. If the orchestrator embedded a
+    //         clarifying question (director mode), prefix with "❓"
+    //         so the user knows they need to answer. Otherwise just
+    //         the final synthesis.
+    const summary = finalForTelegram.trim();
+    if (summary) {
+      const isQuestion = /\?\s*$/.test(summary) || /^❓/.test(summary);
+      const prefix = isQuestion ? "❓" : "✅";
+      await sendTelegram(tgCfg.bot_token, chatId, `${prefix} ${summary}`);
     } else {
       await sendTelegram(tgCfg.bot_token, chatId, "✅ Done.");
     }

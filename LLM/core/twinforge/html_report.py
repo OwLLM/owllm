@@ -47,7 +47,8 @@ def _crop_b64(img: Image.Image, b, max_w: int = 240) -> str:
         crop = img.crop((x0, y0, x1, y1)).convert("RGB")
     if crop.width > max_w:
         r = max_w / crop.width
-        crop = crop.resize((max_w, int(crop.height * r)), Image.LANCZOS)
+        new_h = max(1, int(crop.height * r))
+        crop = crop.resize((max_w, new_h), Image.LANCZOS)
     from io import BytesIO
     buf = BytesIO()
     crop.save(buf, format="PNG", optimize=True)

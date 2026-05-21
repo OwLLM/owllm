@@ -201,6 +201,13 @@ const SHIFT_OUT = BORDER_T / 2;
 // on the Tauri build. EXTRA_RIGHT stays 0 so right padding is symmetric.
 const EXTRA_TOP = 35;
 const EXTRA_RIGHT = 0;
+// EXTRA_BOTTOM reserves 11 px of clearance below outerB so the
+// bottom-corner PNGs (height ≈ CORNER_PNG_H_BR=153, offset by
+// CORNER_OUTSET+1) fit inside the viewport instead of poking 1 px
+// past it. Without this, the bottom cyan strip reads thinner/dimmer
+// than the source because the corner crest art is clipped flush
+// against the window edge.
+const EXTRA_BOTTOM = 11;
 const CORNER_PNG_W = 160;
 const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);
 const CORNER_PNG_H_TR = Math.round(CORNER_PNG_W * 484 / 516);
@@ -226,7 +233,7 @@ function HybridFrame({ children, outerW, outerH }: {
   // + 2*so + 2*CORNER_OUTSET`, solve for parent_w given the live
   // viewport. Clamped to MIN_PARENT_* so frame edges never overlap.
   const parent_w = Math.max(MIN_PARENT_W, outerW - EXTRA_RIGHT - 2 * SHIFT_OUT - 2 * CORNER_OUTSET);
-  const parent_h = Math.max(MIN_PARENT_H, outerH - EXTRA_TOP   - 2 * SHIFT_OUT - 2 * CORNER_OUTSET);
+  const parent_h = Math.max(MIN_PARENT_H, outerH - EXTRA_TOP - EXTRA_BOTTOM - 2 * SHIFT_OUT - 2 * CORNER_OUTSET);
   const parent_x = PARENT_X;
   const parent_y = PARENT_Y;
   const t = BORDER_T;
@@ -389,14 +396,14 @@ function ModeBar({
           style={{
             width: 70, height: 50, borderRadius: 6,
             background: "linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))",
-            border: "none",
+            border: "1px solid rgba(255,255,255,0.20)",
             display: "flex", flexDirection: "column",
             alignItems: "center", justifyContent: "center", lineHeight: 1.0,
             cursor: "pointer", padding: 0,
           }}
         >
-          <div style={{ fontSize: 22 }}>{themeMode === "dark" ? "🌙" : "☀"}</div>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "#fff" }}>
+          <div style={{ fontSize: 29, color: "#fff" }}>{themeMode === "dark" ? "🌙" : "☀"}</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "#fff" }}>
             {themeMode === "dark" ? "Dark" : "Light"}
           </div>
         </button>
@@ -561,11 +568,11 @@ function SubTabs({
         onClick={() => onChange(p.key)}
         style={{
           padding: "5px 14px",
-          background: active ? "var(--accent-soft)" : "transparent",
-          color: active ? "var(--accent)" : "var(--fg-muted)",
+          background: active ? "rgba(102,126,234,0.28)" : "transparent",
+          color: active ? "#fafafa" : "var(--fg-muted)",
           borderRadius: 8,
           fontWeight: 600,
-          borderBottom: active ? "2px solid var(--accent)" : "2px solid transparent",
+          borderBottom: active ? "3px solid var(--accent)" : "3px solid transparent",
           cursor: "pointer",
           userSelect: "none",
         }}
@@ -824,11 +831,21 @@ export default function AppShell() {
             onPickAccent={theme.setAccentKey}
             onOpenServer={() => setServerModalOpen(true)}
           />
+          {/* SubTabs always render — Qt's page list is unconditional.
+              The earlier `mode !== 'finetuning'` guard hid the row when
+              Fine Tuning was active, which made the Train capture look
+              like it was missing the nav strip. */}
           <SubTabs
             pages={visiblePages}
             activeKey={activeKey}
             onChange={handleTabChange}
           />
+          {/* TODO(finding[3]): Train/Models/Agents workspace controls
+              (Team / + New / Rename / Delete) are not in AppShell — they
+              live inside the per-page bodies (or are missing entirely).
+              Locate the Qt source for these affordances (search main.py
+              for 'Rename' / '+ New' / 'workspace') and fix in the owning
+              page file (e.g. TrainPage.tsx), not here in AppShell. */}
           <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
             {PageBody ? <PageBody /> : null}
           </div>

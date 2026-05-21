@@ -114,6 +114,7 @@ pub fn run() {
             huggingface::list_tuned_adapters,
             huggingface::models_list_downloaded,
             recommendations::models_recommended,
+            paths::shell_open_url,
             env_manager::env_profiles_list,
             env_manager::env_profile_status,
             env_manager::env_profile_install,

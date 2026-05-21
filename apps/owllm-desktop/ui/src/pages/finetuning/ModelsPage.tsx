@@ -55,9 +55,27 @@ type RecommendedModel = {
 };
 
 // Filter set IDs match the formatFilterContainer checkbox labels.
+// "abliterated" replaces the old "chat" key — abliterated variants
+// (refusal-stripped) are what users actually search for when checking
+// this box. Generic chat tuning is implicit in most instruct models.
 type FilterKey =
-  | "trainable" | "gguf" | "instruct" | "chat"
+  | "trainable" | "gguf" | "instruct" | "abliterated"
   | "adapter"   | "quantized" | "reasoning" | "vision";
+
+// HF query that "broadens" the result set when this filter is on.
+// When ANY filter is checked, we run an hf_search with the combined
+// query so the user sees fresh/newest matches from the full Hub —
+// not just the curated 20.
+const FILTER_HF_QUERY: Record<FilterKey, string> = {
+  trainable:   "instruct",   // proxy: trainable bases are typically -instruct
+  gguf:        "gguf",
+  instruct:    "instruct",
+  abliterated: "abliterated",
+  adapter:     "lora",
+  quantized:   "AWQ",
+  reasoning:   "reasoning",
+  vision:      "vision",
+};
 
 // Mirrors Rust DownloadedModel — serde renames fields to camelCase
 // automatically via tauri::command's #[serde(rename_all="camelCase")]
@@ -132,7 +150,48 @@ export default function ModelsPage() {
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const [downloading, setDownloading] = React.useState<Set<string>>(new Set());
   const [filters, setFilters] = React.useState<Set<FilterKey>>(new Set());
-  const inSearchMode = query.trim().length > 0 && hits.length > 0;
+  // "search mode" = render `hits` instead of curated. We enter it when
+  // the user types a query OR when at least one filter checkbox is on
+  // (filters trigger a broad HF search via the effect below).
+  const inSearchMode = (query.trim().length > 0 || filters.size > 0) && hits.length > 0;
+
+  // Look up the currently selected card so the right-rail Info tab
+  // has something to render. We resolve in priority order: hit > rec
+  // (search results override curated when the same id appears).
+  const selectedModelForInfo = React.useMemo(() => {
+    if (!selectedId) return null;
+    const hit = hits.find((h) => h.id === selectedId);
+    if (hit) return {
+      id: hit.id,
+      name: hit.id.split("/").pop() ?? hit.id,
+      description: hit.pipelineTag ? `Pipeline: ${hit.pipelineTag}` : "",
+      downloads: hit.downloads,
+      likes: hit.likes,
+      lastModified: hit.lastModified,
+      tags: hit.tags,
+      gated: hit.gated || hit.private,
+      paramsB: null as number | null,
+      inferenceGb: null as number | null,
+      loraTrainGb: null as number | null,
+      compat: null as RecommendedModel["compat"],
+    };
+    const rec = recommended.find((r) => r.id === selectedId);
+    if (rec) return {
+      id: rec.id,
+      name: rec.name,
+      description: rec.description,
+      downloads: rec.downloads,
+      likes: rec.likes,
+      lastModified: null,
+      tags: rec.tags,
+      gated: rec.gated,
+      paramsB: rec.paramsB,
+      inferenceGb: rec.inferenceGb,
+      loraTrainGb: rec.loraTrainGb,
+      compat: rec.compat,
+    };
+    return null;
+  }, [selectedId, hits, recommended]);
 
   // Filter predicate. An empty filter set means "show everything".
   // Otherwise we OR-match across selected filters using tag heuristics.
@@ -143,14 +202,14 @@ export default function ModelsPage() {
       const s = (idOrName || "").toLowerCase();
       const has = (k: FilterKey): boolean => {
         switch (k) {
-          case "trainable": return t.has("trainable") || (!s.includes(".gguf") && !s.includes("lora") && !s.includes("awq") && !s.includes("gptq"));
-          case "gguf":      return t.has("gguf") || s.includes("gguf");
-          case "instruct":  return t.has("instruct") || /instruct|-it\b/.test(s);
-          case "chat":      return t.has("chat") || /chat|dialog/.test(s);
-          case "adapter":   return t.has("lora") || t.has("adapter") || t.has("peft") || /lora|adapter|peft/.test(s);
-          case "quantized": return t.has("quantized") || /awq|gptq|q4|q5|q8/.test(s);
-          case "reasoning": return t.has("reasoning") || /r1|reasoning|thinking|qwq|deepseek-r/.test(s);
-          case "vision":    return t.has("vision") || /vl\b|llava|vision/.test(s);
+          case "trainable":   return t.has("trainable") || (!s.includes(".gguf") && !s.includes("lora") && !s.includes("awq") && !s.includes("gptq"));
+          case "gguf":        return t.has("gguf") || s.includes("gguf");
+          case "instruct":    return t.has("instruct") || /instruct|-it\b/.test(s);
+          case "abliterated": return /abliterated|uncensored/.test(s);
+          case "adapter":     return t.has("lora") || t.has("adapter") || t.has("peft") || /lora|adapter|peft/.test(s);
+          case "quantized":   return t.has("quantized") || /awq|gptq|q4|q5|q8/.test(s);
+          case "reasoning":   return t.has("reasoning") || /r1|reasoning|thinking|qwq|deepseek-r/.test(s);
+          case "vision":      return t.has("vision") || /vl\b|llava|vision/.test(s);
         }
       };
       for (const k of filters) if (has(k)) return true;
@@ -187,6 +246,22 @@ export default function ModelsPage() {
         .finally(() => setLoadingRecommended(false));
     }
   }, [tab, recommended.length, loadingRecommended]);
+
+  // When any filter is checked AND the user hasn't typed a search,
+  // auto-run an HF search with the combined filter query so the user
+  // sees real fresh/popular hits instead of just the 20 curated ones.
+  // Empty filter set returns the curated view.
+  React.useEffect(() => {
+    if (tab !== "browse") return;
+    if (query.trim().length > 0) return; // explicit search wins
+    if (filters.size === 0) {
+      setHits([]); // back to recommended view
+      return;
+    }
+    const parts = [...filters].map((k) => FILTER_HF_QUERY[k]).filter(Boolean);
+    const q = parts.join(" ");
+    runSearch(q);
+  }, [filters, tab, query, runSearch]);
 
   React.useEffect(() => {
     if (tab === "downloaded") {
@@ -285,14 +360,14 @@ export default function ModelsPage() {
         }}
       >
         {([
-          { key: "trainable" as const, label: "✅ Trainable", tip: "transformers-format models with full weights — what the Train tab can fine-tune." },
-          { key: "gguf"      as const, label: "📦 GGUF",      tip: "llama.cpp / bundled-proxy inference format. Cannot be fine-tuned." },
-          { key: "instruct"  as const, label: "💡 Instruct",  tip: "Instruction-tuned base models (-instruct, -it). Follow direct task prompts." },
-          { key: "chat"      as const, label: "💬 Chat",      tip: "Multi-turn chat / conversation tuned (-chat, -dialog, ChatML)." },
-          { key: "adapter"   as const, label: "🧩 Adapter (LoRA)",        tip: "PEFT / LoRA adapters — small overlays that need a base model to load." },
-          { key: "quantized" as const, label: "⚡ Quantized (AWQ / GPTQ)", tip: "Inference-only weight-quantized checkpoints (AWQ or GPTQ)." },
-          { key: "reasoning" as const, label: "🧠 Reasoning", tip: "Chain-of-thought reasoning models (R1, o1-style, deepseek-r1, thinking)." },
-          { key: "vision"    as const, label: "👁️ Vision",    tip: "Multimodal vision-language models (image input — VL, llava, vision)." },
+          { key: "trainable"   as const, label: "✅ Trainable",            tip: "Transformers-format models with full weights — what the Train tab can fine-tune. Checking pulls newest instruct models from Hugging Face." },
+          { key: "gguf"        as const, label: "📦 GGUF",                 tip: "llama.cpp inference format. Checking searches Hugging Face for newest popular GGUF builds." },
+          { key: "instruct"    as const, label: "💡 Instruct",             tip: "Instruction-tuned base models (-instruct, -it). Checking pulls newest instruct from Hugging Face." },
+          { key: "abliterated" as const, label: "🚫 Abliterated",          tip: "Refusal-stripped variants — checking searches Hugging Face for the newest abliterated/uncensored builds." },
+          { key: "adapter"     as const, label: "🧩 Adapter (LoRA)",       tip: "PEFT / LoRA adapters — small overlays that need a base model to load. Checking searches for popular adapters." },
+          { key: "quantized"   as const, label: "⚡ Quantized (AWQ / GPTQ)", tip: "Inference-only weight-quantized checkpoints. Checking searches for popular AWQ/GPTQ builds." },
+          { key: "reasoning"   as const, label: "🧠 Reasoning",            tip: "Chain-of-thought reasoning models (R1, o1-style, deepseek-r1, QwQ). Checking searches for newest reasoning models." },
+          { key: "vision"      as const, label: "👁️ Vision",               tip: "Multimodal vision-language models. Checking searches for newest vision-language builds." },
         ]).map((f) => {
           const on = filters.has(f.key);
           return (
@@ -453,7 +528,17 @@ export default function ModelsPage() {
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 280px", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
+      {/* Cards rail — auto-fills with cards capped at 390 px wide so
+          they stay readable on wide screens (was 1fr 1fr giving ~615 px
+          cards) and reflow on narrow ones. */}
+      <div style={{
+        flex: 1,
+        minWidth: 0,
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(290px, 390px))",
+        gap: 10,
+      }}>
         {(() => {
           // Choose which list to render: live search results when the
           // user has searched, otherwise the curated recommendations.
@@ -530,8 +615,12 @@ export default function ModelsPage() {
             />
           ));
         })()}
-
-        <AccessTokensPane />
+      </div>
+      {/* Right rail — separate flex column. Only ever holds the
+          tokens/info panel; cards never overflow into here. */}
+      <div style={{ width: 280, flexShrink: 0, position: "sticky", top: 0 }}>
+        <AccessTokensPane selectedModel={selectedModelForInfo} />
+      </div>
       </div>
       </>}
 

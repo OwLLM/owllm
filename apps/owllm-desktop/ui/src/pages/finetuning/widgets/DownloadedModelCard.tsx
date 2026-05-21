@@ -32,8 +32,9 @@ function statusBadge(status: OnboardingStatus): { bg: string; text: string } {
   switch (status) {
     case "BUILDING": return { bg: "#FF9800", text: "⏳ Building..." };
     case "BROKEN":   return { bg: "#f44336", text: "❌ Broken" };
-    case "NEW":      return { bg: "#888",    text: "🆕 Not Onboarded" };
-    default:         return { bg: "",        text: "" }; // READY = no inline badge
+    case "READY":    return { bg: "#4CAF50", text: "✓ Ready" };
+    case "NEW":      return { bg: "#888",    text: "⏬ Incomplete" };
+    default:         return { bg: "",        text: "" };
   }
 }
 
@@ -177,8 +178,10 @@ export default function DownloadedModelCard(props: DownloadedModelCardProps) {
         {isIncomplete && !isActiveDownload && (
           <button style={btn} onClick={(e) => { e.stopPropagation(); onRepair?.(modelPath); }}>🔧 Repair</button>
         )}
-        {status === "NEW" && (
-          <button style={btn} onClick={(e) => { e.stopPropagation(); onAddWeights?.(modelPath); }}>🚀 Onboard</button>
+        {/* Ready models surface the dedicated-env builder; "Onboard"
+            for incomplete-but-not-broken downloads finishes them. */}
+        {status === "NEW" && !isIncomplete && (
+          <button style={btn} onClick={(e) => { e.stopPropagation(); onAddWeights?.(modelPath); }}>🚀 Finish download</button>
         )}
         {envKey && (
           <button style={btn} onClick={(e) => { e.stopPropagation(); onDedicatedEnv?.(modelPath); }}>🛠️ Env</button>

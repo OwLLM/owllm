@@ -486,11 +486,23 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                 let has_marker = path.join(".download").is_file()
                               || path.join(".incomplete").is_file();
                 let is_incomplete = has_marker || (has_config && !has_safetensors && total < 100 * 1024 * 1024);
+                // "Onboarded" semantics: if the model has both a
+                // config.json AND weight files on disk, it's usable
+                // for inference / fine-tuning RIGHT NOW. The legacy
+                // "NEW" state was for models that hadn't yet had their
+                // dedicated env built, but we don't auto-create envs
+                // here — usability is what the user actually cares
+                // about, so mark anything weight-complete as READY.
                 let onboarding = if is_incomplete {
                     "BROKEN"
                 } else if has_config && has_safetensors {
-                    "NEW"
+                    "READY"
+                } else if has_safetensors {
+                    // Weights but no config — unusual; flag as broken.
+                    "BROKEN"
                 } else {
+                    // No weights yet — still in flight or a partial
+                    // clone. Show as NEW so the user can decide.
                     "NEW"
                 };
                 out.push(DownloadedModel {

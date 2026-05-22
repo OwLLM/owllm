@@ -269,12 +269,44 @@ export default function ChatPage() {
     let reply = "";
     let buffer = "";
     try {
-      const resp = await fetch(`http://127.0.0.1:${status.port}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: ctrl.signal,
-      });
+      // llama-server returns HTTP 503
+      //   {"error":{"message":"Loading model","type":"unavailable_error","code":503}}
+      // while it's still loading weights. A 29 GB f16 model can take
+      // 60+ s to mmap + offload, so polling /health (or just retrying)
+      // is the only way to know it's ready. Loop with 1.5 s backoff
+      // for up to 180 s, surfacing a "Loading model" status to the
+      // column so the user sees progress instead of one cryptic error.
+      let resp: Response | null = null;
+      const startedAt = Date.now();
+      const READY_TIMEOUT_MS = 180_000;
+      while (true) {
+        if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        resp = await fetch(`http://127.0.0.1:${status.port}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: ctrl.signal,
+        });
+        if (resp.status === 503) {
+          // Drain + inspect the error body so an unexpected 503 (not
+          // the loading one) doesn't get swallowed.
+          const txt = await resp.text().catch(() => "");
+          const isLoading = /loading model/i.test(txt) || /unavailable_error/i.test(txt);
+          if (!isLoading) {
+            throw new Error(txt || "HTTP 503");
+          }
+          const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+          updateCol(col.id, { error: `⏳ Loading model into VRAM… ${elapsedSec}s` });
+          if (Date.now() - startedAt > READY_TIMEOUT_MS) {
+            throw new Error("Model still loading after 3 minutes — likely OOM. Try a smaller quant (Q4_K_M).");
+          }
+          await new Promise((r) => setTimeout(r, 1500));
+          continue;
+        }
+        break;
+      }
+      // Got past 503 — clear the loading banner and parse the stream.
+      updateCol(col.id, { error: null });
       if (!resp.ok || !resp.body) {
         throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
       }

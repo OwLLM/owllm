@@ -331,12 +331,13 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
 // when no ANTHROPIC_API_KEY is saved.
 // ---------------------------------------------------------------------
 
-/// Locate the `claude` executable. Searches PATH for `claude.exe`,
-/// `claude.cmd`, then `claude`. Returns the resolved path or None.
+/// Locate the `claude` executable. Searches PATH first, then the
+/// canonical npm-global install dir (%APPDATA%\npm on Windows) via
+/// which_extended. This catches users who just ran
+/// `npm install -g @anthropic-ai/claude-code` without restarting us.
 fn find_claude_cli() -> Option<PathBuf> {
-    // npm's Windows shim is `claude.cmd` (no extension on Unix).
     for name in ["claude.exe", "claude.cmd", "claude"] {
-        if let Ok(path) = which_in_path(name) {
+        if let Some(path) = which_extended(name) {
             return Some(path);
         }
     }
@@ -344,10 +345,11 @@ fn find_claude_cli() -> Option<PathBuf> {
 }
 
 /// Locate the `kimi` executable (Moonshot's Kimi Code CLI). Same
-/// resolution shape as Claude — pip/npm shim is `kimi.cmd` on Windows.
+/// resolution shape as Claude — installed via pip, so the shim lives
+/// in Python's Scripts dir which which_extended walks for us.
 fn find_kimi_cli() -> Option<PathBuf> {
     for name in ["kimi.exe", "kimi.cmd", "kimi"] {
-        if let Ok(path) = which_in_path(name) {
+        if let Some(path) = which_extended(name) {
             return Some(path);
         }
     }
@@ -363,6 +365,109 @@ fn which_in_path(name: &str) -> Result<PathBuf, ()> {
         }
     }
     Err(())
+}
+
+/// Extra dirs to search when a CLI isn't on PATH. The Tauri process
+/// inherits PATH from whenever the desktop was launched — if the user
+/// `pip install kimi-cli`s AFTER launch, the new kimi.exe lands in
+/// %APPDATA%\Python\Python3X\Scripts (per-user pip) which isn't on
+/// the inherited PATH and the card forever insists "kimi not found".
+/// Restarting fixes it, but that's a terrible UX. Walking these
+/// canonical install locations directly catches every standard pip /
+/// npm global install layout without forcing a restart.
+fn extra_search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    let appdata = std::env::var_os("APPDATA");
+    let localappdata = std::env::var_os("LOCALAPPDATA");
+
+    // npm global — Windows default for `npm install -g`.
+    if let Some(ad) = &appdata {
+        dirs.push(PathBuf::from(ad).join("npm"));
+    }
+
+    // pip --user / pipx — Windows: %APPDATA%\Python\PythonNNN\Scripts.
+    // Walk every PythonNNN dir we find so 3.10/3.11/3.12 coexist.
+    if let Some(ad) = &appdata {
+        let py_root = PathBuf::from(ad).join("Python");
+        if let Ok(entries) = std::fs::read_dir(&py_root) {
+            for e in entries.flatten() {
+                let scripts = e.path().join("Scripts");
+                if scripts.is_dir() {
+                    dirs.push(scripts);
+                }
+            }
+        }
+    }
+
+    // Per-user Python install (no admin) — same Scripts layout under
+    // %LOCALAPPDATA%\Programs\Python\PythonNNN\Scripts.
+    if let Some(lad) = &localappdata {
+        let py_root = PathBuf::from(lad).join("Programs").join("Python");
+        if let Ok(entries) = std::fs::read_dir(&py_root) {
+            for e in entries.flatten() {
+                let scripts = e.path().join("Scripts");
+                if scripts.is_dir() {
+                    dirs.push(scripts);
+                }
+            }
+        }
+    }
+
+    // System-wide Python install (admin) — C:\Python3NN\Scripts.
+    #[cfg(windows)]
+    if let Ok(entries) = std::fs::read_dir("C:\\") {
+        for e in entries.flatten() {
+            let name = e.file_name();
+            if let Some(s) = name.to_str() {
+                if s.starts_with("Python3") {
+                    let scripts = e.path().join("Scripts");
+                    if scripts.is_dir() {
+                        dirs.push(scripts);
+                    }
+                }
+            }
+        }
+    }
+
+    // System Node.js install.
+    #[cfg(windows)]
+    {
+        for p in [
+            "C:\\Program Files\\nodejs",
+            "C:\\Program Files (x86)\\nodejs",
+        ] {
+            let pp = PathBuf::from(p);
+            if pp.is_dir() {
+                dirs.push(pp);
+            }
+        }
+    }
+
+    // POSIX pip --user / pipx fallback.
+    if let Some(h) = &home {
+        let local_bin = PathBuf::from(h).join(".local").join("bin");
+        if local_bin.is_dir() {
+            dirs.push(local_bin);
+        }
+    }
+
+    dirs
+}
+
+/// PATH search → fallback to extra_search_dirs. Use this anywhere we
+/// need to locate a CLI/binary that the user may have just installed.
+fn which_extended(name: &str) -> Option<PathBuf> {
+    if let Ok(p) = which_in_path(name) {
+        return Some(p);
+    }
+    for dir in extra_search_dirs() {
+        let cand = dir.join(name);
+        if cand.is_file() {
+            return Some(cand);
+        }
+    }
+    None
 }
 
 /// One-shot completion via `claude --print`. Streams the user's
@@ -909,7 +1014,7 @@ fn gemini_cli_logged_in() -> bool {
 
 fn find_gemini_cli() -> Option<PathBuf> {
     for name in ["gemini.exe", "gemini.cmd", "gemini"] {
-        if let Ok(path) = which_in_path(name) {
+        if let Some(path) = which_extended(name) {
             return Some(path);
         }
     }
@@ -1021,14 +1126,139 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
 }
 
 /// Locate the `codex` executable (OpenAI Codex CLI). Pattern matches
-/// find_claude_cli / find_kimi_cli — npm/cmd shims on Windows.
+/// find_claude_cli / find_kimi_cli — npm-installed, lives in the
+/// npm-global dir on Windows.
 fn find_codex_cli() -> Option<PathBuf> {
     for name in ["codex.exe", "codex.cmd", "codex"] {
-        if let Ok(path) = which_in_path(name) {
+        if let Some(path) = which_extended(name) {
             return Some(path);
         }
     }
     None
+}
+
+/// One streaming event from the install process. Mirrors the shape
+/// React's right-rail log panel renders. `stream` is "stdout" |
+/// "stderr" so the UI can colour-tint stderr lines without giving
+/// up colour-by-content heuristics.
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CliInstallEvent {
+    /// One line of output from the install process.
+    Line { stream: String, text: String },
+    /// Final exit status. code is None when the OS killed the process
+    /// before it set one (timeout, OOM).
+    Done { code: Option<i32> },
+}
+
+/// Streaming counterpart to cli_install. Spawns the install hidden,
+/// pipes stdout + stderr, and streams each line back over the supplied
+/// Channel so the React side can render it in an in-app log panel
+/// instead of a pop-out console window. Same per-backend mapping as
+/// cli_install — see that function for the install commands.
+///
+/// Returns Ok with the exit code on completion. Callers should also
+/// watch the on_event stream for a Done event so they can disable the
+/// Install button until it fires.
+#[tauri::command]
+pub async fn cli_install_stream(
+    backend: String,
+    on_event: Channel<CliInstallEvent>,
+) -> Result<i32, String> {
+    let (tool, args): (&'static str, Vec<&'static str>) = match backend.as_str() {
+        "claude_cli" => ("npm", vec!["install", "-g", "@anthropic-ai/claude-code"]),
+        "codex_cli"  => ("npm", vec!["install", "-g", "@openai/codex"]),
+        "kimi_cli"   => ("pip", vec!["install", "--upgrade", "kimi-cli"]),
+        "gemini_cli" => ("npm", vec!["install", "-g", "@google/gemini-cli"]),
+        other => return Err(format!("unknown CLI backend: {other}")),
+    };
+
+    // Find the package manager. Mirrors cli_install's pre-check.
+    let tool_path = {
+        let names = [format!("{tool}.exe"), format!("{tool}.cmd"), tool.to_string()];
+        names.iter().find_map(|n| which_extended(n))
+            .ok_or_else(|| {
+                let runtime = if tool == "npm" { "Node.js (https://nodejs.org/)" }
+                              else            { "Python (https://www.python.org/)" };
+                format!("{tool} not found on PATH — install {runtime} first.")
+            })?
+    };
+
+    let backend_label = backend.clone();
+    let on_event_done = on_event.clone();
+    tokio::task::spawn_blocking(move || -> Result<i32, String> {
+        let mut cmd = Command::new(&tool_path);
+        // npm/pip on Windows are .cmd shims; route args through raw_arg
+        // so the BatBadBut guard doesn't reject perfectly safe arg strings.
+        #[cfg(windows)]
+        let batch = is_batch_shim(&tool_path);
+        #[cfg(not(windows))]
+        let batch = false;
+        for a in &args {
+            push_arg(&mut cmd, batch, a);
+        }
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let _ = on_event.send(CliInstallEvent::Line {
+            stream: "stdout".to_string(),
+            text: format!("$ {} {}", tool_path.display(), args.join(" ")),
+        });
+        let _ = on_event.send(CliInstallEvent::Line {
+            stream: "stdout".to_string(),
+            text: format!("[{backend_label}] installing… this can take 30-90 s for npm packages."),
+        });
+
+        let mut child = cmd.spawn().map_err(|e| format!("spawn {}: {e}", tool_path.display()))?;
+        let stdout = child.stdout.take().ok_or("no stdout pipe")?;
+        let stderr = child.stderr.take().ok_or("no stderr pipe")?;
+
+        // Two reader threads — one per pipe — so a chatty stderr can't
+        // backpressure a stdout-only npm run (or vice versa).
+        let ev_out = on_event.clone();
+        let t_out = std::thread::spawn(move || {
+            let r = BufReader::new(stdout);
+            for line in r.lines().flatten() {
+                let _ = ev_out.send(CliInstallEvent::Line {
+                    stream: "stdout".to_string(),
+                    text: line,
+                });
+            }
+        });
+        let ev_err = on_event.clone();
+        let t_err = std::thread::spawn(move || {
+            let r = BufReader::new(stderr);
+            for line in r.lines().flatten() {
+                let _ = ev_err.send(CliInstallEvent::Line {
+                    stream: "stderr".to_string(),
+                    text: line,
+                });
+            }
+        });
+
+        let status = child.wait().map_err(|e| format!("wait child: {e}"))?;
+        let _ = t_out.join();
+        let _ = t_err.join();
+        let code = status.code().unwrap_or(-1);
+        Ok(code)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))
+    .and_then(|r| r)
+    .map(|code| {
+        let _ = on_event_done.send(CliInstallEvent::Done { code: Some(code) });
+        code
+    })
+    .map_err(|e| {
+        let _ = on_event_done.send(CliInstallEvent::Done { code: None });
+        e
+    })
 }
 
 /// One-click installer for the four subscription CLIs. Bundling these
@@ -1062,13 +1292,15 @@ pub fn cli_install(backend: String) -> Result<(), String> {
 
     // Verify the package manager is reachable before we open a console
     // and run something that just errors out. On Windows npm/pip ship
-    // as .cmd shims; check all three extensions.
+    // as .cmd shims; check all three extensions. Use which_extended so
+    // a freshly-installed Node.js or Python that hasn't been picked up
+    // by our inherited PATH still counts.
     let names: [String; 3] = [
         format!("{tool}.exe"),
         format!("{tool}.cmd"),
         tool.to_string(),
     ];
-    let pm_found = names.iter().any(|n| which_in_path(n).is_ok());
+    let pm_found = names.iter().any(|n| which_extended(n).is_some());
     if !pm_found {
         let runtime = if tool == "npm" { "Node.js (https://nodejs.org/)" }
                       else            { "Python (https://www.python.org/)" };

@@ -71,6 +71,7 @@ pub fn run() {
             accounts::gemini_cli_complete,
             accounts::subscription_cli_login,
             accounts::cli_install,
+            accounts::cli_install_stream,
             agents::list_team_templates,
             agents::list_agent_roles,
             agents::list_skill_packs,

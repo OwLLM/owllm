@@ -1,28 +1,32 @@
-﻿// AccountsPage — ported from LLM/desktop_app/pages/accounts_page.py
-// (AccountsPage._build_ui, line 403). 2x2 grid of brand cards, one
-// per cloud route: Claude (subscription), Codex (subscription),
-// Anthropic API (key), OpenAI API (key).
+// AccountsPage v2 — one unified container per provider (subscription
+// route on top + API key route below, sharing the same brand header,
+// logo, and column slot). Right-rail dock streams cli_install output
+// in-app so the user never has to chase a pop-out CMD window to read
+// npm's progress.
 //
-// Each card: brand-tinted gradient (accent_top → page bg), no
-// borders, soft drop shadow (Qt accounts_page.py:111 _add_shadow:
-// blur 24 / y 4 / alpha 120), header with emoji icon + name in
-// brand accent + tagline + status dot, status line, Test result
-// line, Connect/Disconnect button + Test button.
+// Visual contract:
+//   * left flex column: provider containers (auto-fit grid, max 480px each)
+//   * right docked rail (340px wide): persistent install / login log
+//   * inline SVG logos per brand (no emoji fallback)
 //
-// API-key flow opens a modal dialog (Qt _ApiKeyDialog at line 319)
-// with a password input, Show/Hide toggle, and prose explaining
-// LLM/data/owllm_agent_secrets.json persistence.
-//
-// Background of host page is #0e1117 (per style notes); Qt uses
-// palette(base) for the gradient's bottom stop — we hard-code the
-// same value here so cards visually dissolve into the page.
+// Backend contract unchanged: accounts_status / accounts_save_api_key /
+// accounts_delete_secret / accounts_test_probe / subscription_cli_login /
+// cli_install_stream / shell_open_url. The CardState shape is per-route
+// now (one CardState entry per subscription OR api spec).
+
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
+import {
+  AnthropicLogo, OpenAILogo, MoonshotLogo, GeminiLogo,
+  DeepSeekLogo, XaiLogo, GroqLogo, PerplexityLogo,
+  MistralLogo, TogetherLogo,
+} from "./brandLogos";
 
-const PAGE_BG = "var(--bg-panel)"; // matches palette(base) used by Qt gradient stops 0.6 + 1
+const PAGE_BG = "var(--bg-panel)";
 
-// Backend status shape — mirrors AccountsStatus in src-tauri/src/accounts.rs.
-// Each flag is a presence check; we never see the secret values themselves.
+// -----------------------------------------------------------------------
+// Backend types
+// -----------------------------------------------------------------------
 type AccountsStatus = {
   anthropic_api_key: boolean;
   openai_api_key: boolean;
@@ -39,337 +43,266 @@ type AccountsStatus = {
   kimi_cli: boolean;
   gemini_cli: boolean;
 };
-
 type ProbeResult = { ok: boolean; detail: string; elapsed_ms: number };
 
-type BrandSpec = {
+// -----------------------------------------------------------------------
+// Route + provider model
+// -----------------------------------------------------------------------
+type RouteSpec = {
   key: string;
-  name: string;
-  tagline: string;
-  icon: string;
-  accent: string;       // brand color (title + connect button bg)
-  accentTop: string;    // gradient top stop
   kind: "subscription" | "api";
-  envName?: string;
+  /// Display label inside the container (e.g. "Subscription · Claude
+  /// Code CLI"). Sits under the brand title in the route row.
+  routeLabel: string;
+  /// Backend identifier passed to accounts_test_probe and
+  /// subscription_cli_login. For api routes also matches envName.
   backend: string;
-  /// Web-only subscriptions (Grok via X Premium+, DeepSeek via
-  /// chat.deepseek.com): no official CLI to launch, so Connect just
-  /// opens the signup/management page in the browser. The card never
-  /// flips to green because we have no programmatic signal — the user
-  /// uses the subscription via the web UI, or copies an API key into
-  /// the matching API card below.
+  /// Env var stored in ~/.owllm/agent_secrets.json. Required for api,
+  /// optional for subscription (Grok/DeepSeek subscriptions have no key).
+  envName?: string;
+  /// Web-only subscription (no CLI). Connect opens this URL instead of
+  /// spawning a CLI login flow.
   webOnly?: { url: string };
 };
 
-// Verbatim from accounts_page.py:47-94 (BRAND_CARDS tuple). Accent
-// colours, taglines, emoji icons, env-var names all preserved.
-// Order matters — the layout below pairs (sub, api) into the same
-// brand column, so each provider's two routes sit one above the other.
-const BRANDS: BrandSpec[] = [
+type ProviderSpec = {
+  /// Container key + brand display name.
+  key: string;
+  name: string;
+  tagline: string;
+  /// Renders the inline SVG logo. Color follows accent for tint.
+  Logo: React.ComponentType<{ size?: number; color?: string }>;
+  accent: string;
+  accentTop: string;
+  /// One or two routes; rendered top-to-bottom in the container.
+  routes: RouteSpec[];
+};
+
+// Provider catalogue. Order = visual order in the grid. Each provider
+// gets exactly one container card; subscription + API render as two
+// rows inside it.
+const PROVIDERS: ProviderSpec[] = [
   {
-    key: "claude_subscription",
+    key: "anthropic",
     name: "Claude",
-    tagline: "Subscription · Claude Code CLI",
-    icon: "🅰️",
+    tagline: "Anthropic — flagship Opus / Sonnet / Haiku",
+    Logo: AnthropicLogo,
     accent: "#cc785c",
     accentTop: "#3a2620",
-    kind: "subscription",
-    backend: "claude_cli",
+    routes: [
+      { key: "claude_subscription", kind: "subscription", routeLabel: "Subscription · Claude Code CLI", backend: "claude_cli" },
+      { key: "anthropic_api",       kind: "api",          routeLabel: "API · ANTHROPIC_API_KEY",         backend: "claude_api", envName: "ANTHROPIC_API_KEY" },
+    ],
   },
   {
-    key: "anthropic_api",
-    name: "Anthropic API",
-    tagline: "ANTHROPIC_API_KEY · billed per call",
-    icon: "⚡",
-    accent: "#cc785c",
-    accentTop: "#2e2420",
-    kind: "api",
-    envName: "ANTHROPIC_API_KEY",
-    backend: "claude_api",
-  },
-  {
-    key: "codex_subscription",
-    name: "Codex",
-    tagline: "Subscription · OpenAI Codex CLI",
-    icon: "🟢",
+    key: "openai",
+    name: "OpenAI",
+    tagline: "GPT-5 / Codex via ChatGPT subscription or API",
+    Logo: OpenAILogo,
     accent: "#10a37f",
     accentTop: "#16322a",
-    kind: "subscription",
-    backend: "codex_cli",
+    routes: [
+      { key: "codex_subscription", kind: "subscription", routeLabel: "Subscription · OpenAI Codex CLI", backend: "codex_cli" },
+      { key: "openai_api",         kind: "api",          routeLabel: "API · OPENAI_API_KEY",            backend: "openai_api", envName: "OPENAI_API_KEY" },
+    ],
   },
   {
-    key: "openai_api",
-    name: "OpenAI API",
-    tagline: "OPENAI_API_KEY · billed per call",
-    icon: "⚡",
-    accent: "#10a37f",
-    accentTop: "#172a26",
-    kind: "api",
-    envName: "OPENAI_API_KEY",
-    backend: "openai_api",
-  },
-  {
-    key: "kimi_subscription",
-    name: "Kimi",
-    tagline: "Subscription · Kimi Code CLI",
-    icon: "🌙",
+    key: "moonshot",
+    name: "Kimi (Moonshot)",
+    tagline: "K2 / Long-context Chinese model",
+    Logo: MoonshotLogo,
     accent: "#d36bff",
     accentTop: "#2a1c33",
-    kind: "subscription",
-    backend: "kimi_cli",
+    routes: [
+      { key: "kimi_subscription", kind: "subscription", routeLabel: "Subscription · Kimi Code CLI", backend: "kimi_cli" },
+      { key: "moonshot_api",      kind: "api",          routeLabel: "API · MOONSHOT_API_KEY",       backend: "moonshot_api", envName: "MOONSHOT_API_KEY" },
+    ],
   },
   {
-    key: "moonshot_api",
-    name: "Kimi (Moonshot) API",
-    tagline: "MOONSHOT_API_KEY · billed per call",
-    icon: "⚡",
-    accent: "#d36bff",
-    accentTop: "#241830",
-    kind: "api",
-    envName: "MOONSHOT_API_KEY",
-    backend: "moonshot_api",
-  },
-  {
-    key: "gemini_subscription",
-    name: "Gemini",
-    tagline: "Subscription · Google Gemini CLI",
-    icon: "♊",
+    key: "gemini",
+    name: "Google Gemini",
+    tagline: "Gemini 2.5 · multimodal w/ huge context",
+    Logo: GeminiLogo,
     accent: "#4285f4",
     accentTop: "#142036",
-    kind: "subscription",
-    backend: "gemini_cli",
+    routes: [
+      { key: "gemini_subscription", kind: "subscription", routeLabel: "Subscription · Google Gemini CLI", backend: "gemini_cli" },
+      { key: "gemini_api",          kind: "api",          routeLabel: "API · GEMINI_API_KEY",             backend: "gemini_api", envName: "GEMINI_API_KEY" },
+    ],
   },
   {
-    key: "gemini_api",
-    name: "Gemini API",
-    tagline: "GEMINI_API_KEY · billed per call",
-    icon: "⚡",
-    accent: "#4285f4",
-    accentTop: "#101a2d",
-    kind: "api",
-    envName: "GEMINI_API_KEY",
-    backend: "gemini_api",
-  },
-  {
-    key: "deepseek_subscription",
+    key: "deepseek",
     name: "DeepSeek",
-    tagline: "Subscription · chat.deepseek.com",
-    icon: "🐋",
+    tagline: "DeepSeek V4 — strong open-weight + cheap API",
+    Logo: DeepSeekLogo,
     accent: "#2563eb",
     accentTop: "#142036",
-    kind: "subscription",
-    backend: "deepseek_web",
-    webOnly: { url: "https://chat.deepseek.com" },
+    routes: [
+      { key: "deepseek_subscription", kind: "subscription", routeLabel: "Subscription · chat.deepseek.com", backend: "deepseek_web", webOnly: { url: "https://chat.deepseek.com" } },
+      { key: "deepseek_api",          kind: "api",          routeLabel: "API · DEEPSEEK_API_KEY",            backend: "deepseek_api", envName: "DEEPSEEK_API_KEY" },
+    ],
   },
   {
-    key: "deepseek_api",
-    name: "DeepSeek API",
-    tagline: "DEEPSEEK_API_KEY · billed per call",
-    icon: "🐋",
-    accent: "#2563eb",
-    accentTop: "#0f1a2e",
-    kind: "api",
-    envName: "DEEPSEEK_API_KEY",
-    backend: "deepseek_api",
-  },
-  {
-    key: "xai_subscription",
+    key: "xai",
     name: "xAI Grok",
-    tagline: "Subscription · SuperGrok / X Premium+",
-    icon: "𝕏",
+    tagline: "Grok 4 — fast reasoning · X Premium+ access",
+    Logo: XaiLogo,
     accent: "#9aa0a6",
     accentTop: "#1a1c1f",
-    kind: "subscription",
-    backend: "xai_web",
-    webOnly: { url: "https://grok.com" },
+    routes: [
+      { key: "xai_subscription", kind: "subscription", routeLabel: "Subscription · SuperGrok / X Premium+", backend: "xai_web", webOnly: { url: "https://grok.com" } },
+      { key: "xai_api",          kind: "api",          routeLabel: "API · XAI_API_KEY",                       backend: "xai_api", envName: "XAI_API_KEY" },
+    ],
   },
   {
-    key: "xai_api",
-    name: "xAI Grok API",
-    tagline: "XAI_API_KEY · billed per call",
-    icon: "𝕏",
-    accent: "#9aa0a6",
-    accentTop: "#1a1c1f",
-    kind: "api",
-    envName: "XAI_API_KEY",
-    backend: "xai_api",
-  },
-  {
-    key: "groq_api",
-    name: "Groq API",
-    tagline: "GROQ_API_KEY · ~1000 tok/s LPU",
-    icon: "⚡",
+    key: "groq",
+    name: "Groq",
+    tagline: "~1000 tok/s LPU inference · open models",
+    Logo: GroqLogo,
     accent: "#ff5d11",
     accentTop: "#2a160c",
-    kind: "api",
-    envName: "GROQ_API_KEY",
-    backend: "groq_api",
+    routes: [
+      { key: "groq_api", kind: "api", routeLabel: "API · GROQ_API_KEY", backend: "groq_api", envName: "GROQ_API_KEY" },
+    ],
   },
   {
-    key: "perplexity_api",
-    name: "Perplexity Sonar API",
-    tagline: "PERPLEXITY_API_KEY · built-in search",
-    icon: "🔎",
+    key: "perplexity",
+    name: "Perplexity",
+    tagline: "Sonar — built-in real-time web search",
+    Logo: PerplexityLogo,
     accent: "#20b2aa",
     accentTop: "#102624",
-    kind: "api",
-    envName: "PERPLEXITY_API_KEY",
-    backend: "perplexity_api",
+    routes: [
+      { key: "perplexity_api", kind: "api", routeLabel: "API · PERPLEXITY_API_KEY", backend: "perplexity_api", envName: "PERPLEXITY_API_KEY" },
+    ],
   },
   {
-    key: "mistral_api",
-    name: "Mistral API",
-    tagline: "MISTRAL_API_KEY · billed per call",
-    icon: "🇫🇷",
+    key: "mistral",
+    name: "Mistral",
+    tagline: "Large / Magistral / Codestral — French frontier",
+    Logo: MistralLogo,
     accent: "#ff7a00",
     accentTop: "#2b1a0a",
-    kind: "api",
-    envName: "MISTRAL_API_KEY",
-    backend: "mistral_api",
+    routes: [
+      { key: "mistral_api", kind: "api", routeLabel: "API · MISTRAL_API_KEY", backend: "mistral_api", envName: "MISTRAL_API_KEY" },
+    ],
   },
   {
-    key: "together_api",
-    name: "Together AI API",
-    tagline: "TOGETHER_API_KEY · open-source host",
-    icon: "🧩",
+    key: "together",
+    name: "Together AI",
+    tagline: "Hosted open-source models · Llama / Qwen / Mixtral",
+    Logo: TogetherLogo,
     accent: "#7fc8ff",
     accentTop: "#12222e",
-    kind: "api",
-    envName: "TOGETHER_API_KEY",
-    backend: "together_api",
+    routes: [
+      { key: "together_api", kind: "api", routeLabel: "API · TOGETHER_API_KEY", backend: "together_api", envName: "TOGETHER_API_KEY" },
+    ],
   },
 ];
 
-// Brand columns: each pair is (subscription on top, API below). API-only
-// providers go in the bottom slot alone. The AccountsPage renders one
-// column per pair so a user looking at the "Claude" column sees both
-// ways to use Claude side by side.
-const BRAND_COLUMNS: [string, string | null][] = [
-  ["claude_subscription",   "anthropic_api"],
-  ["codex_subscription",    "openai_api"],
-  ["kimi_subscription",     "moonshot_api"],
-  ["gemini_subscription",   "gemini_api"],
-  ["deepseek_subscription", "deepseek_api"],
-  ["xai_subscription",      "xai_api"],
-  ["groq_api", null],
-  ["perplexity_api", null],
-  ["mistral_api", null],
-  ["together_api", null],
-];
-
-// ---------------------------------------------------------------------------
-// State store — mirrors AccountsPage._refresh / agent_runtime_manager.status()
-// (Qt accounts_page.py:444). In the real backend each card maps to one
-// boolean coming from agent_runtime_manager; here we hold the same shape
-// in component state and expose connect/disconnect/test mutators.
-// ---------------------------------------------------------------------------
-
+// -----------------------------------------------------------------------
+// CardState — per route (one entry per RouteSpec.key)
+// -----------------------------------------------------------------------
 type CardState = {
   connected: boolean;
   testing: boolean;
-  testText: string;        // "" hides the line (Qt setVisible(False), line 214)
-  testOk: boolean | null;  // null = probe running / pristine
+  testText: string;
+  testOk: boolean | null;
+  installing: boolean; // true while cli_install_stream is in-flight
 };
-
 const initialCardState: CardState = {
   connected: false,
   testing: false,
   testText: "",
   testOk: null,
+  installing: false,
 };
 
-// ---------------------------------------------------------------------------
-// Status dot — Qt uses #4caf50 connected / #5a6376 disconnected (lines
-// 251 + 265). Brand accent does NOT bleed into the dot in Qt.
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Install / login log hub — module-scope so the right rail keeps logs
+// across re-renders, tab switches, and reconcile() ticks.
+// -----------------------------------------------------------------------
+type LogLine = { ts: number; stream: "stdout" | "stderr" | "info"; text: string; backend: string };
 
+class LogHub {
+  private lines: LogLine[] = [];
+  private subs = new Set<(lines: LogLine[]) => void>();
+  private cap = 2000;
+
+  push(line: LogLine) {
+    this.lines.push(line);
+    if (this.lines.length > this.cap) {
+      this.lines = this.lines.slice(-this.cap);
+    }
+    this.emit();
+  }
+  clear() { this.lines = []; this.emit(); }
+  snapshot() { return this.lines.slice(); }
+  subscribe(fn: (lines: LogLine[]) => void) {
+    this.subs.add(fn);
+    fn(this.snapshot());
+    return () => { this.subs.delete(fn); };
+  }
+  private emit() {
+    const snap = this.snapshot();
+    this.subs.forEach((s) => s(snap));
+  }
+}
+const LOG_HUB = new LogHub();
+
+// -----------------------------------------------------------------------
+// Status dot
+// -----------------------------------------------------------------------
 function StatusDot({ connected }: { connected: boolean }) {
-  const c = connected ? "#4caf50" : "#5a6376";
   return (
     <span
       style={{
-        width: 10,
-        height: 10,
-        borderRadius: 5,
-        background: c,
+        width: 9, height: 9, borderRadius: 5,
+        background: connected ? "#4caf50" : "#5a6376",
         flexShrink: 0,
-        marginTop: 4, // Qt header.addWidget(status_dot, 0, Qt.AlignTop)
       }}
     />
   );
 }
 
-// ---------------------------------------------------------------------------
-// API-key modal — Qt _ApiKeyDialog (accounts_page.py:319). Prose text and
-// path are verbatim from line 331-335.
-// ---------------------------------------------------------------------------
-
+// -----------------------------------------------------------------------
+// API-key dialog
+// -----------------------------------------------------------------------
 function ApiKeyDialog({
-  envName,
-  onCancel,
-  onSave,
-}: {
-  envName: string;
-  onCancel: () => void;
-  onSave: (value: string) => void;
-}) {
+  envName, onCancel, onSave,
+}: { envName: string; onCancel: () => void; onSave: (value: string) => void }) {
   const [value, setValue] = useState("");
   const [show, setShow] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
-
-  function commit() {
-    const v = value.trim();
-    if (v) onSave(v);
-  }
-
+  useEffect(() => { inputRef.current?.focus(); }, []);
+  function commit() { const v = value.trim(); if (v) onSave(v); }
   return (
     <div
-      // Backdrop
       onClick={onCancel}
       style={{
-        position: "fixed",
-        inset: 0,
+        position: "fixed", inset: 0,
         background: "rgba(0,0,0,0.55)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        display: "flex", alignItems: "center", justifyContent: "center",
         zIndex: 100,
       }}
     >
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          minWidth: 440, // Qt setMinimumWidth(440), line 324
-          maxWidth: 520,
-          background: "#15191f",
-          borderRadius: 12,
-          padding: "20px 20px", // Qt setContentsMargins(20,20,20,20), line 327
-          display: "flex",
-          flexDirection: "column",
-          gap: 12, // Qt setSpacing(12), line 328
+          minWidth: 440, maxWidth: 520,
+          background: "#15191f", borderRadius: 12,
+          padding: "20px 20px",
+          display: "flex", flexDirection: "column", gap: 12,
           boxShadow: "0 18px 60px rgba(0,0,0,0.6)",
         }}
       >
-        <div style={{ color: "var(--fg-strong)", fontSize: 14, fontWeight: 700 }}>
-          {/* Qt setWindowTitle(f"Set {env_name}") line 322 */}
-          Set {envName}
-        </div>
-        <div
-          style={{ color: "#bbb", fontSize: 11, lineHeight: 1.55 }}
-          // Prose verbatim from Qt accounts_page.py:331-335.
-        >
+        <div style={{ color: "var(--fg-strong)", fontSize: 14, fontWeight: 700 }}>Set {envName}</div>
+        <div style={{ color: "#bbb", fontSize: 11, lineHeight: 1.55 }}>
           Paste your <b>{envName}</b> below. It will be stored in{" "}
           <code style={{ background: "var(--bg-surface)", padding: "1px 4px", borderRadius: 3 }}>
-            LLM/data/owllm_agent_secrets.json
+            ~/.owllm/agent_secrets.json
           </code>{" "}
-          on this machine and applied to{" "}
-          <code style={{ background: "var(--bg-surface)", padding: "1px 4px", borderRadius: 3 }}>
-            os.environ
-          </code>{" "}
-          at startup. Shell-exported env vars take precedence.
+          on this machine. Agents fall back to the CLI subscription automatically when no key is saved.
         </div>
         <input
           ref={inputRef}
@@ -377,289 +310,312 @@ function ApiKeyDialog({
           value={value}
           placeholder={envName}
           onChange={(e) => setValue(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") commit();
-            else if (e.key === "Escape") onCancel();
-          }}
+          onKeyDown={(e) => { if (e.key === "Enter") commit(); else if (e.key === "Escape") onCancel(); }}
           style={{
-            minHeight: 34, // Qt setMinimumHeight(34), line 343
-            padding: "0 12px",
-            borderRadius: 8,
-            border: "1px solid var(--border-strong)",
-            background: "rgba(0,0,0,0.30)",
-            color: "var(--fg)",
-            fontSize: 12,
-            fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+            minHeight: 34, padding: "0 12px",
+            borderRadius: 8, border: "1px solid var(--border-strong)",
+            background: "rgba(0,0,0,0.30)", color: "var(--fg)",
+            fontSize: 12, fontFamily: "ui-monospace, Menlo, Consolas, monospace",
           }}
         />
         <button
           onClick={() => setShow((s) => !s)}
           style={{
-            // Qt toggle styled as text-decoration:underline (line 348-351).
-            background: "transparent",
-            color: "var(--fg-muted)",
-            border: "none",
-            textDecoration: "underline",
-            fontSize: 11,
-            cursor: "pointer",
-            alignSelf: "flex-start",
-            padding: 0,
+            background: "transparent", color: "var(--fg-muted)",
+            border: "none", textDecoration: "underline",
+            fontSize: 11, cursor: "pointer",
+            alignSelf: "flex-start", padding: 0,
           }}
-        >
-          {show ? "Hide" : "Show"}
-        </button>
+        >{show ? "Hide" : "Show"}</button>
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
           <button
             onClick={onCancel}
-            style={{
-              minHeight: 30,
-              padding: "0 14px",
-              background: "var(--bg-surface)",
-              color: "#ddd",
-              border: "none",
-              borderRadius: 6,
-              fontSize: 12,
-              cursor: "pointer",
-            }}
-          >
-            Cancel
-          </button>
+            style={{ minHeight: 30, padding: "0 14px", background: "var(--bg-surface)", color: "#ddd", border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+          >Cancel</button>
           <button
             onClick={commit}
             disabled={!value.trim()}
-            style={{
-              minHeight: 30,
-              padding: "0 14px",
-              background: value.trim() ? "#3b82f6" : "rgba(59,130,246,0.30)",
-              color: "var(--fg-strong)",
-              border: "none",
-              borderRadius: 6,
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: value.trim() ? "pointer" : "default",
-            }}
-          >
-            Save
-          </button>
+            style={{ minHeight: 30, padding: "0 14px", background: value.trim() ? "#3b82f6" : "rgba(59,130,246,0.30)", color: "var(--fg-strong)", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: value.trim() ? "pointer" : "default" }}
+          >Save</button>
         </div>
       </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Confirmation prompt — Qt uses QMessageBox.question for both disconnect and
-// the post-connect info message (lines 463, 479). We use window.confirm /
-// window.alert in the React port — minimal but matches the visible
-// state-machine contract.
-// ---------------------------------------------------------------------------
-
-function confirmDisconnect(name: string): boolean {
-  // Qt: f"Remove the local {name} credentials?" line 482.
-  return window.confirm(`Remove the local ${name} credentials?`);
-}
-
-// ---------------------------------------------------------------------------
-// Brand card
-// ---------------------------------------------------------------------------
-
-function BrandCard({
-  spec,
-  state,
-  onConnect,
-  onDisconnect,
-  onTest,
+// -----------------------------------------------------------------------
+// One route row inside a provider container.
+// -----------------------------------------------------------------------
+function RouteRow({
+  provider, route, state, onConnect, onInstall, onDisconnect, onTest,
 }: {
-  spec: BrandSpec;
+  provider: ProviderSpec;
+  route: RouteSpec;
   state: CardState;
   onConnect: () => void;
+  onInstall: () => void;
   onDisconnect: () => void;
   onTest: () => void;
 }) {
-  const isSub = spec.kind === "subscription";
-  // Qt accounts_page.py:267 — exactly "Connect" / "Set key", no parenthetical.
-  const actionLabel = state.connected ? "Disconnect" : isSub ? "Connect" : "Set key";
-  // Subscription cards detect their CLI's credentials file; API cards
-  // detect a saved key. Spell that out so users don't think saving on
-  // one card transfers to the other.
-  const statusText = state.connected
+  const isSub = route.kind === "subscription";
+  const connected = state.connected;
+  const statusText = connected
     ? (isSub ? "CLI logged in" : "API key saved")
-    : (isSub ? "CLI not logged in" : "No API key saved");
+    : (isSub ? (route.webOnly ? "Web-only · sign up to subscribe" : "CLI not installed / logged in")
+             : "No API key saved");
 
-  function handleAction() {
-    if (state.connected) {
-      if (confirmDisconnect(spec.name)) onDisconnect();
+  // Subscription routes with a CLI get TWO buttons when disconnected:
+  // [Install] [Connect]. Web-only subs (Grok/DeepSeek) just get
+  // [Open subscription]. API routes get [Set key].
+  const cliBackedSub = isSub && !route.webOnly;
+
+  const primaryLabel =
+    connected ? "Disconnect"
+    : isSub ? (route.webOnly ? "Open subscription" : "Connect")
+    : "Set key";
+
+  function handlePrimary() {
+    if (connected) {
+      if (window.confirm(`Remove the local ${provider.name} credentials?`)) onDisconnect();
     } else {
       onConnect();
     }
   }
 
-  // Test result line — Qt format: f"{prefix}  {detail}  ·  {elapsed_ms} ms"
-  // (line 297, two spaces around prefix). Color #4caf50 ok / #ff8c8c fail
-  // (line 296). While testing, "Running probe…" in #dcb0ff (lines 286-287).
-  const testLineColor =
-    state.testing ? "#dcb0ff" : state.testOk == null ? "#9aa0a6" : state.testOk ? "#4caf50" : "#ff8c8c";
-  const showTestLine = state.testing || state.testText.length > 0;
-
   return (
     <div
       style={{
-        // Qt qlineargradient: stop 0 accent_top → stop 0.6 palette(base) →
-        // stop 1 palette(base). Lines 159-163.
-        background: `linear-gradient(180deg, ${spec.accentTop} 0%, ${PAGE_BG} 60%, ${PAGE_BG} 100%)`,
-        borderRadius: 16, // Qt border-radius: 16px (line 165)
-        // Qt setContentsMargins(22, 20, 22, 20) (line 171). Translate to
-        // CSS as padding: top right bottom left.
-        padding: "20px 22px 20px 22px",
-        // Qt _add_shadow defaults: blur 24 / y 4 / alpha 120 = ~0.47.
-        boxShadow: "0 4px 24px rgba(0,0,0,0.47)",
-        minHeight: 220, // Qt setMinimumHeight(220) (line 154)
-        display: "flex",
-        flexDirection: "column",
-        gap: 10, // Qt setSpacing(10) (line 172)
+        display: "flex", flexDirection: "column", gap: 6,
+        padding: "10px 0",
       }}
     >
-      {/* Header — Qt QHBoxLayout w/ spacing 14, line 175-176 */}
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 14 }}>
-        <div style={{ fontSize: 28, lineHeight: 1, background: "transparent" }}>
-          {/* Qt QFont().setPointSize(28) line 179 */}
-          {spec.icon}
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <StatusDot connected={connected} />
+        <div style={{ flex: 1, color: "#dcdfe7", fontSize: 12 }}>
+          {route.routeLabel}
         </div>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
-          {/* Qt text_box spacing 2 (line 185) */}
-          <div
-            style={{
-              color: spec.accent,
-              fontSize: 15, // Qt setPointSize(15) line 188
-              fontWeight: 700, // Qt setBold(True) line 189
-              background: "transparent",
-            }}
-          >
-            {spec.name}
-          </div>
-          <div style={{ color: "var(--fg-muted)", fontSize: 11, background: "transparent" }}>
-            {/* Qt color:#9aa0a6; font-size:11px (line 194) */}
-            {spec.tagline}
-          </div>
-        </div>
-        <StatusDot connected={state.connected} />
       </div>
-
-      {/* Status line — Qt color:#bbb; font-size:11px (line 205) */}
-      <div style={{ color: "#bbb", fontSize: 11, background: "transparent" }}>{statusText}</div>
-
-      {/* Stretch — Qt layout.addStretch(1) line 208 */}
-      <div style={{ flex: 1 }} />
-
-      {/* Test result line — hidden until probe runs (Qt setVisible(False) line 214) */}
-      {showTestLine && (
-        <div
-          style={{
-            color: testLineColor,
-            fontSize: 11,
-            background: "transparent",
-            wordBreak: "break-word",
-          }}
-        >
+      <div style={{ fontSize: 11, color: "#9aa0a6", marginLeft: 17 }}>
+        {statusText}
+      </div>
+      {state.testText && (
+        <div style={{
+          fontSize: 11, marginLeft: 17, wordBreak: "break-word",
+          color: state.testing ? "#dcb0ff" : state.testOk ? "#4caf50" : "#ff8c8c",
+        }}>
           {state.testing ? "Running probe…" : state.testText}
         </div>
       )}
-
-      {/* Button row — Qt spacing 8 (line 219) */}
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, marginLeft: 17, marginTop: 4 }}>
+        {cliBackedSub && !connected && (
+          <button
+            onClick={onInstall}
+            disabled={state.installing}
+            style={{
+              minHeight: 30, padding: "0 14px",
+              background: state.installing ? "rgba(255,255,255,0.04)" : "rgba(255,255,255,0.06)",
+              color: state.installing ? "#888" : "#ddd",
+              border: "1px solid rgba(255,255,255,0.10)",
+              borderRadius: 6, fontSize: 11, fontWeight: 600,
+              cursor: state.installing ? "default" : "pointer",
+            }}
+          >{state.installing ? "Installing…" : "⬇ Install CLI"}</button>
+        )}
         <button
-          onClick={handleAction}
+          onClick={handlePrimary}
           style={{
-            flex: 1,
-            minHeight: 34, // Qt setMinimumHeight(34) line 222
-            background: state.connected
-              ? "rgba(255,110,110,0.12)" // Qt line 256
-              : spec.accent, // Qt line 271 — solid accent, no gradient
-            color: state.connected ? "#ff8c8c" : "#fff",
-            border: "none",
-            borderRadius: 8,
-            fontSize: 12,
-            fontWeight: 600, // Qt font-weight:600 lines 259 + 273
-            cursor: "pointer",
-            padding: "0 18px",
+            flex: 1, minHeight: 30, padding: "0 14px",
+            background: connected ? "rgba(255,110,110,0.12)" : provider.accent,
+            color: connected ? "#ff8c8c" : "#fff",
+            border: "none", borderRadius: 6,
+            fontSize: 11, fontWeight: 600, cursor: "pointer",
           }}
-        >
-          {actionLabel}
-        </button>
+        >{primaryLabel}</button>
         <button
           onClick={onTest}
-          // Qt: test_btn enabled iff connected (lines 263 + 278 + 291);
-          // disabled also while a probe is in flight (line 285).
-          disabled={!state.connected || state.testing}
+          disabled={!connected || state.testing}
           style={{
-            minHeight: 34,
-            padding: "0 18px",
-            background:
-              !state.connected || state.testing
-                ? "rgba(255,255,255,0.03)" // Qt :disabled bg line 236
-                : "var(--bg-surface)", // Qt normal bg line 230
-            color: !state.connected || state.testing ? "#555" : "#ddd", // Qt line 236 / 231
-            border: "none",
-            borderRadius: 8,
-            fontSize: 12,
-            fontWeight: 500, // Qt line 233
-            cursor: !state.connected || state.testing ? "default" : "pointer",
+            minHeight: 30, padding: "0 14px",
+            background: !connected || state.testing ? "rgba(255,255,255,0.03)" : "var(--bg-surface)",
+            color: !connected || state.testing ? "#555" : "#ddd",
+            border: "none", borderRadius: 6,
+            fontSize: 11, fontWeight: 500,
+            cursor: !connected || state.testing ? "default" : "pointer",
           }}
-        >
-          {state.testing ? "Testing…" : "Test"}
-        </button>
+        >{state.testing ? "…" : "Test"}</button>
       </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Page
-// ---------------------------------------------------------------------------
-
-export default function AccountsPage() {
-  const [cards, setCards] = useState<Record<string, CardState>>(() =>
-    Object.fromEntries(BRANDS.map((b) => [b.key, { ...initialCardState }])),
+// -----------------------------------------------------------------------
+// Provider container — header + N route rows.
+// -----------------------------------------------------------------------
+function ProviderCard({
+  provider, cards, onConnect, onInstall, onDisconnect, onTest,
+}: {
+  provider: ProviderSpec;
+  cards: Record<string, CardState>;
+  onConnect: (route: RouteSpec) => void;
+  onInstall: (route: RouteSpec) => void;
+  onDisconnect: (route: RouteSpec) => void;
+  onTest: (route: RouteSpec) => void;
+}) {
+  const Logo = provider.Logo;
+  return (
+    <div
+      style={{
+        background: `linear-gradient(180deg, ${provider.accentTop} 0%, ${PAGE_BG} 60%, ${PAGE_BG} 100%)`,
+        borderRadius: 14,
+        padding: "18px 20px 14px 20px",
+        boxShadow: "0 4px 24px rgba(0,0,0,0.47)",
+        display: "flex", flexDirection: "column",
+        minHeight: 220,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 14, marginBottom: 10 }}>
+        <div style={{ width: 36, height: 36, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <Logo size={32} color={provider.accent} />
+        </div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ color: provider.accent, fontSize: 15, fontWeight: 700 }}>{provider.name}</div>
+          <div style={{ color: "var(--fg-muted)", fontSize: 11 }}>{provider.tagline}</div>
+        </div>
+      </div>
+      {provider.routes.map((route, i) => (
+        <div key={route.key} style={{ borderTop: i === 0 ? "none" : "1px solid rgba(255,255,255,0.06)" }}>
+          <RouteRow
+            provider={provider}
+            route={route}
+            state={cards[route.key] ?? initialCardState}
+            onConnect={() => onConnect(route)}
+            onInstall={() => onInstall(route)}
+            onDisconnect={() => onDisconnect(route)}
+            onTest={() => onTest(route)}
+          />
+        </div>
+      ))}
+    </div>
   );
-  // Pending API-key dialog — non-null when the user clicked "Set key" on an
-  // API card. Qt opens a modal QDialog (line 473).
-  const [dialogFor, setDialogFor] = useState<BrandSpec | null>(null);
+}
 
-  // Poll the Rust accounts_status command and reconcile each card's
-  // `connected` flag against what's actually saved on disk / detected
-  // on the system. Runs once on mount + every 3s after, mirroring the
-  // legacy Qt 3000ms timer (accounts_page.py:387). Each card's
-  // testText/testOk are LOCAL (not derived from backend) so the probe
-  // line survives across polls.
+// -----------------------------------------------------------------------
+// Right-rail log panel. Subscribes to LOG_HUB.
+// -----------------------------------------------------------------------
+function InstallLogPanel() {
+  const [lines, setLines] = useState<LogLine[]>(LOG_HUB.snapshot());
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => LOG_HUB.subscribe(setLines), []);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    // Auto-scroll only when the user is already near the bottom — don't
+    // yank the view if they scrolled up to read older lines.
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
+  }, [lines]);
+
+  return (
+    <div
+      style={{
+        width: 340, flexShrink: 0,
+        display: "flex", flexDirection: "column",
+        background: "#0c0f14",
+        border: "1px solid rgba(255,255,255,0.06)",
+        borderRadius: 12,
+        minHeight: 0,
+      }}
+    >
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "10px 14px",
+        borderBottom: "1px solid rgba(255,255,255,0.06)",
+      }}>
+        <div style={{ color: "#dcdfe7", fontSize: 12, fontWeight: 700 }}>
+          Install / login log
+        </div>
+        <button
+          onClick={() => LOG_HUB.clear()}
+          style={{
+            background: "transparent", border: "none",
+            color: "#9aa0a6", fontSize: 11, cursor: "pointer",
+            textDecoration: "underline",
+          }}
+        >clear</button>
+      </div>
+      <div
+        ref={scrollRef}
+        style={{
+          flex: 1, overflowY: "auto",
+          padding: "8px 12px",
+          fontFamily: "ui-monospace, Menlo, Consolas, monospace",
+          fontSize: 11, lineHeight: 1.5,
+          color: "#cfd4e1",
+          whiteSpace: "pre-wrap", wordBreak: "break-word",
+        }}
+      >
+        {lines.length === 0 && (
+          <div style={{ color: "#5a6376", fontStyle: "italic" }}>
+            No activity yet. Click Install or Connect on any provider to
+            see the live output here instead of a pop-out console.
+          </div>
+        )}
+        {lines.map((l, i) => (
+          <div
+            key={i}
+            style={{
+              color: l.stream === "stderr" ? "#ffcc88"
+                    : l.stream === "info"  ? "#7fb8ff"
+                    : "#cfd4e1",
+            }}
+          >
+            {l.text}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------
+// Page
+// -----------------------------------------------------------------------
+export default function AccountsPage() {
+  // Flatten all routes into card state keyed by route.key
+  const allRoutes = PROVIDERS.flatMap((p) => p.routes);
+  const [cards, setCards] = useState<Record<string, CardState>>(() =>
+    Object.fromEntries(allRoutes.map((r) => [r.key, { ...initialCardState }])),
+  );
+  const [dialogFor, setDialogFor] = useState<{ route: RouteSpec; provider: ProviderSpec } | null>(null);
+
   function reconcile(status: AccountsStatus) {
-    setCards(prev => {
+    setCards((prev) => {
       const next = { ...prev };
       const flag = (key: string, connected: boolean) => {
         const cur = next[key];
         if (!cur) return;
         if (cur.connected !== connected) {
-          // When backend flips us to disconnected, clear stale test line.
           next[key] = {
-            ...cur,
-            connected,
+            ...cur, connected,
             ...(connected ? {} : { testText: "", testOk: null }),
           };
         }
       };
-      flag("anthropic_api",  status.anthropic_api_key);
-      flag("openai_api",     status.openai_api_key);
-      flag("moonshot_api",   status.moonshot_api_key);
-      flag("deepseek_api",   status.deepseek_api_key);
-      flag("xai_api",        status.xai_api_key);
-      flag("groq_api",       status.groq_api_key);
-      flag("perplexity_api", status.perplexity_api_key);
-      flag("mistral_api",    status.mistral_api_key);
-      flag("together_api",   status.together_api_key);
-      flag("gemini_api",     status.gemini_api_key);
-      flag("claude_subscription",  status.claude_cli);
-      flag("codex_subscription",   status.codex_cli);
-      flag("kimi_subscription",    status.kimi_cli);
-      flag("gemini_subscription",  status.gemini_cli);
+      flag("anthropic_api",         status.anthropic_api_key);
+      flag("openai_api",            status.openai_api_key);
+      flag("moonshot_api",          status.moonshot_api_key);
+      flag("deepseek_api",          status.deepseek_api_key);
+      flag("xai_api",               status.xai_api_key);
+      flag("groq_api",              status.groq_api_key);
+      flag("perplexity_api",        status.perplexity_api_key);
+      flag("mistral_api",           status.mistral_api_key);
+      flag("together_api",          status.together_api_key);
+      flag("gemini_api",            status.gemini_api_key);
+      flag("claude_subscription",   status.claude_cli);
+      flag("codex_subscription",    status.codex_cli);
+      flag("kimi_subscription",     status.kimi_cli);
+      flag("gemini_subscription",   status.gemini_cli);
       return next;
     });
   }
@@ -683,132 +639,108 @@ export default function AccountsPage() {
     setCards((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
   }
 
-  function handleConnect(spec: BrandSpec) {
-    if (spec.kind === "subscription") {
-      // Web-only subscriptions (Grok, DeepSeek): no official CLI to
-      // launch — just open the subscription portal in the browser.
-      // The user signs up there; usage happens via the matching API
-      // card below (subscription tier comes with an API key on both
-      // providers).
-      if (spec.webOnly) {
-        invoke("shell_open_url", { url: spec.webOnly.url }).catch((e) => {
-          window.alert(`Couldn't open browser: ${e}\n\nVisit ${spec.webOnly!.url} manually.`);
+  function logInfo(backend: string, text: string) {
+    LOG_HUB.push({ ts: Date.now(), stream: "info", text, backend });
+  }
+
+  function handleConnect(route: RouteSpec, provider: ProviderSpec) {
+    if (route.kind === "subscription") {
+      if (route.webOnly) {
+        logInfo(route.backend, `Opening ${route.webOnly.url} in your browser…`);
+        invoke("shell_open_url", { url: route.webOnly.url }).catch((e) => {
+          logInfo(route.backend, `[error] couldn't open browser: ${e}`);
         });
         return;
       }
-      // CLI-backed subscriptions (Claude, Codex, Kimi, Gemini): spawn
-      // a real terminal running the CLI's login command. Each CLI
-      // opens the user's browser for OAuth and waits in the shell
-      // until the flow finishes. The 3-second accounts_status poll
-      // picks up the credentials file automatically once the CLI
-      // writes it.
-      //
-      // If the CLI isn't installed yet, the Rust side returns a "not
-      // found on PATH" error. That's not a real failure — the user
-      // just doesn't have the tool. Open the official install /
-      // download page in their browser so they can fix it with one
-      // click instead of being stuck at an alert.
-      invoke("subscription_cli_login", { backend: spec.backend }).catch((e) => {
+      logInfo(route.backend, `Launching ${provider.name} CLI login…`);
+      invoke("subscription_cli_login", { backend: route.backend }).catch((e) => {
         const msg = String(e ?? "");
-        const cliMissing = /not found on PATH/i.test(msg);
-        // Per-provider install + login info. installPkg is the npm /
-        // pip package we ship via cli_install; loginCmd is what runs
-        // inside the open REPL after install if the user wants to
-        // manually re-trigger OAuth.
-        const installInfo: Record<string, { pkg: string; runtime: string; loginCmd: string; name: string }> = {
-          claude_cli: { pkg: "@anthropic-ai/claude-code", runtime: "Node.js", loginCmd: "claude /login", name: "Claude Code CLI" },
-          codex_cli:  { pkg: "@openai/codex",             runtime: "Node.js", loginCmd: "codex login",   name: "OpenAI Codex CLI" },
-          kimi_cli:   { pkg: "kimi-cli",                  runtime: "Python",  loginCmd: "kimi /login",   name: "Kimi Code CLI" },
-          gemini_cli: { pkg: "@google/gemini-cli",        runtime: "Node.js", loginCmd: "gemini /auth",  name: "Google Gemini CLI" },
-        };
-        const info = installInfo[spec.backend];
-        if (cliMissing && info) {
-          // Offer to run the install for them. One click → a visible
-          // console runs `npm install -g …` or `pip install …`. After
-          // it succeeds the user re-clicks Connect to do OAuth.
-          const accepted = window.confirm(
-            `${info.name} isn't installed yet.\n\n` +
-            `Install it now via ${info.runtime === "Node.js" ? "npm" : "pip"}?\n` +
-            `(opens a terminal that runs: ${info.runtime === "Node.js" ? `npm install -g ${info.pkg}` : `pip install --upgrade ${info.pkg}`})\n\n` +
-            `Click OK to install. After it finishes, click Connect again to log in.`
-          );
-          if (!accepted) return;
-          invoke("cli_install", { backend: spec.backend }).catch((ie) => {
-            const ieMsg = String(ie ?? "");
-            // Package manager itself missing → point them at the
-            // runtime install page.
-            const runtimeUrl = info.runtime === "Node.js"
-              ? "https://nodejs.org/en/download"
-              : "https://www.python.org/downloads";
-            invoke("shell_open_url", { url: runtimeUrl }).catch(() => {});
-            window.alert(
-              `${ieMsg}\n\nOpening the ${info.runtime} install page so you can install the runtime first.`
-            );
-          });
-          return;
+        if (/not found on PATH/i.test(msg)) {
+          logInfo(route.backend, `[warn] CLI not found — click 'Install CLI' on the same row to add it via npm/pip.`);
+        } else {
+          logInfo(route.backend, `[error] login spawn failed: ${msg}`);
         }
-        // Real spawn failure (CLI present but launch crashed). Surface
-        // the manual command so the user has an escape hatch.
-        const loginCmd = info?.loginCmd ?? `${spec.backend} login`;
-        window.alert(
-          `Couldn't open a terminal: ${msg}\n\n` +
-          `Run this manually instead:\n\n  ${loginCmd}\n\n` +
-          `The card will flip to green within 3 seconds after the CLI saves its credentials.`
-        );
       });
     } else {
-      setDialogFor(spec);
+      setDialogFor({ route, provider });
     }
   }
 
-  async function handleDisconnect(spec: BrandSpec) {
+  function handleInstall(route: RouteSpec, provider: ProviderSpec) {
+    if (route.kind !== "subscription" || route.webOnly) return;
+    if ((cards[route.key]?.installing)) return;
+    setCardState(route.key, { installing: true });
+    logInfo(route.backend, `Installing ${provider.name} CLI…`);
+
+    const channel = new Channel<{ kind: string; stream?: string; text?: string; code?: number | null }>();
+    channel.onmessage = (evt) => {
+      if (evt.kind === "line") {
+        LOG_HUB.push({
+          ts: Date.now(),
+          stream: (evt.stream === "stderr" ? "stderr" : "stdout"),
+          text: evt.text ?? "",
+          backend: route.backend,
+        });
+      } else if (evt.kind === "done") {
+        const ok = evt.code === 0;
+        logInfo(route.backend, ok
+          ? `✓ install finished — click Connect on the same row to log in.`
+          : `✗ install failed (exit ${evt.code ?? "?"}); see lines above.`);
+        setCardState(route.key, { installing: false });
+      }
+    };
+    invoke("cli_install_stream", { backend: route.backend, onEvent: channel }).catch((e) => {
+      logInfo(route.backend, `[error] ${String(e)}`);
+      setCardState(route.key, { installing: false });
+    });
+  }
+
+  async function handleDisconnect(route: RouteSpec, provider: ProviderSpec) {
     try {
-      if (spec.kind === "api" && spec.envName) {
-        await invoke("accounts_delete_secret", { name: spec.envName });
+      if (route.kind === "api" && route.envName) {
+        await invoke("accounts_delete_secret", { name: route.envName });
       } else {
-        // Subscription disconnect — we don't auto-delete the CLI
-        // credentials file (that's the user's CLI to manage). Just
-        // surface what they need to do manually.
-        const cmd = spec.backend === "claude_cli"  ? "claude /logout"
-                  : spec.backend === "codex_cli"   ? "codex logout"
-                  : spec.backend === "kimi_cli"    ? "kimi /logout"
-                  : spec.backend === "gemini_cli"  ? "gemini auth logout"
-                  : `${spec.backend} logout`;
-        window.alert(`Run this in a terminal to sign out:\n\n  ${cmd}`);
+        const cmd = route.backend === "claude_cli"  ? "claude /logout"
+                  : route.backend === "codex_cli"   ? "codex logout"
+                  : route.backend === "kimi_cli"    ? "kimi /logout"
+                  : route.backend === "gemini_cli"  ? "gemini auth logout"
+                  : `${route.backend} logout`;
+        logInfo(route.backend, `[info] Run \`${cmd}\` in a terminal to fully sign out (we don't auto-delete CLI creds).`);
         return;
       }
-      // Optimistic flip — next poll confirms.
-      setCardState(spec.key, { connected: false, testText: "", testOk: null });
+      setCardState(route.key, { connected: false, testText: "", testOk: null });
+      logInfo(route.backend, `Removed ${provider.name} API key from local store.`);
     } catch (e: any) {
-      window.alert(`Disconnect failed: ${e?.message ?? e}`);
+      logInfo(route.backend, `[error] disconnect failed: ${e?.message ?? e}`);
     }
   }
 
   async function handleDialogSave(value: string) {
     if (!dialogFor) return;
-    if (!dialogFor.envName) { setDialogFor(null); return; }
+    const { route, provider } = dialogFor;
+    if (!route.envName) { setDialogFor(null); return; }
     try {
-      await invoke("accounts_save_api_key", { name: dialogFor.envName, value });
-      // Optimistic flip — the 3s poll will confirm.
-      setCardState(dialogFor.key, { connected: true, testText: "", testOk: null });
+      await invoke("accounts_save_api_key", { name: route.envName, value });
+      setCardState(route.key, { connected: true, testText: "", testOk: null });
+      logInfo(route.backend, `Saved ${provider.name} API key locally.`);
     } catch (e: any) {
-      window.alert(`Save failed: ${e?.message ?? e}`);
+      logInfo(route.backend, `[error] save failed: ${e?.message ?? e}`);
     }
     setDialogFor(null);
   }
 
-  async function handleTest(spec: BrandSpec) {
-    setCardState(spec.key, { testing: true, testText: "", testOk: null });
+  async function handleTest(route: RouteSpec) {
+    setCardState(route.key, { testing: true, testText: "", testOk: null });
     try {
-      const r = await invoke<ProbeResult>("accounts_test_probe", { backend: spec.backend });
+      const r = await invoke<ProbeResult>("accounts_test_probe", { backend: route.backend });
       const prefix = r.ok ? "✓" : "✗";
-      setCardState(spec.key, {
+      setCardState(route.key, {
         testing: false,
         testText: `${prefix}  ${r.detail}  ·  ${r.elapsed_ms} ms`,
         testOk: r.ok,
       });
     } catch (e: any) {
-      setCardState(spec.key, {
+      setCardState(route.key, {
         testing: false,
         testText: `✗  ${String(e?.message ?? e)}`,
         testOk: false,
@@ -819,89 +751,58 @@ export default function AccountsPage() {
   return (
     <div
       style={{
-        // Qt setContentsMargins(28, 24, 28, 24) line 405. CSS order:
-        // top right bottom left.
         padding: "24px 28px 24px 28px",
         height: "100%",
         background: PAGE_BG,
         display: "flex",
         flexDirection: "column",
-        gap: 18, // Qt outer.setSpacing(18) line 406
-        overflow: "auto",
+        gap: 18,
+        overflow: "hidden",
         boxSizing: "border-box",
       }}
     >
-      {/* Title — Qt QFont().setPointSize(22).setBold(True) lines 411-412 */}
       <div style={{ fontSize: 22, fontWeight: 800, color: "var(--fg-strong)" }}>Accounts</div>
-      {/* Subtitle — verbatim Qt accounts_page.py:418, color #9aa0a6 12px (line 420) */}
       <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-        Connect each provider once. Test verifies credentials end-to-end.
-        <br />
-        <span style={{ color: "var(--fg-subtle)" }}>
-          The two CLI cards detect <code>claude</code> / <code>codex</code> logins on this machine.
-          The two API cards store keys in <code>~/.owllm/agent_secrets.json</code>.
-          Agents fall back to the CLI subscription automatically when no matching API key is saved.
-        </span>
+        Each provider gets one card with both ways to access it: subscription
+        (CLI login or web portal) and API key. Install / Connect output streams
+        live into the right-side log — no pop-out console.
       </div>
 
-      {/* 2x2 grid — Qt QGridLayout h/v spacing 18 (lines 425-426), both
-          columns stretch 1 (lines 436-437). */}
-      {/* Three brand columns, each with subscription card on top and
-          API card below — so Claude/Anthropic, Codex/OpenAI, and
-          Kimi/Moonshot stack their two routes inside the same column.
-          Columns reflow on narrow windows; each capped at 450px wide
-          so cards don't stretch absurdly on big monitors. */}
-      <div
-        style={{
-          flex: 1,
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 450px))",
-          columnGap: 18,
-          rowGap: 18,
-          minHeight: 0,
-          alignContent: "start",
-        }}
-      >
-        {BRAND_COLUMNS.map(([topKey, bottomKey]) => {
-          const topSpec = BRANDS.find((b) => b.key === topKey);
-          const bottomSpec = bottomKey ? BRANDS.find((b) => b.key === bottomKey) : null;
-          return (
-            <div
-              key={topKey}
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: 18,
-                maxWidth: 450,
-                minWidth: 0,
-              }}
-            >
-              {topSpec && (
-                <BrandCard
-                  spec={topSpec}
-                  state={cards[topSpec.key]}
-                  onConnect={() => handleConnect(topSpec)}
-                  onDisconnect={() => handleDisconnect(topSpec)}
-                  onTest={() => handleTest(topSpec)}
-                />
-              )}
-              {bottomSpec && (
-                <BrandCard
-                  spec={bottomSpec}
-                  state={cards[bottomSpec.key]}
-                  onConnect={() => handleConnect(bottomSpec)}
-                  onDisconnect={() => handleDisconnect(bottomSpec)}
-                  onTest={() => handleTest(bottomSpec)}
-                />
-              )}
-            </div>
-          );
-        })}
+      <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 18 }}>
+        {/* Provider grid — left column */}
+        <div
+          style={{
+            flex: 1,
+            minWidth: 0,
+            overflowY: "auto",
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(320px, 480px))",
+            columnGap: 18,
+            rowGap: 18,
+            alignContent: "start",
+            paddingRight: 4,
+          }}
+        >
+          {PROVIDERS.map((provider) => (
+            <ProviderCard
+              key={provider.key}
+              provider={provider}
+              cards={cards}
+              onConnect={(r) => handleConnect(r, provider)}
+              onInstall={(r) => handleInstall(r, provider)}
+              onDisconnect={(r) => handleDisconnect(r, provider)}
+              onTest={(r) => handleTest(r)}
+            />
+          ))}
+        </div>
+
+        {/* In-app log panel — right rail */}
+        <InstallLogPanel />
       </div>
 
       {dialogFor && (
         <ApiKeyDialog
-          envName={dialogFor.envName!}
+          envName={dialogFor.route.envName!}
           onCancel={() => setDialogFor(null)}
           onSave={handleDialogSave}
         />

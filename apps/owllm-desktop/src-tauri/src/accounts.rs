@@ -657,7 +657,7 @@ fn extra_search_dirs() -> Vec<PathBuf> {
 
 /// PATH search → fallback to extra_search_dirs. Use this anywhere we
 /// need to locate a CLI/binary that the user may have just installed.
-fn which_extended(name: &str) -> Option<PathBuf> {
+pub fn which_extended(name: &str) -> Option<PathBuf> {
     if let Ok(p) = which_in_path(name) {
         return Some(p);
     }

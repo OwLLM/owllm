@@ -27,8 +27,63 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::ipc::Channel;
+
+/// Resolve a bare CLI name ("kimi", "claude", …) to (exe, args) ready
+/// for portable-pty's CommandBuilder. Two Windows-specific gotchas
+/// the bare-spawn path falls over on:
+///
+///   * CreateProcessW does NOT walk PATHEXT, so `CommandBuilder::new
+///     ("kimi")` fails with os error 2 even though `kimi.cmd` sits
+///     happily in %APPDATA%\Python\Python312\Scripts.
+///   * Batch shims (.cmd / .bat) aren't PE binaries, so even when
+///     CreateProcessW finds them it returns os error 193 ("not a
+///     valid Win32 application"). They MUST be launched via
+///     `cmd.exe /c <full path>`.
+///
+/// This helper handles both: walks the same PATH+extra-dirs that
+/// accounts::which_extended uses (so kimi.cmd shows up), preferring
+/// .exe → .cmd → bare; if the resolved file is a batch shim, wraps
+/// with cmd.exe /c. Returns (exe, args) the caller hands to CommandBuilder.
+fn resolve_cli_command(name: &str, args: &[String]) -> Result<(PathBuf, Vec<String>), String> {
+    // Same search order as the find_*_cli helpers in accounts.rs.
+    let candidates = [
+        format!("{name}.exe"),
+        format!("{name}.cmd"),
+        name.to_string(),
+    ];
+    let resolved = candidates
+        .iter()
+        .find_map(|n| crate::accounts::which_extended(n))
+        .ok_or_else(|| format!(
+            "'{name}' not found on PATH or common install dirs — install it via the Install CLI button first."
+        ))?;
+
+    let is_batch = resolved
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|e| {
+            let e = e.to_ascii_lowercase();
+            e == "cmd" || e == "bat"
+        })
+        .unwrap_or(false);
+
+    if is_batch {
+        // cmd.exe /c <path> <args...>. We pass the path WITHOUT extra
+        // quotes here because CommandBuilder quotes args itself; the
+        // PATH lookup gave us a literal absolute path with no embedded
+        // quoting required (no special cmd-meta chars). If a future
+        // path lands in C:\Program Files\... CommandBuilder still
+        // quotes the spaces correctly because we hand it as ONE arg.
+        let mut wrapped: Vec<String> = vec!["/c".to_string(), resolved.to_string_lossy().to_string()];
+        wrapped.extend(args.iter().cloned());
+        Ok((PathBuf::from("cmd.exe"), wrapped))
+    } else {
+        Ok((resolved, args.to_vec()))
+    }
+}
 
 /// One PTY event the React xterm.js side consumes.
 #[derive(Clone, Serialize)]
@@ -66,13 +121,20 @@ pub fn pty_spawn(
     let cols = cols.unwrap_or(100);
     let rows = rows.unwrap_or(28);
 
+    // Resolve `cli` to an absolute path + adjust args for batch shims.
+    // Without this, npm-installed CLIs (kimi.cmd, gemini.cmd) hit os
+    // error 193 because CreateProcessW can't launch .cmd files
+    // directly, and pip-installed CLIs hit os error 2 because
+    // CreateProcessW doesn't walk PATHEXT.
+    let (exe, resolved_args) = resolve_cli_command(&cli, &args)?;
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| format!("openpty: {e}"))?;
 
-    let mut cmd = CommandBuilder::new(&cli);
-    for a in &args {
+    let mut cmd = CommandBuilder::new(&exe);
+    for a in &resolved_args {
         cmd.arg(a);
     }
     if let Some(c) = cwd.as_ref().filter(|s| !s.trim().is_empty()) {

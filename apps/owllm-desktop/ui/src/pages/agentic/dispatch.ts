@@ -206,6 +206,25 @@ export function getClaudeSession(
   return uuid;
 }
 
+/// Wipe every cached Claude session across every project. Used when
+/// the CLI reports "Session ID … is already in use" — that means a
+/// prior process crashed without releasing the lock, and the next
+/// call will keep hitting the same stale id unless we evict it from
+/// our cache too.
+export function clearAllClaudeSessions(): void {
+  for (const k of Array.from(sessionMemCache.keys())) {
+    if (k.startsWith(SESSION_KEY_PREFIX)) sessionMemCache.delete(k);
+  }
+  try {
+    const toRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(SESSION_KEY_PREFIX)) toRemove.push(k);
+    }
+    for (const k of toRemove) localStorage.removeItem(k);
+  } catch { /* localStorage unavailable */ }
+}
+
 /// Clear the cached session id(s). Pass agentName to reset one agent;
 /// omit it to reset every agent in the project. Forces the next call
 /// to start a fresh CLI session — the agent forgets its prior turns.

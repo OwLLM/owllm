@@ -25,6 +25,7 @@ import {
   mapClaudeEffort,
   getClaudeSession,
   resetClaudeSession,
+  clearAllClaudeSessions,
 } from "./dispatch";
 
 const ICONS = "/Page_icons";
@@ -3575,20 +3576,43 @@ async function streamAnthropic(
     }
     // Stream via claude_cli_stream when the consumer wants live
     // thought traffic (AgentsPage Thought tab); fall back to one-shot
-    // --print blob otherwise.
+    // --print blob otherwise. Session-id conflicts get swallowed +
+    // retried with a fresh uuid: Claude CLI rejects a session_id
+    // that's currently locked by another in-flight (or stale-crashed)
+    // process, so we drop the persistent id, regenerate, and try
+    // once more before bubbling up.
+    const runWithSessionRetry = async <T,>(
+      attempt: (sid: string | null | undefined) => Promise<T>,
+    ): Promise<T> => {
+      try {
+        return await attempt(sessionId);
+      } catch (e: unknown) {
+        const msg = (e as { message?: string })?.message ?? String(e);
+        const isSessionConflict = /Session ID .* (is already in use|already in use)/i.test(msg)
+          || (/already in use/i.test(msg) && /session/i.test(msg));
+        if (!isSessionConflict) throw e;
+        // Stale lock from a prior crashed claude process — the
+        // persistent session ID is wedged. Wipe every cached
+        // Claude session across the app so this dispatch AND every
+        // future one gets a fresh UUID, then retry the current call
+        // in one-shot mode (sid=null) so it succeeds now.
+        try { clearAllClaudeSessions(); } catch { /* best-effort */ }
+        return await attempt(null);
+      }
+    };
     if (onThought) {
-      return await runClaudeCliStream({
+      return await runWithSessionRetry((sid) => runClaudeCliStream({
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false, allowedTools,
-        model: cliModel, effort: claudeEffort, sessionId,
+        model: cliModel, effort: claudeEffort, sessionId: sid,
         onDelta, onThought,
-      });
+      }));
     }
-    const reply = await invoke<string>("claude_cli_complete", {
+    const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
       systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
       autoApprove: autoApprove ?? false,
-      model: cliModel, effort: claudeEffort, sessionId,
-    });
+      model: cliModel, effort: claudeEffort, sessionId: sid,
+    }));
     if (reply) onDelta(reply);
     return reply;
   }

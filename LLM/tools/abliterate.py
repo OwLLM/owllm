@@ -314,6 +314,16 @@ def dequantize_bnb_if_needed(model) -> bool:
                     delattr(model.config, attr)
         except Exception:
             pass
+        # bnb load stores torch_dtype as a torch.dtype object (not a
+        # string), which then trips "Object of type dtype is not JSON
+        # serializable" when save_pretrained writes config.json. Normalize
+        # every torch.dtype value in the config dict to its string name.
+        try:
+            for k, v in list(model.config.__dict__.items()):
+                if isinstance(v, torch.dtype):
+                    setattr(model.config, k, str(v).replace("torch.", ""))
+        except Exception:
+            pass
     return swapped > 0
 
 

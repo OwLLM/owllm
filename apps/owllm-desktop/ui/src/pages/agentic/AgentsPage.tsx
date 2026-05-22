@@ -4767,38 +4767,46 @@ export default function AgentsPage() {
       return next;
     });
   };
-  // Auto-start the local llama-server when the team model resolves to a
-  // local GGUF — mirrors ChatPage's column A behaviour so the user
-  // doesn't have to flip to the Server tab to launch a model they
-  // already picked here. Cloud models (sub/api/auto prefixes) and
-  // already-running matches are skipped. A different model running →
-  // swap (stop then start).
+  // Lazy server-start state. The local llama-server is no longer
+  // pre-launched when the user opens this page or picks a model —
+  // dispatchGoal() starts it on the first message instead, so
+  // browsing the Agents tab doesn't spin up a 7B model the user may
+  // not actually use.
   const [serverAutoStarting, setServerAutoStarting] = useState<string | null>(null);
-  useEffect(() => {
-    const wanted = effectiveTeamModel.trim();
-    if (!wanted) return;
-    // Cloud + auto routes never run on the local llama-server.
-    if (wanted.startsWith("sub/") || wanted.startsWith("api/") || wanted.startsWith("auto/")) return;
-    const m = models.find((x) => x.model_id === wanted);
-    if (!m || m.provider !== "local" || m.port == null) return; // non-GGUF (transformers dir) → can't serve
-    if (serverState.running && serverState.model_id === wanted) return;
-    if (serverAutoStarting === wanted) return;
 
-    let dead = false;
-    (async () => {
-      setServerAutoStarting(wanted);
+  // Start the llama-server for `wanted` and poll server_status until
+  // it's actually running on that model, or until `timeoutMs` elapses.
+  // Returns true when ready, false on timeout. Used by dispatchGoal
+  // so the first user message waits for the server before fanning
+  // out to specialists.
+  async function ensureLocalServer(wanted: string, timeoutMs = 90_000): Promise<boolean> {
+    if (serverState.running && serverState.model_id === wanted) return true;
+    setServerAutoStarting(wanted);
+    try {
+      if (serverState.running) await invoke("server_stop").catch(() => {});
+      await invoke("server_start", { modelId: wanted });
+    } catch (e) {
+      console.warn("[agents] lazy server start failed:", e);
+      setServerAutoStarting(null);
+      return false;
+    }
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
       try {
-        if (serverState.running) await invoke("server_stop").catch(() => {});
-        await invoke("server_start", { modelId: wanted });
-      } catch (e) {
-        if (!dead) console.warn("[agents] auto-start failed:", e);
-      } finally {
-        if (!dead) setServerAutoStarting(null);
+        const s = await invoke<ServerStatus>("server_status");
+        setServerState(s);
+        if (s.running && s.model_id === wanted && s.port) {
+          setServerAutoStarting(null);
+          return true;
+        }
+      } catch {
+        // ignore, retry
       }
-    })();
-    return () => { dead = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [effectiveTeamModel, serverState.running, serverState.model_id]);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    setServerAutoStarting(null);
+    return false;
+  }
 
   const onPickTeamModel = (modelId: string) => {
     setTeamModelOverride(modelId);
@@ -4865,9 +4873,32 @@ export default function AgentsPage() {
     const isLocallyServed = (p: string) => p === "local" || p === "tuned";
     const needsLocal = isLocallyServed(providerFor(orchModelId))
       || (activeTeam?.agents ?? []).some(a => isLocallyServed(providerFor(modelFor(a.name))));
-    if (needsLocal && (!serverState.running || !serverState.port)) {
-      setRunError("This team uses local model(s) but no local server is running. Start one on the Server tab.");
-      return;
+    if (needsLocal) {
+      // Decide which model the local server should be running. The
+      // orchestrator's model wins; if it's not local we look for any
+      // locally-served agent in the team. A blank model means "we
+      // can't infer which weights to load" — that's user error.
+      const localCandidates: string[] = [];
+      if (isLocallyServed(providerFor(orchModelId))) localCandidates.push(orchModelId);
+      for (const a of activeTeam?.agents ?? []) {
+        const id = modelFor(a.name);
+        if (id && isLocallyServed(providerFor(id))) localCandidates.push(id);
+      }
+      const wantedLocal = localCandidates[0]?.trim();
+      if (!wantedLocal) {
+        setRunError("This team uses local model(s) but no model is picked. Choose one in the picker.");
+        return;
+      }
+      if (!serverState.running || !serverState.port || serverState.model_id !== wantedLocal) {
+        setPhase("planning");
+        setRunError(`Starting local server (${wantedLocal})…`);
+        const ok = await ensureLocalServer(wantedLocal);
+        if (!ok) {
+          setRunError(`Local server failed to start for "${wantedLocal}" within 90s — try the Server tab manually.`);
+          return;
+        }
+        setRunError(null);
+      }
     }
     if (!activeTeam || activeTeam.agents.length === 0) {
       setRunError("No team is loaded. Pick a team via 'Team…' or select a project with a roster.");

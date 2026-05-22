@@ -142,19 +142,26 @@ const AUTO_OPTIONS = [
 export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | null): Entry[] {
   const out: Entry[] = [];
 
-  // LOCAL — base GGUFs + transformers dirs under LLM/models/.
+  // LOCAL — base GGUFs + transformers dirs under LLM/models/. Entries
+  // with port=null are transformers-format directories that
+  // llama-server can't serve as-is; we show them dimmed with a hint
+  // telling the user to convert to GGUF first (rather than letting
+  // them pick a model that silently no-ops on Server start).
   for (const m of models) {
     if (m.provider !== "local") continue;
     const parts: string[] = [];
     if (m.size_mib != null) parts.push(`${(m.size_mib / 1024).toFixed(1)} GiB`);
     if (m.port != null) parts.push(`Port: ${m.port}`);
+    const isUnservable = m.port == null;
     out.push({
       id: m.model_id,
       label: m.model_id,
       section: "local",
       variant: "local",
-      available: true,
-      hint: parts.length > 0 ? parts.join(" · ") : undefined,
+      available: !isUnservable,
+      hint: isUnservable
+        ? (parts.length > 0 ? `${parts.join(" · ")} · transformers dir — export GGUF first` : "transformers dir — export GGUF first")
+        : (parts.length > 0 ? parts.join(" · ") : undefined),
     });
   }
 
@@ -166,13 +173,17 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
     if (m.provider !== "tuned") continue;
     const parts: string[] = [];
     if (m.size_mib != null) parts.push(`${(m.size_mib / 1024).toFixed(1)} GiB`);
+    if (m.port != null) parts.push(`Port: ${m.port}`);
+    const isUnservable = m.port == null;
     out.push({
       id: m.model_id,
       label: m.model_id,
       section: "tuned",
       variant: "tuned",
-      available: true,
-      hint: parts.length > 0 ? parts.join(" · ") : undefined,
+      available: !isUnservable,
+      hint: isUnservable
+        ? (parts.length > 0 ? `${parts.join(" · ")} · transformers dir — export GGUF first` : "transformers dir — export GGUF first")
+        : (parts.length > 0 ? parts.join(" · ") : undefined),
     });
   }
 

@@ -850,14 +850,18 @@ fn kimi_cli_logged_in() -> bool {
     cfg.exists()
 }
 
-/// One-shot completion via `kimi --print`. Mirrors claude_cli_complete
-/// — same shape, same expectations: stdin gets the user message, the
-/// CLI emits a final reply on stdout. Kimi Code CLI's --print mode
-/// is non-streaming, so the UI just receives the complete reply when
-/// the child exits. Model selection goes via `--model <id>` when the
-/// picker passes one; system prompt gets concatenated in front of the
-/// user message because the CLI doesn't expose a separate
-/// --append-system-prompt flag.
+/// One-shot completion via `kimi --print --prompt`. Mirrors the
+/// shape of claude_cli_complete but uses Kimi Code CLI's actual flag
+/// surface: `--print` (alias `-q` for quiet/final-only when paired
+/// with `--final-message-only`), `--prompt` (`-p`) for the user text,
+/// `--model` (`-m`) for the model id. We use `--print
+/// --final-message-only --output-format text` so the CLI emits ONLY
+/// the assistant's final reply on stdout — no streaming preamble for
+/// us to strip on this side.
+///
+/// System prompt: the CLI has no `--append-system-prompt` (that's a
+/// Claude-CLI-specific flag); we fold it into the prompt with a clear
+/// separator instead.
 #[tauri::command]
 pub async fn kimi_cli_complete(
     system_prompt: String,
@@ -867,7 +871,7 @@ pub async fn kimi_cli_complete(
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let exe = find_kimi_cli()
-            .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code first".to_string())?;
+            .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code (https://github.com/MoonshotAI/kimi-cli) first".to_string())?;
         let mut cmd = Command::new(&exe);
 
         #[cfg(windows)]
@@ -875,18 +879,34 @@ pub async fn kimi_cli_complete(
         #[cfg(not(windows))]
         let batch = false;
 
+        // Compose system + user into a single prompt — Kimi --print
+        // mode doesn't expose a system-message flag.
+        let composed = if system_prompt.trim().is_empty() {
+            user_message
+        } else {
+            format!("{system_prompt}\n\n---\n\n{user_message}")
+        };
+
         push_arg(&mut cmd, batch, "--print");
+        // Suppress everything except the final assistant message so
+        // the React side gets a clean blob, not a streaming preamble.
+        push_arg(&mut cmd, batch, "--output-format");
+        push_arg(&mut cmd, batch, "text");
+        push_arg(&mut cmd, batch, "--final-message-only");
         if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             push_arg(&mut cmd, batch, "--model");
             push_arg(&mut cmd, batch, m);
         }
+        push_arg(&mut cmd, batch, "--prompt");
+        push_arg(&mut cmd, batch, &composed);
+
         if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let p = std::path::Path::new(dir);
             if p.is_dir() {
                 cmd.current_dir(p);
             }
         }
-        cmd.stdin(Stdio::piped());
+        cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         #[cfg(windows)]
@@ -894,21 +914,9 @@ pub async fn kimi_cli_complete(
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        let mut child = cmd.spawn().map_err(|e| format!("spawn kimi: {e}"))?;
-        // Compose system + user prompts into a single stdin payload.
-        // The CLI's --print mode doesn't take a system prompt flag, so
-        // we fold it in front of the user message with a clear marker.
-        let stdin_payload = if system_prompt.trim().is_empty() {
-            user_message
-        } else {
-            format!("{system_prompt}\n\n---\n\n{user_message}")
-        };
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(stdin_payload.as_bytes())
-                .map_err(|e| format!("write stdin: {e}"))?;
-        }
-        let output = child
+        let output = cmd
+            .spawn()
+            .map_err(|e| format!("spawn kimi: {e}"))?
             .wait_with_output()
             .map_err(|e| format!("wait kimi: {e}"))?;
         if !output.status.success() {

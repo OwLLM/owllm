@@ -91,7 +91,6 @@ export default function TunedModelCard(props: TunedModelCardProps) {
       </>}
       actions={
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button style={btn} onClick={(e) => { e.stopPropagation(); onTest?.(adapterPath); }}>💬 Test</button>
           {!isGguf && (
             <button style={btn} onClick={(e) => { e.stopPropagation(); onExportGguf?.(adapterPath); }}>📦 Export GGUF</button>
           )}

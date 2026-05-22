@@ -286,25 +286,6 @@ function deleteTunedAdapter(
     });
 }
 
-// "Test" a tuned model: for transformers dirs the user needs to GGUF
-// first; for .gguf files we hand off to the Server start path so the
-// Chat page can talk to it. Cheap & honest — surface the situation
-// instead of pretending to do something.
-function testTunedAdapter(path: string, setError: (msg: string | null) => void) {
-  console.log("[test-tuned] →", path);
-  if (path.toLowerCase().endsWith(".gguf")) {
-    // Start the server pointing at this .gguf so the Chat page can use it.
-    setError(`▶ Starting server with ${path.split(/[\\/]/).pop()}…`);
-    invoke<void>("server_start", { modelId: path })
-      .then(() => setError(`✅ Server starting — open the Chat page.`))
-      .catch((e) => setError(`❌ Server start failed: ${e}`));
-  } else {
-    setError(
-      "ℹ Transformers-dir models can't be served by llama-server directly. Click 📦 Export GGUF first, then 💬 Test the resulting .gguf.",
-    );
-  }
-}
-
 export default function ModelsPage() {
   const [tab, setTab] = React.useState<SubTab>("browse");
   const [downloaded, setDownloaded] = React.useState<DownloadedItem[]>([]);
@@ -973,7 +954,6 @@ export default function ModelsPage() {
               createdAt={t.modified ?? undefined}
               selected={selectedPath === t.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
-              onTest={(path) => testTunedAdapter(path, setHfError)}
               onExportGguf={(path) => exportTunedToGguf(path, setHfError, refreshTuned, setExportLogs, setExportLogsOpen, setExportStatus)}
               onDelete={(path) => deleteTunedAdapter(path, t.name, setHfError, refreshTuned)}
             />

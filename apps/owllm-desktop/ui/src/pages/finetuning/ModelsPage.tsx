@@ -21,7 +21,7 @@ import AccessTokensPane from "./widgets/AccessTokensPane";
 import WeightPickerDialog from "./widgets/WeightPickerDialog";
 import { invoke, Channel } from "@tauri-apps/api/core";
 
-type SubTab = "browse" | "downloaded" | "tuned";
+type SubTab = "browse" | "downloaded" | "tuned" | "cache";
 
 // Mirrors Rust HfModelHit in src-tauri/src/huggingface.rs.
 type HfModelHit = {
@@ -468,6 +468,7 @@ export default function ModelsPage() {
           { key: "browse",     dataUi: "browseTabBtn",     label: "🚀 Browse Models" },
           { key: "downloaded", dataUi: "downloadedTabBtn", label: "💾 Downloaded"    },
           { key: "tuned",      dataUi: "tunedTabBtn",      label: "🎯 Tuned Models"  },
+          { key: "cache",      dataUi: "cacheTabBtn",      label: "💽 Cache"          },
         ] as const).map((t) => {
           const active = tab === t.key;
           return (
@@ -959,6 +960,10 @@ export default function ModelsPage() {
         </div>
       )}
 
+      {tab === "cache" && (
+        <CacheTab setBanner={setHfError} />
+      )}
+
       {tab === "browse" && (
       <div
         style={{
@@ -1005,3 +1010,262 @@ export default function ModelsPage() {
     </div>
   );
 }
+
+// ──────────────────────────────────────────────────────────────────
+// CacheTab — surfaces every "models--owner--name" dir under the
+// known HF cache roots so the user can see where disk is going and
+// reclaim it. Without this, abliterate/train/GGUF runs silently grow
+// $HF_HOME/$TRANSFORMERS_CACHE forever (see hf_cache_list in Rust).
+// ──────────────────────────────────────────────────────────────────
+type HfCacheEntry = {
+  repoId: string;
+  path: string;
+  cacheRoot: string;
+  sizeBytes: number;
+  modifiedAt: number | null;
+};
+type HfCacheSummary = {
+  roots: string[];
+  totalBytes: number;
+  entries: HfCacheEntry[];
+};
+
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+function fmtAge(unixSeconds: number | null): string {
+  if (!unixSeconds) return "—";
+  const ageDays = (Date.now() / 1000 - unixSeconds) / 86400;
+  if (ageDays < 1) return "today";
+  if (ageDays < 30) return `${Math.round(ageDays)}d ago`;
+  if (ageDays < 365) return `${Math.round(ageDays / 30)}mo ago`;
+  return `${(ageDays / 365).toFixed(1)}y ago`;
+}
+
+function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
+  const [summary, setSummary] = React.useState<HfCacheSummary | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [selected, setSelected] = React.useState<Set<string>>(new Set());
+  const [busy, setBusy] = React.useState(false);
+
+  const refresh = React.useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const s = await invoke<HfCacheSummary>("hf_cache_list");
+      setSummary(s);
+      setSelected(new Set());
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const toggleOne = (path: string) =>
+    setSelected((curr) => {
+      const next = new Set(curr);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+
+  const toggleAll = () => {
+    if (!summary) return;
+    if (selected.size === summary.entries.length) setSelected(new Set());
+    else setSelected(new Set(summary.entries.map((e) => e.path)));
+  };
+
+  const selectedSizeBytes = React.useMemo(() => {
+    if (!summary) return 0;
+    return summary.entries
+      .filter((e) => selected.has(e.path))
+      .reduce((a, e) => a + e.sizeBytes, 0);
+  }, [selected, summary]);
+
+  const deleteSelected = async () => {
+    if (!summary || selected.size === 0) return;
+    const paths = Array.from(selected);
+    const repoNames = summary.entries
+      .filter((e) => selected.has(e.path))
+      .map((e) => e.repoId);
+    const ok = window.confirm(
+      `Delete ${paths.length} cached model${paths.length === 1 ? "" : "s"} ` +
+        `(${fmtBytes(selectedSizeBytes)})?\n\n` +
+        repoNames.slice(0, 8).join("\n") +
+        (repoNames.length > 8 ? `\n…and ${repoNames.length - 8} more` : "") +
+        `\n\nThis is permanent. Anything still in use will be re-downloaded on demand.`,
+    );
+    if (!ok) return;
+    setBusy(true);
+    setBanner(`🧹 Deleting ${paths.length} cached model(s)…`);
+    let freed = 0;
+    let failures: string[] = [];
+    for (const p of paths) {
+      try {
+        const f = await invoke<number>("hf_cache_delete", { path: p });
+        freed += f;
+      } catch (e) {
+        failures.push(`${p}: ${e}`);
+      }
+    }
+    setBusy(false);
+    if (failures.length === 0) {
+      setBanner(`✅ Freed ${fmtBytes(freed)} (${paths.length} models)`);
+    } else {
+      setBanner(
+        `⚠ Freed ${fmtBytes(freed)} but ${failures.length} delete(s) failed — ${failures[0]}`,
+      );
+    }
+    await refresh();
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{
+        padding: "10px 12px",
+        background: "rgba(102,126,234,0.08)",
+        border: "1px solid rgba(102,126,234,0.3)",
+        borderRadius: 6,
+        fontSize: 12,
+        color: "var(--fg)",
+      }}>
+        <div style={{ fontWeight: 700, marginBottom: 4 }}>
+          💽 HuggingFace cache —{" "}
+          <span style={{ color: "#9cc3ff" }}>
+            {summary ? fmtBytes(summary.totalBytes) : "scanning…"}
+          </span>{" "}
+          across {summary?.entries.length ?? 0} model
+          {summary?.entries.length === 1 ? "" : "s"}
+        </div>
+        <div style={{ fontSize: 10, color: "var(--fg-muted)", lineHeight: 1.5 }}>
+          Abliterate / Train / GGUF export read source models from these
+          dirs. Deleting one here doesn't break anything currently loaded —
+          HuggingFace will just re-download next time you ask for it.
+        </div>
+        {summary && summary.roots.length > 0 && (
+          <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 6, wordBreak: "break-all" }}>
+            <b>Roots:</b> {summary.roots.join("   ·   ")}
+          </div>
+        )}
+      </div>
+
+      {error && (
+        <div style={{ padding: 8, color: "#ffb3b3", border: "1px solid rgba(244,67,54,0.4)", borderRadius: 4 }}>
+          {error}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button
+          onClick={refresh}
+          disabled={loading || busy}
+          style={btnGhost(loading || busy)}
+        >🔄 {loading ? "Scanning…" : "Refresh"}</button>
+        <button
+          onClick={toggleAll}
+          disabled={!summary || summary.entries.length === 0 || busy}
+          style={btnGhost(busy)}
+        >{summary && selected.size === summary.entries.length ? "Clear" : "Select all"}</button>
+        <div style={{ flex: 1 }} />
+        <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+          {selected.size} selected · {fmtBytes(selectedSizeBytes)}
+        </div>
+        <button
+          onClick={deleteSelected}
+          disabled={selected.size === 0 || busy}
+          style={{
+            padding: "6px 14px",
+            background: selected.size > 0
+              ? "linear-gradient(180deg, #c84a4a 0%, #8c2828 100%)"
+              : "rgba(244,67,54,0.10)",
+            border: "1px solid rgba(244,67,54,0.5)",
+            color: "white",
+            borderRadius: 6,
+            fontSize: 12,
+            fontWeight: 700,
+            cursor: selected.size === 0 || busy ? "not-allowed" : "pointer",
+            opacity: selected.size === 0 || busy ? 0.6 : 1,
+          }}
+        >🗑️ Delete selected</button>
+      </div>
+
+      <div style={{
+        border: "1px solid #2a3242",
+        borderRadius: 6,
+        overflow: "hidden",
+      }}>
+        <div style={cacheRow(true)}>
+          <div style={{ width: 28 }}></div>
+          <div style={{ flex: 2 }}>Model</div>
+          <div style={{ width: 100, textAlign: "right" }}>Size</div>
+          <div style={{ width: 100 }}>Last used</div>
+          <div style={{ width: 90 }}>Cache</div>
+        </div>
+        {!summary || summary.entries.length === 0 ? (
+          <div style={{ padding: 30, textAlign: "center", color: "var(--fg-muted)", fontSize: 12 }}>
+            {loading ? "Scanning…" : "No cached models found."}
+          </div>
+        ) : summary.entries.map((e) => (
+          <div key={e.path} style={cacheRow(false, selected.has(e.path))} title={e.path}>
+            <div style={{ width: 28 }}>
+              <input
+                type="checkbox"
+                checked={selected.has(e.path)}
+                onChange={() => toggleOne(e.path)}
+                disabled={busy}
+              />
+            </div>
+            <div style={{ flex: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {e.repoId}
+            </div>
+            <div style={{ width: 100, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+              {fmtBytes(e.sizeBytes)}
+            </div>
+            <div style={{ width: 100, color: "var(--fg-muted)" }}>
+              {fmtAge(e.modifiedAt)}
+            </div>
+            <div style={{ width: 90, color: "var(--fg-muted)", fontSize: 10 }}>
+              {e.cacheRoot}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const btnGhost = (disabled: boolean): React.CSSProperties => ({
+  padding: "6px 12px",
+  background: "transparent",
+  border: "1px solid #2a3242",
+  color: "var(--fg)",
+  borderRadius: 6,
+  fontSize: 11,
+  cursor: disabled ? "not-allowed" : "pointer",
+  opacity: disabled ? 0.6 : 1,
+});
+
+const cacheRow = (isHeader: boolean, isSelected = false): React.CSSProperties => ({
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  padding: "8px 10px",
+  fontSize: 12,
+  background: isHeader
+    ? "rgba(0,0,0,0.4)"
+    : isSelected
+      ? "rgba(102,126,234,0.10)"
+      : "transparent",
+  borderBottom: isHeader ? "1px solid #2a3242" : "1px solid rgba(255,255,255,0.05)",
+  color: isHeader ? "var(--fg-muted)" : "var(--fg)",
+  fontWeight: isHeader ? 700 : 400,
+});

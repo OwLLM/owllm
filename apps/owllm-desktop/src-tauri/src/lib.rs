@@ -114,6 +114,8 @@ pub fn run() {
             huggingface::hf_download,
             huggingface::list_tuned_adapters,
             huggingface::delete_tuned_adapter,
+            huggingface::hf_cache_list,
+            huggingface::hf_cache_delete,
             huggingface::models_list_downloaded,
             recommendations::models_recommended,
             paths::shell_open_url,

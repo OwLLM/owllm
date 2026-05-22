@@ -138,6 +138,32 @@ const grid2: React.CSSProperties = {
   gap: 10,
 };
 
+// After abliterate (or any HF-source-consuming flow) finishes, the
+// original repo in the HF cache is redundant: we've written a new
+// transformers dir locally. Walk the cache, find the entry matching
+// the source repo id, and offer a one-click delete. Silent if not
+// found (model came from disk, or cache was already cleared).
+async function offerSourceCleanup(repoId: string, outputDir: string): Promise<void> {
+  type Entry = { repoId: string; path: string; sizeBytes: number };
+  type Summary = { entries: Entry[] };
+  try {
+    const s = await invoke<Summary>("hf_cache_list");
+    const hit = s.entries.find((e) => e.repoId === repoId);
+    if (!hit) return;
+    const sizeGb = (hit.sizeBytes / 1024 ** 3).toFixed(2);
+    const ok = window.confirm(
+      `✅ Abliterated → ${outputDir}\n\n` +
+        `The source download is still cached at:\n${hit.path}\n` +
+        `(${sizeGb} GB)\n\n` +
+        `Delete the source to reclaim disk? The abliterated copy stays.`,
+    );
+    if (!ok) return;
+    await invoke<number>("hf_cache_delete", { path: hit.path });
+  } catch {
+    // Best-effort cleanup — never block the success path on it.
+  }
+}
+
 async function tryInvoke<T>(cmd: string, args: Record<string, unknown>, fallback: T): Promise<T> {
   try {
     return await invoke<T>(cmd, args);
@@ -784,6 +810,11 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
       } else if (ev.kind === "finished") {
         setMessage(`✅ Done → ${ev.outputDir}`);
         setRunning(false);
+        // The source bnb-4bit weights still sit in the HF cache (~5GB
+        // for 7B, ~24GB for 70B). The abliterated dir we just wrote
+        // is a complete copy, so the source is now redundant. Offer a
+        // one-click cleanup — refusing leaves the cache alone.
+        void offerSourceCleanup(baseModel, ev.outputDir);
       } else if (ev.kind === "failed") {
         const err = pythonError ?? ev.error;
         setMessage(`❌ ${err} — see logs below`);

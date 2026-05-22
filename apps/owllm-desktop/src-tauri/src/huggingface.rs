@@ -643,3 +643,222 @@ fn parse_base_from_name(name: &str) -> Option<String> {
     }
     Some(parts[1].to_string())
 }
+
+// ---------------------------------------------------------------------
+// HF cache audit — abliterate / GGUF export / Train flows all rely on
+// transformers/huggingface_hub, which silently stash downloads in
+// $HF_HOME, $TRANSFORMERS_CACHE, $HF_HUB_CACHE, or
+// ~/.cache/huggingface/hub. A 7B bnb-4bit model is ~5GB; a 70B is
+// ~37GB. The "Tuned" tab's delete button only touches LLM/fine_tuned/,
+// so without explicit cache management the disk balloons forever.
+// These two commands surface the cache to the UI and allow safe
+// deletion of individual model dirs (path-gated to known cache roots).
+// ---------------------------------------------------------------------
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HfCacheEntry {
+    /// "owner/name" reconstructed from the dir name "models--owner--name".
+    pub repo_id: String,
+    /// Full disk path to the models--*/ directory.
+    pub path: String,
+    /// Which cache root this lives under (display label like "transformers"
+    /// or "hub" — derived from the parent dir name).
+    pub cache_root: String,
+    /// Total disk usage in bytes (recursive).
+    pub size_bytes: u64,
+    /// Unix seconds of the most recent file mtime inside the dir, so the
+    /// UI can sort by "oldest unused".
+    pub modified_at: Option<i64>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HfCacheSummary {
+    pub roots: Vec<String>,
+    pub total_bytes: u64,
+    pub entries: Vec<HfCacheEntry>,
+}
+
+/// Enumerate every cache root we know about. We probe each env var +
+/// the standard ~/.cache fallback. The same physical dir can be
+/// referenced by multiple env vars; dedupe by canonicalized path.
+fn cache_roots() -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    let push_if = |v: &mut Vec<PathBuf>, p: PathBuf| {
+        if p.is_dir() && !v.iter().any(|x| x == &p) {
+            v.push(p);
+        }
+    };
+    // Explicit env vars take priority — match what transformers /
+    // huggingface_hub read at runtime.
+    for var in &["TRANSFORMERS_CACHE", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"] {
+        if let Ok(v) = std::env::var(var) {
+            push_if(&mut candidates, PathBuf::from(v));
+        }
+    }
+    if let Ok(home) = std::env::var("HF_HOME") {
+        let h = PathBuf::from(&home);
+        push_if(&mut candidates, h.join("hub"));
+        push_if(&mut candidates, h.join("transformers"));
+        push_if(&mut candidates, h); // some bnb / datasets dirs sit at root
+    }
+    // Standard fallback locations.
+    if let Some(home) = dirs_home() {
+        push_if(&mut candidates, home.join(".cache").join("huggingface").join("hub"));
+        push_if(&mut candidates, home.join(".cache").join("huggingface").join("transformers"));
+    }
+    // Common Windows convention we've seen in this codebase: C:\hf\*.
+    #[cfg(windows)]
+    {
+        for sub in &["hub", "transformers", "datasets", "xet"] {
+            push_if(&mut candidates, PathBuf::from(format!("C:\\hf\\{sub}")));
+        }
+    }
+    // Canonicalize so we don't double-count via different relative
+    // forms. Fall back to the original path if canonicalize fails.
+    candidates
+        .into_iter()
+        .map(|p| std::fs::canonicalize(&p).unwrap_or(p))
+        .fold(Vec::new(), |mut acc, p| {
+            if !acc.iter().any(|x| x == &p) {
+                acc.push(p);
+            }
+            acc
+        })
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var("USERPROFILE")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok())
+        .map(PathBuf::from)
+}
+
+fn dir_size_recursive(path: &std::path::Path) -> (u64, Option<i64>) {
+    let mut total: u64 = 0;
+    let mut newest: Option<i64> = None;
+    let mut stack: Vec<PathBuf> = vec![path.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let entries = match std::fs::read_dir(&p) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let metadata = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if metadata.is_dir() {
+                stack.push(entry.path());
+            } else if metadata.is_file() {
+                total = total.saturating_add(metadata.len());
+                if let Ok(mtime) = metadata.modified() {
+                    if let Ok(d) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                        let secs = d.as_secs() as i64;
+                        if newest.map(|n| secs > n).unwrap_or(true) {
+                            newest = Some(secs);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (total, newest)
+}
+
+#[tauri::command]
+pub async fn hf_cache_list() -> Result<HfCacheSummary, String> {
+    tokio::task::spawn_blocking(|| -> Result<HfCacheSummary, String> {
+        let roots = cache_roots();
+        let mut entries: Vec<HfCacheEntry> = Vec::new();
+        let mut total: u64 = 0;
+        for root in &roots {
+            // The HF cache convention: each cached repo lives at
+            // <root>/models--<owner>--<name>/. Walk one level deep.
+            let read = match std::fs::read_dir(root) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let label = root
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| root.display().to_string());
+            for entry in read.flatten() {
+                let p = entry.path();
+                let name = match p.file_name().and_then(|s| s.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                if !name.starts_with("models--") {
+                    continue;
+                }
+                // models--owner--name → owner/name. The HF layout uses
+                // -- as the separator and inside owner / name can't
+                // contain --, so splitn(3,"--") gives [_, owner, name].
+                let parts: Vec<&str> = name.splitn(3, "--").collect();
+                let repo_id = if parts.len() == 3 {
+                    format!("{}/{}", parts[1], parts[2])
+                } else {
+                    name.clone()
+                };
+                let (size, modified) = dir_size_recursive(&p);
+                total = total.saturating_add(size);
+                entries.push(HfCacheEntry {
+                    repo_id,
+                    path: p.to_string_lossy().into_owned(),
+                    cache_root: label.clone(),
+                    size_bytes: size,
+                    modified_at: modified,
+                });
+            }
+        }
+        // Biggest first — that's what the user wants to clean.
+        entries.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+        Ok(HfCacheSummary {
+            roots: roots.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            total_bytes: total,
+            entries,
+        })
+    })
+    .await
+    .map_err(|e| format!("join: {e}"))?
+}
+
+/// Delete a single cached model dir. Path-gated: must be under one of
+/// the cache_roots() we just enumerated, AND must be a "models--*"
+/// dir (no nuking the cache root itself).
+#[tauri::command]
+pub async fn hf_cache_delete(path: String) -> Result<u64, String> {
+    let target = PathBuf::from(&path);
+    let canon_target = std::fs::canonicalize(&target)
+        .map_err(|e| format!("canonicalize {path}: {e}"))?;
+    let name = canon_target
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    if !name.starts_with("models--") {
+        return Err(format!(
+            "refused: {} is not a models--*/ cache entry",
+            canon_target.display()
+        ));
+    }
+    let roots = cache_roots();
+    let under_a_root = roots.iter().any(|r| canon_target.starts_with(r));
+    if !under_a_root {
+        return Err(format!(
+            "refused: {} is not under any known HF cache root ({})",
+            canon_target.display(),
+            roots
+                .iter()
+                .map(|r| r.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let (size, _) = dir_size_recursive(&canon_target);
+    std::fs::remove_dir_all(&canon_target)
+        .map_err(|e| format!("remove_dir_all {}: {e}", canon_target.display()))?;
+    Ok(size)
+}

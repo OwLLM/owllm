@@ -793,12 +793,27 @@ pub async fn export_gguf(
     say(&format!("[export-gguf] python = {}", python_exe.display()));
     say(&format!("[export-gguf] outfile = {}", out_path.display()));
     say(&format!("[export-gguf] argv = {}", argv.join(" ")));
-    say("[export-gguf] spawning… (transformers import takes 5-15s before first log)");
 
     let channel_for_task = channel.clone();
     let out_path_for_task = out_path.clone();
+    let python_str = python_exe.to_string_lossy().into_owned();
+    let convert_py_str = convert_py.to_string_lossy().into_owned();
     tokio::spawn(async move {
-        let outcome = spawn_gguf_exporter(&python_exe.to_string_lossy(), &argv, &channel_for_task).await;
+        // Preflight: run `python <convert_py> --help` first. If it
+        // bombs with a gguf-package version mismatch (e.g.
+        // "AttributeError: MISTRAL4" because the shipped script
+        // expects a newer gguf than is installed), auto-upgrade gguf
+        // in this venv and retry once. This makes the env self-heal
+        // without the user needing to know about pip.
+        if let Err(reason) = preflight_convert(&python_str, &convert_py_str, &channel_for_task).await {
+            let _ = channel_for_task.send(AbliterateEvent::Failed { error: reason });
+            return;
+        }
+        let _ = channel_for_task.send(AbliterateEvent::Log {
+            stream: "stdout".into(),
+            line: "[export-gguf] spawning… (transformers import takes 5-15s before first log)".into(),
+        });
+        let outcome = spawn_gguf_exporter(&python_str, &argv, &channel_for_task).await;
         match outcome {
             Ok(()) => {
                 let _ = channel_for_task.send(AbliterateEvent::Finished {
@@ -812,6 +827,148 @@ pub async fn export_gguf(
     });
 
     Ok(())
+}
+
+/// Preflight check: convert_hf_to_gguf.py crashes at import time when
+/// the installed gguf pip package is older than the script expects
+/// (script references gguf.MODEL_ARCH.MISTRAL4, package is 0.18.0
+/// which only has up to MISTRAL3, etc). Run `python <convert> --help`
+/// to flush imports; if it fails with a MODEL_ARCH AttributeError,
+/// `pip install -U gguf` and retry once.
+async fn preflight_convert(
+    python_exe: &str,
+    convert_py: &str,
+    channel: &Channel<AbliterateEvent>,
+) -> Result<(), String> {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let say = |line: &str| {
+        let _ = channel.send(AbliterateEvent::Log {
+            stream: "stdout".into(),
+            line: line.to_string(),
+        });
+    };
+    let warn = |line: &str| {
+        let _ = channel.send(AbliterateEvent::Log {
+            stream: "stderr".into(),
+            line: line.to_string(),
+        });
+    };
+
+    let run_probe = || async {
+        let mut cmd = Command::new(python_exe);
+        cmd.arg(convert_py)
+            .arg("--help")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null());
+        cmd.env("PYTHONUNBUFFERED", "1");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("preflight spawn: {e}"))?;
+        let stderr = child.stderr.take().ok_or_else(|| "no stderr".to_string())?;
+        let stderr_task = tokio::spawn(async move {
+            let mut reader = tokio::io::BufReader::new(stderr).lines();
+            let mut buf = String::new();
+            while let Ok(Some(line)) = reader.next_line().await {
+                buf.push_str(&line);
+                buf.push('\n');
+            }
+            buf
+        });
+        let status = child.wait().await.map_err(|e| format!("preflight wait: {e}"))?;
+        let stderr_buf = stderr_task.await.unwrap_or_default();
+        Ok::<(bool, String), String>((status.success(), stderr_buf))
+    };
+
+    say("[export-gguf] preflight: importing convert_hf_to_gguf.py + gguf …");
+    let (ok, stderr_buf) = run_probe().await?;
+    if ok {
+        say("[export-gguf] preflight ok — gguf package in sync with convert script");
+        return Ok(());
+    }
+
+    // Look for the specific failure mode we know how to fix.
+    let stderr_lc = stderr_buf.to_ascii_lowercase();
+    let looks_like_gguf_mismatch = stderr_lc.contains("model_arch")
+        || (stderr_lc.contains("gguf") && stderr_lc.contains("attributeerror"));
+
+    for line in stderr_buf.lines() {
+        warn(line);
+    }
+
+    if !looks_like_gguf_mismatch {
+        return Err(format!(
+            "preflight failed and the error doesn't look like a gguf version mismatch — see logs above"
+        ));
+    }
+
+    say("[export-gguf] gguf package is out-of-date relative to convert_hf_to_gguf.py");
+    say("[export-gguf] auto-fixing: pip install -U gguf in the llamacpp venv …");
+
+    // pip install -U gguf
+    let mut cmd = Command::new(python_exe);
+    cmd.args(["-m", "pip", "install", "-U", "gguf"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+    cmd.env("PYTHONUNBUFFERED", "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("pip install gguf spawn: {e}"))?;
+    let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
+    let stderr = child.stderr.take().ok_or_else(|| "no stderr".to_string())?;
+    let ch_out = channel.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = ch_out.send(AbliterateEvent::Log {
+                stream: "stdout".into(),
+                line: format!("  pip: {line}"),
+            });
+        }
+    });
+    let ch_err = channel.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = ch_err.send(AbliterateEvent::Log {
+                stream: "stderr".into(),
+                line: format!("  pip: {line}"),
+            });
+        }
+    });
+    let status = child.wait().await.map_err(|e| format!("pip wait: {e}"))?;
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+    if !status.success() {
+        return Err(format!(
+            "auto-upgrade failed (pip exit code {}). Try `pip install -U gguf` manually in {} ",
+            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+            python_exe,
+        ));
+    }
+    say("[export-gguf] pip upgrade ok — re-running preflight …");
+    let (ok2, stderr_buf2) = run_probe().await?;
+    if ok2 {
+        say("[export-gguf] preflight ok after upgrade — proceeding");
+        return Ok(());
+    }
+    for line in stderr_buf2.lines() {
+        warn(line);
+    }
+    Err("preflight still fails after gguf upgrade — see logs above".into())
 }
 
 async fn spawn_gguf_exporter(

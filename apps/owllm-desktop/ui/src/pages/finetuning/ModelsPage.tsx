@@ -684,50 +684,6 @@ export default function ModelsPage() {
           {hfError.startsWith("✅") || hfError.startsWith("❌") || hfError.startsWith("📦") ? "" : "⚠ "}{hfError}
         </div>
       )}
-      {exportLogs.length > 0 && (
-        <div style={{
-          position: "sticky",
-          top: hfError ? 40 : 0,
-          zIndex: 49,
-          marginBottom: 10,
-        }}>
-          <button
-            onClick={() => setExportLogsOpen((v) => !v)}
-            style={{
-              padding: "3px 10px",
-              background: "rgba(102,126,234,0.18)",
-              border: "1px solid rgba(102,126,234,0.4)",
-              borderRadius: 4,
-              color: "#9cc3ff",
-              fontSize: 11,
-              cursor: "pointer",
-              marginBottom: 4,
-            }}
-          >{exportLogsOpen ? "▼" : "▶"} GGUF export logs ({exportLogs.length})</button>
-          {exportLogsOpen && (
-            <div style={{
-              maxHeight: 260,
-              overflowY: "auto",
-              background: "rgba(0,0,0,0.55)",
-              border: "1px solid rgba(255,255,255,0.1)",
-              borderRadius: 4,
-              padding: 6,
-              fontFamily: "Consolas, monospace",
-              fontSize: 10,
-              color: "#cfd4e1",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-            }}>
-              {exportLogs.map((l, i) => (
-                <div
-                  key={i}
-                  style={{ color: l.startsWith("⚠ ") ? "#ffb3b3" : undefined }}
-                >{l}</div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
       {/* Qt main.py:8257-8289 — "📚 Recommended Models" at 16pt bold #667eea,
           followed inline (no stretch) by a 3-colour legend row. Dots are
           14pt; labels are 10pt #9aa0a6. legend_row contentsMargins (16,0,0,0)
@@ -782,12 +738,17 @@ export default function ModelsPage() {
           ))}
         </div>
       </div>
+      </>}
 
+      {/* Shared flex row across browse/downloaded/tuned: cards on the
+          left, a sticky right rail holding the tokens/info panel and
+          the GGUF export logs panel. The cache tab has its own
+          full-width layout below. */}
+      {tab !== "cache" && (
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-      {/* Cards rail — auto-fills with cards capped at 390 px wide so
-          they stay readable on wide screens (was 1fr 1fr giving ~615 px
-          cards) and reflow on narrow ones. */}
-      <div style={{ ...CARD_GRID, flex: 1, minWidth: 0 }}>
+      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+      {tab === "browse" && (
+      <div style={CARD_GRID}>
         {(() => {
           // Choose which list to render: live search results when the
           // user has searched, otherwise the curated recommendations.
@@ -872,13 +833,7 @@ export default function ModelsPage() {
           ));
         })()}
       </div>
-      {/* Right rail — separate flex column. Only ever holds the
-          tokens/info panel; cards never overflow into here. */}
-      <div style={{ width: 280, flexShrink: 0, position: "sticky", top: 0 }}>
-        <AccessTokensPane selectedModel={selectedModelForInfo} />
-      </div>
-      </div>
-      </>}
+      )}
 
       {tab === "downloaded" && (
         <div style={CARD_GRID}>
@@ -958,6 +913,55 @@ export default function ModelsPage() {
             />
           ))}
         </div>
+      )}
+      </div>
+      {/* Shared right rail — tokens/info panel up top, GGUF export
+          logs below. Same column for all three tabs. */}
+      <div style={{ width: 280, flexShrink: 0, position: "sticky", top: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+        <AccessTokensPane selectedModel={selectedModelForInfo} />
+        {exportLogs.length > 0 && (
+          <div>
+            <button
+              onClick={() => setExportLogsOpen((v) => !v)}
+              style={{
+                padding: "4px 10px",
+                background: "rgba(102,126,234,0.18)",
+                border: "1px solid rgba(102,126,234,0.4)",
+                borderRadius: 4,
+                color: "#9cc3ff",
+                fontSize: 11,
+                cursor: "pointer",
+                marginBottom: 4,
+                width: "100%",
+                textAlign: "left",
+              }}
+            >{exportLogsOpen ? "▼" : "▶"} GGUF export logs ({exportLogs.length})</button>
+            {exportLogsOpen && (
+              <div style={{
+                maxHeight: 320,
+                overflowY: "auto",
+                background: "rgba(0,0,0,0.55)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 4,
+                padding: 6,
+                fontFamily: "Consolas, monospace",
+                fontSize: 10,
+                color: "#cfd4e1",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-all",
+              }}>
+                {exportLogs.map((l, i) => (
+                  <div
+                    key={i}
+                    style={{ color: l.startsWith("⚠ ") ? "#ffb3b3" : undefined }}
+                  >{l}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      </div>
       )}
 
       {tab === "cache" && (

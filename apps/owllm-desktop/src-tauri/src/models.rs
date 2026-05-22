@@ -106,18 +106,31 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
     // are surfaced under their own "TUNED (LOCAL)" group in the
     // picker — same llama-server path, separate label so the user
     // doesn't confuse a 14B abliterated dir with a downloaded base.
+    // Tuned .gguf files get their own port range (10600+) so
+    // server_start can launch them like any other local model — the
+    // previous (port: None) version failed with "no port in config".
     if let Some(root) = paths::llm_root() {
         let tuned_root = root.join("fine_tuned");
         if tuned_root.is_dir() {
+            let tuned_base_port: u16 = 10600;
+            let mut tuned_gguf_idx: u16 = 0;
             if let Ok(read) = std::fs::read_dir(&tuned_root) {
-                for entry in read.flatten() {
-                    let p = entry.path();
-                    let name = entry.file_name().to_string_lossy().to_string();
+                let mut tuned_entries: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
+                tuned_entries.sort();
+                for p in tuned_entries {
+                    let name = match p.file_name().and_then(|s| s.to_str()) {
+                        Some(n) => n.to_string(),
+                        None => continue,
+                    };
                     if name.starts_with('.') || name.starts_with("checkpoint-") || name == "_crash_logs" {
                         continue;
                     }
                     if p.is_dir() {
                         // The directory itself (transformers format).
+                        // No port — llama-server can't serve a
+                        // transformers dir; the user has to GGUF-export
+                        // first. The picker's hint already encodes that
+                        // by leaving the port field blank.
                         let size_mib = dir_weight_size_mib(&p);
                         out.push(ModelInfo {
                             model_id: name.clone(),
@@ -127,28 +140,36 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
                             provider: "tuned".to_string(),
                         });
                         // Any .gguf one level deep is its own pickable
-                        // entry (the user typically exports a .gguf
-                        // inside the transformers dir).
+                        // entry with an assigned port so the Server
+                        // tab can launch it directly.
+                        let mut inner_files: Vec<PathBuf> = Vec::new();
                         if let Ok(inner) = std::fs::read_dir(&p) {
                             for f in inner.flatten() {
                                 let fp = f.path();
-                                if !fp.is_file() { continue; }
-                                let ext = fp.extension().and_then(|s| s.to_str()).unwrap_or("");
-                                if !ext.eq_ignore_ascii_case("gguf") { continue; }
-                                let fname = fp
-                                    .file_stem()
-                                    .and_then(|s| s.to_str())
-                                    .unwrap_or("model")
-                                    .to_string();
-                                let fsize = f.metadata().map(|m| m.len() / 1024 / 1024).ok();
-                                out.push(ModelInfo {
-                                    model_id: fname,
-                                    port: None,
-                                    base_model: Some(fp.to_string_lossy().into_owned()),
-                                    size_mib: fsize,
-                                    provider: "tuned".to_string(),
-                                });
+                                if fp.is_file() {
+                                    inner_files.push(fp);
+                                }
                             }
+                        }
+                        inner_files.sort();
+                        for fp in inner_files {
+                            let ext = fp.extension().and_then(|s| s.to_str()).unwrap_or("");
+                            if !ext.eq_ignore_ascii_case("gguf") { continue; }
+                            let fname = fp
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .unwrap_or("model")
+                                .to_string();
+                            let fsize = std::fs::metadata(&fp).ok().map(|m| m.len() / 1024 / 1024);
+                            let port = tuned_base_port.saturating_add(tuned_gguf_idx);
+                            tuned_gguf_idx = tuned_gguf_idx.saturating_add(1);
+                            out.push(ModelInfo {
+                                model_id: fname,
+                                port: Some(port),
+                                base_model: Some(fp.to_string_lossy().into_owned()),
+                                size_mib: fsize,
+                                provider: "tuned".to_string(),
+                            });
                         }
                     }
                 }

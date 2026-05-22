@@ -29,6 +29,7 @@ type AccountsStatus = {
   moonshot_api_key: boolean;
   claude_cli: boolean;
   codex_cli: boolean;
+  kimi_cli: boolean;
 };
 
 type ProbeResult = { ok: boolean; detail: string; elapsed_ms: number };
@@ -47,6 +48,8 @@ type BrandSpec = {
 
 // Verbatim from accounts_page.py:47-94 (BRAND_CARDS tuple). Accent
 // colours, taglines, emoji icons, env-var names all preserved.
+// Order matters — the layout below pairs (sub, api) into the same
+// brand column, so each provider's two routes sit one above the other.
 const BRANDS: BrandSpec[] = [
   {
     key: "claude_subscription",
@@ -57,16 +60,6 @@ const BRANDS: BrandSpec[] = [
     accentTop: "#3a2620",
     kind: "subscription",
     backend: "claude_cli",
-  },
-  {
-    key: "codex_subscription",
-    name: "Codex",
-    tagline: "Subscription · OpenAI Codex CLI",
-    icon: "🟢",
-    accent: "#10a37f",
-    accentTop: "#16322a",
-    kind: "subscription",
-    backend: "codex_cli",
   },
   {
     key: "anthropic_api",
@@ -80,6 +73,16 @@ const BRANDS: BrandSpec[] = [
     backend: "claude_api",
   },
   {
+    key: "codex_subscription",
+    name: "Codex",
+    tagline: "Subscription · OpenAI Codex CLI",
+    icon: "🟢",
+    accent: "#10a37f",
+    accentTop: "#16322a",
+    kind: "subscription",
+    backend: "codex_cli",
+  },
+  {
     key: "openai_api",
     name: "OpenAI API",
     tagline: "OPENAI_API_KEY · billed per call",
@@ -91,16 +94,35 @@ const BRANDS: BrandSpec[] = [
     backend: "openai_api",
   },
   {
-    key: "moonshot_api",
-    name: "Kimi (Moonshot) API",
-    tagline: "MOONSHOT_API_KEY · billed per call",
+    key: "kimi_subscription",
+    name: "Kimi",
+    tagline: "Subscription · Kimi Code CLI",
     icon: "🌙",
     accent: "#d36bff",
     accentTop: "#2a1c33",
+    kind: "subscription",
+    backend: "kimi_cli",
+  },
+  {
+    key: "moonshot_api",
+    name: "Kimi (Moonshot) API",
+    tagline: "MOONSHOT_API_KEY · billed per call",
+    icon: "⚡",
+    accent: "#d36bff",
+    accentTop: "#241830",
     kind: "api",
     envName: "MOONSHOT_API_KEY",
     backend: "moonshot_api",
   },
+];
+
+// Brand columns: each pair is (subscription on top, API below). The
+// AccountsPage renders one column per pair so a user looking at the
+// "Claude" column sees both ways to use Claude side by side.
+const BRAND_COLUMNS: [string, string][] = [
+  ["claude_subscription", "anthropic_api"],
+  ["codex_subscription",  "openai_api"],
+  ["kimi_subscription",   "moonshot_api"],
 ];
 
 // ---------------------------------------------------------------------------
@@ -497,6 +519,7 @@ export default function AccountsPage() {
       flag("moonshot_api",  status.moonshot_api_key);
       flag("claude_subscription", status.claude_cli);
       flag("codex_subscription",  status.codex_cli);
+      flag("kimi_subscription",   status.kimi_cli);
       return next;
     });
   }
@@ -528,7 +551,10 @@ export default function AccountsPage() {
       // it does, point the user at the manual command so they can get
       // unblocked. The 3-second poll picks up the credentials file
       // automatically once the CLI finishes its OAuth flow.
-      const cmd = spec.backend === "claude_cli" ? "claude /login" : "codex login";
+      const cmd = spec.backend === "claude_cli" ? "claude /login"
+                : spec.backend === "codex_cli"  ? "codex login"
+                : spec.backend === "kimi_cli"   ? "kimi /login"
+                : `${spec.backend} login`;
       window.alert(
         `Run this in a terminal to sign in:\n\n  ${cmd}\n\n` +
         `The card will flip to green within 3 seconds after the CLI saves its credentials.`
@@ -546,7 +572,10 @@ export default function AccountsPage() {
         // Subscription disconnect — we don't auto-delete the CLI
         // credentials file (that's the user's CLI to manage). Just
         // surface what they need to do manually.
-        const cmd = spec.backend === "claude_cli" ? "claude /logout" : "codex logout";
+        const cmd = spec.backend === "claude_cli" ? "claude /logout"
+                  : spec.backend === "codex_cli"  ? "codex logout"
+                  : spec.backend === "kimi_cli"   ? "kimi /logout"
+                  : `${spec.backend} logout`;
         window.alert(`Run this in a terminal to sign out:\n\n  ${cmd}`);
         return;
       }
@@ -619,31 +648,57 @@ export default function AccountsPage() {
 
       {/* 2x2 grid — Qt QGridLayout h/v spacing 18 (lines 425-426), both
           columns stretch 1 (lines 436-437). */}
+      {/* Three brand columns, each with subscription card on top and
+          API card below — so Claude/Anthropic, Codex/OpenAI, and
+          Kimi/Moonshot stack their two routes inside the same column.
+          Columns reflow on narrow windows; each capped at 450px wide
+          so cards don't stretch absurdly on big monitors. */}
       <div
         style={{
           flex: 1,
           display: "grid",
-          // Five cards now: 3-col grid reflows to a 3+2 layout while
-          // still letting cards expand on wide screens. Cards stretch
-          // by default; minmax keeps a card from collapsing too narrow
-          // on small windows.
-          gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-          gridAutoRows: "1fr",
+          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 450px))",
           columnGap: 18,
           rowGap: 18,
           minHeight: 0,
+          alignContent: "start",
         }}
       >
-        {BRANDS.map((spec) => (
-          <BrandCard
-            key={spec.key}
-            spec={spec}
-            state={cards[spec.key]}
-            onConnect={() => handleConnect(spec)}
-            onDisconnect={() => handleDisconnect(spec)}
-            onTest={() => handleTest(spec)}
-          />
-        ))}
+        {BRAND_COLUMNS.map(([subKey, apiKey]) => {
+          const subSpec = BRANDS.find((b) => b.key === subKey);
+          const apiSpec = BRANDS.find((b) => b.key === apiKey);
+          return (
+            <div
+              key={subKey}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 18,
+                maxWidth: 450,
+                minWidth: 0,
+              }}
+            >
+              {subSpec && (
+                <BrandCard
+                  spec={subSpec}
+                  state={cards[subSpec.key]}
+                  onConnect={() => handleConnect(subSpec)}
+                  onDisconnect={() => handleDisconnect(subSpec)}
+                  onTest={() => handleTest(subSpec)}
+                />
+              )}
+              {apiSpec && (
+                <BrandCard
+                  spec={apiSpec}
+                  state={cards[apiSpec.key]}
+                  onConnect={() => handleConnect(apiSpec)}
+                  onDisconnect={() => handleDisconnect(apiSpec)}
+                  onTest={() => handleTest(apiSpec)}
+                />
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {dialogFor && (

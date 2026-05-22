@@ -36,6 +36,7 @@ export type AccountsStatusLite = {
   moonshot_api_key: boolean;
   claude_cli: boolean;
   codex_cli: boolean;
+  kimi_cli: boolean;
 };
 
 type Section = "local" | "tuned" | "anthropic" | "openai" | "kimi" | "other";
@@ -112,18 +113,21 @@ const OPENAI_MODELS: OpenAIModel[] = [
   { id: "gpt-4o-mini",   display: "GPT-4o mini",    api: true },
 ];
 
-// Kimi / Moonshot AI — OpenAI-compatible REST at api.moonshot.ai/v1.
-// No subscription CLI route yet (Moonshot doesn't ship one), so every
-// row is API-only. K2 preview ids are not included because Moonshot
-// deprecates them 2026-05-25.
+// Kimi / Moonshot AI — two routes: (subscription) via Kimi Code CLI
+// at https://github.com/MoonshotAI/kimi-cli (OAuth via `kimi /login`,
+// covered by a Moonshot membership) and (API) at api.moonshot.ai/v1
+// (pay-as-you-go MOONSHOT_API_KEY). K2 preview ids omitted because
+// Moonshot deprecates them 2026-05-25.
 type KimiModel = {
   id: string;
   display: string;
+  sub?: boolean;
+  api?: boolean;
 };
 const KIMI_MODELS: KimiModel[] = [
-  { id: "kimi-k2.6",        display: "Kimi K2.6" },
-  { id: "kimi-k2.5",        display: "Kimi K2.5 (multimodal)" },
-  { id: "moonshot-v1-128k", display: "Moonshot V1 · 128K" },
+  { id: "kimi-k2.6",        display: "Kimi K2.6",                  sub: true, api: true },
+  { id: "kimi-k2.5",        display: "Kimi K2.5 (multimodal)",     sub: true, api: true },
+  { id: "moonshot-v1-128k", display: "Moonshot V1 · 128K",         api: true },
 ];
 function displayEffort(level: string): string {
   return level === "extra_high" ? "extra high" : level;
@@ -210,19 +214,26 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
     if (m.api) pushOpenAI(m, "api", openaiApi, openaiApi ? undefined : "(set OPENAI_API_KEY)");
   }
 
-  // KIMI — API-only. ID encoding: "api/<model-id>" so the dispatch's
-  // provider router (providerFor in AgentsPage) can branch on the
-  // bare id like it does for Anthropic / OpenAI.
+  // KIMI — subscription via Kimi Code CLI, API via MOONSHOT_API_KEY.
+  // ID encoding: "sub/<id>" / "api/<id>" so the dispatch's
+  // providerFor (in AgentsPage) can branch off the bare id like it
+  // does for Anthropic / OpenAI.
+  const kimiSub = !!status?.kimi_cli;
   const kimiApi = !!status?.moonshot_api_key;
-  for (const m of KIMI_MODELS) {
+  const pushKimi = (m: KimiModel, variant: "sub" | "api", available: boolean, hint?: string) => {
+    const tag = variant === "sub" ? "subscription" : "API";
     out.push({
-      id: `api/${m.id}`,
-      label: `${m.display} (API)`,
+      id: `${variant}/${m.id}`,
+      label: `${m.display} (${tag})`,
       section: "kimi",
-      variant: "api",
-      available: kimiApi,
-      hint: kimiApi ? undefined : "(set MOONSHOT_API_KEY)",
+      variant,
+      available,
+      hint,
     });
+  };
+  for (const m of KIMI_MODELS) {
+    if (m.sub) pushKimi(m, "sub", kimiSub, kimiSub ? undefined : "(kimi /login)");
+    if (m.api) pushKimi(m, "api", kimiApi, kimiApi ? undefined : "(set MOONSHOT_API_KEY)");
   }
 
   for (const a of AUTO_OPTIONS) {

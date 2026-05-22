@@ -132,6 +132,9 @@ pub struct AccountsStatus {
     pub claude_cli: bool,
     /// OpenAI Codex CLI is installed AND has logged-in credentials.
     pub codex_cli: bool,
+    /// Kimi Code CLI (MoonshotAI/kimi-cli) is installed AND has
+    /// logged-in credentials (config.toml present in ~/.kimi/).
+    pub kimi_cli: bool,
 }
 
 /// Probe what's connected right now. Cheap — runs on the AccountsPage
@@ -158,6 +161,7 @@ pub fn accounts_status() -> AccountsStatus {
             .unwrap_or(false),
         claude_cli: claude_cli_logged_in(),
         codex_cli: codex_cli_logged_in(),
+        kimi_cli: kimi_cli_logged_in(),
     }
 }
 
@@ -270,6 +274,13 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
                 (false, "codex CLI not installed or not logged in".to_string())
             }
         }
+        "kimi_cli" => {
+            if kimi_cli_logged_in() {
+                (true, "kimi CLI credentials found".to_string())
+            } else {
+                (false, "kimi CLI not installed or not logged in".to_string())
+            }
+        }
         other => (false, format!("Unknown backend '{}'", other)),
     };
     ProbeResult {
@@ -290,6 +301,17 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
 fn find_claude_cli() -> Option<PathBuf> {
     // npm's Windows shim is `claude.cmd` (no extension on Unix).
     for name in ["claude.exe", "claude.cmd", "claude"] {
+        if let Ok(path) = which_in_path(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Locate the `kimi` executable (Moonshot's Kimi Code CLI). Same
+/// resolution shape as Claude — pip/npm shim is `kimi.cmd` on Windows.
+fn find_kimi_cli() -> Option<PathBuf> {
+    for name in ["kimi.exe", "kimi.cmd", "kimi"] {
         if let Ok(path) = which_in_path(name) {
             return Some(path);
         }
@@ -815,4 +837,91 @@ fn codex_cli_logged_in() -> bool {
     let p1 = PathBuf::from(&home).join(".codex").join("auth.json");
     let p2 = PathBuf::from(&home).join(".openai").join("auth.json");
     p1.exists() || p2.exists()
+}
+
+/// Kimi Code CLI (MoonshotAI/kimi-cli) saves its OAuth config to
+/// ~/.kimi/config.toml after `kimi /login`. Same presence-of-file
+/// signal as Claude / Codex.
+fn kimi_cli_logged_in() -> bool {
+    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+        return false;
+    };
+    let cfg = PathBuf::from(home).join(".kimi").join("config.toml");
+    cfg.exists()
+}
+
+/// One-shot completion via `kimi --print`. Mirrors claude_cli_complete
+/// — same shape, same expectations: stdin gets the user message, the
+/// CLI emits a final reply on stdout. Kimi Code CLI's --print mode
+/// is non-streaming, so the UI just receives the complete reply when
+/// the child exits. Model selection goes via `--model <id>` when the
+/// picker passes one; system prompt gets concatenated in front of the
+/// user message because the CLI doesn't expose a separate
+/// --append-system-prompt flag.
+#[tauri::command]
+pub async fn kimi_cli_complete(
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    model: Option<String>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let exe = find_kimi_cli()
+            .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code first".to_string())?;
+        let mut cmd = Command::new(&exe);
+
+        #[cfg(windows)]
+        let batch = is_batch_shim(&exe);
+        #[cfg(not(windows))]
+        let batch = false;
+
+        push_arg(&mut cmd, batch, "--print");
+        if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            push_arg(&mut cmd, batch, "--model");
+            push_arg(&mut cmd, batch, m);
+        }
+        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let p = std::path::Path::new(dir);
+            if p.is_dir() {
+                cmd.current_dir(p);
+            }
+        }
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("spawn kimi: {e}"))?;
+        // Compose system + user prompts into a single stdin payload.
+        // The CLI's --print mode doesn't take a system prompt flag, so
+        // we fold it in front of the user message with a clear marker.
+        let stdin_payload = if system_prompt.trim().is_empty() {
+            user_message
+        } else {
+            format!("{system_prompt}\n\n---\n\n{user_message}")
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(stdin_payload.as_bytes())
+                .map_err(|e| format!("write stdin: {e}"))?;
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("wait kimi: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            return Err(format!(
+                "kimi CLI exited {} — {}",
+                output.status.code().unwrap_or(-1),
+                if stderr.is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
+            ));
+        }
+        let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
+        Ok(stdout.trim().to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }

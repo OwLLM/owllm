@@ -3478,7 +3478,7 @@ async function streamChatCompletion(
     return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
   }
   if (provider === "moonshot") {
-    return streamMoonshot(bareId, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
+    return streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images);
   }
   // Local llama-server. OpenAI-compatible SSE. History (when present)
   // becomes the alternating user/assistant turns preceding the new
@@ -3784,21 +3784,44 @@ async function streamOpenAI(
   return consumeOpenAISse(resp, onDelta, onThought);
 }
 
-/// Moonshot AI / Kimi streaming. OpenAI-compatible REST at
-/// api.moonshot.ai/v1 — same SSE shape so we can reuse
-/// consumeOpenAISse. Subscription-CLI route doesn't exist yet (no
-/// Moonshot CLI ships an auth flow), so this path is API-only.
+/// Moonshot AI / Kimi streaming. Two routes:
+///   * subscription — shell out to Moonshot's `kimi --print` CLI.
+///     Used when the picker resolved to a `sub/<id>` row AND the
+///     user is logged into the Kimi CLI. Non-streaming: the CLI emits
+///     one final reply, which we flush via a single onDelta call.
+///   * API — OpenAI-compatible REST at api.moonshot.ai/v1, same SSE
+///     shape so we reuse consumeOpenAISse.
 async function streamMoonshot(
   modelId: string,
+  route: CloudRoute,
   systemPrompt: string,
   userMessage: string,
   temperature: number,
   signal: AbortSignal,
   onDelta: StreamHandler,
+  projectCwd?: string,
   history?: HistoryItem[],
   onThought?: ThoughtHandler,
   images?: Attachment[],
 ): Promise<string> {
+  // Subscription path — shell to `kimi --print`. Fold history into the
+  // user prompt because the CLI's --print mode is single-turn.
+  if (route.forceSub) {
+    const folded = (history ?? [])
+      .map((h) => `${h.role}: ${typeof h.content === "string" ? h.content : ""}`)
+      .join("\n\n");
+    const composed = folded ? `${folded}\n\nuser: ${userMessage}` : userMessage;
+    const reply = await invoke<string>("kimi_cli_complete", {
+      systemPrompt,
+      userMessage: composed,
+      cwd: projectCwd ?? null,
+      model: modelId,
+    });
+    if (reply) onDelta(reply);
+    // No thought stream for --print mode; CLI emits a single blob.
+    return reply;
+  }
+  // API path — OpenAI-compatible streaming.
   const key = await invoke<string | null>("accounts_get_secret", { name: "MOONSHOT_API_KEY" });
   if (!key) throw new Error("No MOONSHOT_API_KEY saved — set it on the Accounts page.");
   const resp = await fetch("https://api.moonshot.ai/v1/chat/completions", {

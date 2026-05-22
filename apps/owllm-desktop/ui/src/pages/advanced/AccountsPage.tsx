@@ -882,17 +882,30 @@ export default function AccountsPage() {
     try {
       if (route.kind === "api" && route.envName) {
         await invoke("accounts_delete_secret", { name: route.envName });
+        setCardState(route.key, { connected: false, testText: "", testOk: null });
+        logInfo(route.backend, `Removed ${provider.name} API key from local store.`);
       } else {
-        const cmd = route.backend === "claude_cli"  ? "claude /logout"
-                  : route.backend === "codex_cli"   ? "codex logout"
-                  : route.backend === "kimi_cli"    ? "kimi /logout"
-                  : route.backend === "gemini_cli"  ? "gemini auth logout"
-                  : `${route.backend} logout`;
-        logInfo(route.backend, `[info] Run \`${cmd}\` in a terminal to fully sign out (we don't auto-delete CLI creds).`);
-        return;
+        // Web-only sub (Grok/DeepSeek) has nothing to wipe locally —
+        // their "connection" is just the browser tab the user opened.
+        if (route.webOnly) {
+          logInfo(route.backend, `${provider.name} subscription is web-only — sign out at ${route.webOnly.url} if you want.`);
+          return;
+        }
+        // CLI subscription: wipe the local credentials file so the
+        // 3-s status poll flips us to disconnected and the next
+        // Connect triggers a fresh OAuth. Was previously a no-op
+        // that just printed a "run kimi /logout yourself" hint and
+        // left the broken green card in place.
+        const summary = await invoke<string>("subscription_cli_logout", { backend: route.backend });
+        setCardState(route.key, { connected: false, testText: "", testOk: null });
+        logInfo(route.backend, `${provider.name} disconnected. ${summary} Click Connect to log in again.`);
+        // If the broken session's terminal is still open in the right
+        // rail, close it so the user doesn't accidentally type into a
+        // dead REPL.
+        if (activeTerm?.backend === route.backend) {
+          handleCloseTerm();
+        }
       }
-      setCardState(route.key, { connected: false, testText: "", testOk: null });
-      logInfo(route.backend, `Removed ${provider.name} API key from local store.`);
     } catch (e: any) {
       logInfo(route.backend, `[error] disconnect failed: ${e?.message ?? e}`);
     }

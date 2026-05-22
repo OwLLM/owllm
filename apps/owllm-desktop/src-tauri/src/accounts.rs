@@ -345,7 +345,13 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             find_codex_cli(), &["--print", "--prompt", "ok"], "Codex").await,
         "kimi_cli" => probe_cli_subscription(
             find_kimi_cli(),
-            &["--print", "--output-format", "text", "--final-message-only", "--prompt", "ok"],
+            // `--model kimi-latest` so the probe works even when the
+            // user's kimi config has no default model set (CLI's REPL
+            // welcome screen prints "Model: not set" and any --print
+            // call exits 1 without a model). kimi-latest is Moonshot's
+            // always-available alias.
+            &["--print", "--output-format", "text", "--final-message-only",
+              "--model", "kimi-latest", "--prompt", "ok"],
             "Kimi",
         ).await,
         "gemini_cli" => probe_cli_subscription(
@@ -1239,6 +1245,82 @@ fn generic_api_probe(
             format!("Key does not start with {:?} — double-check the provider's docs", prefix.unwrap_or("")),
         ),
         None => (false, format!("No {env} saved")),
+    }
+}
+
+/// Wipe the local credentials file for a subscription CLI so the
+/// AccountsPage card flips to disconnected within the next 3-second
+/// status poll, AND so the next Connect click triggers a clean fresh
+/// OAuth instead of resuming the broken session. This is the real
+/// "Disconnect" — the legacy path only printed a "run `kimi /logout`
+/// in a terminal" message and called it done, which left the user
+/// stuck if the CLI was logged in but broken (e.g. free-tier account
+/// can't use subscription, or stale token).
+///
+/// Cred file locations per CLI (mirrors the corresponding
+/// `*_cli_logged_in()` detector):
+///   * claude: ~/.claude/.credentials.json
+///   * codex:  ~/.codex/auth.json + ~/.openai/auth.json (old path)
+///   * kimi:   ~/.kimi/config.toml
+///   * gemini: every *.json under ~/.gemini/ (oauth_creds.json,
+///             settings.json, etc. — the detector greenlights on any
+///             json present, so we wipe them all)
+///
+/// Returns a human-readable summary of what was removed so the React
+/// log panel can confirm; never errors on a missing file (already
+/// disconnected = success).
+#[tauri::command]
+pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or_else(|| "could not resolve home dir".to_string())?;
+    let home = PathBuf::from(home);
+    let mut removed: Vec<String> = Vec::new();
+
+    let try_remove = |p: &PathBuf, removed: &mut Vec<String>| {
+        if p.exists() {
+            if std::fs::remove_file(p).is_ok() {
+                removed.push(p.display().to_string());
+            }
+        }
+    };
+
+    match backend.as_str() {
+        "claude_cli" => {
+            try_remove(&home.join(".claude").join(".credentials.json"), &mut removed);
+        }
+        "codex_cli" => {
+            try_remove(&home.join(".codex").join("auth.json"), &mut removed);
+            try_remove(&home.join(".openai").join("auth.json"), &mut removed);
+        }
+        "kimi_cli" => {
+            try_remove(&home.join(".kimi").join("config.toml"), &mut removed);
+        }
+        "gemini_cli" => {
+            let dir = home.join(".gemini");
+            if dir.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for e in entries.flatten() {
+                        let path = e.path();
+                        let is_json = path
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .map(|x| x.eq_ignore_ascii_case("json"))
+                            .unwrap_or(false);
+                        if is_json {
+                            try_remove(&path, &mut removed);
+                        }
+                    }
+                }
+            }
+        }
+        other => return Err(format!("unknown subscription backend: {other}")),
+    }
+
+    if removed.is_empty() {
+        Ok("Already disconnected (no credentials file found).".to_string())
+    } else {
+        Ok(format!("Removed credentials: {}", removed.join(", ")))
     }
 }
 

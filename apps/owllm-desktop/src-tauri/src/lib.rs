@@ -71,6 +71,7 @@ pub fn run() {
             accounts::kimi_cli_complete,
             accounts::gemini_cli_complete,
             accounts::subscription_cli_login,
+            accounts::subscription_cli_logout,
             accounts::cli_install,
             accounts::cli_install_stream,
             accounts::accounts_test_probe_live,

@@ -649,6 +649,11 @@ export function parseDispatches(text: string, team: Team, exclude: string): Disp
     const m = raw.trim().match(re);
     if (!m) continue;
     const name = m[1];
+    // critical_thinker is a synthetic agent (not in team.agents); it's
+    // routed via extractUserInputRequest's CRITIC_DISPATCH_RE branch
+    // instead. Skip here so we don't fall through to the unknown-agent
+    // drop-on-floor path.
+    if (/^critical[_\s-]?thinker$/i.test(name)) continue;
     if (!known.has(name)) continue;
     if (name === exclude) continue;
     out.push({ agentName: name, instruction: m[2].trim() });
@@ -1363,18 +1368,36 @@ export type DispatchInput = {
 };
 
 const NEED_USER_INPUT_RE = /^\s*\[NEED_USER_INPUT\][\s:]+(.+?)\s*$/im;
+/// Also recognise the natural dispatch syntax the orchestrator gravitates
+/// to: `@critical_thinker: <question>`. The synthetic critic isn't in
+/// team.agents (parseDispatches would silently drop it), so without this
+/// alias every `@critical_thinker:` line the orchestrator emits is a
+/// dead letter — which is exactly the bug "I turned on Director Mode
+/// and nothing happened" surfaces. Accept either prefix.
+const CRITIC_DISPATCH_RE = /^[\s\-\d.*•]*@critical[_\s-]?thinker\s*[:：]\s*(.+?)\s*$/im;
 
-/// Parse [NEED_USER_INPUT] markers out of an orchestrator reply. We only
-/// honour the FIRST marker per turn — a single dispatch shouldn't spawn
-/// multiple critic calls (paralysis-by-committee). Returns the question
-/// text + the cleaned reply (marker line removed) so the orchestrator's
-/// own log doesn't show the marker verbatim.
+/// Parse [NEED_USER_INPUT] / @critical_thinker: markers out of an
+/// orchestrator reply. We only honour the FIRST marker per turn — a
+/// single dispatch shouldn't spawn multiple critic calls (paralysis-
+/// by-committee). Returns the question text + the cleaned reply
+/// (marker line removed) so the orchestrator's own log doesn't show
+/// the marker verbatim.
 export function extractUserInputRequest(text: string): { question: string | null; cleaned: string } {
-  const m = text.match(NEED_USER_INPUT_RE);
-  if (!m) return { question: null, cleaned: text };
-  const question = m[1].trim();
-  const cleaned = text.replace(NEED_USER_INPUT_RE, "").trim();
-  return { question, cleaned };
+  const m1 = text.match(NEED_USER_INPUT_RE);
+  if (m1) {
+    return {
+      question: m1[1].trim(),
+      cleaned: text.replace(NEED_USER_INPUT_RE, "").trim(),
+    };
+  }
+  const m2 = text.match(CRITIC_DISPATCH_RE);
+  if (m2) {
+    return {
+      question: m2[1].trim(),
+      cleaned: text.replace(CRITIC_DISPATCH_RE, "").trim(),
+    };
+  }
+  return { question: null, cleaned: text };
 }
 
 /// Run a single Critic turn. Used by the dispatch loop when director

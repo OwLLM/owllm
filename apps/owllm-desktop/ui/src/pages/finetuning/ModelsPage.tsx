@@ -151,6 +151,8 @@ function exportTunedToGguf(
   sourceDir: string,
   setError: (msg: string | null) => void,
   refreshTuned: () => void,
+  setLogs: (updater: (prev: string[]) => string[]) => void,
+  setLogsOpen: (v: boolean) => void,
 ) {
   type Evt =
     | { kind: "progress"; stage: string; step?: number; total?: number; detail?: string }
@@ -160,23 +162,28 @@ function exportTunedToGguf(
   console.log("[export-gguf] click → sourceDir =", sourceDir);
   const channel = new Channel<Evt>();
   setError(`📦 Exporting GGUF from ${sourceDir.split(/[\\/]/).pop()}…`);
+  setLogs(() => []);
+  setLogsOpen(true);
+  const pushLog = (s: string) => setLogs((prev) => {
+    const next = [...prev, s];
+    return next.length > 300 ? next.slice(next.length - 300) : next;
+  });
   channel.onmessage = (ev) => {
     console.log("[export-gguf] event", ev);
     if (ev.kind === "log") {
-      // Surface error-ish stderr lines so the banner shows the real
-      // reason a conversion failed (unsupported arch, missing weights).
-      if (
-        ev.line.toLowerCase().includes("error") ||
-        ev.line.toLowerCase().includes("traceback") ||
-        ev.line.toLowerCase().includes("notimplemented")
-      ) {
+      pushLog(`${ev.stream === "stderr" ? "⚠ " : ""}${ev.line}`);
+      // Update the banner only on signal lines so it doesn't churn on
+      // every INFO log; the full tail is in the logs panel.
+      const low = ev.line.toLowerCase();
+      if (low.includes("error") || low.includes("traceback") || low.includes("notimplemented")) {
         setError(`GGUF export: ${ev.line}`);
       }
     } else if (ev.kind === "finished") {
       setError(`✅ GGUF written → ${ev.outputDir}`);
       refreshTuned();
     } else if (ev.kind === "failed") {
-      setError(`❌ GGUF export failed: ${ev.error}`);
+      setError(`❌ GGUF export failed: ${ev.error} — see logs below`);
+      setLogsOpen(true);
     }
   };
   invoke<void>("export_gguf", {
@@ -187,6 +194,7 @@ function exportTunedToGguf(
     .catch((e) => {
       console.error("[export-gguf] invoke rejected", e);
       setError(`GGUF export start failed: ${e}`);
+      pushLog(`invoke rejected: ${e}`);
     });
 }
 
@@ -251,6 +259,11 @@ export default function ModelsPage() {
   const [hits, setHits] = React.useState<HfModelHit[]>([]);
   const [loadingHits, setLoadingHits] = React.useState(false);
   const [hfError, setHfError] = React.useState<string | null>(null);
+  // Rolling tail of GGUF export stdout/stderr — convert_hf_to_gguf.py
+  // talks to stderr and the banner only shows the last setError() line,
+  // so a silent crash leaves the user with no clue what happened.
+  const [exportLogs, setExportLogs] = React.useState<string[]>([]);
+  const [exportLogsOpen, setExportLogsOpen] = React.useState(false);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const [downloading, setDownloading] = React.useState<Set<string>>(new Set());
@@ -670,6 +683,50 @@ export default function ModelsPage() {
           {hfError.startsWith("✅") || hfError.startsWith("❌") || hfError.startsWith("📦") ? "" : "⚠ "}{hfError}
         </div>
       )}
+      {exportLogs.length > 0 && (
+        <div style={{
+          position: "sticky",
+          top: hfError ? 40 : 0,
+          zIndex: 49,
+          marginBottom: 10,
+        }}>
+          <button
+            onClick={() => setExportLogsOpen((v) => !v)}
+            style={{
+              padding: "3px 10px",
+              background: "rgba(102,126,234,0.18)",
+              border: "1px solid rgba(102,126,234,0.4)",
+              borderRadius: 4,
+              color: "#9cc3ff",
+              fontSize: 11,
+              cursor: "pointer",
+              marginBottom: 4,
+            }}
+          >{exportLogsOpen ? "▼" : "▶"} GGUF export logs ({exportLogs.length})</button>
+          {exportLogsOpen && (
+            <div style={{
+              maxHeight: 260,
+              overflowY: "auto",
+              background: "rgba(0,0,0,0.55)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              borderRadius: 4,
+              padding: 6,
+              fontFamily: "Consolas, monospace",
+              fontSize: 10,
+              color: "#cfd4e1",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+            }}>
+              {exportLogs.map((l, i) => (
+                <div
+                  key={i}
+                  style={{ color: l.startsWith("⚠ ") ? "#ffb3b3" : undefined }}
+                >{l}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
       {/* Qt main.py:8257-8289 — "📚 Recommended Models" at 16pt bold #667eea,
           followed inline (no stretch) by a 3-colour legend row. Dots are
           14pt; labels are 10pt #9aa0a6. legend_row contentsMargins (16,0,0,0)
@@ -895,7 +952,7 @@ export default function ModelsPage() {
               selected={selectedPath === t.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
               onTest={(path) => testTunedAdapter(path, setHfError)}
-              onExportGguf={(path) => exportTunedToGguf(path, setHfError, refreshTuned)}
+              onExportGguf={(path) => exportTunedToGguf(path, setHfError, refreshTuned, setExportLogs, setExportLogsOpen)}
               onDelete={(path) => deleteTunedAdapter(path, t.name, setHfError, refreshTuned)}
             />
           ))}

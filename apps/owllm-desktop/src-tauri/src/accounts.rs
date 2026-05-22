@@ -1062,19 +1062,23 @@ fn generic_api_probe(
 /// poll flips the card to green. Returns immediately after spawn.
 #[tauri::command]
 pub fn subscription_cli_login(backend: String) -> Result<(), String> {
-    // Resolve which CLI to launch + the login command to run inside
-    // the visible console. Each CLI has its own flavour:
-    //   * codex login            — real subcommand, single line
-    //   * gemini auth login      — real subcommand pair
-    //   * claude /login          — slash command (passed as positional;
-    //                              if the CLI rejects it, the user can
-    //                              retype it inside the open REPL)
-    //   * kimi /login            — same pattern as claude
+    // Resolve which CLI to launch + the login command. Two flavours:
+    //   * codex login          — real subcommand, runs OAuth and exits
+    //   * gemini auth login    — same shape, two-word subcommand
+    //   * claude (no args)     — REPL auto-prompts /login on first run
+    //                            because there are no credentials yet
+    //   * kimi (no args)       — same: kimi REPL auto-prompts for login
+    //                            when ~/.kimi/config.toml is missing
+    //
+    // We avoid passing `/login` as a positional argv because slash
+    // commands only work INSIDE the REPL — every CLI we tested
+    // (claude, kimi) errors out with "unknown argument /login" if
+    // they receive it on the command line.
     let (find_fn, login_args): (fn() -> Option<PathBuf>, &[&str]) = match backend.as_str() {
-        "claude_cli"  => (find_claude_cli,  &["/login"]),
+        "claude_cli"  => (find_claude_cli,  &[]),
         "codex_cli"   => (find_codex_cli,   &["login"]),
-        "kimi_cli"    => (find_kimi_cli,    &["/login"]),
-        "gemini_cli"  => (find_gemini_cli,  &["/auth"]),
+        "kimi_cli"    => (find_kimi_cli,    &[]),
+        "gemini_cli"  => (find_gemini_cli,  &["auth", "login"]),
         other => return Err(format!("unknown subscription backend: {other}")),
     };
     let exe = find_fn().ok_or_else(|| format!(

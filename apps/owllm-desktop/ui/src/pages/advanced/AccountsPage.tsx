@@ -502,24 +502,49 @@ function ProviderCard({
 // -----------------------------------------------------------------------
 // Right-rail log panel. Subscribes to LOG_HUB.
 // -----------------------------------------------------------------------
-function InstallLogPanel() {
+function InstallLogPanel({ stacked = false }: { stacked?: boolean }) {
   const [lines, setLines] = useState<LogLine[]>(LOG_HUB.snapshot());
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Track whether the user has scrolled up. While true, auto-scroll
+  // is suppressed so new lines don't yank them away from what they
+  // were reading. Re-arms (becomes false) as soon as they scroll back
+  // to the bottom. Default false so the first new line auto-pins.
+  const stuckBottomRef = useRef(true);
 
   useEffect(() => LOG_HUB.subscribe(setLines), []);
+
+  // Listen to user scrolls and recompute the stuck-to-bottom flag.
+  // We use a 6 px slop so micro-pixels of rounding don't unstick us.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // Auto-scroll only when the user is already near the bottom — don't
-    // yank the view if they scrolled up to read older lines.
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
+    const onScroll = () => {
+      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      stuckBottomRef.current = distFromBottom <= 6;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, []);
+
+  // After every new batch of lines, snap to the bottom IFF the user
+  // hasn't scrolled away. requestAnimationFrame gives the browser a
+  // chance to lay out the new line so scrollHeight is up to date.
+  useEffect(() => {
+    if (!stuckBottomRef.current) return;
+    const el = scrollRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
   }, [lines]);
 
   return (
     <div
       style={{
-        width: 340, flexShrink: 0,
+        // When stacked (narrow viewport) the panel takes full width
+        // below the cards instead of sitting in a 340-px right rail
+        // that would otherwise crush the cards into overlap.
+        width: stacked ? "100%" : 340,
+        height: stacked ? 220 : "auto",
+        flexShrink: 0,
         display: "flex", flexDirection: "column",
         background: "#0c0f14",
         border: "1px solid rgba(255,255,255,0.06)",
@@ -589,6 +614,19 @@ export default function AccountsPage() {
   );
   const [dialogFor, setDialogFor] = useState<{ route: RouteSpec; provider: ProviderSpec } | null>(null);
 
+  // Responsive layout: at narrow widths the 340 px right rail crushes
+  // the card grid (cards visually overlap as they fall below their
+  // minmax floor). Below 960 px we stack the log panel UNDER the
+  // cards instead — full width, fixed height — so the cards always
+  // have room to lay out cleanly. Cap is generous: 960 covers most
+  // laptops + window snapped to half-screen on 1080p.
+  const [narrow, setNarrow] = useState(() => window.innerWidth < 960);
+  useEffect(() => {
+    const onResize = () => setNarrow(window.innerWidth < 960);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
   function reconcile(status: AccountsStatus) {
     setCards((prev) => {
       const next = { ...prev };
@@ -652,7 +690,17 @@ export default function AccountsPage() {
         });
         return;
       }
-      logInfo(route.backend, `Launching ${provider.name} CLI login…`);
+      // Per-CLI hint: how the OAuth flow actually starts so the user
+      // knows what to do inside the terminal that opens. claude / kimi
+      // launch a REPL that auto-prompts for /login on first run;
+      // codex / gemini run a one-shot login subcommand.
+      const hint: Record<string, string> = {
+        claude_cli: "claude REPL will open; type `/login` if it doesn't auto-prompt.",
+        codex_cli:  "codex login will open the OAuth page in your browser.",
+        kimi_cli:   "kimi REPL will open; it auto-prompts for /login on first run.",
+        gemini_cli: "gemini auth login will open the OAuth page in your browser.",
+      };
+      logInfo(route.backend, `Launching ${provider.name} CLI… ${hint[route.backend] ?? ""}`);
       invoke("subscription_cli_login", { backend: route.backend }).catch((e) => {
         const msg = String(e ?? "");
         if (/not found on PATH/i.test(msg)) {
@@ -768,19 +816,32 @@ export default function AccountsPage() {
         live into the right-side log — no pop-out console.
       </div>
 
-      <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 18 }}>
-        {/* Provider grid — left column */}
+      <div
+        style={{
+          flex: 1, minHeight: 0,
+          display: "flex",
+          // narrow: stack vertically with log under cards; wide: side
+          // by side with log as right rail
+          flexDirection: narrow ? "column" : "row",
+          gap: 18,
+        }}
+      >
+        {/* Provider grid — left column (wide) or top stack (narrow) */}
         <div
           style={{
             flex: 1,
             minWidth: 0,
+            minHeight: 0,
             overflowY: "auto",
             display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(320px, 480px))",
+            // 90 px narrower than v1 (480 → 390). minmax floor 260 lets
+            // cards shrink into a single column on tiny windows instead
+            // of overlapping their neighbours.
+            gridTemplateColumns: "repeat(auto-fit, minmax(260px, 390px))",
             columnGap: 18,
             rowGap: 18,
             alignContent: "start",
-            paddingRight: 4,
+            paddingRight: narrow ? 0 : 4,
           }}
         >
           {PROVIDERS.map((provider) => (
@@ -796,8 +857,8 @@ export default function AccountsPage() {
           ))}
         </div>
 
-        {/* In-app log panel — right rail */}
-        <InstallLogPanel />
+        {/* In-app log panel — right rail when wide, bottom dock when narrow */}
+        <InstallLogPanel stacked={narrow} />
       </div>
 
       {dialogFor && (

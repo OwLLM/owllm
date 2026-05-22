@@ -63,7 +63,20 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
         inner.child = None;
         inner.message = match exit_code {
             Some(0) => "Stopped cleanly.".to_string(),
-            Some(code) => format!("Crashed (exit code {code}). Check the log for details."),
+            // Decode Windows NTSTATUS-style codes that surface as
+            // signed i32 from Tokio's exit_status — these are by far
+            // the most common llama-server crashes the user hits and
+            // a bare exit code is impossible to act on without
+            // googling. We surface the friendly cause + remediation
+            // inline so the user knows the next step.
+            Some(code) => {
+                let hint = crash_hint_for(code);
+                if let Some(h) = hint {
+                    format!("Crashed (exit code {code}). {h} See log for full trace.")
+                } else {
+                    format!("Crashed (exit code {code}). Check the log for details.")
+                }
+            }
             None => "Process ended unexpectedly. Check the log for details.".to_string(),
         };
     } else if !alive && inner.message.is_empty() {
@@ -205,6 +218,42 @@ pub async fn server_stop(
         },
     );
     Ok(())
+}
+
+/// Translate the most common llama-server crash exit codes into a
+/// one-line, actionable English hint shown alongside the raw number
+/// in the Server tab status. Built around what the user actually
+/// hits on Windows; non-matches fall through to the generic
+/// "Check the log for details." message.
+fn crash_hint_for(code: i32) -> Option<&'static str> {
+    // Tokio's exit_status returns the unsigned NTSTATUS as a signed
+    // i32, so 0xC000_0005 surfaces as -1_073_741_819, etc. Match on
+    // both forms for clarity.
+    let unsigned = code as u32;
+    match unsigned {
+        0xC000_0005 => Some(
+            "STATUS_ACCESS_VIOLATION — usually VRAM OOM on a too-large model. \
+             Try a smaller quant (e.g. Q4_K_M instead of f16) or lower -ngl."
+        ),
+        0xC000_0017 => Some(
+            "STATUS_NO_MEMORY — out of system RAM. Close other apps or pick a smaller model."
+        ),
+        0xC000_001D => Some(
+            "STATUS_ILLEGAL_INSTRUCTION — the llama.cpp build needs a CPU feature this machine lacks. \
+             Reinstall the llama.cpp runtime with the non-AVX build."
+        ),
+        0xC000_0096 => Some(
+            "STATUS_PRIVILEGED_INSTRUCTION — same root cause as STATUS_ILLEGAL_INSTRUCTION: CPU/build mismatch."
+        ),
+        0xC000_0142 => Some(
+            "STATUS_DLL_INIT_FAILED — a CUDA / cuBLAS DLL failed to load. \
+             Reinstall the llama.cpp+CUDA runtime."
+        ),
+        0xC000_0409 => Some(
+            "STATUS_STACK_BUFFER_OVERRUN — likely a corrupt model file. Re-download or re-export the GGUF."
+        ),
+        _ => None,
+    }
 }
 
 /// Convenience: install ServerState in a Tauri builder. Keeps the

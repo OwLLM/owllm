@@ -826,7 +826,16 @@ export default function AccountsPage() {
           gap: 18,
         }}
       >
-        {/* Provider grid — left column (wide) or top stack (narrow) */}
+        {/* Provider grid — left column (wide) or top stack (narrow).
+            grid-auto-rows: min-content is the key bit: without it the
+            implicit rows can size as 1fr and overlap when there's
+            leftover container height. align-items: start keeps each
+            card pinned to the TOP of its row (default `stretch` would
+            grow shorter cards to fill taller neighbours' row height,
+            wasting space and making the layout look unbalanced).
+            align-content removed for the same reason — alignItems
+            does the right thing per-item without grid-wide packing
+            quirks. */}
         <div
           style={{
             flex: 1,
@@ -834,14 +843,12 @@ export default function AccountsPage() {
             minHeight: 0,
             overflowY: "auto",
             display: "grid",
-            // 90 px narrower than v1 (480 → 390). minmax floor 260 lets
-            // cards shrink into a single column on tiny windows instead
-            // of overlapping their neighbours.
             gridTemplateColumns: "repeat(auto-fit, minmax(260px, 390px))",
-            columnGap: 18,
-            rowGap: 18,
-            alignContent: "start",
+            gridAutoRows: "min-content",
+            alignItems: "start",
+            gap: 22,
             paddingRight: narrow ? 0 : 4,
+            paddingBottom: 4,
           }}
         >
           {PROVIDERS.map((provider) => (

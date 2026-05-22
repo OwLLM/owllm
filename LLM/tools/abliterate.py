@@ -288,6 +288,32 @@ def dequantize_bnb_if_needed(model) -> bool:
                     del model.config.quantization_config
         except Exception:
             pass
+        # Critical: transformers caches a bunch of "this model is
+        # quantized" flags at load time. If we leave them set,
+        # save_pretrained routes through the bnb quantizer's save path
+        # — which then TypeErrors because every module it expects to be
+        # bnb is now a plain nn.Linear. Strip them so save_pretrained
+        # treats this like any other fp16 HF model.
+        for attr, val in (
+            ("is_loaded_in_4bit", False),
+            ("is_loaded_in_8bit", False),
+            ("is_quantized", False),
+            ("hf_quantizer", None),
+            ("quantization_method", None),
+            ("_hf_peft_config_loaded", False),
+        ):
+            try:
+                if hasattr(model, attr):
+                    setattr(model, attr, val)
+            except Exception:
+                pass
+        # Older transformers paths look at model.config too.
+        try:
+            for attr in ("_is_quantized_training_enabled", "quantization_config"):
+                if hasattr(model.config, attr):
+                    delattr(model.config, attr)
+        except Exception:
+            pass
     return swapped > 0
 
 

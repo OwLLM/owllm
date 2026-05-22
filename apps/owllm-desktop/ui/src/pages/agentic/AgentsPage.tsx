@@ -3477,6 +3477,9 @@ async function streamChatCompletion(
   if (provider === "openai") {
     return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
   }
+  if (provider === "moonshot") {
+    return streamMoonshot(bareId, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
+  }
   // Local llama-server. OpenAI-compatible SSE. History (when present)
   // becomes the alternating user/assistant turns preceding the new
   // user message — gives the model continuity across restarts.
@@ -3761,6 +3764,44 @@ async function streamOpenAI(
   const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
   if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...(history ?? []),
+        { role: "user", content: openaiUserContent(userMessage, images ?? []) },
+      ],
+      stream: true,
+      temperature,
+    }),
+    signal,
+  });
+  return consumeOpenAISse(resp, onDelta, onThought);
+}
+
+/// Moonshot AI / Kimi streaming. OpenAI-compatible REST at
+/// api.moonshot.ai/v1 — same SSE shape so we can reuse
+/// consumeOpenAISse. Subscription-CLI route doesn't exist yet (no
+/// Moonshot CLI ships an auth flow), so this path is API-only.
+async function streamMoonshot(
+  modelId: string,
+  systemPrompt: string,
+  userMessage: string,
+  temperature: number,
+  signal: AbortSignal,
+  onDelta: StreamHandler,
+  history?: HistoryItem[],
+  onThought?: ThoughtHandler,
+  images?: Attachment[],
+): Promise<string> {
+  const key = await invoke<string | null>("accounts_get_secret", { name: "MOONSHOT_API_KEY" });
+  if (!key) throw new Error("No MOONSHOT_API_KEY saved — set it on the Accounts page.");
+  const resp = await fetch("https://api.moonshot.ai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -4756,9 +4797,10 @@ export default function AgentsPage() {
     if (modelId.startsWith("auto/")) return "auto";
     const bareId = stripModelPrefix(modelId);
     if (modelId.startsWith("sub/") || modelId.startsWith("api/")) {
-      // Pure cloud entries — decide between anthropic / openai by id.
+      // Pure cloud entries — decide between anthropic / openai / moonshot by id.
       if (bareId.startsWith("claude-")) return "anthropic";
       if (bareId.startsWith("gpt-") || bareId === "o3") return "openai";
+      if (bareId.startsWith("kimi-") || bareId.startsWith("moonshot-")) return "moonshot";
     }
     const m = models.find(x => x.model_id === bareId);
     return m?.provider || "local";
@@ -4795,8 +4837,11 @@ export default function AgentsPage() {
     // dispatched specialist) actually resolves to a local model. Cloud-
     // only teams should run without one.
     const orchModelId = activeTeam ? modelFor(findOrchestratorSpec(activeTeam)!.name) : "";
-    const needsLocal = providerFor(orchModelId) === "local"
-      || (activeTeam?.agents ?? []).some(a => providerFor(modelFor(a.name)) === "local");
+    // "tuned" models live in LLM/fine_tuned/ and are served by the
+    // same llama-server, so they need the local server up too.
+    const isLocallyServed = (p: string) => p === "local" || p === "tuned";
+    const needsLocal = isLocallyServed(providerFor(orchModelId))
+      || (activeTeam?.agents ?? []).some(a => isLocallyServed(providerFor(modelFor(a.name))));
     if (needsLocal && (!serverState.running || !serverState.port)) {
       setRunError("This team uses local model(s) but no local server is running. Start one on the Server tab.");
       return;

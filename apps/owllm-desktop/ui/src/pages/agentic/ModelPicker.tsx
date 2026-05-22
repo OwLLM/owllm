@@ -33,12 +33,13 @@ export type ModelInfo = {
 export type AccountsStatusLite = {
   anthropic_api_key: boolean;
   openai_api_key: boolean;
+  moonshot_api_key: boolean;
   claude_cli: boolean;
   codex_cli: boolean;
 };
 
-type Section = "local" | "anthropic" | "openai" | "other";
-type Variant = "local" | "sub" | "api" | "auto";
+type Section = "local" | "tuned" | "anthropic" | "openai" | "kimi" | "other";
+type Variant = "local" | "tuned" | "sub" | "api" | "auto";
 
 type Entry = {
   id: string;
@@ -50,10 +51,12 @@ type Entry = {
 };
 
 const SECTION_META: Record<Section, { label: string; color: string }> = {
-  local:     { label: "LOCAL",     color: "#7fdfff" },
-  anthropic: { label: "ANTHROPIC", color: "#ff9a3a" },
-  openai:    { label: "OPENAI",    color: "#10a37f" },
-  other:     { label: "OTHER",     color: "#c08aff" },
+  local:     { label: "LOCAL",         color: "#7fdfff" },
+  tuned:     { label: "TUNED (LOCAL)", color: "#ffd166" },
+  anthropic: { label: "ANTHROPIC",     color: "#ff9a3a" },
+  openai:    { label: "OPENAI",        color: "#10a37f" },
+  kimi:      { label: "KIMI",          color: "#d36bff" },
+  other:     { label: "OTHER",         color: "#c08aff" },
 };
 
 // Hardcoded cloud catalogue — keep small + curated rather than
@@ -91,15 +94,36 @@ type OpenAIModel = {
   api?: boolean;
   effort?: readonly string[];
 };
+// GPT-5.4 family went GA on 2026-03-05 and replaces the prior gpt-5
+// line in this picker. 5.4-pro and 5.4-mini/nano sit alongside the
+// 5.5 Codex pair (which keeps the Codex CLI subscription row). The
+// original "GPT-5" / "GPT-5 Codex" entries are dropped — picking them
+// today resolves to the same underlying model as 5.4 anyway.
 const OPENAI_MODELS: OpenAIModel[] = [
-  { id: "gpt-5",         display: "GPT-5",          sub: true, api: true },
-  { id: "gpt-5-mini",    display: "GPT-5 Codex",    sub: true, api: true },
+  { id: "gpt-5.4",       display: "GPT-5.4",        api: true,
+    effort: ["low", "medium", "high", "extra_high"] },
+  { id: "gpt-5.4-mini",  display: "GPT-5.4 mini",   api: true },
+  { id: "gpt-5.4-nano",  display: "GPT-5.4 nano",   api: true },
   { id: "gpt-5.5-codex", display: "GPT-5.5 Codex",  sub: true,
     effort: ["low", "medium", "high", "extra_high"] },
   { id: "gpt-5.5",       display: "GPT-5.5",        api: true,
     effort: ["low", "medium", "high", "extra_high"] },
   { id: "gpt-4o",        display: "GPT-4o",         api: true },
   { id: "gpt-4o-mini",   display: "GPT-4o mini",    api: true },
+];
+
+// Kimi / Moonshot AI — OpenAI-compatible REST at api.moonshot.ai/v1.
+// No subscription CLI route yet (Moonshot doesn't ship one), so every
+// row is API-only. K2 preview ids are not included because Moonshot
+// deprecates them 2026-05-25.
+type KimiModel = {
+  id: string;
+  display: string;
+};
+const KIMI_MODELS: KimiModel[] = [
+  { id: "kimi-k2.6",        display: "Kimi K2.6" },
+  { id: "kimi-k2.5",        display: "Kimi K2.5 (multimodal)" },
+  { id: "moonshot-v1-128k", display: "Moonshot V1 · 128K" },
 ];
 function displayEffort(level: string): string {
   return level === "extra_high" ? "extra high" : level;
@@ -114,7 +138,7 @@ const AUTO_OPTIONS = [
 export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | null): Entry[] {
   const out: Entry[] = [];
 
-  // LOCAL
+  // LOCAL — base GGUFs + transformers dirs under LLM/models/.
   for (const m of models) {
     if (m.provider !== "local") continue;
     const parts: string[] = [];
@@ -125,6 +149,24 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
       label: m.model_id,
       section: "local",
       variant: "local",
+      available: true,
+      hint: parts.length > 0 ? parts.join(" · ") : undefined,
+    });
+  }
+
+  // TUNED (LOCAL) — abliterated / fine-tuned weights under
+  // LLM/fine_tuned/. Same dispatch path as local; separate section so
+  // the user doesn't confuse a 14B abliterated dir with a downloaded
+  // base. Rust models.rs tags these with provider="tuned".
+  for (const m of models) {
+    if (m.provider !== "tuned") continue;
+    const parts: string[] = [];
+    if (m.size_mib != null) parts.push(`${(m.size_mib / 1024).toFixed(1)} GiB`);
+    out.push({
+      id: m.model_id,
+      label: m.model_id,
+      section: "tuned",
+      variant: "tuned",
       available: true,
       hint: parts.length > 0 ? parts.join(" · ") : undefined,
     });
@@ -166,6 +208,21 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
   for (const m of OPENAI_MODELS) {
     if (m.sub) pushOpenAI(m, "sub", codexSub, codexSub ? undefined : "(codex login)");
     if (m.api) pushOpenAI(m, "api", openaiApi, openaiApi ? undefined : "(set OPENAI_API_KEY)");
+  }
+
+  // KIMI — API-only. ID encoding: "api/<model-id>" so the dispatch's
+  // provider router (providerFor in AgentsPage) can branch on the
+  // bare id like it does for Anthropic / OpenAI.
+  const kimiApi = !!status?.moonshot_api_key;
+  for (const m of KIMI_MODELS) {
+    out.push({
+      id: `api/${m.id}`,
+      label: `${m.display} (API)`,
+      section: "kimi",
+      variant: "api",
+      available: kimiApi,
+      hint: kimiApi ? undefined : "(set MOONSHOT_API_KEY)",
+    });
   }
 
   for (const a of AUTO_OPTIONS) {
@@ -247,10 +304,10 @@ export default function ModelPicker({
   }, [open]);
 
   const entries = buildEntries(models, status)
-    .filter((e) => !localOnly || e.section === "local");
+    .filter((e) => !localOnly || e.section === "local" || e.section === "tuned");
   const sections: Section[] = localOnly
-    ? ["local"]
-    : ["local", "anthropic", "openai", "other"];
+    ? ["local", "tuned"]
+    : ["local", "tuned", "anthropic", "openai", "kimi", "other"];
 
   const triggerLabel = value
     ? displayForId(value, entries)

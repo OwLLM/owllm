@@ -26,6 +26,7 @@ const PAGE_BG = "var(--bg-panel)"; // matches palette(base) used by Qt gradient 
 type AccountsStatus = {
   anthropic_api_key: boolean;
   openai_api_key: boolean;
+  moonshot_api_key: boolean;
   claude_cli: boolean;
   codex_cli: boolean;
 };
@@ -88,6 +89,17 @@ const BRANDS: BrandSpec[] = [
     kind: "api",
     envName: "OPENAI_API_KEY",
     backend: "openai_api",
+  },
+  {
+    key: "moonshot_api",
+    name: "Kimi (Moonshot) API",
+    tagline: "MOONSHOT_API_KEY · billed per call",
+    icon: "🌙",
+    accent: "#d36bff",
+    accentTop: "#2a1c33",
+    kind: "api",
+    envName: "MOONSHOT_API_KEY",
+    backend: "moonshot_api",
   },
 ];
 
@@ -482,6 +494,7 @@ export default function AccountsPage() {
       };
       flag("anthropic_api", status.anthropic_api_key);
       flag("openai_api",    status.openai_api_key);
+      flag("moonshot_api",  status.moonshot_api_key);
       flag("claude_subscription", status.claude_cli);
       flag("codex_subscription",  status.codex_cli);
       return next;
@@ -610,8 +623,12 @@ export default function AccountsPage() {
         style={{
           flex: 1,
           display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gridTemplateRows: "1fr 1fr",
+          // Five cards now: 3-col grid reflows to a 3+2 layout while
+          // still letting cards expand on wide screens. Cards stretch
+          // by default; minmax keeps a card from collapsing too narrow
+          // on small windows.
+          gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
+          gridAutoRows: "1fr",
           columnGap: 18,
           rowGap: 18,
           minHeight: 0,

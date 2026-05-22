@@ -26,11 +26,15 @@ pub struct ModelInfo {
     /// Size of the GGUF in MiB. Useful for the Models page so the
     /// user can sort by disk footprint without a separate stat call.
     pub size_mib: Option<u64>,
-    /// Which backend serves this model. "local" → llama-server.exe
-    /// on the assigned port; "anthropic" → api.anthropic.com (needs
+    /// Which backend serves this model. "local" → base GGUFs in
+    /// LLM/models/ served by llama-server.exe; "tuned" → user-tuned
+    /// or abliterated models in LLM/fine_tuned/ (also local, but
+    /// kept distinct so the picker can group them under a "TUNED
+    /// (LOCAL)" header); "anthropic" → api.anthropic.com (needs
     /// ANTHROPIC_API_KEY); "openai" → api.openai.com (needs
-    /// OPENAI_API_KEY). The React dispatch loop branches on this to
-    /// choose the right endpoint + request shape.
+    /// OPENAI_API_KEY); "moonshot" → api.moonshot.ai/v1 (needs
+    /// MOONSHOT_API_KEY). The React dispatch loop branches on this
+    /// to choose the right endpoint + request shape.
     #[serde(default)]
     pub provider: String,
 }
@@ -98,6 +102,60 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
         }
     }
 
+    // Tuned / abliterated local weights live in LLM/fine_tuned/ and
+    // are surfaced under their own "TUNED (LOCAL)" group in the
+    // picker — same llama-server path, separate label so the user
+    // doesn't confuse a 14B abliterated dir with a downloaded base.
+    if let Some(root) = paths::llm_root() {
+        let tuned_root = root.join("fine_tuned");
+        if tuned_root.is_dir() {
+            if let Ok(read) = std::fs::read_dir(&tuned_root) {
+                for entry in read.flatten() {
+                    let p = entry.path();
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with('.') || name.starts_with("checkpoint-") || name == "_crash_logs" {
+                        continue;
+                    }
+                    if p.is_dir() {
+                        // The directory itself (transformers format).
+                        let size_mib = dir_weight_size_mib(&p);
+                        out.push(ModelInfo {
+                            model_id: name.clone(),
+                            port: None,
+                            base_model: Some(p.to_string_lossy().into_owned()),
+                            size_mib,
+                            provider: "tuned".to_string(),
+                        });
+                        // Any .gguf one level deep is its own pickable
+                        // entry (the user typically exports a .gguf
+                        // inside the transformers dir).
+                        if let Ok(inner) = std::fs::read_dir(&p) {
+                            for f in inner.flatten() {
+                                let fp = f.path();
+                                if !fp.is_file() { continue; }
+                                let ext = fp.extension().and_then(|s| s.to_str()).unwrap_or("");
+                                if !ext.eq_ignore_ascii_case("gguf") { continue; }
+                                let fname = fp
+                                    .file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .unwrap_or("model")
+                                    .to_string();
+                                let fsize = f.metadata().map(|m| m.len() / 1024 / 1024).ok();
+                                out.push(ModelInfo {
+                                    model_id: fname,
+                                    port: None,
+                                    base_model: Some(fp.to_string_lossy().into_owned()),
+                                    size_mib: fsize,
+                                    provider: "tuned".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Cloud models — ALWAYS surfaced so the user can see Claude / GPT
     // options in the agent dropdowns even before saving a key. If they
     // pick one without the matching credentials saved, the dispatch
@@ -117,10 +175,15 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
             provider: "anthropic".to_string(),
         });
     }
+    // GPT-5.4 family replaces the previous gpt-5 entries (gpt-5 retired
+    // when 5.4 + 5.5 went GA in 2026). 5.5 / 5.5-codex stay below for
+    // the new Codex CLI subscription line.
     for id in [
-        "gpt-5",
-        "gpt-5-mini",
-        "gpt-4.1",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gpt-5.5-codex",
+        "gpt-5.5",
         "gpt-4o",
         "gpt-4o-mini",
     ] {
@@ -130,6 +193,23 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
             base_model: None,
             size_mib: None,
             provider: "openai".to_string(),
+        });
+    }
+    // Moonshot AI / Kimi — OpenAI-compatible API. The older
+    // kimi-k2-* preview ids are being discontinued 2026-05-25 by
+    // Moonshot; we ship only the current K2.5 + K2.6 line plus the
+    // stable Moonshot V1 128K context fallback.
+    for id in [
+        "kimi-k2.6",
+        "kimi-k2.5",
+        "moonshot-v1-128k",
+    ] {
+        out.push(ModelInfo {
+            model_id: id.to_string(),
+            port: None,
+            base_model: None,
+            size_mib: None,
+            provider: "moonshot".to_string(),
         });
     }
 

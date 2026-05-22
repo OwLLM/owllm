@@ -119,6 +119,15 @@ pub struct AccountsStatus {
     pub anthropic_api_key: bool,
     /// OPENAI_API_KEY is set + non-empty.
     pub openai_api_key: bool,
+    /// MOONSHOT_API_KEY is set + non-empty. Moonshot AI's Kimi
+    /// platform — OpenAI-compatible REST API at api.moonshot.ai/v1.
+    /// Same env-var name the official Kimi docs and most third-party
+    /// SDKs use.
+    pub moonshot_api_key: bool,
+    /// HF_TOKEN (HuggingFace user access token) is set + non-empty.
+    /// Used by `huggingface::*` commands for private repos and to lift
+    /// the anonymous rate-limit on /api/models.
+    pub hf_token: bool,
     /// Claude CLI is installed AND has logged-in credentials.
     pub claude_cli: bool,
     /// OpenAI Codex CLI is installed AND has logged-in credentials.
@@ -137,6 +146,14 @@ pub fn accounts_status() -> AccountsStatus {
             .unwrap_or(false),
         openai_api_key: map
             .get("OPENAI_API_KEY")
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
+        moonshot_api_key: map
+            .get("MOONSHOT_API_KEY")
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
+        hf_token: map
+            .get("HF_TOKEN")
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false),
         claude_cli: claude_cli_logged_in(),
@@ -215,6 +232,28 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
                 Some(k) if k.starts_with("sk-") => (true, "Key present (sk-…)".to_string()),
                 Some(_) => (false, "Key does not start with 'sk-'".to_string()),
                 None => (false, "No OPENAI_API_KEY saved".to_string()),
+            }
+        }
+        "moonshot_api" => {
+            // Moonshot AI / Kimi keys are prefixed "sk-" like OpenAI's.
+            let v = load_secrets().get("MOONSHOT_API_KEY").cloned();
+            match v {
+                Some(k) if k.starts_with("sk-") => (true, "Key present (sk-…)".to_string()),
+                Some(k) if !k.trim().is_empty() => (true, format!("Key present ({} chars)", k.len())),
+                _ => (false, "No MOONSHOT_API_KEY saved".to_string()),
+            }
+        }
+        "huggingface" => {
+            // HF user-access tokens are prefixed "hf_" (read tokens
+            // and write tokens alike). The prefix isn't enforced by
+            // HF — older tokens may not have it — so we accept any
+            // non-empty value but flag the common "hf_" pattern as
+            // the green path.
+            let v = load_secrets().get("HF_TOKEN").cloned();
+            match v {
+                Some(k) if k.starts_with("hf_") => (true, "Token present (hf_…)".to_string()),
+                Some(k) if !k.trim().is_empty() => (true, format!("Token present ({} chars)", k.len())),
+                _ => (false, "No HF_TOKEN saved".to_string()),
             }
         }
         "claude_cli" => {

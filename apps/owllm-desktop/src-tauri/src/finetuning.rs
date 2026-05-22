@@ -773,31 +773,63 @@ pub async fn export_gguf(
     })?;
     let convert_py = convert_py.unwrap();
 
-    let outtype = config.outtype.unwrap_or_else(|| "f16".to_string());
-    let out_path = if let Some(p) = config.output_path.as_deref().filter(|s| !s.is_empty()) {
+    let outtype_raw = config.outtype.unwrap_or_else(|| "f16".to_string());
+    // convert_hf_to_gguf.py natively writes f32/f16/bf16/q8_0/auto.
+    // Everything else (Q*_K_M, IQ*) needs llama-quantize as a
+    // post-step: convert to f16 first, then quantize. Decide which
+    // path we're on up-front so we can compute the right output
+    // filename and the user gets a single final .gguf they can serve.
+    let outtype_lower = outtype_raw.to_ascii_lowercase();
+    let is_native = matches!(outtype_lower.as_str(),
+        "f32" | "f16" | "bf16" | "q8_0" | "auto");
+
+    let basename = src
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("model")
+        .to_string();
+    let final_out_path = if let Some(p) = config.output_path.as_deref().filter(|s| !s.is_empty()) {
         std::path::PathBuf::from(p)
     } else {
-        let base = src
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("model");
-        src.join(format!("{base}-{outtype}.gguf"))
+        // Use the user-visible quant tag (uppercase) in the filename
+        // so the Tuned tab clearly shows what they got — Q4_K_M.gguf
+        // is more useful than q4_k_m.gguf.
+        src.join(format!("{basename}-{}.gguf", outtype_raw.to_uppercase()))
     };
+    // When we're going through the 2-step pipeline (convert → quantize)
+    // the convert pass writes an f16 intermediate; llama-quantize
+    // then rewrites it into the final K-quant. Keep the intermediate
+    // next to the final output for predictability.
+    let f16_tmp_path = if is_native {
+        final_out_path.clone()
+    } else {
+        src.join(format!("{basename}-f16.tmp.gguf"))
+    };
+    let convert_outtype = if is_native { outtype_lower.clone() } else { "f16".to_string() };
 
     let argv: Vec<String> = vec![
         convert_py.to_string_lossy().into_owned(),
         src.to_string_lossy().into_owned(),
-        "--outfile".into(), out_path.to_string_lossy().into_owned(),
-        "--outtype".into(), outtype.clone(),
+        "--outfile".into(), f16_tmp_path.to_string_lossy().into_owned(),
+        "--outtype".into(), convert_outtype.clone(),
     ];
     say(&format!("[export-gguf] python = {}", python_exe.display()));
-    say(&format!("[export-gguf] outfile = {}", out_path.display()));
+    say(&format!("[export-gguf] outfile = {}", final_out_path.display()));
     say(&format!("[export-gguf] argv = {}", argv.join(" ")));
+    if !is_native {
+        say(&format!(
+            "[export-gguf] 2-step pipeline: convert→f16 then llama-quantize→{}",
+            outtype_raw.to_uppercase()
+        ));
+    }
 
     let channel_for_task = channel.clone();
-    let out_path_for_task = out_path.clone();
+    let final_out_for_task = final_out_path.clone();
+    let f16_tmp_for_task = f16_tmp_path.clone();
     let python_str = python_exe.to_string_lossy().into_owned();
     let convert_py_str = convert_py.to_string_lossy().into_owned();
+    let outtype_for_task = outtype_raw.clone();
+    let is_native_task = is_native;
     tokio::spawn(async move {
         // Preflight: run `python <convert_py> --help` first. If it
         // bombs with a gguf-package version mismatch (e.g.
@@ -811,13 +843,43 @@ pub async fn export_gguf(
         }
         let _ = channel_for_task.send(AbliterateEvent::Log {
             stream: "stdout".into(),
-            line: "[export-gguf] spawning… (transformers import takes 5-15s before first log)".into(),
+            line: "[export-gguf] spawning convert_hf_to_gguf.py… (transformers import takes 5-15s before first log)".into(),
         });
         let outcome = spawn_gguf_exporter(&python_str, &argv, &channel_for_task).await;
-        match outcome {
+        if let Err(e) = outcome {
+            let _ = channel_for_task.send(AbliterateEvent::Failed { error: e });
+            return;
+        }
+        // Native target — convert wrote the final file directly.
+        if is_native_task {
+            let _ = channel_for_task.send(AbliterateEvent::Finished {
+                output_dir: final_out_for_task.to_string_lossy().into_owned(),
+            });
+            return;
+        }
+        // K-quant target — run llama-quantize on the f16 intermediate.
+        let _ = channel_for_task.send(AbliterateEvent::Log {
+            stream: "stdout".into(),
+            line: format!(
+                "[export-gguf] quantizing f16 → {} via llama-quantize…",
+                outtype_for_task.to_uppercase()
+            ),
+        });
+        let q_outcome = spawn_llama_quantize(
+            &f16_tmp_for_task,
+            &final_out_for_task,
+            &outtype_for_task,
+            &channel_for_task,
+        ).await;
+        // Best-effort cleanup of the f16 intermediate so the user's
+        // disk doesn't gain 28 GB of scratch per export.
+        if f16_tmp_for_task != final_out_for_task {
+            let _ = std::fs::remove_file(&f16_tmp_for_task);
+        }
+        match q_outcome {
             Ok(()) => {
                 let _ = channel_for_task.send(AbliterateEvent::Finished {
-                    output_dir: out_path_for_task.to_string_lossy().into_owned(),
+                    output_dir: final_out_for_task.to_string_lossy().into_owned(),
                 });
             }
             Err(e) => {
@@ -827,6 +889,99 @@ pub async fn export_gguf(
     });
 
     Ok(())
+}
+
+/// Run `llama-quantize.exe <input> <output> <type>` and forward its
+/// stdout/stderr to the same channel the convert step uses, so the
+/// UI's logs panel sees the whole pipeline in one place.
+async fn spawn_llama_quantize(
+    f16_path: &std::path::Path,
+    out_path: &std::path::Path,
+    quant_type: &str,
+    channel: &Channel<AbliterateEvent>,
+) -> Result<(), String> {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let exe = crate::paths::llama_quantize_exe()
+        .ok_or_else(|| "llama-quantize.exe not found under LLM/runtime/llama.cpp/".to_string())?;
+    let _ = channel.send(AbliterateEvent::Log {
+        stream: "stdout".into(),
+        line: format!(
+            "[export-gguf] {} {} {} {}",
+            exe.display(), f16_path.display(), out_path.display(), quant_type.to_uppercase()
+        ),
+    });
+    let mut cmd = Command::new(&exe);
+    cmd.arg(f16_path)
+        .arg(out_path)
+        .arg(quant_type.to_uppercase())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("spawn llama-quantize: {e}"))?;
+    let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
+    let stderr = child.stderr.take().ok_or_else(|| "no stderr".to_string())?;
+    let ch_out = channel.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = ch_out.send(AbliterateEvent::Log { stream: "stdout".into(), line });
+        }
+    });
+    let ch_err = channel.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = tokio::io::BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = reader.next_line().await {
+            let _ = ch_err.send(AbliterateEvent::Log { stream: "stderr".into(), line });
+        }
+    });
+    let status = child.wait().await.map_err(|e| format!("wait llama-quantize: {e}"))?;
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+    if !status.success() {
+        return Err(format!(
+            "llama-quantize exited with code {}",
+            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+        ));
+    }
+    Ok(())
+}
+
+/// Quick disk-walk to estimate a transformers-format model's weight
+/// size — used by the React Export-GGUF picker to color quant options
+/// by VRAM fit. Returns the sum of all *.safetensors and *.bin file
+/// sizes inside the dir (one level deep).
+#[tauri::command]
+pub async fn hf_dir_weight_bytes(path: String) -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || -> Result<u64, String> {
+        let p = std::path::PathBuf::from(&path);
+        if !p.is_dir() {
+            return Err(format!("not a directory: {path}"));
+        }
+        let mut total: u64 = 0;
+        for entry in std::fs::read_dir(&p).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let fp = entry.path();
+            if !fp.is_file() { continue; }
+            let name = fp.file_name().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+            if name.ends_with(".safetensors") || name.ends_with(".bin") {
+                if let Ok(m) = std::fs::metadata(&fp) {
+                    total = total.saturating_add(m.len());
+                }
+            }
+        }
+        Ok(total)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 /// Preflight check: convert_hf_to_gguf.py crashes at import time when

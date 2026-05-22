@@ -110,6 +110,27 @@ pub fn llama_server_exe() -> Option<PathBuf> {
     }
 }
 
+/// Path to `llama-quantize.exe` — used by the GGUF export pipeline to
+/// turn an f16 intermediate into K-quants (Q4_K_M etc) that the
+/// convert script can't produce directly.
+pub fn llama_quantize_exe() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("OWLLM_LLAMA_QUANTIZE") {
+        let pb = PathBuf::from(p);
+        if pb.is_file() {
+            return Some(pb);
+        }
+    }
+    let exe = llm_root()?
+        .join("runtime")
+        .join("llama.cpp")
+        .join("llama-quantize.exe");
+    if exe.is_file() {
+        Some(exe)
+    } else {
+        None
+    }
+}
+
 /// Path to the bundled Python interpreter shipped under
 /// `LLM/python_runtime/python3.11/python.exe`. Used as the SOURCE
 /// for every per-profile venv that env_manager spawns — this way

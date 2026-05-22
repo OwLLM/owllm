@@ -200,6 +200,7 @@ function deriveExportStatus(line: string): string | null {
 
 function exportTunedToGguf(
   sourceDir: string,
+  outtype: string,
   setError: (msg: string | null) => void,
   refreshTuned: () => void,
   setLogs: (updater: (prev: string[]) => string[]) => void,
@@ -248,7 +249,7 @@ function exportTunedToGguf(
     }
   };
   invoke<void>("export_gguf", {
-    config: { sourceDir, outtype: "f16" },
+    config: { sourceDir, outtype },
     channel,
   })
     .then(() => console.log("[export-gguf] invoke returned ok (script running in background)"))
@@ -954,7 +955,8 @@ export default function ModelsPage() {
               createdAt={t.modified ?? undefined}
               selected={selectedPath === t.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
-              onExportGguf={(path) => exportTunedToGguf(path, setHfError, refreshTuned, setExportLogs, setExportLogsOpen, setExportStatus)}
+              vramGb={vramGb}
+              onExportGguf={(path, outtype) => exportTunedToGguf(path, outtype, setHfError, refreshTuned, setExportLogs, setExportLogsOpen, setExportStatus)}
               onDelete={(path) => deleteTunedAdapter(path, t.name, setHfError, refreshTuned)}
             />
           ))}

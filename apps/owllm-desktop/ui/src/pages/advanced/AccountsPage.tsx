@@ -711,34 +711,48 @@ export default function AccountsPage() {
       invoke("subscription_cli_login", { backend: spec.backend }).catch((e) => {
         const msg = String(e ?? "");
         const cliMissing = /not found on PATH/i.test(msg);
-        // Per-provider install pages + the local CLI command to run
-        // once it's installed. URLs go to the canonical install docs
-        // for each tool (npm/pip flow + first login).
-        const installInfo: Record<string, { url: string; cmd: string; name: string }> = {
-          claude_cli: { url: "https://docs.anthropic.com/en/docs/claude-code/quickstart", cmd: "claude /login",   name: "Claude Code CLI" },
-          codex_cli:  { url: "https://github.com/openai/codex",                            cmd: "codex login",    name: "OpenAI Codex CLI" },
-          kimi_cli:   { url: "https://github.com/MoonshotAI/kimi-cli",                    cmd: "kimi /login",    name: "Kimi Code CLI" },
-          gemini_cli: { url: "https://github.com/google-gemini/gemini-cli",               cmd: "gemini /auth",   name: "Google Gemini CLI" },
+        // Per-provider install + login info. installPkg is the npm /
+        // pip package we ship via cli_install; loginCmd is what runs
+        // inside the open REPL after install if the user wants to
+        // manually re-trigger OAuth.
+        const installInfo: Record<string, { pkg: string; runtime: string; loginCmd: string; name: string }> = {
+          claude_cli: { pkg: "@anthropic-ai/claude-code", runtime: "Node.js", loginCmd: "claude /login", name: "Claude Code CLI" },
+          codex_cli:  { pkg: "@openai/codex",             runtime: "Node.js", loginCmd: "codex login",   name: "OpenAI Codex CLI" },
+          kimi_cli:   { pkg: "kimi-cli",                  runtime: "Python",  loginCmd: "kimi /login",   name: "Kimi Code CLI" },
+          gemini_cli: { pkg: "@google/gemini-cli",        runtime: "Node.js", loginCmd: "gemini /auth",  name: "Google Gemini CLI" },
         };
-        const info = installInfo[spec.backend] ?? { url: "", cmd: `${spec.backend} login`, name: spec.name };
-        if (cliMissing && info.url) {
-          // Open the install page directly — no popup blocking us.
-          // The CLI's README will walk the user through `npm install
-          // -g …` or `pip install …`, then they come back and click
-          // Connect again.
-          invoke("shell_open_url", { url: info.url }).catch(() => {});
-          window.alert(
-            `${info.name} isn't installed yet — opening its install page in your browser.\n\n` +
-            `Once installed, click Connect again. The card will flip to green within 3 seconds after the CLI saves its credentials.\n\n` +
-            `Manual login command once installed:\n  ${info.cmd}`
+        const info = installInfo[spec.backend];
+        if (cliMissing && info) {
+          // Offer to run the install for them. One click → a visible
+          // console runs `npm install -g …` or `pip install …`. After
+          // it succeeds the user re-clicks Connect to do OAuth.
+          const accepted = window.confirm(
+            `${info.name} isn't installed yet.\n\n` +
+            `Install it now via ${info.runtime === "Node.js" ? "npm" : "pip"}?\n` +
+            `(opens a terminal that runs: ${info.runtime === "Node.js" ? `npm install -g ${info.pkg}` : `pip install --upgrade ${info.pkg}`})\n\n` +
+            `Click OK to install. After it finishes, click Connect again to log in.`
           );
+          if (!accepted) return;
+          invoke("cli_install", { backend: spec.backend }).catch((ie) => {
+            const ieMsg = String(ie ?? "");
+            // Package manager itself missing → point them at the
+            // runtime install page.
+            const runtimeUrl = info.runtime === "Node.js"
+              ? "https://nodejs.org/en/download"
+              : "https://www.python.org/downloads";
+            invoke("shell_open_url", { url: runtimeUrl }).catch(() => {});
+            window.alert(
+              `${ieMsg}\n\nOpening the ${info.runtime} install page so you can install the runtime first.`
+            );
+          });
           return;
         }
         // Real spawn failure (CLI present but launch crashed). Surface
         // the manual command so the user has an escape hatch.
+        const loginCmd = info?.loginCmd ?? `${spec.backend} login`;
         window.alert(
           `Couldn't open a terminal: ${msg}\n\n` +
-          `Run this manually instead:\n\n  ${info.cmd}\n\n` +
+          `Run this manually instead:\n\n  ${loginCmd}\n\n` +
           `The card will flip to green within 3 seconds after the CLI saves its credentials.`
         );
       });

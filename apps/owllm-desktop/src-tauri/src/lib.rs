@@ -70,6 +70,7 @@ pub fn run() {
             accounts::kimi_cli_complete,
             accounts::gemini_cli_complete,
             accounts::subscription_cli_login,
+            accounts::cli_install,
             agents::list_team_templates,
             agents::list_agent_roles,
             agents::list_skill_packs,

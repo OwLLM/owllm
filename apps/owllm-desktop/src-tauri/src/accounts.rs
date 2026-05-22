@@ -1031,6 +1031,93 @@ fn find_codex_cli() -> Option<PathBuf> {
     None
 }
 
+/// One-click installer for the four subscription CLIs. Bundling these
+/// directly in our installer is impractical — Node.js + Python +
+/// 4 CLIs is ~300 MB of extra weight and the CLIs auto-update on
+/// their own. Instead we shell out to the user's existing npm / pip
+/// in a VISIBLE console so they can see the install progress and any
+/// permission prompts. Once the install finishes the console stays
+/// open (cmd /k) so they can read the success / error message before
+/// closing it. The next Connect click then finds the CLI on PATH and
+/// runs the OAuth flow normally.
+///
+/// Returns an Err with a "tool not on PATH" message when the user
+/// doesn't have npm or pip; the React side surfaces that with a link
+/// to the appropriate runtime download page (nodejs.org / python.org).
+#[tauri::command]
+pub fn cli_install(backend: String) -> Result<(), String> {
+    // Per-backend install recipe + the runtime tool it needs. We
+    // intentionally pick the canonical package each project publishes:
+    //   * Claude Code: @anthropic-ai/claude-code (npm)
+    //   * Codex:       @openai/codex (npm)
+    //   * Kimi Code:   kimi-cli (pip)
+    //   * Gemini CLI:  @google/gemini-cli (npm)
+    let (tool, install_cmd) = match backend.as_str() {
+        "claude_cli" => ("npm", "npm install -g @anthropic-ai/claude-code"),
+        "codex_cli"  => ("npm", "npm install -g @openai/codex"),
+        "kimi_cli"   => ("pip", "pip install --upgrade kimi-cli"),
+        "gemini_cli" => ("npm", "npm install -g @google/gemini-cli"),
+        other => return Err(format!("unknown CLI backend: {other}")),
+    };
+
+    // Verify the package manager is reachable before we open a console
+    // and run something that just errors out. On Windows npm/pip ship
+    // as .cmd shims; check all three extensions.
+    let names: [String; 3] = [
+        format!("{tool}.exe"),
+        format!("{tool}.cmd"),
+        tool.to_string(),
+    ];
+    let pm_found = names.iter().any(|n| which_in_path(n).is_ok());
+    if !pm_found {
+        let runtime = if tool == "npm" { "Node.js (https://nodejs.org/)" }
+                      else            { "Python (https://www.python.org/)" };
+        return Err(format!(
+            "{tool} not found on PATH — install {runtime} first, then click Install again."
+        ));
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // Same shape as subscription_cli_login: open a new visible
+        // console via `cmd /c start cmd /k "<install command>"`. /k
+        // keeps the window open after install completes so the user
+        // can read npm's summary / any "added 132 packages in 14s"
+        // confirmation before closing.
+        let inner = format!("\"{install_cmd}\"");
+        let title = format!("\"Install {backend}\"");
+        let mut cmd = Command::new("cmd.exe");
+        cmd.raw_arg("/c");
+        cmd.raw_arg("start");
+        cmd.raw_arg(title);
+        cmd.raw_arg("cmd.exe");
+        cmd.raw_arg("/k");
+        cmd.raw_arg(inner);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+        // CREATE_NEW_CONSOLE so the install window is decoupled from
+        // this Tauri-spawned process.
+        cmd.creation_flags(0x00000010);
+        cmd.spawn().map_err(|e| format!("spawn install console: {e}"))?;
+    }
+
+    #[cfg(not(windows))]
+    {
+        // POSIX: rely on the user's default terminal. Most distros
+        // have $TERMINAL or xdg-terminal; fall back to plain spawn.
+        let mut parts = install_cmd.split_whitespace();
+        let head = parts.next().ok_or("empty install command")?;
+        let args: Vec<&str> = parts.collect();
+        let mut cmd = Command::new(head);
+        cmd.args(&args);
+        cmd.spawn().map_err(|e| format!("spawn {head}: {e}"))?;
+    }
+
+    Ok(())
+}
+
 /// One-shot completion via `gemini --prompt`. Same shape as the
 /// Kimi CLI handler — non-interactive mode that returns the model's
 /// final reply on stdout. gemini-cli (google-gemini/gemini-cli) reads

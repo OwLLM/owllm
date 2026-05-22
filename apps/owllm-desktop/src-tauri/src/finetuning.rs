@@ -705,15 +705,29 @@ pub async fn export_gguf(
     config: GgufExportConfig,
     channel: Channel<AbliterateEvent>,
 ) -> Result<(), String> {
+    // Emit a synthetic Log line immediately so the UI sees activity
+    // before the python process even starts (convert_hf_to_gguf.py
+    // takes 5-15s to import transformers before its first stderr line,
+    // which made the click feel dead).
+    let say = |line: &str| {
+        let _ = channel.send(AbliterateEvent::Log {
+            stream: "stdout".into(),
+            line: line.to_string(),
+        });
+    };
+    say(&format!("[export-gguf] source = {}", config.source_dir));
     let src = std::path::PathBuf::from(&config.source_dir);
     if !src.is_dir() {
-        return Err(format!("source_dir not a directory: {}", src.display()));
+        let msg = format!("source_dir not a directory: {}", src.display());
+        say(&format!("ERROR: {msg}"));
+        return Err(msg);
     }
     // Find a llamacpp env python.exe — that's where convert_hf_to_gguf.py
     // ships (bundled with the gguf pip package).
     let root = crate::paths::llm_root()
         .ok_or_else(|| "could not resolve LLM root".to_string())?;
     let envs_dir = root.join(".envs");
+    say(&format!("[export-gguf] scanning envs at {}", envs_dir.display()));
     let mut python_exe: Option<std::path::PathBuf> = None;
     let mut convert_py: Option<std::path::PathBuf> = None;
     if let Ok(entries) = std::fs::read_dir(&envs_dir) {
@@ -730,21 +744,32 @@ pub async fn export_gguf(
             }
         }
         candidates.sort_by(|a, b| b.cmp(a)); // stable > edge
+        say(&format!("[export-gguf] found {} llamacpp env(s)", candidates.len()));
+        for c in &candidates {
+            say(&format!("  candidate: {}", c.display()));
+        }
         if let Some(py) = candidates.first() {
             // convert_hf_to_gguf.py lives under .venv/Lib/site-packages/bin/
             let conv = py
                 .parent().and_then(|p| p.parent()) // .venv/
                 .map(|venv| venv.join("Lib").join("site-packages").join("bin").join("convert_hf_to_gguf.py"));
             if let Some(c) = conv {
+                say(&format!("[export-gguf] checking {}", c.display()));
                 if c.is_file() {
                     convert_py = Some(c);
                     python_exe = Some(py.clone());
+                } else {
+                    say(&format!("ERROR: convert_hf_to_gguf.py not at expected path: {}", c.display()));
                 }
             }
         }
+    } else {
+        say(&format!("ERROR: could not read {}", envs_dir.display()));
     }
     let python_exe = python_exe.ok_or_else(|| {
-        "No llamacpp env with convert_hf_to_gguf.py found. Install one via Server → Environment.".to_string()
+        let msg = "No llamacpp env with convert_hf_to_gguf.py found. Install one via Server → Environment.".to_string();
+        say(&format!("ERROR: {msg}"));
+        msg
     })?;
     let convert_py = convert_py.unwrap();
 
@@ -765,6 +790,10 @@ pub async fn export_gguf(
         "--outfile".into(), out_path.to_string_lossy().into_owned(),
         "--outtype".into(), outtype.clone(),
     ];
+    say(&format!("[export-gguf] python = {}", python_exe.display()));
+    say(&format!("[export-gguf] outfile = {}", out_path.display()));
+    say(&format!("[export-gguf] argv = {}", argv.join(" ")));
+    say("[export-gguf] spawning… (transformers import takes 5-15s before first log)");
 
     let channel_for_task = channel.clone();
     let out_path_for_task = out_path.clone();

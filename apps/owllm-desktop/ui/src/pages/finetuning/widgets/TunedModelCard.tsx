@@ -94,11 +94,33 @@ export default function TunedModelCard(props: TunedModelCardProps) {
   // Export-GGUF dropdown state. Opens on the 📦 button click, fetches
   // the source dir's safetensor bytes once, then renders QUANTS with
   // size estimates and red-marks anything that won't fit in VRAM.
+  //
+  // The menu uses position:fixed (not absolute) so it escapes the
+  // CardShell's overflow-clipping container. menuPos is computed from
+  // the trigger's getBoundingClientRect() at open time, plus refreshed
+  // on scroll/resize so the menu tracks the card if the user scrolls
+  // while it's open.
   const [menuOpen, setMenuOpen] = React.useState(false);
+  const [menuPos, setMenuPos] = React.useState<{ top: number; left: number } | null>(null);
   const [sourceBytes, setSourceBytes] = React.useState<number | null>(null);
   const [loadingSize, setLoadingSize] = React.useState(false);
   const menuRef = React.useRef<HTMLDivElement | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+
+  const recomputeMenuPos = React.useCallback(() => {
+    const r = triggerRef.current?.getBoundingClientRect();
+    if (!r) return;
+    // Open BELOW the trigger by default; flip ABOVE if there isn't
+    // ~340 px of room left between the trigger and the viewport bottom.
+    const menuH = 360;
+    const wantTop = r.bottom + 6;
+    const top = (wantTop + menuH > window.innerHeight) ? Math.max(8, r.top - menuH - 6) : wantTop;
+    // Clamp horizontally so a card near the right edge doesn't push
+    // the 320 px menu off-screen.
+    const menuW = 320;
+    const left = Math.min(Math.max(8, r.left), window.innerWidth - menuW - 8);
+    setMenuPos({ top, left });
+  }, []);
 
   React.useEffect(() => {
     if (!menuOpen) return;
@@ -110,7 +132,8 @@ export default function TunedModelCard(props: TunedModelCardProps) {
       .finally(() => setLoadingSize(false));
   }, [menuOpen, adapterPath, sourceBytes, loadingSize]);
 
-  // Close menu on outside click.
+  // Close menu on outside click + keep its position glued to the
+  // trigger when the user scrolls/resizes while it's open.
   React.useEffect(() => {
     if (!menuOpen) return;
     const onDoc = (e: MouseEvent) => {
@@ -119,9 +142,16 @@ export default function TunedModelCard(props: TunedModelCardProps) {
       if (triggerRef.current?.contains(t)) return;
       setMenuOpen(false);
     };
+    const onScroll = () => recomputeMenuPos();
     window.addEventListener("mousedown", onDoc);
-    return () => window.removeEventListener("mousedown", onDoc);
-  }, [menuOpen]);
+    window.addEventListener("resize", onScroll);
+    window.addEventListener("scroll", onScroll, true); // capture so nested scrollers also trigger
+    return () => {
+      window.removeEventListener("mousedown", onDoc);
+      window.removeEventListener("resize", onScroll);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [menuOpen, recomputeMenuPos]);
 
   const isGguf = format === "gguf";
   const compat: CompatibilityBadge = isGguf
@@ -179,24 +209,29 @@ export default function TunedModelCard(props: TunedModelCardProps) {
         </div>
       </>}
       actions={
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", position: "relative" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {!isGguf && (
             <button
               ref={triggerRef}
               style={btn}
-              onClick={(e) => { e.stopPropagation(); setMenuOpen(v => !v); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (!menuOpen) recomputeMenuPos();
+                setMenuOpen(v => !v);
+              }}
             >📦 Export GGUF ▾</button>
           )}
           <button style={dangerBtn} onClick={(e) => { e.stopPropagation(); onDelete?.(adapterPath); }}>🗑️ Delete</button>
 
-          {menuOpen && !isGguf && (
+          {menuOpen && !isGguf && menuPos && (
             <div
               ref={menuRef}
               onClick={(e) => e.stopPropagation()}
               style={{
-                position: "absolute",
-                top: "100%", left: 0, marginTop: 6,
-                zIndex: 100,
+                position: "fixed",
+                top: menuPos.top,
+                left: menuPos.left,
+                zIndex: 9999,
                 width: 320,
                 background: "var(--bg-panel)",
                 border: "1px solid rgba(102,126,234,0.5)",

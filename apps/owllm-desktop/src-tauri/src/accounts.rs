@@ -943,49 +943,80 @@ fn generic_api_probe(
     }
 }
 
-/// Trigger the subscription CLI's OAuth flow. Each CLI auto-opens
-/// the user's browser when it runs `login`, so we just spawn the
-/// CLI as a HIDDEN background process (no console window pops up).
-/// The browser opens for the user to complete auth; once the CLI
-/// writes its credentials file, the AccountsPage 3-s poll flips the
-/// card to green.
+/// Trigger the subscription CLI's OAuth flow. Each CLI needs a real
+/// TTY to print the OAuth URL + handle the interactive slash-command
+/// path (`claude /login`, `kimi /login`, …) — hiding the console was
+/// the wrong fix and silently killed the login flow. Match the legacy
+/// PySide6 app (agent_runtime_manager._spawn_visible_login): open a
+/// NEW visible console with `cmd /K` so:
+///   * the OAuth URL stays on screen long enough to copy
+///   * the user can type the slash-command if the CLI needs it
+///   * the window survives the CLI exit ("press enter" prompts work)
 ///
-/// Returns immediately after spawn — caller doesn't await the CLI.
-/// On a spawn failure (CLI not on PATH) we bubble up an error so the
-/// React side can offer a manual fallback ("run `kimi login` in a
-/// terminal").
+/// Once the CLI writes its credentials file, the AccountsPage 3-s
+/// poll flips the card to green. Returns immediately after spawn.
 #[tauri::command]
 pub fn subscription_cli_login(backend: String) -> Result<(), String> {
-    // Resolve the CLI binary + its login subcommand. We invoke the
-    // CLI directly (not via cmd /C) so no console window appears on
-    // Windows — the CLI itself opens the browser.
+    // Resolve which CLI to launch + the login command to run inside
+    // the visible console. Each CLI has its own flavour:
+    //   * codex login            — real subcommand, single line
+    //   * gemini auth login      — real subcommand pair
+    //   * claude /login          — slash command (passed as positional;
+    //                              if the CLI rejects it, the user can
+    //                              retype it inside the open REPL)
+    //   * kimi /login            — same pattern as claude
     let (find_fn, login_args): (fn() -> Option<PathBuf>, &[&str]) = match backend.as_str() {
         "claude_cli"  => (find_claude_cli,  &["/login"]),
         "codex_cli"   => (find_codex_cli,   &["login"]),
-        "kimi_cli"    => (find_kimi_cli,    &["login"]),
-        // gemini-cli's standalone OAuth flow: `gemini auth login`
-        // — opens browser, writes ~/.gemini/oauth_creds.json.
-        "gemini_cli"  => (find_gemini_cli,  &["auth", "login"]),
+        "kimi_cli"    => (find_kimi_cli,    &["/login"]),
+        "gemini_cli"  => (find_gemini_cli,  &["/auth"]),
         other => return Err(format!("unknown subscription backend: {other}")),
     };
     let exe = find_fn().ok_or_else(|| format!(
         "CLI not found on PATH for {backend} — install it first"
     ))?;
-    let mut cmd = Command::new(&exe);
-    cmd.args(login_args);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::null());
-    cmd.stderr(Stdio::null());
+
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW (0x08000000) keeps the terminal hidden;
-        // DETACHED_PROCESS (0x00000008) lets the OAuth child outlive
-        // this Tauri ipc call so the user can complete browser auth
-        // at their own pace.
-        cmd.creation_flags(0x08000000 | 0x00000008);
+        // `cmd /c start "Login" cmd /k "<cli> <args>"`:
+        //   * `start` spawns a NEW window (CREATE_NEW_CONSOLE), so the
+        //     CLI's stdout/stderr go somewhere the user can see.
+        //   * `/k` keeps the inner cmd open after the CLI exits so the
+        //     OAuth URL and any closing message stay readable.
+        // We pass the cli args inside one quoted string so any spaces
+        // in the exe path survive cmd's word-splitting.
+        let inner = format!(
+            "\"\"{}\" {}\"",
+            exe.display(),
+            login_args.join(" ")
+        );
+        let mut cmd = Command::new("cmd.exe");
+        cmd.raw_arg("/c");
+        cmd.raw_arg("start");
+        cmd.raw_arg("\"OWLLM Login\"");
+        cmd.raw_arg("cmd.exe");
+        cmd.raw_arg("/k");
+        cmd.raw_arg(inner);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+        // CREATE_NEW_CONSOLE (0x00000010) on the wrapper so the new
+        // console actually decouples from this Tauri-spawned process.
+        cmd.creation_flags(0x00000010);
+        cmd.spawn().map_err(|e| format!("spawn login console: {e}"))?;
     }
-    cmd.spawn().map_err(|e| format!("spawn {}: {e}", exe.display()))?;
+
+    #[cfg(not(windows))]
+    {
+        let mut cmd = Command::new(&exe);
+        cmd.args(login_args);
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+        cmd.spawn().map_err(|e| format!("spawn {}: {e}", exe.display()))?;
+    }
+
     Ok(())
 }
 

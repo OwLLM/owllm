@@ -157,12 +157,19 @@ function exportTunedToGguf(
     | { kind: "log"; stream: string; line: string }
     | { kind: "finished"; outputDir: string }
     | { kind: "failed"; error: string };
+  console.log("[export-gguf] click → sourceDir =", sourceDir);
   const channel = new Channel<Evt>();
   setError(`📦 Exporting GGUF from ${sourceDir.split(/[\\/]/).pop()}…`);
   channel.onmessage = (ev) => {
+    console.log("[export-gguf] event", ev);
     if (ev.kind === "log") {
-      // Surface only error-ish lines so the banner doesn't spam.
-      if (ev.line.toLowerCase().includes("error") || ev.line.toLowerCase().includes("traceback")) {
+      // Surface error-ish stderr lines so the banner shows the real
+      // reason a conversion failed (unsupported arch, missing weights).
+      if (
+        ev.line.toLowerCase().includes("error") ||
+        ev.line.toLowerCase().includes("traceback") ||
+        ev.line.toLowerCase().includes("notimplemented")
+      ) {
         setError(`GGUF export: ${ev.line}`);
       }
     } else if (ev.kind === "finished") {
@@ -175,7 +182,12 @@ function exportTunedToGguf(
   invoke<void>("export_gguf", {
     config: { sourceDir, outtype: "f16" },
     channel,
-  }).catch((e) => setError(`GGUF export start failed: ${e}`));
+  })
+    .then(() => console.log("[export-gguf] invoke returned ok (script running in background)"))
+    .catch((e) => {
+      console.error("[export-gguf] invoke rejected", e);
+      setError(`GGUF export start failed: ${e}`);
+    });
 }
 
 export default function ModelsPage() {
@@ -579,16 +591,38 @@ export default function ModelsPage() {
       </div>
 
       {hfError && (
-        <div style={{
-          padding: "8px 12px",
-          marginBottom: 10,
-          background: "rgba(244,67,54,0.12)",
-          border: "1px solid rgba(244,67,54,0.4)",
-          borderRadius: 6,
-          color: "#ff8080",
-          fontSize: 12,
-        }}>
-          ⚠ {hfError}
+        <div
+          onClick={() => setHfError(null)}
+          title="click to dismiss"
+          style={{
+            position: "sticky",
+            top: 0,
+            zIndex: 50,
+            padding: "8px 12px",
+            marginBottom: 10,
+            // Colour by content: green for finished, red for errors,
+            // blue for in-progress / informational.
+            background: hfError.startsWith("✅")
+              ? "rgba(76,175,80,0.18)"
+              : hfError.startsWith("❌") || hfError.includes("failed")
+                ? "rgba(244,67,54,0.18)"
+                : "rgba(102,126,234,0.18)",
+            border: `1px solid ${hfError.startsWith("✅")
+              ? "rgba(76,175,80,0.5)"
+              : hfError.startsWith("❌") || hfError.includes("failed")
+                ? "rgba(244,67,54,0.5)"
+                : "rgba(102,126,234,0.5)"}`,
+            borderRadius: 6,
+            color: hfError.startsWith("✅")
+              ? "#a5e6a5"
+              : hfError.startsWith("❌") || hfError.includes("failed")
+                ? "#ff8080"
+                : "#cfd4e1",
+            fontSize: 12,
+            cursor: "pointer",
+          }}
+        >
+          {hfError.startsWith("✅") || hfError.startsWith("❌") || hfError.startsWith("📦") ? "" : "⚠ "}{hfError}
         </div>
       )}
       {/* Qt main.py:8257-8289 — "📚 Recommended Models" at 16pt bold #667eea,

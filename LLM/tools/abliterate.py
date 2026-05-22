@@ -221,6 +221,76 @@ def orthogonalize(weight: torch.Tensor, direction: torch.Tensor) -> torch.Tensor
     return weight
 
 
+def dequantize_bnb_if_needed(model) -> bool:
+    """If the model has bitsandbytes Linear4bit / Linear8bit modules,
+    swap each one for a stock torch.nn.Linear holding dequantized fp16
+    weights. Returns True when a swap happened.
+
+    Why: convert_hf_to_gguf.py reads standard safetensors. bnb modules
+    store weights in a custom 4-bit packed format with absmax / scale
+    tensors that the GGUF converter doesn't understand. Without this
+    step, abliterating a bnb-4bit model produces an output directory
+    GGUF export can't read.
+    """
+    try:
+        import bitsandbytes as bnb  # type: ignore
+    except Exception:
+        return False  # no bnb installed → nothing to dequantize
+
+    swapped = 0
+
+    def _walk(module: torch.nn.Module, parent_name: str = ""):
+        nonlocal swapped
+        for child_name, child in list(module.named_children()):
+            full_name = f"{parent_name}.{child_name}" if parent_name else child_name
+            is_4bit = isinstance(child, getattr(bnb.nn, "Linear4bit", tuple()))
+            is_8bit = isinstance(child, getattr(bnb.nn, "Linear8bitLt", tuple()))
+            if is_4bit or is_8bit:
+                # bnb.functional.dequantize_4bit / dequantize_blockwise
+                # give us the float weight back. We then build a plain
+                # nn.Linear with the same shape/bias and copy in.
+                with torch.no_grad():
+                    if is_4bit:
+                        w = bnb.functional.dequantize_4bit(
+                            child.weight.data,
+                            child.weight.quant_state,
+                        ).to(torch.float16)
+                    else:
+                        # 8bit: state holds CB (column-quantized) and
+                        # SCB (scales). Easiest path: forward an identity
+                        # and grab the dequant'd weight via the
+                        # module's .data fp16 cache.
+                        w = (child.weight.CB.to(torch.float16) * child.weight.SCB.unsqueeze(1).to(torch.float16) / 127.0).contiguous()
+                new_lin = torch.nn.Linear(
+                    in_features=child.in_features,
+                    out_features=child.out_features,
+                    bias=child.bias is not None,
+                    device=w.device,
+                    dtype=torch.float16,
+                )
+                new_lin.weight.data.copy_(w)
+                if child.bias is not None:
+                    new_lin.bias.data.copy_(child.bias.data.to(torch.float16))
+                setattr(module, child_name, new_lin)
+                swapped += 1
+                emit(event="dequantize", target=full_name)
+            else:
+                _walk(child, full_name)
+
+    _walk(model)
+    if swapped > 0:
+        # Mark the config so save_pretrained writes a plain HF config,
+        # not the bnb-flavoured quantization_config that would confuse
+        # downstream loaders.
+        try:
+            if hasattr(model, "config"):
+                if hasattr(model.config, "quantization_config"):
+                    del model.config.quantization_config
+        except Exception:
+            pass
+    return swapped > 0
+
+
 def apply_ablation(model, direction: torch.Tensor):
     """Walk the model and orthogonalize every residual-writing weight."""
     direction = direction.detach()
@@ -287,9 +357,17 @@ def main():
         apply_ablation(model, direction)
         maybe_stop(stop_file)
 
+        # If the base was bnb-quantized, swap every bnb module for a
+        # standard fp16 Linear so save_pretrained writes GGUF-readable
+        # safetensors. Pass-through for non-bnb models.
+        emit(event="dequantize_check")
+        did_swap = dequantize_bnb_if_needed(model)
+        if did_swap:
+            emit(event="dequantized", note="bnb modules replaced with fp16 Linear")
+
         out.mkdir(parents=True, exist_ok=True)
         emit(event="saving", path=str(out))
-        model.save_pretrained(out)
+        model.save_pretrained(out, safe_serialization=True)
         tokenizer.save_pretrained(out)
         emit(event="saved", path=str(out))
         emit(event="finished")

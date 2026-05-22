@@ -334,12 +334,44 @@ def main():
         device = "cuda"
         emit(event="loading", model=args.model)
         tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model,
-            torch_dtype=torch.float16,
-            device_map=device,
-            trust_remote_code=True,
-        )
+
+        # Preflight: bnb-4bit/8bit models embed a quantization_config in
+        # their HF config. Loading them needs bitsandbytes to actually
+        # work — without that, transformers raises a cryptic ImportError
+        # deep inside from_pretrained. Detect early and give the user
+        # something they can act on.
+        wants_bnb = False
+        try:
+            from transformers import AutoConfig  # type: ignore
+            cfg = AutoConfig.from_pretrained(args.model, trust_remote_code=True)
+            qc = getattr(cfg, "quantization_config", None)
+            if qc:
+                qmethod = (qc.get("quant_method") if isinstance(qc, dict)
+                           else getattr(qc, "quant_method", None))
+                if qmethod in ("bitsandbytes", "bnb", "bnb_4bit", "bnb_8bit") \
+                        or (isinstance(qc, dict) and (qc.get("load_in_4bit") or qc.get("load_in_8bit"))):
+                    wants_bnb = True
+        except Exception:
+            pass
+        if wants_bnb:
+            try:
+                import bitsandbytes  # noqa: F401
+            except Exception as e:
+                emit(event="failed", error=(
+                    f"This model is bnb-quantized ({args.model}) and the active env "
+                    f"has no working bitsandbytes ({type(e).__name__}: {e}). "
+                    f"Install bitsandbytes in the env that runs abliterate, or pick "
+                    f"a non-quantized HF model (no `quantization_config` in config.json)."
+                ))
+                sys.exit(1)
+
+        load_kwargs = dict(device_map=device, trust_remote_code=True)
+        # torch_dtype is incompatible with already-quantized weights; let
+        # the existing quantization_config drive dtype. For plain models
+        # we ask for fp16.
+        if not wants_bnb:
+            load_kwargs["torch_dtype"] = torch.float16
+        model = AutoModelForCausalLM.from_pretrained(args.model, **load_kwargs)
         model.eval()
 
         # Collect residual states for both prompt sets.

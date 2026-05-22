@@ -732,6 +732,10 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
   const [running, setRunning] = React.useState(false);
   const [message, setMessage] = React.useState<string>("");
   const [showInfo, setShowInfo] = React.useState(false);
+  // Rolling tail of recent stdout/stderr lines so a crash can be
+  // diagnosed without screenshots — exit code 1 is useless on its own.
+  const [logLines, setLogLines] = React.useState<string[]>([]);
+  const [showLogs, setShowLogs] = React.useState(false);
   // Rust derives the default output dir as
   //   <llm_root>/fine_tuned/<safe>__abliterated/
   // so the result auto-appears in the Models page Tuned tab. Display
@@ -750,21 +754,40 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
     }
     setRunning(true);
     setMessage("Starting…");
+    setLogLines([]);
+    setShowLogs(true);
     type Evt =
       | { kind: "progress"; stage: string; step?: number; total?: number; detail?: string }
       | { kind: "log"; stream: string; line: string }
       | { kind: "finished"; outputDir: string }
       | { kind: "failed"; error: string };
     const channel = new Channel<Evt>();
+    // Python emits {"event":"failed","error":"..."} on stdout before
+    // sys.exit(1). Capture that text so we can show it instead of the
+    // generic "abliterate exited with code 1" that Rust emits next.
+    let pythonError: string | null = null;
+    const pushLog = (s: string) => setLogLines((prev) => {
+      const next = [...prev, s];
+      // Keep last 200 lines — enough for a Python traceback + context.
+      return next.length > 200 ? next.slice(next.length - 200) : next;
+    });
     channel.onmessage = (ev) => {
       if (ev.kind === "progress") {
         const pct = ev.total ? ` (${ev.step}/${ev.total})` : "";
         setMessage(`${ev.stage}${pct}${ev.detail ? ` · ${ev.detail}` : ""}`);
+        pushLog(`[${ev.stage}]${pct}${ev.detail ? ` ${ev.detail}` : ""}`);
+        if (ev.stage === "failed" && ev.detail) {
+          pythonError = ev.detail.replace(/^error=/, "").replace(/^"|"$/g, "");
+        }
+      } else if (ev.kind === "log") {
+        pushLog(`${ev.stream === "stderr" ? "⚠ " : ""}${ev.line}`);
       } else if (ev.kind === "finished") {
         setMessage(`✅ Done → ${ev.outputDir}`);
         setRunning(false);
       } else if (ev.kind === "failed") {
-        setMessage(`❌ ${ev.error}`);
+        const err = pythonError ?? ev.error;
+        setMessage(`❌ ${err} — see logs below`);
+        setShowLogs(true);
         setRunning(false);
       }
     };
@@ -835,6 +858,46 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
           color: message.startsWith("❌") ? "#ffb3b3" : "#cfd4e1",
           wordBreak: "break-word",
         }}>{message}</div>
+      )}
+
+      {logLines.length > 0 && (
+        <div>
+          <button
+            onClick={() => setShowLogs((v) => !v)}
+            style={{
+              padding: "3px 8px",
+              background: "rgba(102,126,234,0.10)",
+              border: "1px solid rgba(102,126,234,0.3)",
+              borderRadius: 4,
+              color: "#9cc3ff",
+              fontSize: 10,
+              cursor: "pointer",
+              marginBottom: 4,
+            }}
+          >{showLogs ? "▼" : "▶"} Logs ({logLines.length})</button>
+          {showLogs && (
+            <div style={{
+              maxHeight: 220,
+              overflowY: "auto",
+              background: "rgba(0,0,0,0.35)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 4,
+              padding: 6,
+              fontFamily: "Consolas, monospace",
+              fontSize: 10,
+              color: "#cfd4e1",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+            }}>
+              {logLines.map((l, i) => (
+                <div
+                  key={i}
+                  style={{ color: l.startsWith("⚠ ") ? "#ffb3b3" : undefined }}
+                >{l}</div>
+              ))}
+            </div>
+          )}
+        </div>
       )}
 
       {showInfo && <AbliterateInfoModal onClose={() => setShowInfo(false)} />}

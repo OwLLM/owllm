@@ -52,6 +52,13 @@ type BrandSpec = {
   kind: "subscription" | "api";
   envName?: string;
   backend: string;
+  /// Web-only subscriptions (Grok via X Premium+, DeepSeek via
+  /// chat.deepseek.com): no official CLI to launch, so Connect just
+  /// opens the signup/management page in the browser. The card never
+  /// flips to green because we have no programmatic signal — the user
+  /// uses the subscription via the web UI, or copies an API key into
+  /// the matching API card below.
+  webOnly?: { url: string };
 };
 
 // Verbatim from accounts_page.py:47-94 (BRAND_CARDS tuple). Accent
@@ -144,6 +151,17 @@ const BRANDS: BrandSpec[] = [
     backend: "gemini_api",
   },
   {
+    key: "deepseek_subscription",
+    name: "DeepSeek",
+    tagline: "Subscription · chat.deepseek.com",
+    icon: "🐋",
+    accent: "#2563eb",
+    accentTop: "#142036",
+    kind: "subscription",
+    backend: "deepseek_web",
+    webOnly: { url: "https://chat.deepseek.com" },
+  },
+  {
     key: "deepseek_api",
     name: "DeepSeek API",
     tagline: "DEEPSEEK_API_KEY · billed per call",
@@ -153,6 +171,17 @@ const BRANDS: BrandSpec[] = [
     kind: "api",
     envName: "DEEPSEEK_API_KEY",
     backend: "deepseek_api",
+  },
+  {
+    key: "xai_subscription",
+    name: "xAI Grok",
+    tagline: "Subscription · SuperGrok / X Premium+",
+    icon: "𝕏",
+    accent: "#9aa0a6",
+    accentTop: "#1a1c1f",
+    kind: "subscription",
+    backend: "xai_web",
+    webOnly: { url: "https://grok.com" },
   },
   {
     key: "xai_api",
@@ -216,12 +245,12 @@ const BRANDS: BrandSpec[] = [
 // column per pair so a user looking at the "Claude" column sees both
 // ways to use Claude side by side.
 const BRAND_COLUMNS: [string, string | null][] = [
-  ["claude_subscription", "anthropic_api"],
-  ["codex_subscription",  "openai_api"],
-  ["kimi_subscription",   "moonshot_api"],
-  ["gemini_subscription", "gemini_api"],
-  ["deepseek_api", null],
-  ["xai_api", null],
+  ["claude_subscription",   "anthropic_api"],
+  ["codex_subscription",    "openai_api"],
+  ["kimi_subscription",     "moonshot_api"],
+  ["gemini_subscription",   "gemini_api"],
+  ["deepseek_subscription", "deepseek_api"],
+  ["xai_subscription",      "xai_api"],
   ["groq_api", null],
   ["perplexity_api", null],
   ["mistral_api", null],
@@ -656,20 +685,60 @@ export default function AccountsPage() {
 
   function handleConnect(spec: BrandSpec) {
     if (spec.kind === "subscription") {
-      // Spawn a real terminal running the CLI's login command. Each
-      // CLI opens the user's browser for OAuth and waits in the
-      // shell until the flow finishes. The 3-second accounts_status
-      // poll picks up the credentials file automatically once the
-      // CLI writes it.
+      // Web-only subscriptions (Grok, DeepSeek): no official CLI to
+      // launch — just open the subscription portal in the browser.
+      // The user signs up there; usage happens via the matching API
+      // card below (subscription tier comes with an API key on both
+      // providers).
+      if (spec.webOnly) {
+        invoke("shell_open_url", { url: spec.webOnly.url }).catch((e) => {
+          window.alert(`Couldn't open browser: ${e}\n\nVisit ${spec.webOnly!.url} manually.`);
+        });
+        return;
+      }
+      // CLI-backed subscriptions (Claude, Codex, Kimi, Gemini): spawn
+      // a real terminal running the CLI's login command. Each CLI
+      // opens the user's browser for OAuth and waits in the shell
+      // until the flow finishes. The 3-second accounts_status poll
+      // picks up the credentials file automatically once the CLI
+      // writes it.
+      //
+      // If the CLI isn't installed yet, the Rust side returns a "not
+      // found on PATH" error. That's not a real failure — the user
+      // just doesn't have the tool. Open the official install /
+      // download page in their browser so they can fix it with one
+      // click instead of being stuck at an alert.
       invoke("subscription_cli_login", { backend: spec.backend }).catch((e) => {
-        const fallback = spec.backend === "claude_cli"  ? "claude /login"
-                        : spec.backend === "codex_cli"   ? "codex login"
-                        : spec.backend === "kimi_cli"    ? "kimi login"
-                        : spec.backend === "gemini_cli"  ? "gemini auth login"
-                        : `${spec.backend} login`;
+        const msg = String(e ?? "");
+        const cliMissing = /not found on PATH/i.test(msg);
+        // Per-provider install pages + the local CLI command to run
+        // once it's installed. URLs go to the canonical install docs
+        // for each tool (npm/pip flow + first login).
+        const installInfo: Record<string, { url: string; cmd: string; name: string }> = {
+          claude_cli: { url: "https://docs.anthropic.com/en/docs/claude-code/quickstart", cmd: "claude /login",   name: "Claude Code CLI" },
+          codex_cli:  { url: "https://github.com/openai/codex",                            cmd: "codex login",    name: "OpenAI Codex CLI" },
+          kimi_cli:   { url: "https://github.com/MoonshotAI/kimi-cli",                    cmd: "kimi /login",    name: "Kimi Code CLI" },
+          gemini_cli: { url: "https://github.com/google-gemini/gemini-cli",               cmd: "gemini /auth",   name: "Google Gemini CLI" },
+        };
+        const info = installInfo[spec.backend] ?? { url: "", cmd: `${spec.backend} login`, name: spec.name };
+        if (cliMissing && info.url) {
+          // Open the install page directly — no popup blocking us.
+          // The CLI's README will walk the user through `npm install
+          // -g …` or `pip install …`, then they come back and click
+          // Connect again.
+          invoke("shell_open_url", { url: info.url }).catch(() => {});
+          window.alert(
+            `${info.name} isn't installed yet — opening its install page in your browser.\n\n` +
+            `Once installed, click Connect again. The card will flip to green within 3 seconds after the CLI saves its credentials.\n\n` +
+            `Manual login command once installed:\n  ${info.cmd}`
+          );
+          return;
+        }
+        // Real spawn failure (CLI present but launch crashed). Surface
+        // the manual command so the user has an escape hatch.
         window.alert(
-          `Couldn't open a terminal: ${e}\n\n` +
-          `Run this manually instead:\n\n  ${fallback}\n\n` +
+          `Couldn't open a terminal: ${msg}\n\n` +
+          `Run this manually instead:\n\n  ${info.cmd}\n\n` +
           `The card will flip to green within 3 seconds after the CLI saves its credentials.`
         );
       });

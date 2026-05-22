@@ -420,18 +420,69 @@ pub async fn list_tuned_adapters() -> Result<Vec<TunedAdapter>, String> {
             let (total, modified) = dir_summary(&path);
             let base_hint = parse_base_from_name(&name);
             out.push(TunedAdapter {
-                name,
+                name: name.clone(),
                 path: path.to_string_lossy().into_owned(),
                 size_mib: total / 1024 / 1024,
                 modified,
-                base_hint,
+                base_hint: base_hint.clone(),
             });
+            // GGUFs that the user exported via the 📦 button land
+            // INSIDE the transformers dir (default output = <dir>/<dir>-f16.gguf).
+            // Surface them as separate rows so the user can Test the
+            // .gguf directly (server_start handles .gguf paths) and
+            // delete it without nuking the source transformers weights.
+            if let Ok(inner) = std::fs::read_dir(&path) {
+                for f in inner.flatten() {
+                    let fp = f.path();
+                    if !fp.is_file() {
+                        continue;
+                    }
+                    let ext = fp.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    if !ext.eq_ignore_ascii_case("gguf") {
+                        continue;
+                    }
+                    let fsize = f.metadata().map(|m| m.len()).unwrap_or(0);
+                    let fmtime = f.metadata().ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| format_unix_seconds(d.as_secs() as i64));
+                    let fname = fp.file_name().and_then(|s| s.to_str()).unwrap_or("model.gguf").to_string();
+                    out.push(TunedAdapter {
+                        name: fname,
+                        path: fp.to_string_lossy().into_owned(),
+                        size_mib: fsize / 1024 / 1024,
+                        modified: fmtime,
+                        base_hint: base_hint.clone(),
+                    });
+                }
+            }
         }
         out.sort_by(|a, b| b.modified.cmp(&a.modified));
         Ok(out)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
+}
+
+fn format_unix_seconds(secs: i64) -> String {
+    // ISO-8601-ish "YYYY-MM-DD HH:MM" in UTC. Good enough for the
+    // "createdAt" hint on the card without pulling chrono.
+    let days = secs / 86400;
+    let secs_of_day = secs % 86400;
+    let h = secs_of_day / 3600;
+    let m = (secs_of_day % 3600) / 60;
+    // Civil from days (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let doe = (z - era * 146_097) as i64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02} {:02}:{:02}", year, month, d, h, m)
 }
 
 /// Sum file sizes + find the most-recent mtime under `dir`. Used by

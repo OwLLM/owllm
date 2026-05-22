@@ -147,12 +147,64 @@ function iconsForTags(tags: string[]): string {
 // Lightweight wrapper: spawn, log progress to console + show the user
 // a banner via setError, refresh the tuned list on completion so the
 // new .gguf file appears as a sibling row.
+// Classify a log line so the UI can colour real errors red, real
+// warnings yellow, and everything else (INFO) plain. Stream alone
+// isn't enough — Python's logging module writes INFO to stderr by
+// default, so "is stderr" ≠ "is an error".
+function classifyLogSeverity(line: string): "err" | "warn" | "info" {
+  const low = line.toLowerCase();
+  if (
+    low.includes("traceback") ||
+    /\berror\b/.test(low) ||
+    low.includes("exception") ||
+    low.includes("fatal") ||
+    low.includes("notimplemented")
+  ) {
+    return "err";
+  }
+  if (
+    low.includes("warning:") ||
+    low.includes("futurewarning") ||
+    low.includes("userwarning") ||
+    low.includes("deprecat") ||
+    low.startsWith("warn") ||
+    low.startsWith("warning") ||
+    low.startsWith("⚠")
+  ) {
+    return "warn";
+  }
+  return "info";
+}
+
+// Pluck a human-readable status from a single convert_hf_to_gguf.py
+// line. The script doesn't emit a structured progress channel, but it
+// logs enough breadcrumbs (blk.N.*, "Set model tokenizer", "Writing
+// the following files", total_size=X) that we can show the user what
+// phase they're in instead of a wall of mysterious stderr.
+function deriveExportStatus(line: string): string | null {
+  // Block processing — keep the highest block number seen so we can
+  // show "block N" even while later attn/ffn lines for the same
+  // block scroll by.
+  const blk = line.match(/blk\.(\d+)\./);
+  if (blk) return `🔄 Processing layer ${blk[1]}`;
+  if (line.includes("Set model parameters")) return "⚙️ Reading model parameters";
+  if (line.includes("Set model tokenizer") || line.includes("vocab")) return "🔤 Reading tokenizer / vocab";
+  if (line.includes("Set model quantization")) return "📐 Setting quantization metadata";
+  // gguf_writer: ".../X.gguf: n_tensors = N, total_size = X"
+  const writing = line.match(/total_size\s*=\s*([\d.]+\s*[KMGT]?)/i);
+  if (writing) return `💾 Writing GGUF to disk — ${writing[1]} (this can take several minutes)`;
+  if (line.match(/Loading model.*part/) || line.includes("model-")) return "📥 Reading source weights";
+  if (line.includes("Model conversion") && line.includes("success")) return "✅ Done";
+  return null;
+}
+
 function exportTunedToGguf(
   sourceDir: string,
   setError: (msg: string | null) => void,
   refreshTuned: () => void,
   setLogs: (updater: (prev: string[]) => string[]) => void,
   setLogsOpen: (v: boolean) => void,
+  setStatus: (s: string) => void,
 ) {
   type Evt =
     | { kind: "progress"; stage: string; step?: number; total?: number; detail?: string }
@@ -164,6 +216,7 @@ function exportTunedToGguf(
   setError(`📦 Exporting GGUF from ${sourceDir.split(/[\\/]/).pop()}…`);
   setLogs(() => []);
   setLogsOpen(true);
+  setStatus("🚀 Starting…");
   const pushLog = (s: string) => setLogs((prev) => {
     const next = [...prev, s];
     return next.length > 300 ? next.slice(next.length - 300) : next;
@@ -171,18 +224,26 @@ function exportTunedToGguf(
   channel.onmessage = (ev) => {
     console.log("[export-gguf] event", ev);
     if (ev.kind === "log") {
-      pushLog(`${ev.stream === "stderr" ? "⚠ " : ""}${ev.line}`);
-      // Update the banner only on signal lines so it doesn't churn on
+      const sev = classifyLogSeverity(ev.line);
+      // Encode severity into the stored line as a 5-char tag so the
+      // renderer can colour without re-classifying. Keep the original
+      // text after the tag.
+      const tag = sev === "err" ? "[ERR]" : sev === "warn" ? "[WRN]" : "[INF]";
+      pushLog(`${tag} ${ev.line}`);
+      const newStatus = deriveExportStatus(ev.line);
+      if (newStatus) setStatus(newStatus);
+      // Update the banner only on real errors so it doesn't churn on
       // every INFO log; the full tail is in the logs panel.
-      const low = ev.line.toLowerCase();
-      if (low.includes("error") || low.includes("traceback") || low.includes("notimplemented")) {
+      if (sev === "err") {
         setError(`GGUF export: ${ev.line}`);
       }
     } else if (ev.kind === "finished") {
       setError(`✅ GGUF written → ${ev.outputDir}`);
+      setStatus("✅ Done");
       refreshTuned();
     } else if (ev.kind === "failed") {
       setError(`❌ GGUF export failed: ${ev.error} — see logs below`);
+      setStatus("❌ Failed");
       setLogsOpen(true);
     }
   };
@@ -194,7 +255,8 @@ function exportTunedToGguf(
     .catch((e) => {
       console.error("[export-gguf] invoke rejected", e);
       setError(`GGUF export start failed: ${e}`);
-      pushLog(`invoke rejected: ${e}`);
+      setStatus("❌ Failed to start");
+      pushLog(`[ERR] invoke rejected: ${e}`);
     });
 }
 
@@ -264,6 +326,10 @@ export default function ModelsPage() {
   // so a silent crash leaves the user with no clue what happened.
   const [exportLogs, setExportLogs] = React.useState<string[]>([]);
   const [exportLogsOpen, setExportLogsOpen] = React.useState(false);
+  // Live human-readable status derived from log lines. Shown above the
+  // panel so the user knows what phase the export is in without having
+  // to read the wall of INFO lines.
+  const [exportStatus, setExportStatus] = React.useState<string>("");
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const [downloading, setDownloading] = React.useState<Set<string>>(new Set());
@@ -908,7 +974,7 @@ export default function ModelsPage() {
               selected={selectedPath === t.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
               onTest={(path) => testTunedAdapter(path, setHfError)}
-              onExportGguf={(path) => exportTunedToGguf(path, setHfError, refreshTuned, setExportLogs, setExportLogsOpen)}
+              onExportGguf={(path) => exportTunedToGguf(path, setHfError, refreshTuned, setExportLogs, setExportLogsOpen, setExportStatus)}
               onDelete={(path) => deleteTunedAdapter(path, t.name, setHfError, refreshTuned)}
             />
           ))}
@@ -919,14 +985,41 @@ export default function ModelsPage() {
           logs below. Same column for all three tabs. */}
       <div style={{ width: 280, flexShrink: 0, position: "sticky", top: 0, display: "flex", flexDirection: "column", gap: 10 }}>
         <AccessTokensPane selectedModel={selectedModelForInfo} />
-        {exportLogs.length > 0 && (
+        {(exportLogs.length > 0 || exportStatus) && (
           <div>
+            {/* Live status — single line, biggest emoji clue first.
+                Updates as we parse layer/phase markers out of convert
+                logs (not driven by line count). */}
+            {exportStatus && (
+              <div style={{
+                padding: "6px 10px",
+                background: exportStatus.startsWith("✅")
+                  ? "rgba(76,175,80,0.18)"
+                  : exportStatus.startsWith("❌")
+                    ? "rgba(244,67,54,0.18)"
+                    : "rgba(102,126,234,0.18)",
+                border: `1px solid ${exportStatus.startsWith("✅")
+                  ? "rgba(76,175,80,0.5)"
+                  : exportStatus.startsWith("❌")
+                    ? "rgba(244,67,54,0.5)"
+                    : "rgba(102,126,234,0.4)"}`,
+                borderRadius: 4,
+                color: exportStatus.startsWith("✅")
+                  ? "#a5e6a5"
+                  : exportStatus.startsWith("❌")
+                    ? "#ff8080"
+                    : "#cfd4e1",
+                fontSize: 11,
+                marginBottom: 6,
+                wordBreak: "break-word",
+              }}>{exportStatus}</div>
+            )}
             <button
               onClick={() => setExportLogsOpen((v) => !v)}
               style={{
                 padding: "4px 10px",
-                background: "rgba(102,126,234,0.18)",
-                border: "1px solid rgba(102,126,234,0.4)",
+                background: "rgba(102,126,234,0.10)",
+                border: "1px solid rgba(102,126,234,0.3)",
                 borderRadius: 4,
                 color: "#9cc3ff",
                 fontSize: 11,
@@ -950,12 +1043,19 @@ export default function ModelsPage() {
                 whiteSpace: "pre-wrap",
                 wordBreak: "break-all",
               }}>
-                {exportLogs.map((l, i) => (
-                  <div
-                    key={i}
-                    style={{ color: l.startsWith("⚠ ") ? "#ffb3b3" : undefined }}
-                  >{l}</div>
-                ))}
+                {exportLogs.map((l, i) => {
+                  // Lines arrive tagged "[ERR] …" / "[WRN] …" / "[INF] …".
+                  // Map tag → colour so real errors stand out and the
+                  // INFO firehose stays neutral.
+                  let color: string | undefined;
+                  let text = l;
+                  if (l.startsWith("[ERR] ")) { color = "#ff9b9b"; text = l.slice(6); }
+                  else if (l.startsWith("[WRN] ")) { color = "#f5d76e"; text = l.slice(6); }
+                  else if (l.startsWith("[INF] ")) { color = "#a0a8b6"; text = l.slice(6); }
+                  return (
+                    <div key={i} style={{ color }}>{text}</div>
+                  );
+                })}
               </div>
             )}
           </div>

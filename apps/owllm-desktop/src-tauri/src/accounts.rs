@@ -325,6 +325,200 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
     }
 }
 
+/// Live round-trip probe — actually calls the CLI / API endpoint and
+/// surfaces real failures (subscription required, quota exceeded,
+/// API key invalid). The existing accounts_test_probe is presence-only
+/// and would happily return "key present (sk-…)" for a logged-in but
+/// free-tier kimi account, even though dispatch later fails. This
+/// command exists so the Test button can fail honestly. Fires only
+/// on user click, not on the 3-s status poll.
+#[tauri::command]
+pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
+    let start = Instant::now();
+    let (ok, detail) = match backend.as_str() {
+        // -- CLI subscriptions: ask the CLI to print "ok" via a
+        //    minimum-cost prompt. Any non-zero exit or stderr blob
+        //    mentioning subscription/quota/auth is a real failure.
+        "claude_cli" => probe_cli_subscription(
+            find_claude_cli(), &["--print", "--prompt", "ok"], "Claude").await,
+        "codex_cli" => probe_cli_subscription(
+            find_codex_cli(), &["--print", "--prompt", "ok"], "Codex").await,
+        "kimi_cli" => probe_cli_subscription(
+            find_kimi_cli(),
+            &["--print", "--output-format", "text", "--final-message-only", "--prompt", "ok"],
+            "Kimi",
+        ).await,
+        "gemini_cli" => probe_cli_subscription(
+            find_gemini_cli(), &["--prompt", "ok"], "Gemini").await,
+
+        // -- API keys: HTTP GET the provider's /v1/models endpoint
+        //    with the key in Authorization. 200 = valid. 401/403 =
+        //    invalid key. Other = network / transient.
+        "claude_api"     => probe_api_key("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/models", true).await,
+        "openai_api"     => probe_api_key("OPENAI_API_KEY", "https://api.openai.com/v1/models", false).await,
+        "moonshot_api"   => probe_api_key("MOONSHOT_API_KEY", "https://api.moonshot.ai/v1/models", false).await,
+        "deepseek_api"   => probe_api_key("DEEPSEEK_API_KEY", "https://api.deepseek.com/v1/models", false).await,
+        "xai_api"        => probe_api_key("XAI_API_KEY", "https://api.x.ai/v1/models", false).await,
+        "groq_api"       => probe_api_key("GROQ_API_KEY", "https://api.groq.com/openai/v1/models", false).await,
+        "perplexity_api" => probe_api_key("PERPLEXITY_API_KEY", "https://api.perplexity.ai/models", false).await,
+        "mistral_api"    => probe_api_key("MISTRAL_API_KEY", "https://api.mistral.ai/v1/models", false).await,
+        "together_api"   => probe_api_key("TOGETHER_API_KEY", "https://api.together.xyz/v1/models", false).await,
+        "gemini_api" => {
+            // Google's REST API takes the key as a query param, not
+            // Authorization header. Probe the models list endpoint.
+            let map = load_secrets();
+            let key = map.get("GEMINI_API_KEY").or_else(|| map.get("GOOGLE_API_KEY")).cloned();
+            match key.filter(|k| !k.trim().is_empty()) {
+                Some(k) => {
+                    let url = format!("https://generativelanguage.googleapis.com/v1beta/models?key={k}");
+                    match http_get(&url, None).await {
+                        Ok(200) => (true, "API responded 200 OK".to_string()),
+                        Ok(s) => (false, format!("API responded HTTP {s} — key may be invalid")),
+                        Err(e) => (false, format!("network: {e}")),
+                    }
+                }
+                None => (false, "No GEMINI_API_KEY saved".to_string()),
+            }
+        }
+        other => (false, format!("Unknown backend '{other}'")),
+    };
+    ProbeResult { ok, detail, elapsed_ms: start.elapsed().as_millis() as u64 }
+}
+
+/// Real CLI round-trip. Runs the CLI with a tiny prompt and reads its
+/// stdout + stderr. Heuristic for "subscription works":
+///   * exit 0 AND stdout non-empty AND no subscription-error pattern
+///     in stderr → success
+///   * any subscription/quota/auth pattern in stdout OR stderr → fail
+///     (surface a trimmed slice of the offending message)
+///   * timeout (15 s) → fail
+async fn probe_cli_subscription(
+    exe: Option<PathBuf>,
+    args: &'static [&'static str],
+    name: &'static str,
+) -> (bool, String) {
+    let Some(exe) = exe else {
+        return (false, format!("{name} CLI not found on PATH"));
+    };
+    let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let exe_clone = exe.clone();
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        tokio::task::spawn_blocking(move || {
+            let mut cmd = Command::new(&exe_clone);
+            #[cfg(windows)]
+            let batch = is_batch_shim(&exe_clone);
+            #[cfg(not(windows))]
+            let batch = false;
+            for a in &args_vec {
+                push_arg(&mut cmd, batch, a);
+            }
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            cmd.spawn()
+                .and_then(|c| c.wait_with_output())
+                .map_err(|e| e.to_string())
+        }),
+    )
+    .await;
+
+    let output = match result {
+        Err(_) => return (false, format!("{name} CLI timed out after 15s — login may be stale")),
+        Ok(Err(e)) => return (false, format!("{name} CLI join error: {e}")),
+        Ok(Ok(Err(e))) => return (false, format!("{name} CLI spawn error: {e}")),
+        Ok(Ok(Ok(out))) => out,
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let combined = format!("{stdout}\n{stderr}");
+    let lower = combined.to_ascii_lowercase();
+
+    // Subscription / quota error patterns. Each CLI phrases these
+    // differently; cast a wide net.
+    let sub_errors: &[&str] = &[
+        "subscription required",
+        "upgrade your plan",
+        "not subscribed",
+        "free tier",
+        "quota exceeded",
+        "rate limit",
+        "insufficient_quota",
+        "not authenticated",
+        "401",
+        "403",
+        "auth required",
+        "please log in",
+        "no credit",
+        "billing required",
+    ];
+    if let Some(hit) = sub_errors.iter().find(|p| lower.contains(*p)) {
+        let snippet = combined.lines()
+            .find(|l| l.to_ascii_lowercase().contains(hit))
+            .unwrap_or(*hit)
+            .trim().to_string();
+        let trimmed = if snippet.len() > 140 { format!("{}…", &snippet[..140]) } else { snippet };
+        return (false, format!("{name}: {trimmed}"));
+    }
+    if !output.status.success() {
+        let snippet = stderr.lines().next().unwrap_or("non-zero exit").trim().to_string();
+        let trimmed = if snippet.len() > 140 { format!("{}…", &snippet[..140]) } else { snippet };
+        return (false, format!("{name} CLI exited {}: {trimmed}", output.status.code().unwrap_or(-1)));
+    }
+    if stdout.trim().is_empty() {
+        return (false, format!("{name} CLI returned empty output — model may have refused"));
+    }
+    (true, format!("{name} responded: {}", stdout.trim().chars().take(80).collect::<String>()))
+}
+
+/// Round-trip an API key against the provider's /v1/models endpoint.
+/// `use_anthropic_header` switches the auth header to x-api-key
+/// (Anthropic's convention) vs Authorization: Bearer.
+async fn probe_api_key(env: &str, url: &str, use_anthropic_header: bool) -> (bool, String) {
+    let map = load_secrets();
+    let key = map.get(env).cloned().filter(|k| !k.trim().is_empty());
+    let Some(key) = key else {
+        return (false, format!("No {env} saved"));
+    };
+    let header = if use_anthropic_header {
+        ("x-api-key", key)
+    } else {
+        ("Authorization", format!("Bearer {key}"))
+    };
+    match http_get(url, Some(header)).await {
+        Ok(200) => (true, "API responded 200 OK".to_string()),
+        Ok(401) | Ok(403) => (false, format!("API rejected key (HTTP {})", 401)),
+        Ok(s)   => (false, format!("API responded HTTP {s}")),
+        Err(e)  => (false, format!("network: {e}")),
+    }
+}
+
+/// Thin reqwest GET wrapper that returns just the status code so the
+/// probe helpers stay one-liner. Includes a 10-s timeout; anything
+/// slower than that is surfaced as "network: timeout".
+async fn http_get(url: &str, header: Option<(&str, String)>) -> Result<u16, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut req = client.get(url);
+    if let Some((k, v)) = header {
+        req = req.header(k, v);
+    }
+    // Anthropic requires the version header even on /v1/models.
+    if url.contains("api.anthropic.com") {
+        req = req.header("anthropic-version", "2023-06-01");
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    Ok(resp.status().as_u16())
+}
+
 // ---------------------------------------------------------------------
 // Subscription-CLI dispatch — runs `claude --print` non-interactively
 // so the agentic loop can use the user's Claude Code subscription

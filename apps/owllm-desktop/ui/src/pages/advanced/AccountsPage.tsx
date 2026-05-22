@@ -21,6 +21,21 @@ import {
   DeepSeekLogo, XaiLogo, GroqLogo, PerplexityLogo,
   MistralLogo, TogetherLogo,
 } from "./brandLogos";
+import PtyTerminal from "./PtyTerminal";
+
+/// Per-CLI spawn recipe for the embedded terminal. The exe name is
+/// what we hand portable-pty's CommandBuilder — PATH resolution
+/// happens there (or in Rust's which_extended fallback). Args mirror
+/// what subscription_cli_login used to pass when opening CMD:
+///   * claude/kimi: bare REPL, the CLI prompts for /login on first run
+///   * codex: `login` subcommand (one-shot OAuth)
+///   * gemini: `auth login` subcommand pair
+const LOGIN_CMD: Record<string, { cli: string; args: string[] } | undefined> = {
+  claude_cli: { cli: "claude", args: [] },
+  codex_cli:  { cli: "codex",  args: ["login"] },
+  kimi_cli:   { cli: "kimi",   args: [] },
+  gemini_cli: { cli: "gemini", args: ["auth", "login"] },
+};
 
 const PAGE_BG = "var(--bg-panel)";
 
@@ -500,9 +515,116 @@ function ProviderCard({
 }
 
 // -----------------------------------------------------------------------
-// Right-rail log panel. Subscribes to LOG_HUB.
+// Right-rail tabbed view: Log (install + status messages) + Terminal
+// (live CLI session for OAuth login). The terminal tab is only
+// available while a CLI session is active; clicking Connect on a
+// CLI-backed subscription card spawns the CLI inside it.
 // -----------------------------------------------------------------------
-function InstallLogPanel({ stacked = false }: { stacked?: boolean }) {
+type RailTab = "log" | "terminal";
+
+type ActiveTerminal = {
+  cli: string;
+  args: string[];
+  backend: string;
+  providerName: string;
+};
+
+function RightRail({
+  stacked, activeTerm, tab, setTab, onCloseTerm,
+}: {
+  stacked: boolean;
+  activeTerm: ActiveTerminal | null;
+  tab: RailTab;
+  setTab: (t: RailTab) => void;
+  onCloseTerm: () => void;
+}) {
+  // Auto-switch to the terminal tab whenever a new session opens, so
+  // the user doesn't have to hunt for it. Switching back to log is up
+  // to them.
+  useEffect(() => {
+    if (activeTerm) setTab("terminal");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTerm?.backend, activeTerm?.cli]);
+
+  return (
+    <div
+      style={{
+        width: stacked ? "100%" : 380,
+        height: stacked ? 320 : "auto",
+        flexShrink: 0,
+        display: "flex", flexDirection: "column",
+        background: "#0c0f14",
+        border: "1px solid rgba(255,255,255,0.06)",
+        borderRadius: 12,
+        minHeight: 0,
+        overflow: "hidden",
+      }}
+    >
+      {/* Tab bar */}
+      <div style={{
+        display: "flex", alignItems: "stretch",
+        borderBottom: "1px solid rgba(255,255,255,0.06)",
+      }}>
+        <TabButton label="Install / login log" active={tab === "log"} onClick={() => setTab("log")} />
+        <TabButton
+          label={activeTerm ? `Terminal · ${activeTerm.providerName}` : "Terminal"}
+          active={tab === "terminal"}
+          disabled={!activeTerm}
+          onClick={() => activeTerm && setTab("terminal")}
+        />
+        <div style={{ flex: 1 }} />
+        {tab === "log" && (
+          <button
+            onClick={() => LOG_HUB.clear()}
+            style={{ background: "transparent", border: "none", color: "#9aa0a6", fontSize: 11, padding: "0 12px", cursor: "pointer", textDecoration: "underline" }}
+          >clear</button>
+        )}
+        {tab === "terminal" && activeTerm && (
+          <button
+            onClick={onCloseTerm}
+            style={{ background: "transparent", border: "none", color: "#ff8c8c", fontSize: 11, padding: "0 12px", cursor: "pointer" }}
+          >✕ close</button>
+        )}
+      </div>
+
+      <div style={{ flex: 1, minHeight: 0, display: tab === "log" ? "block" : "none" }}>
+        <InstallLogPanel embedded />
+      </div>
+      <div style={{ flex: 1, minHeight: 0, display: tab === "terminal" ? "block" : "none" }}>
+        {activeTerm
+          ? <PtyTerminal cli={activeTerm.cli} args={activeTerm.args} />
+          : <div style={{ padding: 14, color: "#5a6376", fontSize: 11, fontStyle: "italic" }}>
+              Click Connect on any CLI-backed subscription to open a live terminal here.
+            </div>}
+      </div>
+    </div>
+  );
+}
+
+function TabButton({ label, active, disabled, onClick }: { label: string; active: boolean; disabled?: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        background: active ? "rgba(127,184,255,0.10)" : "transparent",
+        border: "none",
+        borderBottom: active ? "2px solid #7fb8ff" : "2px solid transparent",
+        color: disabled ? "#3e4654" : active ? "#dcdfe7" : "#9aa0a6",
+        fontSize: 11, fontWeight: 700,
+        padding: "10px 14px",
+        cursor: disabled ? "default" : "pointer",
+      }}
+    >{label}</button>
+  );
+}
+
+// -----------------------------------------------------------------------
+// In-app log panel (was the entire right rail in v2). Now lives as one
+// tab inside RightRail. `embedded` strips the panel's own header since
+// the tab bar handles that.
+// -----------------------------------------------------------------------
+function InstallLogPanel({ stacked = false, embedded = false }: { stacked?: boolean; embedded?: boolean }) {
   const [lines, setLines] = useState<LogLine[]>(LOG_HUB.snapshot());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   // Track whether the user has scrolled up. While true, auto-scroll
@@ -536,12 +658,11 @@ function InstallLogPanel({ stacked = false }: { stacked?: boolean }) {
     requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
   }, [lines]);
 
-  return (
-    <div
-      style={{
-        // When stacked (narrow viewport) the panel takes full width
-        // below the cards instead of sitting in a 340-px right rail
-        // that would otherwise crush the cards into overlap.
+  // When `embedded`, the parent RightRail provides the chrome (tab bar
+  // and clear button). Strip our own header so we don't double up.
+  const outer: React.CSSProperties = embedded
+    ? { width: "100%", height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }
+    : {
         width: stacked ? "100%" : 340,
         height: stacked ? 220 : "auto",
         flexShrink: 0,
@@ -550,25 +671,25 @@ function InstallLogPanel({ stacked = false }: { stacked?: boolean }) {
         border: "1px solid rgba(255,255,255,0.06)",
         borderRadius: 12,
         minHeight: 0,
-      }}
-    >
-      <div style={{
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        padding: "10px 14px",
-        borderBottom: "1px solid rgba(255,255,255,0.06)",
-      }}>
-        <div style={{ color: "#dcdfe7", fontSize: 12, fontWeight: 700 }}>
-          Install / login log
+      };
+
+  return (
+    <div style={outer}>
+      {!embedded && (
+        <div style={{
+          display: "flex", alignItems: "center", justifyContent: "space-between",
+          padding: "10px 14px",
+          borderBottom: "1px solid rgba(255,255,255,0.06)",
+        }}>
+          <div style={{ color: "#dcdfe7", fontSize: 12, fontWeight: 700 }}>
+            Install / login log
+          </div>
+          <button
+            onClick={() => LOG_HUB.clear()}
+            style={{ background: "transparent", border: "none", color: "#9aa0a6", fontSize: 11, cursor: "pointer", textDecoration: "underline" }}
+          >clear</button>
         </div>
-        <button
-          onClick={() => LOG_HUB.clear()}
-          style={{
-            background: "transparent", border: "none",
-            color: "#9aa0a6", fontSize: 11, cursor: "pointer",
-            textDecoration: "underline",
-          }}
-        >clear</button>
-      </div>
+      )}
       <div
         ref={scrollRef}
         style={{
@@ -626,6 +747,13 @@ export default function AccountsPage() {
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  // Embedded-terminal session: non-null while a CLI login REPL is
+  // running in the right rail's Terminal tab. Only one at a time —
+  // a new Connect click replaces the previous session (which kills
+  // its pty_kill in PtyTerminal's cleanup effect).
+  const [activeTerm, setActiveTerm] = useState<ActiveTerminal | null>(null);
+  const [railTab, setRailTab] = useState<RailTab>("log");
 
   function reconcile(status: AccountsStatus) {
     setCards((prev) => {
@@ -690,28 +818,35 @@ export default function AccountsPage() {
         });
         return;
       }
-      // Per-CLI hint: how the OAuth flow actually starts so the user
-      // knows what to do inside the terminal that opens. claude / kimi
-      // launch a REPL that auto-prompts for /login on first run;
-      // codex / gemini run a one-shot login subcommand.
+      // CLI-backed subscription: spawn the CLI inside our embedded
+      // terminal (right rail, Terminal tab). No pop-out CMD any more.
+      const recipe = LOGIN_CMD[route.backend];
+      if (!recipe) {
+        logInfo(route.backend, `[error] no spawn recipe for ${route.backend}`);
+        return;
+      }
       const hint: Record<string, string> = {
-        claude_cli: "claude REPL will open; type `/login` if it doesn't auto-prompt.",
-        codex_cli:  "codex login will open the OAuth page in your browser.",
-        kimi_cli:   "kimi REPL will open; it auto-prompts for /login on first run.",
-        gemini_cli: "gemini auth login will open the OAuth page in your browser.",
+        claude_cli: "type `/login` if the REPL doesn't auto-prompt.",
+        codex_cli:  "follow the OAuth URL that appears.",
+        kimi_cli:   "REPL auto-prompts for /login on first run.",
+        gemini_cli: "follow the OAuth URL that appears.",
       };
-      logInfo(route.backend, `Launching ${provider.name} CLI… ${hint[route.backend] ?? ""}`);
-      invoke("subscription_cli_login", { backend: route.backend }).catch((e) => {
-        const msg = String(e ?? "");
-        if (/not found on PATH/i.test(msg)) {
-          logInfo(route.backend, `[warn] CLI not found — click 'Install CLI' on the same row to add it via npm/pip.`);
-        } else {
-          logInfo(route.backend, `[error] login spawn failed: ${msg}`);
-        }
+      logInfo(route.backend, `Opening ${provider.name} CLI in the embedded terminal — ${hint[route.backend] ?? ""}`);
+      setActiveTerm({
+        cli: recipe.cli,
+        args: recipe.args,
+        backend: route.backend,
+        providerName: provider.name,
       });
+      setRailTab("terminal");
     } else {
       setDialogFor({ route, provider });
     }
+  }
+
+  function handleCloseTerm() {
+    setActiveTerm(null);
+    setRailTab("log");
   }
 
   function handleInstall(route: RouteSpec, provider: ProviderSpec) {
@@ -779,20 +914,22 @@ export default function AccountsPage() {
 
   async function handleTest(route: RouteSpec) {
     setCardState(route.key, { testing: true, testText: "", testOk: null });
+    logInfo(route.backend, `Running live round-trip probe (this calls the actual API / CLI)…`);
     try {
-      const r = await invoke<ProbeResult>("accounts_test_probe", { backend: route.backend });
+      // accounts_test_probe_live actually round-trips: API keys hit
+      // /v1/models with the key; CLI subscriptions run a `--print
+      // --prompt ok` and read the response. Catches "logged in but
+      // free tier can't use the subscription" cases the old presence-
+      // only probe missed.
+      const r = await invoke<ProbeResult>("accounts_test_probe_live", { backend: route.backend });
       const prefix = r.ok ? "✓" : "✗";
-      setCardState(route.key, {
-        testing: false,
-        testText: `${prefix}  ${r.detail}  ·  ${r.elapsed_ms} ms`,
-        testOk: r.ok,
-      });
+      const line = `${prefix}  ${r.detail}  ·  ${r.elapsed_ms} ms`;
+      setCardState(route.key, { testing: false, testText: line, testOk: r.ok });
+      logInfo(route.backend, line);
     } catch (e: any) {
-      setCardState(route.key, {
-        testing: false,
-        testText: `✗  ${String(e?.message ?? e)}`,
-        testOk: false,
-      });
+      const line = `✗  ${String(e?.message ?? e)}`;
+      setCardState(route.key, { testing: false, testText: line, testOk: false });
+      logInfo(route.backend, line);
     }
   }
 
@@ -864,8 +1001,15 @@ export default function AccountsPage() {
           ))}
         </div>
 
-        {/* In-app log panel — right rail when wide, bottom dock when narrow */}
-        <InstallLogPanel stacked={narrow} />
+        {/* Right rail — tabbed: Log + Terminal. Stacks below the
+            cards when the viewport is narrow. */}
+        <RightRail
+          stacked={narrow}
+          activeTerm={activeTerm}
+          tab={railTab}
+          setTab={setRailTab}
+          onCloseTerm={handleCloseTerm}
+        />
       </div>
 
       {dialogFor && (

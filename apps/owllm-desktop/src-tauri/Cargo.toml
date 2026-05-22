@@ -40,11 +40,42 @@ rfd = "0.15"
 # rustls-tls so we don't need OpenSSL on the build host. blocking
 # feature so the Tauri commands can stay synchronous-flavoured under
 # tokio's async runtime without ping-ponging through spawn_blocking.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# `stream` feature unlocks Response::bytes_stream() — needed by the
+# huggingface::hf_download streaming progress emitter.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 # Used by telegram::telegram_download_file to base64-encode media bytes
 # for the JS-side Attachment carrier. No-default-features keeps the dep
 # lean (we don't need the alloc/std features for this single helper).
 base64 = "0.22"
+# URL-encode HF model ids before stitching them into REST paths so
+# names like "TheBloke/Llama-2-7B-GGUF" survive the round-trip (the
+# slash needs to stay as a slash for the route, but anything else
+# gets encoded). Tiny, no deps of its own.
+urlencoding = "2"
+# Stream combinator for reqwest::Response::bytes_stream() —
+# `while let Some(chunk) = stream.next().await` needs StreamExt.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# ISO-8601 timestamps for list_tuned_adapters() and env_manager state.
+# default-features=false drops the deprecated `time` integration to
+# keep the dep slim; "clock" is what we need for DateTime::from_timestamp.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# YAML for env_profiles.yaml — the env-install manifest the app fetches
+# from the repo + caches locally. JSON would work too but YAML is more
+# readable for the hand-curated profile list.
+serde_yaml = "0.9"
+# Hash env profile sources so we can detect manifest changes and
+# trigger reinstalls atomically. SHA-256 is overkill for a 20-line
+# YAML but it's the same hash the rest of the app uses elsewhere.
+sha2 = "0.10"
+# Cross-platform pseudo-terminal for the in-app CLI terminal that
+# replaces the pop-out CMD window during subscription-CLI login.
+# Uses ConPTY on Windows 10+/11 (no extra dep) and forkpty on Unix.
+portable-pty = "0.8"
+# UUID for PTY session ids — each spawn returns a session id the
+# React side passes back on write/resize/kill.
+uuid = { version = "1", features = ["v4"] }
+# Lock-free singleton for the PTY session map shared between commands.
+once_cell = "1"
 [dev-dependencies]
 tempfile = "3"
 

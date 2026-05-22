@@ -28,6 +28,7 @@ mod huggingface;
 mod models;
 mod paths;
 mod projects;
+mod pty;
 mod recommendations;
 mod server;
 mod skill_library;
@@ -72,6 +73,11 @@ pub fn run() {
             accounts::subscription_cli_login,
             accounts::cli_install,
             accounts::cli_install_stream,
+            accounts::accounts_test_probe_live,
+            pty::pty_spawn,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_kill,
             agents::list_team_templates,
             agents::list_agent_roles,
             agents::list_skill_packs,

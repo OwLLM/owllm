@@ -27,9 +27,17 @@ type AccountsStatus = {
   anthropic_api_key: boolean;
   openai_api_key: boolean;
   moonshot_api_key: boolean;
+  deepseek_api_key: boolean;
+  xai_api_key: boolean;
+  groq_api_key: boolean;
+  perplexity_api_key: boolean;
+  mistral_api_key: boolean;
+  together_api_key: boolean;
+  gemini_api_key: boolean;
   claude_cli: boolean;
   codex_cli: boolean;
   kimi_cli: boolean;
+  gemini_cli: boolean;
 };
 
 type ProbeResult = { ok: boolean; detail: string; elapsed_ms: number };
@@ -114,15 +122,110 @@ const BRANDS: BrandSpec[] = [
     envName: "MOONSHOT_API_KEY",
     backend: "moonshot_api",
   },
+  {
+    key: "gemini_subscription",
+    name: "Gemini",
+    tagline: "Subscription · Google Gemini CLI",
+    icon: "♊",
+    accent: "#4285f4",
+    accentTop: "#142036",
+    kind: "subscription",
+    backend: "gemini_cli",
+  },
+  {
+    key: "gemini_api",
+    name: "Gemini API",
+    tagline: "GEMINI_API_KEY · billed per call",
+    icon: "⚡",
+    accent: "#4285f4",
+    accentTop: "#101a2d",
+    kind: "api",
+    envName: "GEMINI_API_KEY",
+    backend: "gemini_api",
+  },
+  {
+    key: "deepseek_api",
+    name: "DeepSeek API",
+    tagline: "DEEPSEEK_API_KEY · billed per call",
+    icon: "🐋",
+    accent: "#2563eb",
+    accentTop: "#0f1a2e",
+    kind: "api",
+    envName: "DEEPSEEK_API_KEY",
+    backend: "deepseek_api",
+  },
+  {
+    key: "xai_api",
+    name: "xAI Grok API",
+    tagline: "XAI_API_KEY · billed per call",
+    icon: "𝕏",
+    accent: "#9aa0a6",
+    accentTop: "#1a1c1f",
+    kind: "api",
+    envName: "XAI_API_KEY",
+    backend: "xai_api",
+  },
+  {
+    key: "groq_api",
+    name: "Groq API",
+    tagline: "GROQ_API_KEY · ~1000 tok/s LPU",
+    icon: "⚡",
+    accent: "#ff5d11",
+    accentTop: "#2a160c",
+    kind: "api",
+    envName: "GROQ_API_KEY",
+    backend: "groq_api",
+  },
+  {
+    key: "perplexity_api",
+    name: "Perplexity Sonar API",
+    tagline: "PERPLEXITY_API_KEY · built-in search",
+    icon: "🔎",
+    accent: "#20b2aa",
+    accentTop: "#102624",
+    kind: "api",
+    envName: "PERPLEXITY_API_KEY",
+    backend: "perplexity_api",
+  },
+  {
+    key: "mistral_api",
+    name: "Mistral API",
+    tagline: "MISTRAL_API_KEY · billed per call",
+    icon: "🇫🇷",
+    accent: "#ff7a00",
+    accentTop: "#2b1a0a",
+    kind: "api",
+    envName: "MISTRAL_API_KEY",
+    backend: "mistral_api",
+  },
+  {
+    key: "together_api",
+    name: "Together AI API",
+    tagline: "TOGETHER_API_KEY · open-source host",
+    icon: "🧩",
+    accent: "#7fc8ff",
+    accentTop: "#12222e",
+    kind: "api",
+    envName: "TOGETHER_API_KEY",
+    backend: "together_api",
+  },
 ];
 
-// Brand columns: each pair is (subscription on top, API below). The
-// AccountsPage renders one column per pair so a user looking at the
-// "Claude" column sees both ways to use Claude side by side.
-const BRAND_COLUMNS: [string, string][] = [
+// Brand columns: each pair is (subscription on top, API below). API-only
+// providers go in the bottom slot alone. The AccountsPage renders one
+// column per pair so a user looking at the "Claude" column sees both
+// ways to use Claude side by side.
+const BRAND_COLUMNS: [string, string | null][] = [
   ["claude_subscription", "anthropic_api"],
   ["codex_subscription",  "openai_api"],
   ["kimi_subscription",   "moonshot_api"],
+  ["gemini_subscription", "gemini_api"],
+  ["deepseek_api", null],
+  ["xai_api", null],
+  ["groq_api", null],
+  ["perplexity_api", null],
+  ["mistral_api", null],
+  ["together_api", null],
 ];
 
 // ---------------------------------------------------------------------------
@@ -514,12 +617,20 @@ export default function AccountsPage() {
           };
         }
       };
-      flag("anthropic_api", status.anthropic_api_key);
-      flag("openai_api",    status.openai_api_key);
-      flag("moonshot_api",  status.moonshot_api_key);
-      flag("claude_subscription", status.claude_cli);
-      flag("codex_subscription",  status.codex_cli);
-      flag("kimi_subscription",   status.kimi_cli);
+      flag("anthropic_api",  status.anthropic_api_key);
+      flag("openai_api",     status.openai_api_key);
+      flag("moonshot_api",   status.moonshot_api_key);
+      flag("deepseek_api",   status.deepseek_api_key);
+      flag("xai_api",        status.xai_api_key);
+      flag("groq_api",       status.groq_api_key);
+      flag("perplexity_api", status.perplexity_api_key);
+      flag("mistral_api",    status.mistral_api_key);
+      flag("together_api",   status.together_api_key);
+      flag("gemini_api",     status.gemini_api_key);
+      flag("claude_subscription",  status.claude_cli);
+      flag("codex_subscription",   status.codex_cli);
+      flag("kimi_subscription",    status.kimi_cli);
+      flag("gemini_subscription",  status.gemini_cli);
       return next;
     });
   }
@@ -551,9 +662,10 @@ export default function AccountsPage() {
       // poll picks up the credentials file automatically once the
       // CLI writes it.
       invoke("subscription_cli_login", { backend: spec.backend }).catch((e) => {
-        const fallback = spec.backend === "claude_cli" ? "claude /login"
-                        : spec.backend === "codex_cli"  ? "codex login"
-                        : spec.backend === "kimi_cli"   ? "kimi login"
+        const fallback = spec.backend === "claude_cli"  ? "claude /login"
+                        : spec.backend === "codex_cli"   ? "codex login"
+                        : spec.backend === "kimi_cli"    ? "kimi login"
+                        : spec.backend === "gemini_cli"  ? "gemini auth login"
                         : `${spec.backend} login`;
         window.alert(
           `Couldn't open a terminal: ${e}\n\n` +
@@ -574,9 +686,10 @@ export default function AccountsPage() {
         // Subscription disconnect — we don't auto-delete the CLI
         // credentials file (that's the user's CLI to manage). Just
         // surface what they need to do manually.
-        const cmd = spec.backend === "claude_cli" ? "claude /logout"
-                  : spec.backend === "codex_cli"  ? "codex logout"
-                  : spec.backend === "kimi_cli"   ? "kimi /logout"
+        const cmd = spec.backend === "claude_cli"  ? "claude /logout"
+                  : spec.backend === "codex_cli"   ? "codex logout"
+                  : spec.backend === "kimi_cli"    ? "kimi /logout"
+                  : spec.backend === "gemini_cli"  ? "gemini auth logout"
                   : `${spec.backend} logout`;
         window.alert(`Run this in a terminal to sign out:\n\n  ${cmd}`);
         return;
@@ -666,12 +779,12 @@ export default function AccountsPage() {
           alignContent: "start",
         }}
       >
-        {BRAND_COLUMNS.map(([subKey, apiKey]) => {
-          const subSpec = BRANDS.find((b) => b.key === subKey);
-          const apiSpec = BRANDS.find((b) => b.key === apiKey);
+        {BRAND_COLUMNS.map(([topKey, bottomKey]) => {
+          const topSpec = BRANDS.find((b) => b.key === topKey);
+          const bottomSpec = bottomKey ? BRANDS.find((b) => b.key === bottomKey) : null;
           return (
             <div
-              key={subKey}
+              key={topKey}
               style={{
                 display: "flex",
                 flexDirection: "column",
@@ -680,22 +793,22 @@ export default function AccountsPage() {
                 minWidth: 0,
               }}
             >
-              {subSpec && (
+              {topSpec && (
                 <BrandCard
-                  spec={subSpec}
-                  state={cards[subSpec.key]}
-                  onConnect={() => handleConnect(subSpec)}
-                  onDisconnect={() => handleDisconnect(subSpec)}
-                  onTest={() => handleTest(subSpec)}
+                  spec={topSpec}
+                  state={cards[topSpec.key]}
+                  onConnect={() => handleConnect(topSpec)}
+                  onDisconnect={() => handleDisconnect(topSpec)}
+                  onTest={() => handleTest(topSpec)}
                 />
               )}
-              {apiSpec && (
+              {bottomSpec && (
                 <BrandCard
-                  spec={apiSpec}
-                  state={cards[apiSpec.key]}
-                  onConnect={() => handleConnect(apiSpec)}
-                  onDisconnect={() => handleDisconnect(apiSpec)}
-                  onTest={() => handleTest(apiSpec)}
+                  spec={bottomSpec}
+                  state={cards[bottomSpec.key]}
+                  onConnect={() => handleConnect(bottomSpec)}
+                  onDisconnect={() => handleDisconnect(bottomSpec)}
+                  onTest={() => handleTest(bottomSpec)}
                 />
               )}
             </div>

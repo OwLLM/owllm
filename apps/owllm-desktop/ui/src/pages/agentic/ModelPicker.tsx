@@ -34,12 +34,24 @@ export type AccountsStatusLite = {
   anthropic_api_key: boolean;
   openai_api_key: boolean;
   moonshot_api_key: boolean;
+  deepseek_api_key: boolean;
+  xai_api_key: boolean;
+  groq_api_key: boolean;
+  perplexity_api_key: boolean;
+  mistral_api_key: boolean;
+  together_api_key: boolean;
+  gemini_api_key: boolean;
   claude_cli: boolean;
   codex_cli: boolean;
   kimi_cli: boolean;
+  gemini_cli: boolean;
 };
 
-type Section = "local" | "tuned" | "anthropic" | "openai" | "kimi" | "other";
+type Section =
+  | "local" | "tuned"
+  | "anthropic" | "openai" | "kimi" | "gemini"
+  | "deepseek" | "xai" | "groq" | "perplexity" | "mistral" | "together"
+  | "other";
 type Variant = "local" | "tuned" | "sub" | "api" | "auto";
 
 type Entry = {
@@ -52,12 +64,19 @@ type Entry = {
 };
 
 const SECTION_META: Record<Section, { label: string; color: string }> = {
-  local:     { label: "LOCAL",         color: "#7fdfff" },
-  tuned:     { label: "TUNED (LOCAL)", color: "#ffd166" },
-  anthropic: { label: "ANTHROPIC",     color: "#ff9a3a" },
-  openai:    { label: "OPENAI",        color: "#10a37f" },
-  kimi:      { label: "KIMI",          color: "#d36bff" },
-  other:     { label: "OTHER",         color: "#c08aff" },
+  local:      { label: "LOCAL",         color: "#7fdfff" },
+  tuned:      { label: "TUNED (LOCAL)", color: "#ffd166" },
+  anthropic:  { label: "ANTHROPIC",     color: "#ff9a3a" },
+  openai:     { label: "OPENAI",        color: "#10a37f" },
+  kimi:       { label: "KIMI",          color: "#d36bff" },
+  gemini:     { label: "GEMINI",        color: "#4285f4" },
+  deepseek:   { label: "DEEPSEEK",      color: "#2563eb" },
+  xai:        { label: "xAI · GROK",    color: "#9aa0a6" },
+  groq:       { label: "GROQ",          color: "#ff5d11" },
+  perplexity: { label: "PERPLEXITY",    color: "#20b2aa" },
+  mistral:    { label: "MISTRAL",       color: "#ff7a00" },
+  together:   { label: "TOGETHER AI",   color: "#7fc8ff" },
+  other:      { label: "OTHER",         color: "#c08aff" },
 };
 
 // Hardcoded cloud catalogue — keep small + curated rather than
@@ -128,6 +147,52 @@ const KIMI_MODELS: KimiModel[] = [
   { id: "kimi-k2.6",        display: "Kimi K2.6",                  sub: true, api: true },
   { id: "kimi-k2.5",        display: "Kimi K2.5 (multimodal)",     sub: true, api: true },
   { id: "moonshot-v1-128k", display: "Moonshot V1 · 128K",         api: true },
+];
+
+// One row per provider catalogue. Each list is the smallest useful
+// set as of 2026-05: flagship + budget tier. Users can plug exact
+// model ids by hand later if they need a niche variant. Keys aren't
+// listed here — see models.rs for the canonical source registered
+// with list_models(); this picker just renders them.
+type CloudModel = { id: string; display: string; sub?: boolean; api?: boolean };
+
+const DEEPSEEK_MODELS: CloudModel[] = [
+  { id: "deepseek-v4-pro",   display: "DeepSeek V4 Pro",   api: true },
+  { id: "deepseek-v4-flash", display: "DeepSeek V4 Flash", api: true },
+];
+const XAI_MODELS: CloudModel[] = [
+  { id: "grok-4.3",       display: "Grok 4.3",       api: true },
+  { id: "grok-4.20",      display: "Grok 4.20",      api: true },
+  { id: "grok-4.1-fast",  display: "Grok 4.1 Fast",  api: true },
+];
+const GROQ_MODELS: CloudModel[] = [
+  { id: "llama-3.3-70b-versatile",         display: "Llama 3.3 70B (fast)",            api: true },
+  { id: "llama-4-scout",                   display: "Llama 4 Scout",                   api: true },
+  { id: "qwen3-32b",                       display: "Qwen 3 32B",                      api: true },
+  { id: "deepseek-r1-distill-llama-70b",   display: "DeepSeek R1 Distill 70B",         api: true },
+  { id: "gpt-oss-120b",                    display: "gpt-oss 120B",                    api: true },
+];
+const PERPLEXITY_MODELS: CloudModel[] = [
+  { id: "sonar-pro",        display: "Sonar Pro (search)",      api: true },
+  { id: "sonar",            display: "Sonar (search)",          api: true },
+  { id: "sonar-reasoning",  display: "Sonar Reasoning",         api: true },
+];
+const MISTRAL_MODELS: CloudModel[] = [
+  { id: "mistral-large-latest",     display: "Mistral Large",      api: true },
+  { id: "magistral-medium-latest",  display: "Magistral (reasoning)", api: true },
+  { id: "codestral-latest",         display: "Codestral",          api: true },
+  { id: "mistral-small-latest",     display: "Mistral Small",      api: true },
+];
+const TOGETHER_MODELS: CloudModel[] = [
+  { id: "meta-llama/Llama-3.3-70B-Instruct-Turbo",  display: "Llama 3.3 70B Turbo",     api: true },
+  { id: "Qwen/Qwen2.5-72B-Instruct-Turbo",          display: "Qwen 2.5 72B Turbo",      api: true },
+  { id: "deepseek-ai/DeepSeek-V3",                  display: "DeepSeek V3",             api: true },
+  { id: "mistralai/Mixtral-8x22B-Instruct-v0.1",    display: "Mixtral 8x22B",           api: true },
+];
+const GEMINI_MODELS: CloudModel[] = [
+  { id: "gemini-2.5-pro",        display: "Gemini 2.5 Pro",         sub: true, api: true },
+  { id: "gemini-2.5-flash",      display: "Gemini 2.5 Flash",       sub: true, api: true },
+  { id: "gemini-2.5-flash-lite", display: "Gemini 2.5 Flash-Lite",  api: true },
 ];
 function displayEffort(level: string): string {
   return level === "extra_high" ? "extra high" : level;
@@ -247,6 +312,49 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
     if (m.api) pushKimi(m, "api", kimiApi, kimiApi ? undefined : "(set MOONSHOT_API_KEY)");
   }
 
+  // Generic OpenAI-compatible provider rows. Same encoding as
+  // Anthropic / OpenAI / Kimi: "api/<id>" so providerFor can map back
+  // to the right base URL + key in dispatch.
+  const pushCloud = (
+    section: Section,
+    m: CloudModel,
+    variant: "sub" | "api",
+    available: boolean,
+    hint?: string,
+  ) => {
+    const tag = variant === "sub" ? "subscription" : "API";
+    out.push({
+      id: `${variant}/${m.id}`,
+      label: `${m.display} (${tag})`,
+      section,
+      variant,
+      available,
+      hint,
+    });
+  };
+  // Gemini: subscription via gemini-cli + API via GEMINI_API_KEY.
+  const geminiSub = !!status?.gemini_cli;
+  const geminiApi = !!status?.gemini_api_key;
+  for (const m of GEMINI_MODELS) {
+    if (m.sub) pushCloud("gemini", m, "sub", geminiSub, geminiSub ? undefined : "(gemini auth login)");
+    if (m.api) pushCloud("gemini", m, "api", geminiApi, geminiApi ? undefined : "(set GEMINI_API_KEY)");
+  }
+  // API-only providers.
+  type ApiOnly = { section: Section; models: CloudModel[]; available: boolean; envHint: string };
+  const apiOnly: ApiOnly[] = [
+    { section: "deepseek",   models: DEEPSEEK_MODELS,   available: !!status?.deepseek_api_key,   envHint: "DEEPSEEK_API_KEY" },
+    { section: "xai",        models: XAI_MODELS,        available: !!status?.xai_api_key,        envHint: "XAI_API_KEY" },
+    { section: "groq",       models: GROQ_MODELS,       available: !!status?.groq_api_key,       envHint: "GROQ_API_KEY" },
+    { section: "perplexity", models: PERPLEXITY_MODELS, available: !!status?.perplexity_api_key, envHint: "PERPLEXITY_API_KEY" },
+    { section: "mistral",    models: MISTRAL_MODELS,    available: !!status?.mistral_api_key,    envHint: "MISTRAL_API_KEY" },
+    { section: "together",   models: TOGETHER_MODELS,   available: !!status?.together_api_key,   envHint: "TOGETHER_API_KEY" },
+  ];
+  for (const grp of apiOnly) {
+    for (const m of grp.models) {
+      if (m.api) pushCloud(grp.section, m, "api", grp.available, grp.available ? undefined : `(set ${grp.envHint})`);
+    }
+  }
+
   for (const a of AUTO_OPTIONS) {
     out.push({
       id: a.id,
@@ -329,7 +437,12 @@ export default function ModelPicker({
     .filter((e) => !localOnly || e.section === "local" || e.section === "tuned");
   const sections: Section[] = localOnly
     ? ["local", "tuned"]
-    : ["local", "tuned", "anthropic", "openai", "kimi", "other"];
+    : [
+        "local", "tuned",
+        "anthropic", "openai", "kimi", "gemini",
+        "deepseek", "xai", "groq", "perplexity", "mistral", "together",
+        "other",
+      ];
 
   const triggerLabel = value
     ? displayForId(value, entries)

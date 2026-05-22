@@ -3481,6 +3481,63 @@ async function streamChatCompletion(
   if (provider === "moonshot") {
     return streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images);
   }
+  if (provider === "deepseek") {
+    return streamOpenAICompatible({
+      url: "https://api.deepseek.com/v1/chat/completions",
+      keyName: "DEEPSEEK_API_KEY",
+      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
+      signal, onDelta, history, onThought, images,
+      providerLabel: "DeepSeek",
+    });
+  }
+  if (provider === "xai") {
+    return streamOpenAICompatible({
+      url: "https://api.x.ai/v1/chat/completions",
+      keyName: "XAI_API_KEY",
+      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
+      signal, onDelta, history, onThought, images,
+      providerLabel: "xAI Grok",
+    });
+  }
+  if (provider === "groq") {
+    return streamOpenAICompatible({
+      url: "https://api.groq.com/openai/v1/chat/completions",
+      keyName: "GROQ_API_KEY",
+      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
+      signal, onDelta, history, onThought, images,
+      providerLabel: "Groq",
+    });
+  }
+  if (provider === "perplexity") {
+    return streamOpenAICompatible({
+      url: "https://api.perplexity.ai/chat/completions",
+      keyName: "PERPLEXITY_API_KEY",
+      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
+      signal, onDelta, history, onThought, images,
+      providerLabel: "Perplexity",
+    });
+  }
+  if (provider === "mistral") {
+    return streamOpenAICompatible({
+      url: "https://api.mistral.ai/v1/chat/completions",
+      keyName: "MISTRAL_API_KEY",
+      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
+      signal, onDelta, history, onThought, images,
+      providerLabel: "Mistral",
+    });
+  }
+  if (provider === "together") {
+    return streamOpenAICompatible({
+      url: "https://api.together.xyz/v1/chat/completions",
+      keyName: "TOGETHER_API_KEY",
+      modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
+      signal, onDelta, history, onThought, images,
+      providerLabel: "Together AI",
+    });
+  }
+  if (provider === "gemini") {
+    return streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images);
+  }
   // Local llama-server. OpenAI-compatible SSE. History (when present)
   // becomes the alternating user/assistant turns preceding the new
   // user message — gives the model continuity across restarts.
@@ -3867,6 +3924,140 @@ async function streamMoonshot(
     signal,
   });
   return consumeOpenAISse(resp, onDelta, onThought);
+}
+
+/// Generic OpenAI-compatible streamer. DeepSeek, xAI Grok, Groq,
+/// Perplexity, Mistral, and Together AI all speak the same JSON
+/// chat-completions shape with /v1/chat/completions endpoints; this
+/// keeps each provider's dispatch entry to a 1-line config.
+async function streamOpenAICompatible(args: {
+  url: string;
+  keyName: string;
+  modelId: string;
+  systemPrompt: string;
+  userMessage: string;
+  temperature: number;
+  signal: AbortSignal;
+  onDelta: StreamHandler;
+  history?: HistoryItem[];
+  onThought?: ThoughtHandler;
+  images?: Attachment[];
+  providerLabel: string;
+}): Promise<string> {
+  const key = await invoke<string | null>("accounts_get_secret", { name: args.keyName });
+  if (!key) throw new Error(`No ${args.keyName} saved — set it on the Accounts page (${args.providerLabel}).`);
+  const resp = await fetch(args.url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      model: args.modelId,
+      messages: [
+        { role: "system", content: args.systemPrompt },
+        ...(args.history ?? []),
+        { role: "user", content: openaiUserContent(args.userMessage, args.images ?? []) },
+      ],
+      stream: true,
+      temperature: args.temperature,
+    }),
+    signal: args.signal,
+  });
+  return consumeOpenAISse(resp, args.onDelta, args.onThought);
+}
+
+/// Google Gemini streaming via generativelanguage.googleapis.com.
+/// NOT OpenAI-compatible — different request body and event shape.
+/// Request: POST .../v1beta/models/<id>:streamGenerateContent?alt=sse&key=<K>
+/// Body: { contents: [{ role, parts: [{ text }] }], systemInstruction:
+///         { parts: [{ text }] }, generationConfig: { temperature } }
+/// SSE events: { candidates: [{ content: { parts: [{ text: "..." }] } }] }
+async function streamGemini(
+  modelId: string,
+  route: CloudRoute,
+  systemPrompt: string,
+  userMessage: string,
+  temperature: number,
+  signal: AbortSignal,
+  onDelta: StreamHandler,
+  projectCwd?: string,
+  history?: HistoryItem[],
+  _onThought?: ThoughtHandler,
+  _images?: Attachment[],
+): Promise<string> {
+  // Subscription path — gemini-cli's --print mode (per its docs,
+  // similar to claude/kimi). Folds history into the prompt since
+  // --print is single-turn.
+  if (route.forceSub) {
+    const folded = (history ?? [])
+      .map((h) => `${h.role}: ${typeof h.content === "string" ? h.content : ""}`)
+      .join("\n\n");
+    const composed = folded ? `${folded}\n\nuser: ${userMessage}` : userMessage;
+    const reply = await invoke<string>("gemini_cli_complete", {
+      systemPrompt,
+      userMessage: composed,
+      cwd: projectCwd ?? null,
+      model: modelId,
+    }).catch((e) => { throw new Error(`Gemini CLI: ${e}`); });
+    if (reply) onDelta(reply);
+    return reply;
+  }
+  // API path — REST + SSE.
+  const key = await invoke<string | null>("accounts_get_secret", { name: "GEMINI_API_KEY" });
+  const fallbackKey = key || await invoke<string | null>("accounts_get_secret", { name: "GOOGLE_API_KEY" });
+  if (!fallbackKey) throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) saved — set it on the Accounts page.");
+  // Translate alternating user/assistant history to Gemini's contents
+  // shape. Gemini uses "model" instead of "assistant".
+  const contents = (history ?? []).map((h) => ({
+    role: h.role === "assistant" ? "model" : (h.role === "user" ? "user" : "model"),
+    parts: [{ text: typeof h.content === "string" ? h.content : "" }],
+  }));
+  contents.push({ role: "user", parts: [{ text: userMessage }] });
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(fallbackKey)}`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents,
+      systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined,
+      generationConfig: { temperature },
+    }),
+    signal,
+  });
+  if (!resp.ok || !resp.body) {
+    throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
+  }
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let acc = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).replace(/\r$/, "");
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const body = line.slice(5).trim();
+      if (!body) continue;
+      try {
+        const j = JSON.parse(body);
+        const parts = j?.candidates?.[0]?.content?.parts;
+        if (Array.isArray(parts)) {
+          for (const p of parts) {
+            if (typeof p?.text === "string" && p.text) {
+              acc += p.text;
+              onDelta(p.text);
+            }
+          }
+        }
+      } catch { /* malformed event line, skip */ }
+    }
+  }
+  return acc;
 }
 
 /// Shared SSE consumer for OpenAI-compatible endpoints (llama-server,
@@ -4852,10 +5043,20 @@ export default function AgentsPage() {
     if (modelId.startsWith("auto/")) return "auto";
     const bareId = stripModelPrefix(modelId);
     if (modelId.startsWith("sub/") || modelId.startsWith("api/")) {
-      // Pure cloud entries — decide between anthropic / openai / moonshot by id.
+      // Pure cloud entries — decide which provider by id prefix.
       if (bareId.startsWith("claude-")) return "anthropic";
       if (bareId.startsWith("gpt-") || bareId === "o3") return "openai";
       if (bareId.startsWith("kimi-") || bareId.startsWith("moonshot-")) return "moonshot";
+      if (bareId.startsWith("gemini-")) return "gemini";
+      if (bareId.startsWith("deepseek-")) return "deepseek";
+      if (bareId.startsWith("grok-")) return "xai";
+      // Groq's catalog overlaps with open-weight names (llama-*, qwen3-*,
+      // gpt-oss-*). Match by exact id against the registry instead.
+      const m = models.find(x => x.model_id === bareId);
+      if (m?.provider) return m.provider;
+      if (bareId.startsWith("sonar")) return "perplexity";
+      if (bareId.startsWith("mistral-") || bareId.startsWith("magistral-") || bareId.startsWith("codestral-")) return "mistral";
+      if (bareId.includes("/")) return "together"; // Together uses "owner/model" ids.
     }
     const m = models.find(x => x.model_id === bareId);
     return m?.provider || "local";

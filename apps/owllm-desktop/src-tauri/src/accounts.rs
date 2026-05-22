@@ -103,6 +103,10 @@ fn load_secrets() -> BTreeMap<String, String> {
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
+fn nonempty(map: &BTreeMap<String, String>, key: &str) -> bool {
+    map.get(key).map(|s| !s.trim().is_empty()).unwrap_or(false)
+}
+
 fn write_secrets(map: &BTreeMap<String, String>) -> Result<(), String> {
     let path = secrets_path().ok_or_else(|| "could not resolve home dir".to_string())?;
     if let Some(parent) = path.parent() {
@@ -121,20 +125,32 @@ pub struct AccountsStatus {
     pub openai_api_key: bool,
     /// MOONSHOT_API_KEY is set + non-empty. Moonshot AI's Kimi
     /// platform — OpenAI-compatible REST API at api.moonshot.ai/v1.
-    /// Same env-var name the official Kimi docs and most third-party
-    /// SDKs use.
     pub moonshot_api_key: bool,
-    /// HF_TOKEN (HuggingFace user access token) is set + non-empty.
-    /// Used by `huggingface::*` commands for private repos and to lift
-    /// the anonymous rate-limit on /api/models.
+    /// DEEPSEEK_API_KEY for api.deepseek.com (OpenAI-compatible).
+    pub deepseek_api_key: bool,
+    /// XAI_API_KEY for api.x.ai (Grok, OpenAI-compatible).
+    pub xai_api_key: bool,
+    /// GROQ_API_KEY for api.groq.com (OpenAI-compatible, ultra-fast LPU).
+    pub groq_api_key: bool,
+    /// PERPLEXITY_API_KEY for api.perplexity.ai (Sonar, OAI-compatible).
+    pub perplexity_api_key: bool,
+    /// MISTRAL_API_KEY for api.mistral.ai (OpenAI-compatible).
+    pub mistral_api_key: bool,
+    /// TOGETHER_API_KEY for api.together.xyz (hosts open-source models).
+    pub together_api_key: bool,
+    /// GEMINI_API_KEY (or GOOGLE_API_KEY) for Google's Gemini REST.
+    pub gemini_api_key: bool,
+    /// HF_TOKEN — HuggingFace user access token.
     pub hf_token: bool,
-    /// Claude CLI is installed AND has logged-in credentials.
+    /// Claude Code CLI is installed AND has logged-in credentials.
     pub claude_cli: bool,
     /// OpenAI Codex CLI is installed AND has logged-in credentials.
     pub codex_cli: bool,
-    /// Kimi Code CLI (MoonshotAI/kimi-cli) is installed AND has
-    /// logged-in credentials (config.toml present in ~/.kimi/).
+    /// Kimi Code CLI (MoonshotAI/kimi-cli) is installed AND logged in.
     pub kimi_cli: bool,
+    /// Google Gemini CLI (google-gemini/gemini-cli) is installed AND
+    /// logged in (~/.gemini/ contains OAuth cache).
+    pub gemini_cli: bool,
 }
 
 /// Probe what's connected right now. Cheap — runs on the AccountsPage
@@ -151,10 +167,15 @@ pub fn accounts_status() -> AccountsStatus {
             .get("OPENAI_API_KEY")
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false),
-        moonshot_api_key: map
-            .get("MOONSHOT_API_KEY")
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false),
+        moonshot_api_key: nonempty(&map, "MOONSHOT_API_KEY"),
+        deepseek_api_key:  nonempty(&map, "DEEPSEEK_API_KEY"),
+        xai_api_key:       nonempty(&map, "XAI_API_KEY"),
+        groq_api_key:      nonempty(&map, "GROQ_API_KEY"),
+        perplexity_api_key: nonempty(&map, "PERPLEXITY_API_KEY"),
+        mistral_api_key:   nonempty(&map, "MISTRAL_API_KEY"),
+        together_api_key:  nonempty(&map, "TOGETHER_API_KEY"),
+        gemini_api_key:    nonempty(&map, "GEMINI_API_KEY") || nonempty(&map, "GOOGLE_API_KEY"),
+        gemini_cli:        gemini_cli_logged_in(),
         hf_token: map
             .get("HF_TOKEN")
             .map(|s| !s.trim().is_empty())
@@ -238,13 +259,27 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
                 None => (false, "No OPENAI_API_KEY saved".to_string()),
             }
         }
-        "moonshot_api" => {
-            // Moonshot AI / Kimi keys are prefixed "sk-" like OpenAI's.
-            let v = load_secrets().get("MOONSHOT_API_KEY").cloned();
-            match v {
-                Some(k) if k.starts_with("sk-") => (true, "Key present (sk-…)".to_string()),
-                Some(k) if !k.trim().is_empty() => (true, format!("Key present ({} chars)", k.len())),
-                _ => (false, "No MOONSHOT_API_KEY saved".to_string()),
+        "moonshot_api" => generic_api_probe(&load_secrets(), "MOONSHOT_API_KEY", Some("sk-")),
+        "deepseek_api" => generic_api_probe(&load_secrets(), "DEEPSEEK_API_KEY", Some("sk-")),
+        "xai_api"      => generic_api_probe(&load_secrets(), "XAI_API_KEY", Some("xai-")),
+        "groq_api"     => generic_api_probe(&load_secrets(), "GROQ_API_KEY", Some("gsk_")),
+        "perplexity_api" => generic_api_probe(&load_secrets(), "PERPLEXITY_API_KEY", Some("pplx-")),
+        "mistral_api"  => generic_api_probe(&load_secrets(), "MISTRAL_API_KEY", None),
+        "together_api" => generic_api_probe(&load_secrets(), "TOGETHER_API_KEY", None),
+        "gemini_api"   => {
+            // Google accepts either env var; check both.
+            let map = load_secrets();
+            if nonempty(&map, "GEMINI_API_KEY") || nonempty(&map, "GOOGLE_API_KEY") {
+                (true, "Key present".to_string())
+            } else {
+                (false, "No GEMINI_API_KEY (or GOOGLE_API_KEY) saved".to_string())
+            }
+        }
+        "gemini_cli" => {
+            if gemini_cli_logged_in() {
+                (true, "gemini CLI credentials found".to_string())
+            } else {
+                (false, "gemini CLI not installed or not logged in".to_string())
             }
         }
         "huggingface" => {
@@ -850,6 +885,64 @@ fn kimi_cli_logged_in() -> bool {
     cfg.exists()
 }
 
+/// Google Gemini CLI (google-gemini/gemini-cli) caches OAuth at
+/// ~/.gemini/ after `gemini /auth` (or `gemini login`). The dir
+/// presence + at least one file inside is a reliable "logged in"
+/// signal — Google ships a few JSON files there (credentials.json,
+/// settings.json) once auth completes.
+fn gemini_cli_logged_in() -> bool {
+    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+        return false;
+    };
+    let dir = PathBuf::from(home).join(".gemini");
+    if !dir.is_dir() {
+        return false;
+    }
+    // Require at least one JSON-shaped file to avoid greenlighting an
+    // empty stub directory left behind by a previous failed install.
+    std::fs::read_dir(&dir)
+        .map(|it| it.flatten().any(|e| {
+            e.path().extension().and_then(|s| s.to_str()).map(|x| x.eq_ignore_ascii_case("json")).unwrap_or(false)
+        }))
+        .unwrap_or(false)
+}
+
+fn find_gemini_cli() -> Option<PathBuf> {
+    for name in ["gemini.exe", "gemini.cmd", "gemini"] {
+        if let Ok(path) = which_in_path(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Reusable validator for the new wave of OpenAI-compatible providers.
+/// `prefix` lets each provider's expected key shape ("sk-", "xai-",
+/// "gsk_", "pplx-") surface in the probe message; pass None for
+/// providers that don't enforce one.
+fn generic_api_probe(
+    map: &BTreeMap<String, String>,
+    env: &str,
+    prefix: Option<&str>,
+) -> (bool, String) {
+    let v = map.get(env).cloned();
+    match v {
+        Some(k) if k.trim().is_empty() => (false, format!("No {env} saved")),
+        Some(k) if prefix.map(|p| k.starts_with(p)).unwrap_or(true) => {
+            let detail = match prefix {
+                Some(p) => format!("Key present ({p}…)"),
+                None => format!("Key present ({} chars)", k.len()),
+            };
+            (true, detail)
+        }
+        Some(_) => (
+            false,
+            format!("Key does not start with {:?} — double-check the provider's docs", prefix.unwrap_or("")),
+        ),
+        None => (false, format!("No {env} saved")),
+    }
+}
+
 /// Trigger the subscription CLI's OAuth flow. Each CLI auto-opens
 /// the user's browser when it runs `login`, so we just spawn the
 /// CLI as a HIDDEN background process (no console window pops up).
@@ -867,9 +960,12 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
     // CLI directly (not via cmd /C) so no console window appears on
     // Windows — the CLI itself opens the browser.
     let (find_fn, login_args): (fn() -> Option<PathBuf>, &[&str]) = match backend.as_str() {
-        "claude_cli" => (find_claude_cli, &["/login"]),
-        "codex_cli"  => (find_codex_cli,  &["login"]),
-        "kimi_cli"   => (find_kimi_cli,   &["login"]),
+        "claude_cli"  => (find_claude_cli,  &["/login"]),
+        "codex_cli"   => (find_codex_cli,   &["login"]),
+        "kimi_cli"    => (find_kimi_cli,    &["login"]),
+        // gemini-cli's standalone OAuth flow: `gemini auth login`
+        // — opens browser, writes ~/.gemini/oauth_creds.json.
+        "gemini_cli"  => (find_gemini_cli,  &["auth", "login"]),
         other => return Err(format!("unknown subscription backend: {other}")),
     };
     let exe = find_fn().ok_or_else(|| format!(
@@ -902,6 +998,77 @@ fn find_codex_cli() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// One-shot completion via `gemini --prompt`. Same shape as the
+/// Kimi CLI handler — non-interactive mode that returns the model's
+/// final reply on stdout. gemini-cli (google-gemini/gemini-cli) reads
+/// OAuth creds from ~/.gemini and routes the call through the
+/// Gemini API on the user's subscription.
+#[tauri::command]
+pub async fn gemini_cli_complete(
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    model: Option<String>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let exe = find_gemini_cli()
+            .ok_or_else(|| "gemini CLI not found on PATH — install gemini-cli (https://github.com/google-gemini/gemini-cli) first".to_string())?;
+        let mut cmd = Command::new(&exe);
+
+        #[cfg(windows)]
+        let batch = is_batch_shim(&exe);
+        #[cfg(not(windows))]
+        let batch = false;
+
+        let composed = if system_prompt.trim().is_empty() {
+            user_message
+        } else {
+            format!("{system_prompt}\n\n---\n\n{user_message}")
+        };
+
+        // gemini-cli accepts --prompt (-p) for non-interactive output
+        // (matches Claude/Kimi conventions). --model picks the variant.
+        if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            push_arg(&mut cmd, batch, "--model");
+            push_arg(&mut cmd, batch, m);
+        }
+        push_arg(&mut cmd, batch, "--prompt");
+        push_arg(&mut cmd, batch, &composed);
+
+        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let p = std::path::Path::new(dir);
+            if p.is_dir() {
+                cmd.current_dir(p);
+            }
+        }
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let output = cmd
+            .spawn()
+            .map_err(|e| format!("spawn gemini: {e}"))?
+            .wait_with_output()
+            .map_err(|e| format!("wait gemini: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            return Err(format!(
+                "gemini CLI exited {} — {}",
+                output.status.code().unwrap_or(-1),
+                if stderr.is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
+            ));
+        }
+        let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
+        Ok(stdout.trim().to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 /// One-shot completion via `kimi --print --prompt`. Mirrors the

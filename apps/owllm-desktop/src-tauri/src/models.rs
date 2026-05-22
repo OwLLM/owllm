@@ -233,6 +233,47 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
             provider: "moonshot".to_string(),
         });
     }
+    // DeepSeek API (api.deepseek.com).
+    for id in ["deepseek-v4-pro", "deepseek-v4-flash"] {
+        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "deepseek".into() });
+    }
+    // xAI Grok (api.x.ai). grok-4.3 is the May 2026 flagship; older
+    // ids redirect to it server-side.
+    for id in ["grok-4.3", "grok-4.20", "grok-4.1-fast"] {
+        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "xai".into() });
+    }
+    // Groq LPU (api.groq.com) — fastest inference for open models.
+    for id in [
+        "llama-3.3-70b-versatile",
+        "llama-4-scout",
+        "qwen3-32b",
+        "deepseek-r1-distill-llama-70b",
+        "gpt-oss-120b",
+    ] {
+        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "groq".into() });
+    }
+    // Perplexity Sonar (api.perplexity.ai) — built-in web search.
+    for id in ["sonar-pro", "sonar", "sonar-reasoning"] {
+        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "perplexity".into() });
+    }
+    // Mistral (api.mistral.ai).
+    for id in ["mistral-large-latest", "magistral-medium-latest", "codestral-latest", "mistral-small-latest"] {
+        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "mistral".into() });
+    }
+    // Together AI (api.together.xyz) — open-source model host. Top 5
+    // popular options; users can plug exact IDs later.
+    for id in [
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "Qwen/Qwen2.5-72B-Instruct-Turbo",
+        "deepseek-ai/DeepSeek-V3",
+        "mistralai/Mixtral-8x22B-Instruct-v0.1",
+    ] {
+        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "together".into() });
+    }
+    // Google Gemini (generativelanguage.googleapis.com).
+    for id in ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"] {
+        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "gemini".into() });
+    }
 
     Ok(out)
 }

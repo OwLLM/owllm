@@ -545,20 +545,22 @@ export default function AccountsPage() {
 
   function handleConnect(spec: BrandSpec) {
     if (spec.kind === "subscription") {
-      // Subscription routes need an OAuth handoff to the corresponding
-      // CLI (claude login / codex login). The PySide6 app shelled out
-      // to a console; the Tauri rewrite hasn't wired that yet — until
-      // it does, point the user at the manual command so they can get
-      // unblocked. The 3-second poll picks up the credentials file
-      // automatically once the CLI finishes its OAuth flow.
-      const cmd = spec.backend === "claude_cli" ? "claude /login"
-                : spec.backend === "codex_cli"  ? "codex login"
-                : spec.backend === "kimi_cli"   ? "kimi /login"
-                : `${spec.backend} login`;
-      window.alert(
-        `Run this in a terminal to sign in:\n\n  ${cmd}\n\n` +
-        `The card will flip to green within 3 seconds after the CLI saves its credentials.`
-      );
+      // Spawn a real terminal running the CLI's login command. Each
+      // CLI opens the user's browser for OAuth and waits in the
+      // shell until the flow finishes. The 3-second accounts_status
+      // poll picks up the credentials file automatically once the
+      // CLI writes it.
+      invoke("subscription_cli_login", { backend: spec.backend }).catch((e) => {
+        const fallback = spec.backend === "claude_cli" ? "claude /login"
+                        : spec.backend === "codex_cli"  ? "codex login"
+                        : spec.backend === "kimi_cli"   ? "kimi login"
+                        : `${spec.backend} login`;
+        window.alert(
+          `Couldn't open a terminal: ${e}\n\n` +
+          `Run this manually instead:\n\n  ${fallback}\n\n` +
+          `The card will flip to green within 3 seconds after the CLI saves its credentials.`
+        );
+      });
     } else {
       setDialogFor(spec);
     }

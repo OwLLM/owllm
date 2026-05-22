@@ -68,6 +68,7 @@ pub fn run() {
             accounts::claude_cli_complete,
             accounts::claude_cli_stream,
             accounts::kimi_cli_complete,
+            accounts::subscription_cli_login,
             agents::list_team_templates,
             agents::list_agent_roles,
             agents::list_skill_packs,

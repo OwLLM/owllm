@@ -850,6 +850,84 @@ fn kimi_cli_logged_in() -> bool {
     cfg.exists()
 }
 
+/// Open a new visible terminal running the subscription CLI's login
+/// command. Each CLI's OAuth flow auto-launches the user's browser
+/// AND waits in the terminal for completion (Kimi prints "available
+/// models will be automatically configured" once the browser
+/// finishes), so we can't pipe stdout — we need a real window the
+/// user can see and that survives until the CLI is done.
+///
+/// Returns immediately after spawning; the 3-s accounts_status poll
+/// flips the AccountsPage card to green once the CLI writes its
+/// credentials file. Best-effort on non-Windows: tries common
+/// terminal emulators in order, falls back to spawning the CLI
+/// directly (whose own behaviour will at least open the browser).
+#[tauri::command]
+pub fn subscription_cli_login(backend: String) -> Result<(), String> {
+    // Exact command line per each CLI's docs.
+    let cmd = match backend.as_str() {
+        "claude_cli" => "claude /login",
+        "codex_cli"  => "codex login",
+        "kimi_cli"   => "kimi login",
+        other => return Err(format!("unknown subscription backend: {other}")),
+    };
+    #[cfg(windows)]
+    {
+        // `cmd /C start cmd /K "<cli login>"` opens a fresh console,
+        // runs the CLI, and KEEPS it open after exit so the user can
+        // read any final message ("logged in as …"). title arg
+        // ("OwLLM login") prevents the dreaded "" before the path
+        // that Windows otherwise treats as the title token.
+        let title = match backend.as_str() {
+            "claude_cli" => "OwLLM · Claude login",
+            "codex_cli"  => "OwLLM · Codex login",
+            "kimi_cli"   => "OwLLM · Kimi login",
+            _ => "OwLLM login",
+        };
+        let mut child = std::process::Command::new("cmd");
+        child.args(["/C", "start", title, "cmd", "/K", cmd]);
+        child
+            .spawn()
+            .map_err(|e| format!("spawn cmd: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Open Terminal.app with the CLI command. AppleScript via
+        // `osascript` is the standard cross-distribution way.
+        let script = format!("tell application \"Terminal\" to do script \"{cmd}\"");
+        std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+            .map_err(|e| format!("osascript: {e}"))?;
+        return Ok(());
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        // Linux: try common terminals in order. If none are found,
+        // run the CLI directly — it'll open the browser even without
+        // a visible terminal, the user just can't see the prompt.
+        for term in [
+            ("x-terminal-emulator", vec!["-e".to_string(), "bash".into(), "-c".into(), format!("{cmd}; exec bash")]),
+            ("gnome-terminal", vec!["--".into(), "bash".into(), "-c".into(), format!("{cmd}; exec bash")]),
+            ("konsole", vec!["-e".into(), "bash".into(), "-c".into(), format!("{cmd}; exec bash")]),
+            ("xterm", vec!["-hold".into(), "-e".into(), format!("bash -c \"{cmd}\"")]),
+        ] {
+            if std::process::Command::new(term.0).args(&term.1).spawn().is_ok() {
+                return Ok(());
+            }
+        }
+        // Fallback — just exec the CLI; relies on its own browser-open.
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let exe = parts.first().ok_or_else(|| "empty cmd".to_string())?;
+        std::process::Command::new(exe)
+            .args(&parts[1..])
+            .spawn()
+            .map_err(|e| format!("spawn fallback: {e}"))?;
+        Ok(())
+    }
+}
+
 /// One-shot completion via `kimi --print --prompt`. Mirrors the
 /// shape of claude_cli_complete but uses Kimi Code CLI's actual flag
 /// surface: `--print` (alias `-q` for quiet/final-only when paired

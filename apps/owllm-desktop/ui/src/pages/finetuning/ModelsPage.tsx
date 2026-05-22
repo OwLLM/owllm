@@ -190,6 +190,51 @@ function exportTunedToGguf(
     });
 }
 
+// Delete a tuned adapter dir from disk after confirmation. Rust side
+// is path-gated to <llm_root>/fine_tuned/ so a typo can't nuke a
+// system dir. Refreshes the tile list on success.
+function deleteTunedAdapter(
+  path: string,
+  name: string,
+  setError: (msg: string | null) => void,
+  refreshTuned: () => void,
+) {
+  const confirmed = window.confirm(
+    `Delete tuned model "${name}"?\n\nPath: ${path}\n\nThis is permanent — the directory and all its files will be removed.`,
+  );
+  if (!confirmed) return;
+  console.log("[delete-tuned] confirmed →", path);
+  setError(`🗑️ Deleting ${name}…`);
+  invoke<void>("delete_tuned_adapter", { path })
+    .then(() => {
+      setError(`✅ Deleted ${name}`);
+      refreshTuned();
+    })
+    .catch((e) => {
+      console.error("[delete-tuned] failed", e);
+      setError(`❌ Delete failed: ${e}`);
+    });
+}
+
+// "Test" a tuned model: for transformers dirs the user needs to GGUF
+// first; for .gguf files we hand off to the Server start path so the
+// Chat page can talk to it. Cheap & honest — surface the situation
+// instead of pretending to do something.
+function testTunedAdapter(path: string, setError: (msg: string | null) => void) {
+  console.log("[test-tuned] →", path);
+  if (path.toLowerCase().endsWith(".gguf")) {
+    // Start the server pointing at this .gguf so the Chat page can use it.
+    setError(`▶ Starting server with ${path.split(/[\\/]/).pop()}…`);
+    invoke<void>("server_start", { modelId: path })
+      .then(() => setError(`✅ Server starting — open the Chat page.`))
+      .catch((e) => setError(`❌ Server start failed: ${e}`));
+  } else {
+    setError(
+      "ℹ Transformers-dir models can't be served by llama-server directly. Click 📦 Export GGUF first, then 💬 Test the resulting .gguf.",
+    );
+  }
+}
+
 export default function ModelsPage() {
   const [tab, setTab] = React.useState<SubTab>("browse");
   const [downloaded, setDownloaded] = React.useState<DownloadedItem[]>([]);
@@ -849,7 +894,9 @@ export default function ModelsPage() {
               createdAt={t.modified ?? undefined}
               selected={selectedPath === t.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
+              onTest={(path) => testTunedAdapter(path, setHfError)}
               onExportGguf={(path) => exportTunedToGguf(path, setHfError, refreshTuned)}
+              onDelete={(path) => deleteTunedAdapter(path, t.name, setHfError, refreshTuned)}
             />
           ))}
         </div>

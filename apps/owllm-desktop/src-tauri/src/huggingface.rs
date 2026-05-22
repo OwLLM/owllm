@@ -353,6 +353,39 @@ pub struct TunedAdapter {
     pub base_hint: Option<String>,
 }
 
+/// Delete a tuned adapter directory (or .gguf file) from disk. Used
+/// by the Models page Tuned tab's 🗑️ button. We only allow paths
+/// strictly under <llm_root>/fine_tuned/ so a stray call can't
+/// rm-rf an arbitrary system dir.
+#[tauri::command]
+pub async fn delete_tuned_adapter(path: String) -> Result<(), String> {
+    let target = std::path::PathBuf::from(&path);
+    let root = crate::paths::llm_root().ok_or_else(|| "no LLM root".to_string())?;
+    let fine_tuned_root = root.join("fine_tuned");
+    // Canonicalize both so a path like "fine_tuned/../models/x" can't
+    // escape the guard via .. traversal.
+    let canon_target = std::fs::canonicalize(&target)
+        .map_err(|e| format!("canonicalize {path}: {e}"))?;
+    let canon_root = std::fs::canonicalize(&fine_tuned_root)
+        .map_err(|e| format!("canonicalize {}: {e}", fine_tuned_root.display()))?;
+    if !canon_target.starts_with(&canon_root) {
+        return Err(format!(
+            "refused: {} is not under {} (Tuned tab can only delete its own entries)",
+            canon_target.display(), canon_root.display()
+        ));
+    }
+    if canon_target.is_dir() {
+        std::fs::remove_dir_all(&canon_target)
+            .map_err(|e| format!("remove_dir_all {}: {e}", canon_target.display()))?;
+    } else if canon_target.is_file() {
+        std::fs::remove_file(&canon_target)
+            .map_err(|e| format!("remove_file {}: {e}", canon_target.display()))?;
+    } else {
+        return Err(format!("not a file or directory: {}", canon_target.display()));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_tuned_adapters() -> Result<Vec<TunedAdapter>, String> {
     tokio::task::spawn_blocking(|| -> Result<Vec<TunedAdapter>, String> {

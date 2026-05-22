@@ -113,6 +113,7 @@ pub fn run() {
             huggingface::hf_model_files,
             huggingface::hf_download,
             huggingface::list_tuned_adapters,
+            huggingface::delete_tuned_adapter,
             huggingface::models_list_downloaded,
             recommendations::models_recommended,
             paths::shell_open_url,

@@ -247,31 +247,43 @@ def dequantize_bnb_if_needed(model) -> bool:
             is_8bit = isinstance(child, getattr(bnb.nn, "Linear8bitLt", tuple()))
             if is_4bit or is_8bit:
                 # bnb.functional.dequantize_4bit / dequantize_blockwise
-                # give us the float weight back. We then build a plain
-                # nn.Linear with the same shape/bias and copy in.
+                # give us the float weight back. Critical for ≥7B
+                # models: a fully fp16-dequantized 12B model is ~24GB,
+                # which OOMs on 22GB cards. So we dequantize on GPU,
+                # immediately move the result to CPU, then swap the
+                # original bnb module out (freeing its GPU memory).
                 with torch.no_grad():
                     if is_4bit:
-                        w = bnb.functional.dequantize_4bit(
+                        w_gpu = bnb.functional.dequantize_4bit(
                             child.weight.data,
                             child.weight.quant_state,
                         ).to(torch.float16)
                     else:
                         # 8bit: state holds CB (column-quantized) and
-                        # SCB (scales). Easiest path: forward an identity
-                        # and grab the dequant'd weight via the
-                        # module's .data fp16 cache.
-                        w = (child.weight.CB.to(torch.float16) * child.weight.SCB.unsqueeze(1).to(torch.float16) / 127.0).contiguous()
+                        # SCB (scales).
+                        w_gpu = (
+                            child.weight.CB.to(torch.float16)
+                            * child.weight.SCB.unsqueeze(1).to(torch.float16) / 127.0
+                        ).contiguous()
+                    w_cpu = w_gpu.to("cpu")
+                    del w_gpu
                 new_lin = torch.nn.Linear(
                     in_features=child.in_features,
                     out_features=child.out_features,
                     bias=child.bias is not None,
-                    device=w.device,
+                    device="cpu",
                     dtype=torch.float16,
                 )
-                new_lin.weight.data.copy_(w)
+                new_lin.weight.data.copy_(w_cpu)
+                del w_cpu
                 if child.bias is not None:
-                    new_lin.bias.data.copy_(child.bias.data.to(torch.float16))
+                    new_lin.bias.data.copy_(child.bias.data.to("cpu").to(torch.float16))
                 setattr(module, child_name, new_lin)
+                # Release the bnb module's GPU storage. Aggressive
+                # empty_cache after each swap keeps the high-water mark
+                # at ~(remaining bnb) instead of (bnb + fp16-so-far).
+                del child
+                torch.cuda.empty_cache()
                 swapped += 1
                 emit(event="dequantize", target=full_name)
             else:

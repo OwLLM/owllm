@@ -183,40 +183,31 @@ export default function ChatPage() {
     return () => { dead = true; };
   }, []);
 
-  // Auto-start the global llama-server when column A picks a local
-  // GGUF — server.rs holds one Child today, so we treat column A's
-  // selection as the active server's model. Cloud / non-GGUF
-  // entries (no port, provider != local-gguf) are skipped here and
-  // routed through dispatch.ts on send. If a different model is
-  // already running, swap (stop then start).
+  // Lazy server-start state. The local llama-server is no longer
+  // pre-launched when this page opens or column A's model changes —
+  // sendOne() starts it on the FIRST send instead, so just browsing
+  // the Chat tab doesn't spin a 7-14 B model into VRAM the user
+  // never asked for.
   const [autoStarting, setAutoStarting] = useState<string | null>(null);
-  useEffect(() => {
-    const driver = columns[0]; // column A
-    if (!driver?.selectedModel) return;
-    // Only auto-start servable local/tuned GGUF entries (have a port,
-    // no prefix). Both "local" (LLM/models/) and "tuned"
-    // (LLM/fine_tuned/) route through the same llama-server.
-    const m = availableModels.find((x) => x.model_id === driver.selectedModel);
-    if (!m || (m.provider !== "local" && m.provider !== "tuned") || m.port == null) return;
-    if (status.running && status.model_id === driver.selectedModel) return;
-    if (autoStarting === driver.selectedModel) return;
 
-    let dead = false;
-    (async () => {
-      setAutoStarting(driver.selectedModel);
-      try {
-        if (status.running) {
-          await invoke("server_stop").catch(() => {});
-        }
-        await invoke("server_start", { modelId: driver.selectedModel });
-      } catch (e) {
-        if (!dead) updateCol("A", { error: `Failed to start server: ${e}` });
-      } finally {
-        if (!dead) setAutoStarting(null);
-      }
-    })();
-    return () => { dead = true; };
-  }, [columns[0]?.selectedModel, status.running, status.model_id, availableModels]);
+  // Start the llama-server for `wanted` and resolve once it's actually
+  // serving that model. The 503-poll loop in sendOne handles the
+  // "still loading weights" wait — this just kicks the spawn and
+  // updates the local autoStarting flag for any UI that cares.
+  async function ensureLocalServer(wanted: string): Promise<boolean> {
+    if (status.running && status.model_id === wanted) return true;
+    setAutoStarting(wanted);
+    try {
+      if (status.running) await invoke("server_stop").catch(() => {});
+      await invoke("server_start", { modelId: wanted });
+      return true;
+    } catch (e) {
+      updateCol("A", { error: `Failed to start server: ${e}` });
+      return false;
+    } finally {
+      setAutoStarting(null);
+    }
+  }
 
   // Auto-scroll each column's transcript when new tokens land.
   useEffect(() => {
@@ -240,11 +231,65 @@ export default function ChatPage() {
       return { ...c, messages: out };
     }));
 
+  // Quick check: did the user hit Stop on this column while we were
+  // waiting for the server to come up? Read the aborter ref so the
+  // boot poll exits cleanly.
+  function ctrlAborted(id: "A" | "B" | "C"): boolean {
+    const c = abortersRef.current.get(id);
+    return !!c && c.signal.aborted;
+  }
+
   // Send the same user text to one column. Returns the assistant
   // reply when the stream completes (used by the M2M loop).
   async function sendOne(col: Column, userText: string): Promise<string> {
-    if (!status.running || !status.port) {
-      updateCol(col.id, { error: "No server running. Start one on the Server tab." });
+    // Lazy server start. If the user picked a servable local/tuned
+    // model on this column (or column A as the driver), spawn the
+    // server now — first send is what kicks the load. The 503 retry
+    // loop below then waits through the weights mapping. We track
+    // port locally because the 3 s server_status poll hasn't fired
+    // yet right after server_start — the stale `status.port` would
+    // give 'Failed to fetch' against http://127.0.0.1:undefined.
+    const driver = columns[0];
+    const wantedModelId =
+      (col.selectedModel || driver?.selectedModel || "").trim();
+    let activePort: number | null = status.port;
+    if (wantedModelId) {
+      const m = availableModels.find((x) => x.model_id === wantedModelId);
+      const isServable = !!m && (m.provider === "local" || m.provider === "tuned") && m.port != null;
+      const alreadyRight = status.running && status.model_id === wantedModelId;
+      if (isServable && !alreadyRight) {
+        updateCol(col.id, { error: `⏳ Starting server (${wantedModelId})…`, busy: true });
+        const ok = await ensureLocalServer(wantedModelId);
+        if (!ok) {
+          updateCol(col.id, { busy: false });
+          return "";
+        }
+        // Pull a fresh status so we have a real port BEFORE the POST.
+        // Server may report running=true with the new port within a
+        // few hundred ms even though weights are still mapping (the
+        // 503 loop handles that part).
+        for (let i = 0; i < 30; i++) {
+          try {
+            const s = await invoke<typeof status>("server_status");
+            setStatus(s);
+            if (s.running && s.port && s.model_id === wantedModelId) {
+              activePort = s.port;
+              break;
+            }
+          } catch {
+            // ignore, retry
+          }
+          if (ctrlAborted(col.id)) return "";
+          await new Promise((r) => setTimeout(r, 400));
+        }
+        if (!activePort) {
+          updateCol(col.id, { error: "Server start timed out — check the Server tab logs.", busy: false });
+          return "";
+        }
+      }
+    }
+    if (!activePort) {
+      updateCol(col.id, { error: "No server running and no servable model picked. Pick a local/tuned model first." });
       return "";
     }
     const userMsg: ChatMsg = { role: "user", content: userText };
@@ -281,7 +326,7 @@ export default function ChatPage() {
       const READY_TIMEOUT_MS = 180_000;
       while (true) {
         if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
-        resp = await fetch(`http://127.0.0.1:${status.port}/v1/chat/completions`, {
+        resp = await fetch(`http://127.0.0.1:${activePort}/v1/chat/completions`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
@@ -609,7 +654,7 @@ export default function ChatPage() {
                 }
               }}
               placeholder="Type your message here..."
-              disabled={!status.running || anyBusy}
+              disabled={anyBusy}
               style={{
                 flex: 1, minHeight: 90, maxHeight: 90,
                 resize: "none",
@@ -636,16 +681,16 @@ export default function ChatPage() {
               ) : (
                 <button
                   onClick={sendAll}
-                  disabled={!status.running || !draft.trim()}
+                  disabled={!draft.trim()}
                   style={{
                     height: 40,
                     background: "linear-gradient(180deg, #4a6cff, #3a55cc)",
                     color: "#fff",
                     border: "none", borderRadius: 8,
                     fontSize: 12, fontWeight: 700,
-                    cursor: (!status.running || !draft.trim()) ? "not-allowed" : "pointer",
-                    opacity: (!status.running || !draft.trim()) ? 0.75 : 1,
-                    boxShadow: !status.running || !draft.trim() ? "none" : "0 0 16px -4px #4a6cff88",
+                    cursor: !draft.trim() ? "not-allowed" : "pointer",
+                    opacity: !draft.trim() ? 0.75 : 1,
+                    boxShadow: !draft.trim() ? "none" : "0 0 16px -4px #4a6cff88",
                   }}
                 >📤 Send</button>
               )}

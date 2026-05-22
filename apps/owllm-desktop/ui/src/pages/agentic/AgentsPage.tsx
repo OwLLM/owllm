@@ -5659,10 +5659,40 @@ export default function AgentsPage() {
             {/* Info-card overlay — moved from left to RIGHT side (user
                 spec 2026-05-18). Rendered in BOTH views so the page
                 stays consistent and selection state survives a view
-                toggle. When an agent is selected its info card replaces
-                the team card; the Super User input sits below either way. */}
-            <div style={{ position:"absolute", top:8, right:8, width:450, pointerEvents:"none" }}>
-              <div style={{ pointerEvents:"auto" }}>
+                toggle. Layout updated 2026-05-22: SuperUserCard sits
+                ON TOP (always reachable even on shorter screens), with
+                the TeamInfo/AgentInfo card BELOW so a long info card
+                pushes off-screen instead of the chat input.
+                The container scrolls when total height exceeds the
+                viewport so nothing is unreachable. */}
+            <div style={{
+              position: "absolute",
+              top: 8,
+              right: 8,
+              bottom: 8,
+              width: 450,
+              pointerEvents: "none",
+              overflowY: "auto",
+              display: "flex",
+              flexDirection: "column",
+              gap: 10,
+            }}>
+              <div style={{ pointerEvents: "auto" }}>
+                <SuperUserCard
+                  team={renderTeam}
+                  roleByName={roleByName}
+                  chat={supChat}
+                  onSend={onSupSend}
+                  autoApprove={autoApprove}
+                  onToggleAutoApprove={() => setAutoApprove(v => !v)}
+                  projectId={selectedProjectId}
+                  directives={directives}
+                  onDirectivesChanged={reloadDirectives}
+                  directorMode={directorMode}
+                  onToggleDirectorMode={() => setDirectorMode(!directorMode)}
+                />
+              </div>
+              <div style={{ pointerEvents: "auto" }}>
                 {selectedAgentSpec ? (
                   <AgentInfoCard
                     team={renderTeam}
@@ -5692,19 +5722,6 @@ export default function AgentsPage() {
                     accountsStatus={accountsStatus}
                   />
                 )}
-                <SuperUserCard
-                  team={renderTeam}
-                  roleByName={roleByName}
-                  chat={supChat}
-                  onSend={onSupSend}
-                  autoApprove={autoApprove}
-                  onToggleAutoApprove={() => setAutoApprove(v => !v)}
-                  projectId={selectedProjectId}
-                  directives={directives}
-                  onDirectivesChanged={reloadDirectives}
-                  directorMode={directorMode}
-                  onToggleDirectorMode={() => setDirectorMode(!directorMode)}
-                />
               </div>
             </div>
           </div>

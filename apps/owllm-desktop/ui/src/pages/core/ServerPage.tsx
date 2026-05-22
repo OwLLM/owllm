@@ -868,8 +868,78 @@ function LogColumn({ logs, onClear }: { logs: string[]; onClear: () => void }) {
 // ---------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------
+// Logs persist across tab switches by surviving in localStorage. The
+// `server-log` listener stays mounted via SERVER_LOG_HUB (module
+// scope) so the rolling tail accumulates even when ServerPage is
+// unmounted — the user can switch to Chat / Agents and come back to
+// the full Server boot trace.
+const LOG_STORAGE_KEY = "owllm.server.logs";
+const LOG_MAX = 2000;
+type LogListener = (lines: string[]) => void;
+
+class ServerLogHub {
+  private lines: string[];
+  private listeners: Set<LogListener> = new Set();
+  private wired = false;
+  private unlisten: (() => void) | null = null;
+
+  constructor() {
+    let stored: string[] = [];
+    try {
+      const raw = localStorage.getItem(LOG_STORAGE_KEY);
+      if (raw) stored = JSON.parse(raw);
+    } catch { /* corrupted store — start fresh */ }
+    this.lines = Array.isArray(stored) ? stored : [];
+  }
+
+  async ensureWired() {
+    if (this.wired) return;
+    this.wired = true;
+    try {
+      const fn = await listen<ServerLog>("server-log", (ev) => {
+        const p = ev.payload;
+        const prefix = p.stream === "stderr" ? "[stderr] " : "";
+        this.push(`${prefix}${p.line}`);
+      });
+      this.unlisten = fn;
+    } catch (e) {
+      console.warn("[server-log] listen failed:", e);
+      this.wired = false;
+    }
+  }
+
+  push(line: string) {
+    this.lines = [...this.lines, line].slice(-LOG_MAX);
+    this.persist();
+    for (const l of this.listeners) l(this.lines);
+  }
+
+  clear() {
+    this.lines = [];
+    this.persist();
+    for (const l of this.listeners) l(this.lines);
+  }
+
+  snapshot() {
+    return this.lines;
+  }
+
+  subscribe(fn: LogListener): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+
+  private persist() {
+    try {
+      localStorage.setItem(LOG_STORAGE_KEY, JSON.stringify(this.lines));
+    } catch { /* quota — just drop persistence */ }
+  }
+}
+
+const SERVER_LOG_HUB = new ServerLogHub();
+
 export default function ServerPage() {
-  const [logs, setLogs] = useState<string[]>([]);
+  const [logs, setLogs] = useState<string[]>(() => SERVER_LOG_HUB.snapshot());
   const [modelId, setModelId] = useState<string>("");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string>("");
@@ -877,18 +947,17 @@ export default function ServerPage() {
   const [serverState, setServerState] = useState<string>("Not checked");
 
   function appendLog(line: string) {
-    setLogs((prev) => [...prev, line].slice(-2000));
+    SERVER_LOG_HUB.push(line);
   }
 
-  // Live log stream from the native server.rs supervisor — emits a
-  // `server-log` event per stdout/stderr line of the llama.cpp child.
+  // The hub is wired once and stays subscribed for the app lifetime.
+  // ServerPage just subscribes to its updates and unsubscribes on
+  // unmount — the lines themselves accumulate even when this page
+  // isn't mounted.
   useEffect(() => {
-    const unlisten = listen<ServerLog>("server-log", (ev) => {
-      const p = ev.payload;
-      const prefix = p.stream === "stderr" ? "[stderr] " : "";
-      setLogs((prev) => [...prev, `${prefix}${p.line}`].slice(-2000));
-    });
-    return () => { unlisten.then((fn) => fn()); };
+    SERVER_LOG_HUB.ensureWired();
+    const unsub = SERVER_LOG_HUB.subscribe((next) => setLogs(next));
+    return () => { unsub(); };
   }, []);
 
   useEffect(() => { refreshAll(); }, []);
@@ -939,44 +1008,24 @@ export default function ServerPage() {
   }
 
   return (
-    // The Server page is presented as a centered popup card sitting on
-    // top of a dimmed app background — mirrors the legacy PySide6
-    // behaviour where the Server window pops over the rest of the UI.
-    // The cyan-glass frame visually echoes the main app's HybridFrame
-    // so the popup reads as part of the same window family.
+    // Standard flowing page — was a centered fixed popup, but the user
+    // couldn't scroll or reach content that overflowed the 820px cap.
+    // Now it's a normal scrollable column that fills the tab area.
     <div data-ui="ServerPopupHost" style={{
       position: "relative",
       height: "100%",
       width: "100%",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      // Slight dim layer so the centered card pops against the rest of
-      // the AppShell behind it.
-      background: "rgba(8, 12, 24, 0.55)",
-      padding: 24,
+      padding: "16px 22px 18px",
       boxSizing: "border-box",
       overflow: "auto",
     }}>
       <div data-ui="ServerPopupCard" style={{
         position: "relative",
-        width: "min(1400px, 96%)",
-        height: "min(820px, 96%)",
-        padding: "16px 22px 18px",
+        width: "100%",
+        minHeight: "100%",
         display: "flex",
         flexDirection: "column",
         gap: 12,
-        background: "var(--bg-panel)",
-        // Cyan-glass frame — matches the HybridFrame border colour
-        // / accent / shadow palette used by AppShell so the popup
-        // reads as "same window family".
-        border: "1.6px solid rgba(120,220,255,0.78)",
-        borderRadius: 16,
-        boxShadow:
-          "0 0 0 1px rgba(200,240,255,0.32) inset, " +
-          "0 24px 60px rgba(0,0,0,0.55), " +
-          "0 0 40px rgba(120,220,255,0.20)",
-        minHeight: 0,
       }}>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         {/* Real owl_server.png — same asset family as CodePage / AgentsPage */}
@@ -1019,7 +1068,7 @@ export default function ServerPage() {
           error={error}
           appendLog={appendLog}
         />
-        <LogColumn logs={logs} onClear={() => setLogs([])} />
+        <LogColumn logs={logs} onClear={() => SERVER_LOG_HUB.clear()} />
       </div>
       </div>
     </div>

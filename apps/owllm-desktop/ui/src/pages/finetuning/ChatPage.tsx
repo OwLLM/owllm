@@ -193,9 +193,11 @@ export default function ChatPage() {
   useEffect(() => {
     const driver = columns[0]; // column A
     if (!driver?.selectedModel) return;
-    // Only auto-start local GGUF entries (have a port, no prefix).
+    // Only auto-start servable local/tuned GGUF entries (have a port,
+    // no prefix). Both "local" (LLM/models/) and "tuned"
+    // (LLM/fine_tuned/) route through the same llama-server.
     const m = availableModels.find((x) => x.model_id === driver.selectedModel);
-    if (!m || m.provider !== "local" || m.port == null) return;
+    if (!m || (m.provider !== "local" && m.provider !== "tuned") || m.port == null) return;
     if (status.running && status.model_id === driver.selectedModel) return;
     if (autoStarting === driver.selectedModel) return;
 

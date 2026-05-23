@@ -1,0 +1,147 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OwLLM Overlay Frame</title>
+    <style>
+      :root {
+        --border-t: 18px;
+        --corner-outset: 10px;
+        --extra-top: 35px;
+        --corner-w: 160px;
+        --badge-w: 300px;
+        --badge-h: 195px;
+        --frame-bg: rgba(8, 12, 24, 0.95);
+        --frame-line: rgba(200, 240, 255, 0.86);
+        --frame-accent: rgba(120, 220, 255, 0.78);
+      }
+
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+      }
+
+      #frame {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        user-select: none;
+      }
+
+      .bar {
+        position: absolute;
+        background: var(--frame-bg);
+      }
+
+      .line {
+        position: absolute;
+        inset: 0;
+        border: 1px solid var(--frame-line);
+        border-radius: 14px;
+      }
+
+      .inner-line {
+        position: absolute;
+        border: 1px solid var(--frame-accent);
+        border-radius: 10px;
+      }
+
+      .corner,
+      .badge {
+        position: absolute;
+        pointer-events: none;
+      }
+
+      .corner {
+        width: var(--corner-w);
+        height: auto;
+      }
+
+      .badge {
+        width: var(--badge-w);
+        height: var(--badge-h);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="frame" aria-hidden="true">
+      <div id="top" class="bar"></div>
+      <div id="bottom" class="bar"></div>
+      <div id="left" class="bar"></div>
+      <div id="right" class="bar"></div>
+      <div id="outerLine" class="line"></div>
+      <div id="innerLine" class="inner-line"></div>
+
+      <img id="cornerBr" class="corner" src="/Page_icons/CornersNew/corner_br.png" />
+      <img id="cornerTl" class="corner" src="/Page_icons/CornersNew/corner_ul.png" />
+      <img id="cornerTr" class="corner" src="/Page_icons/CornersNew/corner_ur.png" />
+      <img id="cornerBl" class="corner" src="/Page_icons/CornersNew/corner_bl.png" />
+      <img id="badge" class="badge" src="/Page_icons/owl_studio_square.png" />
+    </div>
+
+    <script>
+      const BORDER_T = 18;
+      const CORNER_OUTSET = 10;
+      const SHIFT_OUT = BORDER_T / 2;
+      const EXTRA_TOP = 35;
+      const EXTRA_BOTTOM = 0;
+      const EXTRA_RIGHT = 0;
+      const MIN_PARENT_W = 800;
+      const MIN_PARENT_H = 500;
+      const BADGE_W = 300;
+      const BADGE_H = 195;
+      const CORNER_W = 160;
+      const H_TL = Math.round(CORNER_W * 513 / 486);
+      const H_TR = Math.round(CORNER_W * 484 / 516);
+      const H_BL = Math.round(CORNER_W * 512 / 488);
+      const H_BR = Math.round(CORNER_W * 488 / 512);
+
+      const el = (id) => document.getElementById(id);
+      const setBox = (node, x, y, w, h) => {
+        node.style.left = `${x}px`;
+        node.style.top = `${y}px`;
+        node.style.width = `${w}px`;
+        node.style.height = `${h}px`;
+      };
+
+      function layout() {
+        const outerW = window.innerWidth;
+        const outerH = window.innerHeight;
+        const parentW = Math.max(MIN_PARENT_W, outerW - EXTRA_RIGHT - 2 * SHIFT_OUT - 2 * CORNER_OUTSET);
+        const parentH = Math.max(MIN_PARENT_H, outerH - EXTRA_TOP - EXTRA_BOTTOM - 2 * SHIFT_OUT - 2 * CORNER_OUTSET);
+        const parentX = SHIFT_OUT + CORNER_OUTSET;
+        const parentY = EXTRA_TOP + SHIFT_OUT + CORNER_OUTSET;
+        const t = BORDER_T;
+        const so = SHIFT_OUT;
+
+        const outerL = parentX - so;
+        const outerT = parentY - so;
+        const outerW2 = parentW + 2 * so;
+        const outerH2 = parentH + 2 * so;
+        const outerR = outerL + outerW2;
+        const outerB = outerT + outerH2;
+
+        setBox(el("top"), parentX - so, parentY - so, parentW + 2 * so, t);
+        setBox(el("bottom"), parentX - so, parentY + parentH - t / 2, parentW + 2 * so, t);
+        setBox(el("left"), parentX - so, parentY - so, t, parentH + 2 * so);
+        setBox(el("right"), parentX + parentW - so, parentY - so, t, parentH + 2 * so);
+        setBox(el("outerLine"), outerL + 1, outerT + 1, outerW2 - 2, outerH2 - 2);
+        setBox(el("innerLine"), parentX - so + t, parentY - so + t, parentW + 2 * so - 2 * t, parentH + 2 * so - 2 * t);
+
+        setBox(el("cornerTl"), outerL - CORNER_OUTSET, outerT - CORNER_OUTSET, CORNER_W, H_TL);
+        setBox(el("cornerTr"), outerR - CORNER_W + 1 + CORNER_OUTSET, outerT - CORNER_OUTSET, CORNER_W, H_TR);
+        setBox(el("cornerBl"), outerL - CORNER_OUTSET, outerB - H_BL + 1 + CORNER_OUTSET, CORNER_W, H_BL);
+        setBox(el("cornerBr"), outerR - CORNER_W + 1 + CORNER_OUTSET, outerB - H_BR + 1 + CORNER_OUTSET, CORNER_W, H_BR);
+        setBox(el("badge"), parentX + (parentW - BADGE_W) / 2, parentY - BADGE_H / 2, BADGE_W, BADGE_H);
+      }
+
+      window.addEventListener("resize", layout);
+      layout();
+    </script>
+  </body>
+</html>

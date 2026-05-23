@@ -733,6 +733,19 @@ function resolveDeepLink(key: string): { mode: ActiveMode; activeKey: string } |
   return null;
 }
 
+function OverlayContentPanel({ children }: { children: React.ReactNode }) {
+  return (
+    <div style={{
+      position: "fixed",
+      inset: 0,
+      background: "var(--bg-panel)",
+      overflow: "hidden",
+    }}>
+      {children}
+    </div>
+  );
+}
+
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
   // Resolve the URL's ?page= once on mount so TwinForge can deep-link
@@ -749,7 +762,15 @@ export default function AppShell() {
   const [mode, setMode] = useState<ActiveMode>(initialDeep?.mode ?? "home");
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(initialAdvanced);
   const [serverModalOpen, setServerModalOpen] = useState<boolean>(false);
+  const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
   const theme = useTheme();
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    invoke<boolean>("overlay_frame_enabled")
+      .then(setOverlayFrame)
+      .catch(() => setOverlayFrame(false));
+  }, []);
 
   // Compose the visible page list: Core always, plus the active
   // mode's pages, plus Advanced's pages when advancedOpen.
@@ -843,13 +864,8 @@ export default function AppShell() {
   const PageBody = activePage?.component;
 
   const vp = useViewportSize();
-
-  return (
-    <>
-      <TelegramBridgeRunner />
-      <ResizeEdges />
-      <HybridFrame outerW={vp.w} outerH={vp.h}>
-        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
+  const appContent = (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
           <ModeBar
             mode={mode}
             setMode={handleSetMode}
@@ -880,8 +896,16 @@ export default function AppShell() {
           <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
             {PageBody ? <PageBody /> : null}
           </div>
-        </div>
-      </HybridFrame>
+    </div>
+  );
+
+  return (
+    <>
+      <TelegramBridgeRunner />
+      <ResizeEdges />
+      {overlayFrame
+        ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
+        : <HybridFrame outerW={vp.w} outerH={vp.h}>{appContent}</HybridFrame>}
       {serverModalOpen && <ServerModal onClose={() => setServerModalOpen(false)} />}
     </>
   );

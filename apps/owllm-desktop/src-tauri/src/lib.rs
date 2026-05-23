@@ -26,6 +26,7 @@ mod fleet;
 mod hardware;
 mod huggingface;
 mod models;
+mod overlay_frame;
 mod paths;
 mod projects;
 mod pty;
@@ -41,6 +42,7 @@ pub fn run() {
             // Module-local state lives where the module lives; lib.rs
             // just kicks off the install.
             server::install(app);
+            overlay_frame::install(app);
             Ok(())
         })
         .on_page_load(|webview, payload| {
@@ -104,6 +106,7 @@ pub fn run() {
             hardware::vram_status,
             hardware::set_gpu_selection,
             models::list_models,
+            overlay_frame::overlay_frame_enabled,
             projects::list_projects,
             projects::create_project,
             projects::update_project,
@@ -150,7 +153,7 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building OwLLM Desktop")
-        .run(|_app, event| {
+        .run(|app, event| {
             // Reap every spawned llama-server when the app is asked
             // to exit OR is actually exiting. ExitRequested fires
             // before windows are torn down; Exit fires when the
@@ -161,10 +164,19 @@ pub fn run() {
             // doesn't run if the runtime is force-killed before the
             // Child is dropped.
             match event {
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::CloseRequested { .. },
+                    ..
+                } if label == "main" => {
+                    overlay_frame::close_if_present(app);
+                }
                 tauri::RunEvent::ExitRequested { .. } => {
+                    overlay_frame::close_if_present(app);
                     server::kill_all_llama_servers("exit-requested");
                 }
                 tauri::RunEvent::Exit => {
+                    overlay_frame::close_if_present(app);
                     server::kill_all_llama_servers("exit");
                 }
                 _ => {}

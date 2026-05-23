@@ -387,14 +387,23 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                 {QUANTS.map((q) => {
                   const eb = sourceBytes ? estGgufBytes(sourceBytes, q) : 0;
                   const fit = sourceBytes ? fitsInVram(eb, vramGb ?? 0) : "ok";
+                  // Row background + label colour driven by GPU fit.
+                  // Previous opacities (0.10) made everything look
+                  // identical — the icons ✅⚠❌ carried the whole
+                  // signal. Stronger fills + a coloured left edge
+                  // make the three states pop side-by-side.
                   const color =
-                    fit === "no"    ? "#ff8080" :
+                    fit === "no"    ? "#ffb0b0" :
                     fit === "tight" ? "#f5d76e" :
-                                      "var(--fg)";
+                                      "#b8f0c0";
                   const bg =
-                    fit === "no"    ? "rgba(244,67,54,0.10)" :
-                    fit === "tight" ? "rgba(255,193,7,0.10)" :
-                                      "transparent";
+                    fit === "no"    ? "rgba(244,67,54,0.18)" :
+                    fit === "tight" ? "rgba(255,193,7,0.16)" :
+                                      "rgba(76,175,80,0.16)";
+                  const edge =
+                    fit === "no"    ? "#f44336" :
+                    fit === "tight" ? "#f5b400" :
+                                      "#4caf50";
                   // Recommendation is VRAM-aware now: largest quant
                   // that fits the user's GPU rather than a hardcoded
                   // q4_k_m. So on an 8 GB card with a 14B model the
@@ -420,13 +429,22 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                         gap: 8,
                         width: "100%",
                         padding: "6px 10px",
-                        background: isPicked ? "rgba(102,126,234,0.18)" : bg,
-                        border: isPicked ? "1px solid #7fb8ff" : "1px solid transparent",
+                        // Stack the GPU-fit bg with a left edge in the
+                        // matching colour so each row has TWO redundant
+                        // visual signals. When picked, swap the
+                        // border to the selection blue but keep the
+                        // GPU-fit edge so the user still sees red/
+                        // yellow/green for the picked row.
+                        background: isPicked
+                          ? `linear-gradient(90deg, ${edge}40 0 4px, rgba(102,126,234,0.20) 4px 100%)`
+                          : `linear-gradient(90deg, ${edge} 0 3px, ${bg} 3px 100%)`,
+                        border: isPicked ? "1px solid #7fb8ff" : `1px solid ${edge}55`,
                         borderRadius: 4,
                         color,
                         textAlign: "left",
                         fontSize: 12,
                         cursor: "pointer",
+                        marginBottom: 2,
                       }}
                       onMouseEnter={(ev) => { if (!isPicked) (ev.currentTarget as HTMLElement).style.outline = "1px solid rgba(102,126,234,0.5)"; }}
                       onMouseLeave={(ev) => { if (!isPicked) (ev.currentTarget as HTMLElement).style.outline = "none"; }}

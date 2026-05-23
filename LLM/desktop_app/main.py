@@ -10359,6 +10359,21 @@ class MainWindow(QMainWindow):
         )
         onboarded = (path / ".onboarded").exists()
 
+        # --- GPU-fit compatibility badge ----------------------------------
+        # Tuned adapters ride on top of their base model — the VRAM cost
+        # at chat time is the BASE model's footprint, plus a tiny LoRA.
+        # Reuse the Browse/Downloaded badge function so all three card
+        # families colour their borders the same way for the same model.
+        from desktop_app.model_card_widget import border_color_for_compat
+        compatibility_badge = None
+        if base_model and base_model != "—":
+            try:
+                compatibility_badge = get_model_compatibility_badge(
+                    base_model, base_model, self.user_vram_gb
+                )
+            except Exception:
+                compatibility_badge = None
+
         # --- card frame: same border + gradient as DownloadedModelCard --
         card = QFrame()
         card.setMinimumHeight(220)
@@ -10367,7 +10382,7 @@ class MainWindow(QMainWindow):
         # border + hover pop. The colour values are copied verbatim
         # from model_card_widget.DownloadedModelCard._apply_style so the
         # two card types render identically side by side.
-        border_color = "#667eea"
+        border_color = border_color_for_compat(compatibility_badge)
         card.setStyleSheet(f"""
             QFrame {{
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
@@ -10475,6 +10490,34 @@ class MainWindow(QMainWindow):
         badge_row = QHBoxLayout()
         badge_row.setSpacing(10)
         badge_row.addWidget(status_badge)
+
+        # GPU-fit badge next to the status pill — same visual treatment
+        # as ModelCard / DownloadedModelCard so users can read fit at a
+        # glance across all three card families.
+        if compatibility_badge:
+            _bg_map = {
+                "green":  "#4CAF50",
+                "orange": "#FF9800",
+                "yellow": "#FF9800",
+                "red":    "#f44336",
+            }
+            _b_color = _bg_map.get(compatibility_badge.get("color", ""), "#888")
+            compat_badge = QLabel(compatibility_badge.get("text", ""), card)
+            compat_badge.setToolTip(compatibility_badge.get("tooltip", ""))
+            compat_badge.setStyleSheet(f"""
+                QLabel {{
+                    background-color: {_b_color};
+                    color: white;
+                    padding: 3px 8px;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    font-weight: bold;
+                }}
+            """)
+            compat_badge.setWordWrap(True)
+            compat_badge.setMaximumWidth(180)
+            badge_row.addWidget(compat_badge)
+
         badge_row.addStretch(1)
         title_stats_layout.addLayout(badge_row)
 
@@ -15322,7 +15365,7 @@ class MainWindow(QMainWindow):
         )
 
         from PySide6.QtWidgets import QStyledItemDelegate, QStyle
-        from PySide6.QtGui import QTextOption
+        from PySide6.QtGui import QTextOption, QPalette
         from PySide6.QtCore import QSize as _QSize
 
         class _WrapAnywhereDelegate(QStyledItemDelegate):
@@ -15341,7 +15384,10 @@ class MainWindow(QMainWindow):
                 opt.setWrapMode(QTextOption.WrapAnywhere)
                 opt.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 painter.save()
-                painter.setPen(option.palette.color(option.palette.Text))
+                # PySide6 ≥6.7 dropped the per-instance `.Text` shortcut
+                # (was always a class-level enum). Use the explicit form
+                # so the call works on both old and new bindings.
+                painter.setPen(option.palette.color(QPalette.ColorRole.Text))
                 painter.drawText(rect, str(text), opt)
                 painter.restore()
 

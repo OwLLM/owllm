@@ -12,6 +12,35 @@ except ImportError:
     NETWORK_AVAILABLE = False
 
 
+# Shared GPU-fit colour mapping. Used by ModelCard, DownloadedModelCard, and
+# main.py's inline Tuned card builder so the three card types apply IDENTICAL
+# borders for the same compatibility badge — the Browse / Downloaded / Tuned
+# grids are visually a single object family, only the action set differs.
+_COMPAT_BORDER = {
+    "green":  "#4CAF50",
+    "orange": "#FF9800",
+    "yellow": "#FF9800",
+    "red":    "#f44336",
+}
+_DEFAULT_BORDER = "#667eea"
+
+
+def border_color_for_compat(badge: Optional[dict],
+                            requires_token: bool = False,
+                            is_incomplete: bool = False) -> str:
+    """Return the card border color for a (badge, token, incomplete) state.
+
+    Precedence: incomplete > requires_token > badge color > default blue.
+    """
+    if is_incomplete:
+        return "#ff6b6b"
+    if requires_token:
+        return "#F7C948"
+    if badge:
+        return _COMPAT_BORDER.get(badge.get("color", ""), _DEFAULT_BORDER)
+    return _DEFAULT_BORDER
+
+
 class ModelCard(QFrame):
     """Beautiful large card widget matching Streamlit design"""
     
@@ -303,18 +332,10 @@ class ModelCard(QFrame):
     
     def _apply_style(self):
         """Apply card styling with color-coded border based on compatibility"""
-        # Get border color based on compatibility badge or token requirement
-        border_color = "#667eea"  # Default blue
-        if getattr(self, "requires_token", False):
-            border_color = "#F7C948"
-        elif self.compatibility_badge:
-            color = self.compatibility_badge.get("color", "")
-            if color == "green":
-                border_color = "#4CAF50"
-            elif color == "orange":
-                border_color = "#FF9800"
-            elif color == "red":
-                border_color = "#f44336"
+        border_color = border_color_for_compat(
+            self.compatibility_badge,
+            requires_token=getattr(self, "requires_token", False),
+        )
 
         # Downloading override — pink blinking ring beats every other
         # border colour so the user sees in-flight downloads at a glance.
@@ -848,20 +869,11 @@ class DownloadedModelCard(QFrame):
     
     def _apply_style(self):
         # Apply color-coded border based on compatibility badge or token requirement
-        border_color = "#667eea"  # Default blue
-        if getattr(self, "requires_token", False):
-            border_color = "#F7C948"
-        elif self.compatibility_badge and not self.is_incomplete:
-            color = self.compatibility_badge.get("color", "")
-            if color == "green":
-                border_color = "#4CAF50"
-            elif color == "orange":
-                border_color = "#FF9800"
-            elif color == "red":
-                border_color = "#f44336"
-        
-        if self.is_incomplete:
-            border_color = "#ff6b6b"
+        border_color = border_color_for_compat(
+            self.compatibility_badge,
+            requires_token=getattr(self, "requires_token", False),
+            is_incomplete=self.is_incomplete,
+        )
         
         req = getattr(self, "requires_token", False)
         if self.is_dark:

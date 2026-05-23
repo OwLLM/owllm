@@ -142,6 +142,56 @@
 
       window.addEventListener("resize", layout);
       layout();
+
+      // ─ Accent integration ─────────────────────────────────────────
+      // The overlay frame is a SEPARATE Tauri webview, so the React
+      // app's runtime applyAccent() doesn't reach it. We read the
+      // shared localStorage key the main app writes, look up the
+      // accent hex from the same 6-entry table, then rewrite
+      // --frame-line / --frame-accent / --frame-bg on :root. Without
+      // this the overlay frame stayed permanently cyan no matter
+      // which colour square the user picked, and flashed bright cyan
+      // every launch.
+      const ACCENTS = {
+        indigo:  "#667eea",
+        amber:   "#fbbf24",
+        red:     "#ef4444",
+        blue:    "#3b82f6",
+        emerald: "#10b981",
+        slate:   "#6b7280",
+      };
+      function applyOverlayAccent(accentKey) {
+        const hex = ACCENTS[accentKey] || ACCENTS.indigo;
+        const h = hex.replace("#", "");
+        const aR = parseInt(h.slice(0, 2), 16);
+        const aG = parseInt(h.slice(2, 4), 16);
+        const aB = parseInt(h.slice(4, 6), 16);
+        const root = document.documentElement;
+        root.style.setProperty("--frame-line",   `rgba(${aR}, ${aG}, ${aB}, 0.86)`);
+        root.style.setProperty("--frame-accent", `rgba(${aR}, ${aG}, ${aB}, 0.78)`);
+        // Mix accent into the dark navy at 70 % — same recipe the
+        // main app uses for --bg-header so the chrome reads as a
+        // single colour family across both webviews.
+        const nR = 28, nG = 34, nB = 68;
+        const mR = Math.round(0.70 * aR + 0.30 * nR);
+        const mG = Math.round(0.70 * aG + 0.30 * nG);
+        const mB = Math.round(0.70 * aB + 0.30 * nB);
+        root.style.setProperty("--frame-bg", `rgba(${mR}, ${mG}, ${mB}, 0.95)`);
+      }
+      try {
+        applyOverlayAccent(localStorage.getItem("owllm:theme:accent") || "indigo");
+      } catch { /* localStorage blocked */ }
+      // Listen for live accent changes pushed by the main webview.
+      window.addEventListener("storage", (e) => {
+        if (e.key === "owllm:theme:accent" && e.newValue) {
+          applyOverlayAccent(e.newValue);
+        }
+      });
+      if (window.__TAURI__?.event) {
+        window.__TAURI__.event.listen("owllm:accent-changed", (ev) => {
+          if (typeof ev.payload === "string") applyOverlayAccent(ev.payload);
+        });
+      }
     </script>
   </body>
 </html>

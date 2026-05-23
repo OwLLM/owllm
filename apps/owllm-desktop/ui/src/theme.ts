@@ -129,6 +129,15 @@ export function useTheme() {
   useEffect(() => {
     applyAccent(accent.color);
     try { localStorage.setItem(LS_ACCENT, accentKey); } catch { /* ignore */ }
+    // Push to the overlay-frame webview so its cyan corners flip
+    // immediately on a picker click (cold-boot is handled by the
+    // overlay's own localStorage read).
+    try {
+      const tauri = (window as any).__TAURI__;
+      if (tauri?.event?.emit) {
+        tauri.event.emit("owllm:accent-changed", accentKey);
+      }
+    } catch { /* not in Tauri ctx */ }
   }, [accentKey, accent.color]);
 
   return {

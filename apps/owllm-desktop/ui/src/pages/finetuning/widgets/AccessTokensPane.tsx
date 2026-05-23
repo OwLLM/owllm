@@ -118,9 +118,9 @@ export default function AccessTokensPane(props: AccessTokensPaneProps) {
   const tabBtn = (active: boolean): React.CSSProperties => ({
     flex: 1,
     padding: "5px 10px",
-    background: active ? "#162033" : "transparent",
+    background: active ? "var(--bg-elevated)" : "transparent",
     color: active ? "var(--fg)" : "var(--fg-muted)",
-    border: "1px solid #243044",
+    border: "1px solid var(--border-strong)",
     borderRadius: 4,
     fontSize: 11,
     cursor: "pointer",
@@ -130,9 +130,9 @@ export default function AccessTokensPane(props: AccessTokensPaneProps) {
   const actionBtn: React.CSSProperties = {
     flex: 1,
     padding: "5px 0",
-    background: "#162033",
+    background: "var(--bg-elevated)",
     color: "var(--fg)",
-    border: "1px solid #243044",
+    border: "1px solid var(--border-strong)",
     borderRadius: 4,
     fontSize: 11,
     cursor: "pointer",
@@ -143,8 +143,8 @@ export default function AccessTokensPane(props: AccessTokensPaneProps) {
       data-ui="AccessTokensPane"
       style={{
         padding: 10,
-        background: "#0e1320",
-        border: "1px solid #1c2434",
+        background: "var(--bg-card)",
+        border: "1px solid var(--border-strong)",
         borderRadius: 6,
         display: "flex",
         flexDirection: "column",
@@ -207,8 +207,8 @@ function TokensTab(p: {
         style={{
           minHeight: 60,
           padding: 6,
-          background: "#0b1020",
-          border: "1px solid #1c2434",
+          background: "var(--bg-input)",
+          border: "1px solid var(--border-strong)",
           borderRadius: 4,
           color: "var(--fg)",
           fontSize: 11,
@@ -290,7 +290,7 @@ function InfoTab(p: { selectedModel: SelectedModelInfo | null }) {
         <div style={{ fontSize: 12, color: "#d6d8de", lineHeight: 1.4 }}>{m.description}</div>
       )}
 
-      <div style={{ borderTop: "1px solid #1c2434", marginTop: 4, paddingTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ borderTop: "1px solid var(--border-strong)", marginTop: 4, paddingTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
         {m.paramsB != null && Row("Params",     `${m.paramsB.toFixed(1)} B`)}
         {m.inferenceGb != null && Row("Inference", `≈${m.inferenceGb.toFixed(1)} GB VRAM (fp16)`)}
         {m.loraTrainGb != null && Row("LoRA train", `≈${m.loraTrainGb.toFixed(1)} GB VRAM`)}
@@ -303,7 +303,7 @@ function InfoTab(p: { selectedModel: SelectedModelInfo | null }) {
             {m.tags.slice(0, 6).map((t) => (
               <span key={t} style={{
                 fontSize: 10, padding: "1px 6px",
-                background: "#162033", color: "#9cc3ff",
+                background: "var(--bg-elevated)", color: "#9cc3ff",
                 borderRadius: 3,
               }}>{t}</span>
             ))}
@@ -316,9 +316,9 @@ function InfoTab(p: { selectedModel: SelectedModelInfo | null }) {
         style={{
           marginTop: 4,
           padding: "5px 0",
-          background: "#162033",
+          background: "var(--bg-elevated)",
           color: "var(--fg)",
-          border: "1px solid #243044",
+          border: "1px solid var(--border-strong)",
           borderRadius: 4,
           fontSize: 11,
           cursor: "pointer",

@@ -211,7 +211,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
                         display: "flex", alignItems: "center", gap: 10,
                         padding: "6px 10px",
                         background: sel ? "rgba(102,126,234,0.12)" : "transparent",
-                        border: `1px solid ${sel ? "rgba(102,126,234,0.5)" : "#1c2434"}`,
+                        border: `1px solid ${sel ? "rgba(102,126,234,0.5)" : "var(--border-strong)"}`,
                         borderRadius: 6,
                         cursor: downloadAll ? "default" : "pointer",
                         opacity: downloadAll ? 0.55 : 1,

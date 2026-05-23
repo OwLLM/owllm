@@ -397,7 +397,7 @@ function LocationRow({
   const bridgeText   = bridgeOn ? "📱 Bridge: ON" : "📱 Bridge: OFF";
   const bridgeColor  = bridgeOn ? "var(--accent)" : "#7d8595";
   const bridgeBg     = bridgeOn ? "#0a2230" : "#1a1f2a";
-  const bridgeBorder = bridgeOn ? "#2a5060" : "#2a3148";
+  const bridgeBorder = bridgeOn ? "#2a5060" : "var(--border-strong)";
   return (
     <div data-ui="ProjectStrip" style={{ height:52, padding:"10px 14px", background:"linear-gradient(180deg, #1f2632, #181c29)", borderRadius:10, margin:"0 23px", display:"flex", alignItems:"center", gap:10, position:"relative" }}>
       <div data-ui="LocationLabel" style={{ display:"inline-flex", alignItems:"center", height:32, fontSize:11, color:"var(--fg-muted)", textTransform:"uppercase", letterSpacing:0.6, marginRight:4 }}>LOCATION</div>
@@ -1306,7 +1306,7 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
           </div>
           <button
             onClick={onClose}
-            style={{ width:28, height:28, padding:0, borderRadius:6, border:"1px solid #2a3148", background:"#1a2030", color:"var(--fg)", cursor:"pointer", fontSize:14 }}
+            style={{ width:28, height:28, padding:0, borderRadius:6, border:"1px solid var(--border-strong)", background:"#1a2030", color:"var(--fg)", cursor:"pointer", fontSize:14 }}
             title="Close"
           >✕</button>
         </div>
@@ -1316,7 +1316,7 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
           <select
             value={newKind}
             onChange={e => setNewKind(e.target.value as any)}
-            style={{ width:90, padding:"4px 6px", borderRadius:6, border:"1px solid #2a3148", background:"#0e1320", color:"var(--fg)", fontSize:12 }}
+            style={{ width:90, padding:"4px 6px", borderRadius:6, border:"1px solid var(--border-strong)", background:"var(--bg-input)", color:"var(--fg)", fontSize:12 }}
           >
             <option value="must">MUST</option>
             <option value="prefer">PREFER</option>
@@ -1327,7 +1327,7 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
             onChange={e => setNewText(e.target.value)}
             onKeyDown={e => { if (e.key === "Enter") submit(); }}
             placeholder="e.g. never mock data — always real DB calls"
-            style={{ flex:1, padding:"4px 8px", borderRadius:6, border:"1px solid #2a3148", background:"#0e1320", color:"var(--fg)", fontSize:13 }}
+            style={{ flex:1, padding:"4px 8px", borderRadius:6, border:"1px solid var(--border-strong)", background:"var(--bg-input)", color:"var(--fg)", fontSize:13 }}
           />
           <button
             onClick={submit}
@@ -1352,13 +1352,13 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
             <div key={g.k} style={{ display:"flex", flexDirection:"column", gap:4 }}>
               <div style={{ fontSize:10, fontWeight:700, color: kindColor(g.k), letterSpacing:0.6 }}>{kindLabel(g.k)}</div>
               {g.items.map(d => (
-                <div key={d.id} style={{ display:"flex", gap:6, alignItems:"flex-start", padding:"6px 8px", borderRadius:6, background:"#0e1320", border:"1px solid #1c2333" }}>
+                <div key={d.id} style={{ display:"flex", gap:6, alignItems:"flex-start", padding:"6px 8px", borderRadius:6, background:"var(--bg-input)", border:"1px solid var(--border)" }}>
                   {editingId === d.id ? (
                     <>
                       <select
                         value={editKind}
                         onChange={e => setEditKind(e.target.value as any)}
-                        style={{ width:80, padding:"2px 4px", borderRadius:4, border:"1px solid #2a3148", background:"#0e1320", color:"var(--fg)", fontSize:11 }}
+                        style={{ width:80, padding:"2px 4px", borderRadius:4, border:"1px solid var(--border-strong)", background:"var(--bg-input)", color:"var(--fg)", fontSize:11 }}
                       >
                         <option value="must">MUST</option>
                         <option value="prefer">PREFER</option>
@@ -1369,16 +1369,16 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
                         onChange={e => setEditText(e.target.value)}
                         onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditingId(null); }}
                         autoFocus
-                        style={{ flex:1, padding:"2px 6px", borderRadius:4, border:"1px solid #2a3148", background:"#0e1320", color:"var(--fg)", fontSize:13 }}
+                        style={{ flex:1, padding:"2px 6px", borderRadius:4, border:"1px solid var(--border-strong)", background:"var(--bg-input)", color:"var(--fg)", fontSize:13 }}
                       />
                       <button onClick={saveEdit} disabled={busy} style={{ padding:"2px 8px", fontSize:11, fontWeight:700, borderRadius:4, border:"1px solid #5cf0ff", background:"var(--accent)", color:"var(--bg-elevated)", cursor:"pointer" }}>Save</button>
-                      <button onClick={() => setEditingId(null)} disabled={busy} style={{ padding:"2px 6px", fontSize:11, borderRadius:4, border:"1px solid #2a3148", background:"#1a2030", color:"var(--fg)", cursor:"pointer" }}>Cancel</button>
+                      <button onClick={() => setEditingId(null)} disabled={busy} style={{ padding:"2px 6px", fontSize:11, borderRadius:4, border:"1px solid var(--border-strong)", background:"#1a2030", color:"var(--fg)", cursor:"pointer" }}>Cancel</button>
                     </>
                   ) : (
                     <>
                       <div style={{ flex:1, fontSize:13, color:"var(--fg)", lineHeight:1.4 }}>{d.text}</div>
-                      <button onClick={() => beginEdit(d)} title="Edit" style={{ width:24, height:22, padding:0, fontSize:11, borderRadius:4, border:"1px solid #2a3148", background:"#1a2030", color:"#9aa6c0", cursor:"pointer" }}>✎</button>
-                      <button onClick={() => doDelete(d.id)} title="Delete" style={{ width:24, height:22, padding:0, fontSize:11, borderRadius:4, border:"1px solid #2a3148", background:"#1a2030", color:"#ff8c8c", cursor:"pointer" }}>✕</button>
+                      <button onClick={() => beginEdit(d)} title="Edit" style={{ width:24, height:22, padding:0, fontSize:11, borderRadius:4, border:"1px solid var(--border-strong)", background:"#1a2030", color:"#9aa6c0", cursor:"pointer" }}>✎</button>
+                      <button onClick={() => doDelete(d.id)} title="Delete" style={{ width:24, height:22, padding:0, fontSize:11, borderRadius:4, border:"1px solid var(--border-strong)", background:"#1a2030", color:"#ff8c8c", cursor:"pointer" }}>✕</button>
                     </>
                   )}
                 </div>

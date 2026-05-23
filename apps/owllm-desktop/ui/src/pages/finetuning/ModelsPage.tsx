@@ -1107,8 +1107,8 @@ export default function ModelsPage() {
           gap: 8,
           marginTop: 10,
           padding: "6px 8px",
-          background: "#0e1320",
-          border: "1px solid #1c2434",
+          background: "var(--bg-card)",
+          border: "1px solid var(--border-strong)",
           borderRadius: 6,
           fontSize: 11,
         }}
@@ -1122,9 +1122,9 @@ export default function ModelsPage() {
         <button
           style={{
             padding: "4px 12px",
-            background: "#162033",
+            background: "var(--bg-elevated)",
             color: "var(--fg)",
-            border: "1px solid #243044",
+            border: "1px solid var(--border-strong)",
             borderRadius: 4,
             fontSize: 11,
           }}

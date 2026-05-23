@@ -519,7 +519,7 @@ export default function ChatPage() {
               onChange={(e) => setMaxTurns(Number(e.target.value) || 1)}
               style={{
                 width: 60, padding: "2px 6px",
-                background: "#0b1020", border: "1px solid #1c2434",
+                background: "var(--bg-input)", border: "1px solid var(--border-strong)",
                 borderRadius: 4, color: "var(--fg)", fontSize: 16,
               }}
             />
@@ -552,8 +552,8 @@ export default function ChatPage() {
             {columns.slice(0, count).map((col) => (
               <div key={col.id} style={{
                 display: "flex", flexDirection: "column",
-                background: "#0e1320",
-                border: "1px solid #1c2434",
+                background: "var(--bg-card)",
+                border: "1px solid var(--border-strong)",
                 borderRadius: 8,
                 minHeight: 0,
                 overflow: "hidden",
@@ -596,7 +596,7 @@ export default function ChatPage() {
                     padding: 12, marginTop: 6,
                     display: "flex", flexDirection: "column", gap: 10,
                     fontSize: 13, lineHeight: 1.5,
-                    background: "#0b1020",
+                    background: "var(--bg-input)",
                     borderRadius: 6,
                   }}
                 >
@@ -659,9 +659,9 @@ export default function ChatPage() {
                 flex: 1, minHeight: 90, maxHeight: 90,
                 resize: "none",
                 padding: 10, borderRadius: 8,
-                background: "#0b1020",
+                background: "var(--bg-input)",
                 color: "var(--fg)",
-                border: "1px solid #1c2434",
+                border: "1px solid var(--border-strong)",
                 fontFamily: "inherit", fontSize: 13, lineHeight: 1.5,
                 outline: "none",
               }}
@@ -698,8 +698,8 @@ export default function ChatPage() {
                 onClick={resetAll}
                 style={{
                   height: 40,
-                  background: "#162033",
-                  border: "1px solid #243044",
+                  background: "var(--bg-elevated)",
+                  border: "1px solid var(--border-strong)",
                   color: "var(--fg)",
                   borderRadius: 8,
                   fontSize: 12, fontWeight: 600,
@@ -711,8 +711,8 @@ export default function ChatPage() {
                 onClick={saveJson}
                 style={{
                   height: 40,
-                  background: "#162033",
-                  border: "1px solid #243044",
+                  background: "var(--bg-elevated)",
+                  border: "1px solid var(--border-strong)",
                   color: "var(--fg)",
                   borderRadius: 8,
                   fontSize: 12, fontWeight: 600,
@@ -791,8 +791,8 @@ export default function ChatPage() {
                         onChange={(e) => { applyTemplate(col.id, e.target.value); e.currentTarget.value = ""; }}
                         style={{
                           flex: 1,
-                          background: "#0b1020",
-                          border: "1px solid #1c2434",
+                          background: "var(--bg-input)",
+                          border: "1px solid var(--border-strong)",
                           color: "var(--fg)",
                           borderRadius: 4,
                           fontSize: 12, padding: "6px 8px",
@@ -826,8 +826,8 @@ export default function ChatPage() {
                         minHeight: 200,
                         maxHeight: 300,
                         padding: 8,
-                        background: "#0b1020",
-                        border: "1px solid #1c2434",
+                        background: "var(--bg-input)",
+                        border: "1px solid var(--border-strong)",
                         borderRadius: 4,
                         color: "var(--fg)",
                         fontSize: 12,
@@ -874,7 +874,7 @@ export default function ChatPage() {
               the tab strip mirrors Qt main.py:18948-18951 — 11pt bold
               white QLabel placed immediately before the tab widget. */}
           <div style={{ display: "flex", flexDirection: "column", minHeight: 200 }}>
-            <div style={{ color: "#fff", fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
+            <div style={{ color: "var(--fg-strong)", fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
               Right Panel
             </div>
             <div style={{ display: "flex", gap: 2 }}>
@@ -954,8 +954,8 @@ const smallActionBtn: React.CSSProperties = {
 const paramInputStyle: React.CSSProperties = {
   width: 80,
   padding: "3px 6px",
-  background: "#0b1020",
-  border: "1px solid #1c2434",
+  background: "var(--bg-input)",
+  border: "1px solid var(--border-strong)",
   color: "var(--fg)",
   borderRadius: 4,
   fontSize: 11,

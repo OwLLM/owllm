@@ -119,8 +119,8 @@ export function CheckpointToggle(p: CheckpointToggleProps) {
         style={{
           width: 70,
           padding: "4px 6px",
-          background: "#0b1020",
-          border: "1px solid #1c2434",
+          background: "var(--bg-input)",
+          border: "1px solid var(--border-strong)",
           borderRadius: 4,
           color: "var(--fg)",
           fontSize: 12,

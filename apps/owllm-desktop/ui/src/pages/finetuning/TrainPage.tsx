@@ -623,7 +623,7 @@ export default function TrainPage() {
 
         {/* Progress bar (only meaningful while running). */}
         {(status.state === "running" || status.step != null) && (
-          <div style={{ height: 8, background: "#0b1020", border: "1px solid #1c2434", borderRadius: 4, overflow: "hidden" }}>
+          <div style={{ height: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 4, overflow: "hidden" }}>
             <div style={{
               height: "100%",
               width: `${pct}%`,

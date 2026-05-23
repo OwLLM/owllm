@@ -25,6 +25,7 @@ import {
   PageDef,
 } from "./core/modules";
 import { ACCENTS, AccentKey, Mode, useTheme } from "./theme";
+import { headerPill } from "./theme/styles";
 import TelegramBridgeRunner from "./bridges/TelegramBridgeRunner";
 import ServerPage from "./pages/core/ServerPage";
 
@@ -370,30 +371,12 @@ function ModeBar({
   // OWLLM title read consistently across themes. Buttons therefore
   // stay light-on-dark regardless of mode — we don't drive their
   // colours from the theme.
-  // Font size + padding tuned to match SubTabs (page selection row
-  // under the header) so the two button strips read as one typographic
-  // family. SubTabs uses fontSize:15 / padding:"5px 14px"; the header
-  // pills mirror that font size but use tight horizontal padding ("0
-  // 6px") because the fixed pill widths already give the label room
-  // to breathe.
-  const baseBtn: React.CSSProperties = {
-    height: 50, padding: "0 6px",
-    background: "linear-gradient(180deg, rgba(60,60,80,0.85), rgba(40,40,60,0.85))",
-    color: "#fff",
-    border: "1px solid rgba(255,255,255,0.20)",
-    borderRadius: 6, fontSize: 15, fontWeight: 700,
-    display: "flex", flexDirection: "column",
-    alignItems: "center", justifyContent: "center",
-    lineHeight: 1.05, gap: 0,
-    cursor: "pointer", userSelect: "none",
-  };
-  // Qt :checked QPushButton — gold border + warm dark gradient.
-  // (main.py:3137-3141 style applied to the group toggles.)
-  const active: React.CSSProperties = {
-    ...baseBtn,
-    border: "1px solid #ffd080",
-    background: "linear-gradient(180deg, rgba(80,70,50,0.85), rgba(60,50,30,0.85))",
-  };
+  // Header pills (Advanced / Fine Tuning / Agentic Team / Gamify):
+  // single source of truth lives in theme/styles.headerPill so this
+  // file no longer carries duplicate button CSS. The pill is chrome —
+  // it stays white-on-dark in BOTH themes by design.
+  const baseBtn = headerPill(false);
+  const active  = headerPill(true);
 
   // Filter the three mode toggles to only those installed.
   // ActiveMode excludes "home" / "core" / "advanced" — only the three
@@ -418,6 +401,10 @@ function ModeBar({
       height: 80,
       display: "grid", gridTemplateColumns: "auto 1fr auto auto",
       alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
+      // Header chrome — always dark blue in both themes. The
+      // --bg-header token resolves to #1c2244 (dark) / #e4e7ec (light);
+      // we keep the dark variant explicitly here because the OWLLM
+      // title + corner PNGs were drawn against that exact navy.
       background: "#1c2244",
       cursor: "default",
     }}>

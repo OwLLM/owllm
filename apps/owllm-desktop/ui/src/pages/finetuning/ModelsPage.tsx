@@ -20,6 +20,7 @@ import TunedModelCard from "./widgets/TunedModelCard";
 import AccessTokensPane from "./widgets/AccessTokensPane";
 import WeightPickerDialog from "./widgets/WeightPickerDialog";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { chip, INPUT, BUTTON, banner } from "../../theme/styles";
 
 type SubTab = "browse" | "downloaded" | "tuned" | "cache";
 
@@ -121,7 +122,7 @@ const emptyState: React.CSSProperties = {
   padding: 40,
   textAlign: "center",
   color: "var(--fg-muted)",
-  border: "1px dashed #2a3242",
+  border: "1px dashed var(--border-strong)",
   borderRadius: 8,
   fontSize: 13,
 };
@@ -209,6 +210,8 @@ function exportTunedToGguf(
   setLogs: (updater: (prev: string[]) => string[]) => void,
   setLogsOpen: (v: boolean) => void,
   setStatus: (s: string) => void,
+  setExportingPath: (p: string | null) => void,
+  setExportProgress: (p: number | null) => void,
 ) {
   type Evt =
     | { kind: "progress"; stage: string; step?: number; total?: number; detail?: string }
@@ -221,6 +224,14 @@ function exportTunedToGguf(
   setLogs(() => []);
   setLogsOpen(true);
   setStatus("🚀 Starting…");
+  setExportingPath(sourceDir);
+  setExportProgress(null);
+  // Track the highest block index seen so we can derive a progress
+  // fraction. Different model architectures have different layer
+  // counts; we infer total = max-seen + 1 once Writing-to-disk
+  // appears, which is the convert script's last phase before EOF.
+  let maxBlk = -1;
+  let convertDone = false;
   const pushLog = (s: string) => setLogs((prev) => {
     const next = [...prev, s];
     return next.length > 300 ? next.slice(next.length - 300) : next;
@@ -229,26 +240,57 @@ function exportTunedToGguf(
     console.log("[export-gguf] event", ev);
     if (ev.kind === "log") {
       const sev = classifyLogSeverity(ev.line);
-      // Encode severity into the stored line as a 5-char tag so the
-      // renderer can colour without re-classifying. Keep the original
-      // text after the tag.
       const tag = sev === "err" ? "[ERR]" : sev === "warn" ? "[WRN]" : "[INF]";
       pushLog(`${tag} ${ev.line}`);
       const newStatus = deriveExportStatus(ev.line);
       if (newStatus) setStatus(newStatus);
-      // Update the banner only on real errors so it doesn't churn on
-      // every INFO log; the full tail is in the logs panel.
+      // Update progress fraction from convert-script breadcrumbs.
+      // Phase 1 (convert): track max block index. Assume total layers
+      // ≈ maxBlk+1 once we hit the disk-write phase. Until then the
+      // fraction is open (max-seen / projected-total); we project an
+      // optimistic 40 layers as the upper bound so the bar moves but
+      // doesn't pretend to finish. Phase 2 (quantize): set to 0.95
+      // and let the Finished event close it out.
+      const blk = ev.line.match(/blk\.(\d+)\./);
+      if (blk) {
+        const n = parseInt(blk[1], 10);
+        if (!isNaN(n) && n > maxBlk) {
+          maxBlk = n;
+          const total = convertDone ? Math.max(maxBlk + 1, 1) : 40;
+          setExportProgress(Math.min(0.85, (maxBlk + 1) / total));
+        }
+      }
+      if (/total_size\s*=/.test(ev.line)) {
+        // Writing-to-disk phase — convert pass nearly done.
+        convertDone = true;
+        setExportProgress(0.88);
+      }
+      if (ev.line.toLowerCase().includes("llama-quantize") || /quantizing/i.test(ev.line)) {
+        setExportProgress(0.92);
+      }
       if (sev === "err") {
         setError(`GGUF export: ${ev.line}`);
       }
     } else if (ev.kind === "finished") {
       setError(`✅ GGUF written → ${ev.outputDir}`);
       setStatus("✅ Done");
+      setExportProgress(1);
+      // Keep the status row visible for a moment, then clear it so
+      // the card returns to its normal layout.
+      window.setTimeout(() => {
+        setExportingPath(null);
+        setExportProgress(null);
+      }, 2500);
       refreshTuned();
     } else if (ev.kind === "failed") {
       setError(`❌ GGUF export failed: ${ev.error} — see logs below`);
-      setStatus("❌ Failed");
+      setStatus(`❌ Failed: ${ev.error}`);
       setLogsOpen(true);
+      // Leave the failure status visible — user needs to read the
+      // logs. Clear exportingPath so they can retry from the same
+      // card without re-triggering progress state.
+      setExportingPath(null);
+      setExportProgress(null);
     }
   };
   invoke<void>("export_gguf", {
@@ -527,22 +569,11 @@ export default function ModelsPage() {
               key={t.key}
               data-ui={t.dataUi}
               onClick={() => setTab(t.key)}
-              style={{
-                // Height matches the adjacent formatFilterContainer (50px)
-                // so the tab buttons + checkbox container read as a single
-                // toolbar row. Font size matches SubTabs (15px) — same
-                // typographic family as the page-selection strip above.
-                // Horizontal padding kept tight so the label dominates.
-                height: 50,
-                padding: "0 10px",
-                background: active ? "#1f6feb" : "transparent",
-                color: active ? "#fff" : "var(--fg)",
-                border: `1px solid ${active ? "#1f6feb" : "#2a3242"}`,
-                borderRadius: 6,
-                fontSize: 15,
-                cursor: "pointer",
-                transition: "background 120ms ease, border-color 120ms ease",
-              }}
+              // Centralised in theme/styles.chip — height 50 (matches
+              // formatFilterContainer), fontSize 15 (matches SubTabs),
+              // active state pulls from --accent so light/dark + accent
+              // picker all flow through one source of truth.
+              style={chip(active)}
             >
               {t.label}
             </button>
@@ -647,15 +678,9 @@ export default function ModelsPage() {
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
           title="Sort by"
-          style={{
-            padding: "6px 8px",
-            background: "#0b1020",
-            border: "1px solid #1c2434",
-            borderRadius: 6,
-            color: "var(--fg)",
-            fontSize: 12,
-            cursor: "pointer",
-          }}
+          // INPUT.field reads --bg-input / --fg / --border-strong so
+          // the select switches with dark/light theme.
+          style={{ ...INPUT.field, padding: "6px 8px", cursor: "pointer" }}
         >
           <option value="downloads">↓ Downloads</option>
           <option value="likes">❤ Likes</option>
@@ -666,43 +691,23 @@ export default function ModelsPage() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter") runSearch(query); }}
-          style={{
-            flex: 1,
-            minWidth: 0,
-            padding: "6px 10px",
-            background: "#0b1020",
-            border: "1px solid #1c2434",
-            borderRadius: 6,
-            color: "var(--fg)",
-            fontSize: 12,
-          }}
+          style={{ ...INPUT.field, flex: 1, minWidth: 0 }}
         />
         <button
           title="Clear search"
           onClick={() => { setQuery(""); runSearch(""); }}
-          style={{
-            padding: "6px 10px",
-            background: "#162033",
-            border: "1px solid #243044",
-            borderRadius: 6,
-            color: "var(--fg)",
-            fontSize: 12,
-            cursor: "pointer",
-          }}
+          // Ghost button reads --ghost-bg / --ghost-fg — switches with theme.
+          style={{ ...BUTTON.ghost, padding: "6px 10px" }}
         >
           ×
         </button>
         <button
           onClick={() => runSearch(query)}
           disabled={loadingHits}
-          style={{
-            padding: "6px 14px",
-            background: "#1f6feb",
-            border: "1px solid #1f6feb",
-            borderRadius: 6,
-            color: "#fff",
-            fontSize: 12,
-          }}
+          // Primary action: pulls --accent so the user's colour pick
+          // shows on this one button (intentionally scoped — most of
+          // the UI keeps its violet/blue tone).
+          style={BUTTON.primary}
         >
           {loadingHits ? "…" : "Search"}
         </button>
@@ -714,30 +719,20 @@ export default function ModelsPage() {
           onClick={() => setHfError(null)}
           title="click to dismiss"
           style={{
+            // banner() reads accent + status tokens so the colours
+            // adapt across themes. Tone is derived from the message
+            // prefix the rest of the page emits.
+            ...banner(
+              hfError.startsWith("✅")
+                ? "success"
+                : (hfError.startsWith("❌") || hfError.includes("failed"))
+                  ? "error"
+                  : "info"
+            ),
             position: "sticky",
             top: 0,
             zIndex: 50,
-            padding: "8px 12px",
             marginBottom: 10,
-            // Colour by content: green for finished, red for errors,
-            // blue for in-progress / informational.
-            background: hfError.startsWith("✅")
-              ? "rgba(76,175,80,0.18)"
-              : hfError.startsWith("❌") || hfError.includes("failed")
-                ? "rgba(244,67,54,0.18)"
-                : "rgba(102,126,234,0.18)",
-            border: `1px solid ${hfError.startsWith("✅")
-              ? "rgba(76,175,80,0.5)"
-              : hfError.startsWith("❌") || hfError.includes("failed")
-                ? "rgba(244,67,54,0.5)"
-                : "rgba(102,126,234,0.5)"}`,
-            borderRadius: 6,
-            color: hfError.startsWith("✅")
-              ? "#a5e6a5"
-              : hfError.startsWith("❌") || hfError.includes("failed")
-                ? "#ff8080"
-                : "#cfd4e1",
-            fontSize: 12,
             cursor: "pointer",
           }}
         >

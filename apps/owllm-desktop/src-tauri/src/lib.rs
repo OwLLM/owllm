@@ -46,6 +46,11 @@ pub fn run() {
             Ok(())
         })
         .on_page_load(|webview, payload| {
+            if webview.label() == overlay_frame::label()
+                && payload.event() == tauri::webview::PageLoadEvent::Finished
+            {
+                overlay_frame::mark_ready();
+            }
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
             {
@@ -54,10 +59,11 @@ pub fn run() {
                 let show_window = window.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(120));
+                    overlay_frame::wait_until_ready(std::time::Duration::from_millis(700));
                     let dispatch_window = show_window.clone();
                     let _ = show_window.run_on_main_thread(move || {
+                        let _ = overlay_frame::prepare_and_show_for_main(&dispatch_window);
                         let _ = dispatch_window.show();
-                        let _ = overlay_frame::show_for_main(&dispatch_window);
                         let _ = dispatch_window.emit("owllm:shown", ());
                     });
                 });

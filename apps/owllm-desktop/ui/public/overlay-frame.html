@@ -31,11 +31,6 @@
         inset: 0;
         pointer-events: none;
         user-select: none;
-        opacity: 0;
-      }
-
-      #frame.ready {
-        opacity: 1;
       }
 
       .bar {
@@ -147,11 +142,6 @@
 
       window.addEventListener("resize", layout);
       layout();
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          document.getElementById("frame").classList.add("ready");
-        });
-      });
     </script>
   </body>
 </html>

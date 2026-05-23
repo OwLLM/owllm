@@ -8,11 +8,13 @@
 //! Nothing in the current app depends on this yet. It exists so we can
 //! test the approach later without touching the production chrome.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use tauri::{App, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window};
 
 const OVERLAY_LABEL: &str = "owllm-overlay-frame";
+static OVERLAY_READY: AtomicBool = AtomicBool::new(false);
 const BORDER_T: i32 = 18;
 const CORNER_OUTSET: i32 = 10;
 const SHIFT_OUT: i32 = BORDER_T / 2;
@@ -33,6 +35,24 @@ pub fn enabled() -> bool {
 #[tauri::command]
 pub fn overlay_frame_enabled() -> bool {
     enabled()
+}
+
+pub fn label() -> &'static str {
+    OVERLAY_LABEL
+}
+
+pub fn mark_ready() {
+    OVERLAY_READY.store(true, Ordering::Release);
+}
+
+pub fn wait_until_ready(timeout: Duration) {
+    if !enabled() {
+        return;
+    }
+    let start = Instant::now();
+    while !OVERLAY_READY.load(Ordering::Acquire) && start.elapsed() < timeout {
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 pub fn install(app: &mut App) {
@@ -92,7 +112,7 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
     .build()
 }
 
-pub fn show_for_main(main: &Window) -> tauri::Result<()> {
+pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {
     if !enabled() {
         return Ok(());
     }
@@ -128,6 +148,8 @@ fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()>
 
     if !main.is_visible()? {
         let _ = overlay.hide();
+    } else if !main.is_minimized()? {
+        let _ = overlay.show();
     }
 
     if main.is_minimized()? {

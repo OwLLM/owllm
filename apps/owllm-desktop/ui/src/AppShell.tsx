@@ -100,7 +100,7 @@ function WindowControls() {
   const w = tauri ? getCurrentWindow() : null;
   const fsBtn: React.CSSProperties = {
     width: 30, height: 30, border: "none",
-    background: "transparent", color: "#ffffff",
+    background: "transparent", color: "var(--bg-header-fg)",
     fontSize: 20, fontWeight: 700, padding: 0,
     cursor: tauri ? "pointer" : "default", userSelect: "none",
     display: "flex", alignItems: "center", justifyContent: "center",
@@ -432,8 +432,8 @@ function ModeBar({
             cursor: "pointer", padding: 0,
           }}
         >
-          <div style={{ fontSize: 29, color: "#fff" }}>{themeMode === "dark" ? "🌙" : "☀"}</div>
-          <div style={{ fontSize: 15, fontWeight: 700, color: "#fff" }}>
+          <div style={{ fontSize: 29, color: "var(--bg-header-fg)" }}>{themeMode === "dark" ? "🌙" : "☀"}</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--bg-header-fg)" }}>
             {themeMode === "dark" ? "Dark" : "Light"}
           </div>
         </button>
@@ -508,7 +508,7 @@ function ModeBar({
           transform: "translate(-50%, -50%)",
           width: 200,
           height: 54,
-          fontSize: 35, fontWeight: 700, color: "#fff",
+          fontSize: 35, fontWeight: 700, color: "var(--bg-header-fg)",
           letterSpacing: 2, lineHeight: "54px",
           textAlign: "center",
           pointerEvents: "none",
@@ -551,7 +551,7 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
         maxWidth: 420, height: 60,
         display: "flex", flexDirection: "column",
         alignItems: "stretch", justifyContent: "center", gap: 3,
-        fontSize: 12, fontWeight: 700, color: "#fff", textAlign: "right",
+        fontSize: 12, fontWeight: 700, color: "var(--bg-header-fg)", textAlign: "right",
         // Trimmed from the Qt-port's hard 543px to free room for the
         // inline WindowControls 4th grid column. overflow:hidden +
         // text-overflow on the children below keeps long model ids
@@ -672,7 +672,7 @@ function ServerModal({ onClose }: { onClose: () => void }) {
         <div style={{
           height: 56,
           background: "var(--bg-header)",
-          color: "#fff",
+          color: "var(--bg-header-fg)",
           display: "flex", alignItems: "center",
           padding: "0 20px",
           borderBottom: "1px solid rgba(var(--accent-rgb), 0.30)",

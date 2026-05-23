@@ -148,7 +148,10 @@ export function headerPill(active: boolean, width?: number): React.CSSProperties
     // as a recess; same colour family means the picker repaints these
     // along with the rest of the header.
     background: "color-mix(in srgb, var(--accent) 35%, #14172a)",
-    color: "#ffffff",
+    // Text follows --bg-header-fg so amber → black labels, indigo /
+    // red / slate / emerald / blue → white labels. Computed in
+    // theme.ts from the actual mixed bg-header luminance.
+    color: "var(--bg-header-fg)",
     border: "1px solid rgba(255,255,255,0.20)",
     borderRadius: 6,
     fontSize: 15,

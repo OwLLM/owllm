@@ -69,12 +69,17 @@ export default function CardShell(props: CardShellProps) {
   const fam = iconOverride ?? familyIcon(iconKey);
   const border = borderColor(compat, requiresToken);
 
+  // Card surface — mixes the picked accent into the dark base so the
+  // Browse / Downloaded / Tuned grids visibly repaint with the picker
+  // instead of staying permanently dark-navy. requiresToken keeps its
+  // amber-warning tinge but ALSO gets the accent mix so the warning
+  // colour still reads against any picked theme.
   const bgStart = requiresToken
-    ? (hover ? "#332a18" : "#2a2610")
-    : (hover ? "#262740" : "#1a1d2e");
+    ? `color-mix(in srgb, var(--accent) ${hover ? 28 : 22}%, ${hover ? "#332a18" : "#2a2610"})`
+    : `color-mix(in srgb, var(--accent) ${hover ? 38 : 32}%, ${hover ? "#262740" : "#1a1d2e"})`;
   const bgEnd = requiresToken
-    ? (hover ? "#2a2540" : "#2a2610")
-    : (hover ? "#1a2540" : "#16213e");
+    ? `color-mix(in srgb, var(--accent) ${hover ? 28 : 22}%, ${hover ? "#2a2540" : "#2a2610"})`
+    : `color-mix(in srgb, var(--accent) ${hover ? 38 : 32}%, ${hover ? "#1a2540" : "#16213e"})`;
 
   return (
     <div

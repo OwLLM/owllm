@@ -86,17 +86,20 @@ function LauncherCard({ spec }: { spec: LauncherSpec }) {
   const onClick = () => {
     window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: spec.targetPage } }));
   };
+  // Mix the per-launcher brand gradient (Fine Tuning = blue, Agentic
+  // Team = teal) with the picked accent. 60 % accent / 40 % brand so
+  // the identity hue stays recognisable but the picker visibly
+  // repaints these too. Was 100 % brand → dark navy/teal regardless
+  // of accent, which the user (rightly) called "old color".
+  const bgTop    = `color-mix(in srgb, var(--accent) 60%, ${spec.accentTop})`;
+  const bgBottom = `color-mix(in srgb, var(--accent) 60%, ${spec.accentBottom})`;
+  const bgHover  = `color-mix(in srgb, var(--accent) 70%, ${spec.accentTop})`;
   return (
     <div
       data-ui={`LauncherCard:${spec.key}`}
       onClick={onClick}
       style={{
-        // Launcher cards are brand chrome — the per-card accentTop /
-        // accentBottom gradient is the visual identity (blue for Fine
-        // Tuning, teal for Agentic Team). They stay dark in BOTH themes
-        // by design, so the inner text overrides var(--fg) (which would
-        // flip black in light mode and disappear) with explicit white.
-        background: `linear-gradient(180deg, ${spec.accentTop} 0%, ${spec.accentBottom} 100%)`,
+        background: `linear-gradient(180deg, ${bgTop} 0%, ${bgBottom} 100%)`,
         borderLeft: `6px solid ${spec.accentLine}`,
         borderRadius: 18,
         padding: "26px 34px",
@@ -109,11 +112,11 @@ function LauncherCard({ spec }: { spec: LauncherSpec }) {
       }}
       onMouseEnter={(e) => {
         (e.currentTarget as HTMLDivElement).style.background =
-          `linear-gradient(180deg, ${spec.accentTop}, ${spec.accentTop})`;
+          `linear-gradient(180deg, ${bgHover}, ${bgHover})`;
       }}
       onMouseLeave={(e) => {
         (e.currentTarget as HTMLDivElement).style.background =
-          `linear-gradient(180deg, ${spec.accentTop} 0%, ${spec.accentBottom} 100%)`;
+          `linear-gradient(180deg, ${bgTop} 0%, ${bgBottom} 100%)`;
       }}
     >
       <img

@@ -119,6 +119,8 @@ function scoreProject(text: string, project: ProjectRow): number {
 type RouteDecision =
   | { kind: "ping" }
   | { kind: "list-projects" }
+  | { kind: "list-models" }
+  | { kind: "set-model"; project: ProjectRow; modelId: string }
   | { kind: "switch-project"; project: ProjectRow }
   | { kind: "new-brainstorm"; idea: string }
   | { kind: "dispatch"; project: ProjectRow; reason: string };
@@ -259,6 +261,12 @@ export default function TelegramBridgeRunner() {
     return project;
   };
 
+  const refreshProjects = async (): Promise<ProjectRow[]> => {
+    const rows = await invoke<ProjectRow[]>("list_projects");
+    setProjects(rows);
+    return rows;
+  };
+
   const ensureBrainstormProject = async (): Promise<ProjectRow> => {
     const existing = projectsRef.current.find(p => p.name === BRAINSTORM_PROJECT_NAME);
     if (existing) return existing;
@@ -279,11 +287,76 @@ export default function TelegramBridgeRunner() {
     return best && best.score >= 20 ? best.project : null;
   };
 
+  const currentProjectForChat = async (chatId: number): Promise<ProjectRow> => {
+    const projectsNow = projectsRef.current;
+    const activeId = getChatProject(chatId);
+    const active = activeId ? projectsNow.find(p => p.id === activeId) : null;
+    if (active) return active;
+    const configured = cfgRef.current?.project_id
+      ? projectsNow.find(p => p.id === cfgRef.current?.project_id)
+      : null;
+    if (configured) return configured;
+    return ensureBrainstormProject();
+  };
+
+  const usableModelIds = (): string[] => {
+    const local = modelsRef.current
+      .filter(m => (m.provider === "local" || m.provider === "tuned") && m.port != null)
+      .map(m => m.model_id);
+    return [
+      ...local,
+      "sub/claude-opus-4-5-20251101:high",
+      "sub/gpt-5.5:high",
+      "api/gpt-5.5",
+    ];
+  };
+
+  const modelHelp = (projectName?: string): string => {
+    const ids = usableModelIds().slice(0, 15);
+    const target = projectName ? ` for "${projectName}"` : "";
+    const choices = ids.length
+      ? ids.map((id, i) => `${i + 1}. ${id}`).join("\n")
+      : "(no local models detected yet)";
+    return [
+      `Choose a model${target} before the agents can run.`,
+      "",
+      choices,
+      "",
+      "Reply with:",
+      "/model <model-id>",
+      "",
+      "You can also set the team model in the Agentic Team page.",
+    ].join("\n");
+  };
+
+  const normalizeModelId = (text: string): string => {
+    const raw = text.trim();
+    if (!raw) return "";
+    const exact = usableModelIds().find(id => id.toLowerCase() === raw.toLowerCase());
+    if (exact) return exact;
+    const byBare = usableModelIds().find(id => norm(id).includes(norm(raw)));
+    return byBare || raw;
+  };
+
+  const saveProjectModel = async (projectId: string, modelId: string): Promise<ProjectRow | null> => {
+    await invoke("update_project", { input: { id: projectId, team_default_model_id: modelId } });
+    const rows = await refreshProjects().catch(() => projectsRef.current);
+    return rows.find(p => p.id === projectId) ?? null;
+  };
+
   const routeTelegram = async (chatId: number, text: string): Promise<RouteDecision> => {
     const trimmed = text.trim();
     const projectsNow = projectsRef.current;
     if (/^\/ping\b/i.test(trimmed)) return { kind: "ping" };
     if (/^\/projects\b/i.test(trimmed)) return { kind: "list-projects" };
+    if (/^\/models\b/i.test(trimmed)) return { kind: "list-models" };
+
+    const modelMatch = trimmed.match(/^\/model\s+(.+)$/i)
+      ?? trimmed.match(/^model\s*:\s*(.+)$/i);
+    if (modelMatch) {
+      const project = await currentProjectForChat(chatId);
+      return { kind: "set-model", project, modelId: normalizeModelId(modelMatch[1]) };
+    }
 
     const switchMatch = trimmed.match(/^\/(?:project|use|switch)\s+(.+)$/i)
       ?? trimmed.match(/^project\s*:\s*(.+)$/i);
@@ -329,8 +402,24 @@ export default function TelegramBridgeRunner() {
     if (route.kind === "list-projects") {
       const lines = projectsRef.current.slice(0, 20).map((p, i) => `${i + 1}. ${p.name}`);
       await sendTelegram(tgCfg.bot_token, chatId, lines.length
-        ? `Projects:\n${lines.join("\n")}\n\nUse /project <name> to choose one, or /new <idea> to start brainstorming.`
+        ? `Projects:\n${lines.join("\n")}\n\nUse /project <name> to choose one, /models to see model IDs, or /new <idea> to start brainstorming.`
         : "No projects yet. Send /new <idea> to start brainstorming.");
+      return;
+    }
+    if (route.kind === "list-models") {
+      const project = await currentProjectForChat(chatId);
+      await sendTelegram(tgCfg.bot_token, chatId, modelHelp(project.name));
+      return;
+    }
+    if (route.kind === "set-model") {
+      if (!route.modelId) {
+        await sendTelegram(tgCfg.bot_token, chatId, modelHelp(route.project.name));
+        return;
+      }
+      const updated = await saveProjectModel(route.project.id, route.modelId);
+      setChatProject(chatId, route.project.id);
+      await sendTelegram(tgCfg.bot_token, chatId,
+        `Model associated with ${updated?.name ?? route.project.name}: ${route.modelId}`);
       return;
     }
     if (route.kind === "switch-project") {
@@ -345,7 +434,9 @@ export default function TelegramBridgeRunner() {
         `Telegram brainstorm seed:\n${route.idea || "(empty)"}`,
       );
       setChatProject(chatId, project.id);
-      await sendTelegram(tgCfg.bot_token, chatId, `Created brainstorm project: ${project.name}`);
+      await sendTelegram(tgCfg.bot_token, chatId,
+        `Created brainstorm project: ${project.name}\n\n${modelHelp(project.name)}`);
+      return;
     } else {
       setChatProject(chatId, project.id);
     }
@@ -401,10 +492,23 @@ export default function TelegramBridgeRunner() {
     const orch = findOrchestratorSpec(team);
     const orchName = orch?.name ?? "orchestrator";
 
-    // Model resolution — project default → server fallback → "local"
+    // Model resolution — Telegram-created projects must get an
+    // explicit team default before dispatch. Falling back to "local"
+    // made fresh agent teams look valid while they had no runnable model.
     const teamDefault = (project?.team_default_model_id || "").trim();
-    const serverFallback = serverRef.current.model_id ?? "local";
-    const baseModel = teamDefault || serverFallback;
+    if (!teamDefault) {
+      const note = modelHelp(project.name);
+      await sendTelegram(tgCfg.bot_token, chatId, note);
+      const sysMsg: GoalMsg = { role: "system", color: "#ffd166", text: note };
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+          detail: { projectId, messages: [sysMsg], source: "telegram" },
+        }));
+      } catch {}
+      if (projectId) await persistChat(projectId, [sysMsg]);
+      return;
+    }
+    const baseModel = teamDefault;
     const modelFor = (_agent: string) => baseModel;
 
     // ---- 3. Hook events: every phase, dispatch, agent reply maps
@@ -652,7 +756,7 @@ export default function TelegramBridgeRunner() {
             const hasMedia = hasPhoto || hasVoice || hasAudio || docIsImage || docIsAudio;
             if (!text && !hasMedia) continue;
             console.log(`[telegram] inbound from ${chatId}: text="${text.slice(0, 60)}" photo=${hasPhoto} voice=${hasVoice} audio=${hasAudio} doc=${docMime || "-"}`);
-            const immediateCommand = !hasMedia && /^\/(?:ping|projects|project|use|switch)\b/i.test(text.trim());
+            const immediateCommand = !hasMedia && /^\/(?:ping|projects|project|use|switch|models|model)\b/i.test(text.trim());
 
             // Snapshot the file_ids + mime hints NOW (msg ref will be
             // out of scope by the time the queued task runs). Downloads

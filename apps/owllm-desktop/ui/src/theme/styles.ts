@@ -133,17 +133,21 @@ export const BUTTON = {
 } as const;
 
 // ---------------------------------------------------------------------
-// Header pill — used ONLY by AppShell.ModeBar. The header surface is
-// chrome (always dark blue), so the pill keeps white text and a
-// gradient-on-dark fill regardless of theme mode. Active = gold ring.
-// Centralised here so the four toggles + Advanced share one source of
-// truth instead of redefining the style at every call site.
+// Header pill — used by AppShell.ModeBar. Sits on the accent-tinted
+// header band, so the pill ALSO uses the accent (a darker mix of it)
+// instead of a fixed dark-grey gradient. That way amber-header sees
+// amber pills, red-header sees red pills, etc. — same colour family
+// across the whole top bar. Active state inverts: pill fills with the
+// accent itself and the label flips to the accent's foreground colour.
 // ---------------------------------------------------------------------
 export function headerPill(active: boolean, width?: number): React.CSSProperties {
   const base: React.CSSProperties = {
     height: 50,
     padding: "0 6px",
-    background: "linear-gradient(180deg, rgba(60,60,80,0.85), rgba(40,40,60,0.85))",
+    // Slightly darker mix than the header surface so the pill reads
+    // as a recess; same colour family means the picker repaints these
+    // along with the rest of the header.
+    background: "color-mix(in srgb, var(--accent) 35%, #14172a)",
     color: "#ffffff",
     border: "1px solid rgba(255,255,255,0.20)",
     borderRadius: 6,
@@ -162,8 +166,14 @@ export function headerPill(active: boolean, width?: number): React.CSSProperties
   if (!active) return base;
   return {
     ...base,
+    // Active pill: filled with the accent so it pops against the
+    // less-saturated header band, and the label flips to the accent
+    // foreground (var(--accent-fg) picks black-on-amber/yellow but
+    // white-on-red/blue/etc.). The yellow ring stays as a focus
+    // affordance that reads against every accent.
     border: "1px solid #ffd080",
-    background: "linear-gradient(180deg, rgba(80,70,50,0.85), rgba(60,50,30,0.85))",
+    background: "var(--accent)",
+    color: "var(--accent-fg)",
   };
 }
 

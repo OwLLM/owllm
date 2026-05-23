@@ -417,7 +417,7 @@ function ModeBar({
       background: "var(--bg-header)",
       cursor: "default",
     }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
         {/* Dark/Light toggle. Persists via theme.ts. */}
         <button
           data-ui="DarkModeBtn"

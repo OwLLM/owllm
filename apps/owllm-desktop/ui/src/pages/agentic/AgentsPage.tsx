@@ -423,9 +423,9 @@ function LocationRow({
       {pickerOpen && (
         <div style={{ position:"absolute", top:60, right:14, background:"var(--bg-panel)", border:"1px solid var(--border-strong)", borderRadius:10, padding:8, zIndex:50, maxHeight:340, overflow:"auto", minWidth:280, boxShadow:"0 8px 30px rgba(0,0,0,0.6)" }}>
           <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:1, textTransform:"uppercase", padding:"6px 10px" }}>Team template</div>
-          <button onClick={() => { onPickTeam(null); setPickerOpen(false); }} style={{ display:"block", width:"100%", textAlign:"left", padding:"8px 12px", border:"none", background: pickedTeamId === null ? "rgba(92,240,255,0.12)" : "transparent", color:"var(--fg)", fontSize:12, cursor:"pointer", borderRadius:6 }}>(use project roster)</button>
+          <button onClick={() => { onPickTeam(null); setPickerOpen(false); }} style={{ display:"block", width:"100%", textAlign:"left", padding:"8px 12px", border:"none", background: pickedTeamId === null ? "rgba(var(--accent-rgb),0.12)" : "transparent", color:"var(--fg)", fontSize:12, cursor:"pointer", borderRadius:6 }}>(use project roster)</button>
           {teams.map(t => (
-            <button key={t.id} onClick={() => { onPickTeam(t.id); setPickerOpen(false); }} style={{ display:"flex", alignItems:"center", gap:8, width:"100%", textAlign:"left", padding:"8px 12px", border:"none", background: pickedTeamId === t.id ? "rgba(92,240,255,0.12)" : "transparent", color:"var(--fg)", fontSize:12, cursor:"pointer", borderRadius:6 }}>
+            <button key={t.id} onClick={() => { onPickTeam(t.id); setPickerOpen(false); }} style={{ display:"flex", alignItems:"center", gap:8, width:"100%", textAlign:"left", padding:"8px 12px", border:"none", background: pickedTeamId === t.id ? "rgba(var(--accent-rgb),0.12)" : "transparent", color:"var(--fg)", fontSize:12, cursor:"pointer", borderRadius:6 }}>
               <img src={owlSrc(t.icon)} style={{ width:20, height:20, objectFit:"contain", flexShrink:0 }} />
               <div style={{ display:"flex", flexDirection:"column", minWidth:0, flex:1 }}>
                 <span style={{ color:"var(--fg-strong)", fontWeight:600 }}>{t.display}</span>
@@ -554,7 +554,7 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
                    color: busy ? "#ff8c8c" : "#555", fontWeight:600, fontSize:14,
                    cursor: busy ? "pointer" : "not-allowed" }}>Cancel</button>
         <button data-ui="GoalTelemetryBtn" title="Open the tool-call telemetry panel" style={{ height:38, width:44, padding:0, border:"none", borderRadius:8, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16 }}>📊</button>
-        <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(92,240,255,0.18)", color:"var(--accent)", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
+        <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(var(--accent-rgb),0.18)", color:"var(--accent)", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
       </div>
       {(attachments.length > 0 || attachError) && (
         <div data-ui="GoalAttachStrip" style={{ marginTop:6, display:"flex", flexWrap:"wrap", gap:6 }}>
@@ -633,7 +633,7 @@ function FlowHeader({
         className="ghost-btn"
         onClick={onToggleView}
         title={toggleTitle}
-        style={{ height:28, padding:"0 8px", fontSize:11, background: viewMode === "graph" ? "rgba(120,220,255,0.18)" : undefined, color: viewMode === "graph" ? "var(--accent)" : undefined }}
+        style={{ height:28, padding:"0 8px", fontSize:11, background: viewMode === "graph" ? "rgba(var(--accent-rgb),0.18)" : undefined, color: viewMode === "graph" ? "var(--accent)" : undefined }}
       >{toggleLabel}</button>
     </div>
   );
@@ -678,7 +678,7 @@ function TeamInfoCard({
   // Original cyan→purple palette — yellow tones live on the SuperUserCard
   // only (user clarified 2026-05-20).
   const cardBg = "linear-gradient(135deg, rgba(18,22,34,0.90) 0%, rgba(8,11,18,0.90) 100%)";
-  const borderGrad = "linear-gradient(135deg, rgba(92,240,255,0.86) 0%, rgba(192,138,255,0.86) 100%)";
+  const borderGrad = "linear-gradient(135deg, rgba(var(--accent-rgb),0.86) 0%, rgba(192,138,255,0.86) 100%)";
   return (
     <div data-ui="TeamInfoCard" style={{ position:"relative", width:CARD_W, height:CARD_H, borderRadius:12, background:cardBg, border:"1.6px solid transparent", overflow:"hidden" }}>
       <div style={{ position:"absolute", inset:0, borderRadius:12, padding:"1.6px", background:borderGrad, WebkitMask:"linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)", WebkitMaskComposite:"xor", maskComposite:"exclude", pointerEvents:"none" }} />
@@ -688,15 +688,15 @@ function TeamInfoCard({
       <div data-ui="TeamHeader" style={{ position:"absolute", left:8, top:8, width:CARD_W - 16, height:28, display:"flex", alignItems:"center", gap:8, paddingLeft:8, fontSize:14, fontWeight:700, color:"var(--fg)", overflow:"hidden" }}>
         <span style={{ flex:"0 1 auto", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={team.display}>{team.display}</span>
         <span style={{
-          background: "rgba(92,240,255,0.18)",
+          background: "rgba(var(--accent-rgb),0.18)",
           color: "#a8e8ff",
-          border: "1px solid rgba(92,240,255,0.45)",
+          border: "1px solid rgba(var(--accent-rgb),0.45)",
           fontSize: 9, fontWeight: 800, letterSpacing: 0.4,
           padding: "2px 7px", borderRadius: 8,
           textTransform:"uppercase", whiteSpace:"nowrap", flexShrink:0,
         }}>{team.category}</span>
       </div>
-      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y - 6, width:pic_size + 12, height:pic_size + 12, borderRadius:"50%", background:"radial-gradient(circle, rgba(92,240,255,0.43) 0%, rgba(92,240,255,0) 100%)", pointerEvents:"none" }} />
+      <div style={{ position:"absolute", left:pic_x - 6, top:pic_y - 6, width:pic_size + 12, height:pic_size + 12, borderRadius:"50%", background:"radial-gradient(circle, rgba(var(--accent-rgb),0.43) 0%, rgba(var(--accent-rgb),0) 100%)", pointerEvents:"none" }} />
       <div style={{ position:"absolute", left:pic_x, top:pic_y, width:pic_size, height:pic_size, borderRadius:"50%", background:"#1e2434", border:"1.4px solid rgba(230,240,255,0.78)", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden" }}>
         <img src={owlSrc(team.icon)} style={{ width:pic_size * 0.85, height:pic_size * 0.85, objectFit:"contain" }} />
       </div>
@@ -1334,8 +1334,8 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
             disabled={busy || !newText.trim()}
             style={{
               padding:"4px 14px", borderRadius:6,
-              border:"1px solid #5cf0ff",
-              background: newText.trim() ? "var(--accent)" : "rgba(92,240,255,0.25)",
+              border:"1px solid var(--accent)",
+              background: newText.trim() ? "var(--accent)" : "rgba(var(--accent-rgb),0.25)",
               color: newText.trim() ? "var(--bg-elevated)" : "#7d8595",
               fontSize:12, fontWeight:700,
               cursor: newText.trim() ? "pointer" : "not-allowed",
@@ -1371,7 +1371,7 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
                         autoFocus
                         style={{ flex:1, padding:"2px 6px", borderRadius:4, border:"1px solid var(--border-strong)", background:"var(--bg-input)", color:"var(--fg)", fontSize:13 }}
                       />
-                      <button onClick={saveEdit} disabled={busy} style={{ padding:"2px 8px", fontSize:11, fontWeight:700, borderRadius:4, border:"1px solid #5cf0ff", background:"var(--accent)", color:"var(--bg-elevated)", cursor:"pointer" }}>Save</button>
+                      <button onClick={saveEdit} disabled={busy} style={{ padding:"2px 8px", fontSize:11, fontWeight:700, borderRadius:4, border:"1px solid var(--accent)", background:"var(--accent)", color:"var(--bg-elevated)", cursor:"pointer" }}>Save</button>
                       <button onClick={() => setEditingId(null)} disabled={busy} style={{ padding:"2px 6px", fontSize:11, borderRadius:4, border:"1px solid var(--border-strong)", background:"#1a2030", color:"var(--fg)", cursor:"pointer" }}>Cancel</button>
                     </>
                   ) : (
@@ -1712,14 +1712,14 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
       <svg width={w} height={h} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
         <defs>
           <radialGradient id="halo" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="rgba(120,220,255,0.85)" />
-            <stop offset="45%" stopColor="rgba(120,220,255,0.35)" />
-            <stop offset="100%" stopColor="rgba(120,220,255,0)" />
+            <stop offset="0%" stopColor="rgba(var(--accent-rgb),0.85)" />
+            <stop offset="45%" stopColor="rgba(var(--accent-rgb),0.35)" />
+            <stop offset="100%" stopColor="rgba(var(--accent-rgb),0)" />
           </radialGradient>
           <radialGradient id="haloActive" cx="50%" cy="50%" r="50%">
-            <stop offset="0%" stopColor="rgba(127,223,255,1)" />
-            <stop offset="40%" stopColor="rgba(127,223,255,0.55)" />
-            <stop offset="100%" stopColor="rgba(127,223,255,0)" />
+            <stop offset="0%" stopColor="rgba(var(--accent-rgb),1)" />
+            <stop offset="40%" stopColor="rgba(var(--accent-rgb),0.55)" />
+            <stop offset="100%" stopColor="rgba(var(--accent-rgb),0)" />
           </radialGradient>
           <radialGradient id="orchHalo" cx="50%" cy="50%" r="50%">
             <stop offset="0%" stopColor="rgba(255,200,100,0.85)" />
@@ -1733,7 +1733,7 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
           </radialGradient>
           {nodes.map((n,i) => (
             <linearGradient key={"spg"+i} id={`spokeGrad${i}`} gradientUnits="userSpaceOnUse" x1={cx} y1={cy} x2={n.x} y2={n.y}>
-              <stop offset="0%" stopColor="rgba(92,240,255,0.43)" />
+              <stop offset="0%" stopColor="rgba(var(--accent-rgb),0.43)" />
               <stop offset="100%" stopColor="rgba(116,164,255,0.12)" />
             </linearGradient>
           ))}
@@ -1746,7 +1746,7 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
           );
         })}
         {nodes.map((n,i) => (
-          <line key={"sp"+i} x1={cx} y1={cy} x2={n.x} y2={n.y} stroke={n.active?"rgba(120,220,255,0.55)":`url(#spokeGrad${i})`} strokeWidth={n.active?1.6:1.3} />
+          <line key={"sp"+i} x1={cx} y1={cy} x2={n.x} y2={n.y} stroke={n.active?"rgba(var(--accent-rgb),0.55)":`url(#spokeGrad${i})`} strokeWidth={n.active?1.6:1.3} />
         ))}
         {/* Routing edges between specialists — drawn as gentle curves
             with a violet tint so they read as the team's actual flow,
@@ -1991,7 +1991,7 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
             borderRadius:"50%",
             cursor:"pointer",
             background:"transparent",
-            boxShadow: selectedNode === orchSpec.name ? "0 0 0 3px rgba(127,223,255,0.85)" : "none",
+            boxShadow: selectedNode === orchSpec.name ? "0 0 0 3px rgba(var(--accent-rgb),0.85)" : "none",
           }}
         />
       )}
@@ -2013,7 +2013,7 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
             borderRadius:"50%",
             cursor:"pointer",
             background:"transparent",
-            boxShadow: selectedNode === n.name ? "0 0 0 3px rgba(127,223,255,0.85)" : "none",
+            boxShadow: selectedNode === n.name ? "0 0 0 3px rgba(var(--accent-rgb),0.85)" : "none",
           }}
         />
       ))}
@@ -2384,7 +2384,7 @@ function GraphCanvas({
         <svg width={canvasW} height={canvasH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
           <defs>
             <marker id="graphArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
-              <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(120,220,255,0.85)" />
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(var(--accent-rgb),0.85)" />
             </marker>
             <marker id="graphArrowSel" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)" />
@@ -2414,7 +2414,7 @@ function GraphCanvas({
                 )}
                 <path
                   d={edgePath(e.source, e.target, s, t)}
-                  stroke={sel ? "var(--accent)" : synthetic ? "rgba(200,180,255,0.55)" : "rgba(120,220,255,0.55)"}
+                  stroke={sel ? "var(--accent)" : synthetic ? "rgba(200,180,255,0.55)" : "rgba(var(--accent-rgb),0.55)"}
                   strokeWidth={sel ? 2.6 : synthetic ? 1.4 : 1.6}
                   strokeDasharray={synthetic ? "5 4" : undefined}
                   fill="none"
@@ -2434,12 +2434,12 @@ function GraphCanvas({
               <g>
                 <path
                   d={`M ${sP.x} ${sP.y} C ${sP.x + dx} ${sP.y}, ${tx - dx} ${ty}, ${tx} ${ty}`}
-                  stroke={drag.over ? "var(--accent)" : "rgba(120,220,255,0.55)"}
+                  stroke={drag.over ? "var(--accent)" : "rgba(var(--accent-rgb),0.55)"}
                   strokeWidth={drag.over ? 2.4 : 1.6}
                   strokeDasharray="6 4"
                   fill="none"
                 />
-                <circle cx={tx} cy={ty} r={6} fill={drag.over ? "var(--accent)" : "rgba(120,220,255,0.55)"} />
+                <circle cx={tx} cy={ty} r={6} fill={drag.over ? "var(--accent)" : "rgba(var(--accent-rgb),0.55)"} />
               </g>
             );
           })()}
@@ -2541,7 +2541,7 @@ function GraphCanvas({
                   : sel
                   ? `0 0 0 2px ${accent}55, 0 6px 22px rgba(0,0,0,0.6)`
                   : isDragTarget
-                  ? "0 0 0 2px rgba(92,240,255,0.40), 0 6px 22px rgba(0,0,0,0.6)"
+                  ? "0 0 0 2px rgba(var(--accent-rgb),0.40), 0 6px 22px rgba(0,0,0,0.6)"
                   : isCritic
                   ? "0 0 16px rgba(255,180,80,0.35), 0 4px 14px rgba(0,0,0,0.5)"
                   : "0 4px 14px rgba(0,0,0,0.5)",

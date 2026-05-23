@@ -64,7 +64,7 @@ function GroupBox({ title, tooltip, children, style }: {
       title={tooltip}
       style={{
         background: "linear-gradient(180deg, rgba(60,60,80,0.4), rgba(40,40,60,0.4))",
-        border: "1px solid rgba(127,223,255,0.20)",
+        border: "1px solid rgba(var(--accent-rgb),0.20)",
         borderRadius: 10,
         padding: "14px 16px",
         display: "flex",
@@ -78,7 +78,7 @@ function GroupBox({ title, tooltip, children, style }: {
         fontSize: 14, fontWeight: 700,
         color: "var(--fg)",
         marginBottom: 6,
-        borderBottom: "1px solid rgba(127,223,255,0.10)",
+        borderBottom: "1px solid rgba(var(--accent-rgb),0.10)",
         paddingBottom: 6,
       }}>
         {title}
@@ -688,7 +688,7 @@ function LLMServerColumn({
       <div style={{
         marginTop: 8,
         fontSize: 13, fontWeight: 700, color: "var(--fg)",
-        borderTop: "1px solid rgba(127,223,255,0.10)",
+        borderTop: "1px solid rgba(var(--accent-rgb),0.10)",
         paddingTop: 8,
       }}
         title="Every inference server running across the app. Useful when something is holding GPU memory you can't see."
@@ -729,7 +729,7 @@ function LLMServerColumn({
                 padding: "4px 8px",
                 fontSize: 12,
                 color: "var(--fg)",
-                background: selected ? "rgba(127,223,255,0.10)" : "transparent",
+                background: selected ? "rgba(var(--accent-rgb),0.10)" : "transparent",
                 cursor: "pointer",
                 borderRadius: 4,
               }}

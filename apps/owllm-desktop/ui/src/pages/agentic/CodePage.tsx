@@ -297,7 +297,7 @@ export default function CodePage() {
         style={{
           flex: 1,
           background: "var(--bg-app)",
-          border: "1px dashed rgba(127,223,255,0.18)",
+          border: "1px dashed rgba(var(--accent-rgb),0.18)",
           borderRadius: 12,
           display: "flex",
           flexDirection: "column",

@@ -1068,7 +1068,7 @@ export default function MCPPage() {
       <div style={{
         display: "flex", gap: 4,
         padding: "8px 16px 0",
-        borderBottom: "1px solid rgba(127,223,255,0.10)",
+        borderBottom: "1px solid rgba(var(--accent-rgb),0.10)",
       }}>
         {TABS.map(t => {
           const active = t.key === tab;

@@ -248,8 +248,15 @@ const PARENT_Y = EXTRA_TOP + SHIFT_OUT + CORNER_OUTSET;
 // app chrome rather than content. The inner content background
 // switches via var(--bg-panel) so dark/light affects what's inside
 // the frame.
-const FRAME_COLOR  = "rgba(200, 240, 255, 0.86)";
-const FRAME_ACCENT = "rgba(120, 220, 255, 0.78)";
+//
+// FRAME_COLOR / FRAME_ACCENT pull from --accent so the cyan border
+// follows the colour-picker squares in the header — pick amber and
+// the whole frame turns amber, pick red and it turns red, etc. Was
+// previously hardcoded `rgba(200, 240, 255, 0.86)` (cyan) regardless
+// of accent. FRAME_BG stays a fixed dark navy because it's the
+// opaque chrome behind the cyan bars; it's not driven by accent.
+const FRAME_COLOR  = "rgba(var(--accent-rgb), 0.86)";
+const FRAME_ACCENT = "rgba(var(--accent-rgb), 0.78)";
 const FRAME_BG     = "rgba(8, 12, 24, 0.95)";
 
 const ICONS = "/Page_icons";
@@ -651,7 +658,7 @@ function ServerModal({ onClose }: { onClose: () => void }) {
           // Same cyan accent the HybridFrame uses internally — keeps
           // the modal visually consistent with the app chrome without
           // duplicating corner PNGs etc.
-          border: "2px solid rgba(120,220,255,0.78)",
+          border: "2px solid rgba(var(--accent-rgb), 0.78)",
           borderRadius: 14,
           boxShadow: "0 24px 64px rgba(0,0,0,0.55)",
           display: "flex", flexDirection: "column",
@@ -665,7 +672,7 @@ function ServerModal({ onClose }: { onClose: () => void }) {
           color: "#fff",
           display: "flex", alignItems: "center",
           padding: "0 20px",
-          borderBottom: "1px solid rgba(120,220,255,0.30)",
+          borderBottom: "1px solid rgba(var(--accent-rgb), 0.30)",
         }}>
           <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: 1 }}>
             🖧 Server Control

@@ -21,24 +21,25 @@ OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
 PAGES = ["home", "models", "chat", "train", "agents"]
 MODES = ["dark", "light"]
+ACCENTS = ["indigo", "amber", "red"]  # cover the default + two strong contrasts
 
 VIEWPORT = {"width": 1456, "height": 908}
 
 
-def snap(page_key: str, mode: str) -> None:
+def snap(page_key: str, mode: str, accent: str) -> None:
     out_dir = OUT_ROOT / page_key
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_png = out_dir / f"{mode}.png"
+    out_png = out_dir / f"{accent}-{mode}.png"
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch()
         ctx = browser.new_context(viewport=VIEWPORT)
         # Seed localStorage BEFORE the page loads so bootstrapTheme()
-        # picks up the requested mode on first paint — same path the
-        # real app uses, no race with React mount.
+        # picks up the requested mode + accent on first paint — same
+        # path the real app uses, no race with React mount.
         ctx.add_init_script(
             f"""window.localStorage.setItem('owllm:theme:mode', '{mode}');
-                window.localStorage.setItem('owllm:theme:accent', 'indigo');"""
+                window.localStorage.setItem('owllm:theme:accent', '{accent}');"""
         )
         page = ctx.new_page()
         url = f"http://localhost:5173/?page={page_key}"
@@ -46,17 +47,18 @@ def snap(page_key: str, mode: str) -> None:
         page.wait_for_timeout(2500)
         page.screenshot(path=str(out_png), full_page=False)
         browser.close()
-    print(f"  OK {page_key}/{mode} -> {out_png}")
+    print(f"  OK {page_key}/{accent}-{mode} -> {out_png}")
 
 
 def main() -> None:
     print(f"OUT_ROOT = {OUT_ROOT}")
     for pg in PAGES:
-        for md in MODES:
-            try:
-                snap(pg, md)
-            except Exception as e:
-                print(f"  FAIL {pg}/{md}: {e!r}")
+        for ac in ACCENTS:
+            for md in MODES:
+                try:
+                    snap(pg, md, ac)
+                except Exception as e:
+                    print(f"  FAIL {pg}/{ac}-{md}: {e!r}")
 
 
 if __name__ == "__main__":

@@ -35,8 +35,8 @@ export default function StubPage({ spec }: { spec: StubSpec }) {
         </div>
       </div>
       <div style={{
-        background: "rgba(127, 223, 255, 0.06)",
-        border: "1px solid rgba(127, 223, 255, 0.20)",
+        background: "rgba(var(--accent-rgb), 0.06)",
+        border: "1px solid rgba(var(--accent-rgb), 0.20)",
         borderRadius: 10,
         padding: "16px 20px",
         maxWidth: 720,

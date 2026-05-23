@@ -323,8 +323,8 @@ export default function SkillLibraryDialog({ open, onClose, onChange }: Props) {
               onClick={() => setFilter(f)}
               style={{
                 height: 32, padding: "0 12px", borderRadius: 8,
-                border: filter === f ? "1px solid rgba(120,220,255,0.55)" : "1px solid var(--border)",
-                background: filter === f ? "rgba(120,220,255,0.10)" : "transparent",
+                border: filter === f ? "1px solid rgba(var(--accent-rgb),0.55)" : "1px solid var(--border)",
+                background: filter === f ? "rgba(var(--accent-rgb),0.10)" : "transparent",
                 color: filter === f ? "var(--accent)" : "#9aa0a6",
                 fontSize: 12, fontWeight: 600, cursor: "pointer", textTransform: "capitalize",
               }}
@@ -427,8 +427,8 @@ function SkillRow({
     <div
       onClick={onPreview}
       style={{
-        background: isPreviewing ? "rgba(120,220,255,0.10)" : "var(--bg-elevated)",
-        border: isPreviewing ? "1px solid rgba(120,220,255,0.45)" : "1px solid var(--border)",
+        background: isPreviewing ? "rgba(var(--accent-rgb),0.10)" : "var(--bg-elevated)",
+        border: isPreviewing ? "1px solid rgba(var(--accent-rgb),0.45)" : "1px solid var(--border)",
         borderRadius: 8, padding: "10px 12px",
         cursor: "pointer",
         display: "flex", flexDirection: "column", gap: 4,

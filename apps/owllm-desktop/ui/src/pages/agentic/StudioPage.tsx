@@ -743,7 +743,7 @@ function AgentCard({
         display: "flex",
         gap: 14,
         boxShadow: selected
-          ? "0 4px 12px rgba(127,223,255,0.18)"
+          ? "0 4px 12px rgba(var(--accent-rgb),0.18)"
           : "0 2px 6px rgba(0,0,0,0.4)",
       }}
     >

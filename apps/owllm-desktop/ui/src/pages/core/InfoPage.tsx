@@ -44,7 +44,7 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
   return (
     <div style={{
       background: "linear-gradient(180deg, rgba(60,60,80,0.4), rgba(40,40,60,0.4))",
-      border: "1px solid rgba(127,223,255,0.20)",
+      border: "1px solid rgba(var(--accent-rgb),0.20)",
       borderRadius: 10,
       padding: "14px 18px",
       display: "flex",
@@ -53,7 +53,7 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
     }}>
       <div style={{
         fontSize: 14, fontWeight: 700, color: "var(--fg)",
-        borderBottom: "1px solid rgba(127,223,255,0.10)",
+        borderBottom: "1px solid rgba(var(--accent-rgb),0.10)",
         paddingBottom: 6, marginBottom: 6,
       }}>{title}</div>
       {children}

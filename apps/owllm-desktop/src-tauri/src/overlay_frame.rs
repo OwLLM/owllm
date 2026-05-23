@@ -16,8 +16,8 @@ const OVERLAY_LABEL: &str = "owllm-overlay-frame";
 
 pub fn enabled() -> bool {
     std::env::var("OWLLM_OVERLAY_FRAME")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-        .unwrap_or(false)
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+        .unwrap_or(true)
 }
 
 #[tauri::command]

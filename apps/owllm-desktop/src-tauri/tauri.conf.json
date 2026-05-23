@@ -48,7 +48,7 @@
         "resizable": true,
         "maximized": false,
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
         "center": true,
         "visible": false,
         "backgroundColor": "#06080d"

@@ -15,6 +15,7 @@ use tauri::{App, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Windo
 
 const OVERLAY_LABEL: &str = "owllm-overlay-frame";
 static OVERLAY_READY: AtomicBool = AtomicBool::new(false);
+static MAIN_FOCUSED: AtomicBool = AtomicBool::new(true);
 const BORDER_T: i32 = 18;
 const CORNER_OUTSET: i32 = 10;
 const SHIFT_OUT: i32 = BORDER_T / 2;
@@ -91,6 +92,27 @@ pub fn close_if_present<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+pub fn set_main_focused(app: &tauri::AppHandle, focused: bool) {
+    if !enabled() {
+        return;
+    }
+
+    MAIN_FOCUSED.store(focused, Ordering::Release);
+
+    let Some(overlay) = app.get_webview_window(OVERLAY_LABEL) else {
+        return;
+    };
+
+    if !focused {
+        let _ = overlay.hide();
+        return;
+    }
+
+    if let Some(main) = app.get_webview_window("main") {
+        let _ = sync_once(&main, &overlay);
+    }
+}
+
 fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
     if let Some(existing) = app.get_webview_window(OVERLAY_LABEL) {
         return Ok(existing);
@@ -145,6 +167,11 @@ fn sync_geometry(
 
 fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()> {
     sync_geometry(main.outer_position()?, main.outer_size()?, overlay)?;
+
+    if !MAIN_FOCUSED.load(Ordering::Acquire) {
+        let _ = overlay.hide();
+        return Ok(());
+    }
 
     if !main.is_visible()? {
         let _ = overlay.hide();

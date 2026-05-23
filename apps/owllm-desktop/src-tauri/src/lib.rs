@@ -182,6 +182,13 @@ pub fn run() {
                 } if label == "main" => {
                     overlay_frame::close_if_present(app);
                 }
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Focused(focused),
+                    ..
+                } if label == "main" => {
+                    overlay_frame::set_main_focused(app, focused);
+                }
                 tauri::RunEvent::ExitRequested { .. } => {
                     overlay_frame::close_if_present(app);
                     server::kill_all_llama_servers("exit-requested");

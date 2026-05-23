@@ -41,14 +41,14 @@
       {
         "label": "main",
         "title": "OwLLM Desktop",
-        "width": 1440,
-        "height": 900,
+        "width": 1200,
+        "height": 960,
         "minWidth": 1024,
         "minHeight": 640,
         "resizable": true,
         "maximized": false,
         "decorations": false,
-        "transparent": true,
+        "transparent": false,
         "center": true,
         "visible": false,
         "backgroundColor": "#06080d"

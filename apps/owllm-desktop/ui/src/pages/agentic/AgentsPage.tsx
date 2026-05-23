@@ -27,6 +27,19 @@ import {
   resetClaudeSession,
   clearAllClaudeSessions,
 } from "./dispatch";
+// Local-model tool-use loop. The duplicated streamChatCompletion that
+// AgentsPage carries (separate from dispatch.ts's version) had no tool
+// loop at all — local agents were sending one POST to llama-server and
+// returning the raw reply, so they couldn't ever invoke read_file /
+// shell / write_file etc. Importing the same helpers dispatch.ts uses
+// so the protocol shape is identical across both consumers.
+import {
+  formatToolsForPrompt,
+  parseToolCalls,
+  executeToolCall,
+  renderToolResultsForModel,
+  type ToolExecResult,
+} from "./localTools";
 
 const ICONS = "/Page_icons";
 
@@ -3554,26 +3567,64 @@ async function streamChatCompletion(
   if (provider === "gemini") {
     return streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images);
   }
-  // Local llama-server. OpenAI-compatible SSE. History (when present)
-  // becomes the alternating user/assistant turns preceding the new
-  // user message — gives the model continuity across restarts.
-  const messages: Array<{ role: string; content: unknown }> = [
-    { role: "system", content: systemPrompt },
+  // Local llama-server — OpenAI-compatible SSE with the same XML
+  // <tool_call> protocol dispatch.ts uses. The loop: append a tool
+  // catalog to the system prompt, stream one model turn, parse for
+  // <tool_call> blocks, execute each, fold the results back into the
+  // conversation as a synthetic user turn, repeat. Loop ends when
+  // the model produces a turn with NO tool_call blocks — that turn
+  // is the final answer. Caps at 8 turns to avoid runaway loops.
+  // History (when present) becomes the alternating user/assistant
+  // turns preceding the new user message — gives the model continuity
+  // across restarts.
+  const toolsBlock = formatToolsForPrompt(allowedTools);
+  const augmentedSystem = toolsBlock ? `${systemPrompt}\n${toolsBlock}` : systemPrompt;
+  const liveMessages: Array<{ role: string; content: unknown }> = [
+    { role: "system", content: augmentedSystem },
     ...(history ?? []),
     { role: "user", content: openaiUserContent(effectiveText, images) },
   ];
-  const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: modelId || "local",
-      messages,
-      stream: true,
-      temperature,
-    }),
-    signal,
-  });
-  return consumeOpenAISse(resp, onDelta, onThought);
+  const MAX_TOOL_TURNS = 8;
+  let lastReply = "";
+  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+    const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: modelId || "local",
+        messages: liveMessages,
+        stream: true,
+        temperature,
+      }),
+      signal,
+    });
+    // consumeOpenAISse streams deltas to onDelta AND returns the full
+    // assembled assistant text. We keep both — the deltas reach the
+    // canvas in real time, and the assembled string is what we parse
+    // for tool_call blocks.
+    lastReply = await consumeOpenAISse(resp, onDelta, onThought);
+    if (!toolsBlock) break;                       // no tools wired → no loop
+    const calls = parseToolCalls(lastReply);
+    if (calls.length === 0) break;                // model is done — final answer
+    // Execute every call sequentially (matches the legacy Python loop's
+    // one-at-a-time semantics so each result lands in context before
+    // the next tool runs).
+    const results: ToolExecResult[] = [];
+    for (const c of calls) {
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
+      // Surface the tool call on the Thought tab so the user sees what
+      // the agent's doing (e.g. `🛠 read_file(path=...)`).
+      onThought?.(`tool:${c.name}:${turn}`, c.name, JSON.stringify(c.args, null, 2));
+      // eslint-disable-next-line no-await-in-loop
+      results.push(await executeToolCall(c, projectCwd ?? ""));
+    }
+    // Append the assistant turn + synthetic user turn carrying tool
+    // results, then iterate.
+    liveMessages.push({ role: "assistant", content: lastReply });
+    liveMessages.push({ role: "user", content: renderToolResultsForModel(calls, results) });
+  }
+  return lastReply;
 }
 
 /// Anthropic Messages API streaming. Format:

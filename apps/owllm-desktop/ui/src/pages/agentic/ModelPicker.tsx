@@ -54,7 +54,7 @@ type Section =
   | "other";
 type Variant = "local" | "tuned" | "sub" | "api" | "auto";
 
-type Entry = {
+export type ModelPickerEntry = {
   id: string;
   label: string;
   hint?: string;
@@ -204,8 +204,8 @@ const AUTO_OPTIONS = [
   { id: "auto/balanced",       display: "Auto · Balanced" },
 ];
 
-export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | null): Entry[] {
-  const out: Entry[] = [];
+export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | null): ModelPickerEntry[] {
+  const out: ModelPickerEntry[] = [];
 
   // LOCAL — base GGUFs + transformers dirs under LLM/models/. Entries
   // with port=null are transformers-format directories that
@@ -369,7 +369,7 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
 }
 
 /// Pretty up a stored id for the trigger button.
-function displayForId(id: string, entries: Entry[]): string {
+function displayForId(id: string, entries: ModelPickerEntry[]): string {
   const e = entries.find(x => x.id === id);
   if (e) return e.label;
   // Unknown id (stale config). Show the raw id.

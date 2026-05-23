@@ -21,6 +21,7 @@ import {
   runDispatchLoop, DispatchPhase,
   type Attachment,
 } from "../pages/agentic/dispatch";
+import { buildEntries, type AccountsStatusLite, type ModelPickerEntry } from "../pages/agentic/ModelPicker";
 
 /// Shape returned by the Rust telegram_download_file command. Mirrors
 /// telegram::TelegramFileDownload on the Rust side.
@@ -132,12 +133,14 @@ export default function TelegramBridgeRunner() {
   const [cfg, setCfg] = useState<TelegramConfig | null>(null);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
   const [server, setServer] = useState<ServerStatus>({ running: false, model_id: null, port: null });
   const [teams, setTeams] = useState<Team[]>([]);
   const [roleByName, setRoleByName] = useState<Map<string, RoleData>>(new Map());
 
   const projectsRef = useRef(projects); projectsRef.current = projects;
   const modelsRef = useRef(models); modelsRef.current = models;
+  const accountsStatusRef = useRef(accountsStatus); accountsStatusRef.current = accountsStatus;
   const serverRef = useRef(server); serverRef.current = server;
   const teamsRef = useRef(teams); teamsRef.current = teams;
   const roleByNameRef = useRef(roleByName); roleByNameRef.current = roleByName;
@@ -181,6 +184,7 @@ export default function TelegramBridgeRunner() {
     invoke<BridgeConfigs>("load_bridge_configs").then(c => setCfg(c.telegram)).catch(() => {});
     invoke<ProjectRow[]>("list_projects").then(setProjects).catch(() => {});
     invoke<ModelInfo[]>("list_models").then(setModels).catch(() => {});
+    invoke<AccountsStatusLite>("accounts_status").then(setAccountsStatus).catch(() => {});
     invoke<TeamTemplateBackend[]>("list_team_templates").then(rows => setTeams(rows.map(toTeam))).catch(() => {});
     invoke<AgentRoleBackend[]>("list_agent_roles").then(rows => setRoleByName(rolesFromBackend(rows))).catch(() => {});
   }, []);
@@ -192,6 +196,7 @@ export default function TelegramBridgeRunner() {
     const tick = async () => {
       try { setServer(await invoke<ServerStatus>("server_status")); } catch {}
       try { setProjects(await invoke<ProjectRow[]>("list_projects")); } catch {}
+      try { setAccountsStatus(await invoke<AccountsStatusLite>("accounts_status")); } catch {}
     };
     tick();
     const id = window.setInterval(tick, 5000);
@@ -299,42 +304,43 @@ export default function TelegramBridgeRunner() {
     return ensureBrainstormProject();
   };
 
-  const usableModelIds = (): string[] => {
-    const local = modelsRef.current
-      .filter(m => (m.provider === "local" || m.provider === "tuned") && m.port != null)
-      .map(m => m.model_id);
-    return [
-      ...local,
-      "sub/claude-opus-4-5-20251101:high",
-      "sub/gpt-5.5:high",
-      "api/gpt-5.5",
-    ];
+  const modelChoices = (): ModelPickerEntry[] => {
+    return buildEntries(modelsRef.current, accountsStatusRef.current)
+      .filter(e => e.available && !e.id.startsWith("auto/"));
+  };
+
+  const modelChoiceIdAt = (n: number): string => {
+    const entry = modelChoices()[n - 1];
+    return entry?.id ?? "";
   };
 
   const modelHelp = (projectName?: string): string => {
-    const ids = usableModelIds().slice(0, 15);
+    const entries = modelChoices().slice(0, 20);
     const target = projectName ? ` for "${projectName}"` : "";
-    const choices = ids.length
-      ? ids.map((id, i) => `${i + 1}. ${id}`).join("\n")
-      : "(no local models detected yet)";
+    const choices = entries.length
+      ? entries.map((e, i) => `${i + 1}. ${e.id}`).join("\n")
+      : "(no available models detected yet)";
     return [
       `Choose a model${target} before the agents can run.`,
       "",
       choices,
       "",
-      "Reply with:",
-      "/model <model-id>",
+      "Reply with the number only, for example: 3",
+      "Full id also works: /model <model-id>",
       "",
       "You can also set the team model in the Agentic Team page.",
     ].join("\n");
   };
 
   const normalizeModelId = (text: string): string => {
-    const raw = text.trim();
+    const raw = text.trim().replace(/^<(.+)>$/, "$1");
     if (!raw) return "";
-    const exact = usableModelIds().find(id => id.toLowerCase() === raw.toLowerCase());
+    const n = Number(raw);
+    if (Number.isInteger(n) && n > 0) return modelChoiceIdAt(n);
+    const ids = modelChoices().map(e => e.id);
+    const exact = ids.find(id => id.toLowerCase() === raw.toLowerCase());
     if (exact) return exact;
-    const byBare = usableModelIds().find(id => norm(id).includes(norm(raw)));
+    const byBare = ids.find(id => norm(id).includes(norm(raw)));
     return byBare || raw;
   };
 
@@ -351,7 +357,15 @@ export default function TelegramBridgeRunner() {
     if (/^\/projects\b/i.test(trimmed)) return { kind: "list-projects" };
     if (/^\/models\b/i.test(trimmed)) return { kind: "list-models" };
 
-    const modelMatch = trimmed.match(/^\/model\s+(.+)$/i)
+    const numberOnly = trimmed.match(/^\d+$/);
+    if (numberOnly) {
+      const project = await currentProjectForChat(chatId);
+      if (!(project.team_default_model_id || "").trim()) {
+        return { kind: "set-model", project, modelId: normalizeModelId(trimmed) };
+      }
+    }
+
+    const modelMatch = trimmed.match(/^\/model\s*<?(.+?)>?$/i)
       ?? trimmed.match(/^model\s*:\s*(.+)$/i);
     if (modelMatch) {
       const project = await currentProjectForChat(chatId);
@@ -756,7 +770,7 @@ export default function TelegramBridgeRunner() {
             const hasMedia = hasPhoto || hasVoice || hasAudio || docIsImage || docIsAudio;
             if (!text && !hasMedia) continue;
             console.log(`[telegram] inbound from ${chatId}: text="${text.slice(0, 60)}" photo=${hasPhoto} voice=${hasVoice} audio=${hasAudio} doc=${docMime || "-"}`);
-            const immediateCommand = !hasMedia && /^\/(?:ping|projects|project|use|switch|models|model)\b/i.test(text.trim());
+            const immediateCommand = !hasMedia && (/^\/(?:ping|projects|project|use|switch|models|model)\b/i.test(text.trim()) || /^\d+$/.test(text.trim()));
 
             // Snapshot the file_ids + mime hints NOW (msg ref will be
             // out of scope by the time the queued task runs). Downloads

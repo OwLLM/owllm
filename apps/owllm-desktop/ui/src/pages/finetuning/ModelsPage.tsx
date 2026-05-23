@@ -528,12 +528,18 @@ export default function ModelsPage() {
               data-ui={t.dataUi}
               onClick={() => setTab(t.key)}
               style={{
-                padding: "6px 14px",
+                // Height matches the adjacent formatFilterContainer (50px)
+                // so the tab buttons + checkbox container read as a single
+                // toolbar row. Font size matches SubTabs (15px) — same
+                // typographic family as the page-selection strip above.
+                // Horizontal padding kept tight so the label dominates.
+                height: 50,
+                padding: "0 10px",
                 background: active ? "#1f6feb" : "transparent",
                 color: active ? "#fff" : "var(--fg)",
                 border: `1px solid ${active ? "#1f6feb" : "#2a3242"}`,
                 borderRadius: 6,
-                fontSize: 12,
+                fontSize: 15,
                 cursor: "pointer",
                 transition: "background 120ms ease, border-color 120ms ease",
               }}

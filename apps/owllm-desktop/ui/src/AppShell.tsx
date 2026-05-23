@@ -370,12 +370,18 @@ function ModeBar({
   // OWLLM title read consistently across themes. Buttons therefore
   // stay light-on-dark regardless of mode — we don't drive their
   // colours from the theme.
+  // Font size + padding tuned to match SubTabs (page selection row
+  // under the header) so the two button strips read as one typographic
+  // family. SubTabs uses fontSize:15 / padding:"5px 14px"; the header
+  // pills mirror that font size but use tight horizontal padding ("0
+  // 6px") because the fixed pill widths already give the label room
+  // to breathe.
   const baseBtn: React.CSSProperties = {
-    height: 50, padding: "0 14px",
+    height: 50, padding: "0 6px",
     background: "linear-gradient(180deg, rgba(60,60,80,0.85), rgba(40,40,60,0.85))",
     color: "#fff",
     border: "1px solid rgba(255,255,255,0.20)",
-    borderRadius: 6, fontSize: 13, fontWeight: 700,
+    borderRadius: 6, fontSize: 15, fontWeight: 700,
     display: "flex", flexDirection: "column",
     alignItems: "center", justifyContent: "center",
     lineHeight: 1.05, gap: 0,

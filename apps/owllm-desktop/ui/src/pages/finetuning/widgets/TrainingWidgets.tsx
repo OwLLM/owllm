@@ -18,7 +18,7 @@ export function MetricCard({ title, icon, value, accent = "#667eea" }: MetricCar
     <div
       data-ui="MetricCard"
       style={{
-        background: "linear-gradient(180deg, #1e2336 0%, #161a2a 100%)",
+        background: "var(--bg-card)",
         border: `1px solid ${accent}33`,
         borderRadius: 8,
         padding: "12px 14px",
@@ -31,9 +31,9 @@ export function MetricCard({ title, icon, value, accent = "#667eea" }: MetricCar
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         <span style={{ fontSize: 14, color: accent }}>{icon}</span>
-        <span style={{ fontSize: 11, color: "#9aa0aa", textTransform: "uppercase", letterSpacing: 0.5 }}>{title}</span>
+        <span style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>{title}</span>
       </div>
-      <div style={{ fontSize: 22, fontWeight: 700, color: "#fafafa", lineHeight: 1.1 }}>{value}</div>
+      <div style={{ fontSize: 22, fontWeight: 700, color: "var(--fg-strong)", lineHeight: 1.1 }}>{value}</div>
     </div>
   );
 }

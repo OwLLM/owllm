@@ -83,7 +83,7 @@ function modelCapabilityBlurb(id: string): string {
 
 // Card style — port of `_CARD_STYLE` at main.py:14538-14593 (cfgCard).
 const cfgCard: React.CSSProperties = {
-  background: "rgba(20, 25, 40, 0.55)",
+  background: "var(--bg-card)",
   border: "1px solid rgba(102,126,234,0.28)",
   borderRadius: 10,
   padding: "10px 14px 12px 14px",
@@ -103,16 +103,16 @@ const cardTitle: React.CSSProperties = {
 const labelStyle: React.CSSProperties = {
   fontSize: 11,
   fontWeight: 700,
-  color: "#8595ad",
+  color: "var(--fg-muted)",
   letterSpacing: 0.4,
 };
 
 const inputStyle: React.CSSProperties = {
   padding: "6px 10px",
-  background: "rgba(10,14,24,0.85)",
-  border: "1px solid rgba(102,126,234,0.22)",
+  background: "var(--bg-input)",
+  border: "1px solid var(--border-strong)",
   borderRadius: 6,
-  color: "#e8eef7",
+  color: "var(--fg)",
   fontSize: 12,
   minHeight: 28,
   width: "100%",
@@ -124,7 +124,7 @@ const cardBtn: React.CSSProperties = {
   background: "rgba(102,126,234,0.18)",
   border: "1px solid rgba(102,126,234,0.45)",
   borderRadius: 6,
-  color: "#fafafa",
+  color: "var(--fg-strong)",
   padding: "6px 12px",
   fontWeight: 600,
   minHeight: 28,
@@ -256,7 +256,7 @@ function TrainingHistory() {
     <div
       data-ui="trainingHistorySection"
       style={{
-        background: "linear-gradient(180deg, rgba(15,15,26,0.6), rgba(25,25,36,0.8))",
+        background: "var(--bg-card)",
         border: "1px solid rgba(102,126,234,0.3)",
         borderRadius: 12,
         padding: 12,
@@ -635,7 +635,7 @@ export default function TrainPage() {
 
         {/* Loss Over Time — main.py:16057-16082 */}
         <div data-ui="lossSection" style={{
-          background: "linear-gradient(180deg, rgba(15,15,26,0.6), rgba(25,25,36,0.8))",
+          background: "var(--bg-card)",
           border: "1px solid rgba(102,126,234,0.3)",
           borderRadius: 12,
           padding: "10px 15px",
@@ -650,7 +650,7 @@ export default function TrainPage() {
 
         {/* Training Logs — main.py:16084-16143 */}
         <div data-ui="logsSection" style={{
-          background: "linear-gradient(180deg, rgba(15,15,26,0.6), rgba(25,25,36,0.8))",
+          background: "var(--bg-card)",
           border: "1px solid rgba(102,126,234,0.3)",
           borderRadius: 12,
           padding: "10px 15px",

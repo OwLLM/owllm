@@ -39,6 +39,10 @@ const ICONS = "/Page_icons";
 
 type LauncherSpec = {
   key: string;
+  // Page key to navigate to (matches modules.ts firstTab so the
+  // ModeBar lights up the corresponding mode toggle automatically
+  // via AppShell's owllm:navigate handler).
+  targetPage: string;
   title: string;
   iconPng: string;
   tagline: string;
@@ -52,6 +56,7 @@ type LauncherSpec = {
 const LAUNCHERS: LauncherSpec[] = [
   {
     key: "finetuning",
+    targetPage: "models",
     title: "Fine Tuning",
     iconPng: "owl_FineTuning.png",
     tagline: "Models · Train · Test",
@@ -62,6 +67,7 @@ const LAUNCHERS: LauncherSpec[] = [
   },
   {
     key: "agentic",
+    targetPage: "agents",
     title: "Agentic Team",
     iconPng: "owl_AgenticTeam.png",
     tagline: "Agents · Studio · Code · Characters",
@@ -74,10 +80,22 @@ const LAUNCHERS: LauncherSpec[] = [
 
 function LauncherCard({ spec }: { spec: LauncherSpec }) {
   // Card sized minimally to fit the 270-px PNG (main.py:4187,4234).
+  // onClick dispatches the same owllm:navigate event StudioPage uses
+  // to jump between tabs — AppShell's listener flips the matching
+  // ModeBar toggle on AND switches the active SubTab in one step.
+  const onClick = () => {
+    window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: spec.targetPage } }));
+  };
   return (
     <div
       data-ui={`LauncherCard:${spec.key}`}
+      onClick={onClick}
       style={{
+        // Launcher cards are brand chrome — the per-card accentTop /
+        // accentBottom gradient is the visual identity (blue for Fine
+        // Tuning, teal for Agentic Team). They stay dark in BOTH themes
+        // by design, so the inner text overrides var(--fg) (which would
+        // flip black in light mode and disappear) with explicit white.
         background: `linear-gradient(180deg, ${spec.accentTop} 0%, ${spec.accentBottom} 100%)`,
         borderLeft: `6px solid ${spec.accentLine}`,
         borderRadius: 18,
@@ -112,7 +130,7 @@ function LauncherCard({ spec }: { spec: LauncherSpec }) {
           {spec.title}
         </div>
         <div style={{
-          color: "var(--fg-muted)",
+          color: "rgba(255,255,255,0.65)",
           fontSize: 12,
           letterSpacing: 0.6,
           textTransform: "uppercase",
@@ -120,7 +138,7 @@ function LauncherCard({ spec }: { spec: LauncherSpec }) {
           {spec.tagline}
         </div>
         <div style={{
-          color: "var(--fg)",
+          color: "#fafafa",
           fontSize: 14,
           lineHeight: 1.5,
           marginTop: 4,
@@ -279,7 +297,10 @@ function GridPanel({ children, accent }: {
 }) {
   return (
     <div style={{
-      background: "linear-gradient(180deg, rgba(60,60,80,0.4), rgba(40,40,60,0.4))",
+      // Bottom-row panels switch with theme: --bg-card is white in light
+      // mode and a near-black panel in dark mode, so the inner var(--fg)
+      // text stays readable in both.
+      background: "var(--bg-card)",
       border: `1px solid ${accent}`,
       borderRadius: 12,
       padding: 18,
@@ -303,8 +324,11 @@ function WelcomeCircle() {
       width: D,
       height: D,
       borderRadius: D / 2,
-      border: "3px solid #7fdfff",
-      background: "radial-gradient(circle at 50% 50%, rgba(74,108,255,0.95) 0%, rgba(28,38,72,0.96) 70%, rgba(10,14,28,0.98) 100%)",
+      // Welcome circle ring follows the accent picker — same colour the
+      // active tab and primary action buttons use, so the user's
+      // chosen palette shows here as a brand accent.
+      border: "3px solid var(--accent)",
+      background: "radial-gradient(circle at 50% 50%, rgba(var(--accent-rgb),0.55) 0%, rgba(28,38,72,0.96) 70%, rgba(10,14,28,0.98) 100%)",
       color: "var(--fg-strong)",
       fontSize: 30,
       fontWeight: 700,
@@ -406,7 +430,7 @@ export default function HomePage() {
         <LauncherCard spec={LAUNCHERS[0]} />
         <LauncherCard spec={LAUNCHERS[1]} />
 
-        <GridPanel accent="rgba(127,223,255,0.30)">
+        <GridPanel accent="var(--accent-strong)">
           <PanelHeader
             icon="📊"
             label="System Status"
@@ -415,9 +439,11 @@ export default function HomePage() {
                 data-ui="RefreshGpuBtn"
                 onClick={refreshHw}
                 style={{
-                  // refreshGpuBtn styling — main.py:7577-7597.
-                  background: "linear-gradient(180deg, rgba(60,60,80,0.4), rgba(40,40,60,0.4))",
-                  border: "1px solid rgba(127,223,255,0.30)",
+                  // refreshGpuBtn — uses --bg-elevated so the surface
+                  // tracks the theme; --fg-strong is the contrasting
+                  // text colour for that surface in both modes.
+                  background: "var(--bg-elevated)",
+                  border: "1px solid var(--accent-strong)",
                   borderRadius: 12,
                   padding: "8px 15px",
                   color: "var(--fg-strong)",
@@ -482,7 +508,7 @@ export default function HomePage() {
           </div>
         </GridPanel>
 
-        <GridPanel accent="rgba(127,223,255,0.30)">
+        <GridPanel accent="var(--accent-strong)">
           <PanelHeader icon="⚙️" label="Software Requirements & Setup" />
           {/* Four rows in Qt order — main.py:7788-7873.
               Detail strings reproduce Qt's f-strings verbatim. */}

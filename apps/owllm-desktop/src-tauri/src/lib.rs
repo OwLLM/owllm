@@ -55,7 +55,11 @@ pub fn run() {
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
             {
                 let window = webview.window();
-                let _ = window.maximize();
+                // Don't force-maximize on first paint — tauri.conf.json
+                // sets width/height (1200x960) which is what the user
+                // expects. The previous unconditional .maximize() call
+                // overrode that and made the window open full-screen
+                // every launch.
                 let show_window = window.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(120));

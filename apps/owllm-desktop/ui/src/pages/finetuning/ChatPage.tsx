@@ -49,7 +49,7 @@ const PANEL_TINT: Record<"A" | "B" | "C", string> = {
 };
 
 const LABEL_TINT: Record<"A" | "B" | "C", string> = {
-  A: "#4a6cff",
+  A: "var(--accent)",
   B: "#22c55e",
   C: "#9C27B0",
 };
@@ -684,13 +684,13 @@ export default function ChatPage() {
                   disabled={!draft.trim()}
                   style={{
                     height: 40,
-                    background: "linear-gradient(180deg, #4a6cff, #3a55cc)",
+                    background: "linear-gradient(180deg, var(--accent), var(--accent))",
                     color: "#fff",
                     border: "none", borderRadius: 8,
                     fontSize: 12, fontWeight: 700,
                     cursor: !draft.trim() ? "not-allowed" : "pointer",
                     opacity: !draft.trim() ? 0.75 : 1,
-                    boxShadow: !draft.trim() ? "none" : "0 0 16px -4px #4a6cff88",
+                    boxShadow: !draft.trim() ? "none" : "0 0 16px -4px var(--accent)88",
                   }}
                 >📤 Send</button>
               )}

@@ -131,7 +131,7 @@ function PrimaryButton({
   variant?: "neutral" | "start" | "stop";
 }) {
   const colors = {
-    neutral: { bg: "linear-gradient(180deg, #4a6cff, #3a55cc)", fg: "#fff", border: "none" },
+    neutral: { bg: "linear-gradient(180deg, var(--accent), var(--accent))", fg: "#fff", border: "none" },
     start:   { bg: "linear-gradient(180deg, #4CAF50, #388E3C)", fg: "#fff", border: "none" },
     stop:    { bg: "linear-gradient(180deg, #f44336, #d32f2f)", fg: "#fff", border: "none" },
   }[variant];

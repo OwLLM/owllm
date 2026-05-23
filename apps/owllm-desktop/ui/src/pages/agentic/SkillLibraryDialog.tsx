@@ -260,7 +260,7 @@ export default function SkillLibraryDialog({ open, onClose, onChange }: Props) {
             title="Clone or fast-forward the source"
             style={{
               height: 32, padding: "0 14px", border: "none", borderRadius: 8,
-              background: busy || !currentSource ? "rgba(74,108,255,0.25)" : "#4a6cff",
+              background: busy || !currentSource ? "rgba(var(--accent-rgb),0.25)" : "var(--accent)",
               color: busy || !currentSource ? "#9aa0a6" : "#fff", fontSize: 12, fontWeight: 600,
               cursor: busy || !currentSource ? "not-allowed" : "pointer",
             }}

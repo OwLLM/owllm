@@ -265,10 +265,10 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
             disabled={loading || !!error}
             style={{
               padding: "8px 18px",
-              background: "linear-gradient(180deg, #4a6cff 0%, #3a55cc 100%)",
+              background: "linear-gradient(180deg, var(--accent) 0%, var(--accent) 100%)",
               border: "none", color: "#fff",
               borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: "pointer",
-              boxShadow: "0 0 14px -4px #4a6cff88",
+              boxShadow: "0 0 14px -4px var(--accent)88",
             }}
           >Download {picked.size > 0 && !downloadAll ? `(${picked.size})` : ""}</button>
         </div>

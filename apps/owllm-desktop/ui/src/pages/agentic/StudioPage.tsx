@@ -205,7 +205,7 @@ function OnboardingBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss
       <button
         onClick={onOpen}
         style={{
-          background: "#4a6cff", color: "var(--fg-strong)", border: "none",
+          background: "var(--accent)", color: "var(--fg-strong)", border: "none",
           borderRadius: 8, padding: "6px 14px", fontWeight: 600,
           fontSize: 12, cursor: "pointer",
         }}
@@ -704,7 +704,7 @@ function TeamDetailPanel({
           onClick={() => onCreateProject(team.name)}
           style={{
             minHeight: 38,
-            background: "#4a6cff", color: "var(--fg-strong)",
+            background: "var(--accent)", color: "var(--fg-strong)",
             border: "none", borderRadius: 9, padding: "0 16px",
             fontWeight: 600, fontSize: 12, cursor: "pointer",
           }}
@@ -719,7 +719,7 @@ function TeamDetailPanel({
 // ---------------------------------------------------------------------
 
 // Agent gallery card — mirrors agent_studio_page.py:172 _GalleryCard.
-// Fixed 140px height, accent-coloured left border (#4a6cff for
+// Fixed 140px height, accent-coloured left border (var(--accent) for
 // built-ins/skills, #7a8a9c for plain custom), badges row (BUILT-IN,
 // SKILL, LEADER).
 function AgentCard({
@@ -727,7 +727,7 @@ function AgentCard({
 }: {
   agent: AgentDef; selected: boolean; onClick: () => void;
 }) {
-  const accent = (agent.builtIn || agent.isSkill) ? "#4a6cff" : "#7a8a9c";
+  const accent = (agent.builtIn || agent.isSkill) ? "var(--accent)" : "#7a8a9c";
   return (
     <div
       onClick={onClick}
@@ -941,7 +941,7 @@ function AgentDetailPanel({
       {agent.builtIn && (
         <div style={{
           color: "#c5cdff",
-          background: "rgba(74,108,255,0.10)",
+          background: "rgba(var(--accent-rgb),0.10)",
           borderRadius: 8, padding: "8px 12px", fontSize: 13,
         }}>
           🔒  Built-in role from LLM/core/agents/roles/. Click <b>Duplicate</b> first to make your own copy.
@@ -1036,7 +1036,7 @@ function AgentDetailPanel({
           disabled={!editable}
           style={{
             flex: 1, minHeight: 42,
-            background: editable ? "#4a6cff" : "#2c313c",
+            background: editable ? "var(--accent)" : "#2c313c",
             color: editable ? "#fff" : "#777",
             border: "none", borderRadius: 8, padding: "0 20px",
             fontWeight: 600, cursor: editable ? "pointer" : "default",
@@ -1330,7 +1330,7 @@ export default function StudioPage() {
               onClick={handleNewAgent}
               style={{
                 minHeight: 34,
-                background: "#4a6cff", color: "var(--fg-strong)",
+                background: "var(--accent)", color: "var(--fg-strong)",
                 border: "none", borderRadius: 8, padding: "0 16px",
                 fontWeight: 600, cursor: "pointer", fontSize: 12,
               }}

@@ -543,7 +543,7 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
           style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"var(--bg-input)", color:"var(--fg-strong)", border: dragOver ? "1px dashed rgba(124,196,255,0.85)" : "1px solid transparent" }} />
         <button data-ui="GoalRunBtn" disabled={busy || !goal.trim()} onClick={onRun}
           style={{ height:38, padding:"0 24px", borderRadius:10, border:"none",
-                   background: busy || !goal.trim() ? "rgba(74,108,255,0.25)" : "#4a6cff",
+                   background: busy || !goal.trim() ? "rgba(var(--accent-rgb),0.25)" : "var(--accent)",
                    color: busy || !goal.trim() ? "#9aa0a6" : "#fff", fontWeight:600, fontSize:14,
                    cursor: busy || !goal.trim() ? "not-allowed" : "pointer" }}>
           {busy ? "Running…" : "Run"}

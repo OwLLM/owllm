@@ -270,7 +270,7 @@ export default function CodePage() {
             height: 32,
             padding: "0 16px",
             borderRadius: 8,
-            background: "linear-gradient(180deg, #4a6cff, #3a55cc)",
+            background: "linear-gradient(180deg, var(--accent), var(--accent))",
             color: "var(--fg-strong)",
             border: "none",
             fontWeight: 700,

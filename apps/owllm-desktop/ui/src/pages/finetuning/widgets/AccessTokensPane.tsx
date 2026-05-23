@@ -188,14 +188,14 @@ function TokensTab(p: {
         onClick={() => openExternal("https://huggingface.co/settings/tokens")}
         style={{
           padding: "6px 10px",
-          background: "linear-gradient(180deg, #4a6cff 0%, #3a55cc 100%)",
+          background: "linear-gradient(180deg, var(--accent) 0%, var(--accent) 100%)",
           color: "#fff",
           border: "none",
           borderRadius: 4,
           fontSize: 11,
           fontWeight: 700,
           cursor: "pointer",
-          boxShadow: "0 0 10px -4px #4a6cff88",
+          boxShadow: "0 0 10px -4px var(--accent)88",
         }}
         title="Opens huggingface.co/settings/tokens in your browser. Create a READ token."
       >🚀 Get a token from Hugging Face →</button>

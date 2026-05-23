@@ -40,7 +40,10 @@
   --bg-panel:    color-mix(in srgb, var(--accent) 25%, #0e1117);
   --bg-elevated: color-mix(in srgb, var(--accent) 30%, #11151e);
   --bg-card:     color-mix(in srgb, var(--accent) 32%, #1a1f2c);
-  --bg-header:   color-mix(in srgb, var(--accent) 45%, #1c2244);
+  /* Header band is the most-vivid surface — 70 % accent so amber
+     reads as a clearly golden bar, red as deep red, emerald as
+     forest. Was 45 % which the user called "transparent on dark". */
+  --bg-header:   color-mix(in srgb, var(--accent) 70%, #1c2244);
   --bg-input:    color-mix(in srgb, var(--accent) 18%, #0f0f19);
   --bg-surface: rgba(255, 255, 255, 0.04);
   --bg-surface-hover: rgba(255, 255, 255, 0.10);

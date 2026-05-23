@@ -64,48 +64,21 @@ export function parseToolCalls(text: string): ToolCall[] {
   return calls;
 }
 
-/// Tools that actually MUTATE the world. Used to gate whether the
-/// XML protocol block is even worth showing to a given agent. The
-/// orchestrator's allowlist is just [dispatch, read_file, list_dir]
-/// — pure read-only investigation tools. Telling it the XML format
-/// would just compete with the @agent: dispatch convention its
-/// system prompt already teaches, and Gemma-class local models then
-/// produce neither dispatch lines nor tool_calls. Specialists with
-/// write_file_with_diff / edit_file / shell / create_dir get the
-/// block; orchestrators don't.
-const WRITE_TOOL_NAMES = new Set([
-  "write_file_with_diff",
-  "write_file",
-  "edit_file",
-  "shell",
-  "shell_exec",
-  "create_dir",
-]);
-
 /// Render the tools the agent is allowed to call as a system-prompt
 /// block. Matches the format parseToolCalls reads, with one worked
 /// example so the model has a tight reference + example in one place.
 /// Mirrors format_for_prompt in LLM/core/agents/tools/parser.py:69.
 ///
-/// If `allowed` is given but doesn't overlap our registry (e.g. the
-/// legacy yaml lists tools we haven't ported yet), fall through to
-/// the full registry rather than emitting nothing — otherwise the
-/// model sees zero tools and silently degrades to text-only answers.
-export function formatToolsForPrompt(allowed?: string[]): string {
-  let tools = LOCAL_TOOL_SPECS;
-  if (allowed && allowed.length > 0) {
-    const filtered = LOCAL_TOOL_SPECS.filter((t) => allowed.includes(t.name));
-    if (filtered.length > 0) tools = filtered;
-    // else: fall through to all tools — allowlist names didn't match
-    // any port. Better to expose extra than nothing.
-  }
+/// Local models get the FULL tool registry — no allowlist filtering,
+/// no read-only gate, no per-role pruning. Matches the Claude Code /
+/// Codex model where every agent has every tool and the role's system
+/// prompt (not the runtime) decides what the agent should do with them.
+/// The `allowed` parameter is accepted for API-compat with the Claude
+/// CLI subscription path (which forwards it as --allowedTools) but is
+/// IGNORED here on purpose.
+export function formatToolsForPrompt(_allowed?: string[]): string {
+  const tools = LOCAL_TOOL_SPECS;
   if (tools.length === 0) return "";
-  // GATE: skip the XML protocol block for read-only roles
-  // (orchestrators, researchers in read mode, etc). They have their
-  // own @agent: dispatch convention; adding a competing tool_call
-  // protocol confuses small local models and they emit neither.
-  const hasWrite = tools.some((t) => WRITE_TOOL_NAMES.has(t.name));
-  if (!hasWrite) return "";
   const lines: string[] = [
     "",
     "--- TOOL PROTOCOL ---",

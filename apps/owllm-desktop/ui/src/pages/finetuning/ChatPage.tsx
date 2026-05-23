@@ -26,12 +26,12 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
-// Tool-use loop. When toolsEnabled is on for a column, sendOne()
-// appends the same XML <tool_call> catalog the Agentic Team page uses,
-// then parses each streamed reply for tool_call blocks and runs them
-// against agent_tools.rs. Shared with AgentsPage so the protocol is
-// identical and a user who experiments in Chat can paste prompts that
-// work the same way in the Agentic team.
+// Tool-use loop, always-on. sendOne() appends the same XML <tool_call>
+// catalog the Agentic Team page uses, then parses each streamed reply
+// for tool_call blocks and runs them against agent_tools.rs. Shared
+// with AgentsPage so the protocol is identical and a user who
+// experiments in Chat can paste prompts that work the same way in the
+// Agentic team.
 import {
   formatToolsForPrompt,
   parseToolCalls,
@@ -93,15 +93,6 @@ type Column = {
   messages: ChatMsg[];
   busy: boolean;
   error: string | null;
-  /// When true, the column augments the system prompt with the
-  /// XML <tool_call> protocol catalog and runs the model's reply
-  /// through a tool-execution loop: parse → execute → fold results
-  /// back as a synthetic user turn → re-stream. Loop ends when the
-  /// model produces a turn with no tool_call blocks. Disabled by
-  /// default to preserve the legacy "pure chat" behaviour; flip it
-  /// on per column when you actually want the model to read files,
-  /// run commands, etc.
-  toolsEnabled: boolean;
 };
 
 const DEFAULT_COL = (id: "A" | "B" | "C"): Column => {
@@ -118,7 +109,6 @@ const DEFAULT_COL = (id: "A" | "B" | "C"): Column => {
     messages: [],
     busy: false,
     error: null,
-    toolsEnabled: false,
   };
 };
 
@@ -325,19 +315,19 @@ export default function ChatPage() {
     const ctrl = new AbortController();
     abortersRef.current.set(col.id, ctrl);
 
-    // When tools are enabled, the system prompt grows with the XML
-    // <tool_call> catalog so the model knows how to invoke read_file
-    // / shell / write_file etc. Loop runs up to 8 turns: stream a
-    // reply, parse tool_calls, execute each, fold results back as a
-    // synthetic user turn, re-stream. Loop ends when the model emits
-    // a turn with no tool_call blocks — that's the final answer.
-    const toolsBlock = col.toolsEnabled ? formatToolsForPrompt() : "";
+    // Tools are always-on. System prompt gets the XML <tool_call>
+    // catalog so the model knows how to invoke read_file / shell /
+    // write_file etc. Loop runs up to 8 turns: stream a reply, parse
+    // tool_calls, execute each, fold results back as a synthetic user
+    // turn, re-stream. Loop ends when the model emits a turn with no
+    // tool_call blocks — that's the final answer.
+    const toolsBlock = formatToolsForPrompt();
     const augmentedSystem = toolsBlock ? `${col.system}\n${toolsBlock}` : col.system;
     const liveMessages: Array<{ role: string; content: string }> = [
       { role: "system", content: augmentedSystem },
       ...next.map((m) => ({ role: m.role, content: m.content })),
     ];
-    const MAX_TOOL_TURNS = col.toolsEnabled ? 8 : 1;
+    const MAX_TOOL_TURNS = 8;
 
     let reply = "";
     try {
@@ -933,25 +923,6 @@ export default function ChatPage() {
                         onChange={(e) => updateCol(col.id, { repetitionPenalty: parseFloat(e.target.value) || 0 })}
                         style={paramInputStyle} />
                     </ParamRow>
-                    {/* Tools toggle. When on, sendOne() augments the system
-                        prompt with the XML <tool_call> catalog and runs
-                        a parse/execute loop so the model can call
-                        read_file / shell / write_file / etc. against the
-                        agent_tools.rs commands. Off = pure chat (legacy
-                        behaviour). */}
-                    <label style={{
-                      display: "flex", alignItems: "center", gap: 6,
-                      cursor: "pointer", fontSize: 11, color: "#cfd4e1",
-                      marginTop: 6,
-                    }}>
-                      <input
-                        type="checkbox"
-                        checked={col.toolsEnabled}
-                        onChange={(e) => updateCol(col.id, { toolsEnabled: e.target.checked })}
-                        style={{ accentColor: "#7fb8ff" }}
-                      />
-                      🛠 Allow tools (read/write files, shell)
-                    </label>
                   </fieldset>
 
                   <div style={{ fontSize: 10, color: "#bbb" }}>Tokens: 0</div>

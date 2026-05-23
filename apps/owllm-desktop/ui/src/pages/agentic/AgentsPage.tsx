@@ -5176,9 +5176,22 @@ export default function AgentsPage() {
         const id = modelFor(a.name);
         if (id && isLocallyServed(providerFor(id))) localCandidates.push(id);
       }
-      const wantedLocal = localCandidates[0]?.trim();
+      // Fallback chain so Send always works when local is needed:
+      //   1. Explicit pick (per-agent / team-default / orchestrator).
+      //   2. Whatever the local server is already serving (lets the
+      //      user re-use a model loaded by Chat / Server tabs).
+      //   3. First servable local/tuned model in the registry — auto-
+      //      pick so a fresh team with no model_id assigned still runs.
+      let wantedLocal = localCandidates[0]?.trim() || "";
+      if (!wantedLocal && serverState.model_id && isLocallyServed(providerFor(serverState.model_id))) {
+        wantedLocal = serverState.model_id;
+      }
       if (!wantedLocal) {
-        setRunError("This team uses local model(s) but no model is picked. Choose one in the picker.");
+        const fallback = models.find(m => isLocallyServed(m.provider) && m.port != null);
+        if (fallback) wantedLocal = fallback.model_id;
+      }
+      if (!wantedLocal) {
+        setRunError("This team uses local model(s) but none are installed. Open the Models tab and add a local or tuned model first.");
         return;
       }
       if (!serverState.running || !serverState.port || serverState.model_id !== wantedLocal) {

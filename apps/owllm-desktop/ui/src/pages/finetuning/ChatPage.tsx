@@ -262,13 +262,36 @@ export default function ChatPage() {
     // port locally because the 3 s server_status poll hasn't fired
     // yet right after server_start — the stale `status.port` would
     // give 'Failed to fetch' against http://127.0.0.1:undefined.
+    // Resolve which model the column wants. Priority:
+    //   1. Column's own pick.
+    //   2. Column A's pick (the "driver" column).
+    //   3. Whatever the local server is already running (so a fresh
+    //      column still works if the server is up from another column
+    //      or the Server tab).
+    //   4. First servable local/tuned model in the registry — auto-
+    //      pick so the user can just hit Send on a fresh column
+    //      without manually picking from the dropdown.
     const driver = columns[0];
-    const wantedModelId =
-      (col.selectedModel || driver?.selectedModel || "").trim();
+    const isServableProvider = (p: string | undefined) =>
+      p === "local" || p === "tuned";
+    const runningLocalId = (status.running
+      && status.model_id
+      && isServableProvider(availableModels.find(x => x.model_id === status.model_id)?.provider))
+      ? status.model_id
+      : "";
+    const fallbackLocalId = availableModels
+      .find(m => isServableProvider(m.provider) && m.port != null)?.model_id ?? "";
+    const wantedModelId = (
+      col.selectedModel
+      || driver?.selectedModel
+      || runningLocalId
+      || fallbackLocalId
+      || ""
+    ).trim();
     let activePort: number | null = status.port;
     if (wantedModelId) {
       const m = availableModels.find((x) => x.model_id === wantedModelId);
-      const isServable = !!m && (m.provider === "local" || m.provider === "tuned") && m.port != null;
+      const isServable = !!m && isServableProvider(m.provider) && m.port != null;
       const alreadyRight = status.running && status.model_id === wantedModelId;
       if (isServable && !alreadyRight) {
         updateCol(col.id, { error: `⏳ Starting server (${wantedModelId})…`, busy: true });

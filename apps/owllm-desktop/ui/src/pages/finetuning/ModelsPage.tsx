@@ -357,6 +357,34 @@ export default function ModelsPage() {
   // panel so the user knows what phase the export is in without having
   // to read the wall of INFO lines.
   const [exportStatus, setExportStatus] = React.useState<string>("");
+  // Per-card progress: when an export is running this holds the
+  // SOURCE adapter path. The matching TunedModelCard renders a
+  // progress bar inline so the user sees activity on the card they
+  // clicked instead of having to dig through the right-rail logs.
+  const [exportingPath, setExportingPath] = React.useState<string | null>(null);
+  const [exportProgress, setExportProgress] = React.useState<number | null>(null);
+  // Auto-scroll the log box so the user always sees the last line.
+  // Sticky-bottom by intent — flips off the instant the user scrolls
+  // up to read older lines, re-arms once they're back at the bottom
+  // (6 px slop for rounding).
+  const logScrollRef = React.useRef<HTMLDivElement | null>(null);
+  const logStuckBottomRef = React.useRef(true);
+  React.useEffect(() => {
+    const el = logScrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+      logStuckBottomRef.current = dist <= 6;
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [exportLogsOpen]); // re-attach when the box mounts/unmounts
+  React.useEffect(() => {
+    if (!logStuckBottomRef.current) return;
+    const el = logScrollRef.current;
+    if (!el) return;
+    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+  }, [exportLogs]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const [downloading, setDownloading] = React.useState<Set<string>>(new Set());
@@ -964,8 +992,18 @@ export default function ModelsPage() {
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
               vramGb={vramGb}
               compatibilityBadge={t.compat ?? undefined}
-              onExportGguf={(path, outtype) => exportTunedToGguf(path, outtype, setHfError, refreshTuned, setExportLogs, setExportLogsOpen, setExportStatus)}
+              onExportGguf={(path, outtype) => {
+                // Make sure the user can see the card + log panel as
+                // soon as the export starts. They've already clicked
+                // from the Tuned tab, but a stray Browse switch in
+                // between would hide the progress.
+                setTab("tuned");
+                setExportLogsOpen(true);
+                exportTunedToGguf(path, outtype, setHfError, refreshTuned, setExportLogs, setExportLogsOpen, setExportStatus, setExportingPath, setExportProgress);
+              }}
               onDelete={(path) => deleteTunedAdapter(path, t.name, setHfError, refreshTuned)}
+              exportStatus={exportingPath === t.path ? (exportStatus || "🚀 Starting…") : null}
+              exportProgress={exportingPath === t.path ? exportProgress : null}
             />
           ))}
         </div>
@@ -1020,19 +1058,22 @@ export default function ModelsPage() {
               }}
             >{exportLogsOpen ? "▼" : "▶"} GGUF export logs ({exportLogs.length})</button>
             {exportLogsOpen && (
-              <div style={{
-                maxHeight: 320,
-                overflowY: "auto",
-                background: "rgba(0,0,0,0.55)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 4,
-                padding: 6,
-                fontFamily: "Consolas, monospace",
-                fontSize: 10,
-                color: "#cfd4e1",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-all",
-              }}>
+              <div
+                ref={logScrollRef}
+                style={{
+                  maxHeight: 320,
+                  overflowY: "auto",
+                  background: "rgba(0,0,0,0.55)",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                  borderRadius: 4,
+                  padding: 6,
+                  fontFamily: "Consolas, monospace",
+                  fontSize: 10,
+                  color: "#cfd4e1",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-all",
+                }}
+              >
                 {exportLogs.map((l, i) => {
                   // Lines arrive tagged "[ERR] …" / "[WRN] …" / "[INF] …".
                   // Map tag → colour so real errors stand out and the

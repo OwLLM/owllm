@@ -41,6 +41,14 @@ export type TunedModelCardProps = {
   onExportGguf?: (path: string, outtype: string) => void;
   onDelete?: (path: string) => void;
   onSelect?: (path: string) => void;
+  /// Live progress status while THIS card's export is running. Two
+  /// bits of feedback: a one-line status ("Writing GGUF · 12.4 GB",
+  /// "Quantizing → Q4_K_M", "❌ Failed: …") and an optional 0..1
+  /// progress fraction from log-derived hints. Both null = no export
+  /// in flight. The parent (ModelsPage) tracks per-path state and
+  /// passes it down only for the currently-exporting card.
+  exportStatus?: string | null;
+  exportProgress?: number | null;
 };
 
 // Quant menu definitions. bytesPerParam is the empirical mean over
@@ -81,11 +89,15 @@ function estGgufBytes(sourceBytes: number, q: QuantSpec): number {
 }
 
 // Will this quant survive on the user's GPU at single-batch inference?
-// Reserve a 1.5 GB pad for the KV cache, context, and CUDA bookkeeping
-// — empirically what an 8 K context costs on llama.cpp.
+// Reserve a 1.0 GiB pad for the KV cache, context, and CUDA bookkeeping.
+// Previous value of 1.5 GiB was tuned for an 8K-context 70B-class model
+// — way too pessimistic for typical 4-8K contexts on 7-14B GGUFs where
+// the real KV cache lives around 500-800 MiB. With 1.5 the on-the-edge
+// quants (Q2_K, Q3_K_M for a 14B on an 8 GB GPU) were getting flagged
+// red even though llama-server runs them fine.
 function fitsInVram(gguBytes: number, vramGb: number): "ok" | "tight" | "no" {
   if (!vramGb || vramGb <= 0) return "ok"; // no probe → don't penalise
-  const totalNeeded = gguBytes + 1.5 * 1024 ** 3;
+  const totalNeeded = gguBytes + 1.0 * 1024 ** 3;
   const vramBytes = vramGb * 1024 ** 3;
   if (totalNeeded <= vramBytes * 0.85) return "ok";
   if (totalNeeded <= vramBytes) return "tight";
@@ -97,7 +109,17 @@ export default function TunedModelCard(props: TunedModelCardProps) {
     adapterName, baseModel, adapterPath, size, format = "lora",
     createdAt, steps, finalLoss, selected = false, vramGb,
     compatibilityBadge, onExportGguf, onDelete, onSelect,
+    exportStatus = null, exportProgress = null,
   } = props;
+
+  // Pending quant pick inside the dropdown. Highlighted row, but the
+  // export doesn't fire until the user clicks the bottom Export
+  // button. Previous behaviour was click-row = start export, which
+  // surprised users who wanted to compare sizes side-by-side before
+  // committing. Default to q4_k_m (the ★ recommended row) so the
+  // Export button is enabled immediately for users who just want
+  // "give me the recommended thing".
+  const [pendingQuant, setPendingQuant] = React.useState<string>("q4_k_m");
 
   // Export-GGUF dropdown state. Opens on the 📦 button click, fetches
   // the source dir's safetensor bytes once, then renders QUANTS with
@@ -234,6 +256,48 @@ export default function TunedModelCard(props: TunedModelCardProps) {
             onClick={(e) => e.stopPropagation()}
           >{adapterPath}</a>
         </div>
+        {exportStatus && (
+          <div style={{
+            marginTop: 6,
+            padding: "8px 10px",
+            background: "rgba(102,126,234,0.10)",
+            border: "1px solid rgba(102,126,234,0.35)",
+            borderRadius: 6,
+            fontSize: 11,
+            color: "#dcdfe7",
+            display: "flex", flexDirection: "column", gap: 6,
+          }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span>{exportStatus}</span>
+            </div>
+            {/* Progress bar: indeterminate-shimmer when progress is
+                null (early phase, no total known); proportional fill
+                once the convert script starts emitting tensor counts. */}
+            <div style={{
+              height: 4, width: "100%",
+              background: "rgba(0,0,0,0.30)",
+              borderRadius: 2, overflow: "hidden",
+              position: "relative",
+            }}>
+              {exportProgress != null ? (
+                <div style={{
+                  height: "100%",
+                  width: `${Math.max(2, Math.min(100, exportProgress * 100))}%`,
+                  background: "#667eea",
+                  transition: "width 180ms ease",
+                }} />
+              ) : (
+                // CSS shimmer via background-position animation
+                <div style={{
+                  position: "absolute", inset: 0,
+                  background: "linear-gradient(90deg, transparent 0%, #667eea 40%, #667eea 60%, transparent 100%)",
+                  backgroundSize: "200% 100%",
+                  animation: "owllm-shimmer 1.4s linear infinite",
+                }} />
+              )}
+            </div>
+          </div>
+        )}
       </>}
       actions={
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -275,9 +339,12 @@ export default function TunedModelCard(props: TunedModelCardProps) {
               }}
             >
               <div style={{ padding: "6px 8px", fontSize: 10, color: "#9aa0aa", lineHeight: 1.4 }}>
-                Pick a quantization.
-                {vramGb ? <> Your GPU has <b style={{ color: "#cfd4e1" }}>{vramGb.toFixed(1)} GB</b>; rows in red won't fit.</> : null}
+                Pick a quantization, then click Export.
+                {vramGb ? <> Your GPU has <b style={{ color: "#cfd4e1" }}>{vramGb.toFixed(1)} GB</b>; ❌ rows won't fit, ⚠ rows are tight (will fit but no headroom for context).</> : null}
                 {loadingSize ? " · scanning…" : null}
+                <div style={{ marginTop: 4, color: "#7a8094" }}>
+                  Output: <code style={{ color: "#c8cde0" }}>{adapterName}-&lt;QUANT&gt;.gguf</code> next to the source. Each quant lands as its own card so you can keep several at once.
+                </div>
               </div>
               <div style={{ maxHeight: 320, overflowY: "auto" }}>
                 {QUANTS.map((q) => {
@@ -292,13 +359,16 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                     fit === "tight" ? "rgba(255,193,7,0.10)" :
                                       "transparent";
                   const isRecommended = q.id === "q4_k_m";
+                  const isPicked = pendingQuant === q.id;
                   return (
                     <button
                       key={q.id}
                       onClick={(e) => {
                         e.stopPropagation();
-                        setMenuOpen(false);
-                        onExportGguf?.(adapterPath, q.id);
+                        // Select-then-confirm: clicking a row just
+                        // updates the pending pick. Bottom Export
+                        // button is what actually fires the export.
+                        setPendingQuant(q.id);
                       }}
                       style={{
                         display: "flex",
@@ -306,18 +376,21 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                         gap: 8,
                         width: "100%",
                         padding: "6px 10px",
-                        background: bg,
-                        border: "none",
+                        background: isPicked ? "rgba(102,126,234,0.18)" : bg,
+                        border: isPicked ? "1px solid #7fb8ff" : "1px solid transparent",
                         borderRadius: 4,
                         color,
                         textAlign: "left",
                         fontSize: 12,
                         cursor: "pointer",
                       }}
-                      onMouseEnter={(ev) => { (ev.currentTarget as HTMLElement).style.outline = "1px solid rgba(102,126,234,0.5)"; }}
-                      onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.outline = "none"; }}
+                      onMouseEnter={(ev) => { if (!isPicked) (ev.currentTarget as HTMLElement).style.outline = "1px solid rgba(102,126,234,0.5)"; }}
+                      onMouseLeave={(ev) => { if (!isPicked) (ev.currentTarget as HTMLElement).style.outline = "none"; }}
                     >
-                      <span style={{ width: 70, fontWeight: 700 }}>{q.label}</span>
+                      <span style={{ width: 16, textAlign: "center", color: isPicked ? "#7fb8ff" : "#5a6376" }}>
+                        {isPicked ? "●" : "○"}
+                      </span>
+                      <span style={{ width: 64, fontWeight: 700 }}>{q.label}</span>
                       <span style={{ flex: 1, fontSize: 10, color: fit === "ok" ? "#9aa0aa" : color }}>
                         {q.quality}
                         {isRecommended ? <span style={{ marginLeft: 6, color: "#10a37f" }}>★</span> : null}
@@ -331,6 +404,46 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                     </button>
                   );
                 })}
+              </div>
+              {/* Confirm row — only the click on THIS button actually
+                  starts the export. Disabled while the size probe is
+                  still in flight (we want the fit-warning visible
+                  before committing). */}
+              <div style={{
+                display: "flex", alignItems: "center", gap: 8,
+                marginTop: 6, padding: "6px 4px 0 4px",
+                borderTop: "1px solid rgba(255,255,255,0.06)",
+              }}>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMenuOpen(false);
+                    onExportGguf?.(adapterPath, pendingQuant);
+                  }}
+                  disabled={loadingSize || !pendingQuant}
+                  style={{
+                    flex: 1,
+                    minHeight: 30, padding: "0 14px",
+                    background: loadingSize ? "rgba(102,126,234,0.20)" : "#667eea",
+                    color: "white",
+                    border: "none",
+                    borderRadius: 6,
+                    fontSize: 12, fontWeight: 700,
+                    cursor: loadingSize ? "default" : "pointer",
+                  }}
+                >📦 Export {pendingQuant.toUpperCase()}</button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); setMenuOpen(false); }}
+                  style={{
+                    minHeight: 30, padding: "0 12px",
+                    background: "transparent",
+                    color: "#9aa0a6",
+                    border: "1px solid rgba(255,255,255,0.08)",
+                    borderRadius: 6,
+                    fontSize: 11,
+                    cursor: "pointer",
+                  }}
+                >Cancel</button>
               </div>
             </div>,
             document.body

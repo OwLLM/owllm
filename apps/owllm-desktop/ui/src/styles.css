@@ -162,3 +162,13 @@ input, select, textarea {
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(var(--accent-rgb), 0.45);
 }
+
+/* Indeterminate shimmer for the per-card GGUF export progress bar.
+   Used while the convert script is in its long pre-tensor "loading
+   transformers / reading config" phase where we don't yet have a
+   total to derive a real fraction from. The shimmer keeps the bar
+   visibly alive instead of looking frozen. */
+@keyframes owllm-shimmer {
+  0%   { background-position:  100% 0; }
+  100% { background-position: -100% 0; }
+}

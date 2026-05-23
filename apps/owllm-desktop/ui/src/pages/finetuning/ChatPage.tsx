@@ -26,6 +26,19 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
+// Tool-use loop. When toolsEnabled is on for a column, sendOne()
+// appends the same XML <tool_call> catalog the Agentic Team page uses,
+// then parses each streamed reply for tool_call blocks and runs them
+// against agent_tools.rs. Shared with AgentsPage so the protocol is
+// identical and a user who experiments in Chat can paste prompts that
+// work the same way in the Agentic team.
+import {
+  formatToolsForPrompt,
+  parseToolCalls,
+  executeToolCall,
+  renderToolResultsForModel,
+  type ToolExecResult,
+} from "../agentic/localTools";
 
 const LS_KEY = "owllm:chat:v3";
 
@@ -80,6 +93,15 @@ type Column = {
   messages: ChatMsg[];
   busy: boolean;
   error: string | null;
+  /// When true, the column augments the system prompt with the
+  /// XML <tool_call> protocol catalog and runs the model's reply
+  /// through a tool-execution loop: parse → execute → fold results
+  /// back as a synthetic user turn → re-stream. Loop ends when the
+  /// model produces a turn with no tool_call blocks. Disabled by
+  /// default to preserve the legacy "pure chat" behaviour; flip it
+  /// on per column when you actually want the model to read files,
+  /// run commands, etc.
+  toolsEnabled: boolean;
 };
 
 const DEFAULT_COL = (id: "A" | "B" | "C"): Column => {
@@ -96,6 +118,7 @@ const DEFAULT_COL = (id: "A" | "B" | "C"): Column => {
     messages: [],
     busy: false,
     error: null,
+    toolsEnabled: false,
   };
 };
 
@@ -302,81 +325,130 @@ export default function ChatPage() {
     const ctrl = new AbortController();
     abortersRef.current.set(col.id, ctrl);
 
-    const payload = {
-      model: status.model_id ?? "local",
-      messages: [{ role: "system" as const, content: col.system }, ...next],
-      stream: true,
-      temperature: col.temperature,
-      top_p: col.topP,
-      max_tokens: col.maxTokens,
-    };
+    // When tools are enabled, the system prompt grows with the XML
+    // <tool_call> catalog so the model knows how to invoke read_file
+    // / shell / write_file etc. Loop runs up to 8 turns: stream a
+    // reply, parse tool_calls, execute each, fold results back as a
+    // synthetic user turn, re-stream. Loop ends when the model emits
+    // a turn with no tool_call blocks — that's the final answer.
+    const toolsBlock = col.toolsEnabled ? formatToolsForPrompt() : "";
+    const augmentedSystem = toolsBlock ? `${col.system}\n${toolsBlock}` : col.system;
+    const liveMessages: Array<{ role: string; content: string }> = [
+      { role: "system", content: augmentedSystem },
+      ...next.map((m) => ({ role: m.role, content: m.content })),
+    ];
+    const MAX_TOOL_TURNS = col.toolsEnabled ? 8 : 1;
 
     let reply = "";
-    let buffer = "";
     try {
-      // llama-server returns HTTP 503
-      //   {"error":{"message":"Loading model","type":"unavailable_error","code":503}}
-      // while it's still loading weights. A 29 GB f16 model can take
-      // 60+ s to mmap + offload, so polling /health (or just retrying)
-      // is the only way to know it's ready. Loop with 1.5 s backoff
-      // for up to 180 s, surfacing a "Loading model" status to the
-      // column so the user sees progress instead of one cryptic error.
-      let resp: Response | null = null;
-      const startedAt = Date.now();
-      const READY_TIMEOUT_MS = 180_000;
-      while (true) {
+      for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
-        resp = await fetch(`http://127.0.0.1:${activePort}/v1/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          signal: ctrl.signal,
-        });
-        if (resp.status === 503) {
-          // Drain + inspect the error body so an unexpected 503 (not
-          // the loading one) doesn't get swallowed.
-          const txt = await resp.text().catch(() => "");
-          const isLoading = /loading model/i.test(txt) || /unavailable_error/i.test(txt);
-          if (!isLoading) {
-            throw new Error(txt || "HTTP 503");
-          }
-          const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
-          updateCol(col.id, { error: `⏳ Loading model into VRAM… ${elapsedSec}s` });
-          if (Date.now() - startedAt > READY_TIMEOUT_MS) {
-            throw new Error("Model still loading after 3 minutes — likely OOM. Try a smaller quant (Q4_K_M).");
-          }
-          await new Promise((r) => setTimeout(r, 1500));
-          continue;
-        }
-        break;
-      }
-      // Got past 503 — clear the loading banner and parse the stream.
-      updateCol(col.id, { error: null });
-      if (!resp.ok || !resp.body) {
-        throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
-      }
-      const reader = resp.body.getReader();
-      const dec = new TextDecoder();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += dec.decode(value, { stream: true });
-        let nl;
-        while ((nl = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, nl).replace(/\r$/, "");
-          buffer = buffer.slice(nl + 1);
-          if (!line.startsWith("data:")) continue;
-          const body = line.slice(5).trim();
-          if (!body || body === "[DONE]") continue;
-          try {
-            const j = JSON.parse(body);
-            const delta = j?.choices?.[0]?.delta?.content;
-            if (typeof delta === "string" && delta) {
-              reply += delta;
-              appendAssistant(col.id, delta);
+
+        const payload = {
+          model: status.model_id ?? "local",
+          messages: liveMessages,
+          stream: true,
+          temperature: col.temperature,
+          top_p: col.topP,
+          max_tokens: col.maxTokens,
+        };
+
+        // llama-server returns HTTP 503
+        //   {"error":{"message":"Loading model","type":"unavailable_error","code":503}}
+        // while it's still loading weights. A 29 GB f16 model can take
+        // 60+ s to mmap + offload, so polling /health (or just retrying)
+        // is the only way to know it's ready. Loop with 1.5 s backoff
+        // for up to 180 s, surfacing a "Loading model" status to the
+        // column so the user sees progress instead of one cryptic error.
+        let resp: Response | null = null;
+        const startedAt = Date.now();
+        const READY_TIMEOUT_MS = 180_000;
+        while (true) {
+          if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+          resp = await fetch(`http://127.0.0.1:${activePort}/v1/chat/completions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+            signal: ctrl.signal,
+          });
+          if (resp.status === 503) {
+            // Drain + inspect the error body so an unexpected 503 (not
+            // the loading one) doesn't get swallowed.
+            const txt = await resp.text().catch(() => "");
+            const isLoading = /loading model/i.test(txt) || /unavailable_error/i.test(txt);
+            if (!isLoading) {
+              throw new Error(txt || "HTTP 503");
             }
-          } catch { /* skip malformed */ }
+            const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+            updateCol(col.id, { error: `⏳ Loading model into VRAM… ${elapsedSec}s` });
+            if (Date.now() - startedAt > READY_TIMEOUT_MS) {
+              throw new Error("Model still loading after 3 minutes — likely OOM. Try a smaller quant (Q4_K_M).");
+            }
+            await new Promise((r) => setTimeout(r, 1500));
+            continue;
+          }
+          break;
         }
+        // Got past 503 — clear the loading banner and parse the stream.
+        updateCol(col.id, { error: null });
+        if (!resp.ok || !resp.body) {
+          throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
+        }
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let turnReply = "";
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += dec.decode(value, { stream: true });
+          let nl;
+          while ((nl = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, nl).replace(/\r$/, "");
+            buffer = buffer.slice(nl + 1);
+            if (!line.startsWith("data:")) continue;
+            const body = line.slice(5).trim();
+            if (!body || body === "[DONE]") continue;
+            try {
+              const j = JSON.parse(body);
+              const delta = j?.choices?.[0]?.delta?.content;
+              if (typeof delta === "string" && delta) {
+                turnReply += delta;
+                reply += delta;
+                appendAssistant(col.id, delta);
+              }
+            } catch { /* skip malformed */ }
+          }
+        }
+
+        // Plain chat mode → one shot, done.
+        if (!toolsBlock) break;
+        const calls = parseToolCalls(turnReply);
+        // Model produced no tool calls → that turn IS the final answer.
+        if (calls.length === 0) break;
+
+        // Execute every call sequentially so each result lands in
+        // context before the next tool runs (matches AgentsPage +
+        // legacy Python loop).
+        const results: ToolExecResult[] = [];
+        for (const c of calls) {
+          if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+          // Surface the tool call inline in the chat so the user sees
+          // what the model's doing (formatted as a system message).
+          const argLine = Object.entries(c.args)
+            .map(([k, v]) => `${k}=${String(v).slice(0, 80).replace(/\n/g, " ")}`)
+            .join(", ");
+          appendAssistant(col.id, `\n\n🛠 ${c.name}(${argLine})\n`);
+          // eslint-disable-next-line no-await-in-loop
+          const r = await executeToolCall(c, "");
+          results.push(r);
+          const outSnippet = r.output.slice(0, 240) + (r.output.length > 240 ? "…" : "");
+          appendAssistant(col.id, `${r.ok ? "✓" : "✗"} ${outSnippet}\n\n`);
+        }
+        // Append the assistant turn + synthetic user turn carrying
+        // the tool results, then iterate.
+        liveMessages.push({ role: "assistant", content: turnReply });
+        liveMessages.push({ role: "user", content: renderToolResultsForModel(calls, results) });
       }
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
@@ -861,6 +933,25 @@ export default function ChatPage() {
                         onChange={(e) => updateCol(col.id, { repetitionPenalty: parseFloat(e.target.value) || 0 })}
                         style={paramInputStyle} />
                     </ParamRow>
+                    {/* Tools toggle. When on, sendOne() augments the system
+                        prompt with the XML <tool_call> catalog and runs
+                        a parse/execute loop so the model can call
+                        read_file / shell / write_file / etc. against the
+                        agent_tools.rs commands. Off = pure chat (legacy
+                        behaviour). */}
+                    <label style={{
+                      display: "flex", alignItems: "center", gap: 6,
+                      cursor: "pointer", fontSize: 11, color: "#cfd4e1",
+                      marginTop: 6,
+                    }}>
+                      <input
+                        type="checkbox"
+                        checked={col.toolsEnabled}
+                        onChange={(e) => updateCol(col.id, { toolsEnabled: e.target.checked })}
+                        style={{ accentColor: "#7fb8ff" }}
+                      />
+                      🛠 Allow tools (read/write files, shell)
+                    </label>
                   </fieldset>
 
                   <div style={{ fontSize: 10, color: "#bbb" }}>Tokens: 0</div>

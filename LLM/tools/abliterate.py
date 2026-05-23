@@ -572,6 +572,21 @@ def main():
     ap.add_argument("--output-dir", required=True, help="Where to write the abliterated model.")
     ap.add_argument("--stop-file", default=None, help="Polled for existence to cooperatively stop.")
     ap.add_argument(
+        "--corpus", type=str, default=None,
+        help=(
+            "Path to a JSON file with refusal-direction prompts that "
+            "OVERRIDE the small hard-coded HARMFUL_PROMPTS / HARMLESS_PROMPTS "
+            "lists. Two shapes accepted:\n"
+            "  (a) {'harmful': [...strings...], 'harmless': [...strings...]} "
+            "with both arrays the same length (paired by index).\n"
+            "  (b) [{'harmful': '...', 'harmless': '...'}, ...] — list of "
+            "explicit pairs.\n"
+            "Use this to plug in a 250+-pair, multi-framing corpus generated "
+            "by another model (e.g. via the abliterate_corpus_prompt.md "
+            "playbook) without editing this script."
+        ),
+    )
+    ap.add_argument(
         "--iterations", type=int, default=3,
         help=(
             "Number of refusal directions to peel off, sequentially. Single-pass "
@@ -636,6 +651,49 @@ def main():
         model = AutoModelForCausalLM.from_pretrained(args.model, **load_kwargs)
         model.eval()
 
+        # External corpus override. When --corpus points at a JSON file
+        # we replace the inline HARMFUL_PROMPTS / HARMLESS_PROMPTS with
+        # whatever it carries. Two accepted shapes: paired-object list
+        # ([{harmful, harmless}, ...]) or split-arrays object
+        # ({harmful: [...], harmless: [...]}). The script never reads
+        # the prompt contents — they go straight into collect_hidden as
+        # opaque strings — so the corpus file can hold whatever the
+        # generator emitted without further sanitisation.
+        harmful_pool = HARMFUL_PROMPTS
+        harmless_pool = HARMLESS_PROMPTS
+        if args.corpus:
+            corpus_path = Path(args.corpus).expanduser()
+            if not corpus_path.is_file():
+                emit(event="failed", error=f"--corpus path not found: {corpus_path}")
+                sys.exit(1)
+            try:
+                payload = json.loads(corpus_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError as e:
+                emit(event="failed", error=f"corpus file is not valid JSON: {e}")
+                sys.exit(1)
+            if isinstance(payload, list):
+                # Paired-object list shape.
+                try:
+                    harmful_pool = [str(p["harmful"]) for p in payload]
+                    harmless_pool = [str(p["harmless"]) for p in payload]
+                except (KeyError, TypeError) as e:
+                    emit(event="failed", error=f"corpus list entries must each have 'harmful' and 'harmless': {e}")
+                    sys.exit(1)
+            elif isinstance(payload, dict):
+                # Split-arrays shape.
+                harmful_pool = [str(s) for s in payload.get("harmful", [])]
+                harmless_pool = [str(s) for s in payload.get("harmless", [])]
+            else:
+                emit(event="failed", error="corpus root must be a list of pairs or an object with 'harmful'/'harmless' arrays")
+                sys.exit(1)
+            if len(harmful_pool) != len(harmless_pool):
+                emit(event="failed", error=f"corpus pairs unbalanced: {len(harmful_pool)} harmful vs {len(harmless_pool)} harmless")
+                sys.exit(1)
+            if not harmful_pool:
+                emit(event="failed", error="corpus is empty")
+                sys.exit(1)
+            emit(event="corpus_loaded", path=str(corpus_path), pairs=len(harmful_pool))
+
         # Iterative multi-direction abliteration. Each iteration:
         #   1. Re-collect hidden states with the CURRENT (already-
         #      partially-ablated) weights. The next refusal direction
@@ -651,8 +709,8 @@ def main():
         emit(event="iterative_start", iterations=n_iters)
         for it in range(n_iters):
             emit(event="iteration_begin", n=it + 1, total=n_iters)
-            harmful = collect_hidden(model, tokenizer, HARMFUL_PROMPTS, device, stop_file)
-            harmless = collect_hidden(model, tokenizer, HARMLESS_PROMPTS, device, stop_file)
+            harmful = collect_hidden(model, tokenizer, harmful_pool, device, stop_file)
+            harmless = collect_hidden(model, tokenizer, harmless_pool, device, stop_file)
             maybe_stop(stop_file)
 
             direction, layer, norm = find_refusal_direction(harmful, harmless)

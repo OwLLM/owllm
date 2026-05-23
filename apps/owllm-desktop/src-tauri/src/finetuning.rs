@@ -573,12 +573,23 @@ pub async fn abliterate_start(
         .map_err(|e| format!("mkdir output {}: {e}", out_dir.display()))?;
     let stop_file = out_dir.join(".stop");
 
-    let argv: Vec<String> = vec![
+    let mut argv: Vec<String> = vec![
         script.to_string_lossy().into_owned(),
         "--model".into(), config.model.clone(),
         "--output-dir".into(), out_dir.to_string_lossy().into_owned(),
         "--stop-file".into(), stop_file.to_string_lossy().into_owned(),
     ];
+    // Auto-pick up an external prompt corpus when the user has dropped
+    // one next to the script. Filename convention is fixed so SuperGemma /
+    // any-abliterated-model output just needs to be saved as
+    // `abliterate_corpus.json` to take effect — no CLI tweaking needed.
+    if let Some(parent) = std::path::Path::new(&argv[0]).parent() {
+        let corpus = parent.join("abliterate_corpus.json");
+        if corpus.is_file() {
+            argv.push("--corpus".into());
+            argv.push(corpus.to_string_lossy().into_owned());
+        }
+    }
 
     let channel_for_task = channel.clone();
     let out_dir_for_task = out_dir.clone();

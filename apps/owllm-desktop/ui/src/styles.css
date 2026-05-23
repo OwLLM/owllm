@@ -30,6 +30,19 @@
    accent — only thin borders flip, which is what the user saw before
    and rightly called bullshit on. */
 :root[data-theme="dark"] {
+  /* Header text colour — dark mode is ALWAYS white per explicit user
+     preference, even on amber where bronze + white has weak WCAG
+     contrast. JS still computes --bg-header-fg-dark for completeness
+     but we force #ffffff here. Light mode (below) keeps the smart
+     value because the much-brighter tinted-grey bg genuinely needs
+     black on pale accents (amber, blue). */
+  --bg-header-fg: #ffffff;
+  /* headerPill background base — pills mix this with the accent so
+     they sit slightly darker than the header band as a recess. Dark
+     mode uses a near-black base; light mode (below) uses a light grey
+     so the pills don't look like dark holes punched into a light bar. */
+  --header-pill-base: #14172a;
+
   /* Heavy tint percentages — the previous 8-18 % rendered as a faint
      overlay the user (rightly) said looked identical. Going 22–45 %
      so amber clearly turns the page golden-bronze, red clearly
@@ -74,6 +87,15 @@
    clearly against either backdrop, so the only tweak is that on
    light mode we shift --accent-fg to ensure contrast. */
 :root[data-theme="light"] {
+  /* Header text colour for this theme — see dark-mode comment. The
+     light-mode header is mostly grey with a 35 % accent tint, so bright
+     accents (amber, blue) force black labels via JS-computed value. */
+  --bg-header-fg: var(--bg-header-fg-light, #06080d);
+  /* headerPill light-mode base — a slightly off-white so the pill
+     reads as raised against the more-saturated header band instead of
+     looking like a dark hole. */
+  --header-pill-base: #d4d8e0;
+
   /* Same idea as dark mode — every surface mixes ~4–10 % of the accent
      into the neutral white/grey so light mode also reads "tinted amber"
      vs "tinted red" vs "tinted emerald" instead of identical white

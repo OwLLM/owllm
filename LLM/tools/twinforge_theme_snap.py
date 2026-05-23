@@ -19,8 +19,8 @@ from playwright.sync_api import sync_playwright
 OUT_ROOT = Path(__file__).resolve().parent.parent.parent / "twinforge_loop_out" / "theme-check"
 OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
-PAGES = ["models"]  # models page has more accent-tinted surfaces than home
-MODES = ["dark"]
+PAGES = ["home"]
+MODES = ["dark", "light"]
 ACCENTS = ["indigo", "amber", "red", "blue", "emerald", "slate"]  # all six squares
 
 VIEWPORT = {"width": 1456, "height": 908}

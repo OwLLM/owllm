@@ -56,7 +56,7 @@ pub fn run() {
             {
                 let window = webview.window();
                 // Don't force-maximize on first paint — tauri.conf.json
-                // sets width/height (1200x960) which is what the user
+                // sets width/height (1400x960) which is what the user
                 // expects. The previous unconditional .maximize() call
                 // overrode that and made the window open full-screen
                 // every launch.
@@ -181,13 +181,6 @@ pub fn run() {
                     ..
                 } if label == "main" => {
                     overlay_frame::close_if_present(app);
-                }
-                tauri::RunEvent::WindowEvent {
-                    label,
-                    event: tauri::WindowEvent::Focused(focused),
-                    ..
-                } if label == "main" => {
-                    overlay_frame::set_main_focused(app, focused);
                 }
                 tauri::RunEvent::ExitRequested { .. } => {
                     overlay_frame::close_if_present(app);

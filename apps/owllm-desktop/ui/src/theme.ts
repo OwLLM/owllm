@@ -76,22 +76,26 @@ function pickAccentFg(hex: string): string {
 }
 
 // Pick a readable foreground on top of --bg-header. The header
-// background is NOT the pure accent — it's the accent mixed with the
-// dark navy chrome (color-mix(in srgb, var(--accent) 70%, #1c2244)).
-// Computing the mix here keeps the text contrast logic accurate even
-// when the bg-header recipe in styles.css gets re-tuned. Without this,
-// amber (luminance ~0.75) was forcing white text on a near-yellow band
-// — the user-reported "bright skin, unreadable text" bug.
-const NAVY_R = 28, NAVY_G = 34, NAVY_B = 68; // matches the #1c2244 used in --bg-header
-function pickHeaderFg(accentHex: string, accentMixPct: number = 0.70): string {
+// background recipe differs per theme mode:
+//   dark  → color-mix(in srgb, var(--accent) 70%, #1c2244)  (mostly accent + navy)
+//   light → color-mix(in srgb, var(--accent) 35%, #e4e7ec)  (mostly grey + accent tint)
+// We compute BOTH foreground values and let CSS pick the right one
+// per data-theme, so the dark-mode header keeps WHITE labels even on
+// amber (the bronze bg is dark enough that white reads cleanly), while
+// the light-mode header gets BLACK labels on the much brighter tinted
+// grey. Was a single threshold that mis-fired on amber dark.
+const NAVY_R = 28,  NAVY_G = 34,  NAVY_B = 68;   // #1c2244 — dark-mode bg-header base
+const LITE_R = 228, LITE_G = 231, LITE_B = 236;  // #e4e7ec — light-mode bg-header base
+
+function pickHeaderFgForBg(accentHex: string, baseR: number, baseG: number, baseB: number, accentMixPct: number): string {
   const a = hexToRgbTriplet(accentHex);
-  const r = accentMixPct * a.r + (1 - accentMixPct) * NAVY_R;
-  const g = accentMixPct * a.g + (1 - accentMixPct) * NAVY_G;
-  const b = accentMixPct * a.b + (1 - accentMixPct) * NAVY_B;
-  // Slightly higher cutoff than --accent-fg (0.55) because mixed
-  // backgrounds need more headroom for white to stay readable; only
-  // genuinely bright bgs (amber-bronze, blue-mid) flip to black.
-  return luminance(r, g, b) > 0.50 ? "#06080d" : "#ffffff";
+  const r = accentMixPct * a.r + (1 - accentMixPct) * baseR;
+  const g = accentMixPct * a.g + (1 - accentMixPct) * baseG;
+  const b = accentMixPct * a.b + (1 - accentMixPct) * baseB;
+  // Cut-off 0.55 — pure-white-readable up to mid-bright; only on
+  // genuinely bright backgrounds (≥ 0.55) does the label flip to
+  // black for contrast.
+  return luminance(r, g, b) > 0.55 ? "#06080d" : "#ffffff";
 }
 
 function applyAccent(hex: string) {
@@ -104,11 +108,15 @@ function applyAccent(hex: string) {
   root.style.setProperty("--accent-strong", `rgba(${rgb}, 0.55)`);
   root.style.setProperty("--accent-glow-soft", `rgba(${rgb}, 0.35)`);
   root.style.setProperty("--accent-glow-strong", `rgba(${rgb}, 0.65)`);
-  // Foreground for text painted on the --bg-header surface (which is
-  // also FRAME_BG and the ServerModal title strip). Flips automatically
-  // so amber → black labels on the golden bar, indigo/red/slate →
-  // white labels on the dark band.
-  root.style.setProperty("--bg-header-fg", pickHeaderFg(hex, 0.70));
+  // Header fg per theme mode — set BOTH and let styles.css route
+  // --bg-header-fg to the right one via data-theme. Dark-mode header
+  // stays white-on-tinted-navy for every accent; only the bright
+  // light-mode header (mostly grey + accent) flips to black on amber
+  // / blue / etc.
+  root.style.setProperty("--bg-header-fg-dark",
+    pickHeaderFgForBg(hex, NAVY_R, NAVY_G, NAVY_B, 0.70));
+  root.style.setProperty("--bg-header-fg-light",
+    pickHeaderFgForBg(hex, LITE_R, LITE_G, LITE_B, 0.35));
 }
 
 function applyMode(mode: Mode) {

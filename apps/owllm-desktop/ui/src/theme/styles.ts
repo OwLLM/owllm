@@ -144,13 +144,15 @@ export function headerPill(active: boolean, width?: number): React.CSSProperties
   const base: React.CSSProperties = {
     height: 50,
     padding: "0 6px",
-    // Slightly darker mix than the header surface so the pill reads
-    // as a recess; same colour family means the picker repaints these
-    // along with the rest of the header.
-    background: "color-mix(in srgb, var(--accent) 35%, #14172a)",
-    // Text follows --bg-header-fg so amber → black labels, indigo /
-    // red / slate / emerald / blue → white labels. Computed in
-    // theme.ts from the actual mixed bg-header luminance.
+    // Pill background mixes accent + --header-pill-base. The base is
+    // a theme-aware token (#14172a in dark mode, #d4d8e0 in light
+    // mode) so the pill stays close to the header surface in BOTH
+    // modes instead of looking like a dark navy hole punched into a
+    // bright light-mode header.
+    background: "color-mix(in srgb, var(--accent) 35%, var(--header-pill-base))",
+    // Text follows --bg-header-fg, which CSS routes per data-theme
+    // (white on dark headers regardless of accent; auto-flips on the
+    // brighter light-mode tinted-grey header).
     color: "var(--bg-header-fg)",
     border: "1px solid rgba(255,255,255,0.20)",
     borderRadius: 6,

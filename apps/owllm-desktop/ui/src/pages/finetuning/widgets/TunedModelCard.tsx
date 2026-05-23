@@ -7,6 +7,7 @@
 //     glance vs. base models
 
 import React from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import CardShell, { compatBg } from "./CardShell";
 import CornerRibbon from "./CornerRibbon";
@@ -249,7 +250,14 @@ export default function TunedModelCard(props: TunedModelCardProps) {
           )}
           <button style={dangerBtn} onClick={(e) => { e.stopPropagation(); onDelete?.(adapterPath); }}>🗑️ Delete</button>
 
-          {menuOpen && !isGguf && menuPos && (
+          {/* Portal the menu directly under document.body to escape the
+              CardShell's transformed ancestor. CardShell uses
+              `transform: translateY(-1px)` on hover, which creates a
+              containing block for position:fixed descendants — the
+              dropdown was rendering inside the card's coordinate
+              space and getting clipped by its overflow:hidden. Portal
+              mounts the menu outside that subtree entirely. */}
+          {menuOpen && !isGguf && menuPos && createPortal(
             <div
               ref={menuRef}
               onClick={(e) => e.stopPropagation()}
@@ -324,7 +332,8 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                   );
                 })}
               </div>
-            </div>
+            </div>,
+            document.body
           )}
         </div>
       }

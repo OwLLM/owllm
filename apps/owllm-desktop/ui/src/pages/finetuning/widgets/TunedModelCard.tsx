@@ -116,10 +116,15 @@ export default function TunedModelCard(props: TunedModelCardProps) {
   // export doesn't fire until the user clicks the bottom Export
   // button. Previous behaviour was click-row = start export, which
   // surprised users who wanted to compare sizes side-by-side before
-  // committing. Default to q4_k_m (the ★ recommended row) so the
-  // Export button is enabled immediately for users who just want
-  // "give me the recommended thing".
+  // committing. Default starts at q4_k_m and gets adjusted to the
+  // largest VRAM-fitting quant once the size probe completes — see
+  // the useEffect below.
   const [pendingQuant, setPendingQuant] = React.useState<string>("q4_k_m");
+  // Track whether the user has manually picked a row. If they have,
+  // we don't override their choice when the VRAM-aware "best fit"
+  // computes (otherwise picking Q5_K_M on a beefy machine would
+  // immediately get overwritten to Q4_K_M).
+  const userPickedRef = React.useRef(false);
 
   // Export-GGUF dropdown state. Opens on the 📦 button click, fetches
   // the source dir's safetensor bytes once, then renders QUANTS with
@@ -161,6 +166,38 @@ export default function TunedModelCard(props: TunedModelCardProps) {
       .catch(() => setSourceBytes(0))
       .finally(() => setLoadingSize(false));
   }, [menuOpen, adapterPath, sourceBytes, loadingSize]);
+
+  // VRAM-aware "best quant for this hardware". Prefer quality
+  // (largest bytesPerParam) while still fitting in the user's VRAM —
+  // walk QUANTS in DESCENDING quality order and grab the first one
+  // that reads as "ok". Falls back to "tight" if nothing fits cleanly,
+  // then to the smallest if even that's too big. Used both for the
+  // ★ marker and the default pendingQuant.
+  const recommendedQuantId: string = React.useMemo(() => {
+    if (!sourceBytes || !vramGb) return "q4_k_m";
+    const sorted = [...QUANTS].sort((a, b) => b.bytesPerParam - a.bytesPerParam);
+    const okPick = sorted.find((q) => fitsInVram(estGgufBytes(sourceBytes, q), vramGb) === "ok");
+    if (okPick) return okPick.id;
+    const tightPick = sorted.find((q) => fitsInVram(estGgufBytes(sourceBytes, q), vramGb) === "tight");
+    if (tightPick) return tightPick.id;
+    // Nothing fits — bias to the smallest so the user at least sees a
+    // viable choice. They can still pick a bigger one manually for
+    // CPU-offload runs.
+    return QUANTS[0].id;
+  }, [sourceBytes, vramGb]);
+
+  // Auto-select the recommended quant ONCE per dropdown open, only
+  // while the user hasn't manually picked anything yet. Resets the
+  // user-picked flag when the dropdown closes.
+  React.useEffect(() => {
+    if (!menuOpen) {
+      userPickedRef.current = false;
+      return;
+    }
+    if (!userPickedRef.current && sourceBytes != null) {
+      setPendingQuant(recommendedQuantId);
+    }
+  }, [menuOpen, sourceBytes, recommendedQuantId]);
 
   // Close menu on outside click + keep its position glued to the
   // trigger when the user scrolls/resizes while it's open.
@@ -358,7 +395,13 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                     fit === "no"    ? "rgba(244,67,54,0.10)" :
                     fit === "tight" ? "rgba(255,193,7,0.10)" :
                                       "transparent";
-                  const isRecommended = q.id === "q4_k_m";
+                  // Recommendation is VRAM-aware now: largest quant
+                  // that fits the user's GPU rather than a hardcoded
+                  // q4_k_m. So on an 8 GB card with a 14B model the
+                  // ★ moves to Q2_K / Q3_K_M (whichever's the largest
+                  // green/tight quant) instead of taunting the user
+                  // with Q4_K_M that doesn't fit.
+                  const isRecommended = q.id === recommendedQuantId;
                   const isPicked = pendingQuant === q.id;
                   return (
                     <button
@@ -368,6 +411,7 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                         // Select-then-confirm: clicking a row just
                         // updates the pending pick. Bottom Export
                         // button is what actually fires the export.
+                        userPickedRef.current = true;
                         setPendingQuant(q.id);
                       }}
                       style={{

@@ -212,6 +212,7 @@ function exportTunedToGguf(
   setStatus: (s: string) => void,
   setExportingPath: (p: string | null) => void,
   setExportProgress: (p: number | null) => void,
+  setPhantomExport: (p: { sourceDir: string; outtype: string; baseName: string } | null) => void,
 ) {
   type Evt =
     | { kind: "progress"; stage: string; step?: number; total?: number; detail?: string }
@@ -225,13 +226,25 @@ function exportTunedToGguf(
   setLogsOpen(true);
   setStatus("🚀 Starting…");
   setExportingPath(sourceDir);
-  setExportProgress(null);
-  // Track the highest block index seen so we can derive a progress
-  // fraction. Different model architectures have different layer
-  // counts; we infer total = max-seen + 1 once Writing-to-disk
-  // appears, which is the convert script's last phase before EOF.
+  setExportProgress(0);
+  // Synthesise the phantom output card. Filename matches the Rust
+  // side: <basename>-<QUANT>.gguf inside the source dir. Cleared on
+  // Finished (real card takes over) or Failed (no orphan card).
+  const phantomBase = sourceDir.split(/[\\/]/).pop() ?? "model";
+  setPhantomExport({ sourceDir, outtype, baseName: phantomBase });
+  // Progress mapping. Three phases, each takes a slice of the bar:
+  //   Convert  (load HF + iterate blocks):    0.00 .. 0.30
+  //   Write    (one big GGUF dump, no signal): 0.30 .. 0.40
+  //   Quantize (only when K-quant target;
+  //             llama-quantize iterates every
+  //             tensor and prints `[N/M] …`):  0.40 .. 1.00
+  // For native targets (f16/bf16/q8_0/auto) the Quantize phase
+  // doesn't run; the Write slice carries through to 1.0 on Finished.
   let maxBlk = -1;
-  let convertDone = false;
+  let blkTotal: number | null = null;
+  let quantTotal: number | null = null;
+  let quantSeen = 0;
+  let phase: "convert" | "write" | "quantize" = "convert";
   const pushLog = (s: string) => setLogs((prev) => {
     const next = [...prev, s];
     return next.length > 300 ? next.slice(next.length - 300) : next;
@@ -244,30 +257,64 @@ function exportTunedToGguf(
       pushLog(`${tag} ${ev.line}`);
       const newStatus = deriveExportStatus(ev.line);
       if (newStatus) setStatus(newStatus);
-      // Update progress fraction from convert-script breadcrumbs.
-      // Phase 1 (convert): track max block index. Assume total layers
-      // ≈ maxBlk+1 once we hit the disk-write phase. Until then the
-      // fraction is open (max-seen / projected-total); we project an
-      // optimistic 40 layers as the upper bound so the bar moves but
-      // doesn't pretend to finish. Phase 2 (quantize): set to 0.95
-      // and let the Finished event close it out.
+
+      // ----- Convert phase progress (0 .. 0.30) -----
+      // Detect block count from the convert script's metadata line
+      // ("block_count = N") when it's emitted; fall back to 40 as a
+      // reasonable upper bound for 13-14B models. Once a higher blk
+      // index than that appears, we lift the projected total to
+      // match (architecture is larger than expected).
+      const blkCountMatch = ev.line.match(/block_count\s*=\s*(\d+)/i);
+      if (blkCountMatch) {
+        blkTotal = parseInt(blkCountMatch[1], 10);
+      }
       const blk = ev.line.match(/blk\.(\d+)\./);
-      if (blk) {
+      if (blk && phase === "convert") {
         const n = parseInt(blk[1], 10);
         if (!isNaN(n) && n > maxBlk) {
           maxBlk = n;
-          const total = convertDone ? Math.max(maxBlk + 1, 1) : 40;
-          setExportProgress(Math.min(0.85, (maxBlk + 1) / total));
+          const total = blkTotal ?? Math.max(maxBlk + 1, 40);
+          setExportProgress(Math.min(0.30, ((maxBlk + 1) / total) * 0.30));
         }
       }
-      if (/total_size\s*=/.test(ev.line)) {
-        // Writing-to-disk phase — convert pass nearly done.
-        convertDone = true;
-        setExportProgress(0.88);
+
+      // ----- Write phase (0.30 .. 0.40) -----
+      // "total_size = X" from gguf_writer means the convert pass is
+      // done collecting metadata and is now streaming bytes to disk.
+      // There's no incremental signal — jump to the start of the
+      // Write slice. If we never see a quantize line afterwards
+      // (native target), Finished closes the bar to 1.0.
+      if (/total_size\s*=/.test(ev.line) && phase === "convert") {
+        phase = "write";
+        setExportProgress(0.30);
       }
-      if (ev.line.toLowerCase().includes("llama-quantize") || /quantizing/i.test(ev.line)) {
-        setExportProgress(0.92);
+
+      // ----- Quantize phase (0.40 .. 1.00) -----
+      // llama-quantize prints lines like:
+      //   `[   1/ 579]                 token_embd.weight - …`
+      // The first number is the current tensor; the second is the
+      // total. Use those for real progress through this slice. The
+      // "[N/M]" pattern is space-padded so the regex tolerates that.
+      const qm = ev.line.match(/^\s*\[\s*(\d+)\s*\/\s*(\d+)\s*\]/);
+      if (qm) {
+        const cur = parseInt(qm[1], 10);
+        const total = parseInt(qm[2], 10);
+        if (!isNaN(cur) && !isNaN(total) && total > 0) {
+          if (phase !== "quantize") phase = "quantize";
+          quantTotal = total;
+          quantSeen = cur;
+          // Map cur/total into 0.40 .. 1.00. Cap at 0.99 — Finished
+          // is what bumps to 1.00 so the user knows it's truly done.
+          setExportProgress(0.40 + Math.min(0.99 - 0.40, (cur / total) * (0.99 - 0.40)));
+        }
+      } else if (/quantizing/i.test(ev.line) && phase === "write") {
+        // First quantize-phase line that ISN'T [N/M] yet — bump into
+        // the quantize slice so the bar moves visibly while we wait
+        // for the per-tensor lines.
+        phase = "quantize";
+        setExportProgress(0.42);
       }
+
       if (sev === "err") {
         setError(`GGUF export: ${ev.line}`);
       }
@@ -280,6 +327,7 @@ function exportTunedToGguf(
       window.setTimeout(() => {
         setExportingPath(null);
         setExportProgress(null);
+        setPhantomExport(null);
       }, 2500);
       refreshTuned();
     } else if (ev.kind === "failed") {
@@ -291,7 +339,12 @@ function exportTunedToGguf(
       // card without re-triggering progress state.
       setExportingPath(null);
       setExportProgress(null);
+      setPhantomExport(null);
     }
+    // Silence "unused" warnings for tracking state used in future
+    // sub-phase work (quantSeen / quantTotal will drive an
+    // ETA estimate next).
+    void quantSeen; void quantTotal;
   };
   invoke<void>("export_gguf", {
     config: { sourceDir, outtype },
@@ -363,6 +416,13 @@ export default function ModelsPage() {
   // clicked instead of having to dig through the right-rail logs.
   const [exportingPath, setExportingPath] = React.useState<string | null>(null);
   const [exportProgress, setExportProgress] = React.useState<number | null>(null);
+  // Phantom output card. When an export starts we synthesise a card
+  // representing the .gguf that's about to land on disk and prepend
+  // it to the Tuned list, so the user gets immediate visual feedback
+  // ("the new model just appeared, and it's building"). The phantom
+  // is keyed by sourceDir+outtype; cleared on Finished/Failed and
+  // replaced by the real card via refreshTuned().
+  const [phantomExport, setPhantomExport] = React.useState<{ sourceDir: string; outtype: string; baseName: string } | null>(null);
   // Auto-scroll the log box so the user always sees the last line.
   // Sticky-bottom by intent — flips off the instant the user scrolls
   // up to read older lines, re-arms once they're back at the bottom
@@ -379,12 +439,16 @@ export default function ModelsPage() {
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
   }, [exportLogsOpen]); // re-attach when the box mounts/unmounts
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
+    // useLayoutEffect (not useEffect) so the scrollTop write happens
+    // BEFORE the browser paints — the user never sees the box stuck
+    // at an older position. requestAnimationFrame was racing with
+    // React's commit on fast log bursts.
     if (!logStuckBottomRef.current) return;
     const el = logScrollRef.current;
     if (!el) return;
-    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-  }, [exportLogs]);
+    el.scrollTop = el.scrollHeight;
+  }, [exportLogs, exportLogsOpen, exportStatus]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   const [downloading, setDownloading] = React.useState<Set<string>>(new Set());
@@ -964,7 +1028,26 @@ export default function ModelsPage() {
 
       {tab === "tuned" && (
         <div style={CARD_GRID}>
-          {tuned.length === 0 ? (
+          {/* Phantom output card — appears the instant the user clicks
+              Export, so they get a visible "the new GGUF is being
+              built" tile immediately instead of having to wait for
+              refreshTuned() at the end. Lives at the top of the grid;
+              cleared on Finished (real card takes over) or Failed. */}
+          {phantomExport && (
+            <TunedModelCard
+              key={`phantom:${phantomExport.sourceDir}:${phantomExport.outtype}`}
+              adapterName={`${phantomExport.baseName}-${phantomExport.outtype.toUpperCase()}.gguf`}
+              baseModel={phantomExport.baseName}
+              adapterPath={`${phantomExport.sourceDir}\\${phantomExport.baseName}-${phantomExport.outtype.toUpperCase()}.gguf`}
+              format="gguf"
+              size="(building…)"
+              createdAt={undefined}
+              vramGb={vramGb}
+              exportStatus={exportStatus || "🚀 Starting…"}
+              exportProgress={exportProgress}
+            />
+          )}
+          {tuned.length === 0 && !phantomExport ? (
             <div style={{
               gridColumn: "1 / -1",
               padding: 40,
@@ -993,13 +1076,9 @@ export default function ModelsPage() {
               vramGb={vramGb}
               compatibilityBadge={t.compat ?? undefined}
               onExportGguf={(path, outtype) => {
-                // Make sure the user can see the card + log panel as
-                // soon as the export starts. They've already clicked
-                // from the Tuned tab, but a stray Browse switch in
-                // between would hide the progress.
                 setTab("tuned");
                 setExportLogsOpen(true);
-                exportTunedToGguf(path, outtype, setHfError, refreshTuned, setExportLogs, setExportLogsOpen, setExportStatus, setExportingPath, setExportProgress);
+                exportTunedToGguf(path, outtype, setHfError, refreshTuned, setExportLogs, setExportLogsOpen, setExportStatus, setExportingPath, setExportProgress, setPhantomExport);
               }}
               onDelete={(path) => deleteTunedAdapter(path, t.name, setHfError, refreshTuned)}
               exportStatus={exportingPath === t.path ? (exportStatus || "🚀 Starting…") : null}

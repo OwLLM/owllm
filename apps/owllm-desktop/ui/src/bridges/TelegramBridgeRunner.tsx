@@ -76,6 +76,53 @@ type TelegramConfig = {
 };
 type BridgeConfigs = { telegram: TelegramConfig; whatsapp: unknown };
 
+const BRAINSTORM_PROJECT_NAME = "Telegram Brainstorm Inbox";
+
+function norm(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function shortNameFromText(text: string): string {
+  const words = text
+    .replace(/^\/new\b/i, "")
+    .replace(/^new project\b/i, "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 6);
+  return words.length ? words.join(" ") : "Telegram idea";
+}
+
+function chatProjectKey(chatId: number): string {
+  return `owllm:telegram:active-project:${chatId}`;
+}
+
+function getChatProject(chatId: number): string {
+  try { return localStorage.getItem(chatProjectKey(chatId)) || ""; } catch { return ""; }
+}
+
+function setChatProject(chatId: number, projectId: string) {
+  try { localStorage.setItem(chatProjectKey(chatId), projectId); } catch {}
+}
+
+function scoreProject(text: string, project: ProjectRow): number {
+  const hay = norm(text);
+  const name = norm(project.name);
+  if (!hay || !name) return 0;
+  if (hay.includes(name)) return 100 + name.length;
+  const tokens = name.split(/\s+/).filter(t => t.length >= 3);
+  if (!tokens.length) return 0;
+  const hits = tokens.filter(t => hay.includes(t)).length;
+  return hits >= Math.min(2, tokens.length) ? hits * 20 : 0;
+}
+
+type RouteDecision =
+  | { kind: "ping" }
+  | { kind: "list-projects" }
+  | { kind: "switch-project"; project: ProjectRow }
+  | { kind: "new-brainstorm"; idea: string }
+  | { kind: "dispatch"; project: ProjectRow; reason: string };
+
 export default function TelegramBridgeRunner() {
   const [started, setStarted] = useState<boolean>(() => {
     try { return localStorage.getItem(STARTED_KEY) === "1"; } catch { return false; }
@@ -105,6 +152,26 @@ export default function TelegramBridgeRunner() {
     };
     window.addEventListener("owllm:telegram:status", onStatus as EventListener);
     return () => window.removeEventListener("owllm:telegram:status", onStatus as EventListener);
+  }, []);
+
+  // Belt-and-suspenders sync: the Bridges page persists the start flag
+  // in localStorage, but a same-window event can be missed during hot
+  // reloads, remounts, or early startup. Poll the persisted flag and
+  // config so the runner cannot look "running" in UI while asleep.
+  useEffect(() => {
+    const sync = () => {
+      let running = false;
+      try { running = localStorage.getItem(STARTED_KEY) === "1"; } catch {}
+      setStarted(running);
+      if (running) {
+        invoke<BridgeConfigs>("load_bridge_configs")
+          .then(c => setCfg(c.telegram))
+          .catch(e => console.error("[telegram] config sync failed", e));
+      }
+    };
+    sync();
+    const id = window.setInterval(sync, 2000);
+    return () => window.clearInterval(id);
   }, []);
 
   // Initial config + auxiliary data load on mount.
@@ -172,11 +239,117 @@ export default function TelegramBridgeRunner() {
     return null;
   };
 
+  const createProjectFromText = async (name: string, description: string): Promise<ProjectRow> => {
+    const fallbackTeam = teamsRef.current[0];
+    const team = fallbackTeam ? fallbackTeam.agents.map(a => a.name) : [];
+    const project = await invoke<ProjectRow>("create_project", {
+      input: {
+        name,
+        description,
+        location: "",
+        team,
+        graph_json: "",
+        team_default_model_id: "",
+        trust_writes: false,
+        auto_approve_all: false,
+      },
+    });
+    const rows = await invoke<ProjectRow[]>("list_projects").catch(() => [...projectsRef.current, project]);
+    setProjects(rows);
+    return project;
+  };
+
+  const ensureBrainstormProject = async (): Promise<ProjectRow> => {
+    const existing = projectsRef.current.find(p => p.name === BRAINSTORM_PROJECT_NAME);
+    if (existing) return existing;
+    return createProjectFromText(
+      BRAINSTORM_PROJECT_NAME,
+      "Global Telegram inbox for brainstorming, project discovery, and dispatch routing before a dedicated project exists.",
+    );
+  };
+
+  const findProjectByQuery = (query: string): ProjectRow | null => {
+    const q = norm(query);
+    if (!q) return null;
+    let best: { project: ProjectRow; score: number } | null = null;
+    for (const p of projectsRef.current) {
+      const score = scoreProject(q, p);
+      if (!best || score > best.score) best = { project: p, score };
+    }
+    return best && best.score >= 20 ? best.project : null;
+  };
+
+  const routeTelegram = async (chatId: number, text: string): Promise<RouteDecision> => {
+    const trimmed = text.trim();
+    const projectsNow = projectsRef.current;
+    if (/^\/ping\b/i.test(trimmed)) return { kind: "ping" };
+    if (/^\/projects\b/i.test(trimmed)) return { kind: "list-projects" };
+
+    const switchMatch = trimmed.match(/^\/(?:project|use|switch)\s+(.+)$/i)
+      ?? trimmed.match(/^project\s*:\s*(.+)$/i);
+    if (switchMatch) {
+      const project = findProjectByQuery(switchMatch[1]);
+      if (project) return { kind: "switch-project", project };
+      const inbox = await ensureBrainstormProject();
+      return { kind: "dispatch", project: inbox, reason: "project-not-found" };
+    }
+
+    const newMatch = trimmed.match(/^\/new(?:\s+(.+))?$/i)
+      ?? trimmed.match(/^new project\s*:?\s*(.+)$/i);
+    if (newMatch) {
+      return { kind: "new-brainstorm", idea: (newMatch[1] || trimmed).trim() };
+    }
+
+    const explicit = findProjectByQuery(trimmed);
+    if (explicit && explicit.name !== BRAINSTORM_PROJECT_NAME) {
+      return { kind: "dispatch", project: explicit, reason: "mentioned-project" };
+    }
+
+    const activeId = getChatProject(chatId);
+    const active = activeId ? projectsNow.find(p => p.id === activeId) : null;
+    if (active) return { kind: "dispatch", project: active, reason: "chat-active-project" };
+
+    const configured = cfgRef.current?.project_id
+      ? projectsNow.find(p => p.id === cfgRef.current?.project_id)
+      : null;
+    if (configured) return { kind: "dispatch", project: configured, reason: "configured-default" };
+
+    const inbox = await ensureBrainstormProject();
+    return { kind: "dispatch", project: inbox, reason: "brainstorm-inbox" };
+  };
+
   const handle = async (chatId: number, text: string, attachments: Attachment[] = []) => {
     const tgCfg = cfgRef.current;
     if (!tgCfg) return;
-    const project = projectsRef.current.find(p => p.id === tgCfg.project_id) ?? null;
-    const projectId = project?.id ?? tgCfg.project_id ?? "";
+    const route = await routeTelegram(chatId, text);
+    if (route.kind === "ping") {
+      await sendTelegram(tgCfg.bot_token, chatId, "OWLLM bridge is awake.");
+      return;
+    }
+    if (route.kind === "list-projects") {
+      const lines = projectsRef.current.slice(0, 20).map((p, i) => `${i + 1}. ${p.name}`);
+      await sendTelegram(tgCfg.bot_token, chatId, lines.length
+        ? `Projects:\n${lines.join("\n")}\n\nUse /project <name> to choose one, or /new <idea> to start brainstorming.`
+        : "No projects yet. Send /new <idea> to start brainstorming.");
+      return;
+    }
+    if (route.kind === "switch-project") {
+      setChatProject(chatId, route.project.id);
+      await sendTelegram(tgCfg.bot_token, chatId, `Routing this chat to project: ${route.project.name}`);
+      return;
+    }
+    let project = route.project;
+    if (route.kind === "new-brainstorm") {
+      project = await createProjectFromText(
+        `Brainstorm - ${shortNameFromText(route.idea)}`,
+        `Telegram brainstorm seed:\n${route.idea || "(empty)"}`,
+      );
+      setChatProject(chatId, project.id);
+      await sendTelegram(tgCfg.bot_token, chatId, `Created brainstorm project: ${project.name}`);
+    } else {
+      setChatProject(chatId, project.id);
+    }
+    const projectId = project.id;
 
     // ---- 1. INBOUND VISIBLE IMMEDIATELY ----
     // Fire the chat-append event right when the message arrives so
@@ -239,6 +412,19 @@ export default function TelegramBridgeRunner() {
     //         persisted chat_json gets the user-facing turns only.
     const projectCwd = (project?.location ?? "").trim();
     const auto = !!tgCfg.auto_approve;
+    const isBrainstormProject =
+      project.name === BRAINSTORM_PROJECT_NAME || project.name.startsWith("Brainstorm -");
+    const goalForDispatch = isBrainstormProject
+      ? [
+          "You are OWLLM's global Telegram brainstormer and project dispatcher.",
+          "Brainstorm conversationally with the user before forming a team.",
+          "Create or refine a compact project brief with goal, constraints, unknowns, risks, suggested team, and next milestone.",
+          "Ask clarifying questions when the project is not ready.",
+          "Use the Critical Thinker as an explicit reviewer: have them challenge assumptions, scope, and readiness before launch.",
+          "",
+          `User Telegram message: ${text || "(see attached media)"}`,
+        ].join("\n")
+      : text || "(see attached media)";
 
     // Load directives + director_mode fresh per dispatch so changes
     // made in the desktop DirectivesPanel take effect on the very next
@@ -317,7 +503,7 @@ export default function TelegramBridgeRunner() {
           // Empty text + media-only message: substitute a minimal goal
           // so the orchestrator still has something to plan against.
           // Without this the model sees "" and refuses to act.
-          goal: text || "(see attached media)",
+          goal: goalForDispatch,
           modelFor,
           models: modelsRef.current,
           port: serverRef.current.port ?? 0,
@@ -466,6 +652,7 @@ export default function TelegramBridgeRunner() {
             const hasMedia = hasPhoto || hasVoice || hasAudio || docIsImage || docIsAudio;
             if (!text && !hasMedia) continue;
             console.log(`[telegram] inbound from ${chatId}: text="${text.slice(0, 60)}" photo=${hasPhoto} voice=${hasVoice} audio=${hasAudio} doc=${docMime || "-"}`);
+            const immediateCommand = !hasMedia && /^\/(?:ping|projects|project|use|switch)\b/i.test(text.trim());
 
             // Snapshot the file_ids + mime hints NOW (msg ref will be
             // out of scope by the time the queued task runs). Downloads
@@ -480,6 +667,11 @@ export default function TelegramBridgeRunner() {
             const audioName = hasAudio ? (msg.audio.file_name || undefined) : undefined;
             const docId = (docIsImage || docIsAudio) ? msg.document.file_id : null;
             const docName = (docIsImage || docIsAudio) ? (msg.document.file_name || undefined) : undefined;
+
+            if (immediateCommand) {
+              handle(chatId, text, []).catch(e => console.error("[telegram] command failed", e));
+              continue;
+            }
 
             handlerQueue = handlerQueue
               .then(async () => {
@@ -537,12 +729,13 @@ export default function TelegramBridgeRunner() {
     const handler = async (e: Event) => {
       const detail = (e as CustomEvent<{ projectId: string; messages: GoalMsg[]; source?: string }>).detail;
       if (!detail || detail.source !== "desktop") return;
-      if (detail.projectId !== cfg.project_id) return;
       const msgs = Array.isArray(detail.messages) ? detail.messages : [];
       for (const m of msgs) {
         if (!m || !m.text || !m.text.trim()) continue;
         if (m.role === "you") continue;
         for (const chatId of allow) {
+          const activeProjectId = getChatProject(chatId) || cfg.project_id || "";
+          if (detail.projectId !== activeProjectId) continue;
           await sendTelegram(cfg.bot_token, chatId, m.text);
         }
       }

@@ -84,7 +84,7 @@ function modelCapabilityBlurb(id: string): string {
 // Card style — port of `_CARD_STYLE` at main.py:14538-14593 (cfgCard).
 const cfgCard: React.CSSProperties = {
   background: "var(--bg-card)",
-  border: "1px solid rgba(102,126,234,0.28)",
+  border: "1px solid rgba(var(--accent-rgb),0.28)",
   borderRadius: 10,
   padding: "10px 14px 12px 14px",
   display: "flex",
@@ -121,8 +121,8 @@ const inputStyle: React.CSSProperties = {
 
 // "cardBtn" — port of QPushButton.cardBtn at main.py:14584-14591.
 const cardBtn: React.CSSProperties = {
-  background: "rgba(102,126,234,0.18)",
-  border: "1px solid rgba(102,126,234,0.45)",
+  background: "rgba(var(--accent-rgb),0.18)",
+  border: "1px solid rgba(var(--accent-rgb),0.45)",
   borderRadius: 6,
   color: "var(--fg-strong)",
   padding: "6px 12px",
@@ -204,7 +204,7 @@ function LossChart({ data }: { data: { step: number; loss: number }[] }) {
   const path = data.map((d, i) => `${i === 0 ? "M" : "L"} ${sx(d.step).toFixed(1)} ${sy(d.loss).toFixed(1)}`).join(" ");
   return (
     <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block" }}>
-      <rect x={PX} y={PY} width={W - 2 * PX} height={H - 2 * PY} fill="none" stroke="rgba(102,126,234,0.15)" />
+      <rect x={PX} y={PY} width={W - 2 * PX} height={H - 2 * PY} fill="none" stroke="rgba(var(--accent-rgb),0.15)" />
       <text x={PX - 4} y={PY + 8}      fill="#6b7280" fontSize="9" textAnchor="end">{maxY.toFixed(3)}</text>
       <text x={PX - 4} y={H - PY}      fill="#6b7280" fontSize="9" textAnchor="end">{minY.toFixed(3)}</text>
       <text x={PX} y={H - 2}           fill="#6b7280" fontSize="9" textAnchor="start">{minX}</text>
@@ -257,7 +257,7 @@ function TrainingHistory() {
       data-ui="trainingHistorySection"
       style={{
         background: "var(--bg-card)",
-        border: "1px solid rgba(102,126,234,0.3)",
+        border: "1px solid rgba(var(--accent-rgb),0.3)",
         borderRadius: 12,
         padding: 12,
         display: "flex",
@@ -280,7 +280,7 @@ function TrainingHistory() {
       </div>
       <div style={{
         background: "rgba(10,10,15,0.8)",
-        border: "1px solid rgba(102,126,234,0.2)",
+        border: "1px solid rgba(var(--accent-rgb),0.2)",
         borderRadius: 6,
         overflow: "auto",
         maxHeight: 240,
@@ -290,7 +290,7 @@ function TrainingHistory() {
             <tr>
               {["When", "Adapter", "Base", "Epochs", "Steps", "Final loss", "Status", "Actions"].map((h) => (
                 <th key={h} style={{
-                  background: "rgba(102,126,234,0.2)",
+                  background: "rgba(var(--accent-rgb),0.2)",
                   color: "#fafafa",
                   padding: 6,
                   border: "none",
@@ -308,7 +308,7 @@ function TrainingHistory() {
                 {loading ? "Loading…" : "No past runs found in fine_tuned/."}
               </td></tr>
             ) : rows.map((r, i) => (
-              <tr key={i} style={{ borderTop: "1px solid rgba(102,126,234,0.12)" }}>
+              <tr key={i} style={{ borderTop: "1px solid rgba(var(--accent-rgb),0.12)" }}>
                 <td style={{ padding: 6 }}>{r.when_pretty || "—"}</td>
                 <td style={{ padding: 6, wordBreak: "break-all" }}>{r.adapter || "—"}</td>
                 <td style={{ padding: 6, wordBreak: "break-all" }}>{r.base || "—"}</td>
@@ -636,7 +636,7 @@ export default function TrainPage() {
         {/* Loss Over Time — main.py:16057-16082 */}
         <div data-ui="lossSection" style={{
           background: "var(--bg-card)",
-          border: "1px solid rgba(102,126,234,0.3)",
+          border: "1px solid rgba(var(--accent-rgb),0.3)",
           borderRadius: 12,
           padding: "10px 15px",
           display: "flex",
@@ -651,7 +651,7 @@ export default function TrainPage() {
         {/* Training Logs — main.py:16084-16143 */}
         <div data-ui="logsSection" style={{
           background: "var(--bg-card)",
-          border: "1px solid rgba(102,126,234,0.3)",
+          border: "1px solid rgba(var(--accent-rgb),0.3)",
           borderRadius: 12,
           padding: "10px 15px",
           display: "flex",
@@ -662,7 +662,7 @@ export default function TrainPage() {
         }}>
           <div style={{ display: "flex", alignItems: "center" }}>
             <div style={{ color: "#fff", fontSize: 13, fontWeight: 800, flex: 1 }}>📋 Training Logs</div>
-            <button style={{ ...cardBtn, padding: "5px 15px", background: "rgba(102,126,234,0.3)", border: "none" }}>
+            <button style={{ ...cardBtn, padding: "5px 15px", background: "rgba(var(--accent-rgb),0.3)", border: "none" }}>
               ▼ Show Logs
             </button>
           </div>
@@ -672,7 +672,7 @@ export default function TrainPage() {
             color: "#00ff00",
             fontFamily: "'Consolas', 'Courier New', monospace",
             fontSize: 11,
-            border: "1px solid rgba(102,126,234,0.3)",
+            border: "1px solid rgba(var(--accent-rgb),0.3)",
             borderRadius: 8,
             padding: 10,
             overflow: "auto",
@@ -696,10 +696,10 @@ export default function TrainPage() {
             padding: "8px 10px",
             background: status.message.startsWith("Failed") || status.message.startsWith("Start failed")
               ? "rgba(244,67,54,0.12)"
-              : "rgba(102,126,234,0.12)",
+              : "rgba(var(--accent-rgb),0.12)",
             border: `1px solid ${status.message.startsWith("Failed") || status.message.startsWith("Start failed")
               ? "rgba(244,67,54,0.4)"
-              : "rgba(102,126,234,0.4)"}`,
+              : "rgba(var(--accent-rgb),0.4)"}`,
             borderRadius: 6,
             fontSize: 11,
             color: status.message.startsWith("Failed") || status.message.startsWith("Start failed") ? "#ffb3b3" : "#cfd4e1",
@@ -845,8 +845,8 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
           title="What is abliteration?"
           style={{
             width: 22, height: 22, borderRadius: 11,
-            background: "rgba(102,126,234,0.18)",
-            border: "1px solid rgba(102,126,234,0.4)",
+            background: "rgba(var(--accent-rgb),0.18)",
+            border: "1px solid rgba(var(--accent-rgb),0.4)",
             color: "#9cc3ff",
             fontSize: 12, fontWeight: 700,
             cursor: "pointer",
@@ -882,8 +882,8 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
       {message && (
         <div style={{
           padding: "6px 8px",
-          background: message.startsWith("❌") ? "rgba(244,67,54,0.12)" : "rgba(102,126,234,0.10)",
-          border: `1px solid ${message.startsWith("❌") ? "rgba(244,67,54,0.4)" : "rgba(102,126,234,0.3)"}`,
+          background: message.startsWith("❌") ? "rgba(244,67,54,0.12)" : "rgba(var(--accent-rgb),0.10)",
+          border: `1px solid ${message.startsWith("❌") ? "rgba(244,67,54,0.4)" : "rgba(var(--accent-rgb),0.3)"}`,
           borderRadius: 4,
           fontSize: 10,
           color: message.startsWith("❌") ? "#ffb3b3" : "#cfd4e1",
@@ -897,8 +897,8 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
             onClick={() => setShowLogs((v) => !v)}
             style={{
               padding: "3px 8px",
-              background: "rgba(102,126,234,0.10)",
-              border: "1px solid rgba(102,126,234,0.3)",
+              background: "rgba(var(--accent-rgb),0.10)",
+              border: "1px solid rgba(var(--accent-rgb),0.3)",
               borderRadius: 4,
               color: "#9cc3ff",
               fontSize: 10,

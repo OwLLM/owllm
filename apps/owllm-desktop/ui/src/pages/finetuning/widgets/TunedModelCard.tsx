@@ -237,8 +237,8 @@ export default function TunedModelCard(props: TunedModelCardProps) {
   const compat: CompatibilityBadge | undefined = compatibilityBadge;
 
   const btn: React.CSSProperties = {
-    background: "rgba(102,126,234,0.15)",
-    border: "1px solid rgba(102,126,234,0.4)",
+    background: "rgba(var(--accent-rgb),0.15)",
+    border: "1px solid rgba(var(--accent-rgb),0.4)",
     color: "white", borderRadius: 6, padding: "6px 15px",
     fontWeight: "bold", cursor: "pointer", fontSize: 12,
   };
@@ -304,8 +304,8 @@ export default function TunedModelCard(props: TunedModelCardProps) {
           <div style={{
             marginTop: 6,
             padding: "8px 10px",
-            background: "rgba(102,126,234,0.10)",
-            border: "1px solid rgba(102,126,234,0.35)",
+            background: "rgba(var(--accent-rgb),0.10)",
+            border: "1px solid rgba(var(--accent-rgb),0.35)",
             borderRadius: 6,
             fontSize: 11,
             color: "#dcdfe7",
@@ -376,7 +376,7 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                 zIndex: 9999,
                 width: 320,
                 background: "var(--bg-panel)",
-                border: "1px solid rgba(102,126,234,0.5)",
+                border: "1px solid rgba(var(--accent-rgb),0.5)",
                 borderRadius: 8,
                 boxShadow: "0 10px 30px rgba(0,0,0,0.55)",
                 padding: 6,
@@ -455,7 +455,7 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                         // GPU-fit edge so the user still sees red/
                         // yellow/green for the picked row.
                         background: isPicked
-                          ? `linear-gradient(90deg, ${edge}40 0 4px, rgba(102,126,234,0.20) 4px 100%)`
+                          ? `linear-gradient(90deg, ${edge}40 0 4px, rgba(var(--accent-rgb),0.20) 4px 100%)`
                           : `linear-gradient(90deg, ${edge} 0 3px, ${bg} 3px 100%)`,
                         border: isPicked ? "1px solid #7fb8ff" : `1px solid ${edge}55`,
                         borderRadius: 4,
@@ -465,7 +465,7 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                         cursor: "pointer",
                         marginBottom: 2,
                       }}
-                      onMouseEnter={(ev) => { if (!isPicked) (ev.currentTarget as HTMLElement).style.outline = "1px solid rgba(102,126,234,0.5)"; }}
+                      onMouseEnter={(ev) => { if (!isPicked) (ev.currentTarget as HTMLElement).style.outline = "1px solid rgba(var(--accent-rgb),0.5)"; }}
                       onMouseLeave={(ev) => { if (!isPicked) (ev.currentTarget as HTMLElement).style.outline = "none"; }}
                     >
                       <span style={{ width: 16, textAlign: "center", color: isPicked ? "#7fb8ff" : "#5a6376" }}>
@@ -505,7 +505,7 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                   style={{
                     flex: 1,
                     minHeight: 30, padding: "0 14px",
-                    background: loadingSize ? "rgba(102,126,234,0.20)" : "#667eea",
+                    background: loadingSize ? "rgba(var(--accent-rgb),0.20)" : "#667eea",
                     color: "white",
                     border: "none",
                     borderRadius: 6,

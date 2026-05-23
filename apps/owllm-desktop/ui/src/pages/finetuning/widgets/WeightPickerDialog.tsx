@@ -156,7 +156,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
           boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
         }}
       >
-        <div style={{ padding: "14px 18px", borderBottom: "1px solid rgba(102,126,234,0.3)" }}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid rgba(var(--accent-rgb),0.3)" }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>Choose weights to download</div>
           <div style={{ fontSize: 12, color: "#9aa0aa", marginTop: 4 }}>
             <b>{p.modelId}</b> · Green = fits your {p.vramGb.toFixed(1)} GB VRAM · Red = won't load
@@ -182,8 +182,8 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
               <label style={{
                 display: "flex", alignItems: "center", gap: 8,
                 padding: "8px 10px",
-                background: "rgba(102,126,234,0.08)",
-                border: "1px solid rgba(102,126,234,0.25)",
+                background: "rgba(var(--accent-rgb),0.08)",
+                border: "1px solid rgba(var(--accent-rgb),0.25)",
                 borderRadius: 6,
                 marginBottom: 10,
                 cursor: "pointer",
@@ -210,8 +210,8 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
                       style={{
                         display: "flex", alignItems: "center", gap: 10,
                         padding: "6px 10px",
-                        background: sel ? "rgba(102,126,234,0.12)" : "transparent",
-                        border: `1px solid ${sel ? "rgba(102,126,234,0.5)" : "var(--border-strong)"}`,
+                        background: sel ? "rgba(var(--accent-rgb),0.12)" : "transparent",
+                        border: `1px solid ${sel ? "rgba(var(--accent-rgb),0.5)" : "var(--border-strong)"}`,
                         borderRadius: 6,
                         cursor: downloadAll ? "default" : "pointer",
                         opacity: downloadAll ? 0.55 : 1,
@@ -233,7 +233,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
                       </span>
                       <span style={{
                         fontSize: 10, padding: "2px 6px", borderRadius: 3,
-                        background: "rgba(102,126,234,0.18)",
+                        background: "rgba(var(--accent-rgb),0.18)",
                         color: "#9cc3ff",
                       }}>{quant}</span>
                       <span style={{ fontSize: 11, color: "#9aa0aa", minWidth: 70, textAlign: "right" }}>
@@ -249,7 +249,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
 
         <div style={{
           padding: "12px 18px",
-          borderTop: "1px solid rgba(102,126,234,0.3)",
+          borderTop: "1px solid rgba(var(--accent-rgb),0.3)",
           display: "flex", justifyContent: "flex-end", gap: 8,
         }}>
           <button

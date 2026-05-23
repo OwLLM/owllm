@@ -100,8 +100,8 @@ export function CheckpointToggle(p: CheckpointToggleProps) {
       alignItems: "center",
       gap: 10,
       padding: "8px 12px",
-      background: "rgba(102,126,234,0.06)",
-      border: "1px solid rgba(102,126,234,0.2)",
+      background: "rgba(var(--accent-rgb),0.06)",
+      border: "1px solid rgba(var(--accent-rgb),0.2)",
       borderRadius: 6,
     }}>
       <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
@@ -142,7 +142,7 @@ export function StatusPill({ status, detail }: StatusPillProps) {
     running: { color: "#4CAF50", bg: "rgba(76,175,80,0.18)",   label: "Training" },
     paused:  { color: "#FF9800", bg: "rgba(255,152,0,0.18)",   label: "Paused" },
     error:   { color: "#f44336", bg: "rgba(244,67,54,0.18)",   label: "Error" },
-    done:    { color: "#667eea", bg: "rgba(102,126,234,0.18)", label: "Complete" },
+    done:    { color: "#667eea", bg: "rgba(var(--accent-rgb),0.18)", label: "Complete" },
   };
   const s = styles[status];
   return (
@@ -185,8 +185,8 @@ export function StartTrainingPanel({ status, canStart, onStart, onStop }: StartT
       alignItems: "center",
       gap: 10,
       padding: 12,
-      background: "linear-gradient(180deg, rgba(102,126,234,0.12) 0%, rgba(102,126,234,0.04) 100%)",
-      border: "1px solid rgba(102,126,234,0.3)",
+      background: "linear-gradient(180deg, rgba(var(--accent-rgb),0.12) 0%, rgba(var(--accent-rgb),0.04) 100%)",
+      border: "1px solid rgba(var(--accent-rgb),0.3)",
       borderRadius: 10,
     }}>
       <button

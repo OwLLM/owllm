@@ -65,8 +65,8 @@ export default function DownloadedModelCard(props: DownloadedModelCardProps) {
   }
 
   const btn: React.CSSProperties = {
-    background: "rgba(102,126,234,0.15)",
-    border: "1px solid rgba(102,126,234,0.4)",
+    background: "rgba(var(--accent-rgb),0.15)",
+    border: "1px solid rgba(var(--accent-rgb),0.4)",
     color: "white", borderRadius: 6, padding: "6px 15px",
     fontWeight: "bold", cursor: "pointer", fontSize: 12,
   };
@@ -105,7 +105,7 @@ export default function DownloadedModelCard(props: DownloadedModelCardProps) {
           }}>{local.text}</span>
           {envKey && (
             <span style={{
-              background: "rgba(102,126,234,0.3)", color: "#667eea",
+              background: "rgba(var(--accent-rgb),0.3)", color: "#667eea",
               padding: "2px 8px", borderRadius: 3,
               fontSize: 10, fontWeight: "bold",
             }}>🔧 {envKey}</span>

@@ -901,7 +901,7 @@ export default function ChatPage() {
               maxHeight: 240,
               overflowY: "auto",
               background: rightTab === "logs" ? "rgba(20,20,30,0.8)" : "rgba(24,16,16,0.85)",
-              border: `1px solid ${rightTab === "logs" ? "rgba(102,126,234,0.3)" : "rgba(210,140,100,0.35)"}`,
+              border: `1px solid ${rightTab === "logs" ? "rgba(var(--accent-rgb),0.3)" : "rgba(210,140,100,0.35)"}`,
               borderRadius: 8,
               color: rightTab === "logs" ? "#cccccc" : "#f0d0c0",
               fontFamily: "Consolas, 'Courier New', monospace",

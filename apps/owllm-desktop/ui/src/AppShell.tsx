@@ -596,7 +596,7 @@ function SubTabs({
         onClick={() => onChange(p.key)}
         style={{
           padding: "5px 14px",
-          background: active ? "rgba(102,126,234,0.28)" : "transparent",
+          background: active ? "rgba(var(--accent-rgb),0.28)" : "transparent",
           color: active ? "#fafafa" : "var(--fg-muted)",
           borderRadius: 8,
           fontWeight: 600,

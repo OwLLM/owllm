@@ -49,8 +49,8 @@ export default class ErrorBoundary extends React.Component<
           onClick={() => this.setState({ error: null, info: null })}
           style={{
             padding: "6px 14px",
-            background: "rgba(102,126,234,0.2)",
-            border: "1px solid rgba(102,126,234,0.5)",
+            background: "rgba(var(--accent-rgb),0.2)",
+            border: "1px solid rgba(var(--accent-rgb),0.5)",
             color: "white",
             borderRadius: 6,
             cursor: "pointer",

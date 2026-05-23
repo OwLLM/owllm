@@ -44,13 +44,13 @@ export function ModelCard(props: ModelCardProps) {
 
   const btnBg = isDownloaded
     ? "rgba(150,150,150,0.05)"
-    : btnPressed ? "rgba(102,126,234,0.35)"
-    : btnHover  ? "rgba(102,126,234,0.25)"
-    :              "rgba(102,126,234,0.15)";
+    : btnPressed ? "rgba(var(--accent-rgb),0.35)"
+    : btnHover  ? "rgba(var(--accent-rgb),0.25)"
+    :              "rgba(var(--accent-rgb),0.15)";
   const btnBorder = isDownloaded
     ? "1px solid rgba(150,150,150,0.1)"
-    : btnHover  ? "1px solid rgba(102,126,234,0.6)"
-    :              "1px solid rgba(102,126,234,0.4)";
+    : btnHover  ? "1px solid rgba(var(--accent-rgb),0.6)"
+    :              "1px solid rgba(var(--accent-rgb),0.4)";
 
   return (
     <CardShell
@@ -135,7 +135,7 @@ export function ModelCard(props: ModelCardProps) {
               <span aria-hidden style={{
                 position: "absolute", inset: 0,
                 width: `${pct * 100}%`,
-                background: "linear-gradient(90deg, rgba(102,126,234,0.55), rgba(102,126,234,0.85))",
+                background: "linear-gradient(90deg, rgba(var(--accent-rgb),0.55), rgba(var(--accent-rgb),0.85))",
                 transition: "width 200ms linear",
                 pointerEvents: "none",
               }} />

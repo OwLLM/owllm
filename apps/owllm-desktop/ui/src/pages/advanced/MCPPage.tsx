@@ -10,7 +10,7 @@
 //
 // The PySide6 version lazy-loads each sub-page on first click; we render
 // all three (state stays per-tab). Background: #0e1117 per page style.
-// Sub-tabs use rgba(102,126,234,0.8) selected / rgba(30,30,40,0.8) idle
+// Sub-tabs use rgba(var(--accent-rgb),0.8) selected / rgba(30,30,40,0.8) idle
 // — see mcp_page.py:36-58.
 import React, { useMemo, useState } from "react";
 
@@ -134,7 +134,7 @@ function InstallConfirmDialog({
       <div style={{
         background: "#1a1f2e", borderRadius: 10, padding: 24,
         minWidth: 420, maxWidth: 520,
-        border: "1px solid rgba(102,126,234,0.3)",
+        border: "1px solid rgba(var(--accent-rgb),0.3)",
       }}>
         <div style={{ color: "var(--fg-strong)", fontSize: 16, fontWeight: 700, marginBottom: 12 }}>
           Confirm Installation
@@ -167,7 +167,7 @@ function ServerCard({ server, onInstall }: {
   return (
     <div style={{
       background: "linear-gradient(180deg, rgba(30,30,40,0.9), rgba(20,20,30,0.9))",
-      border: "1px solid rgba(102,126,234,0.30)",
+      border: "1px solid rgba(var(--accent-rgb),0.30)",
       borderRadius: 8, padding: 12,
       display: "flex", flexDirection: "column", gap: 8,
     }}>
@@ -188,7 +188,7 @@ function ServerCard({ server, onInstall }: {
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         {server.categories.slice(0, 3).map(cat => (  // max 3 per server_card.py:84
           <span key={cat} style={{
-            background: "rgba(102,126,234,0.30)", color: "var(--fg-strong)",
+            background: "rgba(var(--accent-rgb),0.30)", color: "var(--fg-strong)",
             padding: "2px 8px", borderRadius: 4, fontSize: 11,
           }}>{cat}</span>
         ))}
@@ -206,7 +206,7 @@ function ServerCard({ server, onInstall }: {
           cursor: server.installed ? "default" : "pointer",
           background: server.installed
             ? "rgba(154,160,166,0.25)"
-            : "linear-gradient(90deg, rgba(102,126,234,0.8), rgba(76,175,80,0.8))",
+            : "linear-gradient(90deg, rgba(var(--accent-rgb),0.8), rgba(76,175,80,0.8))",
         }}
       >
         {server.installed ? "✓ Installed" : "📥 Install"}
@@ -439,7 +439,7 @@ function ConfigureDialog({
       <div style={{
         background: "#1a1f2e", borderRadius: 10, padding: 24,
         minWidth: 500, maxWidth: 600, maxHeight: "85vh", overflow: "auto",
-        border: "1px solid rgba(102,126,234,0.3)",
+        border: "1px solid rgba(var(--accent-rgb),0.3)",
       }}>
         <div style={{ color: "var(--fg-strong)", fontSize: 16, fontWeight: 700, marginBottom: 16 }}>
           Configure: {conn.name}
@@ -502,7 +502,7 @@ function HandshakeInspector({ conn, onClose }: { conn: Connection; onClose: () =
       <div style={{
         background: "#1a1f2e", borderRadius: 10, padding: 24,
         minWidth: 480, maxWidth: 640,
-        border: "1px solid rgba(102,126,234,0.3)",
+        border: "1px solid rgba(var(--accent-rgb),0.3)",
       }}>
         <div style={{ color: "var(--fg-strong)", fontSize: 16, fontWeight: 700, marginBottom: 12 }}>
           Handshake — {conn.name}
@@ -559,7 +559,7 @@ function ConnectionCard({
   return (
     <div style={{
       background: "linear-gradient(180deg, rgba(30,30,40,0.9), rgba(20,20,30,0.9))",
-      border: "1px solid rgba(102,126,234,0.30)",
+      border: "1px solid rgba(var(--accent-rgb),0.30)",
       borderRadius: 8, padding: 12,
       display: "flex", flexDirection: "column", gap: 8,
     }}>
@@ -788,7 +788,7 @@ function ToolCard({ tool, onRun, onToggle, onSelect }: {
       onClick={() => onSelect(tool.name)}
       style={{
         background: "linear-gradient(180deg, rgba(40,40,55,0.6), rgba(25,25,35,0.6))",
-        border: "1px solid rgba(102,126,234,0.20)",
+        border: "1px solid rgba(var(--accent-rgb),0.20)",
         borderRadius: 12, padding: 16,
         display: "flex", flexDirection: "column", gap: 8,
         cursor: "pointer",
@@ -797,7 +797,7 @@ function ToolCard({ tool, onRun, onToggle, onSelect }: {
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <div style={{
           width: 40, height: 40, fontSize: 20,
-          background: "rgba(102,126,234,0.15)", borderRadius: 8,
+          background: "rgba(var(--accent-rgb),0.15)", borderRadius: 8,
           display: "flex", alignItems: "center", justifyContent: "center",
         }}>🔧</div>
         <div style={{ color: "var(--fg-strong)", fontSize: 14, fontWeight: 700, flex: 1 }}>
@@ -825,9 +825,9 @@ function ToolCard({ tool, onRun, onToggle, onSelect }: {
           border: "1px solid rgba(156,39,176,0.30)",
         }}>🔌 {tool.source_server}</span>
         <span style={{
-          background: "rgba(102,126,234,0.20)", color: "#9fa8ff",
+          background: "rgba(var(--accent-rgb),0.20)", color: "#9fa8ff",
           padding: "3px 8px", borderRadius: 8, fontSize: 10, fontWeight: 500,
-          border: "1px solid rgba(102,126,234,0.30)",
+          border: "1px solid rgba(var(--accent-rgb),0.30)",
         }}>{tool.category}</span>
         <span style={{
           background: `${danger}33`, color: danger,
@@ -839,8 +839,8 @@ function ToolCard({ tool, onRun, onToggle, onSelect }: {
       <button
         onClick={e => { e.stopPropagation(); onRun(tool.name); }}
         style={{
-          padding: 8, borderRadius: 6, border: "1px solid rgba(102,126,234,0.40)",
-          background: "linear-gradient(90deg, rgba(102,126,234,0.30), rgba(118,75,162,0.30))",
+          padding: 8, borderRadius: 6, border: "1px solid rgba(var(--accent-rgb),0.40)",
+          background: "linear-gradient(90deg, rgba(var(--accent-rgb),0.30), rgba(118,75,162,0.30))",
           color: "var(--fg-strong)", fontWeight: 600, fontSize: 11, cursor: "pointer",
         }}
       >▶ Run Tool</button>
@@ -945,7 +945,7 @@ function ToolsTab() {
         {selected && (
           <div style={{
             background: "rgba(20,25,40,0.55)",
-            border: "1px solid rgba(102,126,234,0.20)",
+            border: "1px solid rgba(var(--accent-rgb),0.20)",
             borderRadius: 10, padding: 16,
             display: "flex", flexDirection: "column", gap: 10, overflow: "auto",
           }}>
@@ -963,7 +963,7 @@ function ToolsTab() {
             <div style={{
               color: "#667eea", fontSize: 11, fontWeight: 700,
               letterSpacing: 1, paddingTop: 6,
-              borderTop: "1px solid rgba(102,126,234,0.20)",
+              borderTop: "1px solid rgba(var(--accent-rgb),0.20)",
             }}>PARAMETERS (JSON-Schema)</div>
             <SchemaViewer schema={selected.input_schema} />
 
@@ -974,7 +974,7 @@ function ToolsTab() {
 
             <button onClick={execute} style={{
               padding: 10, borderRadius: 8, border: "1px solid rgba(76,175,80,0.50)",
-              background: "linear-gradient(90deg, rgba(76,175,80,0.30), rgba(102,126,234,0.30))",
+              background: "linear-gradient(90deg, rgba(76,175,80,0.30), rgba(var(--accent-rgb),0.30))",
               color: "var(--fg-strong)", fontWeight: 600, fontSize: 12, cursor: "pointer",
             }}>▶ Execute Tool</button>
 
@@ -983,13 +983,13 @@ function ToolsTab() {
                 <div style={{
                   color: "#667eea", fontSize: 11, fontWeight: 700,
                   letterSpacing: 1, paddingTop: 6,
-                  borderTop: "1px solid rgba(102,126,234,0.20)",
+                  borderTop: "1px solid rgba(var(--accent-rgb),0.20)",
                 }}>OUTPUT</div>
                 <pre style={{
                   background: "rgba(0,0,0,0.40)", color: "#4ade80",
                   fontFamily: "Consolas, monospace", fontSize: 11,
                   padding: 10, borderRadius: 6,
-                  border: "1px solid rgba(102,126,234,0.20)",
+                  border: "1px solid rgba(var(--accent-rgb),0.20)",
                   whiteSpace: "pre-wrap", margin: 0,
                 }}>{output}</pre>
                 <button onClick={copyOutput} style={btnGhost}>📋 Copy Output</button>
@@ -1007,7 +1007,7 @@ function ToolsTab() {
 // ---------------------------------------------------------------------
 const inputStyle: React.CSSProperties = {
   height: 32, padding: "0 12px",
-  borderRadius: 6, border: "1px solid rgba(102,126,234,0.30)",
+  borderRadius: 6, border: "1px solid rgba(var(--accent-rgb),0.30)",
   background: "rgba(40,40,50,0.80)", color: "var(--fg-strong)", fontSize: 12,
 };
 const selectStyle: React.CSSProperties = {
@@ -1019,20 +1019,20 @@ const lblStyle: React.CSSProperties = {
 };
 const btnGhost: React.CSSProperties = {
   height: 32, padding: "0 14px", borderRadius: 6,
-  border: "1px solid rgba(102,126,234,0.50)",
-  background: "rgba(102,126,234,0.30)",
+  border: "1px solid rgba(var(--accent-rgb),0.50)",
+  background: "rgba(var(--accent-rgb),0.30)",
   color: "var(--fg-strong)", fontSize: 12, fontWeight: 600, cursor: "pointer",
 };
 const btnPrimary: React.CSSProperties = {
   height: 32, padding: "0 14px", borderRadius: 4,
   border: "none", color: "var(--fg-strong)", fontWeight: 700, fontSize: 12,
   cursor: "pointer",
-  background: "rgba(102,126,234,0.80)",
+  background: "rgba(var(--accent-rgb),0.80)",
 };
 const btnPurple: React.CSSProperties = {
   padding: "6px 12px", borderRadius: 4, border: "none", color: "var(--fg-strong)",
   fontSize: 11, fontWeight: 600, cursor: "pointer",
-  background: "rgba(102,126,234,0.60)",
+  background: "rgba(var(--accent-rgb),0.60)",
 };
 const btnGreen: React.CSSProperties = {
   padding: "6px 12px", borderRadius: 4, border: "none", color: "var(--fg-strong)",
@@ -1064,7 +1064,7 @@ export default function MCPPage() {
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", background: PANEL_BG }}>
       {/* Tab strip — mcp_page.py:36-58 (padding 10/20, min-height 22+padding,
-          radius 6 top-only, selected bg rgba(102,126,234,0.8)) */}
+          radius 6 top-only, selected bg rgba(var(--accent-rgb),0.8)) */}
       <div style={{
         display: "flex", gap: 4,
         padding: "8px 16px 0",
@@ -1078,7 +1078,7 @@ export default function MCPPage() {
               onClick={() => setTab(t.key)}
               style={{
                 padding: "10px 20px",
-                background: active ? "rgba(102,126,234,0.80)" : "rgba(30,30,40,0.80)",
+                background: active ? "rgba(var(--accent-rgb),0.80)" : "rgba(30,30,40,0.80)",
                 color: "var(--fg-strong)", border: "none",
                 borderTopLeftRadius: 6, borderTopRightRadius: 6,
                 fontSize: 13, fontWeight: 600,

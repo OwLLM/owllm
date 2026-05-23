@@ -704,8 +704,8 @@ export default function ModelsPage() {
             width: 513,
             height: 50,
             padding: "4px 10px",
-            background: "rgba(102, 126, 234, 0.08)",
-            border: "1px solid rgba(102, 126, 234, 0.25)",
+            background: "rgba(var(--accent-rgb), 0.08)",
+            border: "1px solid rgba(var(--accent-rgb), 0.25)",
             borderRadius: 8,
             display: "grid",
             gridTemplateColumns: "repeat(4, 1fr)",
@@ -1129,12 +1129,12 @@ export default function ModelsPage() {
                   ? "rgba(76,175,80,0.18)"
                   : exportStatus.startsWith("❌")
                     ? "rgba(244,67,54,0.18)"
-                    : "rgba(102,126,234,0.18)",
+                    : "rgba(var(--accent-rgb),0.18)",
                 border: `1px solid ${exportStatus.startsWith("✅")
                   ? "rgba(76,175,80,0.5)"
                   : exportStatus.startsWith("❌")
                     ? "rgba(244,67,54,0.5)"
-                    : "rgba(102,126,234,0.4)"}`,
+                    : "rgba(var(--accent-rgb),0.4)"}`,
                 borderRadius: 4,
                 color: exportStatus.startsWith("✅")
                   ? "#a5e6a5"
@@ -1150,8 +1150,8 @@ export default function ModelsPage() {
               onClick={() => setExportLogsOpen((v) => !v)}
               style={{
                 padding: "4px 10px",
-                background: "rgba(102,126,234,0.10)",
-                border: "1px solid rgba(102,126,234,0.3)",
+                background: "rgba(var(--accent-rgb),0.10)",
+                border: "1px solid rgba(var(--accent-rgb),0.3)",
                 borderRadius: 4,
                 color: "#9cc3ff",
                 fontSize: 11,
@@ -1371,8 +1371,8 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <div style={{
         padding: "10px 12px",
-        background: "rgba(102,126,234,0.08)",
-        border: "1px solid rgba(102,126,234,0.3)",
+        background: "rgba(var(--accent-rgb),0.08)",
+        border: "1px solid rgba(var(--accent-rgb),0.3)",
         borderRadius: 6,
         fontSize: 12,
         color: "var(--fg)",
@@ -1502,7 +1502,7 @@ const cacheRow = (isHeader: boolean, isSelected = false): React.CSSProperties =>
   background: isHeader
     ? "rgba(0,0,0,0.4)"
     : isSelected
-      ? "rgba(102,126,234,0.10)"
+      ? "rgba(var(--accent-rgb),0.10)"
       : "transparent",
   borderBottom: isHeader ? "1px solid #2a3242" : "1px solid rgba(255,255,255,0.05)",
   color: isHeader ? "var(--fg-muted)" : "var(--fg)",

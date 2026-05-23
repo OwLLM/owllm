@@ -22,15 +22,21 @@
 
 /* Dark theme — the original look. Each token has a "semantic" name
    describing what it's for, not the literal hex; component code reads
-   `var(--bg-panel)` not `#0e1117`. */
+   `var(--bg-panel)` not `#0e1117`.
+   Every surface mixes ~8–14 % of the accent into the neutral dark via
+   color-mix so the WHOLE GUI takes on the picked colour (amber ⇒
+   warm golden tone, red ⇒ red tone, emerald ⇒ green tone). Without
+   this every dark surface stays the same neutral navy regardless of
+   accent — only thin borders flip, which is what the user saw before
+   and rightly called bullshit on. */
 :root[data-theme="dark"] {
-  --bg: #06080d;
-  --bg-app: #06080d;
-  --bg-panel: #0e1117;
-  --bg-elevated: #11151e;
-  --bg-card: #1a1f2c;
-  --bg-header: #1c2244;
-  --bg-input: #0f0f19;
+  --bg:          color-mix(in srgb, var(--accent) 8%,  #06080d);
+  --bg-app:      color-mix(in srgb, var(--accent) 8%,  #06080d);
+  --bg-panel:    color-mix(in srgb, var(--accent) 10%, #0e1117);
+  --bg-elevated: color-mix(in srgb, var(--accent) 12%, #11151e);
+  --bg-card:     color-mix(in srgb, var(--accent) 14%, #1a1f2c);
+  --bg-header:   color-mix(in srgb, var(--accent) 18%, #1c2244);
+  --bg-input:    color-mix(in srgb, var(--accent) 6%,  #0f0f19);
   --bg-surface: rgba(255, 255, 255, 0.04);
   --bg-surface-hover: rgba(255, 255, 255, 0.10);
   --bg-overlay: rgba(6, 8, 13, 0.72);
@@ -60,13 +66,19 @@
    clearly against either backdrop, so the only tweak is that on
    light mode we shift --accent-fg to ensure contrast. */
 :root[data-theme="light"] {
-  --bg: #f0f2f5;
-  --bg-app: #f0f2f5;
-  --bg-panel: #ffffff;
-  --bg-elevated: #f7f8fa;
-  --bg-card: #ffffff;
-  --bg-header: #e4e7ec;
-  --bg-input: #ffffff;
+  /* Same idea as dark mode — every surface mixes ~4–10 % of the accent
+     into the neutral white/grey so light mode also reads "tinted amber"
+     vs "tinted red" vs "tinted emerald" instead of identical white
+     surfaces with only border differences. Percentages are lower than
+     dark mode because tints on a bright background read MUCH stronger
+     than tints on near-black. */
+  --bg:          color-mix(in srgb, var(--accent) 5%,  #f0f2f5);
+  --bg-app:      color-mix(in srgb, var(--accent) 5%,  #f0f2f5);
+  --bg-panel:    color-mix(in srgb, var(--accent) 4%,  #ffffff);
+  --bg-elevated: color-mix(in srgb, var(--accent) 6%,  #f7f8fa);
+  --bg-card:     color-mix(in srgb, var(--accent) 4%,  #ffffff);
+  --bg-header:   color-mix(in srgb, var(--accent) 10%, #e4e7ec);
+  --bg-input:    color-mix(in srgb, var(--accent) 3%,  #ffffff);
   --bg-surface: rgba(0, 0, 0, 0.04);
   --bg-surface-hover: rgba(0, 0, 0, 0.08);
   --bg-overlay: rgba(20, 22, 28, 0.55);

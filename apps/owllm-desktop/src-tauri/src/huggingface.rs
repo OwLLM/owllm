@@ -351,6 +351,10 @@ pub struct TunedAdapter {
     /// (the legacy naming convention is "<YYMMDD>_<base>_<dataset>_…").
     /// Returns None when the convention isn't followed.
     pub base_hint: Option<String>,
+    /// GPU-fit badge derived from base_hint's params count + the user's
+    /// detected VRAM. Same Browse-card formula so the three card families
+    /// colour identically for the same underlying base model.
+    pub compat: Option<crate::recommendations::CompatTag>,
 }
 
 /// Delete a tuned adapter directory (or .gguf file) from disk. Used
@@ -388,7 +392,10 @@ pub async fn delete_tuned_adapter(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn list_tuned_adapters() -> Result<Vec<TunedAdapter>, String> {
-    tokio::task::spawn_blocking(|| -> Result<Vec<TunedAdapter>, String> {
+    // Detect VRAM up-front so every row's compat tag uses the same
+    // value (same approach as models_list_downloaded).
+    let vram_gb = crate::recommendations::detect_vram_gb().await;
+    tokio::task::spawn_blocking(move || -> Result<Vec<TunedAdapter>, String> {
         let root = match crate::paths::llm_root() {
             Some(r) => r.join("fine_tuned"),
             None => return Ok(Vec::new()),
@@ -419,12 +426,24 @@ pub async fn list_tuned_adapters() -> Result<Vec<TunedAdapter>, String> {
             }
             let (total, modified) = dir_summary(&path);
             let base_hint = parse_base_from_name(&name);
+            // GPU-fit badge: try the base hint first (the actual model
+            // the adapter rides on top of), fall back to the raw adapter
+            // dir name so things like "260504_gemma-7b-finetune" still
+            // colour correctly when the legacy "_base_" convention is
+            // missing.
+            let params = base_hint
+                .as_deref()
+                .and_then(crate::recommendations::parse_params_b)
+                .or_else(|| crate::recommendations::parse_params_b(&name));
+            let compat = params
+                .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
             out.push(TunedAdapter {
                 name: name.clone(),
                 path: path.to_string_lossy().into_owned(),
                 size_mib: total / 1024 / 1024,
                 modified,
                 base_hint: base_hint.clone(),
+                compat: compat.clone(),
             });
             // GGUFs that the user exported via the 📦 button land
             // INSIDE the transformers dir (default output = <dir>/<dir>-f16.gguf).
@@ -453,6 +472,7 @@ pub async fn list_tuned_adapters() -> Result<Vec<TunedAdapter>, String> {
                         size_mib: fsize / 1024 / 1024,
                         modified: fmtime,
                         base_hint: base_hint.clone(),
+                        compat: compat.clone(),
                     });
                 }
             }
@@ -543,13 +563,7 @@ pub struct DownloadedModel {
     pub is_incomplete: bool,
     /// "READY" / "BUILDING" / "BROKEN" / "NEW" — matches the React enum.
     pub onboarding: String,
-    pub compat: Option<CompatTag>,
-}
-
-#[derive(Serialize, Clone)]
-pub struct CompatTag {
-    pub color: String, // "green" | "orange" | "red" | "gray"
-    pub text: String,
+    pub compat: Option<crate::recommendations::CompatTag>,
 }
 
 /// Scan LLM/models/ for downloaded model directories. Returns one row
@@ -557,7 +571,11 @@ pub struct CompatTag {
 /// React Models page → Downloaded sub-tab.
 #[tauri::command]
 pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
-    tokio::task::spawn_blocking(|| -> Result<Vec<DownloadedModel>, String> {
+    // GPU-fit badge needs total VRAM; detect once before we spawn the
+    // blocking scan so every row reuses the same value. Detection is
+    // async (shells out to nvidia-smi); the scan itself is sync.
+    let vram_gb = crate::recommendations::detect_vram_gb().await;
+    tokio::task::spawn_blocking(move || -> Result<Vec<DownloadedModel>, String> {
         let root = match crate::paths::llm_root() {
             Some(r) => r.join("models"),
             None => return Ok(Vec::new()),
@@ -619,6 +637,11 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                     // clone. Show as NEW so the user can decide.
                     "NEW"
                 };
+                // Parse "Nb" / "N.NB" out of the dir name so the GPU-fit
+                // border matches what Browse Recommended shows for the same
+                // model. Best-effort: no match → no badge (default blue).
+                let compat = crate::recommendations::parse_params_b(&name)
+                    .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
                 out.push(DownloadedModel {
                     name: name.clone(),
                     path: path.to_string_lossy().into_owned(),
@@ -627,11 +650,13 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                     env_key: None,
                     is_incomplete,
                     onboarding: onboarding.to_string(),
-                    compat: None,
+                    compat,
                 });
             } else if path.extension().map(|e| e == "gguf").unwrap_or(false) {
                 let meta = entry.metadata().ok();
                 let sz = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                let compat = crate::recommendations::parse_params_b(&name)
+                    .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
                 out.push(DownloadedModel {
                     name: name.clone(),
                     path: path.to_string_lossy().into_owned(),
@@ -640,7 +665,7 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                     env_key: Some("llama.cpp".to_string()),
                     is_incomplete: false,
                     onboarding: "READY".to_string(),
-                    compat: None,
+                    compat,
                 });
             }
         }

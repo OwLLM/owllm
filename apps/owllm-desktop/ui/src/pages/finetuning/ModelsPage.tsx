@@ -90,18 +90,21 @@ type DownloadedItem = {
   envKey?: string | null;
   isIncomplete?: boolean;
   onboarding?: "READY" | "BUILDING" | "BROKEN" | "NEW";
-  compat?: { color: "green" | "orange" | "red" | "gray"; text: string } | null;
+  compat?: { color: "green" | "orange" | "red" | "gray"; text: string; tooltip?: string } | null;
 };
 
 // Mirrors Rust TunedAdapter — list_tuned_adapters returns {name, path,
-// sizeMib, modified, baseHint}. We map onto our TunedModelCard prop
-// shape below in the render path.
+// sizeMib, modified, baseHint, compat}. compat is computed Rust-side
+// from base_hint + the user's detected VRAM, mirroring what Browse
+// cards get for the same base model. We map onto our TunedModelCard
+// prop shape below in the render path.
 type TunedAdapterRow = {
   name: string;
   path: string;
   sizeMib: number;
   modified: string | null;
   baseHint: string | null;
+  compat?: { color: "green" | "orange" | "red" | "gray"; text: string; tooltip?: string } | null;
 };
 
 // Shared grid layout for every card-bearing surface (Browse,
@@ -511,7 +514,7 @@ export default function ModelsPage() {
         overflow: "auto",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
         {([
           { key: "browse",     dataUi: "browseTabBtn",     label: "🚀 Browse Models" },
           { key: "downloaded", dataUi: "downloadedTabBtn", label: "💾 Downloaded"    },
@@ -539,6 +542,78 @@ export default function ModelsPage() {
             </button>
           );
         })}
+        {/* Filter checkbox container — sits on the SAME row as the tab
+            buttons. Browse-only; the other tabs don't filter. The
+            internal 2×4 grid of the container is left untouched. */}
+        {tab === "browse" && (
+        <div
+          data-ui="formatFilterContainer"
+          style={{
+            width: 513,
+            height: 50,
+            padding: "4px 10px",
+            background: "rgba(102, 126, 234, 0.08)",
+            border: "1px solid rgba(102, 126, 234, 0.25)",
+            borderRadius: 8,
+            display: "grid",
+            gridTemplateColumns: "repeat(4, 1fr)",
+            gridTemplateRows: "1fr 1fr",
+            columnGap: 14,
+            rowGap: 0,
+            alignItems: "center",
+            flexShrink: 0,
+          }}
+        >
+          {([
+            { key: "trainable"   as const, label: "✅ Trainable",   tip: "Transformers-format models with full weights — what the Train tab can fine-tune. Checking pulls newest instruct models from Hugging Face." },
+            { key: "gguf"        as const, label: "📦 GGUF",        tip: "llama.cpp inference format. Checking searches Hugging Face for newest popular GGUF builds." },
+            { key: "instruct"    as const, label: "💡 Instruct",    tip: "Instruction-tuned base models (-instruct, -it). Checking pulls newest instruct from Hugging Face." },
+            { key: "abliterated" as const, label: "🚫 Abliterated", tip: "Refusal-stripped variants — checking searches Hugging Face for the newest abliterated/uncensored builds." },
+            { key: "adapter"     as const, label: "🧩 LoRA",        tip: "PEFT / LoRA adapters — small overlays that need a base model to load. Checking searches for popular adapters." },
+            { key: "quantized"   as const, label: "⚡ Quantized",    tip: "Inference-only weight-quantized checkpoints (AWQ / GPTQ). Checking searches for popular AWQ/GPTQ builds." },
+            { key: "reasoning"   as const, label: "🧠 Reasoning",   tip: "Chain-of-thought reasoning models (R1, o1-style, deepseek-r1, QwQ). Checking searches for newest reasoning models." },
+            { key: "vision"      as const, label: "👁️ Vision",      tip: "Multimodal vision-language models. Checking searches for newest vision-language builds." },
+          ]).map((f) => {
+            const on = filters.has(f.key);
+            return (
+              <label
+                key={f.key}
+                title={f.tip}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 4,
+                  color: on ? "#fff" : "#dadcdf",
+                  fontWeight: on ? 700 : 400,
+                  fontSize: "10pt",
+                  background: "transparent",
+                  cursor: "pointer",
+                  userSelect: "none",
+                  minWidth: 0,
+                  overflow: "hidden",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={on}
+                  onChange={(e) => setFilters((curr) => {
+                    const next = new Set(curr);
+                    if (e.target.checked) next.add(f.key); else next.delete(f.key);
+                    return next;
+                  })}
+                  style={{ width: 14, height: 14, margin: 0, flexShrink: 0 }}
+                />
+                <span style={{
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  minWidth: 0,
+                }}>{f.label}</span>
+              </label>
+            );
+          })}
+        </div>
+        )}
         <div style={{ marginLeft: "auto", display: "flex", gap: 16, fontSize: 11, color: "var(--fg-muted)" }}>
           <span>{downloaded.length} Downloaded</span>
           <span>{tuned.length} Tuned</span>
@@ -547,78 +622,9 @@ export default function ModelsPage() {
         </div>
       </div>
       {tab === "browse" && <>
-      {/* formatFilterContainer + searchContainer — Qt puts these side-by-side
-          on the same row at y~275 (filter ~513 wide on left, search ~305
-          wide on right). Wrap both in a flex row so the React layout
-          matches Qt's geometry instead of stacking full-width strips. */}
+      {/* Search row — separate from the tab+filter row above so the
+          search field gets full width on narrow viewports. */}
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-      <div
-        data-ui="formatFilterContainer"
-        style={{
-          width: 513,
-          height: 50,
-          padding: "4px 10px",
-          background: "rgba(102, 126, 234, 0.08)",
-          border: "1px solid rgba(102, 126, 234, 0.25)",
-          borderRadius: 8,
-          display: "grid",
-          gridTemplateColumns: "repeat(4, 1fr)",
-          gridTemplateRows: "1fr 1fr",
-          columnGap: 14,
-          rowGap: 0,
-          alignItems: "center",
-          flexShrink: 0,
-        }}
-      >
-        {([
-          { key: "trainable"   as const, label: "✅ Trainable",   tip: "Transformers-format models with full weights — what the Train tab can fine-tune. Checking pulls newest instruct models from Hugging Face." },
-          { key: "gguf"        as const, label: "📦 GGUF",        tip: "llama.cpp inference format. Checking searches Hugging Face for newest popular GGUF builds." },
-          { key: "instruct"    as const, label: "💡 Instruct",    tip: "Instruction-tuned base models (-instruct, -it). Checking pulls newest instruct from Hugging Face." },
-          { key: "abliterated" as const, label: "🚫 Abliterated", tip: "Refusal-stripped variants — checking searches Hugging Face for the newest abliterated/uncensored builds." },
-          { key: "adapter"     as const, label: "🧩 LoRA",        tip: "PEFT / LoRA adapters — small overlays that need a base model to load. Checking searches for popular adapters." },
-          { key: "quantized"   as const, label: "⚡ Quantized",    tip: "Inference-only weight-quantized checkpoints (AWQ / GPTQ). Checking searches for popular AWQ/GPTQ builds." },
-          { key: "reasoning"   as const, label: "🧠 Reasoning",   tip: "Chain-of-thought reasoning models (R1, o1-style, deepseek-r1, QwQ). Checking searches for newest reasoning models." },
-          { key: "vision"      as const, label: "👁️ Vision",      tip: "Multimodal vision-language models. Checking searches for newest vision-language builds." },
-        ]).map((f) => {
-          const on = filters.has(f.key);
-          return (
-            <label
-              key={f.key}
-              title={f.tip}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                color: on ? "#fff" : "#dadcdf",
-                fontWeight: on ? 700 : 400,
-                fontSize: "10pt",
-                background: "transparent",
-                cursor: "pointer",
-                userSelect: "none",
-                minWidth: 0,
-                overflow: "hidden",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={on}
-                onChange={(e) => setFilters((curr) => {
-                  const next = new Set(curr);
-                  if (e.target.checked) next.add(f.key); else next.delete(f.key);
-                  return next;
-                })}
-                style={{ width: 14, height: 14, margin: 0, flexShrink: 0 }}
-              />
-              <span style={{
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                minWidth: 0,
-              }}>{f.label}</span>
-            </label>
-          );
-        })}
-      </div>
       <div
         data-ui="searchContainer"
         style={{
@@ -956,6 +962,7 @@ export default function ModelsPage() {
               selected={selectedPath === t.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
               vramGb={vramGb}
+              compatibilityBadge={t.compat ?? undefined}
               onExportGguf={(path, outtype) => exportTunedToGguf(path, outtype, setHfError, refreshTuned, setExportLogs, setExportLogsOpen, setExportStatus)}
               onDelete={(path) => deleteTunedAdapter(path, t.name, setHfError, refreshTuned)}
             />

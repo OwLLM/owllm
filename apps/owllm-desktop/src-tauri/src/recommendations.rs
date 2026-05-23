@@ -132,7 +132,60 @@ fn tags_for(seed: &Seed) -> Vec<String> {
     t
 }
 
-fn compat_for(inference_gb: f32, lora_train_gb: f32, qlora_gb: f32, vram_gb: Option<f32>) -> Option<CompatTag> {
+/// Parse the parameter-count "Nb" / "N.NB" hint out of a model name
+/// or directory slug. Returns the first match (left-to-right). Used by
+/// the Downloaded and Tuned card builders so they can produce the same
+/// GPU-fit badge the curated Browse cards use.
+///
+/// Examples:
+///   "Llama-3.1-8B-Instruct"     → Some(8.0)
+///   "unsloth__gemma-2-2b-it"    → Some(2.0)
+///   "Qwen2.5-7B-Instruct"       → Some(7.0)
+///   "Mixtral-8x7B-Instruct"     → Some(7.0)  // active params (best effort)
+///   "260504_kbeauty_finetune"   → None
+pub fn parse_params_b(model_name: &str) -> Option<f32> {
+    let bytes = model_name.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        if bytes[i].is_ascii_digit() {
+            let num_start = i;
+            while i < n && bytes[i].is_ascii_digit() { i += 1; }
+            if i + 1 < n && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
+                i += 1;
+                while i < n && bytes[i].is_ascii_digit() { i += 1; }
+            }
+            let num_end = i;
+            while i < n && bytes[i] == b' ' { i += 1; }
+            if i < n && (bytes[i] == b'b' || bytes[i] == b'B') {
+                let after = i + 1;
+                let is_boundary = after >= n || !bytes[after].is_ascii_alphabetic();
+                if is_boundary {
+                    let s = std::str::from_utf8(&bytes[num_start..num_end]).ok()?;
+                    return s.parse::<f32>().ok();
+                }
+            }
+            i = num_start + 1;
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// Convenience: given a parsed params_b + detected VRAM, return the
+/// same compat tag we attach to curated Browse cards. Hides the
+/// inference/lora/qlora arithmetic from callers that only know the
+/// parameter count (Downloaded + Tuned card builders).
+pub fn compat_for_params(params_b: f32, vram_gb: Option<f32>) -> Option<CompatTag> {
+    if params_b <= 0.0 { return None; }
+    let inference_gb  = params_b * 2.0;
+    let lora_train_gb = inference_gb * 2.0;
+    let qlora_gb      = inference_gb * 0.5;
+    compat_for(inference_gb, lora_train_gb, qlora_gb, vram_gb)
+}
+
+pub fn compat_for(inference_gb: f32, lora_train_gb: f32, qlora_gb: f32, vram_gb: Option<f32>) -> Option<CompatTag> {
     let v = vram_gb?;
     if lora_train_gb <= v * 0.95 {
         Some(CompatTag {
@@ -176,7 +229,7 @@ fn compat_for(inference_gb: f32, lora_train_gb: f32, qlora_gb: f32, vram_gb: Opt
 /// Detect total VRAM in GB. Picks the largest GPU when multiple are
 /// present (training usually targets a single device). Returns None
 /// when no NVIDIA GPU is found.
-async fn detect_vram_gb() -> Option<f32> {
+pub async fn detect_vram_gb() -> Option<f32> {
     let status = crate::hardware::vram_status().await.ok()?;
     let max_mib = status.gpus.iter().map(|g| g.total_mib).max()?;
     if max_mib == 0 { return None; }

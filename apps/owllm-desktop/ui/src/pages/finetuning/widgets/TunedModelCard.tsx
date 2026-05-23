@@ -8,7 +8,7 @@
 
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
-import CardShell from "./CardShell";
+import CardShell, { compatBg } from "./CardShell";
 import CornerRibbon from "./CornerRibbon";
 import type { CompatibilityBadge } from "./modelCardShared";
 
@@ -26,6 +26,13 @@ export type TunedModelCardProps = {
   /// fits-in-VRAM coloring on the Export GGUF picker. When undefined
   /// or zero, every quant is rendered neutral (no red marks).
   vramGb?: number;
+  /// GPU-fit compatibility badge for the base model this adapter
+  /// rides on top of. Same shape Browse + Downloaded cards use —
+  /// drives the border colour and a corner pill so all three card
+  /// families read identically for the same model. Undefined → fall
+  /// back to a neutral indigo border (used when the base model can't
+  /// be parsed out of the adapter directory name).
+  compatibilityBadge?: CompatibilityBadge;
   onTest?: (path: string) => void;
   /// outtype is the GGUF quant the user picked from the dropdown
   /// (one of f16 / bf16 / q8_0 / q6_k / q5_k_m / q4_k_m / q4_k_s /
@@ -88,7 +95,7 @@ export default function TunedModelCard(props: TunedModelCardProps) {
   const {
     adapterName, baseModel, adapterPath, size, format = "lora",
     createdAt, steps, finalLoss, selected = false, vramGb,
-    onExportGguf, onDelete, onSelect,
+    compatibilityBadge, onExportGguf, onDelete, onSelect,
   } = props;
 
   // Export-GGUF dropdown state. Opens on the 📦 button click, fetches
@@ -154,9 +161,13 @@ export default function TunedModelCard(props: TunedModelCardProps) {
   }, [menuOpen, recomputeMenuPos]);
 
   const isGguf = format === "gguf";
-  const compat: CompatibilityBadge = isGguf
-    ? { color: "orange", text: "GGUF" }
-    : { color: "green",  text: "LoRA" };
+  // Border colour is driven by GPU-fit compat, same as Browse and
+  // Downloaded cards. Falls back to the default indigo when we can't
+  // parse the base model's parameter count out of the adapter
+  // directory name. (Format — LoRA vs GGUF — is shown as a separate
+  // badge in the title row so it doesn't fight with the GPU-fit pill
+  // for the border colour.)
+  const compat: CompatibilityBadge | undefined = compatibilityBadge;
 
   const btn: React.CSSProperties = {
     background: "rgba(102,126,234,0.15)",
@@ -175,11 +186,26 @@ export default function TunedModelCard(props: TunedModelCardProps) {
       dataUi="TunedModelCard"
       iconKey={baseModel}
       title={adapterName}
-      titleBadges={<span style={{
-        background: isGguf ? "#9C27B0" : "#667eea",
-        color: "white", padding: "3px 8px", borderRadius: 4,
-        fontSize: 11, fontWeight: "bold",
-      }}>{isGguf ? "GGUF" : "LoRA"}</span>}
+      titleBadges={<>
+        <span style={{
+          background: isGguf ? "#9C27B0" : "#667eea",
+          color: "white", padding: "3px 8px", borderRadius: 4,
+          fontSize: 11, fontWeight: "bold",
+        }}>{isGguf ? "GGUF" : "LoRA"}</span>
+        {compatibilityBadge && (
+          <span
+            title={compatibilityBadge.tooltip}
+            style={{
+              background: compatBg(compatibilityBadge.color),
+              color: "white", padding: "3px 8px", borderRadius: 4,
+              fontSize: 11, fontWeight: "bold",
+              maxWidth: 180,
+              whiteSpace: "normal",
+              lineHeight: 1.2,
+            }}
+          >{compatibilityBadge.text}</span>
+        )}
+      </>}
       subline={
         <div style={{ fontSize: 11, color: "#9aa0aa", marginTop: 4 }}>
           base: <span style={{ color: "#d6d8de" }}>{baseModel}</span>

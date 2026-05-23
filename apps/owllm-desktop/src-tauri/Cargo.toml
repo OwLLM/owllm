@@ -76,6 +76,17 @@ portable-pty = "0.8"
 uuid = { version = "1", features = ["v4"] }
 # Lock-free singleton for the PTY session map shared between commands.
 once_cell = "1"
+
+# Windows-only: needed by overlay_frame to make the cyan chrome window
+# an "owned" window of main via SetWindowLongPtrW(GWLP_HWNDPARENT).
+# Owned windows z-order above their owner but drop behind other apps
+# when the owner loses focus — exactly the behaviour we want for a
+# decorative frame (must hover above the React content, must NOT hover
+# above the user's browser when they alt-tab away). Single function
+# call, no need for the heavier `windows` crate.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 tempfile = "3"
 

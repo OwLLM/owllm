@@ -81,6 +81,13 @@ pub fn install(app: &mut App) {
     // app window, which avoids focus/input regressions while testing.
     let _ = overlay.set_ignore_cursor_events(true);
 
+    // Make main the OWNER so the chrome rides with our app instead of
+    // floating above every other window on the desktop. See
+    // `set_owner_to_main` for the why.
+    if let Err(e) = set_owner_to_main(&overlay, &main) {
+        eprintln!("[overlay-frame] failed to set owner: {e}");
+    }
+
     start_sync_loop(main, overlay);
 }
 
@@ -96,6 +103,11 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
         return Ok(existing);
     }
 
+    // NOTE: NO `.always_on_top(true)` — that would make the chrome
+    // float above every other app on the system (browsers, IDE,
+    // explorer windows). The owner-relationship set in `set_owner_to_main`
+    // below is what keeps the overlay z-ordered above main without
+    // promoting it to a system-wide topmost window.
     WebviewWindowBuilder::new(
         app,
         OVERLAY_LABEL,
@@ -107,9 +119,45 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
     .shadow(false)
     .resizable(false)
     .skip_taskbar(true)
-    .always_on_top(true)
     .visible(false)
     .build()
+}
+
+/// Make `main` the OWNER of `overlay` via Win32
+/// `SetWindowLongPtrW(GWLP_HWNDPARENT, ...)`.
+///
+/// On Windows an "owned" window:
+///   * is z-ordered above its owner automatically (no always_on_top
+///     needed — clicking through to main raises both)
+///   * stays BEHIND foreground windows belonging to other apps when
+///     the owner loses focus (this is the bit we want — switching to
+///     a browser hides the cyan chrome that used to float over it)
+///   * minimises/hides with its owner
+///   * is destroyed when the owner is destroyed
+///
+/// This is the standard Win32 idiom for tool windows / floating
+/// chrome. The cross-platform Tauri API doesn't surface it cleanly,
+/// so we drop to one raw FFI call.
+#[cfg(target_os = "windows")]
+fn set_owner_to_main(overlay: &WebviewWindow, main: &WebviewWindow) -> tauri::Result<()> {
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowLongPtrW, GWLP_HWNDPARENT};
+
+    let overlay_hwnd = overlay.hwnd()?.0 as HWND;
+    let main_hwnd = main.hwnd()?.0 as HWND;
+
+    unsafe {
+        SetWindowLongPtrW(overlay_hwnd, GWLP_HWNDPARENT, main_hwnd as isize);
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn set_owner_to_main(_overlay: &WebviewWindow, _main: &WebviewWindow) -> tauri::Result<()> {
+    // Non-Windows builds don't ship the overlay frame today; if they
+    // ever do, equivalent owner/parent wiring goes here. The empty
+    // impl keeps the call site cfg-free.
+    Ok(())
 }
 
 pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {

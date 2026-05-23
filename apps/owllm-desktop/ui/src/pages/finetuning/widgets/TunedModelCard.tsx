@@ -23,10 +23,17 @@ export type TunedModelCardProps = {
   steps?: number;
   finalLoss?: number;
   selected?: boolean;
-  /// Highest available GPU VRAM in GB — drives the per-quant
-  /// fits-in-VRAM coloring on the Export GGUF picker. When undefined
-  /// or zero, every quant is rendered neutral (no red marks).
+  /// VRAM (in GiB) of the GPU the user actually selected in
+  /// gpu_config.json — drives the per-quant fits-in-VRAM coloring on
+  /// the Export GGUF picker. When undefined or zero, every quant is
+  /// rendered neutral (no red marks) and the dropdown header tells
+  /// the user we couldn't probe the GPU.
   vramGb?: number;
+  /// Human-readable GPU name from hardware_info (e.g. "NVIDIA GeForce
+  /// RTX 4090"). Shown in the dropdown header so the user can see at
+  /// a glance which card the fit math is being computed against,
+  /// rather than assuming we hardcoded something.
+  gpuName?: string;
   /// GPU-fit compatibility badge for the base model this adapter
   /// rides on top of. Same shape Browse + Downloaded cards use —
   /// drives the border colour and a corner pill so all three card
@@ -107,7 +114,7 @@ function fitsInVram(gguBytes: number, vramGb: number): "ok" | "tight" | "no" {
 export default function TunedModelCard(props: TunedModelCardProps) {
   const {
     adapterName, baseModel, adapterPath, size, format = "lora",
-    createdAt, steps, finalLoss, selected = false, vramGb,
+    createdAt, steps, finalLoss, selected = false, vramGb, gpuName,
     compatibilityBadge, onExportGguf, onDelete, onSelect,
     exportStatus = null, exportProgress = null,
   } = props;
@@ -377,7 +384,19 @@ export default function TunedModelCard(props: TunedModelCardProps) {
             >
               <div style={{ padding: "6px 8px", fontSize: 10, color: "#9aa0aa", lineHeight: 1.4 }}>
                 Pick a quantization, then click Export.
-                {vramGb ? <> Your GPU has <b style={{ color: "#cfd4e1" }}>{vramGb.toFixed(1)} GB</b>; ❌ rows won't fit, ⚠ rows are tight (will fit but no headroom for context).</> : null}
+                {vramGb ? (
+                  <> Detected GPU:{" "}
+                    <b style={{ color: "#cfd4e1" }}>{gpuName || "GPU"}</b>{" "}
+                    <span style={{ color: "#cfd4e1" }}>({vramGb.toFixed(1)} GB)</span>;
+                    ❌ rows won't fit, ⚠ rows are tight (will fit but no headroom for context).
+                  </>
+                ) : (
+                  <span style={{ color: "#f5d76e" }}>
+                    {" "}GPU not detected ({gpuName || "no probe"}) — fit
+                    colours disabled. Confirm your selected GPU on the
+                    main page header / Advanced › Hardware tab.
+                  </span>
+                )}
                 {loadingSize ? " · scanning…" : null}
                 <div style={{ marginTop: 4, color: "#7a8094" }}>
                   Output: <code style={{ color: "#c8cde0" }}>{adapterName}-&lt;QUANT&gt;.gguf</code> next to the source. Each quant lands as its own card so you can keep several at once.

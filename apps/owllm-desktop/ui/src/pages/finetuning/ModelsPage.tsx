@@ -454,16 +454,39 @@ export default function ModelsPage() {
   const [downloading, setDownloading] = React.useState<Set<string>>(new Set());
   // Weight-picker modal: when set, opens for that model id.
   const [pickerFor, setPickerFor] = React.useState<string | null>(null);
-  // Cached total VRAM in GB for picker color rules.
-  const [vramGb, setVramGb] = React.useState<number>(8);
+  // VRAM + GPU name resolved from the same source the rest of the
+  // app already uses (hardware_info). vram_status returns LIVE used /
+  // total but its snake_case fields collide with our camelCase reader
+  // — and worse, picking max-of-all GPUs ignores the user's explicit
+  // selection in gpu_config.json. hardware_info returns the curated
+  // list with a `selected` flag per GPU, so we pick THE GPU the user
+  // told the app to use, surface its real name, and stop pretending
+  // the fallback "8 GB" is real data.
+  type GpuInfo = { index: number; name: string; vram_gb: number; uuid: string; selected: boolean };
+  type HardwareInfo = { cpu_name: string; cpu_cores: number; cpu_threads: number; ram_total_gb: number; ram_used_gb: number; gpus: GpuInfo[] };
+  const [vramGb, setVramGb] = React.useState<number | null>(null);
+  const [gpuName, setGpuName] = React.useState<string>("");
 
   React.useEffect(() => {
-    invoke<{ gpus: Array<{ totalMib: number }> }>("vram_status")
-      .then((s) => {
-        const max = Math.max(0, ...s.gpus.map((g) => g.totalMib));
-        if (max > 0) setVramGb(max / 1024);
+    invoke<HardwareInfo>("hardware_info")
+      .then((hw) => {
+        if (!hw.gpus || hw.gpus.length === 0) {
+          setVramGb(null);
+          setGpuName("no GPU detected");
+          return;
+        }
+        // Prefer the GPU the user marked selected (gpu_config.json).
+        // Fall back to the largest one when nothing is marked — that's
+        // the most permissive default for fit calculations.
+        const selected = hw.gpus.find((g) => g.selected)
+          ?? [...hw.gpus].sort((a, b) => b.vram_gb - a.vram_gb)[0];
+        setVramGb(selected.vram_gb);
+        setGpuName(selected.name);
       })
-      .catch(() => { /* keep 8 GB fallback */ });
+      .catch(() => {
+        setVramGb(null);
+        setGpuName("VRAM probe failed");
+      });
   }, []);
   const [filters, setFilters] = React.useState<Set<FilterKey>>(new Set());
   // "search mode" = render `hits` instead of curated. We enter it when
@@ -712,7 +735,7 @@ export default function ModelsPage() {
                   display: "inline-flex",
                   alignItems: "center",
                   gap: 4,
-                  color: on ? "#fff" : "#dadcdf",
+                  color: on ? "var(--fg-strong)" : "var(--fg)",
                   fontWeight: on ? 700 : 400,
                   fontSize: "10pt",
                   background: "transparent",
@@ -1042,7 +1065,8 @@ export default function ModelsPage() {
               format="gguf"
               size="(building…)"
               createdAt={undefined}
-              vramGb={vramGb}
+              vramGb={vramGb ?? undefined}
+              gpuName={gpuName}
               exportStatus={exportStatus || "🚀 Starting…"}
               exportProgress={exportProgress}
             />
@@ -1073,7 +1097,8 @@ export default function ModelsPage() {
               createdAt={t.modified ?? undefined}
               selected={selectedPath === t.path}
               onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
-              vramGb={vramGb}
+              vramGb={vramGb ?? undefined}
+              gpuName={gpuName}
               compatibilityBadge={t.compat ?? undefined}
               onExportGguf={(path, outtype) => {
                 setTab("tuned");
@@ -1216,7 +1241,7 @@ export default function ModelsPage() {
       {pickerFor && (
         <WeightPickerDialog
           modelId={pickerFor}
-          vramGb={vramGb}
+          vramGb={vramGb ?? undefined}
           onCancel={() => setPickerFor(null)}
           onConfirm={(files) => confirmDownload(pickerFor, files)}
         />

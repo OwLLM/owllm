@@ -57,6 +57,7 @@ pub fn run() {
                     let dispatch_window = show_window.clone();
                     let _ = show_window.run_on_main_thread(move || {
                         let _ = dispatch_window.show();
+                        let _ = overlay_frame::show_for_main(&dispatch_window);
                         let _ = dispatch_window.emit("owllm:shown", ());
                     });
                 });

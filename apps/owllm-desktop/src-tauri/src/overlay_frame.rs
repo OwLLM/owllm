@@ -10,9 +10,19 @@
 
 use std::time::Duration;
 
-use tauri::{App, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{App, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Window};
 
 const OVERLAY_LABEL: &str = "owllm-overlay-frame";
+const BORDER_T: i32 = 18;
+const CORNER_OUTSET: i32 = 10;
+const SHIFT_OUT: i32 = BORDER_T / 2;
+const EXTRA_TOP: i32 = 35;
+const EXTRA_RIGHT: u32 = 0;
+const EXTRA_BOTTOM: u32 = 0;
+const CONTENT_OFFSET_X: i32 = SHIFT_OUT + CORNER_OUTSET;
+const CONTENT_OFFSET_Y: i32 = EXTRA_TOP + SHIFT_OUT + CORNER_OUTSET;
+const OVERLAY_EXTRA_W: u32 = EXTRA_RIGHT + 2 * (SHIFT_OUT as u32) + 2 * CORNER_OUTSET as u32;
+const OVERLAY_EXTRA_H: u32 = EXTRA_TOP as u32 + EXTRA_BOTTOM + 2 * (SHIFT_OUT as u32) + 2 * CORNER_OUTSET as u32;
 
 pub fn enabled() -> bool {
     std::env::var("OWLLM_OVERLAY_FRAME")
@@ -50,7 +60,6 @@ pub fn install(app: &mut App) {
     // The overlay is decorative only. Clicks pass through to the real
     // app window, which avoids focus/input regressions while testing.
     let _ = overlay.set_ignore_cursor_events(true);
-    let _ = overlay.show();
 
     start_sync_loop(main, overlay);
 }
@@ -83,15 +92,41 @@ fn create_overlay(app: &mut App) -> tauri::Result<WebviewWindow> {
     .build()
 }
 
-fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()> {
-    let pos = main.outer_position()?;
-    let size = main.outer_size()?;
-    overlay.set_position(pos)?;
-    overlay.set_size(size)?;
+pub fn show_for_main(main: &Window) -> tauri::Result<()> {
+    if !enabled() {
+        return Ok(());
+    }
+    let Some(overlay) = main
+        .app_handle()
+        .get_webview_window(OVERLAY_LABEL)
+    else {
+        return Ok(());
+    };
+    sync_geometry(main.outer_position()?, main.outer_size()?, &overlay)?;
+    overlay.show()?;
+    Ok(())
+}
 
-    if main.is_visible()? {
-        let _ = overlay.show();
-    } else {
+fn sync_geometry(
+    pos: tauri::PhysicalPosition<i32>,
+    size: tauri::PhysicalSize<u32>,
+    overlay: &WebviewWindow,
+) -> tauri::Result<()> {
+    overlay.set_position(tauri::PhysicalPosition {
+        x: pos.x - CONTENT_OFFSET_X,
+        y: pos.y - CONTENT_OFFSET_Y,
+    })?;
+    overlay.set_size(tauri::PhysicalSize {
+        width: size.width + OVERLAY_EXTRA_W,
+        height: size.height + OVERLAY_EXTRA_H,
+    })?;
+    Ok(())
+}
+
+fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()> {
+    sync_geometry(main.outer_position()?, main.outer_size()?, overlay)?;
+
+    if !main.is_visible()? {
         let _ = overlay.hide();
     }
 

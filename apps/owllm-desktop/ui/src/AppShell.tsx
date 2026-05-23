@@ -253,11 +253,14 @@ const PARENT_Y = EXTRA_TOP + SHIFT_OUT + CORNER_OUTSET;
 // follows the colour-picker squares in the header — pick amber and
 // the whole frame turns amber, pick red and it turns red, etc. Was
 // previously hardcoded `rgba(200, 240, 255, 0.86)` (cyan) regardless
-// of accent. FRAME_BG stays a fixed dark navy because it's the
-// opaque chrome behind the cyan bars; it's not driven by accent.
+// of accent. FRAME_BG (the fill behind the cyan bars at the four
+// edges) is now also accent-driven via --bg-header — that's the
+// heavily-tinted version of the dark navy chrome. Without this the
+// 18 px frame band stayed identical navy no matter which colour the
+// user picked, which is exactly what the user yelled about.
 const FRAME_COLOR  = "rgba(var(--accent-rgb), 0.86)";
 const FRAME_ACCENT = "rgba(var(--accent-rgb), 0.78)";
-const FRAME_BG     = "rgba(8, 12, 24, 0.95)";
+const FRAME_BG     = "var(--bg-header)";
 
 const ICONS = "/Page_icons";
 const CORNERS = `${ICONS}/CornersNew`;
@@ -408,11 +411,10 @@ function ModeBar({
       height: 80,
       display: "grid", gridTemplateColumns: "auto 1fr auto auto",
       alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
-      // Header chrome — always dark blue in both themes. The
-      // --bg-header token resolves to #1c2244 (dark) / #e4e7ec (light);
-      // we keep the dark variant explicitly here because the OWLLM
-      // title + corner PNGs were drawn against that exact navy.
-      background: "#1c2244",
+      // Header surface — now uses --bg-header so the accent picker
+      // visibly repaints the band (amber → golden header, red → red
+      // header, emerald → green header). Was hardcoded #1c2244.
+      background: "var(--bg-header)",
       cursor: "default",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -665,10 +667,11 @@ function ServerModal({ onClose }: { onClose: () => void }) {
           overflow: "hidden",
         }}
       >
-        {/* Title strip — same #1c2244 the ModeBar uses for chrome parity. */}
+        {/* Title strip — uses --bg-header so it picks up the accent tint
+            just like the main ModeBar (kept in sync with chrome parity). */}
         <div style={{
           height: 56,
-          background: "#1c2244",
+          background: "var(--bg-header)",
           color: "#fff",
           display: "flex", alignItems: "center",
           padding: "0 20px",

@@ -30,13 +30,18 @@
    accent — only thin borders flip, which is what the user saw before
    and rightly called bullshit on. */
 :root[data-theme="dark"] {
-  --bg:          color-mix(in srgb, var(--accent) 8%,  #06080d);
-  --bg-app:      color-mix(in srgb, var(--accent) 8%,  #06080d);
-  --bg-panel:    color-mix(in srgb, var(--accent) 10%, #0e1117);
-  --bg-elevated: color-mix(in srgb, var(--accent) 12%, #11151e);
-  --bg-card:     color-mix(in srgb, var(--accent) 14%, #1a1f2c);
-  --bg-header:   color-mix(in srgb, var(--accent) 18%, #1c2244);
-  --bg-input:    color-mix(in srgb, var(--accent) 6%,  #0f0f19);
+  /* Heavy tint percentages — the previous 8-18 % rendered as a faint
+     overlay the user (rightly) said looked identical. Going 22–45 %
+     so amber clearly turns the page golden-bronze, red clearly
+     reddish-charcoal, emerald clearly forest, etc. The neutral side
+     stays #06080d so the result is still dark enough to read text on. */
+  --bg:          color-mix(in srgb, var(--accent) 22%, #06080d);
+  --bg-app:      color-mix(in srgb, var(--accent) 22%, #06080d);
+  --bg-panel:    color-mix(in srgb, var(--accent) 25%, #0e1117);
+  --bg-elevated: color-mix(in srgb, var(--accent) 30%, #11151e);
+  --bg-card:     color-mix(in srgb, var(--accent) 32%, #1a1f2c);
+  --bg-header:   color-mix(in srgb, var(--accent) 45%, #1c2244);
+  --bg-input:    color-mix(in srgb, var(--accent) 18%, #0f0f19);
   --bg-surface: rgba(255, 255, 255, 0.04);
   --bg-surface-hover: rgba(255, 255, 255, 0.10);
   --bg-overlay: rgba(6, 8, 13, 0.72);
@@ -72,13 +77,16 @@
      surfaces with only border differences. Percentages are lower than
      dark mode because tints on a bright background read MUCH stronger
      than tints on near-black. */
-  --bg:          color-mix(in srgb, var(--accent) 5%,  #f0f2f5);
-  --bg-app:      color-mix(in srgb, var(--accent) 5%,  #f0f2f5);
-  --bg-panel:    color-mix(in srgb, var(--accent) 4%,  #ffffff);
-  --bg-elevated: color-mix(in srgb, var(--accent) 6%,  #f7f8fa);
-  --bg-card:     color-mix(in srgb, var(--accent) 4%,  #ffffff);
-  --bg-header:   color-mix(in srgb, var(--accent) 10%, #e4e7ec);
-  --bg-input:    color-mix(in srgb, var(--accent) 3%,  #ffffff);
+  /* Light-mode tints are stronger too (12–35 %) so the picker
+     visibly repaints surfaces instead of leaving everything the same
+     near-white. */
+  --bg:          color-mix(in srgb, var(--accent) 15%, #f0f2f5);
+  --bg-app:      color-mix(in srgb, var(--accent) 15%, #f0f2f5);
+  --bg-panel:    color-mix(in srgb, var(--accent) 12%, #ffffff);
+  --bg-elevated: color-mix(in srgb, var(--accent) 18%, #f7f8fa);
+  --bg-card:     color-mix(in srgb, var(--accent) 12%, #ffffff);
+  --bg-header:   color-mix(in srgb, var(--accent) 35%, #e4e7ec);
+  --bg-input:    color-mix(in srgb, var(--accent) 10%, #ffffff);
   --bg-surface: rgba(0, 0, 0, 0.04);
   --bg-surface-hover: rgba(0, 0, 0, 0.08);
   --bg-overlay: rgba(20, 22, 28, 0.55);

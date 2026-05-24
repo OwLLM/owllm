@@ -512,6 +512,11 @@ export function buildOrchestratorPrompt(
   orch: AgentSpec,
   directives?: Directive[],
   directorMode?: boolean,
+  /// Project BRIEF.md contents (from the brainstormer). When present,
+  /// becomes a binding scope block — orchestrator must respect v1
+  /// scope, feature priority, and GUI direction. Missing = legacy
+  /// free-interpretation behaviour.
+  briefText?: string,
 ): string {
   const specialists = team.agents.filter(a => a.name !== orch.name);
   const roster = specialists.map(a => {
@@ -550,10 +555,26 @@ export function buildOrchestratorPrompt(
         "--- END DIRECTOR MODE ---",
       ].join("\n")
     : "";
+  const briefBlock = (briefText && briefText.trim())
+    ? [
+        "",
+        "--- PROJECT BRIEF (binding — do not violate scope or stack decisions) ---",
+        briefText.trim(),
+        "--- END PROJECT BRIEF ---",
+        "",
+        "The brief above was produced by the brainstormer after researching",
+        "competitors. Treat v1 Scope as the hard line — anything in v2 Backlog",
+        "is OUT for this run. Respect the GUI Direction recommendations.",
+        "If the user's current message conflicts with the brief, flag it and",
+        "ask before deviating.",
+        "",
+      ].join("\n")
+    : "";
   return [
     `You are the orchestrator of the '${team.display}' team.`,
     "",
     orchSystemPrompt,
+    briefBlock,
     directivesBlock,
     directorBlock,
     "",
@@ -1456,7 +1477,18 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   hooks.onAgentStart(orch.name);
   hooks.onLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
 
-  const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch, directives, directorMode);
+  // Load BRIEF.md if the brainstormer wrote one. Best-effort: silent
+  // miss means the orchestrator runs without binding scope (legacy).
+  let briefText = "";
+  if (projectCwd) {
+    try {
+      briefText = await invoke<string>("tool_read_file", {
+        path: "BRIEF.md", cwd: projectCwd,
+      });
+    } catch { /* no brief yet — proceed without */ }
+  }
+
+  const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch, directives, directorMode, briefText);
   const orchModel = modelFor(orch.name);
   const orchProvider = providerFor(orchModel, models);
   let orchReply: string;

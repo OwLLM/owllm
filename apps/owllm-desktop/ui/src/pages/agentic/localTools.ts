@@ -162,6 +162,39 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       "scripts, etc.",
     args: [{ name: "command", required: true, description: "The shell command line to run." }],
   },
+  {
+    name: "web_search",
+    description:
+      "Web search via Brave Search API. Returns up to 5 results " +
+      "(title + url + description). Requires BRAVE_API_KEY saved in " +
+      "Accounts. Use this to find competitor products, prior art, " +
+      "documentation, or background research.",
+    args: [
+      { name: "query", required: true, description: "Search query string." },
+      { name: "max_results", required: false, description: "How many results to return (1-20, default 5)." },
+    ],
+  },
+  {
+    name: "web_fetch",
+    description:
+      "Fetch a URL and return its readable text (HTML stripped, " +
+      "script/style removed, whitespace collapsed). Capped at 60 KB. " +
+      "Use this on URLs returned by web_search to extract feature lists, " +
+      "documentation, etc.",
+    args: [{ name: "url", required: true, description: "Absolute URL to fetch." }],
+  },
+  {
+    name: "screenshot_url",
+    description:
+      "Screenshot a URL via headless Chromium (TwinForge web_adapter). " +
+      "Returns the saved PNG path. Use this to capture competitor GUIs " +
+      "for the brainstorm GUI-direction synthesis. Output PNG should " +
+      "go under <project>/brainstorm/.",
+    args: [
+      { name: "url", required: true, description: "Absolute URL to screenshot." },
+      { name: "out_png", required: true, description: "Absolute filesystem path for the output PNG." },
+    ],
+  },
 ];
 
 export type ToolExecResult = {
@@ -227,6 +260,29 @@ export async function executeToolCall(call: ToolCall, projectCwd: string): Promi
         if (r.stderr.trim()) parts.push(`stderr:\n${truncate(r.stderr, 2000)}`);
         parts.push(`exit_code: ${r.exitCode}`);
         return { ok: r.exitCode === 0, output: parts.join("\n\n") };
+      }
+      case "web_search": {
+        const maxRaw = call.args.max_results;
+        const max = maxRaw ? Math.max(1, Math.min(20, Number(maxRaw) || 5)) : 5;
+        const hits = await invoke<Array<{ title: string; url: string; description: string }>>(
+          "tool_web_search", { query: call.args.query ?? "", maxResults: max },
+        );
+        if (hits.length === 0) return { ok: true, output: "(no results)" };
+        const lines = hits.map((h, i) =>
+          `${i + 1}. ${h.title}\n   ${h.url}\n   ${truncate(h.description, 200)}`
+        );
+        return { ok: true, output: lines.join("\n\n") };
+      }
+      case "web_fetch": {
+        const text = await invoke<string>("tool_web_fetch", { url: call.args.url ?? "" });
+        return { ok: true, output: truncate(text, 12000) };
+      }
+      case "screenshot_url": {
+        const saved = await invoke<string>("tool_screenshot_url", {
+          url: call.args.url ?? "",
+          outPng: call.args.out_png ?? "",
+        });
+        return { ok: true, output: `screenshot saved: ${saved}` };
       }
       default:
         return { ok: false, output: `unknown tool: ${call.name}` };

@@ -10,6 +10,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import NewProjectDialog from "./NewProjectDialog";
+import BrainstormPanel from "./BrainstormPanel";
 import ModelPicker, { AccountsStatusLite } from "./ModelPicker";
 import {
   type Attachment,
@@ -485,10 +486,17 @@ async function fileToAttachment(file: File): Promise<Attachment> {
   return { kind, mime, data_b64, filename: file.name };
 }
 
-function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachments }: {
+function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachments, onBrainstorm, hasBrief }: {
   goal: string; setGoal: (g: string) => void;
   onRun: () => void; onCancel: () => void; busy: boolean;
   attachments: Attachment[]; setAttachments: (a: Attachment[]) => void;
+  /// Opens the BrainstormPanel modal. Null disables the button — used
+  /// when the project has no location set (brainstormer can't save
+  /// BRIEF.md without one).
+  onBrainstorm: (() => void) | null;
+  /// Whether BRIEF.md exists in this project's location. Drives the
+  /// 🧠 button's tint (green = brief locked, neutral = brief missing).
+  hasBrief: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -554,6 +562,25 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
           onDrop={onDrop}
           placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up' (drop an image / audio here)"
           style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"var(--bg-input)", color:"var(--fg-strong)", border: dragOver ? "1px dashed rgba(124,196,255,0.85)" : "1px solid transparent" }} />
+        <button
+          data-ui="GoalBrainstormBtn"
+          onClick={() => onBrainstorm?.()}
+          disabled={!onBrainstorm || busy}
+          title={onBrainstorm
+            ? (hasBrief
+                ? "Re-run brainstorm (BRIEF.md exists — will be overwritten)"
+                : "Brainstorm: research competitors, build BRIEF.md before the team runs")
+            : "Set a project location first so the brainstormer can save BRIEF.md"}
+          style={{
+            height: 38, minWidth: 44, padding: "0 10px",
+            border: "none", borderRadius: 10,
+            background: hasBrief ? "rgba(80, 200, 120, 0.18)" : "var(--bg-surface)",
+            color: hasBrief ? "#a0f0c0" : "var(--fg)",
+            fontSize: 16,
+            cursor: (onBrainstorm && !busy) ? "pointer" : "not-allowed",
+            opacity: (onBrainstorm && !busy) ? 1 : 0.5,
+          }}
+        >🧠</button>
         <button data-ui="GoalRunBtn" disabled={busy || !goal.trim()} onClick={onRun}
           style={{ height:38, padding:"0 24px", borderRadius:10, border:"none",
                    background: busy || !goal.trim() ? "rgba(var(--accent-rgb),0.25)" : "var(--accent)",
@@ -3187,6 +3214,13 @@ function buildOrchestratorPrompt(
   orch: AgentSpec,
   directives?: Directive[],
   directorMode?: boolean,
+  /// Project BRIEF.md contents, if the brainstormer has already run.
+  /// When present, this becomes a binding scope block at the very top
+  /// of the orchestrator's prompt — the orchestrator must respect the
+  /// v1 scope, feature priority, and GUI direction the brief locked in.
+  /// Without it the orchestrator falls back to free interpretation
+  /// (legacy behaviour, fine for tiny tasks that didn't need a brief).
+  briefText?: string,
 ): string {
   const specialists = team.agents.filter(a => a.name !== orch.name);
   // Prefer the spec's own description (team JSON, agent-specific) over
@@ -3237,10 +3271,26 @@ function buildOrchestratorPrompt(
         "--- END DIRECTOR MODE ---",
       ].join("\n")
     : "";
+  const briefBlock = (briefText && briefText.trim())
+    ? [
+        "",
+        "--- PROJECT BRIEF (binding — do not violate scope or stack decisions) ---",
+        briefText.trim(),
+        "--- END PROJECT BRIEF ---",
+        "",
+        "The brief above was produced by the brainstormer after researching",
+        "competitors. Treat v1 Scope as the hard line — anything in v2 Backlog",
+        "is OUT for this run. Respect the GUI Direction recommendations.",
+        "If the user's current message conflicts with the brief, flag it and",
+        "ask before deviating.",
+        "",
+      ].join("\n")
+    : "";
   return [
     `You are the orchestrator of the '${team.display}' team.`,
     "",
     orchSystemPrompt,
+    briefBlock,
     directivesBlock,
     directorBlock,
     "",
@@ -4428,6 +4478,33 @@ export default function AgentsPage() {
   const [directives, setDirectives] = useState<Directive[]>([]);
   const [directorMode, setDirectorModeState] = useState<boolean>(false);
   const [directivesPanelOpen, setDirectivesPanelOpen] = useState(false);
+  // Brainstorm modal — opens from the 🧠 GoalRow button. Lives at the
+  // top-level so it can be reused later (e.g. from NewProjectDialog).
+  const [brainstormOpen, setBrainstormOpen] = useState(false);
+  // Cached "does BRIEF.md exist for this project's location" — drives
+  // the 🧠 button's green tint and the orchestrator's brief-prepend.
+  // Re-checked whenever the project switches or the brainstormer
+  // reports a save.
+  const [hasBriefForProject, setHasBriefForProject] = useState(false);
+  // Check whether BRIEF.md exists for the active project's location.
+  // Drives the 🧠 button's green tint and confirms the orchestrator
+  // will pick up the brief on its next run. Fires on project switch
+  // and whenever the brainstormer reports a save.
+  useEffect(() => {
+    const cwd = (selectedProject?.location || "").trim();
+    if (!cwd) { setHasBriefForProject(false); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const text = await invoke<string>("tool_read_file", { path: "BRIEF.md", cwd });
+        if (!cancelled) setHasBriefForProject(text.trim().length > 0);
+      } catch {
+        if (!cancelled) setHasBriefForProject(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedProject?.id, selectedProject?.location]);
+
   // Reload directives + director_mode whenever the active project
   // changes. Both fetches run in parallel; errors fall back to empty /
   // false so a fresh DB before the table exists doesn't break the UI.
@@ -5246,10 +5323,23 @@ export default function AgentsPage() {
     // the desktop app's install dir. Empty / unset → CLI inherits cwd.
     const projectCwd = (locationOverride || selectedProject?.location || "").trim();
 
+    // Load BRIEF.md if the brainstormer wrote one for this project.
+    // Best-effort: missing file is silent (legacy behaviour), so
+    // pre-brainstorm projects keep working. Read via tool_read_file
+    // so the path resolution matches what the agents see.
+    let briefText = "";
+    if (projectCwd) {
+      try {
+        briefText = await invoke<string>("tool_read_file", {
+          path: "BRIEF.md", cwd: projectCwd,
+        });
+      } catch { /* no brief yet — proceed without */ }
+    }
+
     try {
       // ----- Phase 1: orchestrator plan + dispatches -----
       addActive(orch.name);
-      const orchPrompt = buildOrchestratorPrompt(activeTeam, roleByName, orch, directives, directorMode);
+      const orchPrompt = buildOrchestratorPrompt(activeTeam, roleByName, orch, directives, directorMode, briefText);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = modelFor(orch.name);
       let orchReply: string;
@@ -5545,7 +5635,7 @@ export default function AgentsPage() {
       try {
         finalReply = await streamChatCompletion(
           port, finalModel, providerFor(finalModel),
-          buildOrchestratorPrompt(activeTeam, roleByName, orch, directives, directorMode), integrationInput,
+          buildOrchestratorPrompt(activeTeam, roleByName, orch, directives, directorMode, briefText), integrationInput,
           tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
@@ -5922,7 +6012,31 @@ export default function AgentsPage() {
         teams={teams}
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
       />
-      <GoalRow goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy} attachments={attachments} setAttachments={setAttachments} />
+      <GoalRow
+        goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy}
+        attachments={attachments} setAttachments={setAttachments}
+        // Brainstorm needs a project location to anchor BRIEF.md +
+        // brainstorm/<png>. Disable the button (null callback) when no
+        // location is set so the title attribute explains why.
+        onBrainstorm={(locationOverride || selectedProject?.location || "").trim()
+          ? () => setBrainstormOpen(true)
+          : null}
+        hasBrief={hasBriefForProject}
+      />
+      <BrainstormPanel
+        open={brainstormOpen}
+        onClose={() => setBrainstormOpen(false)}
+        projectCwd={(locationOverride || selectedProject?.location || "").trim()}
+        brainstormerRole={roleByName.get("brainstormer") ?? null}
+        // Use the team's default model. Fallback to the orchestrator's
+        // model, which respects per-agent overrides. Brainstormer is
+        // research-heavy; users should pick Opus 4.7 medium for best
+        // results but anything that handles tool calls works.
+        modelId={(teamModelOverride || (activeTeam ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "") : "") || "").trim()}
+        port={serverState.port ?? 0}
+        models={models}
+        onBriefSaved={() => setHasBriefForProject(true)}
+      />
       <div data-ui="WorkspaceStack" style={{ flex:1, minHeight:0, margin:"0 23px", display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0 }}>
         <div data-ui="RosterLeft" style={{ flex:"2 1 0", minWidth:0, display:"flex", flexDirection:"column", background:"var(--bg-elevated)" }}>
           <FlowHeader

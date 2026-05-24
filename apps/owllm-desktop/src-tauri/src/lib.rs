@@ -161,6 +161,9 @@ pub fn run() {
             agent_tools::tool_list_dir,
             agent_tools::tool_create_dir,
             agent_tools::tool_shell_exec,
+            agent_tools::tool_web_search,
+            agent_tools::tool_web_fetch,
+            agent_tools::tool_screenshot_url,
         ])
         .build(tauri::generate_context!())
         .expect("error while building OwLLM Desktop")

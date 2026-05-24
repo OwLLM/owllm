@@ -12,9 +12,9 @@
         --corner-w: 160px;
         --badge-w: 300px;
         --badge-h: 195px;
-        --frame-bg: rgba(8, 12, 24, 0.95);
-        --frame-line: rgba(200, 240, 255, 0.86);
-        --frame-accent: rgba(120, 220, 255, 0.78);
+        --frame-bg: rgba(8, 12, 24, 0.96);
+        --frame-line: rgba(86, 130, 170, 0.78);
+        --frame-accent: rgba(64, 118, 158, 0.68);
       }
 
       html,
@@ -167,15 +167,21 @@
         const aG = parseInt(h.slice(2, 4), 16);
         const aB = parseInt(h.slice(4, 6), 16);
         const root = document.documentElement;
-        root.style.setProperty("--frame-line",   `rgba(${aR}, ${aG}, ${aB}, 0.86)`);
-        root.style.setProperty("--frame-accent", `rgba(${aR}, ${aG}, ${aB}, 0.78)`);
-        // Mix accent into the dark navy at 70 % — same recipe the
-        // main app uses for --bg-header so the chrome reads as a
-        // single colour family across both webviews.
-        const nR = 28, nG = 34, nB = 68;
-        const mR = Math.round(0.70 * aR + 0.30 * nR);
-        const mG = Math.round(0.70 * aG + 0.30 * nG);
-        const mB = Math.round(0.70 * aB + 0.30 * nB);
+        const nR = 8, nG = 12, nB = 24;
+        const lineR = Math.round(0.50 * aR + 0.50 * nR);
+        const lineG = Math.round(0.50 * aG + 0.50 * nG);
+        const lineB = Math.round(0.50 * aB + 0.50 * nB);
+        const accentR = Math.round(0.42 * aR + 0.58 * nR);
+        const accentG = Math.round(0.42 * aG + 0.58 * nG);
+        const accentB = Math.round(0.42 * aB + 0.58 * nB);
+        root.style.setProperty("--frame-line",   `rgba(${lineR}, ${lineG}, ${lineB}, 0.78)`);
+        root.style.setProperty("--frame-accent", `rgba(${accentR}, ${accentG}, ${accentB}, 0.68)`);
+        // Keep the frame in the selected colour family, but much
+        // darker than the main header so the overlay chrome does not
+        // shout at startup or overpower the content.
+        const mR = Math.round(0.38 * aR + 0.62 * nR);
+        const mG = Math.round(0.38 * aG + 0.62 * nG);
+        const mB = Math.round(0.38 * aB + 0.62 * nB);
         root.style.setProperty("--frame-bg", `rgba(${mR}, ${mG}, ${mB}, 0.95)`);
       }
       try {

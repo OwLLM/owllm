@@ -82,8 +82,8 @@ const PRESETS: Preset[] = [
     envHints: [
       {
         name: "BRAVE_API_KEY",
-        description: "Free tier: 2000 queries/month. Sign up takes ~30 sec.",
-        url: "https://api.search.brave.com/app/keys",
+        description: "Free tier: 2000 queries/month. Click 'Get Started' → sign up → 'Subscriptions' → 'Free' plan → 'API Keys' tab. Takes ~2 min.",
+        url: "https://brave.com/search/api/",
         placeholder: "BSA…",
       },
     ],

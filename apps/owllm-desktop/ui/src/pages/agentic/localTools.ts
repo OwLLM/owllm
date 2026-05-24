@@ -163,6 +163,32 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     args: [{ name: "command", required: true, description: "The shell command line to run." }],
   },
   {
+    name: "grep",
+    description:
+      "Regex content search across files under a directory. Returns " +
+      "matching {path, line, text} hits. Skips .git / node_modules / " +
+      "target / dist / __pycache__ / venv / python_runtime so vendor " +
+      "noise is filtered out. Use this to find symbols, callers, " +
+      "TODOs, configuration references, anything by content.",
+    args: [
+      { name: "pattern", required: true, description: "Rust regex to match against each line." },
+      { name: "path", required: false, description: "Directory to search under. Defaults to '.' (project cwd)." },
+      { name: "glob", required: false, description: "Filename glob filter, e.g. '*.rs' or '*.{ts,tsx}'." },
+    ],
+  },
+  {
+    name: "glob",
+    description:
+      "Find files by filename pattern. Walks the tree under `path` " +
+      "and returns every file whose name matches `pattern`. Supports " +
+      "* (any chars except /), ** (any depth incl. /), ? (one char). " +
+      "Use this to discover files when you don't yet know their content.",
+    args: [
+      { name: "pattern", required: true, description: "Glob pattern, e.g. 'src/**/*.tsx' or '*.py'." },
+      { name: "path", required: false, description: "Directory root for the search. Defaults to '.' (project cwd)." },
+    ],
+  },
+  {
     name: "web_search",
     description:
       "Web search via Brave Search API. Returns up to 5 results " +
@@ -260,6 +286,28 @@ export async function executeToolCall(call: ToolCall, projectCwd: string): Promi
         if (r.stderr.trim()) parts.push(`stderr:\n${truncate(r.stderr, 2000)}`);
         parts.push(`exit_code: ${r.exitCode}`);
         return { ok: r.exitCode === 0, output: parts.join("\n\n") };
+      }
+      case "grep": {
+        const hits = await invoke<Array<{ path: string; line: number; text: string }>>(
+          "tool_grep", {
+            pattern: call.args.pattern ?? "",
+            path: call.args.path ?? null,
+            glob: call.args.glob ?? null,
+            cwd,
+          },
+        );
+        if (hits.length === 0) return { ok: true, output: "(no matches)" };
+        const lines = hits.map(h => `${h.path}:${h.line}: ${h.text}`);
+        return { ok: true, output: truncate(lines.join("\n"), 8000) };
+      }
+      case "glob": {
+        const paths = await invoke<string[]>("tool_glob", {
+          pattern: call.args.pattern ?? "",
+          path: call.args.path ?? null,
+          cwd,
+        });
+        if (paths.length === 0) return { ok: true, output: "(no files matched)" };
+        return { ok: true, output: truncate(paths.join("\n"), 8000) };
       }
       case "web_search": {
         const maxRaw = call.args.max_results;

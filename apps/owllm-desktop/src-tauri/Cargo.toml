@@ -76,6 +76,10 @@ portable-pty = "0.8"
 uuid = { version = "1", features = ["v4"] }
 # Lock-free singleton for the PTY session map shared between commands.
 once_cell = "1"
+# Regex engine for the grep/glob agent tools (Claude Code parity).
+# default-features OFF drops unicode-segmentation tables we don't need
+# for filename + line matching, keeping the dep slim.
+regex = { version = "1", default-features = false, features = ["std", "perf"] }
 
 # Windows-only: needed by overlay_frame to make the cyan chrome window
 # an "owned" window of main via SetWindowLongPtrW(GWLP_HWNDPARENT).

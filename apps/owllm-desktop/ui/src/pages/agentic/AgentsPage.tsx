@@ -3628,7 +3628,13 @@ async function streamChatCompletion(
   // turns preceding the new user message — gives the model continuity
   // across restarts.
   const toolsBlock = formatToolsForPrompt(allowedTools);
-  const augmentedSystem = toolsBlock ? `${systemPrompt}\n${toolsBlock}` : systemPrompt;
+  // Tools block goes BEFORE the role prompt, not after. Small local
+  // models (Qwen3 ≤14B, Gemma 3, Llama 3.1 8B) lose attention to the
+  // tail of a long system prompt and silently skip the tool catalog
+  // if it's at the bottom. Putting it first means the model sees the
+  // available actions before it reads the role instructions and is
+  // far more likely to actually call them.
+  const augmentedSystem = toolsBlock ? `${toolsBlock}\n\n${systemPrompt}` : systemPrompt;
   const liveMessages: Array<{ role: string; content: unknown }> = [
     { role: "system", content: augmentedSystem },
     ...(history ?? []),

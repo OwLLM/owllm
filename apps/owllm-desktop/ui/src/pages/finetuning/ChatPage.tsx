@@ -345,7 +345,7 @@ export default function ChatPage() {
     // turn, re-stream. Loop ends when the model emits a turn with no
     // tool_call blocks — that's the final answer.
     const toolsBlock = formatToolsForPrompt();
-    const augmentedSystem = toolsBlock ? `${col.system}\n${toolsBlock}` : col.system;
+    const augmentedSystem = toolsBlock ? `${toolsBlock}\n\n${col.system}` : col.system;
     const liveMessages: Array<{ role: string; content: string }> = [
       { role: "system", content: augmentedSystem },
       ...next.map((m) => ({ role: m.role, content: m.content })),

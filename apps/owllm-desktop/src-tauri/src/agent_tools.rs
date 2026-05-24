@@ -136,6 +136,167 @@ pub async fn tool_shell_exec(
     })
 }
 
+// ----- Filesystem search (Claude Code parity: Grep + Glob) -----
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrepHit {
+    pub path: String,
+    pub line: usize,
+    pub text: String,
+}
+
+/// Regex content search across files under a directory (Claude Code's
+/// Grep tool). Skips binary files, .git, node_modules, target, dist,
+/// __pycache__ — the usual noise. Hard cap of 500 hits returned so a
+/// pathological pattern doesn't blow context. `pattern` is a Rust
+/// regex; `glob` filters by filename pattern (e.g. "*.rs") and is
+/// optional.
+#[tauri::command]
+pub async fn tool_grep(
+    pattern: String,
+    path: Option<String>,
+    glob: Option<String>,
+    cwd: Option<String>,
+) -> Result<Vec<GrepHit>, String> {
+    const MAX_HITS: usize = 500;
+    const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024; // 4 MB per file
+    let re = regex::Regex::new(&pattern).map_err(|e| format!("bad pattern: {e}"))?;
+    let root = resolve(path.as_deref().unwrap_or("."), &cwd);
+    let glob_re: Option<regex::Regex> = match glob.as_deref() {
+        None | Some("") => None,
+        Some(g) => Some(regex::Regex::new(&glob_to_regex(g))
+            .map_err(|e| format!("bad glob: {e}"))?),
+    };
+    let mut out: Vec<GrepHit> = Vec::new();
+    walk_grep(&root, &re, glob_re.as_ref(), MAX_FILE_BYTES, MAX_HITS, &mut out);
+    Ok(out)
+}
+
+fn walk_grep(
+    dir: &Path,
+    re: &regex::Regex,
+    glob_re: Option<&regex::Regex>,
+    max_file_bytes: u64,
+    max_hits: usize,
+    out: &mut Vec<GrepHit>,
+) {
+    if out.len() >= max_hits { return; }
+    let Ok(read) = std::fs::read_dir(dir) else { return };
+    for entry in read.flatten() {
+        if out.len() >= max_hits { return; }
+        let p = entry.path();
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        // Skip the usual noise so the agent isn't drowned in vendor code.
+        if matches!(name, ".git" | "node_modules" | "target" | "dist"
+            | "__pycache__" | ".venv" | "venv" | ".envs" | "python_runtime") {
+            continue;
+        }
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            walk_grep(&p, re, glob_re, max_file_bytes, max_hits, out);
+            continue;
+        }
+        if meta.len() > max_file_bytes { continue; }
+        if let Some(g) = glob_re {
+            if !g.is_match(name) { continue; }
+        }
+        let Ok(content) = std::fs::read_to_string(&p) else { continue }; // skip binaries / non-utf8
+        for (i, line) in content.lines().enumerate() {
+            if out.len() >= max_hits { return; }
+            if re.is_match(line) {
+                out.push(GrepHit {
+                    path: p.to_string_lossy().into_owned(),
+                    line: i + 1,
+                    text: line.chars().take(400).collect(),
+                });
+            }
+        }
+    }
+}
+
+/// Filename pattern search (Claude Code's Glob). Walks the tree under
+/// `path` and returns every file whose name matches `pattern`. Pattern
+/// uses `*` and `?` wildcards plus `**` for "any depth". Same skip
+/// list as grep. Caps at 1000 results.
+#[tauri::command]
+pub async fn tool_glob(
+    pattern: String,
+    path: Option<String>,
+    cwd: Option<String>,
+) -> Result<Vec<String>, String> {
+    const MAX_RESULTS: usize = 1000;
+    let root = resolve(path.as_deref().unwrap_or("."), &cwd);
+    // Glob is matched against the path RELATIVE TO `root`, normalised
+    // with forward slashes so patterns work cross-platform.
+    let re = regex::Regex::new(&glob_to_regex(&pattern))
+        .map_err(|e| format!("bad pattern: {e}"))?;
+    let mut out: Vec<String> = Vec::new();
+    walk_glob(&root, &root, &re, MAX_RESULTS, &mut out);
+    out.sort();
+    Ok(out)
+}
+
+fn walk_glob(
+    root: &Path,
+    dir: &Path,
+    re: &regex::Regex,
+    max_results: usize,
+    out: &mut Vec<String>,
+) {
+    if out.len() >= max_results { return; }
+    let Ok(read) = std::fs::read_dir(dir) else { return };
+    for entry in read.flatten() {
+        if out.len() >= max_results { return; }
+        let p = entry.path();
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if matches!(name, ".git" | "node_modules" | "target" | "dist"
+            | "__pycache__" | ".venv" | "venv" | ".envs" | "python_runtime") {
+            continue;
+        }
+        let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+        let meta = match entry.metadata() { Ok(m) => m, Err(_) => continue };
+        if meta.is_dir() {
+            walk_glob(root, &p, re, max_results, out);
+            continue;
+        }
+        if re.is_match(&rel) {
+            out.push(p.to_string_lossy().into_owned());
+        }
+    }
+}
+
+/// Translate a glob pattern into a Rust regex anchored at start+end.
+/// Supports: `*` (any non-slash), `**` (any depth incl. slash), `?`
+/// (single non-slash), literal `/`. Other regex metachars are escaped.
+fn glob_to_regex(glob: &str) -> String {
+    let mut re = String::from("^");
+    let mut chars = glob.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '*' => {
+                if chars.peek() == Some(&'*') {
+                    chars.next(); // consume second *
+                    re.push_str(".*");
+                } else {
+                    re.push_str("[^/]*");
+                }
+            }
+            '?' => re.push_str("[^/]"),
+            '.' | '+' | '(' | ')' | '|' | '^' | '$' | '{' | '}' | '[' | ']' | '\\' => {
+                re.push('\\');
+                re.push(c);
+            }
+            _ => re.push(c),
+        }
+    }
+    re.push('$');
+    re
+}
+
 // ----- Web tools (for the brainstormer agent + any web-aware agent) -----
 
 #[derive(Serialize)]

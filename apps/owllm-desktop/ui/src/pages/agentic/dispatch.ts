@@ -896,7 +896,7 @@ export async function streamChatCompletion(
   // a synthetic user turn, and the loop ends when the model produces
   // a turn with no tool_call blocks. That last turn IS the final
   // answer the caller receives.
-  const toolsBlock = formatToolsForPrompt(allowedTools);
+  const toolsBlock = await formatToolsForPrompt(allowedTools);
   // Tools FIRST so small local models see the catalog before they lose
   // attention to the tail of a long role+brief+directives prompt.
   const augmentedSystem = toolsBlock ? `${toolsBlock}\n\n${systemPrompt}` : systemPrompt;

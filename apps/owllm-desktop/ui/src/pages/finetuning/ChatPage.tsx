@@ -344,7 +344,7 @@ export default function ChatPage() {
     // tool_calls, execute each, fold results back as a synthetic user
     // turn, re-stream. Loop ends when the model emits a turn with no
     // tool_call blocks — that's the final answer.
-    const toolsBlock = formatToolsForPrompt();
+    const toolsBlock = await formatToolsForPrompt();
     const augmentedSystem = toolsBlock ? `${toolsBlock}\n\n${col.system}` : col.system;
     const liveMessages: Array<{ role: string; content: string }> = [
       { role: "system", content: augmentedSystem },

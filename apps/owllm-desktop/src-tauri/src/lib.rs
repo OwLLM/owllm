@@ -25,6 +25,7 @@ mod finetuning;
 mod fleet;
 mod hardware;
 mod huggingface;
+mod mcp;
 mod models;
 mod overlay_frame;
 mod paths;
@@ -166,6 +167,14 @@ pub fn run() {
             agent_tools::tool_web_search,
             agent_tools::tool_web_fetch,
             agent_tools::tool_screenshot_url,
+            mcp::mcp_load_config,
+            mcp::mcp_save_config,
+            mcp::mcp_start_server,
+            mcp::mcp_stop_server,
+            mcp::mcp_list_servers,
+            mcp::mcp_list_all_tools,
+            mcp::mcp_call_tool,
+            mcp::mcp_autostart_all,
         ])
         .build(tauri::generate_context!())
         .expect("error while building OwLLM Desktop")

@@ -76,9 +76,23 @@ export function parseToolCalls(text: string): ToolCall[] {
 /// The `allowed` parameter is accepted for API-compat with the Claude
 /// CLI subscription path (which forwards it as --allowedTools) but is
 /// IGNORED here on purpose.
-export function formatToolsForPrompt(_allowed?: string[]): string {
+///
+/// MCP tools from connected servers are merged in dynamically — every
+/// `mcp_list_all_tools` entry becomes a tool advertised as
+/// `mcp:<server>:<tool>` so models can discover and call them via the
+/// same XML protocol they use for built-in tools.
+export async function formatToolsForPrompt(_allowed?: string[]): Promise<string> {
   const tools = LOCAL_TOOL_SPECS;
-  if (tools.length === 0) return "";
+  // Pull MCP tools at request time so the catalog stays in sync when
+  // the user starts/stops servers mid-session. mcp_list_all_tools is
+  // a cheap in-memory aggregation on the Rust side; safe to call per
+  // dispatch. Failures fall back to "no MCP tools" — never block the
+  // dispatch on an MCP enumeration error.
+  let mcpTools: AggregatedMcpTool[] = [];
+  try {
+    mcpTools = await invoke<AggregatedMcpTool[]>("mcp_list_all_tools");
+  } catch { /* MCP unavailable — proceed with built-ins only */ }
+  if (tools.length === 0 && mcpTools.length === 0) return "";
   const lines: string[] = [
     "",
     "--- TOOL PROTOCOL ---",
@@ -104,9 +118,42 @@ export function formatToolsForPrompt(_allowed?: string[]): string {
     }
     lines.push("");
   }
+  if (mcpTools.length > 0) {
+    lines.push("MCP tools (from connected Model Context Protocol servers):");
+    lines.push("");
+    for (const m of mcpTools) {
+      lines.push(`- ${m.qualifiedName}: ${m.description}`);
+      // Render top-level JSON Schema properties as args. Most MCP tools
+      // use a flat object schema, which maps cleanly to our <arg> tags.
+      const props = (m.inputSchema && typeof m.inputSchema === "object")
+        ? (m.inputSchema as Record<string, unknown>).properties as Record<string, unknown> | undefined
+        : undefined;
+      const required = (m.inputSchema && typeof m.inputSchema === "object")
+        ? (m.inputSchema as Record<string, unknown>).required as string[] | undefined
+        : undefined;
+      if (props && typeof props === "object") {
+        for (const [k, v] of Object.entries(props)) {
+          const desc = (v && typeof v === "object")
+            ? ((v as Record<string, unknown>).description as string | undefined) ?? ""
+            : "";
+          const req = required?.includes(k) ? "required" : "optional";
+          lines.push(`    - ${k} (${req}): ${desc}`);
+        }
+      }
+      lines.push("");
+    }
+  }
   lines.push("--- END TOOL PROTOCOL ---");
   return lines.join("\n");
 }
+
+type AggregatedMcpTool = {
+  qualifiedName: string;
+  server: string;
+  tool: string;
+  description: string;
+  inputSchema: unknown;
+};
 
 type ToolArg = { name: string; required: boolean; description: string };
 type ToolSpec = { name: string; description: string; args: ToolArg[] };
@@ -234,6 +281,27 @@ export type ToolExecResult = {
 /// and the error message — the model decides whether to retry/give up.
 export async function executeToolCall(call: ToolCall, projectCwd: string): Promise<ToolExecResult> {
   const cwd = projectCwd || undefined;
+  // MCP-routed call: name is `mcp:<server>:<tool>`. Split, pass the
+  // args dict through as the arguments object — most MCP tools use
+  // a flat schema so the dict matches. Failures come back from the
+  // MCP server with the right context.
+  if (call.name.startsWith("mcp:")) {
+    const rest = call.name.slice(4);
+    const sep = rest.indexOf(":");
+    if (sep <= 0) {
+      return { ok: false, output: `bad MCP tool name (expected mcp:<server>:<tool>): ${call.name}` };
+    }
+    const server = rest.slice(0, sep);
+    const tool = rest.slice(sep + 1);
+    try {
+      const text = await invoke<string>("mcp_call_tool", {
+        server, tool, arguments: call.args,
+      });
+      return { ok: true, output: truncate(text, 8000) };
+    } catch (e) {
+      return { ok: false, output: String(e) };
+    }
+  }
   try {
     switch (call.name) {
       case "read_file": {

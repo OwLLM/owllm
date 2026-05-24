@@ -3627,7 +3627,7 @@ async function streamChatCompletion(
   // History (when present) becomes the alternating user/assistant
   // turns preceding the new user message — gives the model continuity
   // across restarts.
-  const toolsBlock = formatToolsForPrompt(allowedTools);
+  const toolsBlock = await formatToolsForPrompt(allowedTools);
   // Tools block goes BEFORE the role prompt, not after. Small local
   // models (Qwen3 ≤14B, Gemma 3, Llama 3.1 8B) lose attention to the
   // tail of a long system prompt and silently skip the tool catalog

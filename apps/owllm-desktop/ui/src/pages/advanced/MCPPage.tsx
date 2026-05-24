@@ -50,43 +50,72 @@ type McpConfig = { servers: McpServerConfig[] };
 
 // ----- Preset library — one-click adds for the well-known MCP servers -----
 
+type EnvHint = {
+  /// Env var name the server needs (e.g. BRAVE_API_KEY).
+  name: string;
+  /// One-line plain-English description shown next to the input.
+  description: string;
+  /// URL where the user signs up / generates this credential. Rendered
+  /// as a "Get key →" button that opens the user's default browser via
+  /// shell_open_url. Empty = no signup link (e.g. a path the user
+  /// already knows).
+  url?: string;
+  /// Hint string shown as the input placeholder so the user has a
+  /// shape to recognize (e.g. "BSAxxxx…" for Brave).
+  placeholder?: string;
+};
+
 type Preset = {
   name: string;
   icon: string;
   description: string;
   command: string;
   args: string[];
-  envHints: string[]; // env-var names the user needs to fill in
+  envHints: EnvHint[];
 };
 
 const PRESETS: Preset[] = [
   {
     name: "brave-search", icon: "🦁",
-    description: "Web search via Brave Search API (free 2000 q/mo at brave.com/search/api).",
+    description: "Web search via Brave Search API.",
     command: "npx", args: ["-y", "@modelcontextprotocol/server-brave-search"],
-    envHints: ["BRAVE_API_KEY"],
+    envHints: [
+      {
+        name: "BRAVE_API_KEY",
+        description: "Free tier: 2000 queries/month. Sign up takes ~30 sec.",
+        url: "https://api.search.brave.com/app/keys",
+        placeholder: "BSA…",
+      },
+    ],
   },
   {
     name: "filesystem", icon: "📁",
-    description: "Sandboxed file ops. Pass the root dir as the LAST positional arg.",
+    description: "Sandboxed file ops. Edit the LAST positional arg to set the allowed root dir.",
     command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
     envHints: [],
   },
   {
     name: "github", icon: "🐙",
-    description: "GitHub API — repos, issues, PRs, files. Needs a GITHUB_TOKEN.",
+    description: "GitHub API — repos, issues, PRs, files.",
     command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
-    envHints: ["GITHUB_PERSONAL_ACCESS_TOKEN"],
+    envHints: [
+      {
+        name: "GITHUB_PERSONAL_ACCESS_TOKEN",
+        description: "Personal access token. Classic or fine-grained both work. Grant the scopes you want the agent to use (repo, read:org, etc).",
+        url: "https://github.com/settings/tokens",
+        placeholder: "ghp_…",
+      },
+    ],
   },
   {
     name: "postgres", icon: "🐘",
-    description: "Read-only Postgres. Connection URL as last arg.",
+    description: "Read-only Postgres queries. Edit the LAST arg to your connection URL.",
     command: "npx", args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@host/db"],
     envHints: [],
   },
   {
     name: "puppeteer", icon: "🌐",
-    description: "Headless Chromium — navigate, screenshot, click, scrape.",
+    description: "Headless Chromium — navigate, screenshot, click, scrape. No key, but downloads Chromium on first run.",
     command: "npx", args: ["-y", "@modelcontextprotocol/server-puppeteer"],
     envHints: [],
   },
@@ -94,21 +123,41 @@ const PRESETS: Preset[] = [
     name: "slack", icon: "💬",
     description: "Slack workspace API — messages, channels, search.",
     command: "npx", args: ["-y", "@modelcontextprotocol/server-slack"],
-    envHints: ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"],
+    envHints: [
+      {
+        name: "SLACK_BOT_TOKEN",
+        description: "Bot token from your Slack app (starts with xoxb-). Create a new app at api.slack.com/apps.",
+        url: "https://api.slack.com/apps",
+        placeholder: "xoxb-…",
+      },
+      {
+        name: "SLACK_TEAM_ID",
+        description: "Your workspace's team ID (starts with T). Find at slack.com/admin/settings.",
+        url: "https://slack.com/help/articles/221769328-Locate-your-Slack-URL-or-ID",
+        placeholder: "T0…",
+      },
+    ],
   },
   {
     name: "sqlite", icon: "🗄️",
-    description: "Local SQLite read/write + schema inspection.",
+    description: "Local SQLite read/write + schema inspection. Edit --db-path to your DB.",
     command: "uvx", args: ["mcp-server-sqlite", "--db-path", "C:/path/to/db.sqlite"],
     envHints: [],
   },
   {
     name: "git", icon: "🔀",
-    description: "Local git ops — log, diff, blame, branches.",
+    description: "Local git ops — log, diff, blame, branches. Edit --repository to your repo.",
     command: "uvx", args: ["mcp-server-git", "--repository", "C:/1_Git/LocaLLM"],
     envHints: [],
   },
 ];
+
+/// Open a URL in the user's default browser via the Rust shell_open_url
+/// Tauri command. Used by the "Get key →" buttons in the env-hint rows
+/// so users can fly straight from "add server" to the signup page.
+async function openExternal(url: string) {
+  try { await invoke("shell_open_url", { url }); } catch (e) { console.error("openExternal", e); }
+}
 
 // ----- Shared inline styles (carried from the old MCPPage for visual continuity) -----
 
@@ -152,16 +201,41 @@ const btnGray: React.CSSProperties = {
 // ----- Add/Edit Server dialog -----
 
 function ServerDialog({
-  initial, onCancel, onSave,
+  initial, envHints, onCancel, onSave,
 }: {
   initial: McpServerConfig | null;
+  /// Structured env-var hints from the preset (signup URL per key,
+  /// description, placeholder). Drives the per-key input rows + "Get
+  /// key →" buttons. Empty/undefined = no hints, user uses the raw
+  /// JSON textarea only.
+  envHints?: EnvHint[];
   onCancel: () => void;
   onSave: (cfg: McpServerConfig) => void;
 }) {
   const [name, setName] = useState(initial?.name ?? "");
   const [command, setCommand] = useState(initial?.command ?? "npx");
   const [argsText, setArgsText] = useState((initial?.args ?? []).join(" "));
-  const [envText, setEnvText] = useState(JSON.stringify(initial?.env ?? {}, null, 2));
+  // Per-hint inputs are tracked separately from the JSON textarea so
+  // we can show one row per known key with its own "Get key →" link.
+  const [hintValues, setHintValues] = useState<Record<string, string>>(() => {
+    const out: Record<string, string> = {};
+    const initEnv = initial?.env ?? {};
+    for (const h of envHints ?? []) {
+      out[h.name] = initEnv[h.name] ?? "";
+    }
+    return out;
+  });
+  // The JSON textarea holds OTHER env vars (anything not in envHints).
+  // Lets advanced users add extras without losing the preset hints.
+  const [envText, setEnvText] = useState(() => {
+    const initEnv = initial?.env ?? {};
+    const hintNames = new Set((envHints ?? []).map(h => h.name));
+    const extras: Record<string, string> = {};
+    for (const [k, v] of Object.entries(initEnv)) {
+      if (!hintNames.has(k)) extras[k] = v;
+    }
+    return Object.keys(extras).length > 0 ? JSON.stringify(extras, null, 2) : "";
+  });
   const [enabled, setEnabled] = useState(initial?.enabled ?? true);
   const [error, setError] = useState<string | null>(null);
 
@@ -171,7 +245,22 @@ function ServerDialog({
     let env: Record<string, string> = {};
     if (envText.trim()) {
       try { env = JSON.parse(envText); }
-      catch { setError("Env vars must be valid JSON."); return; }
+      catch { setError("Extra env vars must be valid JSON."); return; }
+    }
+    // Layer hint values on top of any extras the user added in the JSON
+    // textarea. Hints win when both contain the same key.
+    for (const [k, v] of Object.entries(hintValues)) {
+      if (v.trim()) env[k] = v.trim();
+    }
+    // Warn (not block) if a required-looking hint is empty — server
+    // will fail at start but the user might know what they're doing.
+    const missingHints = (envHints ?? []).filter(h => !hintValues[h.name]?.trim());
+    if (missingHints.length > 0) {
+      const names = missingHints.map(h => h.name).join(", ");
+      const ok = window.confirm(
+        `These keys appear empty: ${names}\n\nThe server will likely fail to start without them. Add anyway?`,
+      );
+      if (!ok) return;
     }
     // Simple whitespace split for args. Anything quoted should use the
     // raw textarea — agents in v1 don't run servers with crazy args.
@@ -209,11 +298,65 @@ function ServerDialog({
           placeholder="-y @modelcontextprotocol/server-brave-search"
           style={{ ...inputStyle, width: "100%", marginBottom: 8 }} />
 
-        <label style={lblStyle}>Environment Variables (JSON):</label>
+        {(envHints && envHints.length > 0) && (
+          <div style={{
+            marginTop: 12,
+            background: "rgba(20,25,40,0.5)",
+            border: "1px solid rgba(var(--accent-rgb),0.20)",
+            borderRadius: 8, padding: 12,
+            display: "flex", flexDirection: "column", gap: 12,
+          }}>
+            <div style={{ color: "var(--fg-strong)", fontSize: 12, fontWeight: 700 }}>
+              🔑 Required credentials
+            </div>
+            {envHints.map(h => (
+              <div key={h.name} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <code style={{
+                    background: "rgba(0,0,0,0.4)",
+                    color: "#9ad9ff", padding: "2px 6px", borderRadius: 4,
+                    fontSize: 11, fontFamily: "Consolas, monospace",
+                  }}>{h.name}</code>
+                  {h.url && (
+                    <button
+                      onClick={() => openExternal(h.url!)}
+                      title={`Open ${h.url} to sign up / get your key`}
+                      style={{
+                        padding: "2px 8px", fontSize: 11,
+                        background: "rgba(var(--accent-rgb),0.30)",
+                        color: "#9fa8ff",
+                        border: "1px solid rgba(var(--accent-rgb),0.50)",
+                        borderRadius: 4, cursor: "pointer",
+                      }}
+                    >
+                      🌐 Get key →
+                    </button>
+                  )}
+                </div>
+                {h.description && (
+                  <div style={{ color: "var(--fg-subtle)", fontSize: 11, lineHeight: 1.4 }}>
+                    {h.description}
+                  </div>
+                )}
+                <input
+                  type="password"
+                  value={hintValues[h.name] ?? ""}
+                  onChange={e => setHintValues(prev => ({ ...prev, [h.name]: e.target.value }))}
+                  placeholder={h.placeholder ?? "paste key here"}
+                  style={{ ...inputStyle, width: "100%" }}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+
+        <label style={lblStyle}>
+          {(envHints && envHints.length > 0) ? "Extra env vars (JSON, optional):" : "Environment Variables (JSON):"}
+        </label>
         <textarea value={envText} onChange={e => { setEnvText(e.target.value); setError(null); }}
-          placeholder='{"BRAVE_API_KEY": "your-key-here"}'
+          placeholder='{"EXTRA_VAR": "value"}'
           style={{
-            ...inputStyle, width: "100%", height: 110,
+            ...inputStyle, width: "100%", height: 90,
             fontFamily: "Consolas, monospace", resize: "vertical", padding: 8,
           }} />
 
@@ -243,17 +386,26 @@ function ServerDialog({
 // ----- Server card -----
 
 function ServerCard({
-  status, onStart, onStop, onEdit, onRemove,
+  status, starting, onStart, onStop, onEdit, onRemove,
 }: {
   status: McpServerStatus;
+  /// True while mcp_start_server is in-flight for this server. Surfaces
+  /// the long npx-download wait so the user doesn't think Start was a
+  /// no-op. We show a yellow Starting badge + a hint about what's
+  /// happening so they know to wait, not retry.
+  starting: boolean;
   onStart: () => void;
   onStop: () => void;
   onEdit: () => void;
   onRemove: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const badgeColor = status.running ? "#4CAF50" : (status.error ? "#F44336" : "#9E9E9E");
-  const badgeText = status.running ? "Running" : (status.error ? "Error" : "Stopped");
+  const badgeColor = starting ? "#FFB300"
+    : status.running ? "#4CAF50"
+    : (status.error ? "#F44336" : "#9E9E9E");
+  const badgeText = starting ? "Starting…"
+    : status.running ? "Running"
+    : (status.error ? "Error" : "Stopped");
 
   return (
     <div style={{
@@ -297,9 +449,23 @@ function ServerCard({
         </div>
       )}
 
+      {starting && (
+        <div style={{
+          background: "rgba(255,179,0,0.10)",
+          border: "1px solid rgba(255,179,0,0.4)",
+          color: "#ffcc80", padding: 8, borderRadius: 4,
+          fontSize: 11, lineHeight: 1.5,
+        }}>
+          ⏳ First run downloads the MCP package via npx — usually 20-60s.
+          Wait for it; clicking Start again won't help.
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         {!status.running ? (
-          <button onClick={onStart} style={btnGreen}>▶ Start</button>
+          <button onClick={onStart} disabled={starting} style={{ ...btnGreen, opacity: starting ? 0.5 : 1, cursor: starting ? "not-allowed" : "pointer" }}>
+            {starting ? "⏳ Starting…" : "▶ Start"}
+          </button>
         ) : (
           <button onClick={onStop} style={btnRed}>⏹ Stop</button>
         )}
@@ -375,7 +541,12 @@ export default function MCPPage() {
   const [servers, setServers] = useState<McpServerStatus[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<{ open: boolean; initial: McpServerConfig | null }>({ open: false, initial: null });
+  const [dialog, setDialog] = useState<{ open: boolean; initial: McpServerConfig | null; envHints?: EnvHint[] }>({ open: false, initial: null });
+  // Per-server "starting" flag. mcp_start_server can hang for up to
+  // ~3 minutes on first run while npx downloads the package; without
+  // this the card just shows Stopped during the wait and the user
+  // assumes it failed silently.
+  const [starting, setStarting] = useState<Set<string>>(new Set());
 
   const refresh = async () => {
     setLoading(true);
@@ -399,11 +570,17 @@ export default function MCPPage() {
 
   const start = async (name: string) => {
     setError(null);
+    setStarting(prev => { const next = new Set(prev); next.add(name); return next; });
     try {
       await invoke<McpServerStatus>("mcp_start_server", { name });
       await refresh();
     } catch (e: any) {
-      setError(`start ${name}: ${String(e?.message ?? e)}`);
+      // npx first-run can take 30-90s downloading the package. Past
+      // 180s the backend times out — surface that vs other failures.
+      const msg = String(e?.message ?? e);
+      setError(`start ${name}: ${msg}`);
+    } finally {
+      setStarting(prev => { const next = new Set(prev); next.delete(name); return next; });
     }
   };
 
@@ -447,10 +624,11 @@ export default function MCPPage() {
 
   const addFromPreset = (p: Preset) => {
     const env: Record<string, string> = {};
-    for (const k of p.envHints) env[k] = "";
+    for (const h of p.envHints) env[h.name] = "";
     setDialog({
       open: true,
       initial: { name: p.name, command: p.command, args: p.args, env, enabled: true },
+      envHints: p.envHints,
     });
   };
 
@@ -458,7 +636,10 @@ export default function MCPPage() {
     try {
       const cfg = await invoke<McpConfig>("mcp_load_config");
       const found = cfg.servers.find(s => s.name === name) ?? null;
-      setDialog({ open: true, initial: found });
+      // If this server matches a known preset, surface its envHints
+      // so the user gets the rich rows + Get-key links on edit too.
+      const preset = PRESETS.find(p => p.name === name);
+      setDialog({ open: true, initial: found, envHints: preset?.envHints });
     } catch (e: any) {
       setError(String(e?.message ?? e));
     }
@@ -523,6 +704,7 @@ export default function MCPPage() {
             <ServerCard
               key={s.name}
               status={s}
+              starting={starting.has(s.name)}
               onStart={() => start(s.name)}
               onStop={() => stop(s.name)}
               onEdit={() => edit(s.name)}
@@ -537,6 +719,7 @@ export default function MCPPage() {
       {dialog.open && (
         <ServerDialog
           initial={dialog.initial}
+          envHints={dialog.envHints}
           onCancel={() => setDialog({ open: false, initial: null })}
           onSave={saveServer}
         />

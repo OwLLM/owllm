@@ -315,11 +315,14 @@ async fn send_request(session: &McpSession, method: &str, params: Value) -> Resu
         stdin.write_all(line.as_bytes()).await.map_err(|e| format!("stdin write: {e}"))?;
         stdin.flush().await.map_err(|e| format!("stdin flush: {e}"))?;
     }
-    // 60s ceiling; MCP servers should respond much faster but some
-    // (puppeteer, browser-use) genuinely take a while.
-    let resp = timeout(Duration::from_secs(60), rx)
+    // 180s ceiling. First-run npx -y @modelcontextprotocol/server-X
+    // downloads the package from npm (can be 30-60s on slow networks).
+    // Once cached, subsequent starts respond in <1s. Bump up so we don't
+    // false-fail the first start and confuse users into thinking MCP
+    // is broken when really npm is just being slow.
+    let resp = timeout(Duration::from_secs(180), rx)
         .await
-        .map_err(|_| format!("MCP request '{method}' timed out after 60s"))?
+        .map_err(|_| format!("MCP request '{method}' timed out after 180s — if this is the first run, npx may still be downloading the package; try Start again"))?
         .map_err(|_| format!("MCP request '{method}' dropped before reply"))?;
     if let Some(err) = resp.get("error") {
         return Err(format!("MCP error on {method}: {err}"));

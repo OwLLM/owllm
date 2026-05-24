@@ -28,6 +28,7 @@ import { ACCENTS, AccentKey, Mode, useTheme } from "./theme";
 import { headerPill } from "./theme/styles";
 import TelegramBridgeRunner from "./bridges/TelegramBridgeRunner";
 import ServerPage from "./pages/core/ServerPage";
+import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -475,6 +476,18 @@ function ModeBar({
           <span>Advanced</span>
         </button>
 
+        {advancedOpen && (
+          <button
+            data-ui="TutorialRecorderToggle"
+            onClick={toggleTutorialRecorder}
+            title="Open tutorial recorder"
+            style={{ ...baseBtn, width: 88 }}
+          >
+            <span style={{ fontSize: 14 }}>●</span>
+            <span>Record</span>
+          </button>
+        )}
+
         {/* Mode toggles — single-active. Click toggles back to "home" if
             the same mode is clicked twice. Hidden when the mode isn't
             installed (per getInstalledModes() in modules.ts). */}
@@ -907,6 +920,7 @@ export default function AppShell() {
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
         : <HybridFrame outerW={vp.w} outerH={vp.h}>{appContent}</HybridFrame>}
       {serverModalOpen && <ServerModal onClose={() => setServerModalOpen(false)} />}
+      <TutorialRecorder enabled={advancedOpen} />
     </>
   );
 }

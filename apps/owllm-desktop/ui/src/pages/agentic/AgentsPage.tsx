@@ -4486,25 +4486,6 @@ export default function AgentsPage() {
   // Re-checked whenever the project switches or the brainstormer
   // reports a save.
   const [hasBriefForProject, setHasBriefForProject] = useState(false);
-  // Check whether BRIEF.md exists for the active project's location.
-  // Drives the 🧠 button's green tint and confirms the orchestrator
-  // will pick up the brief on its next run. Fires on project switch
-  // and whenever the brainstormer reports a save.
-  useEffect(() => {
-    const cwd = (selectedProject?.location || "").trim();
-    if (!cwd) { setHasBriefForProject(false); return; }
-    let cancelled = false;
-    (async () => {
-      try {
-        const text = await invoke<string>("tool_read_file", { path: "BRIEF.md", cwd });
-        if (!cancelled) setHasBriefForProject(text.trim().length > 0);
-      } catch {
-        if (!cancelled) setHasBriefForProject(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [selectedProject?.id, selectedProject?.location]);
-
   // Reload directives + director_mode whenever the active project
   // changes. Both fetches run in parallel; errors fall back to empty /
   // false so a fresh DB before the table exists doesn't break the UI.
@@ -4682,6 +4663,27 @@ export default function AgentsPage() {
   }, []);
 
   const selectedProject = projects.find(p => p.id === selectedProjectId) ?? null;
+
+  // Check whether BRIEF.md exists for the active project's location.
+  // Drives the 🧠 button's green tint and confirms the orchestrator
+  // will pick up the brief on its next run. Fires on project switch
+  // and whenever the brainstormer reports a save. Defined here (after
+  // selectedProject) instead of with the other useEffects up top so
+  // selectedProject isn't in the temporal dead zone at hook init time.
+  useEffect(() => {
+    const cwd = (selectedProject?.location || "").trim();
+    if (!cwd) { setHasBriefForProject(false); return; }
+    let cancelled = false;
+    (async () => {
+      try {
+        const text = await invoke<string>("tool_read_file", { path: "BRIEF.md", cwd });
+        if (!cancelled) setHasBriefForProject(text.trim().length > 0);
+      } catch {
+        if (!cancelled) setHasBriefForProject(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedProject?.id, selectedProject?.location]);
 
   // Sync editable fields when project selection changes.
   useEffect(() => {

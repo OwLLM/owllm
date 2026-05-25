@@ -130,6 +130,43 @@ export function loadOverridesForProject(projectId: string): Record<string, strin
   return out;
 }
 
+// ----- Studio-scope overrides (global, not per-project) -----
+//
+// The Studio page lists AGENT DEFINITIONS — same agent role across
+// every project. So Studio icon overrides are global, not scoped to a
+// specific project. Different key prefix so they don't collide with
+// the per-project ones AgentsPage uses.
+
+const STUDIO_PREFIX = "owllm:studio-agent-icon:";
+
+export function getStudioAgentIconOverride(agentName: string): string | null {
+  if (!agentName) return null;
+  try { return localStorage.getItem(STUDIO_PREFIX + agentName); }
+  catch { return null; }
+}
+
+export function setStudioAgentIconOverride(agentName: string, ref: string | null): void {
+  if (!agentName) return;
+  try {
+    if (!ref) localStorage.removeItem(STUDIO_PREFIX + agentName);
+    else localStorage.setItem(STUDIO_PREFIX + agentName, ref);
+  } catch { /* private mode */ }
+}
+
+export function loadStudioOverrides(): Record<string, string> {
+  const out: Record<string, string> = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(STUDIO_PREFIX)) continue;
+      const agentName = k.slice(STUDIO_PREFIX.length);
+      const v = localStorage.getItem(k);
+      if (v) out[agentName] = v;
+    }
+  } catch { /* private mode */ }
+  return out;
+}
+
 // ----- Dialog -----
 
 export default function IconPickerDialog({

@@ -17,6 +17,10 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import SkillLibraryDialog from "./SkillLibraryDialog";
+import IconPickerDialog, {
+  setStudioAgentIconOverride,
+  loadStudioOverrides,
+} from "./IconPickerDialog";
 
 const ICONS = "/Page_icons";
 const AGENT_ICON_DIR = `${ICONS}/Agents`;
@@ -723,9 +727,13 @@ function TeamDetailPanel({
 // built-ins/skills, #7a8a9c for plain custom), badges row (BUILT-IN,
 // SKILL, LEADER).
 function AgentCard({
-  agent, selected, onClick,
+  agent, selected, onClick, onPickIcon,
 }: {
   agent: AgentDef; selected: boolean; onClick: () => void;
+  // Click handler for the avatar — opens the IconPickerDialog. The
+  // card's outer click still handles selection; the avatar swallows
+  // its own click so we don't fire both.
+  onPickIcon: (agentName: string) => void;
 }) {
   const accent = (agent.builtIn || agent.isSkill) ? "var(--accent)" : "#7a8a9c";
   return (
@@ -747,12 +755,21 @@ function AgentCard({
           : "0 2px 6px rgba(0,0,0,0.4)",
       }}
     >
-      <div style={{
-        width: 56, height: 56, flexShrink: 0,
-        display: "flex", alignItems: "center", justifyContent: "center",
-      }}>
-        <img src={owlSrc(agent.icon)} style={{ width: 52, height: 52, objectFit: "contain" }} />
-      </div>
+      <button
+        onClick={(e) => { e.stopPropagation(); onPickIcon(agent.name); }}
+        title="Click to pick a different icon for this agent"
+        style={{
+          width: 56, height: 56, flexShrink: 0,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: "transparent", border: "none", padding: 0,
+          cursor: "pointer", borderRadius: 12,
+          transition: "box-shadow 120ms",
+        }}
+        onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 0 0 2px rgba(140,180,255,0.55)"; }}
+        onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; }}
+      >
+        <img src={owlSrc(agent.icon)} style={{ width: 52, height: 52, objectFit: "contain", pointerEvents: "none" }} />
+      </button>
       <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <div style={{
@@ -1157,6 +1174,18 @@ export default function StudioPage() {
   const [teams, setTeams] = useState<Team[]>(TEAMS_FALLBACK);
   const [agents, setAgents] = useState<AgentDef[]>(AGENTS_FALLBACK);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Global studio-scope icon overrides (one map for all agent defs,
+  // not per-project — agent definitions are global). Hydrated from
+  // localStorage on mount and merged onto every agent's icon at render.
+  const [iconOverrides, setIconOverrides] = useState<Record<string, string>>(() => loadStudioOverrides());
+  const [iconPickerAgent, setIconPickerAgent] = useState<string | null>(null);
+
+  // Layer overrides on top of backend-loaded agent icons. Cheap pass
+  // over the list whenever either dataset changes.
+  const agentsWithIcons = useMemo(
+    () => agents.map(a => iconOverrides[a.name] ? { ...a, icon: iconOverrides[a.name] } : a),
+    [agents, iconOverrides],
+  );
 
   const loadAll = async () => {
     try {
@@ -1198,16 +1227,16 @@ export default function StudioPage() {
 
   const filteredAgents = useMemo(() => {
     const q = agentQuery.trim().toLowerCase();
-    let base = skillsOnly ? agents.filter(a => a.isSkill) : agents;
+    let base = skillsOnly ? agentsWithIcons.filter(a => a.isSkill) : agentsWithIcons;
     if (q) base = base.filter(a =>
       a.name.toLowerCase().includes(q) ||
       a.description.toLowerCase().includes(q)
     );
     return base;
-  }, [agentQuery, agents, skillsOnly]);
+  }, [agentQuery, agentsWithIcons, skillsOnly]);
 
   const team = teams.find(t => t.name === selectedTeam) ?? null;
-  const agent = agents.find(a => a.name === selectedAgent) ?? null;
+  const agent = agentsWithIcons.find(a => a.name === selectedAgent) ?? null;
 
   // Sub-label text per view — verbatim from agent_studio_page.py:1126-1136.
   const subLabel = view === "teams"
@@ -1386,6 +1415,7 @@ export default function StudioPage() {
                   agent={a}
                   selected={selectedAgent === a.name}
                   onClick={() => setSelectedAgent(a.name)}
+                  onPickIcon={(name) => setIconPickerAgent(name)}
                 />
               ))}
             </div>
@@ -1412,6 +1442,30 @@ export default function StudioPage() {
         open={libraryOpen}
         onClose={() => setLibraryOpen(false)}
         onChange={() => loadAll()}
+      />
+      <IconPickerDialog
+        open={iconPickerAgent != null}
+        agentName={iconPickerAgent ?? ""}
+        currentRef={iconPickerAgent
+          ? (agentsWithIcons.find(a => a.name === iconPickerAgent)?.icon ?? "")
+          : ""}
+        onCancel={() => setIconPickerAgent(null)}
+        onPick={(ref) => {
+          if (!iconPickerAgent) { setIconPickerAgent(null); return; }
+          setStudioAgentIconOverride(iconPickerAgent, ref);
+          setIconOverrides(prev => ({ ...prev, [iconPickerAgent]: ref }));
+          setIconPickerAgent(null);
+        }}
+        onReset={() => {
+          if (!iconPickerAgent) { setIconPickerAgent(null); return; }
+          setStudioAgentIconOverride(iconPickerAgent, null);
+          setIconOverrides(prev => {
+            const next = { ...prev };
+            delete next[iconPickerAgent];
+            return next;
+          });
+          setIconPickerAgent(null);
+        }}
       />
     </div>
   );

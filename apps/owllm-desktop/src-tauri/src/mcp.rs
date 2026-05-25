@@ -147,15 +147,32 @@ static SESSIONS: Lazy<TokioMutex<HashMap<String, Arc<McpSession>>>> =
 /// shims on Windows. Mirrors pty.rs::resolve_cli_command's strategy:
 /// npx / uvx / similar npm-bin shims are .cmd files that CreateProcessW
 /// can't launch directly.
+///
+/// First checks our private bundled-runtimes dir (LLM/runtime/uv/),
+/// then falls back to PATH + the common install dirs. Means once
+/// install_uv has run, the user gets uvx without touching PowerShell
+/// or installing anything system-wide.
 fn resolve_command(command: &str, args: &[String]) -> (PathBuf, Vec<String>) {
     let candidates = [
         format!("{command}.exe"),
         format!("{command}.cmd"),
         command.to_string(),
     ];
-    let resolved = candidates
-        .iter()
-        .find_map(|n| crate::accounts::which_extended(n))
+    // Private OwLLM-managed runtimes — keep our bundled tooling out of
+    // the user's system PATH but always preferred when present.
+    let mut resolved: Option<PathBuf> = None;
+    if let Some(root) = crate::paths::llm_root() {
+        for sub in ["uv", "node"] {
+            let dir = root.join("runtime").join(sub);
+            for cand in &candidates {
+                let p = dir.join(cand);
+                if p.is_file() { resolved = Some(p); break; }
+            }
+            if resolved.is_some() { break; }
+        }
+    }
+    let resolved = resolved
+        .or_else(|| candidates.iter().find_map(|n| crate::accounts::which_extended(n)))
         .unwrap_or_else(|| PathBuf::from(command));
 
     let is_batch = resolved
@@ -572,4 +589,128 @@ fn status_from_session(session: &McpSession) -> McpServerStatus {
         tools: session.tools.lock().unwrap().clone(),
         error: session.error.lock().unwrap().clone(),
     }
+}
+
+// ===== Runtime installer =====
+//
+// Some MCP servers (duckduckgo, sqlite, git, sentry, fetch, time) are
+// distributed as PyPI packages and run via `uvx`. Asking end users to
+// open PowerShell and run `winget install astral-sh.uv` to make them
+// work is a non-starter for a desktop product. We bundle uv into our
+// own LLM/runtime/uv/ dir the same way python_runtime/ and
+// runtime/llama.cpp/ already work — private to OwLLM, no admin rights,
+// no system PATH pollution.
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStatus {
+    pub name: String,
+    pub installed: bool,
+    pub path: String, // empty when not installed
+}
+
+/// Where bundled runtimes live. Sibling of LLM/python_runtime and
+/// LLM/runtime/llama.cpp so the layout is consistent.
+fn runtime_dir(name: &str) -> Option<PathBuf> {
+    crate::paths::llm_root().map(|r| r.join("runtime").join(name))
+}
+
+#[tauri::command]
+pub fn runtime_status(name: String) -> RuntimeStatus {
+    let path = runtime_dir(&name);
+    let exe_name = if cfg!(windows) {
+        format!("{name}x.exe")  // uvx.exe (uv ships `uv.exe` + `uvx.exe` in the same zip)
+    } else {
+        format!("{name}x")
+    };
+    let installed = path.as_ref()
+        .map(|p| p.join(&exe_name).is_file())
+        .unwrap_or(false);
+    RuntimeStatus {
+        name,
+        installed,
+        path: path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+    }
+}
+
+/// Download + extract Astral uv to LLM/runtime/uv/. Idempotent — when
+/// uvx.exe is already present we short-circuit. Returns the install
+/// dir path on success.
+///
+/// Source: github.com/astral-sh/uv/releases/latest/download/uv-<arch>.zip
+/// The zip contains uv.exe and uvx.exe at the root; we extract both.
+#[tauri::command]
+pub async fn install_uv() -> Result<String, String> {
+    let dir = runtime_dir("uv").ok_or_else(|| "no LLM root — repo layout unexpected".to_string())?;
+    let uvx_exe = if cfg!(windows) { dir.join("uvx.exe") } else { dir.join("uvx") };
+    if uvx_exe.is_file() {
+        return Ok(dir.to_string_lossy().into_owned());
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+
+    // Pick the right release asset for the host. Currently only
+    // Windows x64 is wired — the other targets would just need their
+    // asset names added below.
+    let asset = if cfg!(all(windows, target_arch = "x86_64")) {
+        "uv-x86_64-pc-windows-msvc.zip"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "uv-aarch64-apple-darwin.tar.gz"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "uv-x86_64-apple-darwin.tar.gz"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "uv-x86_64-unknown-linux-gnu.tar.gz"
+    } else {
+        return Err("no uv release asset known for this host arch — install uv manually".into());
+    };
+    let url = format!("https://github.com/astral-sh/uv/releases/latest/download/{asset}");
+
+    let cli = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = cli.get(&url).send().await
+        .map_err(|e| format!("download {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("download HTTP {} from {url}", resp.status()));
+    }
+    let bytes = resp.bytes().await
+        .map_err(|e| format!("read bytes: {e}"))?;
+
+    // Windows asset is .zip with uv.exe + uvx.exe at root. macOS/Linux
+    // ship .tar.gz — handle in a separate branch when the time comes.
+    if asset.ends_with(".zip") {
+        let cursor = std::io::Cursor::new(bytes);
+        let mut archive = zip::ZipArchive::new(cursor)
+            .map_err(|e| format!("zip open: {e}"))?;
+        for i in 0..archive.len() {
+            let mut entry = archive.by_index(i)
+                .map_err(|e| format!("zip entry {i}: {e}"))?;
+            // The zip stores files like "uv-x86_64-pc-windows-msvc/uv.exe"
+            // OR plain "uv.exe" depending on release version — handle both
+            // by matching on the file_name() suffix.
+            let entry_name = entry.name().to_string();
+            let basename = std::path::Path::new(&entry_name)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(&entry_name)
+                .to_string();
+            if !matches!(basename.as_str(), "uv.exe" | "uvx.exe") { continue }
+            let out_path = dir.join(&basename);
+            let mut out_file = std::fs::File::create(&out_path)
+                .map_err(|e| format!("create {}: {e}", out_path.display()))?;
+            std::io::copy(&mut entry, &mut out_file)
+                .map_err(|e| format!("extract {basename}: {e}"))?;
+        }
+    } else {
+        return Err(format!("non-zip uv asset extraction not implemented yet ({asset})"));
+    }
+
+    if !uvx_exe.is_file() {
+        return Err(format!(
+            "uv archive extracted but {} not found — archive layout may have changed; install uv manually as a fallback",
+            uvx_exe.display(),
+        ));
+    }
+    Ok(dir.to_string_lossy().into_owned())
 }

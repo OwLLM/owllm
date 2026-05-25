@@ -521,7 +521,7 @@ function ServerDialog({
 // ----- Server card -----
 
 function ServerCard({
-  status, starting, onStart, onStop, onEdit, onRemove,
+  status, starting, lastError, installing, onStart, onStop, onEdit, onRemove, onInstallRuntime,
 }: {
   status: McpServerStatus;
   /// True while mcp_start_server is in-flight for this server. Surfaces
@@ -529,10 +529,20 @@ function ServerCard({
   /// no-op. We show a yellow Starting badge + a hint about what's
   /// happening so they know to wait, not retry.
   starting: boolean;
+  /// The last start error returned to the page (if any). Used to detect
+  /// "runtime missing" failures and surface an Install button instead
+  /// of just telling the user to fix it themselves.
+  lastError: string;
+  /// True while install_uv is downloading + extracting. Disables the
+  /// install button so the user can't double-click.
+  installing: boolean;
   onStart: () => void;
   onStop: () => void;
   onEdit: () => void;
   onRemove: () => void;
+  /// Called when the user clicks the runtime-install button. The
+  /// caller decides which runtime (uv/node) based on the missing tool.
+  onInstallRuntime: (runtime: "uv") => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const badgeColor = starting ? "#FFB300"
@@ -571,18 +581,44 @@ function ServerCard({
         </span>
       </div>
 
-      {status.error && (
-        <div style={{
-          background: "rgba(244,67,54,0.10)",
-          border: "1px solid rgba(244,67,54,0.4)",
-          color: "#f87171", padding: 8, borderRadius: 4,
-          fontSize: 11, fontFamily: "Consolas, monospace",
-          maxHeight: 100, overflow: "auto",
-          whiteSpace: "pre-wrap",
-        }}>
-          {status.error}
-        </div>
-      )}
+      {(status.error || lastError) && (() => {
+        const errText = status.error || lastError;
+        // Detect missing-runtime errors so we can offer to install
+        // them instead of dumping shell instructions on the user.
+        const uvMissing = /'uvx'\s+not\s+found|uv\s+not\s+found/i.test(errText)
+          || (status.command === "uvx" && /not\s+found|cannot\s+find\s+file|os\s+error\s+2/i.test(errText));
+        return (
+          <div style={{
+            background: "rgba(244,67,54,0.10)",
+            border: "1px solid rgba(244,67,54,0.4)",
+            color: "#f87171", padding: 8, borderRadius: 4,
+            fontSize: 11, fontFamily: "Consolas, monospace",
+            maxHeight: 140, overflow: "auto",
+            whiteSpace: "pre-wrap",
+            display: "flex", flexDirection: "column", gap: 8,
+          }}>
+            <div>{errText}</div>
+            {uvMissing && (
+              <button
+                onClick={() => onInstallRuntime("uv")}
+                disabled={installing}
+                style={{
+                  alignSelf: "flex-start",
+                  padding: "6px 12px", fontSize: 11, fontWeight: 700,
+                  background: installing ? "rgba(255,179,0,0.30)" : "rgba(76,175,80,0.60)",
+                  color: "#fff", border: "none", borderRadius: 4,
+                  cursor: installing ? "not-allowed" : "pointer",
+                  fontFamily: "inherit",
+                }}
+              >
+                {installing
+                  ? "⏳ Installing uv runtime…"
+                  : "🛠 Install uv runtime (one-click, ~30 MB)"}
+              </button>
+            )}
+          </div>
+        );
+      })()}
 
       {starting && (
         <div style={{
@@ -732,6 +768,14 @@ export default function MCPPage() {
   // this the card just shows Stopped during the wait and the user
   // assumes it failed silently.
   const [starting, setStarting] = useState<Set<string>>(new Set());
+  // Per-server last start error — the backend status.error only fires
+  // while the session is alive; failed spawns return through the
+  // start() catch path and never reach status, so we cache them here.
+  const [startErrors, setStartErrors] = useState<Record<string, string>>({});
+  // Global "uv runtime is installing" flag — shared across all server
+  // cards because there's only one uv install regardless of which
+  // card triggered it.
+  const [installingUv, setInstallingUv] = useState(false);
 
   const refresh = async () => {
     setLoading(true);
@@ -755,6 +799,7 @@ export default function MCPPage() {
 
   const start = async (name: string) => {
     setError(null);
+    setStartErrors(prev => { const n = { ...prev }; delete n[name]; return n; });
     setStarting(prev => { const next = new Set(prev); next.add(name); return next; });
     try {
       await invoke<McpServerStatus>("mcp_start_server", { name });
@@ -764,8 +809,28 @@ export default function MCPPage() {
       // 180s the backend times out — surface that vs other failures.
       const msg = String(e?.message ?? e);
       setError(`start ${name}: ${msg}`);
+      setStartErrors(prev => ({ ...prev, [name]: msg }));
     } finally {
       setStarting(prev => { const next = new Set(prev); next.delete(name); return next; });
+    }
+  };
+
+  /// One-click install for a missing runtime. After install we
+  /// auto-retry Start so the user gets straight from "uvx not found"
+  /// to "server running" without extra clicks.
+  const installRuntime = async (runtime: "uv", retryServer: string) => {
+    setError(null);
+    if (runtime !== "uv") return;
+    setInstallingUv(true);
+    try {
+      await invoke<string>("install_uv");
+      // Retry the server start once uv is on disk. The resolve_command
+      // path inside spawn_session checks LLM/runtime/uv/ first.
+      await start(retryServer);
+    } catch (e: any) {
+      setError(`install uv: ${String(e?.message ?? e)}`);
+    } finally {
+      setInstallingUv(false);
     }
   };
 
@@ -890,10 +955,13 @@ export default function MCPPage() {
               key={s.name}
               status={s}
               starting={starting.has(s.name)}
+              lastError={startErrors[s.name] ?? ""}
+              installing={installingUv}
               onStart={() => start(s.name)}
               onStop={() => stop(s.name)}
               onEdit={() => edit(s.name)}
               onRemove={() => remove(s.name)}
+              onInstallRuntime={(rt) => installRuntime(rt, s.name)}
             />
           ))
         )}

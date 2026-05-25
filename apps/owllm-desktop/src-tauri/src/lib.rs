@@ -175,6 +175,8 @@ pub fn run() {
             mcp::mcp_list_all_tools,
             mcp::mcp_call_tool,
             mcp::mcp_autostart_all,
+            mcp::install_uv,
+            mcp::runtime_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building OwLLM Desktop")

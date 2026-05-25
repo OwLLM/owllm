@@ -80,6 +80,11 @@ once_cell = "1"
 # default-features OFF drops unicode-segmentation tables we don't need
 # for filename + line matching, keeping the dep slim.
 regex = { version = "1", default-features = false, features = ["std", "perf"] }
+# ZIP archive reader for the in-app uv runtime installer — uv ships
+# its Windows release as github.com/astral-sh/uv/releases/.../*.zip,
+# we extract uvx.exe + uv.exe into LLM/runtime/uv/ so users don't
+# have to touch PowerShell to enable Python-based MCP servers.
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
 
 # Windows-only: needed by overlay_frame to make the cyan chrome window
 # an "owned" window of main via SetWindowLongPtrW(GWLP_HWNDPARENT).

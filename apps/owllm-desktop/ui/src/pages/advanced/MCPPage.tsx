@@ -583,20 +583,37 @@ function ServerCard({
 
       {(status.error || lastError) && (() => {
         const errText = status.error || lastError;
+        // When the server is RUNNING, anything in `error` is just
+        // stderr (Python servers write INFO logs to stderr — that's
+        // not a failure). Tint it neutral. When the server is NOT
+        // running, this IS the actual failure — keep it red.
+        const isLogNotError = status.running;
         // Detect missing-runtime errors so we can offer to install
         // them instead of dumping shell instructions on the user.
-        const uvMissing = /'uvx'\s+not\s+found|uv\s+not\s+found/i.test(errText)
-          || (status.command === "uvx" && /not\s+found|cannot\s+find\s+file|os\s+error\s+2/i.test(errText));
+        const uvMissing = !isLogNotError && (
+          /'uvx'\s+not\s+found|uv\s+not\s+found/i.test(errText)
+          || (status.command === "uvx" && /not\s+found|cannot\s+find\s+file|os\s+error\s+2/i.test(errText))
+        );
+        const palette = isLogNotError
+          ? { bg: "rgba(80,120,200,0.08)", border: "rgba(80,120,200,0.30)", fg: "#9fb4d8", label: "stderr (informational)" }
+          : { bg: "rgba(244,67,54,0.10)", border: "rgba(244,67,54,0.4)",  fg: "#f87171", label: null };
         return (
           <div style={{
-            background: "rgba(244,67,54,0.10)",
-            border: "1px solid rgba(244,67,54,0.4)",
-            color: "#f87171", padding: 8, borderRadius: 4,
+            background: palette.bg,
+            border: `1px solid ${palette.border}`,
+            color: palette.fg, padding: 8, borderRadius: 4,
             fontSize: 11, fontFamily: "Consolas, monospace",
             maxHeight: 140, overflow: "auto",
             whiteSpace: "pre-wrap",
             display: "flex", flexDirection: "column", gap: 8,
           }}>
+            {palette.label && (
+              <div style={{
+                fontFamily: "system-ui, sans-serif", fontSize: 10,
+                fontWeight: 700, letterSpacing: 0.5,
+                opacity: 0.85,
+              }}>{palette.label}</div>
+            )}
             <div>{errText}</div>
             {uvMissing && (
               <button

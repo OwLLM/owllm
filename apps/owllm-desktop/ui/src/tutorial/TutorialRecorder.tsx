@@ -55,13 +55,34 @@ function PointerOverlay({
           position: "absolute",
           left: point.x,
           top: point.y,
-          transform: "translate(-5px, -4px)",
+          transform: "translate(-10px, -8px)",
           transition: "left 420ms cubic-bezier(.2,.9,.25,1), top 420ms cubic-bezier(.2,.9,.25,1)",
-          fontSize: 30,
           filter: "drop-shadow(0 3px 7px rgba(0,0,0,0.65))",
+          animation: mark ? "owllmTutorialTap 360ms ease-out" : "none",
+          transformOrigin: "18px 8px",
         }}
       >
-        ☝
+        <svg width="42" height="46" viewBox="0 0 42 46" aria-hidden="true">
+          <path
+            d="M17.6 4.8c2.1 0 3.8 1.7 3.8 3.8v11.2l1.6-2.1c1.2-1.6 3.4-2 5.1-.8 1.1.8 1.6 2 1.6 3.2.7-.4 1.5-.5 2.4-.4 2 .4 3.3 2.3 2.9 4.3l-.3 1.5c.7-.2 1.5-.1 2.2.2 1.9.8 2.7 3 1.9 4.9l-2.1 5c-1.9 4.6-6.4 7.5-11.4 7.5h-4.8c-4 0-7.8-1.9-10.1-5.2L3.6 28c-1.1-1.6-.8-3.8.8-5 1.3-1 3.2-.9 4.4.2l5 4.6V8.6c0-2.1 1.7-3.8 3.8-3.8Z"
+            fill="#ffe0a8"
+            stroke="#271407"
+            strokeWidth="2.2"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M21.4 19.8v8.8M29.5 20.1l-3.3 8.8M34.7 25.5l-2.2 6.8"
+            stroke="#9f6430"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+          />
+          <path
+            d="M13.8 27.8v5.6"
+            stroke="#9f6430"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+          />
+        </svg>
       </div>
       {mark && (
         <div
@@ -87,9 +108,39 @@ function PointerOverlay({
           0% { transform: scale(0.3); opacity: 0.95; }
           100% { transform: scale(1.8); opacity: 0; }
         }
+        @keyframes owllmTutorialTap {
+          0% { transform: translate(-10px, -8px) rotate(0deg) scale(1); }
+          45% { transform: translate(-10px, -8px) rotate(-9deg) scale(0.88); }
+          100% { transform: translate(-10px, -8px) rotate(0deg) scale(1); }
+        }
       `}</style>
     </div>
   );
+}
+
+async function requestDisplayStream(): Promise<MediaStream> {
+  const media = navigator.mediaDevices as MediaDevices & {
+    getDisplayMedia(options?: unknown): Promise<MediaStream>;
+  };
+  const preferred = {
+    video: {
+      frameRate: 30,
+      cursor: "never",
+      displaySurface: "monitor",
+    },
+    audio: false,
+    preferCurrentTab: false,
+    selfBrowserSurface: "include",
+    surfaceSwitching: "exclude",
+  };
+  try {
+    return await media.getDisplayMedia(preferred);
+  } catch (err) {
+    if (err instanceof DOMException && err.name === "NotAllowedError") {
+      throw err;
+    }
+    return media.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+  }
 }
 
 export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
@@ -98,7 +149,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [pointer, setPointer] = useState<Point>({ x: 160, y: 120 });
   const [mark, setMark] = useState<ClickMark | null>(null);
-  const [status, setStatus] = useState("Select the OWLLM window when capture starts.");
+  const [status, setStatus] = useState("Select Entire Screen to include the decorative frame.");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -185,12 +236,9 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       startedAtRef.current = performance.now();
       setElapsedMs(0);
       setPointer({ x: Math.round(window.innerWidth / 2), y: 120 });
-      setStatus("Recording. Use the app normally; clicks drive the clean pointer.");
+      setStatus("Recording. For frame capture, the picker must be Entire Screen, not OWLLM window.");
 
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 30 },
-        audio: false,
-      });
+      const stream = await requestDisplayStream();
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream, {
         mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
@@ -309,7 +357,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
             disabled={state !== "idle"}
             style={recBtn(state === "idle", "#18c96e")}
           >
-            ● Record
+            Record Screen
           </button>
           <button
             onClick={pause}

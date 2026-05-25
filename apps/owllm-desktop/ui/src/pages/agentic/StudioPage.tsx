@@ -885,6 +885,15 @@ function SmallStat({ label, value }: { label: string; value: string }) {
 // voice/MCP) needs /v1/agents endpoints to be useful; for now we
 // surface the read-only summary + the action buttons (Save / Duplicate /
 // Delete) so the UI matches Qt's affordances.
+// Aggregated MCP tool from a running server, mirrors the Rust struct.
+type AggregatedMcpTool = {
+  qualifiedName: string;
+  server: string;
+  tool: string;
+  description: string;
+  inputSchema: unknown;
+};
+
 function AgentDetailPanel({
   agent,
   onSave,
@@ -892,10 +901,31 @@ function AgentDetailPanel({
   onDelete,
 }: {
   agent: AgentDef | null;
-  onSave: () => void;
+  // onSave now receives the edited fields the user has changed in the
+  // detail panel (currently: mcp_allowlist). Parent calls the Rust
+  // save_agent_definition with the merged JSON.
+  onSave: (edits: { mcpAllowlist: string[] | null }) => void;
   onDuplicate: () => void;
   onDelete: () => void;
 }) {
+  // Available MCP tools across every running MCP server. Re-fetched
+  // whenever the panel mounts or the user clicks a different agent so
+  // newly-started servers appear without a manual refresh.
+  const [availableMcp, setAvailableMcp] = useState<AggregatedMcpTool[]>([]);
+  // Draft mcp allowlist — initialised from the agent's persisted set.
+  // null = "all available MCP tools (no restriction)", which is the
+  // role yaml convention. [] = explicitly no MCP tools.
+  const [draftMcp, setDraftMcp] = useState<string[] | null>(agent?.mcpTools ?? null);
+  // Re-seed when the user clicks a different card.
+  useEffect(() => {
+    setDraftMcp(agent?.mcpTools ?? null);
+  }, [agent?.name]);
+  useEffect(() => {
+    invoke<AggregatedMcpTool[]>("mcp_list_all_tools")
+      .then(setAvailableMcp)
+      .catch(() => setAvailableMcp([]));
+  }, [agent?.name]);
+  const dirty = JSON.stringify(draftMcp) !== JSON.stringify(agent?.mcpTools ?? null);
   if (!agent) {
     return (
       <div style={{
@@ -935,6 +965,11 @@ function AgentDetailPanel({
         <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
           <div style={{ color: "var(--fg-muted)", fontSize: 13 }}>Name</div>
           <input
+            // key={agent.name} forces React to REMOUNT the input when
+            // the user clicks a different agent card. Without this the
+            // uncontrolled <input> keeps the FIRST name forever (showed
+            // up as "every card has the same name — John Operation").
+            key={agent.name}
             defaultValue={displayLabel(agent.name)}
             disabled={!editable}
             style={{
@@ -1000,15 +1035,106 @@ function AgentDetailPanel({
       />
 
       <div style={{
+        display: "flex", alignItems: "baseline", gap: 10,
         color: "var(--fg-muted)", fontSize: 13, fontWeight: 600,
         letterSpacing: 0.6, textTransform: "uppercase", marginTop: 4,
-      }}>MCP tools</div>
-      <ChipRow
-        chips={chipsFromAllowlist(agent.mcpTools)}
-        empty="No MCP tools assigned."
-        allText="All available MCP tools (no restriction)."
-        accent="#a0e88a"
-      />
+      }}>
+        <span>MCP tools</span>
+        <span style={{ color: "var(--fg-subtle)", fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>
+          {availableMcp.length === 0
+            ? "(no MCP servers running — start them on the MCP page)"
+            : `${availableMcp.length} available across running servers`}
+        </span>
+        {dirty && (
+          <span style={{
+            color: "#ffd97a", fontWeight: 700, fontSize: 11,
+            background: "rgba(255,217,122,0.12)",
+            padding: "2px 8px", borderRadius: 4,
+            textTransform: "uppercase",
+          }}>unsaved</span>
+        )}
+      </div>
+      {availableMcp.length === 0 ? (
+        <ChipRow
+          chips={chipsFromAllowlist(draftMcp)}
+          empty="No MCP tools assigned (start an MCP server first)."
+          allText="All available MCP tools (no restriction)."
+          accent="#a0e88a"
+        />
+      ) : (
+        <div style={{
+          display: "flex", flexDirection: "column", gap: 8,
+          background: "rgba(20,25,40,0.4)",
+          border: "1px solid rgba(160,232,138,0.20)",
+          borderRadius: 8, padding: 10,
+        }}>
+          <label style={{
+            display: "flex", alignItems: "center", gap: 8,
+            fontSize: 12, color: "var(--fg)", cursor: editable ? "pointer" : "not-allowed",
+            opacity: editable ? 1 : 0.6,
+          }}>
+            <input
+              type="checkbox"
+              checked={draftMcp === null}
+              disabled={!editable}
+              onChange={e => setDraftMcp(e.target.checked ? null : [])}
+            />
+            <span>Allow all MCP tools (no restriction)</span>
+          </label>
+          {draftMcp !== null && (
+            <div style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+              gap: 6,
+            }}>
+              {availableMcp.map(t => {
+                const selected = draftMcp.includes(t.qualifiedName);
+                return (
+                  <label
+                    key={t.qualifiedName}
+                    title={t.description}
+                    style={{
+                      display: "flex", alignItems: "flex-start", gap: 8,
+                      padding: "6px 8px", borderRadius: 6,
+                      fontSize: 12, color: "var(--fg)",
+                      background: selected ? "rgba(160,232,138,0.12)" : "rgba(0,0,0,0.2)",
+                      border: selected
+                        ? "1px solid rgba(160,232,138,0.55)"
+                        : "1px solid rgba(255,255,255,0.05)",
+                      cursor: editable ? "pointer" : "not-allowed",
+                      opacity: editable ? 1 : 0.65,
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      disabled={!editable}
+                      onChange={e => {
+                        if (draftMcp === null) return;
+                        if (e.target.checked) setDraftMcp([...draftMcp, t.qualifiedName]);
+                        else setDraftMcp(draftMcp.filter(n => n !== t.qualifiedName));
+                      }}
+                      style={{ marginTop: 2 }}
+                    />
+                    <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0, flex: 1 }}>
+                      <code style={{
+                        color: "#a0e88a", fontSize: 11, fontWeight: 600,
+                        fontFamily: "Consolas, monospace",
+                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      }}>{t.qualifiedName}</code>
+                      <div style={{
+                        color: "var(--fg-subtle)", fontSize: 10, lineHeight: 1.4,
+                        overflow: "hidden", textOverflow: "ellipsis",
+                        display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+                      }}>{t.description}</div>
+                    </div>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       <div style={{
         display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
@@ -1049,16 +1175,18 @@ function AgentDetailPanel({
       {/* Action row — Save (primary) / Duplicate (ghost) / Delete (destructive). */}
       <div style={{ display: "flex", gap: 8 }}>
         <button
-          onClick={onSave}
+          onClick={() => onSave({ mcpAllowlist: draftMcp })}
           disabled={!editable}
           style={{
             flex: 1, minHeight: 42,
-            background: editable ? "var(--accent)" : "#2c313c",
+            background: editable
+              ? (dirty ? "#f0a832" : "var(--accent)")
+              : "#2c313c",
             color: editable ? "#fff" : "#777",
             border: "none", borderRadius: 8, padding: "0 20px",
             fontWeight: 600, cursor: editable ? "pointer" : "default",
           }}
-        >Save</button>
+        >{dirty ? "Save changes" : "Save"}</button>
         <button
           onClick={onDuplicate}
           style={{
@@ -1422,7 +1550,33 @@ export default function StudioPage() {
             <div style={{ flex: 4, display: "flex", minWidth: 0 }}>
               <AgentDetailPanel
                 agent={agent}
-                onSave={() => console.log("[Studio] save agent", agent?.name)}
+                onSave={async (edits) => {
+                  if (!agent || !agent.path) {
+                    alert("Can't save: no path on disk (built-in role or unloaded). Click Duplicate first.");
+                    return;
+                  }
+                  // Find the raw backend row so we keep every field
+                  // the JSON had — we only override what the user
+                  // edited. Otherwise unmodified keys (system_prompt,
+                  // description, etc.) would be silently lost.
+                  try {
+                    const allRoles = await invoke<AgentRoleBackend[]>("list_agent_roles");
+                    const row = allRoles.find(r => r.path === agent.path);
+                    const original: any = (row?.data && typeof row.data === "object") ? { ...row.data } : {};
+                    // Apply edits. mcpAllowlist === null means "all
+                    // available" (remove the field entirely from JSON);
+                    // [] or non-empty array becomes mcp_allowlist.
+                    if (edits.mcpAllowlist === null) {
+                      delete original.mcp_allowlist;
+                    } else {
+                      original.mcp_allowlist = edits.mcpAllowlist;
+                    }
+                    await invoke("save_agent_definition", { path: agent.path, data: original });
+                    await loadAll();   // reload so the UI shows the persisted state
+                  } catch (e: any) {
+                    alert(`Save failed: ${String(e?.message ?? e)}`);
+                  }
+                }}
                 onDuplicate={() => console.log("[Studio] duplicate agent", agent?.name)}
                 onDelete={() => {
                   if (agent && confirm(`Delete custom agent '${displayLabel(agent.name)}'?`)) {

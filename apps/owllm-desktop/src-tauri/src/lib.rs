@@ -95,6 +95,7 @@ pub fn run() {
             pty::pty_kill,
             agents::list_team_templates,
             agents::list_agent_roles,
+            agents::save_agent_definition,
             agents::list_skill_packs,
             bridges::load_bridge_configs,
             bridges::save_telegram_config,

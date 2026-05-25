@@ -133,6 +133,40 @@ fn split_skill_md(raw: &str) -> (JsonValue, String) {
     (JsonValue::Object(Default::default()), raw.to_string())
 }
 
+/// Persist edits to a CUSTOM agent definition (the JSON files under
+/// LLM/data/agent_definitions/). Built-in YAMLs in LLM/core/agents/roles/
+/// are intentionally read-only — to "edit" a built-in the Studio UI
+/// duplicates it into the custom dir first.
+///
+/// `path` must be inside the custom agent_definitions dir AND end in
+/// .json. We reject anything else so a misbehaving caller can't write
+/// outside the sandbox.
+#[tauri::command]
+pub async fn save_agent_definition(path: String, data: JsonValue) -> Result<(), String> {
+    let Some(root) = paths::llm_root() else { return Err("LLM root not found".into()) };
+    let custom_dir = root.join("data").join("agent_definitions");
+    let target = std::path::PathBuf::from(&path);
+    let target_canon = target.canonicalize().unwrap_or(target.clone());
+    let custom_canon = custom_dir.canonicalize().unwrap_or(custom_dir.clone());
+    if !target_canon.starts_with(&custom_canon) {
+        return Err(format!(
+            "refusing to save outside LLM/data/agent_definitions/ — got {}",
+            target.display(),
+        ));
+    }
+    if target.extension().and_then(|s| s.to_str()) != Some("json") {
+        return Err("save_agent_definition only writes .json files (built-in YAML roles are read-only)".into());
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let pretty = serde_json::to_string_pretty(&data)
+        .map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&target, pretty)
+        .map_err(|e| format!("write {}: {e}", target.display()))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_agent_roles() -> Result<Vec<AgentRole>, String> {
     let Some(root) = paths::llm_root() else { return Ok(Vec::new()) };

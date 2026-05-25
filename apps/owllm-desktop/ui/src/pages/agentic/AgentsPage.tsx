@@ -11,6 +11,11 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import NewProjectDialog from "./NewProjectDialog";
 import BrainstormPanel from "./BrainstormPanel";
+import IconPickerDialog, {
+  getAgentIconOverride,
+  setAgentIconOverride,
+  loadOverridesForProject,
+} from "./IconPickerDialog";
 import ModelPicker, { AccountsStatusLite } from "./ModelPicker";
 import {
   type Attachment,
@@ -175,7 +180,16 @@ const BASE_OWL: Record<string, string> = {
   webapp:        "owl:owl_webapp",
   assistant:     "owl:owl_asssitant",
 };
-function agentIconRef(spec: AgentSpec, roleByName: Map<string, RoleData>): string {
+function agentIconRef(
+  spec: AgentSpec,
+  roleByName: Map<string, RoleData>,
+  // Per-(project, agent) icon overrides from localStorage. When the
+  // map has an entry for spec.name, that wins over every other source.
+  // Passing {} or omitting falls back to the legacy resolution chain
+  // (spec.icon → role.icon → BASE_OWL[base] → assistant).
+  overrides?: Record<string, string>,
+): string {
+  if (overrides && overrides[spec.name]) return overrides[spec.name];
   if (spec.icon) return spec.icon;
   const role = roleByName.get(spec.base);
   if (role?.icon) return role.icon;
@@ -782,7 +796,7 @@ function TeamInfoCard({
 function AgentInfoCard({
   team, spec, roleByName, status,
   models, modelId, onPickModel, accountsStatus, fallbackLabel,
-  onClose,
+  onClose, iconOverrides, onPickIcon,
 }: {
   team: Team | null;
   spec: AgentSpec;
@@ -794,6 +808,10 @@ function AgentInfoCard({
   accountsStatus: AccountsStatusLite | null;
   fallbackLabel: string;
   onClose: () => void;
+  // Per-(project, agent) icon overrides. Empty when no project loaded.
+  iconOverrides: Record<string, string>;
+  // Open the IconPickerDialog for THIS agent. Parent owns the modal.
+  onPickIcon: (agentName: string) => void;
 }) {
   // +90 px over the previous 320 (user spec 2026-05-20) — more room
   // for BASE values, description, and the model picker.
@@ -858,9 +876,25 @@ function AgentInfoCard({
       </div>
       <button onClick={onClose} title="Close (or click empty canvas)" style={{ position:"absolute", right:8, top:8, width:22, height:22, padding:0, border:"none", background:"rgba(255,255,255,0.06)", color:"var(--fg)", borderRadius:6, fontSize:12, cursor:"pointer", zIndex:2 }}>✕</button>
       <div style={{ position:"absolute", left:pic_x - 6, top:pic_y - 6, width:pic_size + 12, height:pic_size + 12, borderRadius:"50%", background:`radial-gradient(circle, ${statusDot}55 0%, ${statusDot}00 100%)`, pointerEvents:"none" }} />
-      <div style={{ position:"absolute", left:pic_x, top:pic_y, width:pic_size, height:pic_size, borderRadius:"50%", background:"#1e2434", border:"1.4px solid rgba(230,240,255,0.78)", display:"flex", alignItems:"center", justifyContent:"center", overflow:"hidden" }}>
-        <img src={owlSrc(agentIconRef(spec, roleByName))} style={{ width:pic_size * 0.85, height:pic_size * 0.85, objectFit:"contain" }} />
-      </div>
+      <button
+        onClick={() => onPickIcon(spec.name)}
+        title="Click to pick a different icon for this agent"
+        style={{
+          position:"absolute", left:pic_x, top:pic_y,
+          width:pic_size, height:pic_size, borderRadius:"50%",
+          background:"#1e2434",
+          border:"1.4px solid rgba(230,240,255,0.78)",
+          display:"flex", alignItems:"center", justifyContent:"center",
+          overflow:"hidden", padding:0, cursor:"pointer",
+          // Subtle hover affordance — slight glow so the user notices
+          // it's clickable without us shouting about it.
+          transition:"box-shadow 120ms, transform 120ms",
+        }}
+        onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 0 0 3px rgba(140,180,255,0.35)"; }}
+        onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; }}
+      >
+        <img src={owlSrc(agentIconRef(spec, roleByName, iconOverrides))} style={{ width:pic_size * 0.85, height:pic_size * 0.85, objectFit:"contain", pointerEvents:"none" }} />
+      </button>
       <div style={{ position:"absolute", left:info_x, top:info_y, width:info_w, height:pic_size + 8, fontSize:12, color:"var(--fg)", lineHeight:1.35, overflow:"hidden" }}>
         {trimmed}
       </div>
@@ -4492,6 +4526,11 @@ export default function AgentsPage() {
   // Re-checked whenever the project switches or the brainstormer
   // reports a save.
   const [hasBriefForProject, setHasBriefForProject] = useState(false);
+  // Per-agent icon overrides for the active project, hydrated from
+  // localStorage on project switch. `setIconPickerAgent(name)` opens
+  // the IconPickerDialog targeting that agent; null = closed.
+  const [agentIconOverrides, setAgentIconOverrides] = useState<Record<string, string>>({});
+  const [iconPickerAgent, setIconPickerAgent] = useState<string | null>(null);
   // Reload directives + director_mode whenever the active project
   // changes. Both fetches run in parallel; errors fall back to empty /
   // false so a fresh DB before the table exists doesn't break the UI.
@@ -4669,6 +4708,13 @@ export default function AgentsPage() {
   }, []);
 
   const selectedProject = projects.find(p => p.id === selectedProjectId) ?? null;
+
+  // Hydrate per-agent icon overrides on project switch. Cheap one-pass
+  // read of localStorage; lives next to selectedProject so it's not in
+  // the temporal-dead-zone the way an early-declared useEffect would be.
+  useEffect(() => {
+    setAgentIconOverrides(loadOverridesForProject(selectedProject?.id ?? ""));
+  }, [selectedProject?.id]);
 
   // Check whether BRIEF.md exists for the active project's location.
   // Drives the 🧠 button's green tint and confirms the orchestrator
@@ -6031,6 +6077,35 @@ export default function AgentsPage() {
           : null}
         hasBrief={hasBriefForProject}
       />
+      <IconPickerDialog
+        open={iconPickerAgent != null}
+        agentName={iconPickerAgent ?? ""}
+        currentRef={iconPickerAgent
+          ? agentIconRef(
+              (renderTeam?.agents.find(a => a.name === iconPickerAgent)
+                ?? { name: iconPickerAgent, base: iconPickerAgent } as AgentSpec),
+              roleByName,
+              agentIconOverrides,
+            )
+          : ""}
+        onCancel={() => setIconPickerAgent(null)}
+        onPick={(ref) => {
+          if (!iconPickerAgent || !selectedProjectId) { setIconPickerAgent(null); return; }
+          setAgentIconOverride(selectedProjectId, iconPickerAgent, ref);
+          setAgentIconOverrides(prev => ({ ...prev, [iconPickerAgent]: ref }));
+          setIconPickerAgent(null);
+        }}
+        onReset={() => {
+          if (!iconPickerAgent || !selectedProjectId) { setIconPickerAgent(null); return; }
+          setAgentIconOverride(selectedProjectId, iconPickerAgent, null);
+          setAgentIconOverrides(prev => {
+            const next = { ...prev };
+            delete next[iconPickerAgent];
+            return next;
+          });
+          setIconPickerAgent(null);
+        }}
+      />
       <BrainstormPanel
         open={brainstormOpen}
         onClose={() => setBrainstormOpen(false)}
@@ -6138,6 +6213,8 @@ export default function AgentsPage() {
                           : "(use team / server fallback)"
                     }
                     onClose={() => setSelectedNode(null)}
+                    iconOverrides={agentIconOverrides}
+                    onPickIcon={(name) => setIconPickerAgent(name)}
                   />
                 ) : (
                   <TeamInfoCard

@@ -81,7 +81,7 @@ const PRESETS: Array<Preset & { category: PresetCategory }> = [
   {
     category: "Search",
     name: "duckduckgo", icon: "🦆",
-    description: "Web search via DuckDuckGo. NO key, NO credit card, unlimited. Recommended default.",
+    description: "Web search via DuckDuckGo. NO key, NO card, unlimited. Requires `uvx` (Astral uv) — install via `winget install astral-sh.uv` or `pip install uv`, then restart OwLLM.",
     command: "uvx", args: ["duckduckgo-mcp-server"],
     envHints: [],
   },

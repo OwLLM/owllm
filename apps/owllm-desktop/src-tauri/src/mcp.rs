@@ -182,6 +182,23 @@ fn resolve_command(command: &str, args: &[String]) -> (PathBuf, Vec<String>) {
 async fn spawn_session(cfg: &McpServerConfig) -> Result<Arc<McpSession>, String> {
     let (exe, resolved_args) = resolve_command(&cfg.command, &cfg.args);
 
+    // Pre-flight: when which_extended fell back to the bare command
+    // name (no .exe / .cmd resolved), the spawn is almost certain to
+    // fail on Windows with a cryptic "cannot find file". Catch that
+    // here and return an actionable error before spawning.
+    let resolved_ok = exe.is_absolute() || exe == PathBuf::from("cmd.exe");
+    if !resolved_ok {
+        let hint = match cfg.command.as_str() {
+            "uvx" | "uv" => " — install Astral uv via `winget install --id=astral-sh.uv` (Windows) or `pip install uv`, then restart OwLLM Desktop so the new PATH is picked up.",
+            "npx" | "npm" | "node" => " — install Node.js from nodejs.org (gives you npx + npm), then restart OwLLM Desktop.",
+            _ => "",
+        };
+        return Err(format!(
+            "'{}' not found on PATH or common install dirs{}",
+            cfg.command, hint
+        ));
+    }
+
     let mut cmd = Command::new(&exe);
     for a in &resolved_args {
         cmd.arg(a);

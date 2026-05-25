@@ -339,10 +339,15 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
         // -- CLI subscriptions: ask the CLI to print "ok" via a
         //    minimum-cost prompt. Any non-zero exit or stderr blob
         //    mentioning subscription/quota/auth is a real failure.
+        // Claude Code CLI: --print is non-interactive, prompt goes on
+        // stdin (no --prompt flag — that's REPL-only). Matches how
+        // claude_cli_complete invokes it elsewhere in this file.
         "claude_cli" => probe_cli_subscription(
-            find_claude_cli(), &["--print", "--prompt", "ok"], "Claude").await,
+            find_claude_cli(), &["--print"], "Claude", Some("ok")).await,
+        // OpenAI Codex CLI: `codex exec <prompt>` is the non-interactive
+        // shape. There's no --print/--prompt; older docs to the contrary.
         "codex_cli" => probe_cli_subscription(
-            find_codex_cli(), &["--print", "--prompt", "ok"], "Codex").await,
+            find_codex_cli(), &["exec", "ok"], "Codex", None).await,
         "kimi_cli" => probe_cli_subscription(
             find_kimi_cli(),
             // `--model kimi-latest` so the probe works even when the
@@ -352,10 +357,10 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             // always-available alias.
             &["--print", "--output-format", "text", "--final-message-only",
               "--model", "kimi-latest", "--prompt", "ok"],
-            "Kimi",
+            "Kimi", None,
         ).await,
         "gemini_cli" => probe_cli_subscription(
-            find_gemini_cli(), &["--prompt", "ok"], "Gemini").await,
+            find_gemini_cli(), &["--prompt", "ok"], "Gemini", None).await,
 
         // -- API keys: HTTP GET the provider's /v1/models endpoint
         //    with the key in Authorization. 200 = valid. 401/403 =
@@ -402,16 +407,22 @@ async fn probe_cli_subscription(
     exe: Option<PathBuf>,
     args: &'static [&'static str],
     name: &'static str,
+    /// Text to write to the CLI's stdin (Claude takes the prompt this
+    /// way under --print since it has no --prompt flag). None = no
+    /// stdin (CLIs that accept the prompt as an argument).
+    stdin_text: Option<&'static str>,
 ) -> (bool, String) {
     let Some(exe) = exe else {
         return (false, format!("{name} CLI not found on PATH"));
     };
     let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let exe_clone = exe.clone();
+    let stdin_owned: Option<String> = stdin_text.map(|s| s.to_string());
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         tokio::task::spawn_blocking(move || {
+            use std::io::Write as _;
             let mut cmd = Command::new(&exe_clone);
             #[cfg(windows)]
             let batch = is_batch_shim(&exe_clone);
@@ -420,7 +431,7 @@ async fn probe_cli_subscription(
             for a in &args_vec {
                 push_arg(&mut cmd, batch, a);
             }
-            cmd.stdin(Stdio::null());
+            cmd.stdin(if stdin_owned.is_some() { Stdio::piped() } else { Stdio::null() });
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             #[cfg(windows)]
@@ -428,9 +439,13 @@ async fn probe_cli_subscription(
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
-            cmd.spawn()
-                .and_then(|c| c.wait_with_output())
-                .map_err(|e| e.to_string())
+            let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+            if let Some(text) = &stdin_owned {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+            }
+            child.wait_with_output().map_err(|e| e.to_string())
         }),
     )
     .await;

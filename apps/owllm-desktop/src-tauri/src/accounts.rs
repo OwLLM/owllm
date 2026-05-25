@@ -403,13 +403,13 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
 ///   * any subscription/quota/auth pattern in stdout OR stderr → fail
 ///     (surface a trimmed slice of the offending message)
 ///   * timeout (15 s) → fail
+// stdin_text: text to write to the CLI's stdin (Claude takes the prompt
+// this way under --print since it has no --prompt flag). None = no
+// stdin (CLIs that accept the prompt as an argument).
 async fn probe_cli_subscription(
     exe: Option<PathBuf>,
     args: &'static [&'static str],
     name: &'static str,
-    /// Text to write to the CLI's stdin (Claude takes the prompt this
-    /// way under --print since it has no --prompt flag). None = no
-    /// stdin (CLIs that accept the prompt as an argument).
     stdin_text: Option<&'static str>,
 ) -> (bool, String) {
     let Some(exe) = exe else {

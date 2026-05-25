@@ -794,23 +794,29 @@ export default function MCPPage() {
   // card triggered it.
   const [installingUv, setInstallingUv] = useState(false);
 
-  const refresh = async () => {
-    setLoading(true);
+  /// Quiet refresh — fetches status without toggling the global
+  /// `loading` flag. Used by the 3-second background tick so the
+  /// Refresh button doesn't flash a spinner every poll.
+  const refreshQuiet = async () => {
     try {
       const list = await invoke<McpServerStatus[]>("mcp_list_servers");
       setServers(list);
       setError(null);
     } catch (e: any) {
       setError(String(e?.message ?? e));
-    } finally {
-      setLoading(false);
     }
+  };
+  /// Loud refresh — what the Refresh button calls. Shows the "🔄 …"
+  /// state so the user gets feedback that their click did something.
+  const refresh = async () => {
+    setLoading(true);
+    try { await refreshQuiet(); } finally { setLoading(false); }
   };
 
   // Initial load + 3s refresh tick to catch status changes (server crashed, etc.).
   useEffect(() => {
-    refresh();
-    const id = window.setInterval(refresh, 3000);
+    refreshQuiet();
+    const id = window.setInterval(refreshQuiet, 3000);
     return () => window.clearInterval(id);
   }, []);
 

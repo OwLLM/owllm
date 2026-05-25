@@ -74,27 +74,72 @@ type Preset = {
   envHints: EnvHint[];
 };
 
-const PRESETS: Preset[] = [
+type PresetCategory = "Search" | "Files" | "Cloud" | "Dev" | "Memory" | "Web";
+
+const PRESETS: Array<Preset & { category: PresetCategory }> = [
+  // ----- Search -----
   {
+    category: "Search",
+    name: "duckduckgo", icon: "🦆",
+    description: "Web search via DuckDuckGo. NO key, NO credit card, unlimited. Recommended default.",
+    command: "uvx", args: ["duckduckgo-mcp-server"],
+    envHints: [],
+  },
+  {
+    category: "Search",
     name: "brave-search", icon: "🦁",
-    description: "Web search via Brave Search API.",
+    description: "Web search via Brave Search API. Free 2000 q/mo but now requires a card to verify.",
     command: "npx", args: ["-y", "@modelcontextprotocol/server-brave-search"],
     envHints: [
       {
         name: "BRAVE_API_KEY",
-        description: "Free tier: 2000 queries/month. Click 'Get Started' → sign up → 'Subscriptions' → 'Free' plan → 'API Keys' tab. Takes ~2 min.",
+        description: "Click 'Get Started' → sign up → 'Subscriptions' → 'Free' plan → 'API Keys' tab.",
         url: "https://brave.com/search/api/",
         placeholder: "BSA…",
       },
     ],
   },
   {
+    category: "Search",
+    name: "tavily", icon: "🔎",
+    description: "LLM-tuned search — returns clean text instead of raw HTML. Free 1000 q/mo, no card.",
+    command: "npx", args: ["-y", "tavily-mcp"],
+    envHints: [
+      {
+        name: "TAVILY_API_KEY",
+        description: "Sign up with email, no card. Built for AI agents — cleaner results than vanilla web search.",
+        url: "https://app.tavily.com/",
+        placeholder: "tvly-…",
+      },
+    ],
+  },
+  {
+    category: "Search",
+    name: "exa", icon: "🔬",
+    description: "Neural/semantic search by exa.ai. Returns full text per result. Free 1000 q/mo, no card.",
+    command: "npx", args: ["-y", "exa-mcp-server"],
+    envHints: [
+      {
+        name: "EXA_API_KEY",
+        description: "Semantic search — better than keyword for research/fact-finding.",
+        url: "https://dashboard.exa.ai/api-keys",
+        placeholder: "exa_…",
+      },
+    ],
+  },
+
+  // ----- Files -----
+  {
+    category: "Files",
     name: "filesystem", icon: "📁",
     description: "Sandboxed file ops. Edit the LAST positional arg to set the allowed root dir.",
     command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
     envHints: [],
   },
+
+  // ----- Cloud -----
   {
+    category: "Cloud",
     name: "github", icon: "🐙",
     description: "GitHub API — repos, issues, PRs, files.",
     command: "npx", args: ["-y", "@modelcontextprotocol/server-github"],
@@ -108,18 +153,7 @@ const PRESETS: Preset[] = [
     ],
   },
   {
-    name: "postgres", icon: "🐘",
-    description: "Read-only Postgres queries. Edit the LAST arg to your connection URL.",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@host/db"],
-    envHints: [],
-  },
-  {
-    name: "puppeteer", icon: "🌐",
-    description: "Headless Chromium — navigate, screenshot, click, scrape. No key, but downloads Chromium on first run.",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-puppeteer"],
-    envHints: [],
-  },
-  {
+    category: "Cloud",
     name: "slack", icon: "💬",
     description: "Slack workspace API — messages, channels, search.",
     command: "npx", args: ["-y", "@modelcontextprotocol/server-slack"],
@@ -139,16 +173,117 @@ const PRESETS: Preset[] = [
     ],
   },
   {
+    category: "Cloud",
+    name: "google-drive", icon: "📂",
+    description: "Google Drive — list, read, search files. Requires OAuth setup (multi-step).",
+    command: "npx", args: ["-y", "@modelcontextprotocol/server-gdrive"],
+    envHints: [
+      {
+        name: "GDRIVE_OAUTH_PATH",
+        description: "Path to gcp-oauth.keys.json downloaded from a Google Cloud OAuth client (web app type). See README.",
+        url: "https://github.com/modelcontextprotocol/servers/tree/main/src/gdrive",
+        placeholder: "C:/path/to/gcp-oauth.keys.json",
+      },
+    ],
+  },
+
+  // ----- Dev -----
+  {
+    category: "Dev",
+    name: "postgres", icon: "🐘",
+    description: "Read-only Postgres queries. Edit the LAST arg to your connection URL.",
+    command: "npx", args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@host/db"],
+    envHints: [],
+  },
+  {
+    category: "Dev",
     name: "sqlite", icon: "🗄️",
     description: "Local SQLite read/write + schema inspection. Edit --db-path to your DB.",
     command: "uvx", args: ["mcp-server-sqlite", "--db-path", "C:/path/to/db.sqlite"],
     envHints: [],
   },
   {
+    category: "Dev",
     name: "git", icon: "🔀",
     description: "Local git ops — log, diff, blame, branches. Edit --repository to your repo.",
     command: "uvx", args: ["mcp-server-git", "--repository", "C:/1_Git/LocaLLM"],
     envHints: [],
+  },
+  {
+    category: "Dev",
+    name: "sentry", icon: "🚨",
+    description: "Sentry issues — list, drill into stacktraces, recent events.",
+    command: "uvx", args: ["mcp-server-sentry"],
+    envHints: [
+      {
+        name: "SENTRY_AUTH_TOKEN",
+        description: "Sentry internal integration token. Settings → Developer Settings → Internal Integrations.",
+        url: "https://sentry.io/settings/account/api/auth-tokens/",
+        placeholder: "sntrys_…",
+      },
+    ],
+  },
+
+  // ----- Web -----
+  {
+    category: "Web",
+    name: "puppeteer", icon: "🌐",
+    description: "Headless Chromium — navigate, screenshot, click, scrape. Downloads Chromium on first run.",
+    command: "npx", args: ["-y", "@modelcontextprotocol/server-puppeteer"],
+    envHints: [],
+  },
+  {
+    category: "Web",
+    name: "fetch", icon: "📥",
+    description: "Fetch a URL → return as markdown. Simpler than puppeteer for static pages.",
+    command: "uvx", args: ["mcp-server-fetch"],
+    envHints: [],
+  },
+
+  // ----- Memory -----
+  {
+    category: "Memory",
+    name: "memory", icon: "🧠",
+    description: "Persistent knowledge-graph store. Agents can save+recall facts across sessions.",
+    command: "npx", args: ["-y", "@modelcontextprotocol/server-memory"],
+    envHints: [],
+  },
+  {
+    category: "Memory",
+    name: "sequential-thinking", icon: "🪜",
+    description: "Structured reasoning aid — agents emit thoughts in a tracked chain, can revise.",
+    command: "npx", args: ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+    envHints: [],
+  },
+  {
+    category: "Memory",
+    name: "time", icon: "🕐",
+    description: "Timezone-aware time queries + conversion. Tiny, useful for scheduling agents.",
+    command: "uvx", args: ["mcp-server-time"],
+    envHints: [],
+  },
+];
+
+const PRESET_CATEGORIES: PresetCategory[] = ["Search", "Files", "Cloud", "Dev", "Web", "Memory"];
+
+/// External catalogs — there's no public registry API yet, but the
+/// modelcontextprotocol/servers README is the canonical first-party
+/// list and awesome-mcp-servers is the community-curated long tail.
+const CATALOG_LINKS: Array<{ label: string; url: string; description: string }> = [
+  {
+    label: "Official MCP servers",
+    url: "https://github.com/modelcontextprotocol/servers",
+    description: "Reference servers maintained by Anthropic. Read the README for the canonical list + setup notes.",
+  },
+  {
+    label: "awesome-mcp-servers",
+    url: "https://github.com/punkpeye/awesome-mcp-servers",
+    description: "Community-curated long tail — 200+ servers across every imaginable category.",
+  },
+  {
+    label: "Glama directory",
+    url: "https://glama.ai/mcp/servers",
+    description: "Browsable web directory with categories, ratings, and one-click install configs.",
   },
 ];
 
@@ -507,29 +642,79 @@ function PresetsRow({ onPick }: { onPick: (p: Preset) => void }) {
       background: "rgba(20,25,40,0.4)",
       border: "1px solid rgba(var(--accent-rgb),0.15)",
       borderRadius: 8, padding: 12,
-      display: "flex", flexDirection: "column", gap: 8,
+      display: "flex", flexDirection: "column", gap: 12,
     }}>
-      <div style={{ color: "var(--fg-strong)", fontSize: 12, fontWeight: 600 }}>
-        Quick add — official MCP servers
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+        <div style={{ color: "var(--fg-strong)", fontSize: 12, fontWeight: 600 }}>
+          Quick add — popular MCP servers
+        </div>
+        <div style={{ color: "var(--fg-subtle)", fontSize: 11 }}>
+          click any to pre-fill the Add dialog
+        </div>
       </div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-        {PRESETS.map(p => (
-          <button
-            key={p.name}
-            onClick={() => onPick(p)}
-            title={`${p.description}${p.envHints.length ? `\n\nNeeds: ${p.envHints.join(", ")}` : ""}`}
-            style={{
-              padding: "8px 12px", borderRadius: 6,
-              background: "rgba(40,45,60,0.8)",
-              border: "1px solid rgba(var(--accent-rgb),0.25)",
-              color: "var(--fg)", fontSize: 12, cursor: "pointer",
-              display: "flex", alignItems: "center", gap: 6,
-            }}
-          >
-            <span style={{ fontSize: 16 }}>{p.icon}</span>
-            <span>{p.name}</span>
-          </button>
-        ))}
+      {PRESET_CATEGORIES.map(cat => {
+        const items = PRESETS.filter(p => p.category === cat);
+        if (items.length === 0) return null;
+        return (
+          <div key={cat} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div style={{
+              color: "var(--fg-subtle)", fontSize: 10,
+              fontWeight: 700, letterSpacing: 1, textTransform: "uppercase",
+            }}>{cat}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {items.map(p => (
+                <button
+                  key={p.name}
+                  onClick={() => onPick(p)}
+                  title={`${p.description}${p.envHints.length ? `\n\nNeeds: ${p.envHints.map(h => h.name).join(", ")}` : ""}`}
+                  style={{
+                    padding: "8px 12px", borderRadius: 6,
+                    background: "rgba(40,45,60,0.8)",
+                    border: "1px solid rgba(var(--accent-rgb),0.25)",
+                    color: "var(--fg)", fontSize: 12, cursor: "pointer",
+                    display: "flex", alignItems: "center", gap: 6,
+                  }}
+                >
+                  <span style={{ fontSize: 16 }}>{p.icon}</span>
+                  <span>{p.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
+      <div style={{
+        marginTop: 4, paddingTop: 12,
+        borderTop: "1px solid rgba(var(--accent-rgb),0.10)",
+        display: "flex", flexDirection: "column", gap: 6,
+      }}>
+        <div style={{ color: "var(--fg-strong)", fontSize: 12, fontWeight: 600 }}>
+          Browse the full MCP universe
+        </div>
+        <div style={{ color: "var(--fg-subtle)", fontSize: 11, lineHeight: 1.5 }}>
+          No in-app registry yet — there's no public MCP marketplace API the way HuggingFace
+          has the model hub. The canonical lists live on GitHub. Pick a server from one of these,
+          grab its <code>npx</code> or <code>uvx</code> command, paste it into <b>+ Add Server</b>.
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 4 }}>
+          {CATALOG_LINKS.map(l => (
+            <button
+              key={l.url}
+              onClick={() => openExternal(l.url)}
+              title={l.description}
+              style={{
+                padding: "8px 12px", borderRadius: 6,
+                background: "rgba(var(--accent-rgb),0.20)",
+                border: "1px solid rgba(var(--accent-rgb),0.40)",
+                color: "#9fa8ff", fontSize: 12, cursor: "pointer",
+                display: "flex", alignItems: "center", gap: 6,
+              }}
+            >
+              🌐 {l.label} →
+            </button>
+          ))}
+        </div>
       </div>
     </div>
   );

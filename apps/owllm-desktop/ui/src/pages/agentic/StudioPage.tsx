@@ -727,13 +727,9 @@ function TeamDetailPanel({
 // built-ins/skills, #7a8a9c for plain custom), badges row (BUILT-IN,
 // SKILL, LEADER).
 function AgentCard({
-  agent, selected, onClick, onPickIcon,
+  agent, selected, onClick,
 }: {
   agent: AgentDef; selected: boolean; onClick: () => void;
-  // Click handler for the avatar — opens the IconPickerDialog. The
-  // card's outer click still handles selection; the avatar swallows
-  // its own click so we don't fire both.
-  onPickIcon: (agentName: string) => void;
 }) {
   const accent = (agent.builtIn || agent.isSkill) ? "var(--accent)" : "#7a8a9c";
   return (
@@ -755,21 +751,12 @@ function AgentCard({
           : "0 2px 6px rgba(0,0,0,0.4)",
       }}
     >
-      <button
-        onClick={(e) => { e.stopPropagation(); onPickIcon(agent.name); }}
-        title="Click to pick a different icon for this agent"
-        style={{
-          width: 56, height: 56, flexShrink: 0,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          background: "transparent", border: "none", padding: 0,
-          cursor: "pointer", borderRadius: 12,
-          transition: "box-shadow 120ms",
-        }}
-        onMouseEnter={e => { e.currentTarget.style.boxShadow = "0 0 0 2px rgba(140,180,255,0.55)"; }}
-        onMouseLeave={e => { e.currentTarget.style.boxShadow = "none"; }}
-      >
-        <img src={owlSrc(agent.icon)} style={{ width: 52, height: 52, objectFit: "contain", pointerEvents: "none" }} />
-      </button>
+      <div style={{
+        width: 56, height: 56, flexShrink: 0,
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>
+        <img src={owlSrc(agent.icon)} style={{ width: 52, height: 52, objectFit: "contain" }} />
+      </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
           <div style={{
@@ -899,6 +886,7 @@ function AgentDetailPanel({
   onSave,
   onDuplicate,
   onDelete,
+  onPickIcon,
 }: {
   agent: AgentDef | null;
   // onSave now receives the edited fields the user has changed in the
@@ -907,6 +895,10 @@ function AgentDetailPanel({
   onSave: (edits: { mcpAllowlist: string[] | null }) => void;
   onDuplicate: () => void;
   onDelete: () => void;
+  // Avatar click — opens the IconPickerDialog for this agent. Lives on
+  // the detail panel (right column) instead of the gallery card so it
+  // doesn't fight the card's select-on-click.
+  onPickIcon: (agentName: string) => void;
 }) {
   // Available MCP tools across every running MCP server. Re-fetched
   // whenever the panel mounts or the user clicks a different agent so
@@ -951,17 +943,41 @@ function AgentDetailPanel({
       display: "flex", flexDirection: "column", gap: 14,
       overflow: "auto",
     }}>
-      {/* Big avatar + name field. Qt uses a 240Ã—240 button (line 477). */}
+      {/* Big avatar + name field. Qt uses a 240Ã—240 button (line 477).
+          Avatar doubles as the icon-picker trigger — click it to open
+          IconPickerDialog. Hover ring + caption hints that it's a button. */}
       <div style={{ display: "flex", gap: 18, alignItems: "flex-start" }}>
-        <div style={{
-          width: 200, height: 200, flexShrink: 0,
-          background: "var(--bg-surface-hover)",
-          border: "1px solid var(--border-strong)",
-          borderRadius: 18,
-          display: "flex", alignItems: "center", justifyContent: "center",
-        }}>
-          <img src={owlSrc(agent.icon)} style={{ width: 180, height: 180, objectFit: "contain" }} />
-        </div>
+        <button
+          onClick={() => onPickIcon(agent.name)}
+          title="Click to pick a different icon for this agent"
+          style={{
+            width: 200, height: 200, flexShrink: 0,
+            background: "var(--bg-surface-hover)",
+            border: "1px solid var(--border-strong)",
+            borderRadius: 18,
+            display: "flex", flexDirection: "column",
+            alignItems: "center", justifyContent: "center",
+            cursor: "pointer", padding: 0,
+            position: "relative",
+            transition: "box-shadow 120ms, border-color 120ms",
+          }}
+          onMouseEnter={e => {
+            e.currentTarget.style.boxShadow = "0 0 0 2px rgba(140,180,255,0.55)";
+            e.currentTarget.style.borderColor = "rgba(140,180,255,0.65)";
+          }}
+          onMouseLeave={e => {
+            e.currentTarget.style.boxShadow = "none";
+            e.currentTarget.style.borderColor = "var(--border-strong)";
+          }}
+        >
+          <img src={owlSrc(agent.icon)} style={{ width: 170, height: 170, objectFit: "contain", pointerEvents: "none" }} />
+          <span style={{
+            position: "absolute", bottom: 8, left: 0, right: 0,
+            color: "var(--fg-subtle)", fontSize: 10, fontWeight: 600,
+            letterSpacing: 0.6, textTransform: "uppercase",
+            pointerEvents: "none",
+          }}>Click to change icon</span>
+        </button>
         <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
           <div style={{ color: "var(--fg-muted)", fontSize: 13 }}>Name</div>
           <input
@@ -1543,7 +1559,6 @@ export default function StudioPage() {
                   agent={a}
                   selected={selectedAgent === a.name}
                   onClick={() => setSelectedAgent(a.name)}
-                  onPickIcon={(name) => setIconPickerAgent(name)}
                 />
               ))}
             </div>
@@ -1583,6 +1598,7 @@ export default function StudioPage() {
                     console.log("[Studio] delete agent", agent.name);
                   }
                 }}
+                onPickIcon={(name) => setIconPickerAgent(name)}
               />
             </div>
           </div>

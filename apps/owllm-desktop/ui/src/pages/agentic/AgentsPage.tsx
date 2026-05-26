@@ -7,6 +7,7 @@
 // bridges.rs, server state via server_status. No hardcoded rosters.
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import NewProjectDialog from "./NewProjectDialog";
@@ -925,19 +926,48 @@ function AgentInfoCard({
   );
 }
 
+// Team category → accent colour for the chat-grid tiles. Mirrors the
+// Studio CATEGORY_ACCENT map so the tile border / LIVE chip / glow
+// share the team's identity colour with the team card the user opened
+// the project from.
+const TEAM_CATEGORY_ACCENT: Record<string, string> = {
+  Personal:  "#74a4ff",
+  Knowledge: "#c08aff",
+  Software:  "#7ad3ff",
+  Ops:       "#ffb56a",
+  Other:     "#9aa0a6",
+  Custom:    "#ff7ed1",
+};
+function teamAccent(team: Team | null): string {
+  if (!team) return "#74a4ff";
+  return TEAM_CATEGORY_ACCENT[team.category] ?? "#74a4ff";
+}
+function hexToRgbStr(hex: string): string {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `${r},${g},${b}`;
+}
+
 // AgentChatGrid — per-agent chat windows tiled into a square grid in
 // the right half of the page. Opened from the ▦ button on the left
 // of the SuperUserCard header. Each tile is a mini live log for one
 // agent and lights up with the same green pulsing ring used on the
-// diagram + graph nodes whenever the agent is mid-stream.
+// diagram + graph nodes whenever the agent is mid-stream. Clicking a
+// tile selects that agent in the left workspace (same effect as
+// clicking the canvas node), so the OrchestratorPane updates too.
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
+  selectedAgent, onSelectAgent,
 }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
   agentLogs: Map<string, GoalMsg[]>;
   activeAgents: Set<string>;
   agentIconOverrides: Record<string, string>;
+  selectedAgent: string | null;
+  onSelectAgent: (name: string) => void;
 }) {
   // Same pulse generator used by the canvas so the ring beat matches
   // the diagram + graph active-state visuals (30 fps, ~1.5 Hz pulse).
@@ -988,6 +1018,7 @@ function AgentChatGrid({
         const icon = agentIconRef(a, roleByName, agentIconOverrides);
         const log = agentLogs.get(a.name) ?? [];
         const lastMessages = log.slice(-20);
+        const accent = teamAccent(team);
         // Active ring matches the GraphCanvas card styling so the user
         // gets the same visual language across diagram, graph, and grid.
         const ringPx = isActive ? 3 + 3 * pulse : 0;
@@ -1001,6 +1032,9 @@ function AgentChatGrid({
             icon={icon}
             messages={lastMessages}
             isActive={isActive}
+            isSelected={selectedAgent === a.name}
+            accent={accent}
+            onClick={() => onSelectAgent(a.name)}
             ringPx={ringPx}
             outerPx={outerPx}
             alphaA={alphaA}
@@ -1016,12 +1050,25 @@ function AgentChatGrid({
 // own its scroll-pin effect — the parent grid would re-fire the effect
 // for every other tile otherwise.
 function AgentChatTile({
-  name, icon, messages, isActive, ringPx, outerPx, alphaA, alphaB,
+  name, icon, messages,
+  isActive, isSelected, accent, onClick,
+  ringPx, outerPx, alphaA, alphaB,
 }: {
   name: string;
   icon: string;
   messages: GoalMsg[];
   isActive: boolean;
+  /// True when this agent is the one selected on the left workspace —
+  /// drawn with the team-accent ring so the user can see at a glance
+  /// which tile maps to the right-pane chat column.
+  isSelected: boolean;
+  /// Team's category colour (Software=#7ad3ff, Personal=#74a4ff …).
+  /// Drives the tile border + LIVE chip + selected-state ring so each
+  /// project's tiles carry the team's identity colour.
+  accent: string;
+  /// Click anywhere on the tile selects this agent in the left
+  /// workspace — same effect as clicking the canvas node.
+  onClick: () => void;
   ringPx: number;
   outerPx: number;
   alphaA: number;
@@ -1033,26 +1080,47 @@ function AgentChatTile({
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [tailSig]);
+  const rgb = hexToRgbStr(accent);
+  // Only show this agent's own reply lines. The user's "you" turn and
+  // any system errors live on the SuperUserCard / OrchestratorPane,
+  // not in the per-agent grid (user spec: "they only plot their own
+  // reply"). Thoughts / dispatches / tool calls also get filtered out
+  // — the tile is the agent's voice, nothing else.
+  const replyMessages = useMemo(() => messages.filter(m =>
+    m.role !== "you" && m.role !== "system" && !m.kind
+  ), [messages]);
   return (
     <div
-      title={name}
+      title={`Click to view ${displayLabel(name)}'s chat in the workspace pane`}
+      onClick={onClick}
       style={{
         minWidth: 0, minHeight: 0,
-        background: "linear-gradient(180deg, #1a1d27 0%, #14171f 100%)",
-        border: isActive ? "1px solid rgba(60,242,107,0.85)" : "1px solid var(--border)",
+        background: `linear-gradient(180deg, rgba(${rgb},0.06) 0%, rgba(20,23,31,0.95) 100%)`,
+        border: isActive
+          ? "1px solid rgba(60,242,107,0.85)"
+          : isSelected
+            ? `1.5px solid rgba(${rgb},0.85)`
+            : `1px solid rgba(${rgb},0.30)`,
         borderRadius: 10,
         boxShadow: isActive
           ? `0 0 0 ${ringPx}px rgba(60,242,107,${alphaA}), 0 0 ${outerPx}px rgba(60,242,107,${alphaB})`
-          : "0 2px 6px rgba(0,0,0,0.4)",
+          : isSelected
+            ? `0 0 0 2px rgba(${rgb},0.45), 0 4px 14px rgba(0,0,0,0.5)`
+            : "0 2px 6px rgba(0,0,0,0.4)",
         display: "flex", flexDirection: "column",
         overflow: "hidden",
+        cursor: "pointer",
+        transition: "border-color 120ms, box-shadow 120ms",
       }}
     >
-      {/* Header */}
+      {/* Header — small icon + name + (optional) LIVE chip. Identifies
+          the tile; this is NOT the sender chip for each message (those
+          are stripped per user spec — the tile is one agent's voice,
+          its messages are just the body text). */}
       <div style={{
         display: "flex", alignItems: "center", gap: 8,
         padding: "6px 10px",
-        borderBottom: "1px solid var(--border)",
+        borderBottom: `1px solid rgba(${rgb},0.25)`,
         background: "rgba(0,0,0,0.25)",
         flexShrink: 0,
       }}>
@@ -1072,27 +1140,28 @@ function AgentChatTile({
           }}>LIVE</span>
         )}
       </div>
-      {/* Log scroll pane — same renderers used by the right-pane
-          OrchestratorPane (renderReplyEntry / renderThoughtEntry) so
-          markdown, code blocks, lists, and tables look like the main
-          chat instead of a raw mono dump. */}
+      {/* Log scroll pane — the agent's reply text only, rendered with
+          the main-chat markdown renderer. No avatar / role chip
+          container per message; just the body. */}
       <div
         ref={scrollRef}
         style={{
           flex: 1, minHeight: 0, overflowY: "auto",
-          padding: 8,
+          padding: 10,
           color: "var(--fg)",
           display: "flex", flexDirection: "column", gap: 6,
           fontFamily: "Segoe UI, sans-serif",
         }}
       >
-        {messages.length === 0 ? (
+        {replyMessages.length === 0 ? (
           <div style={{ color: "var(--fg-subtle)", fontStyle: "italic", textAlign: "center", marginTop: 12 }}>
             (no messages yet)
           </div>
         ) : (
-          messages.map((m, i) => (
-            m.kind ? renderThoughtEntry(m, i) : renderReplyEntry(m, i, name, name)
+          replyMessages.map((m, i) => (
+            m.text
+              ? <MarkdownBody key={i} text={m.text} />
+              : <div key={i} style={{ color: "var(--fg-subtle)", fontStyle: "italic", fontSize: 12 }}>…</div>
           ))
         )}
       </div>
@@ -4687,11 +4756,29 @@ export default function AgentsPage() {
   const [busy, setBusy] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  // Chat-split layout — when true, the page's right half becomes a
-  // grid of per-agent chat windows; the orchestrator pane is hidden
-  // (its content lives inside the grid instead). Toggled from the ▦
-  // button on the left of the SuperUserCard header.
+  // Chat-split layout — when true, the page splits 40 / 60 (workspace
+  // left, per-agent chat grid right) and the window auto-maximizes so
+  // there's enough room for both. Toggled from the ▦ button on the
+  // left of the SuperUserCard header.
   const [chatSplit, setChatSplit] = useState<boolean>(false);
+  const toggleChatSplit = () => {
+    setChatSplit(prev => {
+      const next = !prev;
+      // Maximize the window on toggle-on so the grid has room. We
+      // intentionally don't un-maximize on toggle-off — the user can
+      // resize manually if they want the previous size back. wrapped
+      // in try/catch in case we're outside a Tauri context (e.g. dev
+      // browser preview), where getCurrentWindow throws.
+      if (next) {
+        try {
+          getCurrentWindow().isMaximized().then(isMax => {
+            if (!isMax) getCurrentWindow().maximize().catch(() => {});
+          }).catch(() => {});
+        } catch { /* not in Tauri ctx */ }
+      }
+      return next;
+    });
+  };
   // Multimodal attachments queued against the next Run. Cleared the
   // moment dispatchGoal kicks off — once the orchestrator has them in
   // its context, the user's chip strip should empty so the next prompt
@@ -6408,7 +6495,7 @@ export default function AgentsPage() {
             When chatSplit is off, the wrapper takes 100 % and renders
             only the original workspace. */}
         <div data-ui="WorkspaceCore" style={{
-          flex: chatSplit ? "1 1 50%" : "1 1 100%",
+          flex: chatSplit ? "1 1 40%" : "1 1 100%",
           minWidth: 0, display:"flex", overflow:"hidden",
         }}>
         <div data-ui="RosterLeft" style={{ flex:"2 1 0", minWidth:0, display:"flex", flexDirection:"column", background:"var(--bg-elevated)" }}>
@@ -6483,7 +6570,7 @@ export default function AgentsPage() {
                   directorMode={directorMode}
                   onToggleDirectorMode={() => setDirectorMode(!directorMode)}
                   chatSplit={chatSplit}
-                  onToggleChatSplit={() => setChatSplit(v => !v)}
+                  onToggleChatSplit={toggleChatSplit}
                 />
               </div>
               <div style={{ pointerEvents: "auto" }}>
@@ -6541,13 +6628,15 @@ export default function AgentsPage() {
         </div>
         </div>
         {chatSplit && (
-          <div data-ui="ChatGridRight" style={{ flex: "1 1 50%", minWidth: 0, display: "flex" }}>
+          <div data-ui="ChatGridRight" style={{ flex: "1 1 60%", minWidth: 0, display: "flex" }}>
             <AgentChatGrid
               team={renderTeam}
               roleByName={roleByName}
               agentLogs={agentLogs}
               activeAgents={activeAgents}
               agentIconOverrides={agentIconOverrides}
+              selectedAgent={selectedNode}
+              onSelectAgent={(name) => setSelectedNode(name)}
             />
           </div>
         )}

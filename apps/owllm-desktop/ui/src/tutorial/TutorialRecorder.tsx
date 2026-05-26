@@ -4,7 +4,7 @@ type Point = { x: number; y: number };
 type ClickMark = Point & { id: number };
 
 type RecorderState = "idle" | "recording" | "paused" | "saving";
-type CaptureMode = "screen";
+type CaptureMode = "window" | "screen";
 
 const TOGGLE_EVENT = "owllm:tutorial-recorder-toggle";
 const ICONS = "/Page_icons";
@@ -201,7 +201,7 @@ function CaptureFrameOverlay({
   );
 }
 
-async function requestDisplayStream(): Promise<MediaStream> {
+async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
   const media = navigator.mediaDevices as MediaDevices & {
     getDisplayMedia(options?: unknown): Promise<MediaStream>;
   };
@@ -209,7 +209,7 @@ async function requestDisplayStream(): Promise<MediaStream> {
     video: {
       frameRate: 30,
       cursor: "always",
-      displaySurface: "monitor",
+      displaySurface: mode === "screen" ? "monitor" : "window",
     },
     audio: false,
     preferCurrentTab: false,
@@ -229,10 +229,10 @@ async function requestDisplayStream(): Promise<MediaStream> {
 export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<RecorderState>("idle");
-  const [captureMode] = useState<CaptureMode>("screen");
+  const [captureMode, setCaptureMode] = useState<CaptureMode>("window");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [mark, setMark] = useState<ClickMark | null>(null);
-  const [status, setStatus] = useState("Records the screen so the real OWLLM frame is included. Use Ctrl+Shift+R to stop.");
+  const [status, setStatus] = useState("Window + frame records the selected OWLLM window and draws a clean frame. Use Ctrl+Shift+R to stop.");
   const viewport = useViewportSize();
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -339,9 +339,11 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       pausedAtRef.current = null;
       startedAtRef.current = performance.now();
       setElapsedMs(0);
-      setStatus("Recording. The recorder panel is hidden from the video. Press Ctrl+Shift+R or the header Record button to stop.");
+      setStatus(captureMode === "screen"
+        ? "Recording full screen. The recorder panel is hidden from the video. Press Ctrl+Shift+R or the header Record button to stop."
+        : `Recording window. Pick the OWLLM content window, not the frame overlay. Matched to ${window.innerWidth} x ${window.innerHeight}.`);
 
-      const stream = await requestDisplayStream();
+      const stream = await requestDisplayStream(captureMode);
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream, {
         mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
@@ -415,7 +417,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
 
   return (
     <>
-      <CaptureFrameOverlay active={false} outerW={viewport.w} outerH={viewport.h} />
+      <CaptureFrameOverlay active={active && captureMode === "window"} outerW={viewport.w} outerH={viewport.h} />
       <ClickPulseOverlay mark={mark} active={active} />
       {!hidePanel && (
         <div
@@ -457,13 +459,20 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
             ×
           </button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6, marginBottom: 8 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
           <button
-            onClick={() => undefined}
+            onClick={() => setCaptureMode("window")}
+            disabled={active}
+            style={modeBtn(captureMode === "window", active)}
+          >
+            Window + frame
+          </button>
+          <button
+            onClick={() => setCaptureMode("screen")}
             disabled={active}
             style={modeBtn(captureMode === "screen", active)}
           >
-            Screen capture
+            Full screen
           </button>
         </div>
         <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>

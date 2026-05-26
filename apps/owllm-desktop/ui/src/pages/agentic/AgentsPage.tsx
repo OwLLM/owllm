@@ -1072,14 +1072,18 @@ function AgentChatTile({
           }}>LIVE</span>
         )}
       </div>
-      {/* Log scroll pane */}
+      {/* Log scroll pane — same renderers used by the right-pane
+          OrchestratorPane (renderReplyEntry / renderThoughtEntry) so
+          markdown, code blocks, lists, and tables look like the main
+          chat instead of a raw mono dump. */}
       <div
         ref={scrollRef}
         style={{
           flex: 1, minHeight: 0, overflowY: "auto",
-          padding: 8, fontSize: 11, lineHeight: 1.45,
+          padding: 8,
           color: "var(--fg)",
-          fontFamily: "Consolas, 'JetBrains Mono', monospace",
+          display: "flex", flexDirection: "column", gap: 6,
+          fontFamily: "Segoe UI, sans-serif",
         }}
       >
         {messages.length === 0 ? (
@@ -1088,15 +1092,7 @@ function AgentChatTile({
           </div>
         ) : (
           messages.map((m, i) => (
-            <div key={i} style={{
-              marginBottom: 6,
-              color: m.color || "var(--fg)",
-              whiteSpace: "pre-wrap", wordBreak: "break-word",
-              opacity: m.kind === "thinking" ? 0.7 : 1,
-              fontStyle: m.kind === "thinking" ? "italic" : "normal",
-            }}>
-              {m.text}
-            </div>
+            m.kind ? renderThoughtEntry(m, i) : renderReplyEntry(m, i, name, name)
           ))
         )}
       </div>

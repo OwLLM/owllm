@@ -925,6 +925,185 @@ function AgentInfoCard({
   );
 }
 
+// AgentChatGrid — per-agent chat windows tiled into a square grid in
+// the right half of the page. Opened from the ▦ button on the left
+// of the SuperUserCard header. Each tile is a mini live log for one
+// agent and lights up with the same green pulsing ring used on the
+// diagram + graph nodes whenever the agent is mid-stream.
+function AgentChatGrid({
+  team, roleByName, agentLogs, activeAgents, agentIconOverrides,
+}: {
+  team: Team | null;
+  roleByName: Map<string, RoleData>;
+  agentLogs: Map<string, GoalMsg[]>;
+  activeAgents: Set<string>;
+  agentIconOverrides: Record<string, string>;
+}) {
+  // Same pulse generator used by the canvas so the ring beat matches
+  // the diagram + graph active-state visuals (30 fps, ~1.5 Hz pulse).
+  const [pulsePhase, setPulsePhase] = useState(0);
+  useEffect(() => {
+    let raf = 0;
+    let lastEmit = 0;
+    const start = performance.now();
+    const tick = (now: number) => {
+      if (now - lastEmit >= 33) {
+        setPulsePhase(((now - start) / 1000) * 36);
+        lastEmit = now;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  const pulse = 0.5 + 0.5 * Math.sin((pulsePhase * Math.PI) / 180 * 3);
+
+  const agents = team?.agents ?? [];
+  // Compute a near-square grid: ceil(sqrt(n)) columns, ceil(n/cols) rows.
+  const n = Math.max(1, agents.length);
+  const cols = Math.ceil(Math.sqrt(n));
+  return (
+    <div style={{
+      width: "100%", height: "100%",
+      background: "var(--bg-app)",
+      borderLeft: "1px solid var(--border)",
+      padding: 8,
+      display: "grid",
+      gridTemplateColumns: `repeat(${cols}, 1fr)`,
+      gridAutoRows: "1fr",
+      gap: 8,
+      overflow: "hidden",
+    }}>
+      {agents.length === 0 && (
+        <div style={{
+          gridColumn: "1 / -1",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          color: "var(--fg-subtle)", fontSize: 12, padding: 24, textAlign: "center",
+        }}>
+          No team picked yet. Start a project from the Studio to populate the per-agent chat grid.
+        </div>
+      )}
+      {agents.map(a => {
+        const isActive = activeAgents.has(a.name);
+        const icon = agentIconRef(a, roleByName, agentIconOverrides);
+        const log = agentLogs.get(a.name) ?? [];
+        const lastMessages = log.slice(-20);
+        // Active ring matches the GraphCanvas card styling so the user
+        // gets the same visual language across diagram, graph, and grid.
+        const ringPx = isActive ? 3 + 3 * pulse : 0;
+        const outerPx = isActive ? 14 + 12 * pulse : 0;
+        const alphaA = 0.65 + 0.30 * pulse;
+        const alphaB = 0.40 + 0.30 * pulse;
+        return (
+          <AgentChatTile
+            key={a.name}
+            name={a.name}
+            icon={icon}
+            messages={lastMessages}
+            isActive={isActive}
+            ringPx={ringPx}
+            outerPx={outerPx}
+            alphaA={alphaA}
+            alphaB={alphaB}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+// Single chat-tile in the AgentChatGrid. Pulled out so each tile can
+// own its scroll-pin effect — the parent grid would re-fire the effect
+// for every other tile otherwise.
+function AgentChatTile({
+  name, icon, messages, isActive, ringPx, outerPx, alphaA, alphaB,
+}: {
+  name: string;
+  icon: string;
+  messages: GoalMsg[];
+  isActive: boolean;
+  ringPx: number;
+  outerPx: number;
+  alphaA: number;
+  alphaB: number;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const tailSig = `${messages.length}:${messages[messages.length - 1]?.text?.length ?? 0}`;
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [tailSig]);
+  return (
+    <div
+      title={name}
+      style={{
+        minWidth: 0, minHeight: 0,
+        background: "linear-gradient(180deg, #1a1d27 0%, #14171f 100%)",
+        border: isActive ? "1px solid rgba(60,242,107,0.85)" : "1px solid var(--border)",
+        borderRadius: 10,
+        boxShadow: isActive
+          ? `0 0 0 ${ringPx}px rgba(60,242,107,${alphaA}), 0 0 ${outerPx}px rgba(60,242,107,${alphaB})`
+          : "0 2px 6px rgba(0,0,0,0.4)",
+        display: "flex", flexDirection: "column",
+        overflow: "hidden",
+      }}
+    >
+      {/* Header */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 8,
+        padding: "6px 10px",
+        borderBottom: "1px solid var(--border)",
+        background: "rgba(0,0,0,0.25)",
+        flexShrink: 0,
+      }}>
+        <img src={owlSrc(icon)} style={{ width: 22, height: 22, objectFit: "contain" }} />
+        <div style={{
+          flex: 1, minWidth: 0,
+          color: "var(--fg-strong)", fontSize: 12, fontWeight: 700,
+          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        }}>{displayLabel(name)}</div>
+        {isActive && (
+          <span style={{
+            color: "#3cf26b", fontSize: 9, fontWeight: 800,
+            letterSpacing: 0.6, textTransform: "uppercase",
+            background: "rgba(60,242,107,0.12)",
+            border: "1px solid rgba(60,242,107,0.50)",
+            borderRadius: 4, padding: "1px 5px",
+          }}>LIVE</span>
+        )}
+      </div>
+      {/* Log scroll pane */}
+      <div
+        ref={scrollRef}
+        style={{
+          flex: 1, minHeight: 0, overflowY: "auto",
+          padding: 8, fontSize: 11, lineHeight: 1.45,
+          color: "var(--fg)",
+          fontFamily: "Consolas, 'JetBrains Mono', monospace",
+        }}
+      >
+        {messages.length === 0 ? (
+          <div style={{ color: "var(--fg-subtle)", fontStyle: "italic", textAlign: "center", marginTop: 12 }}>
+            (no messages yet)
+          </div>
+        ) : (
+          messages.map((m, i) => (
+            <div key={i} style={{
+              marginBottom: 6,
+              color: m.color || "var(--fg)",
+              whiteSpace: "pre-wrap", wordBreak: "break-word",
+              opacity: m.kind === "thinking" ? 0.7 : 1,
+              fontStyle: m.kind === "thinking" ? "italic" : "normal",
+            }}>
+              {m.text}
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 // SuperUserCard — widgets/super_user_card.py::SuperUserCard. The chat
 // pane is empty by default (no fake "You: …" / "Team: …" prefill).
 //
@@ -932,7 +1111,7 @@ function AgentInfoCard({
 // (Server, Studio, etc.), so the in-progress message in the input box
 // would otherwise be wiped. Keying by projectId so each project keeps
 // its own draft.
-function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAutoApprove, projectId, directives, onDirectivesChanged, directorMode, onToggleDirectorMode }: {
+function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAutoApprove, projectId, directives, onDirectivesChanged, directorMode, onToggleDirectorMode, chatSplit, onToggleChatSplit }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
   chat: GoalMsg[];
@@ -946,6 +1125,11 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
   onDirectivesChanged: () => Promise<void> | void;
   directorMode: boolean;
   onToggleDirectorMode: () => void;
+  /// When true, the right half of the page becomes a grid of per-agent
+  /// chat windows. The button lives to the LEFT of the Super User
+  /// avatar in this header.
+  chatSplit: boolean;
+  onToggleChatSplit: () => void;
 }) {
   const peekAgents = (team?.agents ?? []).slice(0, 6);
   const draftKey = projectId ? `owllm:supdraft:${projectId}` : "";
@@ -1051,6 +1235,23 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
     // card; subtle amber border instead of the previous neutral one.
     <div data-ui="SuperUserCard" style={{ margin:"8px 0 0 0", padding:"10px 12px", borderRadius:12, background:"linear-gradient(135deg, rgba(38,30,10,0.92) 0%, rgba(18,14,4,0.92) 100%)", border:"1px solid rgba(255,200,80,0.35)", width:410, minHeight:180, display:"flex", flexDirection:"column", gap:8 }}>
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+        {/* Chat-split toggle. Lives to the LEFT of the avatar so the
+            user can flip into the per-agent chat grid without leaving
+            the canvas. Glows yellow when on. */}
+        <button
+          data-ui="suChatSplitToggle"
+          onClick={onToggleChatSplit}
+          title={chatSplit
+            ? "Hide per-agent chat grid (restore full canvas)"
+            : "Show per-agent chat grid on the right half of the page"}
+          style={{
+            width:28, height:28, padding:0,
+            background: chatSplit ? "rgba(255,200,80,0.85)" : "#2a2410",
+            color: chatSplit ? "#1a1408" : "var(--fg)",
+            border: chatSplit ? "1px solid #ffd97a" : "1px solid #3a3018",
+            borderRadius:6, fontSize:14, fontWeight:700, cursor:"pointer",
+          }}
+        >▦</button>
         <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:16, background:"#2a2410", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"var(--fg)" }}>👤</div>
         <div style={{ flex:1, minWidth:0 }}>
           <div data-ui="suName" style={{ fontSize:16, fontWeight:700, color:"var(--fg)", lineHeight:"22px" }}>Super User</div>
@@ -1741,6 +1942,12 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   // top of the orbital diagram exposes the real flow without making
   // the picture too busy.
   const orchName = orchSpec?.name;
+  // Whether the orchestrator itself is mid-stream. The diagram used to
+  // render the central owl as a static image with no active-state
+  // change, so the user saw nothing happen when the orchestrator was
+  // running (only the orbital specialists carry an active flag). We
+  // surface a pulsing ring around the hub when this is true.
+  const orchActive = orchName ? activeAgents.has(orchName) : false;
   const routingEdges = (team?.edges ?? []).filter(e =>
     e.source !== orchName &&
     nodeByName.has(e.source) &&
@@ -1937,7 +2144,29 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
           <path key={"arcIn" + i} d={arcPath(arc_r_in, -arcPhase * 1.3 + off, 70)} stroke="#ffd76a" strokeWidth={2.0} strokeLinecap="round" fill="none" opacity={arcAlphaIn} />
         ))}
       </svg>
-      <img src={`${ICONS}/owl_agentic.png`} style={{ position:"absolute", left:cx - orchestrator_r * 1.12, top:cy - orchestrator_r * 1.12, width:orchestrator_r * 2.24, height:orchestrator_r * 2.24, pointerEvents:"none", filter:"drop-shadow(0 0 16px rgba(255,200,100,0.55)) drop-shadow(0 0 28px rgba(255,180,80,0.35))" }} />
+      {/* Orchestrator active-state ring: pulsing green annulus around
+          the central owl. Only rendered while the orchestrator is mid-
+          stream, so the user can SEE the orchestrator working — the
+          static-image hub previously gave zero visual feedback. */}
+      {orchActive && (() => {
+        const ringR = orchestrator_r * 1.30;
+        const ringPad = 14 + 8 * pulse;
+        return (
+          <div style={{
+            position: "absolute",
+            left: cx - ringR - ringPad,
+            top:  cy - ringR - ringPad,
+            width:  (ringR + ringPad) * 2,
+            height: (ringR + ringPad) * 2,
+            borderRadius: "50%",
+            pointerEvents: "none",
+            border: `3px solid rgba(60,242,107,${0.65 + 0.30 * pulse})`,
+            boxShadow: `0 0 ${24 + 16 * pulse}px rgba(60,242,107,${0.45 + 0.25 * pulse})`,
+            zIndex: 0,
+          }} />
+        );
+      })()}
+      <img src={`${ICONS}/owl_agentic.png`} style={{ position:"absolute", left:cx - orchestrator_r * 1.12, top:cy - orchestrator_r * 1.12, width:orchestrator_r * 2.24, height:orchestrator_r * 2.24, pointerEvents:"none", filter: orchActive ? "drop-shadow(0 0 22px rgba(60,242,107,0.85)) drop-shadow(0 0 40px rgba(60,242,107,0.55))" : "drop-shadow(0 0 16px rgba(255,200,100,0.55)) drop-shadow(0 0 28px rgba(255,180,80,0.35))" }} />
       <div style={{ position:"absolute", left:cx-60, top:cy + orchestrator_r * 1.6, width:120, textAlign:"center", fontSize:11, fontWeight:700, color:"#ffd97a", textTransform:"uppercase", letterSpacing:0.8, textShadow:"0 1px 3px rgba(0,0,0,0.9)", pointerEvents:"none" }}>Orchestrator</div>
       {nodes.map((n,i) => {
         const col = LAYER_COLORS[n.depth % LAYER_COLORS.length];
@@ -1945,6 +2174,13 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
         const glow = n.active ? 12 + 10 * pulse : 4;
         const tint = tintForGroup(n.group);
         const isCritic = n.group === "critic";
+        // Visible active-state ring around each specialist node. The
+        // drop-shadow alone (4→22 px on the icon) was too subtle against
+        // the dark gradient background — users couldn't tell which
+        // specialist was streaming. A 3-px green halo with a soft outer
+        // glow makes the active node unmistakable.
+        const activeRingPad = 5 + 4 * pulse;
+        const activeR = NODE_R + 6 + activeRingPad;
         // Critic gets a SHARP rainbow ring around the icon — full
         // opacity, no blur. The previous blurred 0.55-opacity disc
         // disappeared into the background; this version uses a
@@ -1954,6 +2190,20 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
         const RING_PAD = 9;
         return (
           <React.Fragment key={"node" + i}>
+            {n.active && (
+              <div style={{
+                position: "absolute",
+                left: n.x - activeR,
+                top:  n.y - activeR,
+                width:  activeR * 2,
+                height: activeR * 2,
+                borderRadius: "50%",
+                pointerEvents: "none",
+                border: `3px solid rgba(60,242,107,${0.70 + 0.25 * pulse})`,
+                boxShadow: `0 0 ${16 + 14 * pulse}px rgba(60,242,107,${0.45 + 0.30 * pulse})`,
+                zIndex: 1,
+              }} />
+            )}
             {isCritic ? (
               <div
                 style={{
@@ -2159,6 +2409,26 @@ function GraphCanvas({
   // stopPropagation, so they don't fight with the hook.
   const view = useCanvasGestures({ minZoom: 0.25, maxZoom: 3.0, factor: 1.12 });
   const { pan, zoom, setPan, containerRef, onMouseDown: onContainerMouseDown, onWheel: onContainerWheel, panDragging } = view;
+
+  // Active-state pulse so the green ring on a streaming node breathes
+  // (static 40 %-opacity ring used to be easy to miss against the dark
+  // gradient). 30 fps, same throttle as TeamCanvas.
+  const [pulsePhase, setPulsePhase] = useState(0);
+  useEffect(() => {
+    let raf = 0;
+    let lastEmit = 0;
+    const start = performance.now();
+    const tick = (now: number) => {
+      if (now - lastEmit >= 33) {
+        setPulsePhase(((now - start) / 1000) * 36);
+        lastEmit = now;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  const activePulse = 0.5 + 0.5 * Math.sin((pulsePhase * Math.PI) / 180 * 3);
 
   const LAYER_COLORS = [
     "#f1c44a", "#48d486", "#3aa0ff", "#ee5b5b",
@@ -2595,6 +2865,12 @@ function GraphCanvas({
           const borderColor = isCritic
             ? "transparent"
             : isActive ? "#3cf26b" : sel ? accent : isDragTarget ? "var(--accent)" : tint.border;
+          // Pulsed shadow size and alpha for the active state — beat at
+          // ~1.5 Hz so the user catches it even from peripheral vision.
+          const activeRingPx = 4 + 4 * activePulse;
+          const activeOuterPx = 18 + 14 * activePulse;
+          const activeAlphaA = 0.65 + 0.30 * activePulse;
+          const activeAlphaB = 0.40 + 0.30 * activePulse;
           return (
             <div
               key={n.name}
@@ -2611,7 +2887,7 @@ function GraphCanvas({
                 background: baseBg,
                 border: `1.8px solid ${borderColor}`,
                 boxShadow: isActive
-                  ? "0 0 0 3px rgba(60,242,107,0.40), 0 6px 22px rgba(0,0,0,0.6)"
+                  ? `0 0 0 ${activeRingPx}px rgba(60,242,107,${activeAlphaA}), 0 0 ${activeOuterPx}px rgba(60,242,107,${activeAlphaB}), 0 6px 22px rgba(0,0,0,0.6)`
                   : sel
                   ? `0 0 0 2px ${accent}55, 0 6px 22px rgba(0,0,0,0.6)`
                   : isDragTarget
@@ -4415,6 +4691,11 @@ export default function AgentsPage() {
   const [busy, setBusy] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Chat-split layout — when true, the page's right half becomes a
+  // grid of per-agent chat windows; the orchestrator pane is hidden
+  // (its content lives inside the grid instead). Toggled from the ▦
+  // button on the left of the SuperUserCard header.
+  const [chatSplit, setChatSplit] = useState<boolean>(false);
   // Multimodal attachments queued against the next Run. Cleared the
   // moment dispatchGoal kicks off — once the orchestrator has them in
   // its context, the user's chip strip should empty so the next prompt
@@ -6120,7 +6401,20 @@ export default function AgentsPage() {
         models={models}
         onBriefSaved={() => setHasBriefForProject(true)}
       />
-      <div data-ui="WorkspaceStack" style={{ flex:1, minHeight:0, margin:"0 23px", display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0 }}>
+      <div data-ui="WorkspaceStack" style={{
+        flex:1, minHeight:0, margin:"0 23px",
+        display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0,
+      }}>
+        {/* When chatSplit is on, the existing workspace (canvas +
+            super-user-card overlay + orchestrator pane) compresses to
+            the LEFT half of the page; the RIGHT half becomes a grid
+            of per-agent chat windows. The wrapper below owns the split.
+            When chatSplit is off, the wrapper takes 100 % and renders
+            only the original workspace. */}
+        <div data-ui="WorkspaceCore" style={{
+          flex: chatSplit ? "1 1 50%" : "1 1 100%",
+          minWidth: 0, display:"flex", overflow:"hidden",
+        }}>
         <div data-ui="RosterLeft" style={{ flex:"2 1 0", minWidth:0, display:"flex", flexDirection:"column", background:"var(--bg-elevated)" }}>
           <FlowHeader
             viewMode={viewMode}
@@ -6192,6 +6486,8 @@ export default function AgentsPage() {
                   onDirectivesChanged={reloadDirectives}
                   directorMode={directorMode}
                   onToggleDirectorMode={() => setDirectorMode(!directorMode)}
+                  chatSplit={chatSplit}
+                  onToggleChatSplit={() => setChatSplit(v => !v)}
                 />
               </div>
               <div style={{ pointerEvents: "auto" }}>
@@ -6247,6 +6543,18 @@ export default function AgentsPage() {
             accountsStatus={accountsStatus}
           />
         </div>
+        </div>
+        {chatSplit && (
+          <div data-ui="ChatGridRight" style={{ flex: "1 1 50%", minWidth: 0, display: "flex" }}>
+            <AgentChatGrid
+              team={renderTeam}
+              roleByName={roleByName}
+              agentLogs={agentLogs}
+              activeAgents={activeAgents}
+              agentIconOverrides={agentIconOverrides}
+            />
+          </div>
+        )}
       </div>
     </div>
   );

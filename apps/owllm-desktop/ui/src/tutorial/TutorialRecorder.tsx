@@ -4,7 +4,7 @@ type Point = { x: number; y: number };
 type ClickMark = Point & { id: number };
 
 type RecorderState = "idle" | "recording" | "paused" | "saving";
-type CaptureMode = "window" | "screen";
+type CaptureMode = "screen";
 
 const TOGGLE_EVENT = "owllm:tutorial-recorder-toggle";
 const ICONS = "/Page_icons";
@@ -201,7 +201,7 @@ function CaptureFrameOverlay({
   );
 }
 
-async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
+async function requestDisplayStream(): Promise<MediaStream> {
   const media = navigator.mediaDevices as MediaDevices & {
     getDisplayMedia(options?: unknown): Promise<MediaStream>;
   };
@@ -209,7 +209,7 @@ async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
     video: {
       frameRate: 30,
       cursor: "always",
-      displaySurface: mode === "screen" ? "monitor" : "window",
+      displaySurface: "monitor",
     },
     audio: false,
     preferCurrentTab: false,
@@ -229,10 +229,10 @@ async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
 export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<RecorderState>("idle");
-  const [captureMode, setCaptureMode] = useState<CaptureMode>("window");
+  const [captureMode] = useState<CaptureMode>("screen");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [mark, setMark] = useState<ClickMark | null>(null);
-  const [status, setStatus] = useState("Window mode records OWLLM and draws a clean frame into the video.");
+  const [status, setStatus] = useState("Records the screen so the real OWLLM frame is included. Use Ctrl+Shift+R to stop.");
   const viewport = useViewportSize();
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -247,11 +247,15 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   useEffect(() => {
     const onToggle = () => {
       if (!enabled) return;
+      if (state === "recording" || state === "paused") {
+        stop();
+        return;
+      }
       setOpen(v => !v);
     };
     window.addEventListener(TOGGLE_EVENT, onToggle);
     return () => window.removeEventListener(TOGGLE_EVENT, onToggle);
-  }, [enabled]);
+  }, [enabled, state]);
 
   useEffect(() => {
     if (!enabled) {
@@ -265,6 +269,18 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       setElapsedMs(performance.now() - startedAtRef.current - pausedTotalRef.current);
     }, 250);
     return () => window.clearInterval(id);
+  }, [state]);
+
+  useEffect(() => {
+    if (state !== "recording" && state !== "paused") return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "r") {
+        e.preventDefault();
+        stop();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [state]);
 
   useEffect(() => {
@@ -323,11 +339,9 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       pausedAtRef.current = null;
       startedAtRef.current = performance.now();
       setElapsedMs(0);
-      setStatus(captureMode === "screen"
-        ? "Recording full screen. The real overlay frame is included."
-        : `Recording window. The clean frame is matched to ${window.innerWidth} x ${window.innerHeight}.`);
+      setStatus("Recording. The recorder panel is hidden from the video. Press Ctrl+Shift+R or the header Record button to stop.");
 
-      const stream = await requestDisplayStream(captureMode);
+      const stream = await requestDisplayStream();
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream, {
         mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
@@ -397,28 +411,30 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
 
   const recording = state === "recording";
   const active = state === "recording" || state === "paused" || state === "saving";
+  const hidePanel = active;
 
   return (
     <>
-      <CaptureFrameOverlay active={active && captureMode === "window"} outerW={viewport.w} outerH={viewport.h} />
+      <CaptureFrameOverlay active={false} outerW={viewport.w} outerH={viewport.h} />
       <ClickPulseOverlay mark={mark} active={active} />
-      <div
-        data-ui="TutorialRecorderPanel"
-        style={{
-          position: "fixed",
-          right: 82,
-          top: 76,
-          zIndex: 13000,
-          width: 310,
-          padding: 10,
-          borderRadius: 8,
-          background: "rgba(10,14,26,0.94)",
-          border: "1px solid rgba(var(--accent-rgb),0.45)",
-          boxShadow: "0 12px 36px rgba(0,0,0,0.48)",
-          color: "var(--fg)",
-          fontSize: 12,
-        }}
-      >
+      {!hidePanel && (
+        <div
+          data-ui="TutorialRecorderPanel"
+          style={{
+            position: "fixed",
+            right: 82,
+            top: 76,
+            zIndex: 13000,
+            width: 310,
+            padding: 10,
+            borderRadius: 8,
+            background: "rgba(10,14,26,0.94)",
+            border: "1px solid rgba(var(--accent-rgb),0.45)",
+            boxShadow: "0 12px 36px rgba(0,0,0,0.48)",
+            color: "var(--fg)",
+            fontSize: 12,
+          }}
+        >
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <strong style={{ color: "var(--fg-strong)" }}>Tutorial Recorder</strong>
           <div style={{ flex: 1 }} />
@@ -441,20 +457,13 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
             ×
           </button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6, marginBottom: 8 }}>
           <button
-            onClick={() => setCaptureMode("window")}
-            disabled={active}
-            style={modeBtn(captureMode === "window", active)}
-          >
-            Window + frame
-          </button>
-          <button
-            onClick={() => setCaptureMode("screen")}
+            onClick={() => undefined}
             disabled={active}
             style={modeBtn(captureMode === "screen", active)}
           >
-            Full screen
+            Screen capture
           </button>
         </div>
         <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
@@ -483,7 +492,8 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         <div style={{ color: "var(--fg-muted)", lineHeight: 1.35 }}>
           {status}
         </div>
-      </div>
+        </div>
+      )}
     </>
   );
 }

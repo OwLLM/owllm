@@ -4,8 +4,11 @@ type Point = { x: number; y: number };
 type ClickMark = Point & { id: number };
 
 type RecorderState = "idle" | "recording" | "paused" | "saving";
+type CaptureMode = "window" | "screen";
 
 const TOGGLE_EVENT = "owllm:tutorial-recorder-toggle";
+const ICONS = "/Page_icons";
+const CORNERS = `${ICONS}/CornersNew`;
 
 export function toggleTutorialRecorder() {
   window.dispatchEvent(new CustomEvent(TOGGLE_EVENT));
@@ -118,7 +121,59 @@ function PointerOverlay({
   );
 }
 
-async function requestDisplayStream(): Promise<MediaStream> {
+function CaptureFrameOverlay({ active }: { active: boolean }) {
+  if (!active) return null;
+  const line = "rgba(var(--accent-rgb), 0.86)";
+  const accent = "rgba(var(--accent-rgb), 0.78)";
+  const bg = "var(--bg-header)";
+  const cornerW = 144;
+  return (
+    <div
+      data-ui="TutorialCaptureFrame"
+      style={{
+        position: "fixed",
+        inset: 8,
+        zIndex: 11900,
+        pointerEvents: "none",
+        border: `1px solid ${line}`,
+        borderRadius: 14,
+        boxShadow: `inset 0 0 0 18px ${bg}, inset 0 0 0 19px ${accent}`,
+      }}
+    >
+      <div style={{ position: "absolute", inset: 18, border: `1px solid ${accent}`, borderRadius: 10 }} />
+      <img src={`${CORNERS}/corner_ul.png`} style={captureCornerStyle("tl", cornerW)} />
+      <img src={`${CORNERS}/corner_ur.png`} style={captureCornerStyle("tr", cornerW)} />
+      <img src={`${CORNERS}/corner_bl.png`} style={captureCornerStyle("bl", cornerW)} />
+      <img src={`${CORNERS}/corner_br.png`} style={captureCornerStyle("br", cornerW)} />
+      <img
+        src={`${ICONS}/owl_studio_square.png`}
+        style={{
+          position: "absolute",
+          left: "50%",
+          top: -88,
+          width: 270,
+          height: 176,
+          transform: "translateX(-50%)",
+        }}
+      />
+    </div>
+  );
+}
+
+function captureCornerStyle(pos: "tl" | "tr" | "bl" | "br", width: number): React.CSSProperties {
+  const style: React.CSSProperties = {
+    position: "absolute",
+    width,
+    height: "auto",
+  };
+  if (pos.includes("t")) style.top = -11;
+  if (pos.includes("b")) style.bottom = -11;
+  if (pos.includes("l")) style.left = -11;
+  if (pos.includes("r")) style.right = -11;
+  return style;
+}
+
+async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
   const media = navigator.mediaDevices as MediaDevices & {
     getDisplayMedia(options?: unknown): Promise<MediaStream>;
   };
@@ -126,7 +181,7 @@ async function requestDisplayStream(): Promise<MediaStream> {
     video: {
       frameRate: 30,
       cursor: "never",
-      displaySurface: "monitor",
+      displaySurface: mode === "screen" ? "monitor" : "window",
     },
     audio: false,
     preferCurrentTab: false,
@@ -146,10 +201,11 @@ async function requestDisplayStream(): Promise<MediaStream> {
 export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<RecorderState>("idle");
+  const [captureMode, setCaptureMode] = useState<CaptureMode>("window");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [pointer, setPointer] = useState<Point>({ x: 160, y: 120 });
   const [mark, setMark] = useState<ClickMark | null>(null);
-  const [status, setStatus] = useState("Select Entire Screen to include the decorative frame.");
+  const [status, setStatus] = useState("Window mode records OWLLM and draws a clean frame into the video.");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -236,9 +292,11 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       startedAtRef.current = performance.now();
       setElapsedMs(0);
       setPointer({ x: Math.round(window.innerWidth / 2), y: 120 });
-      setStatus("Recording. For frame capture, the picker must be Entire Screen, not OWLLM window.");
+      setStatus(captureMode === "screen"
+        ? "Recording full screen. The real overlay frame is included."
+        : "Recording window. The recorder adds a clean frame overlay into the video.");
 
-      const stream = await requestDisplayStream();
+      const stream = await requestDisplayStream(captureMode);
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream, {
         mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
@@ -311,6 +369,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
 
   return (
     <>
+      <CaptureFrameOverlay active={active && captureMode === "window"} />
       <PointerOverlay point={pointer} mark={mark} active={active} />
       <div
         data-ui="TutorialRecorderPanel"
@@ -351,13 +410,29 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
             ×
           </button>
         </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
+          <button
+            onClick={() => setCaptureMode("window")}
+            disabled={active}
+            style={modeBtn(captureMode === "window", active)}
+          >
+            Window + frame
+          </button>
+          <button
+            onClick={() => setCaptureMode("screen")}
+            disabled={active}
+            style={modeBtn(captureMode === "screen", active)}
+          >
+            Full screen
+          </button>
+        </div>
         <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
           <button
             onClick={start}
             disabled={state !== "idle"}
             style={recBtn(state === "idle", "#18c96e")}
           >
-            Record Screen
+            Record
           </button>
           <button
             onClick={pause}
@@ -380,6 +455,19 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       </div>
     </>
   );
+}
+
+function modeBtn(selected: boolean, locked: boolean): React.CSSProperties {
+  return {
+    height: 26,
+    borderRadius: 5,
+    border: selected ? "1px solid rgba(var(--accent-rgb),0.72)" : "1px solid rgba(255,255,255,0.14)",
+    background: selected ? "rgba(var(--accent-rgb),0.22)" : "rgba(255,255,255,0.06)",
+    color: selected ? "#ffffff" : "var(--fg-muted)",
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: locked ? "not-allowed" : "pointer",
+  };
 }
 
 function recBtn(enabled: boolean, color: string): React.CSSProperties {

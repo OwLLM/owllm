@@ -889,10 +889,14 @@ function AgentDetailPanel({
   onPickIcon,
 }: {
   agent: AgentDef | null;
-  // onSave now receives the edited fields the user has changed in the
-  // detail panel (currently: mcp_allowlist). Parent calls the Rust
-  // save_agent_definition with the merged JSON.
-  onSave: (edits: { mcpAllowlist: string[] | null }) => void;
+  // onSave receives the edited fields the user has changed. Parent
+  // calls the Rust save_agent_definition with the merged JSON.
+  onSave: (edits: {
+    mcpAllowlist: string[] | null;
+    canDispatch: boolean;
+    temperature: number | null;
+    defaultModelId: string;
+  }) => void;
   onDuplicate: () => void;
   onDelete: () => void;
   // Avatar click — opens the IconPickerDialog for this agent. Lives on
@@ -908,16 +912,33 @@ function AgentDetailPanel({
   // null = "all available MCP tools (no restriction)", which is the
   // role yaml convention. [] = explicitly no MCP tools.
   const [draftMcp, setDraftMcp] = useState<string[] | null>(agent?.mcpTools ?? null);
-  // Re-seed when the user clicks a different card.
+  // Editable behavioural settings — Can dispatch / Temperature /
+  // Default model. Round-tripped through onSave; null/empty means
+  // "use the runtime default" (omitted from the JSON entirely).
+  const [draftCanDispatch, setDraftCanDispatch] = useState<boolean>(agent?.canDispatch ?? false);
+  const [draftTemperature, setDraftTemperature] = useState<string>(
+    agent?.temperature != null ? String(agent.temperature) : ""
+  );
+  const [draftModelId, setDraftModelId] = useState<string>(agent?.defaultModelId ?? "");
+  // Re-seed every editable field when the user clicks a different card.
   useEffect(() => {
     setDraftMcp(agent?.mcpTools ?? null);
+    setDraftCanDispatch(agent?.canDispatch ?? false);
+    setDraftTemperature(agent?.temperature != null ? String(agent.temperature) : "");
+    setDraftModelId(agent?.defaultModelId ?? "");
   }, [agent?.name]);
   useEffect(() => {
     invoke<AggregatedMcpTool[]>("mcp_list_all_tools")
       .then(setAvailableMcp)
       .catch(() => setAvailableMcp([]));
   }, [agent?.name]);
-  const dirty = JSON.stringify(draftMcp) !== JSON.stringify(agent?.mcpTools ?? null);
+  const parsedTemp = draftTemperature.trim() === "" ? null : parseFloat(draftTemperature);
+  const tempValid = parsedTemp === null || (Number.isFinite(parsedTemp) && parsedTemp >= 0 && parsedTemp <= 2);
+  const mcpDirty   = JSON.stringify(draftMcp) !== JSON.stringify(agent?.mcpTools ?? null);
+  const cdDirty    = draftCanDispatch !== (agent?.canDispatch ?? false);
+  const tempDirty  = (parsedTemp ?? null) !== (agent?.temperature ?? null);
+  const modelDirty = draftModelId !== (agent?.defaultModelId ?? "");
+  const dirty = mcpDirty || cdDirty || tempDirty || modelDirty;
   if (!agent) {
     return (
       <div style={{
@@ -1152,13 +1173,103 @@ function AgentDetailPanel({
         </div>
       )}
 
+      {/* Behaviour fields — Can dispatch / Temperature / Default model.
+          Editable when the agent isn't a built-in. Native browser
+          tooltips via the title attribute explain what each setting
+          does on mouse-hover. */}
       <div style={{
         display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
         gap: 10, marginTop: 4,
       }}>
-        <SmallStat label="Can dispatch" value={agent.canDispatch ? "Yes" : "No"} />
-        <SmallStat label="Temperature" value={agent.temperature != null ? agent.temperature.toFixed(2) : "auto"} />
-        <SmallStat label="Default model" value={agent.defaultModelId || "auto"} />
+        {/* Can dispatch */}
+        <label
+          title="Can this agent dispatch sub-tasks to OTHER agents? Orchestrators (and Team Leaders) need this on. Specialists usually leave it off so they focus on their own job and don't fan out work."
+          style={{
+            background: "var(--bg-surface)",
+            border: `1px solid ${cdDirty ? "#f0a832" : "var(--border)"}`,
+            borderRadius: 8, padding: "8px 10px",
+            display: "flex", flexDirection: "column", gap: 6,
+            cursor: editable ? "pointer" : "default",
+            opacity: editable ? 1 : 0.7,
+          }}
+        >
+          <div style={{ fontSize: 10, color: "var(--fg-muted)", letterSpacing: 0.6, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 4 }}>
+            Can dispatch <span style={{ opacity: 0.5 }}>ⓘ</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={draftCanDispatch}
+              disabled={!editable}
+              onChange={e => setDraftCanDispatch(e.target.checked)}
+            />
+            <span style={{ fontSize: 12, color: "var(--fg)" }}>{draftCanDispatch ? "Yes" : "No"}</span>
+          </div>
+        </label>
+
+        {/* Temperature */}
+        <label
+          title="Sampling temperature for this agent's model calls. 0.0 = deterministic (good for code, math, planning). 0.7 = balanced. 1.2 = creative / brainstormy. Leave empty for the per-task default (about 0.4 for orchestrators, 0.7 for prose)."
+          style={{
+            background: "var(--bg-surface)",
+            border: `1px solid ${tempDirty ? "#f0a832" : (tempValid ? "var(--border)" : "#ff8c8c")}`,
+            borderRadius: 8, padding: "8px 10px",
+            display: "flex", flexDirection: "column", gap: 6,
+            opacity: editable ? 1 : 0.7,
+          }}
+        >
+          <div style={{ fontSize: 10, color: "var(--fg-muted)", letterSpacing: 0.6, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 4 }}>
+            Temperature <span style={{ opacity: 0.5 }}>ⓘ</span>
+          </div>
+          <input
+            type="number"
+            min={0}
+            max={2}
+            step={0.05}
+            value={draftTemperature}
+            disabled={!editable}
+            placeholder="auto"
+            onChange={e => setDraftTemperature(e.target.value)}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "var(--fg)", fontSize: 12,
+              padding: 0, outline: "none",
+              width: "100%",
+            }}
+          />
+        </label>
+
+        {/* Default model */}
+        <label
+          title="Force this agent to a specific model id (e.g. 'claude-opus-4-7', 'claude-sonnet-4-6', 'gpt-5'). Leave empty to inherit from the team default → server fallback. Useful for pinning a critic to a cheap fast model while the orchestrator runs on Opus."
+          style={{
+            background: "var(--bg-surface)",
+            border: `1px solid ${modelDirty ? "#f0a832" : "var(--border)"}`,
+            borderRadius: 8, padding: "8px 10px",
+            display: "flex", flexDirection: "column", gap: 6,
+            opacity: editable ? 1 : 0.7,
+          }}
+        >
+          <div style={{ fontSize: 10, color: "var(--fg-muted)", letterSpacing: 0.6, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 4 }}>
+            Default model <span style={{ opacity: 0.5 }}>ⓘ</span>
+          </div>
+          <input
+            type="text"
+            value={draftModelId}
+            disabled={!editable}
+            placeholder="auto"
+            onChange={e => setDraftModelId(e.target.value)}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "var(--fg)", fontSize: 12,
+              padding: 0, outline: "none",
+              width: "100%",
+              fontFamily: "Consolas, monospace",
+            }}
+          />
+        </label>
       </div>
 
       {agent.systemPrompt ? (
@@ -1191,8 +1302,13 @@ function AgentDetailPanel({
       {/* Action row — Save (primary) / Duplicate (ghost) / Delete (destructive). */}
       <div style={{ display: "flex", gap: 8 }}>
         <button
-          onClick={() => onSave({ mcpAllowlist: draftMcp })}
-          disabled={!editable}
+          onClick={() => onSave({
+            mcpAllowlist: draftMcp,
+            canDispatch: draftCanDispatch,
+            temperature: parsedTemp,
+            defaultModelId: draftModelId,
+          })}
+          disabled={!editable || !tempValid}
           style={{
             flex: 1, minHeight: 42,
             background: editable
@@ -1585,6 +1701,21 @@ export default function StudioPage() {
                       delete original.mcp_allowlist;
                     } else {
                       original.mcp_allowlist = edits.mcpAllowlist;
+                    }
+                    // Behaviour fields. canDispatch always written
+                    // (boolean has no "auto"); temperature + default
+                    // model removed when empty so the runtime falls
+                    // back to its per-task defaults.
+                    original.can_dispatch = edits.canDispatch;
+                    if (edits.temperature == null) {
+                      delete original.default_temperature;
+                    } else {
+                      original.default_temperature = edits.temperature;
+                    }
+                    if (!edits.defaultModelId || !edits.defaultModelId.trim()) {
+                      delete original.default_model_id;
+                    } else {
+                      original.default_model_id = edits.defaultModelId.trim();
                     }
                     await invoke("save_agent_definition", { path: agent.path, data: original });
                     await loadAll();   // reload so the UI shows the persisted state

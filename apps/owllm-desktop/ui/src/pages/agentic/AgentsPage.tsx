@@ -938,9 +938,46 @@ const TEAM_CATEGORY_ACCENT: Record<string, string> = {
   Other:     "#9aa0a6",
   Custom:    "#ff7ed1",
 };
+// Fallback palette for teams without a recognised category — most
+// importantly projects (category "Project"), which would otherwise
+// always render the default blue. Hashed by team name so the same
+// project keeps the same colour across sessions; different projects
+// get visibly different colours.
+const TEAM_HASH_PALETTE = [
+  "#74a4ff", "#c08aff", "#7ad3ff", "#ffb56a",
+  "#ff7ed1", "#a0e88a", "#ffd97a", "#ff9aa3",
+  "#9c8aff", "#6cf2c9", "#f08a5d", "#5ed4ff",
+];
 function teamAccent(team: Team | null): string {
   if (!team) return "#74a4ff";
-  return TEAM_CATEGORY_ACCENT[team.category] ?? "#74a4ff";
+  // Known category? Use the canonical Studio colour.
+  const known = TEAM_CATEGORY_ACCENT[team.category];
+  if (known) return known;
+  // Otherwise hash the team name → palette index. Stable per team, no
+  // collision noise across a typical 5-10 project workspace.
+  const key = team.name || team.id || "default";
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = ((h << 5) - h + key.charCodeAt(i)) | 0;
+  return TEAM_HASH_PALETTE[Math.abs(h) % TEAM_HASH_PALETTE.length];
+}
+
+// Sort key for the chat-grid tiles: orchestrator first, critic second,
+// then design (team leader = product_owner first), then build. Matches
+// the visual hierarchy on the canvas so the user reads the same order
+// in both views.
+function chatTileSortKey(spec: AgentSpec): number {
+  const shortName = spec.name.includes(".") ? spec.name.split(".").pop()! : spec.name;
+  const shortBase = spec.base.includes(".") ? spec.base.split(".").pop()! : spec.base;
+  if (shortBase === "orchestrator" || shortName === "orchestrator") return 0;
+  if (spec.name === CRITIC_AGENT_NAME) return 1;
+  const group = groupForAgent(spec);
+  if (group === "design") {
+    if (shortBase === "product_owner" || shortName === "product_owner") return 2;
+    return 3;
+  }
+  // critic-base (non-synthetic) sits with the other critics; build at the back.
+  if (group === "critic") return 4;
+  return 5;
 }
 function hexToRgbStr(hex: string): string {
   const h = hex.replace("#", "");
@@ -988,10 +1025,37 @@ function AgentChatGrid({
   }, []);
   const pulse = 0.5 + 0.5 * Math.sin((pulsePhase * Math.PI) / 180 * 3);
 
-  const agents = team?.agents ?? [];
-  // Compute a near-square grid: ceil(sqrt(n)) columns, ceil(n/cols) rows.
+  // Sort: orchestrator + critic top-left, then design (leader first),
+  // then build. Same hierarchy as the canvas so the grid reads in the
+  // same order the user already knows.
+  const agents = useMemo(() => {
+    const arr = [...(team?.agents ?? [])];
+    arr.sort((a, b) => {
+      const ka = chatTileSortKey(a);
+      const kb = chatTileSortKey(b);
+      if (ka !== kb) return ka - kb;
+      return a.name.localeCompare(b.name);
+    });
+    // Inject the synthetic Critic at index 1 if the team has an
+    // orchestrator and no real critic — keeps the canvas visual
+    // consistent with the grid (canvas auto-injects this node too).
+    const hasOrch = arr.some(a => a.base === "orchestrator" || a.name === "orchestrator");
+    const hasCritic = arr.some(a => a.name === CRITIC_AGENT_NAME);
+    if (hasOrch && !hasCritic) {
+      const synthetic: AgentSpec = { name: CRITIC_AGENT_NAME, base: "critic", icon: null };
+      // Find orchestrator index, insert after.
+      const orchIdx = arr.findIndex(a => a.base === "orchestrator" || a.name === "orchestrator");
+      arr.splice(orchIdx + 1, 0, synthetic);
+    }
+    return arr;
+  }, [team]);
   const n = Math.max(1, agents.length);
-  const cols = Math.ceil(Math.sqrt(n));
+  // Prefer a 4-column grid when there are enough agents to fill at
+  // least two rows; smaller teams use ceil(sqrt(n)) so the tiles stay
+  // roughly square. User asked for a "4 columns setting" as the target
+  // layout — this honours that without forcing a single empty column
+  // for tiny teams.
+  const cols = n >= 6 ? 4 : Math.ceil(Math.sqrt(n));
   return (
     <div style={{
       width: "100%", height: "100%",
@@ -1294,11 +1358,11 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
     finally { setRulesBusy(false); }
   };
   return (
-    // Width:320 + margin:"8px 0 0 0" so the card lines up flush left
-    // with the info card above it (both sit at the container's left
-    // edge — user spec 2026-05-20). Yellow tones to match the info
-    // card; subtle amber border instead of the previous neutral one.
-    <div data-ui="SuperUserCard" style={{ margin:"8px 0 0 0", padding:"10px 12px", borderRadius:12, background:"linear-gradient(135deg, rgba(38,30,10,0.92) 0%, rgba(18,14,4,0.92) 100%)", border:"1px solid rgba(255,200,80,0.35)", width:410, minHeight:180, display:"flex", flexDirection:"column", gap:8 }}>
+    // Width: fills the 450 px overlay column; height: fills the
+    // available canvas vertical space (parent passes flex:1) so the
+    // card occupies roughly the right ~half of the canvas now that the
+    // AgentInfo/TeamInfo cards have been removed below it.
+    <div data-ui="SuperUserCard" style={{ flex:1, padding:"10px 12px", borderRadius:12, background:"linear-gradient(135deg, rgba(38,30,10,0.92) 0%, rgba(18,14,4,0.92) 100%)", border:"1px solid rgba(255,200,80,0.35)", width:"100%", minHeight:0, display:"flex", flexDirection:"column", gap:8 }}>
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
         {/* Chat-split toggle. Lives to the LEFT of the avatar so the
             user can flip into the per-agent chat grid without leaving
@@ -1370,7 +1434,7 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
           {(() => {
             const sentByMe = lastMessages.filter(m => m.role === "you");
             return (
-              <div ref={suChatRef} data-ui="suChat" style={{ height: 120, background:"rgba(20,16,4,0.6)", color:"var(--fg)", border:"1px solid rgba(255,200,80,0.20)", borderRadius:8, padding:"8px 10px", fontSize:13, lineHeight:1.5, overflow:"auto", display:"flex", flexDirection:"column", gap:6 }}>
+              <div ref={suChatRef} data-ui="suChat" style={{ flex:1, minHeight:120, background:"rgba(20,16,4,0.6)", color:"var(--fg)", border:"1px solid rgba(255,200,80,0.20)", borderRadius:8, padding:"8px 10px", fontSize:13, lineHeight:1.5, overflow:"auto", display:"flex", flexDirection:"column", gap:6 }}>
                 {sentByMe.length === 0 ? (
                   <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
                     {team
@@ -3219,6 +3283,7 @@ function OrchestratorPane({
   team, phase,
   models, modelFor, onPickAgentModel,
   accountsStatus,
+  roleByName, effectiveTeamModel, onPickTeamModel,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
@@ -3235,7 +3300,19 @@ function OrchestratorPane({
   onPickAgentModel: (agentName: string, modelId: string) => void;
   /// Account status drives sub/API enabled flags in ModelPicker.
   accountsStatus: AccountsStatusLite | null;
+  /// Role registry — looked up for the focused agent's description /
+  /// default temperature in the Info strip (formerly AgentInfoCard).
+  roleByName: Map<string, RoleData>;
+  /// Team-wide model default + setter (formerly TeamInfoCard's picker).
+  /// The "Team" toggle in the Info strip surfaces this.
+  effectiveTeamModel: string;
+  onPickTeamModel: (id: string) => void;
 }) {
+  // Info strip toggle: "Agent" shows the focused agent's description +
+  // BASE + TEMP; "Team" shows the team's description + team-wide model
+  // picker. Replaces the canvas-overlay AgentInfoCard / TeamInfoCard
+  // that lived to the right of the canvas before 2026-05-26.
+  const [infoTab, setInfoTab] = useState<"agent" | "team">("agent");
   const [activeTab, setActiveTab] = useState<"reply"|"thought"|"tools"|"full">("reply");
   // Pick which buffer to show: explicit selection > currently-active
   // agent > orchestrator (so the user sees the plan even if nothing
@@ -3352,6 +3429,111 @@ function OrchestratorPane({
         <button style={{ width:28, height:28, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:12 }} title="Preview this voice">▶</button>
         <button style={{ width:28, height:28, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:14 }} title="Apply this voice to every agent on the team">➤</button>
       </div>
+      {/* Info strip — the AgentInfoCard + TeamInfoCard merged into the
+          chat column (user spec 2026-05-26). Toggle picks between the
+          focused agent's metadata and the team-wide settings. */}
+      {(() => {
+        const focusSpec = team?.agents.find(a => a.name === focus) ?? null;
+        const role = focusSpec ? roleByName.get(focusSpec.base) : null;
+        const desc = focusSpec
+          ? ((focusSpec.description && focusSpec.description.trim()) ||
+             (role?.description && role.description.trim()) ||
+             "No description provided.")
+          : null;
+        const tint = focusSpec ? tintForGroup(groupForAgent(focusSpec)) : null;
+        return (
+          <div data-ui="InfoHost" style={{ padding:"0 12px 8px", display:"flex", flexDirection:"column", gap:6 }}>
+            <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+              <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Info</span>
+              <button
+                onClick={() => setInfoTab("agent")}
+                disabled={!focusSpec}
+                title={focusSpec ? "Show this agent's description, base role, default temperature" : "Select an agent on the canvas to see its info"}
+                style={{
+                  height:24, padding:"0 10px", borderRadius:6,
+                  border: infoTab === "agent" ? "1px solid var(--accent)" : "1px solid var(--border)",
+                  background: infoTab === "agent" ? "rgba(var(--accent-rgb),0.18)" : "var(--bg-surface)",
+                  color: infoTab === "agent" ? "var(--accent)" : "var(--fg-muted)",
+                  fontSize:11, fontWeight:700, letterSpacing:0.4, textTransform:"uppercase",
+                  cursor: focusSpec ? "pointer" : "not-allowed",
+                  opacity: focusSpec ? 1 : 0.5,
+                }}
+              >Agent</button>
+              <button
+                onClick={() => setInfoTab("team")}
+                title="Show team-wide settings (description + the default model for every agent on this team)"
+                style={{
+                  height:24, padding:"0 10px", borderRadius:6,
+                  border: infoTab === "team" ? "1px solid #ffd97a" : "1px solid var(--border)",
+                  background: infoTab === "team" ? "rgba(255,217,122,0.18)" : "var(--bg-surface)",
+                  color: infoTab === "team" ? "#ffd97a" : "var(--fg-muted)",
+                  fontSize:11, fontWeight:700, letterSpacing:0.4, textTransform:"uppercase",
+                  cursor:"pointer",
+                }}
+              >Team</button>
+            </div>
+            {infoTab === "agent" && focusSpec ? (
+              <div style={{
+                background: tint ? `linear-gradient(135deg, ${tint.bg} 0%, rgba(18,22,34,0.85) 100%)` : "var(--bg-surface)",
+                border: tint ? `1px solid ${tint.border}` : "1px solid var(--border)",
+                borderRadius:8, padding:"8px 10px", display:"flex", flexDirection:"column", gap:6,
+              }}>
+                <div style={{ fontSize:12, color:"var(--fg)", lineHeight:1.4 }}>
+                  {desc!.length > 220 ? desc!.slice(0, 217) + "…" : desc}
+                </div>
+                <div style={{ display:"flex", gap:14, fontSize:11, color:"var(--fg-muted)", flexWrap:"wrap" }}>
+                  <span><b style={{ color:"var(--fg)", textTransform:"capitalize" }}>{focusSpec.base}</b> base</span>
+                  <span><b style={{ color:"var(--fg)" }}>{(role?.defaultTemperature ?? 0.4).toFixed(2)}</b> temp</span>
+                  {tint?.badge && (
+                    <span style={{
+                      background: groupForAgent(focusSpec) === "design" ? "rgba(64,168,96,0.95)" : "rgba(58,120,220,0.95)",
+                      color:"#0a1208", fontSize:9, fontWeight:800, letterSpacing:0.4,
+                      padding:"2px 7px", borderRadius:8, textTransform:"uppercase",
+                    }}>{tint.badge}</span>
+                  )}
+                </div>
+              </div>
+            ) : infoTab === "agent" ? (
+              <div style={{
+                background:"var(--bg-surface)", border:"1px solid var(--border)",
+                borderRadius:8, padding:"8px 10px",
+                fontSize:11, color:"var(--fg-subtle)", fontStyle:"italic",
+              }}>Click an agent on the canvas (or a chat tile) to see its info here.</div>
+            ) : (
+              <div style={{
+                background:"var(--bg-surface)", border:"1px solid rgba(255,217,122,0.35)",
+                borderRadius:8, padding:"8px 10px",
+                display:"flex", flexDirection:"column", gap:6,
+              }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"var(--fg)" }}>
+                  {team?.display || team?.name || "(no team)"}
+                </div>
+                {team?.description && (
+                  <div style={{ fontSize:11, color:"var(--fg-muted)", lineHeight:1.4 }}>
+                    {team.description.length > 220 ? team.description.slice(0, 217) + "…" : team.description}
+                  </div>
+                )}
+                <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:2 }}>
+                  <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.5, textTransform:"uppercase", flexShrink:0 }}>Team model</span>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <ModelPicker
+                      value={effectiveTeamModel}
+                      onChange={onPickTeamModel}
+                      models={models}
+                      status={accountsStatus}
+                      fallbackLabel={
+                        serverState.model_id
+                          ? `(use server model · ${serverState.model_id})`
+                          : "(no server model running — pick one to set the team default)"
+                      }
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
       <div data-ui="OrchestratorLogTabs" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:"0 0 8px" }}>
         <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)" }}>
           {([
@@ -6535,15 +6717,11 @@ export default function AgentsPage() {
                 onPositionsChange={setNodePositions}
               />
             )}
-            {/* Info-card overlay — moved from left to RIGHT side (user
-                spec 2026-05-18). Rendered in BOTH views so the page
-                stays consistent and selection state survives a view
-                toggle. Layout updated 2026-05-22: SuperUserCard sits
-                ON TOP (always reachable even on shorter screens), with
-                the TeamInfo/AgentInfo card BELOW so a long info card
-                pushes off-screen instead of the chat input.
-                The container scrolls when total height exceeds the
-                viewport so nothing is unreachable. */}
+            {/* Canvas overlay — only the SuperUserCard now (the
+                AgentInfo + TeamInfo cards moved into the right-pane
+                OrchestratorPane "Info" / "Team" tabs, user spec
+                2026-05-26). The card stretches to fill the column so
+                the chat pane gets ~50 % of the canvas height. */}
             <div style={{
               position: "absolute",
               top: 8,
@@ -6551,12 +6729,10 @@ export default function AgentsPage() {
               bottom: 8,
               width: 450,
               pointerEvents: "none",
-              overflowY: "auto",
               display: "flex",
               flexDirection: "column",
-              gap: 10,
             }}>
-              <div style={{ pointerEvents: "auto" }}>
+              <div style={{ pointerEvents: "auto", flex: 1, display: "flex", minHeight: 0 }}>
                 <SuperUserCard
                   team={renderTeam}
                   roleByName={roleByName}
@@ -6572,39 +6748,6 @@ export default function AgentsPage() {
                   chatSplit={chatSplit}
                   onToggleChatSplit={toggleChatSplit}
                 />
-              </div>
-              <div style={{ pointerEvents: "auto" }}>
-                {selectedAgentSpec ? (
-                  <AgentInfoCard
-                    team={renderTeam}
-                    spec={selectedAgentSpec}
-                    roleByName={roleByName}
-                    status={activeAgents.has(selectedAgentSpec.name) ? "active" : "idle"}
-                    models={models}
-                    modelId={(perAgentModel.get(selectedAgentSpec.name) ?? "")}
-                    onPickModel={(id) => onPickAgentModel(selectedAgentSpec.name, id)}
-                    accountsStatus={accountsStatus}
-                    fallbackLabel={
-                      effectiveTeamModel
-                        ? `(use team model · ${effectiveTeamModel})`
-                        : serverState.model_id
-                          ? `(use server model · ${serverState.model_id})`
-                          : "(use team / server fallback)"
-                    }
-                    onClose={() => setSelectedNode(null)}
-                    iconOverrides={agentIconOverrides}
-                    onPickIcon={(name) => setIconPickerAgent(name)}
-                  />
-                ) : (
-                  <TeamInfoCard
-                    team={renderTeam}
-                    models={models}
-                    teamModel={effectiveTeamModel}
-                    onChangeTeamModel={onPickTeamModel}
-                    serverModelId={serverState.model_id}
-                    accountsStatus={accountsStatus}
-                  />
-                )}
               </div>
             </div>
           </div>
@@ -6624,6 +6767,9 @@ export default function AgentsPage() {
             modelFor={modelFor}
             onPickAgentModel={onPickAgentModel}
             accountsStatus={accountsStatus}
+            roleByName={roleByName}
+            effectiveTeamModel={effectiveTeamModel}
+            onPickTeamModel={onPickTeamModel}
           />
         </div>
         </div>

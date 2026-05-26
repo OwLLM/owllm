@@ -9,9 +9,39 @@ type CaptureMode = "window" | "screen";
 const TOGGLE_EVENT = "owllm:tutorial-recorder-toggle";
 const ICONS = "/Page_icons";
 const CORNERS = `${ICONS}/CornersNew`;
+const HAND_CURSOR =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='42' height='46' viewBox='0 0 42 46'%3E%3Cpath d='M17.6 4.8c2.1 0 3.8 1.7 3.8 3.8v11.2l1.6-2.1c1.2-1.6 3.4-2 5.1-.8 1.1.8 1.6 2 1.6 3.2.7-.4 1.5-.5 2.4-.4 2 .4 3.3 2.3 2.9 4.3l-.3 1.5c.7-.2 1.5-.1 2.2.2 1.9.8 2.7 3 1.9 4.9l-2.1 5c-1.9 4.6-6.4 7.5-11.4 7.5h-4.8c-4 0-7.8-1.9-10.1-5.2L3.6 28c-1.1-1.6-.8-3.8.8-5 1.3-1 3.2-.9 4.4.2l5 4.6V8.6c0-2.1 1.7-3.8 3.8-3.8Z' fill='%23ffe0a8' stroke='%23271407' stroke-width='2.2' stroke-linejoin='round'/%3E%3Cpath d='M21.4 19.8v8.8M29.5 20.1l-3.3 8.8M34.7 25.5l-2.2 6.8M13.8 27.8v5.6' stroke='%239f6430' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E\") 10 8, pointer";
+
+const MIN_PARENT_W = 800;
+const MIN_PARENT_H = 500;
+const BADGE_W = 300;
+const BADGE_H = 195;
+const BORDER_T = 18;
+const CORNER_OUTSET = 10;
+const SHIFT_OUT = BORDER_T / 2;
+const EXTRA_TOP = 35;
+const EXTRA_RIGHT = 0;
+const EXTRA_BOTTOM = 0;
+const CORNER_PNG_W = 160;
+const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);
+const CORNER_PNG_H_TR = Math.round(CORNER_PNG_W * 484 / 516);
+const CORNER_PNG_H_BL = Math.round(CORNER_PNG_W * 512 / 488);
+const CORNER_PNG_H_BR = Math.round(CORNER_PNG_W * 488 / 512);
+const PARENT_X = SHIFT_OUT + CORNER_OUTSET;
+const PARENT_Y = EXTRA_TOP + SHIFT_OUT + CORNER_OUTSET;
 
 export function toggleTutorialRecorder() {
   window.dispatchEvent(new CustomEvent(TOGGLE_EVENT));
+}
+
+function useViewportSize() {
+  const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight });
+  useEffect(() => {
+    const onResize = () => setSize({ w: window.innerWidth, h: window.innerHeight });
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return size;
 }
 
 function formatTime(ms: number): string {
@@ -32,12 +62,10 @@ function downloadBlob(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-function PointerOverlay({
-  point,
+function ClickPulseOverlay({
   mark,
   active,
 }: {
-  point: Point;
   mark: ClickMark | null;
   active: boolean;
 }) {
@@ -52,41 +80,6 @@ function PointerOverlay({
         pointerEvents: "none",
       }}
     >
-      <div
-        data-ui="TutorialPointer"
-        style={{
-          position: "absolute",
-          left: point.x,
-          top: point.y,
-          transform: "translate(-10px, -8px)",
-          transition: "left 420ms cubic-bezier(.2,.9,.25,1), top 420ms cubic-bezier(.2,.9,.25,1)",
-          filter: "drop-shadow(0 3px 7px rgba(0,0,0,0.65))",
-          animation: mark ? "owllmTutorialTap 360ms ease-out" : "none",
-          transformOrigin: "18px 8px",
-        }}
-      >
-        <svg width="42" height="46" viewBox="0 0 42 46" aria-hidden="true">
-          <path
-            d="M17.6 4.8c2.1 0 3.8 1.7 3.8 3.8v11.2l1.6-2.1c1.2-1.6 3.4-2 5.1-.8 1.1.8 1.6 2 1.6 3.2.7-.4 1.5-.5 2.4-.4 2 .4 3.3 2.3 2.9 4.3l-.3 1.5c.7-.2 1.5-.1 2.2.2 1.9.8 2.7 3 1.9 4.9l-2.1 5c-1.9 4.6-6.4 7.5-11.4 7.5h-4.8c-4 0-7.8-1.9-10.1-5.2L3.6 28c-1.1-1.6-.8-3.8.8-5 1.3-1 3.2-.9 4.4.2l5 4.6V8.6c0-2.1 1.7-3.8 3.8-3.8Z"
-            fill="#ffe0a8"
-            stroke="#271407"
-            strokeWidth="2.2"
-            strokeLinejoin="round"
-          />
-          <path
-            d="M21.4 19.8v8.8M29.5 20.1l-3.3 8.8M34.7 25.5l-2.2 6.8"
-            stroke="#9f6430"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-          />
-          <path
-            d="M13.8 27.8v5.6"
-            stroke="#9f6430"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-          />
-        </svg>
-      </div>
       {mark && (
         <div
           key={mark.id}
@@ -111,66 +104,101 @@ function PointerOverlay({
           0% { transform: scale(0.3); opacity: 0.95; }
           100% { transform: scale(1.8); opacity: 0; }
         }
-        @keyframes owllmTutorialTap {
-          0% { transform: translate(-10px, -8px) rotate(0deg) scale(1); }
-          45% { transform: translate(-10px, -8px) rotate(-9deg) scale(0.88); }
-          100% { transform: translate(-10px, -8px) rotate(0deg) scale(1); }
-        }
       `}</style>
     </div>
   );
 }
 
-function CaptureFrameOverlay({ active }: { active: boolean }) {
+function CaptureFrameOverlay({
+  active,
+  outerW,
+  outerH,
+}: {
+  active: boolean;
+  outerW: number;
+  outerH: number;
+}) {
   if (!active) return null;
-  const line = "rgba(var(--accent-rgb), 0.86)";
-  const accent = "rgba(var(--accent-rgb), 0.78)";
-  const bg = "var(--bg-header)";
-  const cornerW = 144;
+  const parent_w = Math.max(MIN_PARENT_W, outerW - EXTRA_RIGHT - 2 * SHIFT_OUT - 2 * CORNER_OUTSET);
+  const parent_h = Math.max(MIN_PARENT_H, outerH - EXTRA_TOP - EXTRA_BOTTOM - 2 * SHIFT_OUT - 2 * CORNER_OUTSET);
+  const parent_x = PARENT_X;
+  const parent_y = PARENT_Y;
+  const t = BORDER_T;
+  const so = SHIFT_OUT;
+  const outerL = parent_x - so;
+  const outerT = parent_y - so;
+  const outerW2 = parent_w + 2 * so;
+  const outerH2 = parent_h + 2 * so;
+  const outerR = outerL + outerW2;
+  const outerB = outerT + outerH2;
+  const innerL = parent_x - so + t;
+  const innerT = parent_y - so + t;
+  const innerW = parent_w + 2 * so - 2 * t;
+  const innerH = parent_h + 2 * so - 2 * t;
+  const topBar = { x: parent_x - so, y: parent_y - so, w: parent_w + 2 * so, h: t };
+  const botBar = { x: parent_x - so, y: parent_y + parent_h - t / 2, w: parent_w + 2 * so, h: t };
+  const leftBar = { x: parent_x - so, y: parent_y - so, w: t, h: parent_h + 2 * so };
+  const rightBar = { x: parent_x + parent_w - so, y: parent_y - so, w: t, h: parent_h + 2 * so };
+  const brkL = 36;
+  const brkI = 14;
+  const bxL = outerL + brkI;
+  const bxR = outerR - brkI;
+  const byT = outerT + brkI;
+  const byB = outerB - brkI;
+  const tckL = 18;
+  const tckI = 10;
+  const midx = (outerL + outerR) / 2;
+  const midy = (outerT + outerB) / 2;
+  const cnTL = { x: outerL - CORNER_OUTSET, y: outerT - CORNER_OUTSET };
+  const cnTR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET, y: outerT - CORNER_OUTSET };
+  const cnBL = { x: outerL - CORNER_OUTSET, y: outerB - CORNER_PNG_H_BL + 1 + CORNER_OUTSET };
+  const cnBR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET, y: outerB - CORNER_PNG_H_BR + 1 + CORNER_OUTSET };
+  const badgeX = parent_x + (parent_w - BADGE_W) / 2;
+  const badgeY = parent_y - BADGE_H / 2;
+  const frameColor = "rgba(var(--accent-rgb), 0.86)";
+  const frameAccent = "rgba(var(--accent-rgb), 0.78)";
+  const frameBg = "var(--bg-header)";
   return (
     <div
       data-ui="TutorialCaptureFrame"
       style={{
         position: "fixed",
-        inset: 8,
+        inset: 0,
         zIndex: 11900,
         pointerEvents: "none",
-        border: `1px solid ${line}`,
-        borderRadius: 14,
-        boxShadow: `inset 0 0 0 18px ${bg}, inset 0 0 0 19px ${accent}`,
       }}
     >
-      <div style={{ position: "absolute", inset: 18, border: `1px solid ${accent}`, borderRadius: 10 }} />
-      <img src={`${CORNERS}/corner_ul.png`} style={captureCornerStyle("tl", cornerW)} />
-      <img src={`${CORNERS}/corner_ur.png`} style={captureCornerStyle("tr", cornerW)} />
-      <img src={`${CORNERS}/corner_bl.png`} style={captureCornerStyle("bl", cornerW)} />
-      <img src={`${CORNERS}/corner_br.png`} style={captureCornerStyle("br", cornerW)} />
-      <img
-        src={`${ICONS}/owl_studio_square.png`}
-        style={{
-          position: "absolute",
-          left: "50%",
-          top: -88,
-          width: 270,
-          height: 176,
-          transform: "translateX(-50%)",
-        }}
-      />
+      <div style={{ position: "absolute", left: topBar.x, top: topBar.y, width: topBar.w, height: topBar.h, background: frameBg }} />
+      <div style={{ position: "absolute", left: botBar.x, top: botBar.y, width: botBar.w, height: botBar.h, background: frameBg }} />
+      <div style={{ position: "absolute", left: leftBar.x, top: leftBar.y, width: leftBar.w, height: leftBar.h, background: frameBg }} />
+      <div style={{ position: "absolute", left: rightBar.x, top: rightBar.y, width: rightBar.w, height: rightBar.h, background: frameBg }} />
+      <svg width={outerW} height={outerH} style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none" }}>
+        <rect x={outerL + 1} y={outerT + 1} width={outerW2 - 2} height={outerH2 - 2} rx={14} ry={14} fill="none" stroke={frameColor} strokeWidth={1} />
+        <rect x={innerL} y={innerT} width={innerW} height={innerH} rx={10} ry={10} fill="none" stroke={frameAccent} strokeWidth={1} />
+        <g stroke={frameAccent} strokeWidth={1}>
+          <line x1={bxL} y1={byT} x2={bxL + brkL} y2={byT} />
+          <line x1={bxL} y1={byT} x2={bxL} y2={byT + brkL} />
+          <line x1={bxR} y1={byT} x2={bxR - brkL} y2={byT} />
+          <line x1={bxR} y1={byT} x2={bxR} y2={byT + brkL} />
+          <line x1={bxL} y1={byB} x2={bxL + brkL} y2={byB} />
+          <line x1={bxL} y1={byB} x2={bxL} y2={byB - brkL} />
+          <line x1={bxR} y1={byB} x2={bxR - brkL} y2={byB} />
+          <line x1={bxR} y1={byB} x2={bxR} y2={byB - brkL} />
+        </g>
+        <g stroke={frameAccent} strokeWidth={1}>
+          <line x1={midx - tckL / 2} y1={outerT + tckI} x2={midx + tckL / 2} y2={outerT + tckI} />
+          <line x1={midx - tckL / 2} y1={outerB - tckI} x2={midx + tckL / 2} y2={outerB - tckI} />
+          <line x1={outerL + tckI} y1={midy - tckL / 2} x2={outerL + tckI} y2={midy + tckL / 2} />
+          <line x1={outerR - tckI} y1={midy - tckL / 2} x2={outerR - tckI} y2={midy + tckL / 2} />
+        </g>
+      </svg>
+      <img src={`${CORNERS}/corner_br.png`} style={{ position: "absolute", left: cnBR.x, top: cnBR.y, width: CORNER_PNG_W, height: CORNER_PNG_H_BR, pointerEvents: "none" }} />
+      <img src={`${CORNERS}/corner_ul.png`} style={{ position: "absolute", left: cnTL.x, top: cnTL.y, width: CORNER_PNG_W, height: CORNER_PNG_H_TL, pointerEvents: "none" }} />
+      <img src={`${CORNERS}/corner_ur.png`} style={{ position: "absolute", left: cnTR.x, top: cnTR.y, width: CORNER_PNG_W, height: CORNER_PNG_H_TR, pointerEvents: "none" }} />
+      <img src={`${CORNERS}/corner_bl.png`} style={{ position: "absolute", left: cnBL.x, top: cnBL.y, width: CORNER_PNG_W, height: CORNER_PNG_H_BL, pointerEvents: "none" }} />
+      <img src={`${ICONS}/owl_studio_square.png`} style={{ position: "absolute", left: badgeX, top: badgeY, width: BADGE_W, height: BADGE_H, pointerEvents: "none" }} />
     </div>
   );
-}
-
-function captureCornerStyle(pos: "tl" | "tr" | "bl" | "br", width: number): React.CSSProperties {
-  const style: React.CSSProperties = {
-    position: "absolute",
-    width,
-    height: "auto",
-  };
-  if (pos.includes("t")) style.top = -11;
-  if (pos.includes("b")) style.bottom = -11;
-  if (pos.includes("l")) style.left = -11;
-  if (pos.includes("r")) style.right = -11;
-  return style;
 }
 
 async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
@@ -180,7 +208,7 @@ async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
   const preferred = {
     video: {
       frameRate: 30,
-      cursor: "never",
+      cursor: "always",
       displaySurface: mode === "screen" ? "monitor" : "window",
     },
     audio: false,
@@ -203,9 +231,9 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   const [state, setState] = useState<RecorderState>("idle");
   const [captureMode, setCaptureMode] = useState<CaptureMode>("window");
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [pointer, setPointer] = useState<Point>({ x: 160, y: 120 });
   const [mark, setMark] = useState<ClickMark | null>(null);
   const [status, setStatus] = useState("Window mode records OWLLM and draws a clean frame into the video.");
+  const viewport = useViewportSize();
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -241,15 +269,18 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
 
   useEffect(() => {
     if (state !== "recording") return;
-    const oldCursor = document.body.style.cursor;
-    document.body.style.cursor = "none";
+    const cursorClass = "owllm-tutorial-recording";
+    const style = document.createElement("style");
+    style.dataset.owllmTutorialCursor = "1";
+    style.textContent = `html.${cursorClass}, html.${cursorClass} * { cursor: ${HAND_CURSOR} !important; }`;
+    document.head.appendChild(style);
+    document.documentElement.classList.add(cursorClass);
     const onClick = (e: MouseEvent) => {
       const target = e.target instanceof HTMLElement
         ? e.target.closest("[data-ui], button, input, select, textarea, a") as HTMLElement | null
         : null;
       const next = { x: e.clientX, y: e.clientY };
       const id = ++clickIdRef.current;
-      setPointer(next);
       setMark({ ...next, id });
       clickTrackRef.current.push({
         t: performance.now() - startedAtRef.current - pausedTotalRef.current,
@@ -263,7 +294,8 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
     };
     window.addEventListener("click", onClick, true);
     return () => {
-      document.body.style.cursor = oldCursor;
+      document.documentElement.classList.remove(cursorClass);
+      style.remove();
       window.removeEventListener("click", onClick, true);
     };
   }, [state]);
@@ -291,10 +323,9 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       pausedAtRef.current = null;
       startedAtRef.current = performance.now();
       setElapsedMs(0);
-      setPointer({ x: Math.round(window.innerWidth / 2), y: 120 });
       setStatus(captureMode === "screen"
         ? "Recording full screen. The real overlay frame is included."
-        : "Recording window. The recorder adds a clean frame overlay into the video.");
+        : `Recording window. The clean frame is matched to ${window.innerWidth} x ${window.innerHeight}.`);
 
       const stream = await requestDisplayStream(captureMode);
       streamRef.current = stream;
@@ -369,8 +400,8 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
 
   return (
     <>
-      <CaptureFrameOverlay active={active && captureMode === "window"} />
-      <PointerOverlay point={pointer} mark={mark} active={active} />
+      <CaptureFrameOverlay active={active && captureMode === "window"} outerW={viewport.w} outerH={viewport.h} />
+      <ClickPulseOverlay mark={mark} active={active} />
       <div
         data-ui="TutorialRecorderPanel"
         style={{

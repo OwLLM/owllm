@@ -147,6 +147,67 @@ export async function formatToolsForPrompt(_allowed?: string[]): Promise<string>
   return lines.join("\n");
 }
 
+/// OpenAI function-spec tool list — passed as the `tools` parameter on
+/// /v1/chat/completions so llama.cpp activates the model's native chat
+/// template tool-calling. Models with native support (Llama 3.1+, Qwen
+/// 2.5+, Hermes, Mistral Nemo+, Gemma 3) emit clean `delta.tool_calls`
+/// chunks instead of corrupted `<|tool_call|>` special-token soup.
+/// Older / template-less models ignore the field and the XML protocol
+/// in formatToolsForPrompt still applies as the fallback path.
+export async function formatToolsForOpenAI(_allowed?: string[]): Promise<unknown[]> {
+  const out: unknown[] = [];
+  for (const t of LOCAL_TOOL_SPECS) {
+    const properties: Record<string, unknown> = {};
+    const required: string[] = [];
+    for (const a of t.args) {
+      properties[a.name] = { type: "string", description: a.description };
+      if (a.required) required.push(a.name);
+    }
+    out.push({
+      type: "function",
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: {
+          type: "object",
+          properties,
+          required,
+        },
+      },
+    });
+  }
+  // MCP tools — pull at request time so the catalog stays in sync as
+  // servers start/stop. Their inputSchema is already JSON Schema, so we
+  // can pass it through almost verbatim. Tool name has to be a valid
+  // OpenAI identifier (^[a-zA-Z0-9_-]+$); colons in mcp:<server>:<tool>
+  // get rewritten to underscores and back on the way out.
+  let mcpTools: AggregatedMcpTool[] = [];
+  try {
+    mcpTools = await invoke<AggregatedMcpTool[]>("mcp_list_all_tools");
+  } catch { /* MCP unavailable */ }
+  for (const m of mcpTools) {
+    const safeName = m.qualifiedName.replace(/:/g, "__");
+    out.push({
+      type: "function",
+      function: {
+        name: safeName,
+        description: m.description || `MCP tool ${m.qualifiedName}`,
+        parameters: (m.inputSchema && typeof m.inputSchema === "object")
+          ? m.inputSchema
+          : { type: "object", properties: {} },
+      },
+    });
+  }
+  return out;
+}
+
+/// Reverse the MCP name rewrite from formatToolsForOpenAI. Used by the
+/// dispatch loop so it can route native tool_calls back to executeToolCall
+/// which expects mcp:<server>:<tool>.
+export function unmangleMcpName(name: string): string {
+  return name.startsWith("mcp__") ? name.replace(/__/g, ":") : name;
+}
+
 type AggregatedMcpTool = {
   qualifiedName: string;
   server: string;

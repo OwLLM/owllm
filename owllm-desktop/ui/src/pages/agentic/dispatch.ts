@@ -13,8 +13,11 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   executeToolCall,
   formatToolsForPrompt,
+  formatToolsForOpenAI,
   parseToolCalls,
+  unmangleMcpName,
   renderToolResultsForModel,
+  type ToolCall,
   type ToolExecResult,
 } from "./localTools";
 
@@ -912,6 +915,14 @@ export async function streamChatCompletion(
   // a turn with no tool_call blocks. That last turn IS the final
   // answer the caller receives.
   const toolsBlock = await formatToolsForPrompt(allowedTools);
+  // Pass tools= natively so llama.cpp's chat-template-driven tool
+  // rendering activates for models that support it (Llama 3.1+, Qwen
+  // 2.5+, Gemma 3, Hermes, Mistral Nemo+). Those models then emit
+  // structured delta.tool_calls instead of corrupted `<|tool_call|>`
+  // special-token soup. Models without template support ignore the
+  // field and we still parse the XML <tool_call> protocol block out
+  // of the content channel as the fallback.
+  const openaiTools = await formatToolsForOpenAI(allowedTools);
   // Tools FIRST so small local models see the catalog before they lose
   // attention to the tail of a long role+brief+directives prompt.
   const augmentedSystem = toolsBlock ? `${toolsBlock}\n\n${systemPrompt}` : systemPrompt;
@@ -944,6 +955,7 @@ export async function streamChatCompletion(
           messages: liveMessages,
           stream: true,
           temperature,
+          tools: openaiTools.length > 0 ? openaiTools : undefined,
         }),
         signal,
       });
@@ -955,12 +967,17 @@ export async function streamChatCompletion(
       await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
     }
     // consumeOpenAISse calls onDelta for each visible token AND returns
-    // the full assembled assistant text. We capture the text here so we
-    // can parse it for tool_call blocks without losing the streaming
-    // UX in the canvas.
-    lastReply = await consumeOpenAISse(resp, onDelta, onThought);
-    if (!toolsBlock) break; // no tools wired → no need to parse
-    const calls = parseToolCalls(lastReply);
+    // the full assembled assistant text. We also collect any native
+    // delta.tool_calls into nativeCalls so we can run them straight,
+    // before falling back to the XML protocol parser.
+    const nativeCalls: ToolCall[] = [];
+    lastReply = await consumeOpenAISse(resp, onDelta, onThought, nativeCalls);
+    if (!toolsBlock && nativeCalls.length === 0) break; // no tools wired → no need to parse
+    // Prefer native tool_calls — modern models that emit those would
+    // otherwise also leave broken `<|tool_call|>` special-token soup in
+    // `content`. Parsing both protocols would double-execute. Native
+    // wins; XML is the fallback for older / template-less models.
+    const calls: ToolCall[] = nativeCalls.length > 0 ? nativeCalls : parseToolCalls(lastReply);
     if (calls.length === 0) break; // model is done — final answer
     // Run every emitted call (sequentially; matches Python loop's one-
     // at-a-time semantics so each result lands in context before the
@@ -1279,6 +1296,11 @@ async function consumeOpenAISse(
   resp: Response,
   onDelta: StreamHandler,
   onThought?: ThoughtHandler,
+  /// When provided, completed native tool_calls are pushed here as the
+  /// stream finalises. Modern local models (Llama 3.1+, Qwen 2.5+, Gemma
+  /// 3, Hermes) emit these instead of inline content; the caller routes
+  /// them through executeToolCall to actually run the tool.
+  toolCallsOut?: ToolCall[],
 ): Promise<string> {
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
@@ -1292,6 +1314,10 @@ async function consumeOpenAISse(
   // Per-tool-call-index → resolved tool name; the model streams the
   // function name in the first chunk(s) and arguments in later ones.
   const toolNames = new Map<number, string>();
+  // Mirror map for the argument JSON. The model emits the arguments
+  // string in several fragments — we concatenate so the caller can
+  // JSON.parse the complete object when the stream ends.
+  const toolArgs = new Map<number, string>();
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -1327,6 +1353,7 @@ async function consumeOpenAISse(
               const name = toolNames.get(idx) ?? "tool";
               const channel = `tool:${name}:${idx}`;
               onThought?.(channel, `🛠 ${name}`, fn.arguments);
+              toolArgs.set(idx, (toolArgs.get(idx) ?? "") + fn.arguments);
             }
           }
         }
@@ -1342,6 +1369,29 @@ async function consumeOpenAISse(
           if (reply)   { acc += reply; onDelta(reply); }
         }
       } catch { /* skip malformed chunk */ }
+    }
+  }
+  // Finalise native tool_calls — convert each (name, accumulated args JSON)
+  // into the same ToolCall shape parseToolCalls returns so the caller
+  // can run both protocols through executeToolCall without branching.
+  if (toolCallsOut) {
+    for (const [idx, rawName] of toolNames.entries()) {
+      const argsJson = toolArgs.get(idx) ?? "{}";
+      const args: Record<string, string> = {};
+      try {
+        const parsed = JSON.parse(argsJson);
+        if (parsed && typeof parsed === "object") {
+          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+            args[k] = typeof v === "string" ? v : JSON.stringify(v);
+          }
+        }
+      } catch {
+        // Malformed JSON — surface the raw fragment under a single arg so
+        // the caller sees what the model emitted instead of silently
+        // dropping the call.
+        args.raw = argsJson;
+      }
+      toolCallsOut.push({ name: unmangleMcpName(rawName), args });
     }
   }
   return acc;

@@ -62,9 +62,14 @@ pub fn shell_open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Root of the legacy LLM/ tree (contains `models/`, `runtime/`,
-/// etc.). Returns None when the tree cannot be located — callers
-/// must degrade gracefully.
+/// Root of the legacy runtime-data tree (the dir formerly known as
+/// `LLM/`, renamed in Phase 5 to `runtime-data/`). Contains
+/// `models/`, `runtime/`, `python_runtime/`, `.envs/`, etc. Returns
+/// None when the tree cannot be located — callers must degrade
+/// gracefully.
+///
+/// Lookup tries the new name first, falls back to the old `LLM/` name
+/// so a half-renamed checkout still works.
 pub fn llm_root() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_LLM_ROOT") {
         let pb = PathBuf::from(p);
@@ -79,25 +84,30 @@ pub fn llm_root() -> Option<PathBuf> {
     .into_iter()
     .flatten()
     .collect();
+    // Names checked at every ancestor level, in priority order.
+    const NAMES: &[&str] = &["runtime-data", "LLM"];
     for seed in seeds {
         for dir in seed.ancestors() {
-            let candidate = dir.join("LLM");
-            // Anchor on the llama-server.exe shipping under LLM/runtime/llama.cpp
-            // — that's the marker that distinguishes the real legacy tree
-            // from a half-init scratch dir.
-            if candidate
-                .join("runtime")
-                .join("llama.cpp")
-                .join("llama-server.exe")
-                .is_file()
-            {
-                return Some(candidate);
-            }
-            // Fallback marker: a `models/` directory means the user has
-            // at least a partial install — list_models will still find
-            // any GGUFs there even before runtime is bootstrapped.
-            if candidate.join("models").is_dir() {
-                return Some(candidate);
+            for name in NAMES {
+                let candidate = dir.join(name);
+                // Anchor on the llama-server.exe shipping under
+                // <root>/runtime/llama.cpp — the marker that distinguishes
+                // the real tree from a half-init scratch dir.
+                if candidate
+                    .join("runtime")
+                    .join("llama.cpp")
+                    .join("llama-server.exe")
+                    .is_file()
+                {
+                    return Some(candidate);
+                }
+                // Fallback marker: a `models/` directory means the user
+                // has at least a partial install — list_models will
+                // still find any GGUFs there even before runtime is
+                // bootstrapped.
+                if candidate.join("models").is_dir() {
+                    return Some(candidate);
+                }
             }
         }
     }
@@ -220,9 +230,13 @@ pub fn abliterate_script() -> Option<PathBuf> {
 /// Root of the shippable resources tree. Located by:
 ///   1. OWLLM_RESOURCES env override
 ///   2. Walking up from the running exe (or CARGO_MANIFEST_DIR) looking
-///      for `apps/owllm-desktop/resources/agents/roles/` (the marker
-///      file we know exists post-migration).
+///      for `owllm-desktop/resources/agents/roles/` (the marker
+///      directory we know exists post-restructure).
 ///   3. Sibling-of-exe lookup for installed builds: `<exe dir>/resources/`.
+///
+/// Post Phase-5 the app lives at `<repo>/owllm-desktop/` (no apps/
+/// wrapper). The walk-up checks both the new direct layout AND the
+/// legacy `apps/owllm-desktop/` location so older clones still work.
 pub fn resources_root() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_RESOURCES") {
         let pb = PathBuf::from(p);
@@ -248,12 +262,19 @@ pub fn resources_root() -> Option<PathBuf> {
     .collect();
     for seed in seeds {
         for dir in seed.ancestors() {
-            let candidate = dir
+            // New (post-Phase 5) direct layout.
+            let direct = dir.join("owllm-desktop").join("resources");
+            if direct.join("agents").join("roles").is_dir() {
+                return Some(direct);
+            }
+            // Legacy apps/ wrapper layout — kept as a fallback so an
+            // older checkout still resolves until it's restructured.
+            let legacy = dir
                 .join("apps")
                 .join("owllm-desktop")
                 .join("resources");
-            if candidate.join("agents").join("roles").is_dir() {
-                return Some(candidate);
+            if legacy.join("agents").join("roles").is_dir() {
+                return Some(legacy);
             }
         }
     }
@@ -469,6 +490,51 @@ pub fn user_gpu_config_path() -> Option<PathBuf> {
 /// the migration getting skipped.
 pub fn migration_sentinel_path() -> Option<PathBuf> {
     user_data_root().map(|r| r.join(".migrated_from_legacy"))
+}
+
+// Diagnostic command — exposed to JS as `invoke('paths_debug')`. Lets us
+// see exactly which roots the resolver is finding from the running exe,
+// for cases like "downloaded models disappeared after the LLM →
+// runtime-data rename".
+#[derive(serde::Serialize)]
+pub struct PathsDebug {
+    pub current_exe: String,
+    pub cargo_manifest_dir: String,
+    pub resources_root: Option<String>,
+    pub llm_root: Option<String>,
+    pub user_data_root: Option<String>,
+    pub legacy_user_data_root: Option<String>,
+    pub runtime_cache_root: Option<String>,
+    pub runtime_root: Option<String>,
+    pub models_root_new: Option<String>,
+    pub models_dirs_read: Vec<String>,
+    pub fine_tuned_dirs_read: Vec<String>,
+    pub roles_dir: Option<String>,
+    pub teams_dir: Option<String>,
+}
+
+#[tauri::command]
+pub fn paths_debug() -> PathsDebug {
+    let s = |o: Option<PathBuf>| o.map(|p| p.to_string_lossy().into_owned());
+    PathsDebug {
+        current_exe: std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|e| format!("err: {e}")),
+        cargo_manifest_dir: env!("CARGO_MANIFEST_DIR").into(),
+        resources_root: s(resources_root()),
+        llm_root: s(llm_root()),
+        user_data_root: s(user_data_root()),
+        legacy_user_data_root: s(legacy_user_data_root()),
+        runtime_cache_root: s(runtime_cache_root()),
+        runtime_root: s(runtime_root()),
+        models_root_new: s(models_root_new()),
+        models_dirs_read: models_dirs_read()
+            .into_iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+        fine_tuned_dirs_read: fine_tuned_dirs_read()
+            .into_iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+        roles_dir: s(roles_dir()),
+        teams_dir: s(teams_dir()),
+    }
 }
 
 // =====================================================================

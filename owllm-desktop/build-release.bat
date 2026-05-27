@@ -42,14 +42,14 @@ call npm run build
 if errorlevel 1 exit /b 1
 
 echo [owllm-desktop] Building Tauri release with GNU toolchain on P-cores only ^(E-cores excluded to dodge CPU TLB errors^)...
-rem start /affinity FFFF launches a child cmd pinned to logical
-rem processors 0-15 (P-cores w/ HT). All grandchildren of that cmd
-rem (cargo, every rustc subprocess, gcc, link) inherit the same
-rem affinity mask automatically — Windows propagates affinity on
-rem CreateProcess unless the child explicitly resets it.
-rem /b runs in the same console, /wait blocks the .bat until the
-rem inner cmd finishes so errorlevel propagates back correctly.
-start "owllm-build" /affinity FFFF /b /wait cmd /c "call npm run tauri -- build --target x86_64-pc-windows-gnu & exit /b !errorlevel!"
+rem PowerShell sets affinity on the cmd that runs npm run tauri build
+rem — same effect as the previous `start /affinity FFFF /b /wait`
+rem invocation but WITHOUT swallowing the child's stdout/stderr (the
+rem old form ate every "Compiling owllm-desktop" + "Finished release"
+rem line, so silent cargo skips were invisible). Affinity FFFF =
+rem logical processors 0-15 (P-cores w/ HT); grandchildren inherit
+rem the mask via Windows CreateProcess unless they explicitly reset it.
+powershell -NoProfile -Command "$p = Start-Process -FilePath cmd -ArgumentList '/c','npm run tauri -- build --target x86_64-pc-windows-gnu' -PassThru -NoNewWindow; $p.ProcessorAffinity = [System.IntPtr]0xFFFF; $p.WaitForExit(); exit $p.ExitCode"
 if errorlevel 1 exit /b 1
 
 echo.

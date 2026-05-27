@@ -48,6 +48,32 @@ pub fn run() {
             // touches the SQLite state so we don't end up with two parallel
             // DBs on first launch.
             bootstrap::migrate_user_state_if_needed();
+            // Diagnostic: log the resolved paths on startup so missing
+            // models / disappeared user state can be triaged from the
+            // log file without F12 console acrobatics. Tries three
+            // candidate locations so even a stripped-env Tauri context
+            // gets ONE that succeeds.
+            let dbg = paths::paths_debug();
+            if let Ok(s) = serde_json::to_string_pretty(&dbg) {
+                let mut targets: Vec<std::path::PathBuf> = Vec::new();
+                if let Some(t) = std::env::var_os("TEMP") {
+                    targets.push(std::path::PathBuf::from(&t).join("owllm-paths.log"));
+                }
+                if let Some(t) = std::env::var_os("USERPROFILE") {
+                    targets.push(std::path::PathBuf::from(&t).join("owllm-paths.log"));
+                }
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Some(p) = exe.parent() {
+                        targets.push(p.join("owllm-paths.log"));
+                    }
+                }
+                for t in &targets {
+                    if std::fs::write(t, &s).is_ok() {
+                        eprintln!("[owllm] paths_debug written to {}", t.display());
+                        break;
+                    }
+                }
+            }
             // Module-local state lives where the module lives; lib.rs
             // just kicks off the install.
             server::install(app);
@@ -155,6 +181,7 @@ pub fn run() {
             huggingface::models_list_downloaded,
             recommendations::models_recommended,
             paths::shell_open_url,
+            paths::paths_debug,
             env_manager::env_profiles_list,
             env_manager::env_profile_status,
             env_manager::env_profile_install,

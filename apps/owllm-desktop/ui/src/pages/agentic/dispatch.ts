@@ -983,6 +983,29 @@ async function streamAnthropic(
     ? `${userMessage}\n\n[${imgList.length} image attachment(s) dropped — switch to the API row to send images to Claude.]`
     : userMessage;
   const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history);
+  // Wrap CLI invocations so a "Session ID already in use" failure
+  // (a stale lock from a prior crashed claude process, or the same
+  // session being in flight in the desktop UI) gets one automatic
+  // retry with a fresh one-shot session. Without this the Telegram
+  // bridge bubbled the conflict up to the user as
+  // "(dispatch error: Session ID … is already in use)" the moment
+  // OwLLM Desktop also had an active Claude CLI session for the same
+  // (project, agent). AgentsPage.tsx has the same wrapper for its
+  // in-page dispatches; bridges share the same recovery path now.
+  const runWithSessionRetry = async <T,>(
+    attempt: (sid: string | null | undefined) => Promise<T>,
+  ): Promise<T> => {
+    try {
+      return await attempt(sessionId);
+    } catch (e: unknown) {
+      const msg = (e as { message?: string })?.message ?? String(e);
+      const isSessionConflict = /Session ID .* (is already in use|already in use)/i.test(msg)
+        || (/already in use/i.test(msg) && /session/i.test(msg));
+      if (!isSessionConflict) throw e;
+      try { clearAllClaudeSessions(); } catch { /* best-effort */ }
+      return await attempt(null);
+    }
+  };
   if (wantSub) {
     const status = await invoke<{ claude_cli: boolean }>("accounts_status");
     if (!status?.claude_cli) {
@@ -992,18 +1015,18 @@ async function streamAnthropic(
     // back to one-shot --print blob otherwise (the bridge runner that
     // doesn't display a Thought tab).
     if (onThought) {
-      return await runClaudeCliStream({
+      return await runWithSessionRetry((sid) => runClaudeCliStream({
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false, allowedTools,
-        model: cliModel, effort: claudeEffort, sessionId,
+        model: cliModel, effort: claudeEffort, sessionId: sid,
         onDelta, onThought,
-      });
+      }));
     }
-    const reply = await invoke<string>("claude_cli_complete", {
+    const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
       systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
       autoApprove: autoApprove ?? false,
-      model: cliModel, effort: claudeEffort, sessionId,
-    });
+      model: cliModel, effort: claudeEffort, sessionId: sid,
+    }));
     if (reply) onDelta(reply);
     return reply;
   }
@@ -1014,18 +1037,18 @@ async function streamAnthropic(
       const status = await invoke<{ claude_cli: boolean }>("accounts_status");
       if (status?.claude_cli) {
         if (onThought) {
-          return await runClaudeCliStream({
+          return await runWithSessionRetry((sid) => runClaudeCliStream({
             systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
-            model: cliModel, effort: claudeEffort, sessionId,
+            model: cliModel, effort: claudeEffort, sessionId: sid,
             onDelta, onThought,
-          });
+          }));
         }
-        const reply = await invoke<string>("claude_cli_complete", {
+        const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
           systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
           autoApprove: autoApprove ?? false,
-          model: cliModel, effort: claudeEffort, sessionId,
-        });
+          model: cliModel, effort: claudeEffort, sessionId: sid,
+        }));
         if (reply) onDelta(reply);
         return reply;
       }

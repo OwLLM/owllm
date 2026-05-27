@@ -133,6 +133,19 @@ pub async fn server_start(
     // is faking it. 99 is the conventional "all layers" sentinel.
     cmd.arg("-fit").arg("off");
     cmd.arg("-ngl").arg("99");
+    // --jinja activates llama.cpp's jinja chat-template engine. WITHOUT
+    // this flag, llama-server uses its built-in template fallback which
+    // SILENTLY ignores `tools=[…]` on the request body AND can't parse
+    // the model's native tool_call special tokens (`<|tool_call|>` etc.)
+    // back into structured `delta.tool_calls`. The model still emits
+    // those tokens because it was trained to, but they leak through as
+    // raw `delta.content` text and the user sees hallucinated tool
+    // exchanges in their reply. With --jinja, llama.cpp uses the GGUF's
+    // bundled chat template which handles both directions properly for
+    // every modern tool-calling model (Llama 3.1+, Qwen 2.5+, Gemma 3,
+    // Hermes 3, Mistral Nemo+). Older models without a jinja template
+    // fall back to the same built-in path as before — no regression.
+    cmd.arg("--jinja");
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

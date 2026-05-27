@@ -211,6 +211,7 @@ pub fn run() {
             mcp::mcp_list_all_tools,
             mcp::mcp_call_tool,
             mcp::mcp_autostart_all,
+            mcp::mcp_install_pack,
             mcp::install_uv,
             mcp::runtime_status,
         ])
@@ -233,6 +234,14 @@ pub fn run() {
                     ..
                 } if label == "main" => {
                     overlay_frame::close_if_present(app);
+                    // Reap llama-server HERE too, not only on ExitRequested.
+                    // When the user clicks the main window's X, Tauri 2's
+                    // event lifecycle does NOT guarantee ExitRequested fires
+                    // (overlay_frame or other auxiliary windows can hold the
+                    // app alive). Without this, llama-server.exe survives
+                    // the visible-app close and keeps the model resident in
+                    // VRAM — exactly the A2000-stuck-full symptom users hit.
+                    server::kill_all_llama_servers("main-window-close");
                 }
                 tauri::RunEvent::ExitRequested { .. } => {
                     overlay_frame::close_if_present(app);

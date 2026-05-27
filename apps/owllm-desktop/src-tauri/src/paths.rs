@@ -300,3 +300,160 @@ pub fn tools_dir() -> Option<PathBuf> {
     let p = llm_root()?.join("tools");
     if p.is_dir() { Some(p) } else { None }
 }
+
+// =====================================================================
+// User-data root (Phase 2)
+//
+// Per-user MUTABLE state — SQLite, custom agents/teams, installed
+// skills, GPU selection. Lives in the OS-canonical app-data dir:
+//   * Windows: %APPDATA%\OwLLM Desktop\
+//   * macOS:   ~/Library/Application Support/OwLLM Desktop/
+//   * Linux:   $XDG_DATA_HOME/OwLLM Desktop/ (or ~/.local/share/...)
+//
+// One-time migration (in lib.rs setup) copies LLM/data/* here on first
+// launch, so existing users don't lose state.
+//
+// Every helper here returns the NEW location; callers also try the
+// legacy LLM/data/ path as a read-only fallback during the migration
+// window so a half-migrated install still works.
+// =====================================================================
+
+const APP_DIR_NAME: &str = "OwLLM Desktop";
+
+/// Root of the per-user mutable state tree.
+pub fn user_data_root() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("OWLLM_USER_DATA") {
+        let pb = PathBuf::from(p);
+        if !pb.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let pb = PathBuf::from(appdata).join(APP_DIR_NAME);
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let pb = PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(APP_DIR_NAME);
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+            let pb = PathBuf::from(xdg).join(APP_DIR_NAME);
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let pb = PathBuf::from(home).join(".local").join("share").join(APP_DIR_NAME);
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    None
+}
+
+/// Legacy user-data root — `<llm_root>/data/`. Read-only fallback that
+/// lets the app find existing user state from before the move to
+/// `%APPDATA%`. The one-time migration (lib.rs setup) copies these
+/// files into the new home so this fallback only matters once.
+pub fn legacy_user_data_root() -> Option<PathBuf> {
+    let p = llm_root()?.join("data");
+    if p.is_dir() { Some(p) } else { None }
+}
+
+/// SQLite state DB (`owllm_state.db`). Tries the new user-data root
+/// first, then the legacy LLM/data/ location.
+pub fn state_db_path() -> Option<PathBuf> {
+    if let Some(root) = user_data_root() {
+        let p = root.join("owllm_state.db");
+        if p.is_file() { return Some(p); }
+    }
+    if let Some(root) = legacy_user_data_root() {
+        let p = root.join("owllm_state.db");
+        if p.is_file() { return Some(p); }
+    }
+    // Neither exists yet — return the WRITE target (new root) so the
+    // SQLite connection creates the file there.
+    user_data_root().map(|r| r.join("owllm_state.db"))
+}
+
+/// Where save_agent_definition / Studio writes its custom agent JSONs.
+pub fn custom_agents_dir() -> Option<PathBuf> {
+    user_data_root().map(|r| r.join("agent_definitions"))
+}
+
+/// Read-side: list custom agents from EITHER the new dir or the legacy
+/// LLM/data/agent_definitions/ during the migration window.
+pub fn custom_agents_dirs_read() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(p) = custom_agents_dir() {
+        if p.is_dir() { out.push(p); }
+    }
+    if let Some(legacy) = legacy_user_data_root() {
+        let p = legacy.join("agent_definitions");
+        if p.is_dir() && !out.contains(&p) { out.push(p); }
+    }
+    out
+}
+
+/// Where Studio's saved team templates live.
+pub fn custom_teams_dir() -> Option<PathBuf> {
+    user_data_root().map(|r| r.join("teams"))
+}
+
+pub fn custom_teams_dirs_read() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(p) = custom_teams_dir() {
+        if p.is_dir() { out.push(p); }
+    }
+    if let Some(legacy) = legacy_user_data_root() {
+        let p = legacy.join("teams");
+        if p.is_dir() && !out.contains(&p) { out.push(p); }
+    }
+    out
+}
+
+/// Where installed skill packs live (one folder per pack, each with
+/// SKILL.md inside). The `_remote/` subdir under here holds shallow
+/// clones of the curated git sources.
+pub fn skills_dir() -> Option<PathBuf> {
+    user_data_root().map(|r| r.join("skills"))
+}
+
+pub fn skills_dirs_read() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(p) = skills_dir() {
+        if p.is_dir() { out.push(p); }
+    }
+    if let Some(legacy) = legacy_user_data_root() {
+        let p = legacy.join("skills");
+        if p.is_dir() && !out.contains(&p) { out.push(p); }
+    }
+    out
+}
+
+/// GPU selection JSON (`gpu_config.json`). New canonical location is
+/// the user-data root; legacy reads come from LLM/data/ then the even-
+/// older LLM/desktop_app/config/.
+pub fn user_gpu_config_path() -> Option<PathBuf> {
+    user_data_root().map(|r| r.join("gpu_config.json"))
+}
+
+/// Sentinel file marking that the one-time migration ran. Located in
+/// the user-data root so a wipe of that dir is "start over" without
+/// the migration getting skipped.
+pub fn migration_sentinel_path() -> Option<PathBuf> {
+    user_data_root().map(|r| r.join(".migrated_from_legacy"))
+}

@@ -16,6 +16,7 @@ use tauri::Emitter;
 mod accounts;
 mod agent_tools;
 mod agents;
+mod bootstrap;
 mod bridges;
 mod code;
 mod dialog;
@@ -40,6 +41,13 @@ mod telegram;
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            // One-time copy of LLM/data/* into %APPDATA%\OwLLM Desktop\
+            // for users coming from the pre-restructure layout. Idempotent —
+            // gated by a sentinel file inside the new root, so subsequent
+            // launches no-op. Runs synchronously before any module that
+            // touches the SQLite state so we don't end up with two parallel
+            // DBs on first launch.
+            bootstrap::migrate_user_state_if_needed();
             // Module-local state lives where the module lives; lib.rs
             // just kicks off the install.
             server::install(app);

@@ -292,19 +292,26 @@ pub struct GpuSelection {
 }
 
 fn gpu_config_path() -> Option<PathBuf> {
-    Some(paths::llm_root()?.join("data").join("gpu_config.json"))
+    // Phase 2 canonical location: %APPDATA%\OwLLM Desktop\gpu_config.json.
+    paths::user_gpu_config_path()
 }
 
-/// Legacy location that the PySide6 app wrote to (and Rust shared with
-/// it until the restructure). Read-only fallback so we don't lose the
-/// user's existing selection.
-fn legacy_gpu_config_path() -> Option<PathBuf> {
-    Some(paths::llm_root()?.join("desktop_app").join("config").join("gpu_config.json"))
+/// Read-only legacy fallbacks. Two of them now:
+///   1. LLM/data/gpu_config.json — where Phase 4 (post-desktop_app
+///      sandbox) put the file before user-data root existed.
+///   2. LLM/desktop_app/config/gpu_config.json — where the original
+///      PySide6 app wrote it (pre-restructure).
+fn legacy_gpu_config_paths() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(root) = paths::llm_root() {
+        v.push(root.join("data").join("gpu_config.json"));
+        v.push(root.join("desktop_app").join("config").join("gpu_config.json"));
+    }
+    v
 }
 
 fn load_gpu_selection() -> Option<GpuSelection> {
-    // Prefer the new path; fall back to the legacy desktop_app/config
-    // location so we don't lose the user's selection after the move.
+    // Prefer the new %APPDATA% path; fall back to both legacy locations.
     if let Some(path) = gpu_config_path() {
         if let Ok(raw) = std::fs::read_to_string(&path) {
             if let Ok(sel) = serde_json::from_str::<GpuSelection>(&raw) {
@@ -312,9 +319,14 @@ fn load_gpu_selection() -> Option<GpuSelection> {
             }
         }
     }
-    let legacy = legacy_gpu_config_path()?;
-    let raw = std::fs::read_to_string(&legacy).ok()?;
-    serde_json::from_str(&raw).ok()
+    for legacy in legacy_gpu_config_paths() {
+        if let Ok(raw) = std::fs::read_to_string(&legacy) {
+            if let Ok(sel) = serde_json::from_str::<GpuSelection>(&raw) {
+                return Some(sel);
+            }
+        }
+    }
+    None
 }
 
 fn save_gpu_selection(sel: &GpuSelection) -> Result<(), String> {

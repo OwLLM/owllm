@@ -63,11 +63,15 @@ pub async fn list_skill_sources() -> Result<Vec<SkillSource>, String> {
 }
 
 fn remote_root() -> Option<PathBuf> {
-    Some(paths::llm_root()?.join("data").join("skills").join("_remote"))
+    // Writes go to the new %APPDATA%\OwLLM Desktop\skills/_remote/
+    // location. Reads of EXISTING clones fall back to LLM/data/skills/_remote/
+    // via list_skill_packs path resolution; this writer always targets
+    // the new home.
+    Some(paths::skills_dir()?.join("_remote"))
 }
 
 fn installed_root() -> Option<PathBuf> {
-    Some(paths::llm_root()?.join("data").join("skills"))
+    paths::skills_dir()
 }
 
 fn resolve_source_or_custom(key: &str, git_url: Option<&str>) -> Result<SkillSource, String> {

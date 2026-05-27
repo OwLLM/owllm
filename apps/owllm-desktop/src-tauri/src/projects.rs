@@ -64,7 +64,10 @@ fn project_db_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_PROJECT_DB") {
         return Some(PathBuf::from(p));
     }
-    Some(paths::llm_root()?.join("data").join("owllm_state.db"))
+    // %APPDATA%\OwLLM Desktop\owllm_state.db, with the legacy
+    // LLM/data/owllm_state.db as the fallback during the migration
+    // window. Lives in paths::state_db_path().
+    paths::state_db_path()
 }
 
 fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {

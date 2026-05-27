@@ -35,7 +35,9 @@ fn db_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_PROJECT_DB") {
         return Some(PathBuf::from(p));
     }
-    Some(paths::llm_root()?.join("data").join("owllm_state.db"))
+    // Prefer the new %APPDATA%-based location; falls back to the
+    // legacy LLM/data/ path via paths::state_db_path().
+    paths::state_db_path()
 }
 
 fn now_iso() -> String {

@@ -69,51 +69,51 @@ pub struct SkillPack {
 #[tauri::command]
 pub async fn list_team_templates() -> Result<Vec<TeamTemplate>, String> {
     let mut out = Vec::new();
-    // Built-in teams ship as JSONs inside the app's resources tree
-    // (apps/owllm-desktop/resources/agents/teams/). Falls back to the
-    // legacy LLM/core/agents/teams/ for half-migrated installs.
+    // Built-in teams ship as JSONs inside the app's resources tree.
     if let Some(builtin) = paths::teams_dir() {
         collect_team_dir(&builtin, true, &mut out);
     }
-    // User-saved teams (Studio's "+ New" / "Edit on builtin" writes
-    // here). Lives under LLM/data/teams/ — user state, not shippable.
-    if let Some(root) = paths::llm_root() {
-        let custom = root.join("data").join("teams");
+    // User-saved teams — Phase 2 home is %APPDATA%\OwLLM Desktop\teams/.
+    // The helper returns BOTH the new and legacy LLM/data/teams/ dirs
+    // during the migration window so existing teams stay visible.
+    for custom in paths::custom_teams_dirs_read() {
         collect_team_dir(&custom, false, &mut out);
     }
-    // Stable order so the UI's category grouping is deterministic.
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
 }
 
 #[tauri::command]
 pub async fn list_skill_packs() -> Result<Vec<SkillPack>, String> {
-    let Some(root) = paths::llm_root() else { return Ok(Vec::new()) };
     let mut out = Vec::new();
-    let skills_root = root.join("data").join("skills");
-    let Ok(read) = std::fs::read_dir(&skills_root) else { return Ok(Vec::new()) };
-    for entry in read.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() { continue; }
-        // The shallow clone of upstream repos lives under
-        // data/skills/_remote/ — skip that container since the
-        // individual skills are listed at the top level.
-        if dir.file_name().and_then(|n| n.to_str()) == Some("_remote") { continue; }
-        let md = dir.join("SKILL.md");
-        if !md.is_file() { continue; }
-        let raw = match std::fs::read_to_string(&md) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let (frontmatter, body) = split_skill_md(&raw);
-        let id = dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
-        out.push(SkillPack {
-            id,
-            path: md.to_string_lossy().into_owned(),
-            dir: dir.to_string_lossy().into_owned(),
-            frontmatter,
-            body,
-        });
+    // Walk EVERY skills home — Phase 2 puts new installs in
+    // %APPDATA%\OwLLM Desktop\skills/, but the legacy LLM/data/skills/
+    // location is also enumerated during the migration window.
+    for skills_root in paths::skills_dirs_read() {
+        let Ok(read) = std::fs::read_dir(&skills_root) else { continue };
+        for entry in read.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() { continue; }
+            // The shallow clone of upstream repos lives under
+            // skills/_remote/ — skip that container since the
+            // individual skills are listed at the top level.
+            if dir.file_name().and_then(|n| n.to_str()) == Some("_remote") { continue; }
+            let md = dir.join("SKILL.md");
+            if !md.is_file() { continue; }
+            let raw = match std::fs::read_to_string(&md) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let (frontmatter, body) = split_skill_md(&raw);
+            let id = dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            out.push(SkillPack {
+                id,
+                path: md.to_string_lossy().into_owned(),
+                dir: dir.to_string_lossy().into_owned(),
+                frontmatter,
+                body,
+            });
+        }
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
@@ -148,19 +148,33 @@ fn split_skill_md(raw: &str) -> (JsonValue, String) {
 /// outside the sandbox.
 #[tauri::command]
 pub async fn save_agent_definition(path: String, data: JsonValue) -> Result<(), String> {
-    let Some(root) = paths::llm_root() else { return Err("LLM root not found".into()) };
-    let custom_dir = root.join("data").join("agent_definitions");
+    // Writes accepted into EITHER the new %APPDATA% custom dir or the
+    // legacy LLM/data/agent_definitions/ — the path resolver returns
+    // both during the migration window, so the Studio "Save" round-
+    // trip still works whichever home the file came from.
+    let allowed_dirs = paths::custom_agents_dirs_read();
+    let write_target_root = paths::custom_agents_dir()
+        .ok_or_else(|| "user-data root not found".to_string())?;
     let target = std::path::PathBuf::from(&path);
-    let target_canon = target.canonicalize().unwrap_or(target.clone());
-    let custom_canon = custom_dir.canonicalize().unwrap_or(custom_dir.clone());
-    if !target_canon.starts_with(&custom_canon) {
-        return Err(format!(
-            "refusing to save outside LLM/data/agent_definitions/ — got {}",
-            target.display(),
-        ));
-    }
     if target.extension().and_then(|s| s.to_str()) != Some("json") {
         return Err("save_agent_definition only writes .json files (built-in YAML roles are read-only)".into());
+    }
+    // Make sure the canonical path is inside one of the allowed roots.
+    let target_canon = target.canonicalize().unwrap_or(target.clone());
+    let ok = allowed_dirs.iter().any(|d| {
+        let dc = d.canonicalize().unwrap_or(d.clone());
+        target_canon.starts_with(&dc)
+    }) || {
+        // First-time write into the new dir (which doesn't exist yet).
+        let _ = std::fs::create_dir_all(&write_target_root);
+        let wc = write_target_root.canonicalize().unwrap_or(write_target_root.clone());
+        target_canon.starts_with(&wc)
+    };
+    if !ok {
+        return Err(format!(
+            "refusing to save outside an allowed agent_definitions dir — got {}",
+            target.display(),
+        ));
     }
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
@@ -175,16 +189,14 @@ pub async fn save_agent_definition(path: String, data: JsonValue) -> Result<(), 
 #[tauri::command]
 pub async fn list_agent_roles() -> Result<Vec<AgentRole>, String> {
     let mut out = Vec::new();
-    // Built-in role YAMLs ship in the resources tree
-    // (apps/owllm-desktop/resources/agents/roles/), with the legacy
-    // LLM/core/agents/roles/ as the fallback path.
     if let Some(builtin) = paths::roles_dir() {
         collect_role_dir(&builtin, true, &mut out);
     }
-    // User-saved custom roles still live under LLM/data/agent_definitions/
-    // — that's user state, not shippable.
-    if let Some(root) = paths::llm_root() {
-        let custom = root.join("data").join("agent_definitions");
+    // User-saved custom roles — Phase 2 home is
+    // %APPDATA%\OwLLM Desktop\agent_definitions/. Helper returns BOTH
+    // the new and legacy LLM/data/agent_definitions/ dirs so existing
+    // custom roles stay visible during the migration window.
+    for custom in paths::custom_agents_dirs_read() {
         collect_role_dir(&custom, false, &mut out);
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));

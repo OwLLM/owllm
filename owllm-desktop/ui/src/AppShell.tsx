@@ -28,6 +28,7 @@ import { ACCENTS, AccentKey, Mode, useTheme } from "./theme";
 import { headerPill } from "./theme/styles";
 import TelegramBridgeRunner from "./bridges/TelegramBridgeRunner";
 import ServerPage from "./pages/core/ServerPage";
+import BridgesPage from "./pages/agentic/BridgesPage";
 import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
 
 // tauri.conf.json now sets decorations:false again — the OS title
@@ -643,13 +644,20 @@ function SubTabs({
 }
 
 // ---------------------------------------------------------------------
-// ServerModal — popup wrapper around ServerPage. Replaces the old
-// "Server" SubTab: same content, but in a centered modal styled like
-// the app (cyan border, dark-blue title strip, panel body). Closes
-// on backdrop click, Esc, or the ✕ button.
+// PageModal — popup wrapper around a full Page component. Used for
+// Server and Bridges so the user can pop them open from any mode
+// without losing their current tab. Centered modal styled like the
+// app (cyan border, dark-blue title strip, panel body). Closes on
+// backdrop click, Esc, or the ✕ button.
 // ---------------------------------------------------------------------
-function ServerModal({ onClose }: { onClose: () => void }) {
-  // Esc to close — registered once on mount.
+function PageModal({
+  title, dataUi, onClose, children,
+}: {
+  title: string;
+  dataUi: string;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
     window.addEventListener("keydown", onKey);
@@ -657,7 +665,7 @@ function ServerModal({ onClose }: { onClose: () => void }) {
   }, [onClose]);
   return (
     <div
-      data-ui="ServerModalBackdrop"
+      data-ui={`${dataUi}Backdrop`}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
       style={{
         position: "fixed", inset: 0, zIndex: 9000,
@@ -666,13 +674,10 @@ function ServerModal({ onClose }: { onClose: () => void }) {
       }}
     >
       <div
-        data-ui="ServerModal"
+        data-ui={dataUi}
         style={{
           width: "92%", height: "88%",
           background: "var(--bg-panel)",
-          // Same cyan accent the HybridFrame uses internally — keeps
-          // the modal visually consistent with the app chrome without
-          // duplicating corner PNGs etc.
           border: "2px solid rgba(var(--accent-rgb), 0.78)",
           borderRadius: 14,
           boxShadow: "0 24px 64px rgba(0,0,0,0.55)",
@@ -680,8 +685,6 @@ function ServerModal({ onClose }: { onClose: () => void }) {
           overflow: "hidden",
         }}
       >
-        {/* Title strip — uses --bg-header so it picks up the accent tint
-            just like the main ModeBar (kept in sync with chrome parity). */}
         <div style={{
           height: 56,
           background: "var(--bg-header)",
@@ -691,11 +694,11 @@ function ServerModal({ onClose }: { onClose: () => void }) {
           borderBottom: "1px solid rgba(var(--accent-rgb), 0.30)",
         }}>
           <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: 1 }}>
-            🖧 Server Control
+            {title}
           </div>
           <div style={{ flex: 1 }} />
           <button
-            data-ui="ServerModalClose"
+            data-ui={`${dataUi}Close`}
             onClick={onClose}
             title="Close (Esc)"
             style={{
@@ -707,9 +710,8 @@ function ServerModal({ onClose }: { onClose: () => void }) {
             }}
           >✕</button>
         </div>
-        {/* Body — full ServerPage, scrolls on its own. */}
         <div style={{ flex: 1, overflow: "auto", minHeight: 0 }}>
-          <ServerPage />
+          {children}
         </div>
       </div>
     </div>
@@ -775,6 +777,7 @@ export default function AppShell() {
   const [mode, setMode] = useState<ActiveMode>(initialDeep?.mode ?? "home");
   const [advancedOpen, setAdvancedOpen] = useState<boolean>(initialAdvanced);
   const [serverModalOpen, setServerModalOpen] = useState<boolean>(false);
+  const [bridgesModalOpen, setBridgesModalOpen] = useState<boolean>(false);
   const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
   const theme = useTheme();
 
@@ -844,10 +847,11 @@ export default function AppShell() {
       const detail = (e as CustomEvent<{ key?: string }>).detail;
       const key = detail?.key;
       if (typeof key !== "string") return;
-      // "server" is now a modal — intercept here so external nav
-      // requests open the popup instead of trying to switch to a
+      // "server" / "bridges" are modals — intercept here so external
+      // nav requests open the popup instead of trying to switch to a
       // (no-longer-rendered-inline) tab.
       if (key === "server") { setServerModalOpen(true); return; }
+      if (key === "bridges") { setBridgesModalOpen(true); return; }
       // Find which module owns this page key so we can light up the
       // matching ModeBar toggle alongside the SubTabs row.
       for (const m of ALL_MODULES) {
@@ -868,6 +872,7 @@ export default function AppShell() {
   // SubTabs as a visible affordance; we just override the action).
   const handleTabChange = (key: string) => {
     if (key === "server") { setServerModalOpen(true); return; }
+    if (key === "bridges") { setBridgesModalOpen(true); return; }
     setActiveKey(key);
   };
 
@@ -919,7 +924,24 @@ export default function AppShell() {
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
         : <HybridFrame outerW={vp.w} outerH={vp.h}>{appContent}</HybridFrame>}
-      {serverModalOpen && <ServerModal onClose={() => setServerModalOpen(false)} />}
+      {serverModalOpen && (
+        <PageModal
+          title="🖧 Server Control"
+          dataUi="ServerModal"
+          onClose={() => setServerModalOpen(false)}
+        >
+          <ServerPage />
+        </PageModal>
+      )}
+      {bridgesModalOpen && (
+        <PageModal
+          title="📱 Bridges"
+          dataUi="BridgesModal"
+          onClose={() => setBridgesModalOpen(false)}
+        >
+          <BridgesPage />
+        </PageModal>
+      )}
       <TutorialRecorder enabled={advancedOpen} />
     </>
   );

@@ -922,19 +922,38 @@ export async function streamChatCompletion(
   ];
   const MAX_TOOL_TURNS = 8;
   let lastReply = "";
+  // llama-server returns HTTP 503 {"error":{"message":"Loading model",...}}
+  // while the GGUF is still mmap'ing. The Telegram bridge's lazy-start
+  // poll only knows the port is bound; on cold cache a 7B+ model can
+  // need another 30-60 s before /v1/chat/completions stops 503'ing.
+  // Without this retry the first dispatch after a cold start bubbled
+  // the raw 503 body up to the user as "(dispatch error: …)".
+  const LOAD_RETRY_MS = 90_000;
+  const LOAD_RETRY_DELAY = 1500;
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
-    const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: modelId || "local",
-        messages: liveMessages,
-        stream: true,
-        temperature,
-      }),
-      signal,
-    });
+    let resp: Response;
+    const loadDeadline = Date.now() + LOAD_RETRY_MS;
+    while (true) {
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
+      resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: modelId || "local",
+          messages: liveMessages,
+          stream: true,
+          temperature,
+        }),
+        signal,
+      });
+      if (resp.status !== 503) break;
+      // Peek at the body via clone — if it's "Loading model" we retry,
+      // any other 503 surfaces normally through consumeOpenAISse.
+      const txt = await resp.clone().text().catch(() => "");
+      if (!/loading model/i.test(txt) || Date.now() >= loadDeadline) break;
+      await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
+    }
     // consumeOpenAISse calls onDelta for each visible token AND returns
     // the full assembled assistant text. We capture the text here so we
     // can parse it for tool_call blocks without losing the streaming

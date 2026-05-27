@@ -1,0 +1,4 @@
+# This file ensures the models/ directory exists in git
+# Model weight files (*.safetensors, *.bin) are excluded via .gitignore
+# Run the model integrity checker or use the GUI to download missing models
+

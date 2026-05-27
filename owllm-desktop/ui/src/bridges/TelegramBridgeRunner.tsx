@@ -529,6 +529,78 @@ export default function TelegramBridgeRunner() {
     const baseModel = teamDefault;
     const modelFor = (_agent: string) => baseModel;
 
+    // ---- 2b. Lazy local-server start ----
+    // If the team's default model is a LOCAL llama-server model, make
+    // sure llama-server.exe is running on it BEFORE the dispatch loop
+    // calls fetch("http://127.0.0.1:<port>/v1/chat/completions"). Port
+    // 0 (server not started) made fetch reject with "Failed to fetch"
+    // — that's what was showing up in the user's Telegram replies.
+    // For cloud models (claude-*, gpt-*) we skip this block entirely;
+    // their fetch goes to api.anthropic.com / api.openai.com and
+    // doesn't need a local server.
+    const baseModelInfo = modelsRef.current.find(m => m.model_id === baseModel);
+    const isLocalModel = !!baseModelInfo && (baseModelInfo.provider === "local" || baseModelInfo.provider === "tuned");
+    if (isLocalModel) {
+      const alreadyOk =
+        serverRef.current.running &&
+        serverRef.current.model_id === baseModel &&
+        !!serverRef.current.port;
+      if (!alreadyOk) {
+        try {
+          if (serverRef.current.running) {
+            await invoke("server_stop").catch(() => {});
+          }
+          await invoke("server_start", { modelId: baseModel });
+        } catch (e) {
+          const msg = `(failed to start local model '${baseModel}': ${String((e as any)?.message ?? e)})`;
+          await sendTelegram(tgCfg.bot_token, chatId, msg);
+          const sysMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: msg };
+          try {
+            window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+              detail: { projectId, messages: [sysMsg], source: "telegram" },
+            }));
+          } catch {}
+          if (projectId) await persistChat(projectId, [sysMsg]);
+          return;
+        }
+        // Poll server_status until the model is up + has a port.
+        // 120 s ceiling — large 7B+ GGUFs take 30-60 s to mmap on cold
+        // disk; cloud-class models on slower hardware can stretch
+        // further. Once ready, refresh serverRef so the port read
+        // below sees the new value.
+        const t0 = Date.now();
+        let ready = false;
+        while (Date.now() - t0 < 120_000) {
+          try {
+            const s = await invoke<ServerStatus>("server_status");
+            if (s.running && s.model_id === baseModel && s.port) {
+              // Mutate the ref directly. The owning component's
+              // serverRef tracks the React state `server`, but we
+              // need the fresh port NOW for runDispatchLoop. Setting
+              // .current here is safe — the next render will replace
+              // it with the polled state anyway.
+              (serverRef as any).current = s;
+              ready = true;
+              break;
+            }
+          } catch { /* ignore, retry */ }
+          await new Promise(r => setTimeout(r, 500));
+        }
+        if (!ready) {
+          const msg = `(local model '${baseModel}' did not become ready within 120 s — start it manually on the Server tab and retry)`;
+          await sendTelegram(tgCfg.bot_token, chatId, msg);
+          const sysMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: msg };
+          try {
+            window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+              detail: { projectId, messages: [sysMsg], source: "telegram" },
+            }));
+          } catch {}
+          if (projectId) await persistChat(projectId, [sysMsg]);
+          return;
+        }
+      }
+    }
+
     // ---- 3. Hook events: every phase, dispatch, agent reply maps
     //         to a CustomEvent the agentic tab subscribes to. The
     //         persisted chat_json gets the user-facing turns only.

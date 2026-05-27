@@ -1181,12 +1181,16 @@ function AgentChatTile({
       onClick={onClick}
       style={{
         minWidth: 0, minHeight: 0,
-        background: `linear-gradient(180deg, rgba(${rgb},0.06) 0%, rgba(20,23,31,0.95) 100%)`,
+        // Body fill: was rgba(rgb, 0.06); +10% to 0.16 per user spec.
+        // Background was reading as nearly-black; this lifts the team
+        // colour enough to distinguish design/build/critic tiles at
+        // a glance without drowning out the message text.
+        background: `linear-gradient(180deg, rgba(${rgb},0.16) 0%, rgba(20,23,31,0.95) 100%)`,
         border: isActive
           ? "1px solid rgba(60,242,107,0.85)"
           : isSelected
             ? `1.5px solid rgba(${rgb},0.85)`
-            : `1px solid rgba(${rgb},0.30)`,
+            : `1px solid rgba(${rgb},0.40)`,
         borderRadius: 10,
         boxShadow: isActive
           ? `0 0 0 ${ringPx}px rgba(60,242,107,${alphaA}), 0 0 ${outerPx}px rgba(60,242,107,${alphaB})`
@@ -1202,12 +1206,15 @@ function AgentChatTile({
       {/* Header — small icon + name + (optional) LIVE chip. Identifies
           the tile; this is NOT the sender chip for each message (those
           are stripped per user spec — the tile is one agent's voice,
-          its messages are just the body text). */}
+          its messages are just the body text). Header tint: was black
+          rgba(0,0,0,0.25); now uses the team colour at 0.30 alpha
+          (+30 % bump per user spec) so the design/build/critic
+          identity reads at the top of every tile. */}
       <div style={{
         display: "flex", alignItems: "center", gap: 8,
         padding: "6px 10px",
-        borderBottom: `1px solid rgba(${rgb},0.25)`,
-        background: "rgba(0,0,0,0.25)",
+        borderBottom: `1px solid rgba(${rgb},0.55)`,
+        background: `rgba(${rgb},0.30)`,
         flexShrink: 0,
       }}>
         <img src={owlSrc(icon)} style={{ width: 22, height: 22, objectFit: "contain" }} />
@@ -5631,11 +5638,29 @@ export default function AgentsPage() {
       if (orchSpec) appendLog(orchSpec.name, userMsg);
     }
 
-    if (supProvider === "local" && (!serverState.running || !serverState.port)) {
-      const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: "No model server is running — start one on the Server tab to dispatch this." };
-      setSupChat(prev => [...prev, errMsg]);
-      appendLog("system", errMsg);
-      return;
+    // Lazy local-server start. If the resolved model is a llama-
+    // server-backed local model AND the server isn't running on it,
+    // auto-start it and poll until ready — user spec is "start
+    // automatically when the user sends a message; no manual Server-
+    // tab dance". Cloud models (claude-*, gpt-*) skip this block;
+    // their dispatch hits api.anthropic.com / api.openai.com.
+    if (supProvider === "local") {
+      const alreadyOk =
+        serverState.running &&
+        serverState.model_id === supModelId &&
+        !!serverState.port;
+      if (!alreadyOk) {
+        const ok = await ensureLocalServer(supModelId);
+        if (!ok) {
+          const errMsg: GoalMsg = {
+            role: "system", color: "#ff8c8c",
+            text: `(failed to start local model '${supModelId}' — check the Server tab and retry)`,
+          };
+          setSupChat(prev => [...prev, errMsg]);
+          appendLog("system", errMsg);
+          return;
+        }
+      }
     }
 
     // Resolve the orchestrator's actual agent-name (varies per team)
@@ -5653,12 +5678,19 @@ export default function AgentsPage() {
     // the stream completes (desktop → phone mirror, opposite direction
     // of the Telegram → desktop mirror the bridge already does).
     let streamedReply = "";
+    // serverState in the React closure is stale after the awaited
+    // ensureLocalServer call above. Pull a fresh status so the port
+    // we hand to streamChatCompletion is the just-started server's
+    // port, not whatever was set when this handler started.
+    const freshServerState = supProvider === "local"
+      ? await invoke<ServerStatus>("server_status").catch(() => serverState)
+      : serverState;
     try {
       const sys = activeTeam
         ? `You are the orchestrator of '${activeTeam.display}'. Answer the user concisely.`
         : "You are the team's orchestrator.";
       await streamChatCompletion(
-        serverState.port ?? 0,
+        freshServerState.port ?? 0,
         supModelId,
         supProvider,
         sys,

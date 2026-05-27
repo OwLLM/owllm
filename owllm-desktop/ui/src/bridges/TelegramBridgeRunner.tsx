@@ -208,12 +208,52 @@ export default function TelegramBridgeRunner() {
   }, []);
 
   // ---- Telegram helpers (HTTP via Rust, bypasses webview CORS) ----
+  // Telegram's sendMessage endpoint rejects bodies over 4096 chars
+  // (Bot API limit). Long orchestrator replies were silently dropped
+  // by the previous version: the Rust send returned HTTP 400, the
+  // error was console.error'd, and the user's phone got nothing.
+  // Now we split on paragraph / line boundaries so each chunk stays
+  // under 4000 (buffer for the "(1/3) " prefix).
+  const TG_MAX = 4000;
+  const splitForTelegram = (body: string): string[] => {
+    if (body.length <= TG_MAX) return [body];
+    const out: string[] = [];
+    let rest = body;
+    while (rest.length > TG_MAX) {
+      // Prefer paragraph break, then line break, then hard cut.
+      let cut = rest.lastIndexOf("\n\n", TG_MAX);
+      if (cut < TG_MAX / 2) cut = rest.lastIndexOf("\n", TG_MAX);
+      if (cut < TG_MAX / 2) cut = TG_MAX;
+      out.push(rest.slice(0, cut).trimEnd());
+      rest = rest.slice(cut).trimStart();
+    }
+    if (rest.length > 0) out.push(rest);
+    return out;
+  };
   const sendTelegram = async (token: string, chatId: number, body: string) => {
     if (!body || !body.trim()) return;
-    try {
-      await invoke("telegram_send_message", { token, chatId, text: body });
-    } catch (e) {
-      console.error("telegram_send_message failed", e);
+    const chunks = splitForTelegram(body);
+    const total = chunks.length;
+    for (let i = 0; i < total; i++) {
+      const prefix = total > 1 ? `(${i + 1}/${total}) ` : "";
+      try {
+        await invoke("telegram_send_message", { token, chatId, text: prefix + chunks[i] });
+      } catch (e) {
+        // Surface the failure both to the desktop chat AND to Telegram
+        // itself (one-shot "send failed" notice so the user knows their
+        // phone is missing a reply).
+        const msg = `telegram_send_message failed (chunk ${i + 1}/${total}): ${String((e as any)?.message ?? e)}`;
+        console.error(msg, e);
+        try {
+          // Best-effort notice — use a short body to avoid hitting the
+          // same 4096-char limit. If THIS fails too we're truly offline
+          // and there's nothing we can do.
+          await invoke("telegram_send_message", { token, chatId,
+            text: `(reply send failed: ${String((e as any)?.message ?? e).slice(0, 200)})`,
+          });
+        } catch { /* truly offline */ }
+        return;
+      }
     }
   };
 

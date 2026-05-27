@@ -5650,6 +5650,16 @@ export default function AgentsPage() {
         serverState.model_id === supModelId &&
         !!serverState.port;
       if (!alreadyOk) {
+        // Show a visible system message so the user knows we're
+        // working (cold-load of a 7B+ GGUF on first send is 20-60 s;
+        // without this the SuperUserCard just looked frozen and the
+        // user thought their first message had been lost).
+        const startMsg: GoalMsg = {
+          role: "system", color: "#9ad9ff",
+          text: `(starting local model '${supModelId}' — first send may take 20-60 s for cold-load)`,
+        };
+        setSupChat(prev => [...prev, startMsg]);
+        appendLog("system", startMsg);
         const ok = await ensureLocalServer(supModelId);
         if (!ok) {
           const errMsg: GoalMsg = {

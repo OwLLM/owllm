@@ -519,10 +519,25 @@ export function buildOrchestratorPrompt(
   briefText?: string,
 ): string {
   const specialists = team.agents.filter(a => a.name !== orch.name);
-  const roster = specialists.map(a => {
+  const rosterLines = specialists.map(a => {
     const desc = a.description ?? roleByName.get(a.base)?.description ?? "";
     return `  - ${a.name} (${a.base}): ${desc}`;
-  }).join("\n");
+  });
+  // The synthetic Critical Thinker is rendered on the canvas but never
+  // listed in team.agents — so the orchestrator's roster used to omit
+  // it entirely and @critical_thinker dispatches went nowhere. Always
+  // expose it as a peer-reviewer / sanity-checker; the runtime handles
+  // @critical_thinker calls via extractUserInputRequest (works in BOTH
+  // director-mode AND regular mode now).
+  const hasRealCritic = team.agents.some(a => a.name === "critical_thinker");
+  if (!hasRealCritic) {
+    rosterLines.push(
+      "  - critical_thinker (critic): peer-reviewer for decisions you're unsure about. " +
+      "Dispatch with `@critical_thinker: <question>` to get a single one-shot answer " +
+      "before continuing. Use sparingly — designed for hard calls, not chitchat.",
+    );
+  }
+  const roster = rosterLines.join("\n");
   const orchRole = roleByName.get(orch.base);
   const orchBase =
     orchRole?.systemPrompt ??
@@ -1547,7 +1562,12 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // orchestrator so it can replan with the decision resolved. Only one
   // hop — if the orchestrator emits another marker on the second pass
   // we let it through (extracted but not satisfied) to avoid loops.
-  if (directorMode) {
+  // Director mode WAS gating this critic round-trip; pulled the gate
+  // so an explicit `@critical_thinker: <question>` dispatch always
+  // works, whether or not director-mode is on. The orchestrator's
+  // roster now lists the critic explicitly, so it'll do this on its
+  // own initiative when it needs a peer review.
+  {
     const { question, cleaned } = extractUserInputRequest(orchReply);
     if (question) {
       // Visible on the canvas + Thought tab so the user sees the
@@ -1605,7 +1625,12 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // notes folded in so the dispatch the specialists actually receive
   // reflects the joint thinking.
   const critic = findCriticSpec(team);
-  const skipBrainstorm = directorMode && extractUserInputRequest(orchReply).question !== null;
+  // Whenever the orchestrator's first reply triggered a
+  // @critical_thinker / [NEED_USER_INPUT] hand-off above (regardless
+  // of director-mode), the orchestrator's SECOND reply already
+  // reflects the critic's feedback — running another brainstorm pass
+  // on top of that would just be a redundant peer review of itself.
+  const skipBrainstorm = extractUserInputRequest(orchReply).question !== null;
   if (critic && critic.name !== orch.name && !skipBrainstorm) {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
     hooks.onThought(orch.name, {

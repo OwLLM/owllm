@@ -57,14 +57,73 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": "all",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "shortDescription": "Local-first LLM desktop with agentic teams, MCP tools, and a Tauri-native runtime.",
+    "longDescription": "OwLLM Desktop is a local-first AI workstation. It runs llama.cpp models on your hardware, orchestrates multi-agent teams, connects to MCP servers, and bridges Telegram/WhatsApp for remote control. Rust owns the runtime — model lifecycle, hardware probe, tool execution. React owns the UI. Cloud models (Claude / GPT / Gemini) are first-class peers when you provide keys.",
+    "publisher": "LocaLLM",
+    "copyright": "Copyright © 2026 LocaLLM. MIT-licensed.",
+    "homepage": "https://github.com/ruigro/LLM-Studio",
+    "category": "DeveloperTool",
+    "licenseFile": "../../LICENSE",
+    "linux": {
+      "deb": {
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ],
+        "section": "utils",
+        "priority": "optional"
+      },
+      "appimage": {
+        "bundleMediaFramework": true,
+        "files": {}
+      },
+      "rpm": {
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3"
+        ],
+        "release": "1",
+        "epoch": 0
+      }
+    },
+    "macOS": {
+      "frameworks": [],
+      "minimumSystemVersion": "10.15",
+      "exceptionDomain": "",
+      "signingIdentity": null,
+      "providerShortName": null,
+      "entitlements": null,
+      "dmg": {
+        "windowSize": { "width": 660, "height": 400 },
+        "windowPosition": { "x": 200, "y": 200 },
+        "appPosition": { "x": 180, "y": 170 },
+        "applicationFolderPosition": { "x": 480, "y": 170 }
+      }
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com",
+      "tsp": false,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "displayLanguageSelector": false,
+        "installMode": "perMachine",
+        "languages": ["English"]
+      },
+      "allowDowngrades": false
+    },
+    "createUpdaterArtifacts": false
   },
   "plugins": {}
 }

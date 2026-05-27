@@ -42,7 +42,7 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: apps/owllm-desktop/package-lock.json
+          cache-dependency-path: owllm-desktop/package-lock.json
 
       - name: Set up Rust (MSVC) + cargo cache
         uses: dtolnay/rust-toolchain@stable
@@ -52,21 +52,21 @@ jobs:
       - name: Cache cargo registry + target/
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/owllm-desktop/src-tauri
+          workspaces: owllm-desktop/src-tauri
           # Tag cache by the manifest's Cargo.lock + the workflow file
           # so a dep bump or workflow tweak naturally invalidates.
           shared-key: owllm-desktop-msvc
 
       - name: Install UI deps
-        working-directory: apps/owllm-desktop
+        working-directory: owllm-desktop
         run: npm ci
 
       - name: Build the Vite UI (TypeScript → dist/)
-        working-directory: apps/owllm-desktop
+        working-directory: owllm-desktop
         run: npm run build
 
       - name: Build Tauri release (MSVC)
-        working-directory: apps/owllm-desktop
+        working-directory: owllm-desktop
         # `npm run tauri` forwards args to the tauri CLI. The
         # x86_64-pc-windows-msvc target uses the MSVC toolchain that's
         # pre-installed on windows-latest runners — no mingw, no gcc,
@@ -75,7 +75,7 @@ jobs:
         run: npm run tauri -- build --target x86_64-pc-windows-msvc
 
       - name: Stage release artifacts
-        working-directory: apps/owllm-desktop
+        working-directory: owllm-desktop
         shell: pwsh
         run: |
           $rel = "src-tauri\target\x86_64-pc-windows-msvc\release"
@@ -98,7 +98,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OwLLM-Desktop-portable
-          path: apps/owllm-desktop/stage/OwLLM Desktop.exe
+          path: owllm-desktop/stage/OwLLM Desktop.exe
           if-no-files-found: error
           retention-days: 30
 
@@ -106,7 +106,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OwLLM-Desktop-installer
-          path: apps/owllm-desktop/stage/OwLLM Desktop Setup.exe
+          path: owllm-desktop/stage/OwLLM Desktop Setup.exe
           if-no-files-found: warn
           retention-days: 30
 
@@ -114,7 +114,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OwLLM-Desktop-webview2loader
-          path: apps/owllm-desktop/stage/WebView2Loader.dll
+          path: owllm-desktop/stage/WebView2Loader.dll
           if-no-files-found: warn
           retention-days: 30
 
@@ -141,7 +141,7 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: apps/owllm-desktop/package-lock.json
+          cache-dependency-path: owllm-desktop/package-lock.json
 
       - name: Set up Rust (GNU) + cargo cache
         uses: dtolnay/rust-toolchain@stable
@@ -151,7 +151,7 @@ jobs:
       - name: Cache cargo registry + target/
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/owllm-desktop/src-tauri
+          workspaces: owllm-desktop/src-tauri
           shared-key: owllm-desktop-gnu
 
       # windows-latest has mingw-w64 in multiple places (C:\mingw64,
@@ -206,15 +206,15 @@ jobs:
           "WINDRES=$windres"                                 >> $env:GITHUB_ENV
 
       - name: Install UI deps
-        working-directory: apps/owllm-desktop
+        working-directory: owllm-desktop
         run: npm ci
 
       - name: Build the Vite UI (TypeScript → dist/)
-        working-directory: apps/owllm-desktop
+        working-directory: owllm-desktop
         run: npm run build
 
       - name: Build Tauri release (GNU)
-        working-directory: apps/owllm-desktop
+        working-directory: owllm-desktop
         # Cargo defaults apply (no [profile.release] override anymore).
         # The CFLAGS=-O1 workaround for the local gcc 13.2 IRA ICE on
         # sqlite3.c is NOT applied here — CI mingw is a different version
@@ -222,7 +222,7 @@ jobs:
         run: npm run tauri -- build --target x86_64-pc-windows-gnu
 
       - name: Stage GNU release artifacts
-        working-directory: apps/owllm-desktop
+        working-directory: owllm-desktop
         shell: pwsh
         run: |
           $rel = "src-tauri\target\x86_64-pc-windows-gnu\release"
@@ -240,7 +240,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OwLLM-Desktop-portable-gnu
-          path: apps/owllm-desktop/stage-gnu/OwLLM Desktop (GNU).exe
+          path: owllm-desktop/stage-gnu/OwLLM Desktop (GNU).exe
           if-no-files-found: error
           retention-days: 30
 
@@ -248,7 +248,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OwLLM-Desktop-installer-gnu
-          path: apps/owllm-desktop/stage-gnu/OwLLM Desktop Setup (GNU).exe
+          path: owllm-desktop/stage-gnu/OwLLM Desktop Setup (GNU).exe
           if-no-files-found: warn
           retention-days: 30
 
@@ -256,6 +256,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: OwLLM-Desktop-webview2loader-gnu
-          path: apps/owllm-desktop/stage-gnu/WebView2Loader.dll
+          path: owllm-desktop/stage-gnu/WebView2Loader.dll
           if-no-files-found: warn
           retention-days: 30

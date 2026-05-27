@@ -1,0 +1,316 @@
+# Cross-platform release build for OwLLM Desktop.
+#
+# Trigger:
+#   * Tag push matching `v*.*.*`   → builds Windows + macOS (arm64 + x64) + Linux
+#                                     and publishes a GitHub Release (DRAFT) with
+#                                     every installer attached.
+#   * Manual `workflow_dispatch`   → same matrix; the release step still runs
+#                                     when invoked manually so you can iterate
+#                                     without cutting a tag.
+#
+# Output formats per platform (matches the bundle.targets = "all" in
+# src-tauri/tauri.conf.json):
+#   * Windows  — *.exe NSIS installer  +  portable owllm-desktop.exe
+#   * macOS    — *.dmg drag-installer  +  *.app bundle (one each for arm64 + x64)
+#   * Linux    — *.deb (Debian/Ubuntu) + *.rpm (Fedora/RHEL) + *.AppImage (universal)
+#
+# Code signing: every signing env var is OPTIONAL. When the corresponding
+# secret is unset the build still succeeds; the artefact is just unsigned
+# (Windows SmartScreen / macOS Gatekeeper will warn end-users). To turn
+# on signing, add these repository secrets in GitHub Settings → Secrets:
+#
+#   Windows (Authenticode):
+#     WINDOWS_CERTIFICATE                 — .pfx base64-encoded
+#     WINDOWS_CERTIFICATE_PASSWORD        — passphrase
+#
+#   macOS (Developer ID + notarisation):
+#     APPLE_CERTIFICATE                   — .p12 base64-encoded
+#     APPLE_CERTIFICATE_PASSWORD          — passphrase
+#     APPLE_SIGNING_IDENTITY              — "Developer ID Application: <name> (<team>)"
+#     APPLE_ID                            — apple-id email
+#     APPLE_PASSWORD                      — app-specific password
+#     APPLE_TEAM_ID                       — 10-char team id
+#
+#   Auto-updater (Tauri signing, all platforms):
+#     TAURI_SIGNING_PRIVATE_KEY           — generated via `tauri signer generate`
+#     TAURI_SIGNING_PRIVATE_KEY_PASSWORD  — passphrase
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Override version tag (e.g. v0.1.1). Leave blank to use the value baked into tauri.conf.json.'
+        required: false
+        default: ''
+      prerelease:
+        description: 'Mark the GitHub Release as a pre-release.'
+        required: false
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+# Cancel any in-flight release for the same ref so a quick re-tag
+# doesn't waste minutes on a stale build.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write  # needed by the release job to create/update a GitHub Release
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Build matrix — every platform runs in parallel. fail-fast: false so a
+  # single platform failure doesn't cancel the others and you can still
+  # ship the working installers while you triage.
+  # ---------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: 'Windows x64'
+            os: 'windows-latest'
+            rust_target: 'x86_64-pc-windows-msvc'
+            tauri_args: '--target x86_64-pc-windows-msvc'
+            artifact: 'owllm-desktop-windows-x64'
+          - label: 'macOS Apple Silicon'
+            os: 'macos-latest'
+            rust_target: 'aarch64-apple-darwin'
+            tauri_args: '--target aarch64-apple-darwin'
+            artifact: 'owllm-desktop-macos-arm64'
+          - label: 'macOS Intel'
+            os: 'macos-13'
+            rust_target: 'x86_64-apple-darwin'
+            tauri_args: '--target x86_64-apple-darwin'
+            artifact: 'owllm-desktop-macos-x64'
+          - label: 'Linux x64'
+            os: 'ubuntu-22.04'
+            rust_target: 'x86_64-unknown-linux-gnu'
+            tauri_args: ''
+            artifact: 'owllm-desktop-linux-x64'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 20 + npm cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: owllm-desktop/package-lock.json
+
+      - name: Set up Rust + ${{ matrix.rust_target }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache cargo registry + target/
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: owllm-desktop/src-tauri
+          shared-key: tauri-${{ matrix.rust_target }}
+
+      # ---------------------------------------------------------------
+      # Linux system deps. Tauri 2 needs webkit2gtk-4.1, gtk-3 dev headers,
+      # appindicator, librsvg, patchelf (for AppImage relocation), and
+      # libssl-dev/pkg-config for reqwest's transitive deps. ubuntu-22.04
+      # has webkit2gtk-4.1 in the default repos and a glibc old enough
+      # that the resulting .deb/.AppImage runs on Debian 12, Ubuntu 22.04+,
+      # and Fedora 38+.
+      # ---------------------------------------------------------------
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            pkg-config \
+            rpm
+
+      # ---------------------------------------------------------------
+      # Optional signing — these steps are no-ops when their guarding
+      # secret isn't set. Keeps the matrix unconditional and lets the
+      # repo build unsigned for fast iteration, then flip on signing
+      # by adding the secret in repo settings.
+      # ---------------------------------------------------------------
+      - name: Import macOS signing certificate
+        if: startsWith(matrix.os, 'macos') && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Decode the base64 .p12 and import into a temp keychain so the
+          # cert isn't left behind on the runner.
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASS=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          echo "$APPLE_CERTIFICATE" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+
+      - name: Install UI dependencies
+        working-directory: owllm-desktop
+        run: npm ci
+
+      - name: Build the Vite UI
+        working-directory: owllm-desktop
+        run: npm run build
+
+      # ---------------------------------------------------------------
+      # The actual Tauri build. Signing env vars are passed through
+      # unconditionally — tauri-cli ignores empty values. The runner's
+      # CARGO_PROFILE_RELEASE_LTO=thin matches our local
+      # build-release.bat output so debug/release parity stays clean.
+      # ---------------------------------------------------------------
+      - name: Build Tauri (${{ matrix.label }})
+        working-directory: owllm-desktop
+        env:
+          # Tauri auto-updater signing (cross-platform).
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # macOS code-signing identity + notarisation.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Windows Authenticode.
+          TAURI_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          TAURI_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: npm run tauri -- build ${{ matrix.tauri_args }}
+
+      # ---------------------------------------------------------------
+      # Stage installers from the per-target bundle dir into a single
+      # `stage/` folder. We grab every recognised installer extension so
+      # this stays robust as bundle.targets="all" evolves (or as Tauri
+      # adds new formats like flatpak).
+      # ---------------------------------------------------------------
+      - name: Stage installers
+        working-directory: owllm-desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ matrix.rust_target }}" ]; then
+            rel_dir="src-tauri/target/${{ matrix.rust_target }}/release"
+          else
+            rel_dir="src-tauri/target/release"
+          fi
+          bundle_dir="$rel_dir/bundle"
+          mkdir -p stage
+          if [ ! -d "$bundle_dir" ]; then
+            echo "No bundle directory at $bundle_dir — Tauri build produced no installers." >&2
+            exit 1
+          fi
+          # Copy every installer artefact. NSIS bundles end in *-setup.exe;
+          # we keep that pattern, plus every other common platform extension.
+          find "$bundle_dir" -type f \( \
+              -iname '*-setup.exe' \
+              -o -iname '*.msi' \
+              -o -iname '*.dmg' \
+              -o -iname '*.app.tar.gz' \
+              -o -iname '*.deb' \
+              -o -iname '*.rpm' \
+              -o -iname '*.AppImage' \
+              -o -iname '*.AppImage.tar.gz' \
+              -o -iname 'latest.json' \
+              -o -iname '*.sig' \
+            \) -exec cp {} stage/ \;
+          # Portable Windows exe — useful for power-users who don't want
+          # the installer overhead. Copy it next to the setup so it ships
+          # with the same release.
+          if [ -f "$rel_dir/owllm-desktop.exe" ]; then
+            cp "$rel_dir/owllm-desktop.exe" "stage/OwLLM-Desktop-portable-${{ matrix.rust_target }}.exe"
+          fi
+          if [ -f "$rel_dir/WebView2Loader.dll" ]; then
+            cp "$rel_dir/WebView2Loader.dll" "stage/WebView2Loader.dll"
+          fi
+          echo "Staged installers:"
+          ls -la stage/
+
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: owllm-desktop/stage/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------
+  # Release publisher — runs ONCE after every build job (success or
+  # partial — we set always() so a single platform failure still ships
+  # the working ones as a draft release for review). Collects every
+  # uploaded artefact and attaches them to a GitHub Release.
+  # ---------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: always() && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (for release notes)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download every platform artefact
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show staged artefacts
+        run: |
+          ls -laR dist/ || echo "(no artefacts — every build job failed)"
+
+      # Resolve the tag/version for this release. Tag pushes carry it in
+      # github.ref_name; workflow_dispatch lets the human override.
+      - name: Resolve release version
+        id: resolve_version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # No tag, no input — fall back to "dev-<short-sha>" so manual
+            # builds still get a meaningful release name.
+            echo "version=dev-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OwLLM Desktop ${{ steps.resolve_version.outputs.version }}
+          tag_name: ${{ steps.resolve_version.outputs.version }}
+          # Always start as draft so a human can spot-check the
+          # installers before flipping public. Promote with the gh CLI:
+          #   gh release edit <tag> --draft=false
+          draft: true
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          generate_release_notes: true
+          files: |
+            dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

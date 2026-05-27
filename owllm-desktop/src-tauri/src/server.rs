@@ -110,8 +110,11 @@ pub async fn server_start(
         .ok_or_else(|| format!("model {model_id} has no base_model path"))?;
 
     let exe = paths::llama_server_exe().ok_or_else(|| {
-        "llama-server.exe not found; set OWLLM_LLAMA_SERVER or place it at LLM/runtime/llama.cpp/llama-server.exe"
-            .to_string()
+        let name = paths::llama_server_filename();
+        format!(
+            "{name} not found; set OWLLM_LLAMA_SERVER or place it at \
+             runtime-data/runtime/llama.cpp/{name}"
+        )
     })?;
 
     // Take the lock and stop any running child before spawning a new one.

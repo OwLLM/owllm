@@ -86,6 +86,7 @@ pub fn llm_root() -> Option<PathBuf> {
     .collect();
     // Names checked at every ancestor level, in priority order.
     const NAMES: &[&str] = &["runtime-data", "LLM"];
+    let exe_name = llama_server_filename();
     for seed in seeds {
         for dir in seed.ancestors() {
             for name in NAMES {
@@ -96,7 +97,7 @@ pub fn llm_root() -> Option<PathBuf> {
                 if candidate
                     .join("runtime")
                     .join("llama.cpp")
-                    .join("llama-server.exe")
+                    .join(exe_name)
                     .is_file()
                 {
                     return Some(candidate);
@@ -114,8 +115,19 @@ pub fn llm_root() -> Option<PathBuf> {
     None
 }
 
-/// Path to `llama-server.exe` (the llama.cpp HTTP server binary).
-/// Allows direct override via OWLLM_LLAMA_SERVER for custom builds.
+/// Filename of the llama.cpp HTTP server binary on the current host.
+/// Cross-platform: `.exe` on Windows, bare on macOS/Linux. Used wherever
+/// we anchor a directory probe on "is there a llama-server binary here".
+pub const fn llama_server_filename() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    }
+}
+
+/// Path to the llama.cpp HTTP server binary. Allows direct override via
+/// OWLLM_LLAMA_SERVER for custom builds.
 pub fn llama_server_exe() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_LLAMA_SERVER") {
         let pb = PathBuf::from(p);
@@ -123,15 +135,16 @@ pub fn llama_server_exe() -> Option<PathBuf> {
             return Some(pb);
         }
     }
+    let exe_name = llama_server_filename();
     // Phase 3: prefer %LOCALAPPDATA%\OwLLM Desktop\runtime\llama.cpp\.
     if let Some(rt) = runtime_root() {
-        let exe = rt.join("llama.cpp").join("llama-server.exe");
+        let exe = rt.join("llama.cpp").join(exe_name);
         if exe.is_file() { return Some(exe); }
     }
     let exe = llm_root()?
         .join("runtime")
         .join("llama.cpp")
-        .join("llama-server.exe");
+        .join(exe_name);
     if exe.is_file() {
         Some(exe)
     } else {

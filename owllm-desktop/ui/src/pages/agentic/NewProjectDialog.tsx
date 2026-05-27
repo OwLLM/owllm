@@ -233,7 +233,7 @@ export default function NewProjectDialog({
             style={{
               height: 38, padding: "0 22px",
               border: "none", borderRadius: 9,
-              background: busy || !name.trim() || !team ? "rgba(74,108,255,0.30)" : "var(--accent)",
+              background: busy || !name.trim() || !team ? "rgba(var(--accent-rgb),0.30)" : "var(--accent)",
               color: busy || !name.trim() || !team ? "var(--fg-muted)" : "var(--accent-fg)",
               fontWeight: 700, fontSize: 14,
               cursor: busy || !name.trim() || !team ? "not-allowed" : "pointer",

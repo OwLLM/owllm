@@ -144,19 +144,19 @@ function stopButtonStyle(disabled: boolean): React.CSSProperties {
 // ---------------------------------------------------------------------
 // Telegram card — Qt _TelegramCard (bridges_page.py:80)
 // ---------------------------------------------------------------------
-// Shared localStorage key driving the live Telegram bridge in
+// Shared sessionStorage key driving the live Telegram bridge in
 // AgentsPage. Persisted across tab navigations so the user's Start
 // click sticks. AgentsPage listens for `owllm:telegram:status` events
 // dispatched alongside writes here.
 const TELEGRAM_STARTED_KEY = "owllm:telegram:started";
 
 function isTelegramStartedFromStorage(): boolean {
-  try { return localStorage.getItem(TELEGRAM_STARTED_KEY) === "1"; }
+  try { return sessionStorage.getItem(TELEGRAM_STARTED_KEY) === "1"; }
   catch { return false; }
 }
 
 function setTelegramStartedInStorage(running: boolean) {
-  try { localStorage.setItem(TELEGRAM_STARTED_KEY, running ? "1" : "0"); } catch {}
+  try { sessionStorage.setItem(TELEGRAM_STARTED_KEY, running ? "1" : "0"); } catch {}
   // Same-tab listeners don't get a "storage" event, so emit a custom
   // event AgentsPage can subscribe to.
   try {

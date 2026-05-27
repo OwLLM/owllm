@@ -230,3 +230,77 @@ models:
     port: 10532
     use_4bit: true
     system_prompt: ''
+  unsloth/gemma-4-E4B-it-GGUF:
+    base_model: C:\1_Git\LocaLLM\LLM\models\unsloth__gemma-4-E4B-it-GGUF
+    adapter_dir: null
+    model_type: instruct
+    port: 10533
+    use_4bit: true
+    system_prompt: ''
+  google_gemma-4-E4B-it:
+    base_model: C:\1_Git\LocaLLM\LLM\models\google__gemma-4-E4B-it
+    adapter_dir: C:\1_Git\LocaLLM\LLM\fine_tuned\260504_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_2104
+    model_type: instruct
+    port: 10534
+    use_4bit: true
+    system_prompt: ''
+  DavidAU/gemma-4-E4B-it-The-DECKARD-Expresso-Universe-HERETIC-UNCENSORED-Thinking:
+    base_model: C:\1_Git\LocaLLM\LLM\models\DavidAU__gemma-4-E4B-it-The-DECKARD-Expresso-Universe-HERETIC-UNCENSORED-Thinking
+    adapter_dir: null
+    model_type: instruct
+    port: 10535
+    use_4bit: true
+    system_prompt: ''
+  adapter_20260504_095444:
+    base_model: C:\1_Git\LocaLLM\LLM\fine_tuned\adapter_20260504_095444
+    adapter_dir: null
+    model_type: base
+    port: 10536
+    use_4bit: true
+    system_prompt: ''
+  260504_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_1859:
+    base_model: C:\1_Git\LocaLLM\LLM\fine_tuned\260504_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_1859
+    adapter_dir: null
+    model_type: instruct
+    port: 10537
+    use_4bit: true
+    system_prompt: ''
+  tuned__260504_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_2104:
+    base_model: C:\1_Git\LocaLLM\LLM\models\google__gemma-4-E4B-it
+    adapter_dir: C:\1_Git\LocaLLM\LLM\fine_tuned\260504_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_2104
+    model_type: instruct
+    port: 10534
+    use_4bit: true
+    system_prompt: ''
+    shares_server_with: google_gemma-4-E4B-it
+  tuned__260505_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_0645:
+    base_model: C:\1_Git\LocaLLM\LLM\models\google__gemma-4-E4B-it
+    adapter_dir: C:\1_Git\LocaLLM\LLM\fine_tuned\260505_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_0645
+    model_type: instruct
+    port: 10534
+    use_4bit: true
+    system_prompt: ''
+    shares_server_with: google_gemma-4-E4B-it
+  tuned__260505_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_0827:
+    base_model: C:\1_Git\LocaLLM\LLM\models\google__gemma-4-E4B-it
+    adapter_dir: C:\1_Git\LocaLLM\LLM\fine_tuned\260505_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_0827
+    model_type: instruct
+    port: 10534
+    use_4bit: true
+    system_prompt: ''
+    shares_server_with: google_gemma-4-E4B-it
+  tuned__260505_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_0827__lora_gguf:
+    base_model: C:\1_Git\LocaLLM\LLM\models\unsloth__gemma-4-E4B-it-GGUF\gemma-4-E4B-it-Q5_K_M.gguf
+    adapter_dir: C:\1_Git\LocaLLM\LLM\models\260505_gemma-4-E4B-it_kbeauty_finetune_gemma4_1_0827__gguf
+    model_type: instruct
+    port: 10533
+    use_4bit: true
+    system_prompt: ''
+    shares_server_with: unsloth/gemma-4-E4B-it-GGUF
+  NidAll/supergemma4-e4b-abliterated-Q4_K_M-GGUF:
+    base_model: C:\1_Git\LocaLLM\LLM\models\NidAll__supergemma4-e4b-abliterated-Q4_K_M-GGUF
+    adapter_dir: null
+    model_type: base
+    port: 10538
+    use_4bit: true
+    system_prompt: ''

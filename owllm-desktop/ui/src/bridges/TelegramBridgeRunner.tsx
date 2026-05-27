@@ -3,7 +3,7 @@
 // Lives directly inside AppShell so the loop survives page navigation;
 // AgentsPage used to host it, but the bridge died the moment the user
 // clicked away to another tab. Polls Telegram with `getUpdates?timeout=20`,
-// gates inbound messages on the persisted `owllm:telegram:started`
+// gates inbound messages on the session `owllm:telegram:started`
 // flag (toggled by BridgesPage Start/Stop), matches them against the
 // saved allowed_chat_ids, and dispatches each text through the same
 // orchestrator → specialists → integrate loop the desktop Run button
@@ -69,6 +69,10 @@ async function downloadImageDocument(token: string, fileId: string, mime: string
 
 const STARTED_KEY = "owllm:telegram:started";
 
+function getStartedFlag(): boolean {
+  try { return sessionStorage.getItem(STARTED_KEY) === "1"; } catch { return false; }
+}
+
 type TelegramConfig = {
   bot_token: string;
   allowed_chat_ids: number[];
@@ -127,9 +131,7 @@ type RouteDecision =
   | { kind: "dispatch"; project: ProjectRow; reason: string };
 
 export default function TelegramBridgeRunner() {
-  const [started, setStarted] = useState<boolean>(() => {
-    try { return localStorage.getItem(STARTED_KEY) === "1"; } catch { return false; }
-  });
+  const [started, setStarted] = useState<boolean>(() => getStartedFlag());
   const [cfg, setCfg] = useState<TelegramConfig | null>(null);
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -159,14 +161,16 @@ export default function TelegramBridgeRunner() {
     return () => window.removeEventListener("owllm:telegram:status", onStatus as EventListener);
   }, []);
 
-  // Belt-and-suspenders sync: the Bridges page persists the start flag
-  // in localStorage, but a same-window event can be missed during hot
+  // Belt-and-suspenders sync: the Bridges page keeps the start flag
+  // in sessionStorage, but a same-window event can be missed during hot
   // reloads, remounts, or early startup. Poll the persisted flag and
   // config so the runner cannot look "running" in UI while asleep.
+  // It intentionally does not use localStorage: auto-resuming a bot
+  // poller on every app launch steals Telegram updates from the mobile
+  // app when both use the same bot token.
   useEffect(() => {
     const sync = () => {
-      let running = false;
-      try { running = localStorage.getItem(STARTED_KEY) === "1"; } catch {}
+      const running = getStartedFlag();
       setStarted(running);
       if (running) {
         invoke<BridgeConfigs>("load_bridge_configs")

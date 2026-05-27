@@ -6428,7 +6428,7 @@ export default function AgentsPage() {
   // runner handles the actual reply path; this just adds local UX.
   const TELEGRAM_STARTED_KEY = "owllm:telegram:started";
   const [tgStarted, setTgStarted] = useState<boolean>(() => {
-    try { return localStorage.getItem(TELEGRAM_STARTED_KEY) === "1"; }
+    try { return sessionStorage.getItem(TELEGRAM_STARTED_KEY) === "1"; }
     catch { return false; }
   });
   useEffect(() => {

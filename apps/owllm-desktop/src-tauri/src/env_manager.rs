@@ -130,10 +130,29 @@ fn local_profiles_path() -> Option<PathBuf> {
     crate::paths::profiles_dir().map(|d| d.join("env_profiles.yaml"))
 }
 
-/// Where venvs live. `LLM/.envs/<profile-name>/` matches the legacy
-/// layout so users coming from the Python app find their envs in
-/// the same place.
+/// Where venvs live. Phase 3 puts new installs under
+/// `<runtime_cache_root>/envs/<profile-name>/`; legacy LLM/.envs/ is
+/// still recognised so users coming from the Python app find their
+/// envs in the same place.
 fn envs_root() -> Option<PathBuf> {
+    // Prefer the legacy LLM/.envs/ when it already has populated
+    // profiles — otherwise new installs go straight into the
+    // %LOCALAPPDATA% tree.
+    if let Some(r) = crate::paths::llm_root() {
+        let legacy = r.join(".envs");
+        if legacy.is_dir() {
+            // Has the user installed any profile here? If yes, keep
+            // using it so we don't strand existing venvs.
+            if let Ok(read) = std::fs::read_dir(&legacy) {
+                if read.flatten().any(|e| e.path().is_dir()) {
+                    return Some(legacy);
+                }
+            }
+        }
+    }
+    if let Some(rt) = crate::paths::runtime_cache_root() {
+        return Some(rt.join("envs"));
+    }
     crate::paths::llm_root().map(|r| r.join(".envs"))
 }
 

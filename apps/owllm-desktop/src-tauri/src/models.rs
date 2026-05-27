@@ -44,61 +44,58 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
     let mut out: Vec<ModelInfo> = Vec::new();
 
     // Local GGUFs first — these are what the running server actually
-    // ships today. The Server tab can start any of them.
-    if let Some(root) = paths::llm_root() {
-        let models_dir = root.join("models");
-        if models_dir.is_dir() {
-            let mut found: Vec<PathBuf> = Vec::new();
-            walk_gguf(&models_dir, &mut found, 0);
-            found.sort();
-            let base_port: u16 = 10500;
-            let mut gguf_parent_dirs: std::collections::HashSet<PathBuf> =
-                std::collections::HashSet::new();
-            for (i, path) in found.into_iter().enumerate() {
-                let id = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                let size_mib = std::fs::metadata(&path)
-                    .ok()
-                    .map(|m| m.len() / 1024 / 1024);
-                if let Some(parent) = path.parent() {
-                    gguf_parent_dirs.insert(parent.to_path_buf());
-                }
-                out.push(ModelInfo {
-                    model_id: id,
-                    port: Some(base_port.saturating_add(i as u16)),
-                    base_model: Some(path.to_string_lossy().into_owned()),
-                    size_mib,
-                    provider: "local".to_string(),
-                });
-            }
-
-            // Transformers / safetensors directories — onboarded models
-            // that are NOT GGUF. Surfacing them here so the Chat picker
-            // matches the Models page row count. They have no port
-            // because llama-server.exe can't serve them; the Chat send
-            // path will error clearly if the user picks one without a
-            // vLLM/transformers backend.
-            let mut hf_dirs: Vec<PathBuf> = Vec::new();
-            walk_transformers_dirs(&models_dir, &mut hf_dirs, 0, &gguf_parent_dirs);
-            hf_dirs.sort();
-            for path in hf_dirs {
-                let id = path
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-                let size_mib = dir_weight_size_mib(&path);
-                out.push(ModelInfo {
-                    model_id: id,
-                    port: None,
-                    base_model: Some(path.to_string_lossy().into_owned()),
-                    size_mib,
-                    provider: "local".to_string(),
-                });
-            }
+    // ships today. Walks BOTH the new %LOCALAPPDATA% models tree and
+    // the legacy LLM/models/ tree so users keep seeing existing weights.
+    let mut all_found: Vec<PathBuf> = Vec::new();
+    let mut all_gguf_parents: std::collections::HashSet<PathBuf> =
+        std::collections::HashSet::new();
+    for models_dir in paths::models_dirs_read() {
+        walk_gguf(&models_dir, &mut all_found, 0);
+    }
+    all_found.sort();
+    all_found.dedup();
+    let base_port: u16 = 10500;
+    for (i, path) in all_found.into_iter().enumerate() {
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let size_mib = std::fs::metadata(&path)
+            .ok()
+            .map(|m| m.len() / 1024 / 1024);
+        if let Some(parent) = path.parent() {
+            all_gguf_parents.insert(parent.to_path_buf());
+        }
+        out.push(ModelInfo {
+            model_id: id,
+            port: Some(base_port.saturating_add(i as u16)),
+            base_model: Some(path.to_string_lossy().into_owned()),
+            size_mib,
+            provider: "local".to_string(),
+        });
+    }
+    // Transformers / safetensors directories. Same dual-root walk.
+    for models_dir in paths::models_dirs_read() {
+        let mut hf_dirs: Vec<PathBuf> = Vec::new();
+        walk_transformers_dirs(&models_dir, &mut hf_dirs, 0, &all_gguf_parents);
+        hf_dirs.sort();
+        for path in hf_dirs {
+            let id = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            // Skip duplicates that surface from both roots.
+            if out.iter().any(|m| m.model_id == id) { continue; }
+            let size_mib = dir_weight_size_mib(&path);
+            out.push(ModelInfo {
+                model_id: id,
+                port: None,
+                base_model: Some(path.to_string_lossy().into_owned()),
+                size_mib,
+                provider: "local".to_string(),
+            });
         }
     }
 
@@ -109,19 +106,17 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
     // Tuned .gguf files get their own port range (10600+) so
     // server_start can launch them like any other local model — the
     // previous (port: None) version failed with "no port in config".
-    if let Some(root) = paths::llm_root() {
-        let tuned_root = root.join("fine_tuned");
-        if tuned_root.is_dir() {
-            let tuned_base_port: u16 = 10600;
-            let mut tuned_gguf_idx: u16 = 0;
-            if let Ok(read) = std::fs::read_dir(&tuned_root) {
-                let mut tuned_entries: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
-                tuned_entries.sort();
-                for p in tuned_entries {
-                    let name = match p.file_name().and_then(|s| s.to_str()) {
-                        Some(n) => n.to_string(),
-                        None => continue,
-                    };
+    let mut tuned_base_port: u16 = 10600;
+    let mut tuned_gguf_idx: u16 = 0;
+    for tuned_root in paths::fine_tuned_dirs_read() {
+        if let Ok(read) = std::fs::read_dir(&tuned_root) {
+            let mut tuned_entries: Vec<PathBuf> = read.flatten().map(|e| e.path()).collect();
+            tuned_entries.sort();
+            for p in tuned_entries {
+                let name = match p.file_name().and_then(|s| s.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
                     if name.starts_with('.') || name.starts_with("checkpoint-") || name == "_crash_logs" {
                         continue;
                     }
@@ -175,8 +170,6 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
                 }
             }
         }
-    }
-
     // Cloud models — ALWAYS surfaced so the user can see Claude / GPT
     // options in the agent dropdowns even before saving a key. If they
     // pick one without the matching credentials saved, the dispatch

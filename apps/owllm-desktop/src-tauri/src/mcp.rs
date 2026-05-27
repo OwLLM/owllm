@@ -159,16 +159,27 @@ fn resolve_command(command: &str, args: &[String]) -> (PathBuf, Vec<String>) {
         command.to_string(),
     ];
     // Private OwLLM-managed runtimes — keep our bundled tooling out of
-    // the user's system PATH but always preferred when present.
-    let mut resolved: Option<PathBuf> = None;
+    // the user's system PATH but always preferred when present. Phase 3
+    // checks BOTH %LOCALAPPDATA%\OwLLM Desktop\runtime\<uv,node>\ and
+    // the legacy LLM/runtime/<uv,node>/ locations.
+    let mut runtime_roots: Vec<PathBuf> = Vec::new();
+    if let Some(rt) = crate::paths::runtime_root() {
+        runtime_roots.push(rt);
+    }
     if let Some(root) = crate::paths::llm_root() {
+        let legacy = root.join("runtime");
+        if !runtime_roots.contains(&legacy) {
+            runtime_roots.push(legacy);
+        }
+    }
+    let mut resolved: Option<PathBuf> = None;
+    'outer: for rt in &runtime_roots {
         for sub in ["uv", "node"] {
-            let dir = root.join("runtime").join(sub);
+            let dir = rt.join(sub);
             for cand in &candidates {
                 let p = dir.join(cand);
-                if p.is_file() { resolved = Some(p); break; }
+                if p.is_file() { resolved = Some(p); break 'outer; }
             }
-            if resolved.is_some() { break; }
         }
     }
     let resolved = resolved
@@ -609,9 +620,19 @@ pub struct RuntimeStatus {
     pub path: String, // empty when not installed
 }
 
-/// Where bundled runtimes live. Sibling of LLM/python_runtime and
-/// LLM/runtime/llama.cpp so the layout is consistent.
+/// Where bundled runtimes (uv, node, llama.cpp) live. Phase 3 puts new
+/// installs in %LOCALAPPDATA%\OwLLM Desktop\runtime\<name>\; reads also
+/// check the legacy LLM/runtime/<name>/ location for installs that
+/// happened before the move.
 fn runtime_dir(name: &str) -> Option<PathBuf> {
+    // Prefer the new tree.
+    if let Some(rt) = crate::paths::runtime_root() {
+        let p = rt.join(name);
+        // Caller uses this for both writes (install) and reads (status).
+        // Always return the new path as the write target; the resolver
+        // for the EXE (resolve_command) handles legacy fallback.
+        return Some(p);
+    }
     crate::paths::llm_root().map(|r| r.join("runtime").join(name))
 }
 

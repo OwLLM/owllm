@@ -113,6 +113,11 @@ pub fn llama_server_exe() -> Option<PathBuf> {
             return Some(pb);
         }
     }
+    // Phase 3: prefer %LOCALAPPDATA%\OwLLM Desktop\runtime\llama.cpp\.
+    if let Some(rt) = runtime_root() {
+        let exe = rt.join("llama.cpp").join("llama-server.exe");
+        if exe.is_file() { return Some(exe); }
+    }
     let exe = llm_root()?
         .join("runtime")
         .join("llama.cpp")
@@ -134,6 +139,10 @@ pub fn llama_quantize_exe() -> Option<PathBuf> {
             return Some(pb);
         }
     }
+    if let Some(rt) = runtime_root() {
+        let exe = rt.join("llama.cpp").join("llama-quantize.exe");
+        if exe.is_file() { return Some(exe); }
+    }
     let exe = llm_root()?
         .join("runtime")
         .join("llama.cpp")
@@ -146,11 +155,11 @@ pub fn llama_quantize_exe() -> Option<PathBuf> {
 }
 
 /// Path to the bundled Python interpreter shipped under
-/// `LLM/python_runtime/python3.11/python.exe`. Used as the SOURCE
-/// for every per-profile venv that env_manager spawns — this way
-/// users don't need a system Python install. OWLLM_PYTHON env var
-/// overrides for users who want to point at their own interpreter
-/// (e.g. a system Anaconda).
+/// `%LOCALAPPDATA%\OwLLM Desktop\runtime\python_runtime\python3.11\
+/// python.exe` after the Phase-3 installer runs, falling back to the
+/// legacy LLM/python_runtime/python3.11/python.exe. Used as the SOURCE
+/// for every per-profile venv that env_manager spawns. OWLLM_PYTHON
+/// env var overrides for users who want a system interpreter.
 #[allow(dead_code)]
 pub fn bundled_python_exe() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_PYTHON") {
@@ -158,6 +167,10 @@ pub fn bundled_python_exe() -> Option<PathBuf> {
         if pb.is_file() {
             return Some(pb);
         }
+    }
+    if let Some(rt) = runtime_root() {
+        let candidate = rt.join("python_runtime").join("python3.11").join("python.exe");
+        if candidate.is_file() { return Some(candidate); }
     }
     let candidate = llm_root()?
         .join("python_runtime")
@@ -456,4 +469,126 @@ pub fn user_gpu_config_path() -> Option<PathBuf> {
 /// the migration getting skipped.
 pub fn migration_sentinel_path() -> Option<PathBuf> {
     user_data_root().map(|r| r.join(".migrated_from_legacy"))
+}
+
+// =====================================================================
+// Runtime root + models root (Phase 3)
+//
+// Heavy artifacts that the app downloads on demand. Split from user
+// state (Phase 2) because:
+//   * Models + venvs can hit tens of GB — they don't belong under
+//     %APPDATA% (roaming-profile sync would explode).
+//   * They're regenerable: a fresh install can re-fetch them via the
+//     installer's first-launch bootstrap.
+//
+//   Windows: %LOCALAPPDATA%\OwLLM Desktop\runtime\   (and \models\)
+//   macOS:   ~/Library/Application Support/OwLLM Desktop/runtime/
+//   Linux:   $XDG_CACHE_HOME/OwLLM Desktop/runtime/  (or ~/.cache/...)
+//
+// NO migration runs for these. Models are gigabytes — copying would be
+// wasteful and risky. Path helpers prefer the new location and fall
+// back to the existing LLM/{python_runtime, runtime, .envs, models,
+// fine_tuned} paths, so an existing install keeps working as-is. New
+// downloads land in the new location; the installer bootstrap fills
+// the new tree on a fresh machine.
+// =====================================================================
+
+/// Root for heavy runtime + cache. On Windows this is %LOCALAPPDATA%
+/// (NOT %APPDATA%) so gigabytes of weights don't roam between user
+/// profiles. Created if missing.
+pub fn runtime_cache_root() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("OWLLM_RUNTIME_ROOT") {
+        let pb = PathBuf::from(p);
+        if !pb.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let pb = PathBuf::from(local).join(APP_DIR_NAME);
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let pb = PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(APP_DIR_NAME);
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Ok(xdg) = std::env::var("XDG_CACHE_HOME") {
+            let pb = PathBuf::from(xdg).join(APP_DIR_NAME);
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+        if let Ok(home) = std::env::var("HOME") {
+            let pb = PathBuf::from(home).join(".cache").join(APP_DIR_NAME);
+            let _ = std::fs::create_dir_all(&pb);
+            return Some(pb);
+        }
+    }
+    None
+}
+
+/// Where the bundled Python interpreter + runtime binaries (llama.cpp,
+/// uv, node) end up after the Phase-3 installer fetches them. Returns
+/// `<runtime_cache_root>/runtime/`.
+pub fn runtime_root() -> Option<PathBuf> {
+    let pb = runtime_cache_root()?.join("runtime");
+    Some(pb)
+}
+
+/// Where downloaded model weights live. Returns
+/// `<runtime_cache_root>/models/`. Falls back via models_dirs_read().
+pub fn models_root_new() -> Option<PathBuf> {
+    Some(runtime_cache_root()?.join("models"))
+}
+
+/// All readable model-tree roots, in priority order. Lets list_models /
+/// huggingface scans surface weights regardless of whether they live
+/// in the new %LOCALAPPDATA% tree or the legacy LLM/models/ tree.
+pub fn models_dirs_read() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(p) = models_root_new() {
+        if p.is_dir() { out.push(p); }
+    }
+    if let Some(r) = llm_root() {
+        let legacy = r.join("models");
+        if legacy.is_dir() && !out.contains(&legacy) { out.push(legacy); }
+    }
+    out
+}
+
+/// All readable fine-tuned-output roots. Phase-3 home is
+/// `<runtime_cache_root>/fine_tuned/`; falls back to LLM/fine_tuned/.
+pub fn fine_tuned_dirs_read() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(r) = runtime_cache_root() {
+        let p = r.join("fine_tuned");
+        if p.is_dir() { out.push(p); }
+    }
+    if let Some(r) = llm_root() {
+        let legacy = r.join("fine_tuned");
+        if legacy.is_dir() && !out.contains(&legacy) { out.push(legacy); }
+    }
+    out
+}
+
+/// Default write target for new fine-tuned outputs. Returns the
+/// %LOCALAPPDATA% path when available; callers create the dir lazily.
+#[allow(dead_code)]
+pub fn fine_tuned_dir_write() -> Option<PathBuf> {
+    if let Some(r) = runtime_cache_root() {
+        return Some(r.join("fine_tuned"));
+    }
+    llm_root().map(|r| r.join("fine_tuned"))
 }

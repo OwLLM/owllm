@@ -254,11 +254,14 @@ pub async fn hf_download(
         "https://huggingface.co/{}/resolve/{}/{}",
         model_id, branch, file,
     );
-    // Destination: LLM/models/<author>/<model>/<file> — mirrors the
-    // HF repo layout so the local tree stays interpretable.
-    let llm_root = crate::paths::llm_root()
-        .ok_or_else(|| "LLM/ root not found".to_string())?;
-    let models_dir = llm_root.join("models");
+    // Destination: <models-root>/<author>/<model>/<file>. Phase 3 puts
+    // the models root in %LOCALAPPDATA%\OwLLM Desktop\models\, with the
+    // legacy LLM/models/ still recognised by list_models. Downloads
+    // always target the new location so we don't keep filling up the
+    // repo dir on dev machines.
+    let models_dir = crate::paths::models_root_new()
+        .or_else(|| crate::paths::llm_root().map(|r| r.join("models")))
+        .ok_or_else(|| "models root not resolvable (no %LOCALAPPDATA% AND no LLM/ tree)".to_string())?;
     let dest_dir = models_dir.join(model_id.replace('/', std::path::MAIN_SEPARATOR_STR));
     let dest_file = dest_dir.join(&file);
     if let Some(parent) = dest_file.parent() {
@@ -364,18 +367,26 @@ pub struct TunedAdapter {
 #[tauri::command]
 pub async fn delete_tuned_adapter(path: String) -> Result<(), String> {
     let target = std::path::PathBuf::from(&path);
-    let root = crate::paths::llm_root().ok_or_else(|| "no LLM root".to_string())?;
-    let fine_tuned_root = root.join("fine_tuned");
-    // Canonicalize both so a path like "fine_tuned/../models/x" can't
-    // escape the guard via .. traversal.
+    // Phase 3: tuned adapters can live in EITHER the new
+    // %LOCALAPPDATA%\OwLLM Desktop\fine_tuned\ tree OR the legacy
+    // LLM/fine_tuned/. The delete is allowed as long as the canonical
+    // target is rooted in one of those.
+    let allowed_roots = crate::paths::fine_tuned_dirs_read();
+    if allowed_roots.is_empty() {
+        return Err("no fine_tuned root found (neither %LOCALAPPDATA% nor legacy LLM/ tree)".to_string());
+    }
     let canon_target = std::fs::canonicalize(&target)
         .map_err(|e| format!("canonicalize {path}: {e}"))?;
-    let canon_root = std::fs::canonicalize(&fine_tuned_root)
-        .map_err(|e| format!("canonicalize {}: {e}", fine_tuned_root.display()))?;
-    if !canon_target.starts_with(&canon_root) {
+    let mut ok = false;
+    for r in &allowed_roots {
+        if let Ok(canon_root) = std::fs::canonicalize(r) {
+            if canon_target.starts_with(&canon_root) { ok = true; break; }
+        }
+    }
+    if !ok {
         return Err(format!(
-            "refused: {} is not under {} (Tuned tab can only delete its own entries)",
-            canon_target.display(), canon_root.display()
+            "refused: {} is not under any allowed fine_tuned root (Tuned tab can only delete its own entries)",
+            canon_target.display(),
         ));
     }
     if canon_target.is_dir() {
@@ -396,14 +407,12 @@ pub async fn list_tuned_adapters() -> Result<Vec<TunedAdapter>, String> {
     // value (same approach as models_list_downloaded).
     let vram_gb = crate::recommendations::detect_vram_gb().await;
     tokio::task::spawn_blocking(move || -> Result<Vec<TunedAdapter>, String> {
-        let root = match crate::paths::llm_root() {
-            Some(r) => r.join("fine_tuned"),
-            None => return Ok(Vec::new()),
-        };
-        if !root.is_dir() {
+        let roots = crate::paths::fine_tuned_dirs_read();
+        if roots.is_empty() {
             return Ok(Vec::new());
         }
         let mut out: Vec<TunedAdapter> = Vec::new();
+        for root in roots {
         for entry in std::fs::read_dir(&root).map_err(|e| format!("readdir: {e}"))? {
             let entry = match entry {
                 Ok(e) => e,
@@ -476,6 +485,7 @@ pub async fn list_tuned_adapters() -> Result<Vec<TunedAdapter>, String> {
                     });
                 }
             }
+        }
         }
         out.sort_by(|a, b| b.modified.cmp(&a.modified));
         Ok(out)
@@ -576,14 +586,12 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
     // async (shells out to nvidia-smi); the scan itself is sync.
     let vram_gb = crate::recommendations::detect_vram_gb().await;
     tokio::task::spawn_blocking(move || -> Result<Vec<DownloadedModel>, String> {
-        let root = match crate::paths::llm_root() {
-            Some(r) => r.join("models"),
-            None => return Ok(Vec::new()),
-        };
-        if !root.is_dir() {
+        let roots = crate::paths::models_dirs_read();
+        if roots.is_empty() {
             return Ok(Vec::new());
         }
         let mut out: Vec<DownloadedModel> = Vec::new();
+        for root in roots {
         for entry in std::fs::read_dir(&root).map_err(|e| format!("readdir: {e}"))? {
             let entry = match entry { Ok(e) => e, Err(_) => continue };
             let path = entry.path();
@@ -669,6 +677,11 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                 });
             }
         }
+        }
+        // Dedup by name — same model present in both new and legacy
+        // roots would otherwise show twice. Keep the first seen.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        out.retain(|m| seen.insert(m.name.clone()));
         // Most recent first.
         out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         Ok(out)

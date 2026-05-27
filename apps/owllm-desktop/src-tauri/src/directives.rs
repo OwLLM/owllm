@@ -140,7 +140,15 @@ pub async fn directives_list(project_id: String) -> Result<Vec<Directive>, Strin
     }).await.map_err(|e| format!("join error: {e}"))?
 }
 
+// JS sends `projectId` (camelCase) per Tauri's argument convention;
+// serde defaults to literal field names so without rename_all the
+// project_id field deserializes empty, the INSERT runs against
+// project_id="", and `directives_list` (which filters by the real
+// project's id) never sees the row — the rule "disappeared" silently.
+// Bug repro 2026-05-20: SuperUserCard / DirectivesPanel adds did
+// nothing user-visible until this was added.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AddDirectiveInput {
     pub project_id: String,
     pub kind: String,

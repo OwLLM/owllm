@@ -439,44 +439,17 @@ pub async fn tool_screenshot_url(
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    // Resolve the bundled Python runtime + the screenshot_url.py wrapper.
-    // The repo layout puts both under LLM/ at the workspace root; the
-    // Tauri exe runs from apps/owllm-desktop/, so walk up two levels.
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|q| q.to_path_buf()));
-    let candidates: Vec<PathBuf> = {
-        let mut v: Vec<PathBuf> = Vec::new();
-        if let Some(d) = &exe_dir {
-            // Walk up to 6 levels looking for LLM/python_runtime — handles
-            // dev (target/release), installed (Program Files), portable.
-            let mut cur = d.clone();
-            for _ in 0..6 {
-                v.push(cur.join("LLM"));
-                if let Some(p) = cur.parent() {
-                    cur = p.to_path_buf();
-                } else {
-                    break;
-                }
-            }
-        }
-        // Hard-coded dev fallback so this works in cargo run from the repo root.
-        v.push(PathBuf::from("C:/1_Git/LocaLLM/LLM"));
-        v
-    };
-    let mut llm_root: Option<PathBuf> = None;
-    for c in candidates {
-        if c.join("python_runtime").join("python3.11").join("python.exe").is_file()
-            && c.join("tools").join("screenshot_url.py").is_file() {
-            llm_root = Some(c);
-            break;
-        }
-    }
-    let llm_root = llm_root.ok_or_else(|| {
-        "could not locate LLM/python_runtime + LLM/tools/screenshot_url.py — TwinForge dependencies missing".to_string()
-    })?;
-    let python = llm_root.join("python_runtime").join("python3.11").join("python.exe");
-    let script = llm_root.join("tools").join("screenshot_url.py");
+    // Bundled Python lives under the legacy LLM/ tree (will move to
+    // %LocalAppData%\OwLLM Desktop\runtime\ in the installer phase).
+    // The screenshot_url.py wrapper script ships in the app's resources
+    // (apps/owllm-desktop/resources/tools/), with the legacy LLM/tools/
+    // path as the fallback.
+    let python = crate::paths::bundled_python_exe()
+        .ok_or_else(|| "bundled Python not found (expected LLM/python_runtime/python3.11/python.exe). Run the installer to bootstrap the runtime.".to_string())?;
+    let script = crate::paths::tools_dir()
+        .map(|d| d.join("screenshot_url.py"))
+        .filter(|p| p.is_file())
+        .ok_or_else(|| "screenshot_url.py not found in resources/tools/ or LLM/tools/ — TwinForge dependency missing".to_string())?;
 
     // Ensure parent dir for the output PNG exists.
     if let Some(parent) = Path::new(&out_png).parent() {

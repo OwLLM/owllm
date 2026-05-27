@@ -274,12 +274,15 @@ async fn gpus_via_wmic() -> Option<Vec<GpuInfo>> {
 }
 
 // ---------------------------------------------------------------------
-// GPU selection persistence — mirrors the legacy PySide6 config so a
-// selection made here is visible to the old app and vice versa.
-// File: LLM/desktop_app/config/gpu_config.json
+// GPU selection persistence.
+// File: LLM/data/gpu_config.json   (new path post-restructure)
 // Shape: { "selected_gpu_uuids": [...], "selected_gpu_indices": [...] }
 // UUIDs are authoritative; indices are a hint kept for backward
 // compatibility with code that still reads them.
+//
+// Migrated from the legacy LLM/desktop_app/config/gpu_config.json
+// location when the PySide6 app got sandboxed. Read falls back to the
+// old path so an existing user's selection isn't lost.
 // ---------------------------------------------------------------------
 
 #[derive(Default, Serialize, Deserialize, Clone)]
@@ -289,12 +292,28 @@ pub struct GpuSelection {
 }
 
 fn gpu_config_path() -> Option<PathBuf> {
+    Some(paths::llm_root()?.join("data").join("gpu_config.json"))
+}
+
+/// Legacy location that the PySide6 app wrote to (and Rust shared with
+/// it until the restructure). Read-only fallback so we don't lose the
+/// user's existing selection.
+fn legacy_gpu_config_path() -> Option<PathBuf> {
     Some(paths::llm_root()?.join("desktop_app").join("config").join("gpu_config.json"))
 }
 
 fn load_gpu_selection() -> Option<GpuSelection> {
-    let path = gpu_config_path()?;
-    let raw = std::fs::read_to_string(&path).ok()?;
+    // Prefer the new path; fall back to the legacy desktop_app/config
+    // location so we don't lose the user's selection after the move.
+    if let Some(path) = gpu_config_path() {
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            if let Ok(sel) = serde_json::from_str::<GpuSelection>(&raw) {
+                return Some(sel);
+            }
+        }
+    }
+    let legacy = legacy_gpu_config_path()?;
+    let raw = std::fs::read_to_string(&legacy).ok()?;
     serde_json::from_str(&raw).ok()
 }
 

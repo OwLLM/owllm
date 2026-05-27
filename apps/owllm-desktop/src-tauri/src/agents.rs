@@ -68,14 +68,19 @@ pub struct SkillPack {
 
 #[tauri::command]
 pub async fn list_team_templates() -> Result<Vec<TeamTemplate>, String> {
-    let Some(root) = paths::llm_root() else { return Ok(Vec::new()) };
     let mut out = Vec::new();
-    // Built-in teams ship inside the source tree.
-    let builtin = root.join("core").join("agents").join("teams");
-    collect_team_dir(&builtin, true, &mut out);
-    // User-saved teams (Studio's "+ New" / "Edit on builtin" writes here).
-    let custom = root.join("data").join("teams");
-    collect_team_dir(&custom, false, &mut out);
+    // Built-in teams ship as JSONs inside the app's resources tree
+    // (apps/owllm-desktop/resources/agents/teams/). Falls back to the
+    // legacy LLM/core/agents/teams/ for half-migrated installs.
+    if let Some(builtin) = paths::teams_dir() {
+        collect_team_dir(&builtin, true, &mut out);
+    }
+    // User-saved teams (Studio's "+ New" / "Edit on builtin" writes
+    // here). Lives under LLM/data/teams/ — user state, not shippable.
+    if let Some(root) = paths::llm_root() {
+        let custom = root.join("data").join("teams");
+        collect_team_dir(&custom, false, &mut out);
+    }
     // Stable order so the UI's category grouping is deterministic.
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
@@ -169,12 +174,19 @@ pub async fn save_agent_definition(path: String, data: JsonValue) -> Result<(), 
 
 #[tauri::command]
 pub async fn list_agent_roles() -> Result<Vec<AgentRole>, String> {
-    let Some(root) = paths::llm_root() else { return Ok(Vec::new()) };
     let mut out = Vec::new();
-    let builtin = root.join("core").join("agents").join("roles");
-    collect_role_dir(&builtin, true, &mut out);
-    let custom = root.join("data").join("agent_definitions");
-    collect_role_dir(&custom, false, &mut out);
+    // Built-in role YAMLs ship in the resources tree
+    // (apps/owllm-desktop/resources/agents/roles/), with the legacy
+    // LLM/core/agents/roles/ as the fallback path.
+    if let Some(builtin) = paths::roles_dir() {
+        collect_role_dir(&builtin, true, &mut out);
+    }
+    // User-saved custom roles still live under LLM/data/agent_definitions/
+    // — that's user state, not shippable.
+    if let Some(root) = paths::llm_root() {
+        let custom = root.join("data").join("agent_definitions");
+        collect_role_dir(&custom, false, &mut out);
+    }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
 }

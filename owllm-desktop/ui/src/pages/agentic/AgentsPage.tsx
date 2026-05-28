@@ -4883,6 +4883,13 @@ async function streamChatCompletion(
   /// Claude CLI session UUID for multi-turn memory (Phase B). Only
   /// used by CLI subscription branches; OpenAI/local/API paths ignore.
   sessionId?: string | null,
+  /// Optional callback invoked when this call can't deliver a feature
+  /// the user expected — currently fires when the CLI subscription
+  /// path is selected AND images are attached (those CLIs are
+  /// text-only stdin). The caller wires this to appendLog so the
+  /// user sees a yellow system note in the chat instead of the silent
+  /// thought-tab annotation we used to ship.
+  onSystemWarning?: (text: string) => void,
 ): Promise<string> {
   // Strip the optional route prefix encoded by the ModelPicker before
   // handing the bare model id to the provider-specific call.
@@ -4895,6 +4902,27 @@ async function streamChatCompletion(
   // Audio attachments collapse into the user message via Whisper.
   // Images stay on the side and get a provider-specific encoding.
   const images = imageAttachments(attachments);
+  // CLI subscription paths (Claude Code, Kimi `kimi`, Gemini CLI) take
+  // text-only stdin — any image attachments get silently dropped.
+  // Surface this to the user with a visible system note instead of
+  // leaving the orchestrator to mumble "I can see you sent an image but
+  // I can't process it" later. The note tells them exactly how to fix
+  // it (switch to the API row or a local vision model).
+  if (forceSub && images.length > 0 && onSystemWarning &&
+      (provider === "anthropic" || provider === "moonshot" || provider === "gemini" || provider === "openai")) {
+    const providerName = provider === "anthropic" ? "Claude"
+                       : provider === "moonshot"  ? "Kimi"
+                       : provider === "gemini"    ? "Gemini"
+                       :                            "OpenAI";
+    const apiKey = provider === "anthropic" ? "ANTHROPIC_API_KEY"
+                 : provider === "moonshot"  ? "MOONSHOT_API_KEY"
+                 : provider === "gemini"    ? "GEMINI_API_KEY"
+                 :                            "OPENAI_API_KEY";
+    onSystemWarning(
+      `⚠ ${images.length} image attachment${images.length === 1 ? "" : "s"} can't be sent via the ${providerName} CLI subscription path (stdin is text-only). ` +
+      `To send images, switch to the API row (set ${apiKey} on the Accounts page) or pick a local vision model.`
+    );
+  }
   const effectiveText = appendImageAttachmentNotes(
     await transcribeAudioAttachments(userMessage, attachments),
     images,
@@ -6890,6 +6918,14 @@ export default function AgentsPage() {
           runAttachments.length > 0 ? runAttachments : undefined,
           // Persistent CLI session for the orchestrator across dispatches.
           getClaudeSession(selectedProjectId, orch.name),
+          // Visible warning when CLI subscription path + images — emits
+          // a yellow system note in the orchestrator's chat log so the
+          // user sees exactly why their image didn't make it to the
+          // model and how to fix it.
+          (warning) => {
+            appendLog(orch.name, { role: "system", color: "#ffd97a", text: warning });
+            setSupChat(curr => [...curr, { role: "system", color: "#ffd97a", text: warning }]);
+          },
         );
       } finally {
         removeActive(orch.name);

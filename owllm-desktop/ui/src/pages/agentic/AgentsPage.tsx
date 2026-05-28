@@ -3325,7 +3325,7 @@ function OrchestratorPane({
   selectedAgent, activeAgent,
   team,
   projectId, directives, onDirectivesChanged,
-  onSupSend, supSendBusy,
+  supChat, onSupSend, supSendBusy,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
@@ -3338,10 +3338,10 @@ function OrchestratorPane({
   projectId: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
-  /// User Input sub-tab — textarea + send button. The model/voice/
-  /// info "settings header" moved to the OrchestratorSettings panel
-  /// in RightColumnTabs (2026-05-28 restructure: chat container is
-  /// permanent below the small settings panels).
+  /// Super-User chat — feeds the User Input sub-tab's HISTORY view
+  /// (filtered to role="you"). The bottom input dock writes to this
+  /// stream via onSupSend.
+  supChat: GoalMsg[];
   onSupSend: (text: string) => void;
   supSendBusy: boolean;
 }) {
@@ -3624,54 +3624,44 @@ function OrchestratorPane({
             )}
           </div>
         </div>
-        {/* User Input — second sub-tab. Auto-resizing textarea + send.
-            Per user spec: "we add the chat of the user in the chat
-            container, before the Clear Chat, and we call it User
-            Input". The textarea grows with the typed content up to a
-            cap; Enter sends, Shift+Enter inserts a newline. */}
+        {/* User Input — second sub-tab. HISTORY of the user's own
+            messages (filtered to role==="you"). Per user spec
+            2026-05-28: "the user input page means that the chat
+            history is the user input only. It does not mean the input
+            text is available only in that page." So this is a
+            read-only log of what the user has sent; new sends happen
+            via the bottom dock (UserInputDock) which is always
+            visible. */}
         <div data-ui="OrchestratorUserInputView" style={{ flex:1, display: activeTab === "userinput" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
-          <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ffd97a", textTransform:"uppercase" }}>User Input</div>
-          <textarea
-            ref={inputRef}
-            data-ui="UserInputArea"
-            value={draft}
-            onChange={e => setDraft(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                submitInput();
-              }
-            }}
-            placeholder="Reply to the team — Enter to send, Shift+Enter for new line"
-            rows={1}
-            style={{
-              flex:1, minHeight:80, maxHeight:480,
-              padding:"10px 12px",
-              borderRadius:8,
-              background:"var(--bg-surface)",
-              color:"var(--fg)",
-              border:"1px solid rgba(255,200,80,0.30)",
-              fontSize:14, lineHeight:1.5,
-              fontFamily:"Segoe UI, sans-serif",
-              resize:"none",
-              outline:"none",
-              overflowY:"auto",
-            }}
-          />
-          <div style={{ display:"flex", justifyContent:"flex-end" }}>
-            <button
-              onClick={submitInput}
-              disabled={!draft.trim() || supSendBusy}
-              style={{
-                height:36, padding:"6px 18px", borderRadius:8,
-                border:"1px solid #ffd97a",
-                background: draft.trim() && !supSendBusy ? "#ffd97a" : "rgba(255,217,122,0.25)",
-                color: draft.trim() && !supSendBusy ? "#1a1404" : "#7d6f4b",
-                fontSize:13, fontWeight:700,
-                cursor: draft.trim() && !supSendBusy ? "pointer" : "not-allowed",
-              }}
-            >{supSendBusy ? "Sending…" : "Send"}</button>
-          </div>
+          <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ffd97a", textTransform:"uppercase" }}>User Input history</div>
+          {(() => {
+            const sentByMe = supChat.filter(m => m.role === "you");
+            if (sentByMe.length === 0) {
+              return (
+                <div style={{ color:"var(--fg-subtle)", fontStyle:"italic", fontSize:12 }}>
+                  Nothing sent yet. Type below in the input dock and
+                  press Enter — every message you send to the team
+                  will land here as a log.
+                </div>
+              );
+            }
+            return (
+              <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                {sentByMe.map((m, i) => (
+                  <div key={i} style={{
+                    background:"rgba(255,217,122,0.06)",
+                    border:"1px solid rgba(255,217,122,0.20)",
+                    borderRadius:6,
+                    padding:"6px 10px",
+                    color:"var(--fg)",
+                    fontSize:13, lineHeight:1.5,
+                    whiteSpace:"pre-wrap",
+                    fontFamily:"Segoe UI, sans-serif",
+                  }}>{m.text}</div>
+                ))}
+              </div>
+            );
+          })()}
         </div>
         {/* Clear Chat — the user-facing reply stream only, nothing else. */}
         <div ref={replyRef} data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)" }}>
@@ -3719,6 +3709,60 @@ function OrchestratorPane({
           )}
         </div>
       </div>
+      {/* Bottom-pinned input dock — always visible, on every sub-tab
+          (user spec 2026-05-28: "the text input box is in the bottom
+          of the chat box and resizable"). Auto-resizes with content:
+          starts 36 px tall, grows up to 240 px as the user types,
+          shrinks back when text is cleared. Enter sends, Shift+Enter
+          inserts a newline. */}
+      <div data-ui="UserInputDock" style={{
+        borderTop:"1px solid var(--border)",
+        padding:"8px 12px",
+        background:"var(--bg-elevated)",
+        display:"flex", alignItems:"flex-end", gap:8,
+        flexShrink:0,
+      }}>
+        <textarea
+          ref={inputRef}
+          data-ui="UserInputArea"
+          value={draft}
+          onChange={e => setDraft(e.target.value)}
+          onKeyDown={e => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              submitInput();
+            }
+          }}
+          placeholder="Reply to the team — Enter to send, Shift+Enter for new line"
+          rows={1}
+          style={{
+            flex:1, minHeight:36, maxHeight:240,
+            padding:"8px 10px",
+            borderRadius:8,
+            background:"var(--bg-surface)",
+            color:"var(--fg)",
+            border:"1px solid rgba(255,200,80,0.30)",
+            fontSize:13, lineHeight:1.4,
+            fontFamily:"Segoe UI, sans-serif",
+            resize:"none",
+            outline:"none",
+            overflowY:"auto",
+          }}
+        />
+        <button
+          onClick={submitInput}
+          disabled={!draft.trim() || supSendBusy}
+          style={{
+            height:36, padding:"6px 14px", borderRadius:8,
+            border:"1px solid #ffd97a",
+            background: draft.trim() && !supSendBusy ? "#ffd97a" : "rgba(255,217,122,0.25)",
+            color: draft.trim() && !supSendBusy ? "#1a1404" : "#7d6f4b",
+            fontSize:13, fontWeight:700,
+            cursor: draft.trim() && !supSendBusy ? "pointer" : "not-allowed",
+            flexShrink:0,
+          }}
+        >{supSendBusy ? "Sending…" : "Send"}</button>
+      </div>
     </div>
   );
 }
@@ -3760,6 +3804,7 @@ const RIGHT_TAB_LABEL: Record<RightTabId, string> = {
 function RightColumnTabs(props: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
+  supChat: GoalMsg[];
   onSupSend: (text: string) => void;
   supSendBusy: boolean;
   autoApprove: boolean;
@@ -3903,6 +3948,7 @@ function RightColumnTabs(props: {
           projectId={props.projectId}
           directives={props.directives}
           onDirectivesChanged={props.onDirectivesChanged}
+          supChat={props.supChat}
           onSupSend={props.onSupSend}
           supSendBusy={props.supSendBusy}
         />

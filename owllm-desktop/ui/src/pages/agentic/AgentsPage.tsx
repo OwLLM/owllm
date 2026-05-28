@@ -1490,11 +1490,13 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
       )}
       {activeTab === "chat" ? (
         <>
-          {/* Sent-by-you log — replies from the orchestrator/agents are NOT
-              shown here (user spec 2026-05-18). The card is just for SENDING
-              input now; replies are visible elsewhere (the agent info panel,
-              the Run log). Empty filter result yields a brief idle hint so
-              the card doesn't collapse to zero height. */}
+          {/* Sent-by-you log — a read-only view of the user's own
+              past messages. The textarea+Send button that used to live
+              here was promoted to the Orchestrator pane's bottom dock
+              (user spec 2026-05-28: merge the Super User card with
+              the chat box). This panel is now purely a record of what
+              the user has said; replies appear in the Orchestrator
+              Clear Chat tab. */}
           {(() => {
             const sentByMe = lastMessages.filter(m => m.role === "you");
             return (
@@ -1502,7 +1504,7 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
                 {sentByMe.length === 0 ? (
                   <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
                     {team
-                      ? "Type below — your input lands here. Replies appear in the agent panel."
+                      ? "Your sent messages will appear here. Type them in the Orchestrator's User Input dock below."
                       : "Pick a project or team template to begin."}
                   </div>
                 ) : sentByMe.map((m, i) => (
@@ -1513,57 +1515,6 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
               </div>
             );
           })()}
-          {/* Multi-line input — textarea instead of input so long
-              prompts wrap and stay fully visible. Enter sends; Shift+
-              Enter inserts a newline. Vertical resize lets the user
-              expand if their prompt is huge; the default 3 rows + auto
-              overflow keeps short prompts compact. Labelled "User
-              Input" so the section reads clearly when this card lives
-              alongside the orchestrator's Clear-Chat / Thought tabs. */}
-          <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ffd97a", textTransform:"uppercase", marginTop:2 }}>User Input</div>
-          <div data-ui="suInputRow" style={{ display:"flex", alignItems:"flex-end", gap:8 }}>
-            <textarea
-              data-ui="suReply"
-              value={draft}
-              onChange={e => setDraft(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  submit();
-                }
-              }}
-              placeholder="Reply to the team — Enter to send, Shift+Enter for new line"
-              rows={3}
-              style={{
-                flex:1, minHeight:64, maxHeight:200,
-                borderRadius:8, padding:"8px 10px",
-                background:"rgba(20,16,4,0.6)", color:"var(--fg)",
-                fontSize:14, lineHeight:1.4,
-                border:"1px solid rgba(255,200,80,0.25)",
-                resize:"vertical",
-                fontFamily:"Segoe UI, sans-serif",
-                outline:"none",
-              }}
-            />
-            <button
-              data-ui="suSend"
-              onClick={submit}
-              disabled={!draft.trim() || sendBusy}
-              style={{
-                height:32, padding:"6px 14px", borderRadius:8,
-                border:"1px solid #ffd97a",
-                background: draft.trim() && !sendBusy ? "#ffd97a" : "rgba(255,217,122,0.25)",
-                color: draft.trim() && !sendBusy ? "#1a1404" : "#7d6f4b",
-                fontSize:13, fontWeight:700,
-                cursor: draft.trim() && !sendBusy ? "pointer" : "not-allowed",
-              }}
-            >{sendBusy ? "Sending…" : "Send"}</button>
-          </div>
-          {/* auto-approve + director-mode used to live here below the
-              input; moved up into the settings strip under the card
-              header (see `suSettings` block above) so they sit next to
-              the Chat / Rules tab strip like the Orchestrator and Team
-              setting blocks do. */}
         </>
       ) : (
         // Rules tab — full inline add / edit / delete UI. No more
@@ -3376,6 +3327,8 @@ function OrchestratorPane({
   models, modelFor, onPickAgentModel,
   accountsStatus,
   roleByName, effectiveTeamModel, onPickTeamModel,
+  projectId, directives, onDirectivesChanged,
+  onSupSend, supSendBusy,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
@@ -3396,19 +3349,31 @@ function OrchestratorPane({
   /// default temperature in the Info strip (formerly AgentInfoCard).
   roleByName: Map<string, RoleData>;
   /// Team-wide model default + setter (formerly TeamInfoCard's picker).
-  /// The "Team" toggle in the Info strip surfaces this.
+  /// Surfaces in the Info strip's fallback label so the user knows the
+  /// team default even when the focused agent has no override.
   effectiveTeamModel: string;
   onPickTeamModel: (id: string) => void;
+  /// Project + directives wiring for the Rules sub-tab (user spec
+  /// 2026-05-28: rules moved out of the top-level right-column tab
+  /// strip and into a sub-tab here in the chat container).
+  projectId: string;
+  directives: Directive[];
+  onDirectivesChanged: () => Promise<void> | void;
+  /// User-Input dock at the bottom of the pane (also new in the
+  /// 2026-05-28 restructure). Sends the typed message to the team.
+  onSupSend: (text: string) => void;
+  supSendBusy: boolean;
 }) {
-  // Mode toggle for the whole pane (header next to the focus label).
-  // "agent" → Model / Voice / Info / Chat tabs all bind to the focused
-  // agent. "team" → the SAME widgets bind to team-level data: model
-  // picker writes the team default, info shows team description, chat
-  // tabs fall back to the orchestrator's buffer (the team's effective
-  // voice). Replaces the inner Agent/Team toggle in the Info strip
-  // that duplicated controls.
-  const [mode, setMode] = useState<"agent" | "team">("agent");
-  const [activeTab, setActiveTab] = useState<"reply"|"thought"|"tools"|"full">("reply");
+  // The pane's old agent/team mode toggle is gone — Team lives as its
+  // own top-level right-column tab now (2026-05-28). All widgets here
+  // bind to the focused agent. `mode` retained as a const so we don't
+  // have to gut the team-mode branches below in one go.
+  const mode = "agent" as const;
+  // Sub-tab strip now includes "rules" at the front (was a top-level
+  // right-column tab; promoted in / demoted depending on how you look
+  // at it). Default still "reply" so the run log is what users see
+  // first.
+  const [activeTab, setActiveTab] = useState<"rules"|"reply"|"thought"|"tools"|"full">("reply");
   // Pick which buffer to show: explicit selection > currently-active
   // agent > orchestrator (so the user sees the plan even if nothing
   // is selected yet) > "you" (which holds the goal echo).
@@ -3436,6 +3401,19 @@ function OrchestratorPane({
   // elsewhere (LocationRow strip up top); the chat header just wants
   // the role identifier, not a duplicate of the title.
   const teamBtnLabel = "Team";
+  // Dynamic pane title — "Orchestrator" when the orchestrator is the
+  // focus (default / no other selection), otherwise the focused
+  // agent's display name. Per user spec 2026-05-28: the page is the
+  // generic chat container; only the orchestrator's identity gets the
+  // role label.
+  const isOrchFocus = agentFocus === orchName && agentFocus !== "you" && orchName != null;
+  const headerTitle = isOrchFocus
+    ? "Orchestrator"
+    : agentFocus === "you"
+      ? "You"
+      : team
+        ? displayLabel(agentFocus)
+        : agentFocus;
   // Resolved data the reusable widgets bind to. Single source of truth
   // so we don't render a second Model picker / Info section per mode.
   const focusModel = mode === "team" ? effectiveTeamModel : modelFor(agentFocus);
@@ -3488,6 +3466,7 @@ function OrchestratorPane({
     `${fullChat.length}:${fullChat[fullChat.length - 1]?.text?.length ?? 0}`
   );
   useLayoutEffect(() => {
+    if (activeTab === "rules") return;          // rules tab has no log to scroll
     const ref =
       activeTab === "reply"   ? replyRef   :
       activeTab === "thought" ? thoughtRef :
@@ -3496,6 +3475,86 @@ function OrchestratorPane({
     const el = ref.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [activeTab, focus, tailSig]);
+
+  // ---- User-Input dock (bottom of the pane, 2026-05-28 restructure) ----
+  // Persistent draft per project (localStorage); auto-resize textarea
+  // grows with content up to a max height; Enter sends, Shift+Enter
+  // inserts a newline.
+  const draftKey = projectId ? `owllm:supdraft:${projectId}` : "";
+  const draftKeyRef = useRef(draftKey);
+  draftKeyRef.current = draftKey;
+  const [draft, setDraftState] = useState<string>(() => {
+    if (!draftKey) return "";
+    try { return localStorage.getItem(draftKey) ?? ""; } catch { return ""; }
+  });
+  useEffect(() => {
+    if (!draftKey) { setDraftState(""); return; }
+    try { setDraftState(localStorage.getItem(draftKey) ?? ""); } catch { setDraftState(""); }
+  }, [draftKey]);
+  const setDraft = (v: string) => {
+    setDraftState(v);
+    const k = draftKeyRef.current;
+    if (k) { try { localStorage.setItem(k, v); } catch {} }
+  };
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  // Auto-resize: reset to "auto" so the textarea can shrink, then set
+  // height to its content's scrollHeight up to a cap. Runs on every
+  // draft change so the box grows as the user types.
+  useLayoutEffect(() => {
+    const ta = inputRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    const next = Math.min(ta.scrollHeight, 240);
+    ta.style.height = `${Math.max(36, next)}px`;
+  }, [draft]);
+  const submitInput = () => {
+    if (supSendBusy) return;
+    const t = draft.trim();
+    if (!t) return;
+    onSupSend(t);
+    setDraft("");
+  };
+
+  // ---- Rules sub-tab state (inline CRUD, mirrors the SuperUserCard
+  // rules tab; the rules surface lives here now per user spec) ----
+  const [newKind, setNewKind] = useState<"must" | "prefer" | "avoid">("must");
+  const [newText, setNewText] = useState("");
+  const [rulesBusy, setRulesBusy] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editText, setEditText] = useState("");
+  const [editKind, setEditKind] = useState<"must" | "prefer" | "avoid">("must");
+  const addRule = async () => {
+    const text = newText.trim();
+    if (!text || !projectId) return;
+    setRulesBusy(true);
+    try {
+      await invoke("directives_add", { input: { projectId, kind: newKind, text } });
+      setNewText("");
+      await onDirectivesChanged();
+    } catch (e) { console.error("directives_add failed", e); }
+    finally { setRulesBusy(false); }
+  };
+  const beginEdit = (d: Directive) => {
+    setEditingId(d.id); setEditText(d.text); setEditKind(d.kind);
+  };
+  const saveEdit = async () => {
+    if (!editingId) return;
+    setRulesBusy(true);
+    try {
+      await invoke("directives_update", { input: { id: editingId, kind: editKind, text: editText } });
+      setEditingId(null);
+      await onDirectivesChanged();
+    } catch (e) { console.error("directives_update failed", e); }
+    finally { setRulesBusy(false); }
+  };
+  const deleteRule = async (id: string) => {
+    setRulesBusy(true);
+    try {
+      await invoke("directives_delete", { id });
+      await onDirectivesChanged();
+    } catch (e) { console.error("directives_delete failed", e); }
+    finally { setRulesBusy(false); }
+  };
 
   // Phase indicator pill for the header.
   const phaseColor = phase === "idle" || phase === "done"
@@ -3517,40 +3576,21 @@ function OrchestratorPane({
 
   return (
     <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"var(--bg-elevated)", padding:"0 0 0 8px" }}>
-      <div data-ui="LogHeader" style={{ padding:"8px 12px 4px", display:"flex", alignItems:"center", gap:6 }}>
-        {/* Mode toggle in the header — the Agent button shows the
-            current focus (selected / active / orchestrator); the Team
-            button flips the WHOLE pane (Model, Voice, Info, Chat tabs)
-            to team-level data. No duplicated controls below. */}
-        <button
-          onClick={() => setMode("agent")}
-          title={mode === "agent" ? "Showing this agent" : "Switch back to this agent's view"}
-          style={{
-            flex:1, minWidth:0, textAlign:"left",
-            padding:"4px 10px",
-            background: mode === "agent" ? "rgba(var(--accent-rgb),0.18)" : "transparent",
-            border: mode === "agent" ? "1px solid var(--accent)" : "1px solid var(--border)",
-            borderRadius:8,
-            color: mode === "agent" ? "var(--fg-strong)" : "var(--fg-muted)",
-            fontSize:15, fontWeight:700, letterSpacing:0.3,
-            overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
-            cursor:"pointer",
-          }}
-        >📜 {agentBtnLabel}</button>
-        <button
-          onClick={() => setMode("team")}
-          title="Show team-level settings (the model that drives every agent on this team by default + team description)"
-          style={{
-            padding:"4px 12px",
-            background: mode === "team" ? "rgba(255,217,122,0.18)" : "transparent",
-            border: mode === "team" ? "1px solid #ffd97a" : "1px solid var(--border)",
-            borderRadius:8,
-            color: mode === "team" ? "#ffd97a" : "var(--fg-muted)",
-            fontSize:13, fontWeight:700, letterSpacing:0.3,
-            cursor:"pointer", maxWidth:140,
-            overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
-          }}
-        >🏷 {teamBtnLabel}</button>
+      <div data-ui="LogHeader" style={{ padding:"8px 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
+        {/* Dynamic title — auto-flips with the focused agent (user
+            spec 2026-05-28). The old agent/team button pair is gone:
+            Team has its own top-level tab, and naming-the-page-after-
+            the-agent is exactly what makes it a generic agent pane. */}
+        <div style={{
+          flex:1, minWidth:0,
+          padding:"4px 10px",
+          background: focusTint ? `linear-gradient(135deg, ${focusTint.bg} 0%, rgba(18,22,34,0.85) 100%)` : "rgba(var(--accent-rgb),0.10)",
+          border: focusTint ? `1px solid ${focusTint.border}` : "1px solid var(--accent)",
+          borderRadius:8,
+          color:"var(--fg-strong)",
+          fontSize:15, fontWeight:700, letterSpacing:0.3,
+          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
+        }} title={headerTitle}>📜 {headerTitle}</div>
         <span style={{
           fontSize:10, fontWeight:700, letterSpacing:0.6, textTransform:"uppercase",
           color: phaseColor,
@@ -3628,6 +3668,10 @@ function OrchestratorPane({
       <div data-ui="OrchestratorLogTabs" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:"0 0 8px" }}>
         <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)" }}>
           {([
+            // Rules sits first per user spec 2026-05-28 ("before User
+            // Input, before Clear Chat"). It's red — it's an enforcement
+            // surface, visually distinct from the chat tabs.
+            { id:"rules",   label:"📋 Rules",      accent:"#ff6b6b",       count: directives.length },
             { id:"reply",   label:"💬 Clear Chat", accent:"var(--accent)", count: messages.length },
             { id:"thought", label:"🧠 Thought",    accent:"#dcb0ff",       count: thoughts.length },
             { id:"tools",   label:"🛠 Tool Calls", accent:"#7ff0c5",       count: toolCalls.length },
@@ -3654,6 +3698,102 @@ function OrchestratorPane({
             );
           })}
           <div style={{ flex:1 }} />
+        </div>
+        {/* Rules — first sub-tab; project directives with inline CRUD.
+            Mirrors the previous SuperUserCard rules face but lives in
+            the chat container per user spec 2026-05-28. */}
+        <div data-ui="OrchestratorRulesView" style={{ flex:1, display: activeTab === "rules" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
+          <div style={{ background:"rgba(255,107,107,0.08)", border:"1px solid rgba(255,107,107,0.25)", borderRadius:8, padding:"8px 10px", fontSize:11, lineHeight:1.5, color:"var(--fg)", display:"flex", flexDirection:"column", gap:4 }}>
+            <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ff6b6b", textTransform:"uppercase" }}>About rules</div>
+            <div><b style={{ color:"#ff8c8c" }}>MUST</b> — hard requirement; the team should refuse the goal if it can't comply.</div>
+            <div><b style={{ color:"#9af0a8" }}>PREFER</b> — soft hint; bias the plan toward this when there's a choice.</div>
+            <div><b style={{ color:"#ffd97a" }}>AVOID</b> — anti-pattern; do NOT do this unless the goal is impossible without it.</div>
+            <div style={{ color:"var(--fg-muted)", marginTop:2 }}>
+              Rules are injected into every agent on the active team
+              ({team?.agents.length ?? 0} {team?.agents.length === 1 ? "agent" : "agents"}) — orchestrator, specialists, and the critic all see them on every turn.
+            </div>
+          </div>
+          <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+            <select
+              value={newKind}
+              onChange={e => setNewKind(e.target.value as any)}
+              disabled={rulesBusy || !projectId}
+              style={{ height:28, borderRadius:6, padding:"0 6px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", fontSize:11, fontWeight:700 }}
+            >
+              <option value="must">MUST</option>
+              <option value="prefer">PREFER</option>
+              <option value="avoid">AVOID</option>
+            </select>
+            <input
+              value={newText}
+              onChange={e => setNewText(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter" && newText.trim()) addRule(); }}
+              placeholder={projectId ? "New rule — Enter to add" : "Pick a project first"}
+              disabled={rulesBusy || !projectId}
+              style={{ flex:1, height:28, borderRadius:6, padding:"0 8px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", fontSize:13 }}
+            />
+            <button
+              onClick={addRule}
+              disabled={rulesBusy || !projectId || !newText.trim()}
+              title="Add rule"
+              style={{
+                width:28, height:28, borderRadius:6,
+                border:"1px solid #ff6b6b",
+                background: newText.trim() && projectId ? "#ff6b6b" : "rgba(255,107,107,0.25)",
+                color: newText.trim() && projectId ? "#1a0a0a" : "#7d4b4b",
+                fontSize:16, fontWeight:700,
+                cursor: newText.trim() && projectId ? "pointer" : "not-allowed",
+              }}
+            >+</button>
+          </div>
+          <div style={{ flex:1, background:"rgba(20,16,16,0.4)", border:"1px solid rgba(255,107,107,0.18)", borderRadius:8, padding:"8px 10px", fontSize:12, color:"var(--fg)", display:"flex", flexDirection:"column", gap:6, overflow:"auto" }}>
+            {directives.length === 0 ? (
+              <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
+                No project rules yet — type one above to add.
+              </div>
+            ) : (
+              (["must", "prefer", "avoid"] as const).flatMap(kind => {
+                const items = directives.filter(d => d.kind === kind);
+                if (items.length === 0) return [];
+                const kc = kind === "must" ? "#ff8c8c" : kind === "prefer" ? "#9af0a8" : "#ffd97a";
+                return [
+                  <div key={`h-${kind}`} style={{ fontSize:10, fontWeight:800, letterSpacing:0.6, color:kc, textTransform:"uppercase", marginTop:4 }}>{kind}</div>,
+                  ...items.map(d => editingId === d.id ? (
+                    <div key={d.id} style={{ display:"flex", flexDirection:"column", gap:4, paddingLeft:8, borderLeft:`2px solid ${kc}` }}>
+                      <div style={{ display:"flex", gap:4 }}>
+                        <select
+                          value={editKind}
+                          onChange={e => setEditKind(e.target.value as any)}
+                          style={{ height:24, borderRadius:4, padding:"0 4px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", fontSize:10, fontWeight:700 }}
+                        >
+                          <option value="must">MUST</option>
+                          <option value="prefer">PREFER</option>
+                          <option value="avoid">AVOID</option>
+                        </select>
+                        <input
+                          value={editText}
+                          onChange={e => setEditText(e.target.value)}
+                          onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditingId(null); }}
+                          autoFocus
+                          style={{ flex:1, height:24, borderRadius:4, padding:"0 6px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", fontSize:12 }}
+                        />
+                      </div>
+                      <div style={{ display:"flex", gap:4, justifyContent:"flex-end" }}>
+                        <button onClick={() => setEditingId(null)} disabled={rulesBusy} style={{ height:22, padding:"0 8px", borderRadius:4, border:"1px solid var(--border)", background:"transparent", color:"var(--fg-muted)", fontSize:10, cursor:"pointer" }}>Cancel</button>
+                        <button onClick={saveEdit} disabled={rulesBusy || !editText.trim()} style={{ height:22, padding:"0 10px", borderRadius:4, border:"1px solid #ff6b6b", background:"#ff6b6b", color:"#1a0a0a", fontSize:10, fontWeight:700, cursor:"pointer" }}>Save</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div key={d.id} style={{ display:"flex", alignItems:"flex-start", gap:6, paddingLeft:8, borderLeft:`2px solid ${kc}`, lineHeight:1.4 }}>
+                      <span style={{ flex:1 }}>{d.text}</span>
+                      <button onClick={() => beginEdit(d)} disabled={rulesBusy} title="Edit" style={{ width:22, height:22, padding:0, borderRadius:4, border:"none", background:"transparent", color:"var(--fg-muted)", fontSize:12, cursor:"pointer" }}>✏️</button>
+                      <button onClick={() => deleteRule(d.id)} disabled={rulesBusy} title="Delete" style={{ width:22, height:22, padding:0, borderRadius:4, border:"none", background:"transparent", color:"#ff8c8c", fontSize:12, cursor:"pointer" }}>🗑</button>
+                    </div>
+                  )),
+                ];
+              })
+            )}
+          </div>
         </div>
         {/* Clear Chat — the user-facing reply stream only, nothing else. */}
         <div ref={replyRef} data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)" }}>
@@ -3701,6 +3841,63 @@ function OrchestratorPane({
           )}
         </div>
       </div>
+      {/* User Input dock — bottom-pinned across all sub-tabs (user spec
+          2026-05-28: the input goes UNDER the chat box, auto-resizing
+          with the typed text). Hidden on the Rules sub-tab where there
+          is no chat to send into. */}
+      {activeTab !== "rules" && (
+        <div data-ui="UserInputDock" style={{
+          borderTop:"1px solid var(--border)",
+          padding:"8px 12px",
+          background:"var(--bg-elevated)",
+          display:"flex", flexDirection:"column", gap:4,
+          flexShrink:0,
+        }}>
+          <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ffd97a", textTransform:"uppercase" }}>User Input</div>
+          <div style={{ display:"flex", alignItems:"flex-end", gap:8 }}>
+            <textarea
+              ref={inputRef}
+              data-ui="UserInputArea"
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  submitInput();
+                }
+              }}
+              placeholder="Reply to the team — Enter to send, Shift+Enter for new line"
+              rows={1}
+              style={{
+                flex:1, minHeight:36, maxHeight:240,
+                padding:"8px 10px",
+                borderRadius:8,
+                background:"var(--bg-surface)",
+                color:"var(--fg)",
+                border:"1px solid rgba(255,200,80,0.30)",
+                fontSize:13, lineHeight:1.4,
+                fontFamily:"Segoe UI, sans-serif",
+                resize:"none",
+                outline:"none",
+                overflowY:"auto",
+              }}
+            />
+            <button
+              onClick={submitInput}
+              disabled={!draft.trim() || supSendBusy}
+              style={{
+                height:36, padding:"6px 14px", borderRadius:8,
+                border:"1px solid #ffd97a",
+                background: draft.trim() && !supSendBusy ? "#ffd97a" : "rgba(255,217,122,0.25)",
+                color: draft.trim() && !supSendBusy ? "#1a1404" : "#7d6f4b",
+                fontSize:13, fontWeight:700,
+                cursor: draft.trim() && !supSendBusy ? "pointer" : "not-allowed",
+                flexShrink:0,
+              }}
+            >{supSendBusy ? "Sending…" : "Send"}</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3718,24 +3915,25 @@ function OrchestratorPane({
 // now driven by which top-level tab is open. The SuperUserCard canvas
 // overlay is gone too — the card lives entirely inside this column.
 
-type RightTabId = "super" | "orch" | "team" | "rules";
+// Rules is no longer a top-level tab — the user spec 2026-05-28
+// places it as a sub-tab inside the Orchestrator (chat container).
+// Three top-level pages remain: Super User (Y), Orchestrator (B),
+// Team (G).
+type RightTabId = "super" | "orch" | "team";
 const RIGHT_TAB_COLOR: Record<RightTabId, string> = {
   super: "#ffd97a",
   orch:  "#74a4ff",
   team:  "#6cd28e",
-  rules: "#ff6b6b",
 };
 const RIGHT_TAB_BG_ON: Record<RightTabId, string> = {
   super: "rgba(255,217,122,0.18)",
   orch:  "rgba(116,164,255,0.18)",
   team:  "rgba(108,210,142,0.18)",
-  rules: "rgba(255,107,107,0.18)",
 };
 const RIGHT_TAB_LABEL: Record<RightTabId, string> = {
   super: "👤 Super User",
   orch:  "📜 Orchestrator",
   team:  "🏷 Team",
-  rules: "📋 Rules",
 };
 
 function RightColumnTabs(props: {
@@ -3795,7 +3993,7 @@ function RightColumnTabs(props: {
         background: `linear-gradient(180deg, ${tabAccent}10 0%, transparent 100%)`,
         flexShrink:0,
       }}>
-        {(["super","orch","team","rules"] as const).map(id => {
+        {(["super","orch","team"] as const).map(id => {
           const on = tab === id;
           const c  = RIGHT_TAB_COLOR[id];
           const bg = RIGHT_TAB_BG_ON[id];
@@ -3813,7 +4011,7 @@ function RightColumnTabs(props: {
                 fontSize:12, fontWeight:700, cursor:"pointer",
                 letterSpacing:0.3,
               }}
-            >{RIGHT_TAB_LABEL[id]}{id === "rules" ? ` (${props.directives.length})` : ""}</button>
+            >{RIGHT_TAB_LABEL[id]}</button>
           );
         })}
       </div>
@@ -3838,23 +4036,6 @@ function RightColumnTabs(props: {
             mode="super"
           />
         )}
-        {tab === "rules" && (
-          <SuperUserCard
-            team={props.team}
-            roleByName={props.roleByName}
-            chat={props.supChat}
-            onSend={props.onSupSend}
-            sendBusy={props.supSendBusy}
-            autoApprove={props.autoApprove}
-            onToggleAutoApprove={props.onToggleAutoApprove}
-            projectId={props.projectId}
-            directives={props.directives}
-            onDirectivesChanged={props.onDirectivesChanged}
-            directorMode={props.directorMode}
-            onToggleDirectorMode={props.onToggleDirectorMode}
-            mode="rules"
-          />
-        )}
         {tab === "orch" && (
           <OrchestratorPane
             agentLogs={props.agentLogs}
@@ -3872,6 +4053,11 @@ function RightColumnTabs(props: {
             roleByName={props.roleByName}
             effectiveTeamModel={props.effectiveTeamModel}
             onPickTeamModel={props.onPickTeamModel}
+            projectId={props.projectId}
+            directives={props.directives}
+            onDirectivesChanged={props.onDirectivesChanged}
+            onSupSend={props.onSupSend}
+            supSendBusy={props.supSendBusy}
           />
         )}
         {tab === "team" && (

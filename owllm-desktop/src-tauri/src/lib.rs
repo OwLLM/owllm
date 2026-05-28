@@ -16,6 +16,7 @@ use tauri::Emitter;
 mod accounts;
 mod agent_tools;
 mod agents;
+mod audio;
 mod bootstrap;
 mod bridges;
 mod code;
@@ -123,6 +124,9 @@ pub fn run() {
             accounts::cli_install,
             accounts::cli_install_stream,
             accounts::accounts_test_probe_live,
+            audio::audio_transcribe_local,
+            audio::whisper_runtime_status,
+            audio::whisper_runtime_install,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

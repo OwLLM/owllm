@@ -16,12 +16,189 @@
 
 import { useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   AnthropicLogo, OpenAILogo, MoonshotLogo, GeminiLogo,
   DeepSeekLogo, XaiLogo, GroqLogo, PerplexityLogo,
   MistralLogo, TogetherLogo,
 } from "./brandLogos";
 import PtyTerminal from "./PtyTerminal";
+
+// VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
+// transcription pipeline (binary + ggml-base.bin model) and exposes an
+// "Install voice runtime" button that fetches both from upstream into
+// <runtime_cache>/whisper.cpp/. The two assets together unlock voice
+// messages from Telegram, WhatsApp, and the in-app uploader for every
+// model path — local, Anthropic API, OpenAI API, etc.
+type WhisperStatus = {
+  model_installed: boolean;
+  model_path: string;
+  model_bytes: number;
+  binary_installed: boolean;
+  binary_path: string;
+  binary_auto_install: boolean;
+};
+type InstallProgress = {
+  phase: "binary" | "model";
+  downloaded: number;
+  total: number;
+  done: boolean;
+};
+function fmtBytes(n: number): string {
+  if (n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(v < 10 ? 1 : 0)} ${units[i]}`;
+}
+function VoiceRuntimePanel() {
+  const [status, setStatus] = useState<WhisperStatus | null>(null);
+  const [installing, setInstalling] = useState(false);
+  const [progress, setProgress] = useState<InstallProgress | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      const s = await invoke<WhisperStatus>("whisper_runtime_status");
+      setStatus(s);
+    } catch (e) {
+      console.warn("whisper_runtime_status failed", e);
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+    const unlisten = listen<InstallProgress>("owllm:whisper:install:progress", (e) => {
+      setProgress(e.payload);
+    });
+    return () => {
+      unlisten.then((un) => un()).catch(() => {});
+    };
+  }, []);
+
+  const onInstall = async () => {
+    setInstallError(null);
+    setProgress(null);
+    setInstalling(true);
+    try {
+      await invoke<WhisperStatus>("whisper_runtime_install");
+      await refresh();
+    } catch (e: any) {
+      setInstallError(String(e?.message ?? e));
+    } finally {
+      setInstalling(false);
+    }
+  };
+
+  if (!status) return null;
+  const allInstalled = status.model_installed && status.binary_installed;
+  const accent = allInstalled ? "#22c55e" : "#ffd97a";
+  const pct =
+    progress && progress.total > 0
+      ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
+      : 0;
+
+  return (
+    <div
+      data-ui="VoiceRuntimePanel"
+      style={{
+        background: "var(--bg-elevated)",
+        border: `1px solid ${accent}55`,
+        borderRadius: 10,
+        padding: "12px 16px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontSize: 18 }}>🎤</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>
+            Voice runtime · {allInstalled ? "ready" : "needs install"}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+            Transcribes audio attachments (Telegram, WhatsApp, in-app) into text for every agent path.
+            Local — no cloud round-trip.
+          </div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: 11, color: "var(--fg-muted)" }}>
+          <span style={{ color: status.binary_installed ? "#22c55e" : "#ffd97a" }}>
+            {status.binary_installed ? "✓" : "○"} whisper.cpp binary
+          </span>
+          <span style={{ color: status.model_installed ? "#22c55e" : "#ffd97a" }}>
+            {status.model_installed ? "✓" : "○"} ggml-base.bin {status.model_bytes > 0 ? `(${fmtBytes(status.model_bytes)})` : ""}
+          </span>
+        </div>
+      </div>
+      {/* Progress bar — only visible while a download is in flight. */}
+      {installing && progress && (
+        <div>
+          <div style={{ fontSize: 11, color: "var(--fg-muted)", marginBottom: 4 }}>
+            {progress.phase === "binary" ? "Downloading whisper.cpp binary" : "Downloading model (~142 MB)"} —{" "}
+            {fmtBytes(progress.downloaded)}
+            {progress.total > 0 ? ` / ${fmtBytes(progress.total)} · ${pct}%` : ""}
+          </div>
+          <div style={{ height: 6, background: "var(--bg-surface)", borderRadius: 3, overflow: "hidden" }}>
+            <div
+              style={{
+                width: `${pct}%`,
+                height: "100%",
+                background: accent,
+                transition: "width 120ms linear",
+              }}
+            />
+          </div>
+        </div>
+      )}
+      {installError && (
+        <div
+          style={{
+            fontSize: 11,
+            color: "#ff8c8c",
+            background: "rgba(255, 80, 80, 0.10)",
+            border: "1px solid #ff8c8c44",
+            borderRadius: 6,
+            padding: "6px 10px",
+          }}
+        >
+          {installError}
+        </div>
+      )}
+      {!allInstalled && !installing && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <button
+            onClick={onInstall}
+            disabled={!status.binary_auto_install && !status.binary_installed}
+            style={{
+              padding: "6px 14px",
+              borderRadius: 6,
+              border: `1px solid ${accent}`,
+              background: status.binary_auto_install || status.binary_installed ? accent : "rgba(255,217,122,0.25)",
+              color: "#1a1404",
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: status.binary_auto_install || status.binary_installed ? "pointer" : "not-allowed",
+            }}
+          >
+            Install voice runtime
+          </button>
+          {!status.binary_auto_install && !status.binary_installed && (
+            <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+              Auto-install is Windows-only.{" "}
+              <b>macOS:</b> <code style={{ background: "var(--bg-surface)", padding: "1px 4px", borderRadius: 3 }}>brew install whisper-cpp</code>.{" "}
+              <b>Linux:</b> install <code style={{ background: "var(--bg-surface)", padding: "1px 4px", borderRadius: 3 }}>whisper-cpp</code> via your package manager. Then reload this page.
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /// Per-CLI spawn recipe for the embedded terminal. The exe name is
 /// what we hand portable-pty's CommandBuilder — PATH resolution
@@ -965,6 +1142,8 @@ export default function AccountsPage() {
         (CLI login or web portal) and API key. Install / Connect output streams
         live into the right-side log — no pop-out console.
       </div>
+      <VoiceRuntimePanel />
+
 
       <div
         style={{

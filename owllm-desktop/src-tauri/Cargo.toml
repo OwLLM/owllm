@@ -94,6 +94,15 @@ regex = { version = "1", default-features = false, features = ["std", "perf"] }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
+# Pure-Rust audio decoder: turns the user's mp3/m4a/ogg/wav/etc into
+# raw PCM samples without spawning ffmpeg. Supports the formats the
+# Telegram bot + WhatsApp + in-app uploader will realistically deliver.
+# Opus is NOT in symphonia 0.5's feature flags — that codec lives in a
+# separate `symphonia-codec-opus` companion crate. Add it later if the
+# Telegram voice path (which ships as opus-in-ogg) ends up being a hot
+# code path; for now WhatsApp ships m4a/aac and the in-app uploader
+# can use any of the supported formats.
+symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "ogg", "vorbis", "wav", "flac"] }
 
 # Windows-only: needed by overlay_frame to make the cyan chrome window
 # an "owned" window of main via SetWindowLongPtrW(GWLP_HWNDPARENT).

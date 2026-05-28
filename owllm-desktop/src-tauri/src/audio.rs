@@ -41,13 +41,19 @@ const WHISPER_MODEL_MIN_BYTES: u64 = 130 * 1024 * 1024;
 
 /// Pinned whisper.cpp release tag. Bumped manually after testing —
 /// the API around `-m / -f / -otxt / -of` has been stable for years
-/// so version drift is mostly cosmetic.
-const WHISPER_CPP_TAG: &str = "v1.7.4";
+/// so version drift is mostly cosmetic. Note: the project moved
+/// from `ggerganov/whisper.cpp` to `ggml-org/whisper.cpp` during the
+/// 1.7→1.8 transition; the old release tag URLs return 404 so we
+/// have to point at the new org.
+const WHISPER_CPP_TAG: &str = "v1.8.4";
 /// Windows-x64 zip from the upstream release. Contains main.exe +
-/// supporting DLLs (SDL2, etc — none of which we actually need for
-/// our `-otxt` text-only use). About 6 MB.
+/// supporting DLLs. About 6 MB. NOTE: this download path is only the
+/// fallback for users whose installer didn't ship the bundled
+/// runtime (see resources/runtime/whisper.cpp/ in CI). Most users
+/// will never hit it because find_whisper_cli() picks up the
+/// pre-bundled binary from resources_root() first.
 const WHISPER_CPP_WIN_URL: &str =
-    "https://github.com/ggerganov/whisper.cpp/releases/download/v1.7.4/whisper-bin-x64.zip";
+    "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip";
 
 #[derive(Deserialize, Serialize)]
 pub struct AudioTranscription {
@@ -84,14 +90,50 @@ fn whisper_root() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn model_path() -> Result<PathBuf, String> {
+/// Path the installer downloads the model to (writeable cache).
+fn model_install_path() -> Result<PathBuf, String> {
     Ok(whisper_root()?.join(WHISPER_MODEL_NAME))
+}
+
+/// Path where audio_transcribe_local LOOKS for the model — preferred
+/// order: bundled-in-installer → cache → env override.
+fn find_model() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("OWLLM_WHISPER_MODEL_PATH") {
+        let path = PathBuf::from(p);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    if let Some(res) = crate::paths::resources_root() {
+        let p = res.join("runtime").join("whisper.cpp").join(WHISPER_MODEL_NAME);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Ok(rt) = whisper_root() {
+        let p = rt.join(WHISPER_MODEL_NAME);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 #[tauri::command]
 pub fn whisper_runtime_status() -> Result<WhisperRuntimeStatus, String> {
-    let mp = model_path()?;
-    let bytes = std::fs::metadata(&mp).map(|m| m.len()).unwrap_or(0);
+    let resolved = find_model();
+    let (model_path, bytes) = match &resolved {
+        Some(p) => (
+            p.to_string_lossy().to_string(),
+            std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+        ),
+        None => {
+            // Show the cache target so the user knows where the
+            // install-on-click button will drop the file.
+            let mp = model_install_path()?;
+            (mp.to_string_lossy().to_string(), 0)
+        }
+    };
     let model_installed = bytes >= WHISPER_MODEL_MIN_BYTES;
 
     let binary = find_whisper_cli();
@@ -101,7 +143,7 @@ pub fn whisper_runtime_status() -> Result<WhisperRuntimeStatus, String> {
         .unwrap_or_default();
     Ok(WhisperRuntimeStatus {
         model_installed,
-        model_path: mp.to_string_lossy().to_string(),
+        model_path,
         model_bytes: bytes,
         binary_installed: binary.is_some(),
         binary_path,
@@ -135,13 +177,14 @@ pub async fn whisper_runtime_install(
         emit_progress(&app, "binary", 1, 1, true);
     }
 
-    // 2) Model — same on every OS, single HF download.
-    let mp = model_path()?;
-    let on_disk = std::fs::metadata(&mp).map(|m| m.len()).unwrap_or(0);
-    if on_disk < WHISPER_MODEL_MIN_BYTES {
-        download_model_file(&app, &mp).await?;
+    // 2) Model — same on every OS. Skip if the bundled installer
+    //    already shipped one; otherwise HF download into the cache.
+    if let Some(existing) = find_model() {
+        let bytes = std::fs::metadata(&existing).map(|m| m.len()).unwrap_or(0);
+        emit_progress(&app, "model", bytes, bytes, true);
     } else {
-        emit_progress(&app, "model", on_disk, on_disk, true);
+        let mp = model_install_path()?;
+        download_model_file(&app, &mp).await?;
     }
 
     whisper_runtime_status()
@@ -315,14 +358,11 @@ pub async fn audio_transcribe_local(
         return Err(format!("audio too large: {} bytes (max 50 MB)", bytes.len()));
     }
 
-    let model = model_path()?;
-    if !model.is_file() {
-        return Err(
-            "Whisper model not installed yet — open Settings → Voice → \"Install voice runtime\" \
-             or call whisper_runtime_install."
-                .into(),
-        );
-    }
+    let model = find_model().ok_or_else(|| {
+        "Whisper model not installed yet — open Accounts → \"Install voice runtime\" \
+         (or call whisper_runtime_install)."
+            .to_string()
+    })?;
     let whisper = find_whisper_cli().ok_or_else(|| {
         "Whisper binary not detected. On Windows: open Settings → Voice → \"Install voice runtime\". \
          On macOS: `brew install whisper-cpp`. On Linux: install via your package manager."
@@ -565,10 +605,25 @@ fn find_whisper_cli() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let runtime = whisper_root().ok();
-    if let Some(dir) = &runtime {
-        for name in whisper_cli_names() {
-            let p = dir.join(&name);
+    // Search order:
+    //   1. <resources>/runtime/whisper.cpp/ — bundled in the installer,
+    //      the path most installed users will hit.
+    //   2. <runtime_cache>/whisper.cpp/    — downloaded on first run by
+    //      whisper_runtime_install (fallback when the installer didn't
+    //      ship the runtime, e.g. dev builds, side-loaded artifacts).
+    //   3. $PATH                            — covers macOS Homebrew /
+    //      Linux distro packages.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(res) = crate::paths::resources_root() {
+        roots.push(res.join("runtime").join("whisper.cpp"));
+    }
+    if let Ok(rt) = whisper_root() {
+        roots.push(rt);
+    }
+    let names = whisper_cli_names();
+    for dir in &roots {
+        for name in &names {
+            let p = dir.join(name);
             if p.is_file() {
                 return Some(p);
             }
@@ -578,8 +633,8 @@ fn find_whisper_cli() -> Option<PathBuf> {
             for entry in read.flatten() {
                 let p = entry.path();
                 if p.is_dir() {
-                    for name in whisper_cli_names() {
-                        let candidate = p.join(&name);
+                    for name in &names {
+                        let candidate = p.join(name);
                         if candidate.is_file() {
                             return Some(candidate);
                         }
@@ -588,7 +643,7 @@ fn find_whisper_cli() -> Option<PathBuf> {
             }
         }
     }
-    find_on_path(&whisper_cli_names())
+    find_on_path(&names)
 }
 
 fn find_on_path(names: &[String]) -> Option<PathBuf> {

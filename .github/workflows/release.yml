@@ -177,6 +177,80 @@ jobs:
         run: npm run build
 
       # ---------------------------------------------------------------
+      # Bundle the whisper.cpp voice runtime into resources/runtime/
+      # so installed users don't have to click "Install voice runtime"
+      # on the Accounts page — the binary + model travel inside the
+      # installer.
+      #
+      #   * Windows: upstream ships a prebuilt zip with main.exe and
+      #     supporting DLLs. Unpack into resources/runtime/whisper.cpp/.
+      #   * macOS / Linux: no upstream prebuilts → build from source via
+      #     cmake. Produces bin/whisper-cli (and main on older tags) in
+      #     the build tree; we copy that one binary into the resources
+      #     dir, no DLLs needed.
+      #   * Model file (ggml-base.bin, ~142 MB) is platform-neutral and
+      #     downloaded from huggingface for every runner. Installer size
+      #     grows by ~150 MB but first-run voice transcription Just Works
+      #     offline.
+      #
+      # If the asset URL ever 404s (e.g. ggerganov → ggml-org rename
+      # round 2), the build fails fast here — better than shipping a
+      # silently-broken voice runtime.
+      # ---------------------------------------------------------------
+      - name: Bundle whisper.cpp voice runtime
+        shell: bash
+        working-directory: owllm-desktop
+        env:
+          WHISPER_TAG: 'v1.8.4'
+          WHISPER_MODEL_URL: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin'
+        run: |
+          set -euo pipefail
+          DEST="resources/runtime/whisper.cpp"
+          mkdir -p "$DEST"
+          rm -f "$DEST/.gitkeep"
+
+          echo "Downloading ggml-base.bin (~142 MB)..."
+          curl -fL --retry 3 -o "$DEST/ggml-base.bin" "$WHISPER_MODEL_URL"
+
+          case "${{ matrix.os }}" in
+            windows-*)
+              ZIP="https://github.com/ggml-org/whisper.cpp/releases/download/${WHISPER_TAG}/whisper-bin-x64.zip"
+              echo "Downloading Windows whisper.cpp bundle from $ZIP"
+              curl -fL --retry 3 -o /tmp/whisper-bin.zip "$ZIP"
+              # `unzip` is available on windows-latest (via Git for Windows).
+              unzip -q -o /tmp/whisper-bin.zip -d /tmp/whisper-bin-unpacked
+              # The zip nests a `Release/` folder containing main.exe + DLLs.
+              # Flatten it so resources/runtime/whisper.cpp/main.exe is the
+              # path find_whisper_cli() picks up first.
+              find /tmp/whisper-bin-unpacked -name '*.exe' -exec cp {} "$DEST/" \;
+              find /tmp/whisper-bin-unpacked -name '*.dll' -exec cp {} "$DEST/" \;
+              rm -f /tmp/whisper-bin.zip
+              rm -rf /tmp/whisper-bin-unpacked
+              ;;
+            macos-*|ubuntu-*)
+              echo "Building whisper.cpp ${WHISPER_TAG} from source..."
+              git clone --depth 1 -b "$WHISPER_TAG" \
+                https://github.com/ggml-org/whisper.cpp /tmp/whisper-src
+              cmake -S /tmp/whisper-src -B /tmp/whisper-build \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_SHARED_LIBS=OFF \
+                -DWHISPER_BUILD_TESTS=OFF \
+                -DWHISPER_BUILD_SERVER=OFF \
+                -DWHISPER_BUILD_EXAMPLES=ON
+              cmake --build /tmp/whisper-build --config Release -j 4
+              # 1.8.x renamed `main` → `whisper-cli`. Copy whichever the
+              # build produced (or both, if a transitional tag has both).
+              find /tmp/whisper-build -type f \( -name 'whisper-cli' -o -name 'main' \) \
+                -exec cp {} "$DEST/" \;
+              chmod +x "$DEST"/whisper-cli "$DEST"/main 2>/dev/null || true
+              rm -rf /tmp/whisper-src /tmp/whisper-build
+              ;;
+          esac
+
+          echo "Bundled voice runtime:"
+          ls -lh "$DEST"
+
+      # ---------------------------------------------------------------
       # The actual Tauri build. Signing env vars are passed through
       # unconditionally — tauri-cli ignores empty values. The runner's
       # CARGO_PROFILE_RELEASE_LTO=thin matches our local

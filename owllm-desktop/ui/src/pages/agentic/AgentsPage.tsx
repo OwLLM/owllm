@@ -3323,10 +3323,7 @@ function renderThoughtEntry(t: GoalMsg, i: number) {
 function OrchestratorPane({
   agentLogs, agentThoughts, runError, serverState,
   selectedAgent, activeAgent,
-  team, phase,
-  models, modelFor, onPickAgentModel,
-  accountsStatus,
-  roleByName, effectiveTeamModel, onPickTeamModel,
+  team,
   projectId, directives, onDirectivesChanged,
   onSupSend, supSendBusy,
 }: {
@@ -3337,43 +3334,22 @@ function OrchestratorPane({
   selectedAgent: string | null;
   activeAgent: string | null;
   team: Team | null;
-  phase: DispatchPhase;
-  models: ModelInfo[];
-  /// Resolved model id for the agent (per-agent → team default → server fallback).
-  modelFor: (agentName: string) => string;
-  /// Set the per-agent model override. Pass an empty string to clear.
-  onPickAgentModel: (agentName: string, modelId: string) => void;
-  /// Account status drives sub/API enabled flags in ModelPicker.
-  accountsStatus: AccountsStatusLite | null;
-  /// Role registry — looked up for the focused agent's description /
-  /// default temperature in the Info strip (formerly AgentInfoCard).
-  roleByName: Map<string, RoleData>;
-  /// Team-wide model default + setter (formerly TeamInfoCard's picker).
-  /// Surfaces in the Info strip's fallback label so the user knows the
-  /// team default even when the focused agent has no override.
-  effectiveTeamModel: string;
-  onPickTeamModel: (id: string) => void;
-  /// Project + directives wiring for the Rules sub-tab (user spec
-  /// 2026-05-28: rules moved out of the top-level right-column tab
-  /// strip and into a sub-tab here in the chat container).
+  /// Project + directives wiring for the Rules sub-tab.
   projectId: string;
   directives: Directive[];
   onDirectivesChanged: () => Promise<void> | void;
-  /// User-Input dock at the bottom of the pane (also new in the
-  /// 2026-05-28 restructure). Sends the typed message to the team.
+  /// User Input sub-tab — textarea + send button. The model/voice/
+  /// info "settings header" moved to the OrchestratorSettings panel
+  /// in RightColumnTabs (2026-05-28 restructure: chat container is
+  /// permanent below the small settings panels).
   onSupSend: (text: string) => void;
   supSendBusy: boolean;
 }) {
-  // The pane's old agent/team mode toggle is gone — Team lives as its
-  // own top-level right-column tab now (2026-05-28). All widgets here
-  // bind to the focused agent. `mode` retained as a const so we don't
-  // have to gut the team-mode branches below in one go.
-  const mode = "agent" as const;
-  // Sub-tab strip now includes "rules" at the front (was a top-level
-  // right-column tab; promoted in / demoted depending on how you look
-  // at it). Default still "reply" so the run log is what users see
-  // first.
-  const [activeTab, setActiveTab] = useState<"rules"|"reply"|"thought"|"tools"|"full">("reply");
+  // Sub-tab strip — Rules and User Input precede Clear Chat per user
+  // spec ("we add the chat of the user in the chat container, BEFORE
+  // the Clear Chat, and we call it User Input"). Default starts on
+  // Clear Chat so the run log is visible at startup.
+  const [activeTab, setActiveTab] = useState<"rules"|"userinput"|"reply"|"thought"|"tools"|"full">("reply");
   // Pick which buffer to show: explicit selection > currently-active
   // agent > orchestrator (so the user sees the plan even if nothing
   // is selected yet) > "you" (which holds the goal echo).
@@ -3383,53 +3359,10 @@ function OrchestratorPane({
     activeAgent ??
     orchName ??
     "you";
-  // The "focus" used by every downstream widget. In team mode we read
-  // the orchestrator's buffer (or "you" if there's no orchestrator)
-  // because the team's voice == the orchestrator. Writes flip to the
-  // team-level handler.
-  const focus = mode === "team" ? (orchName ?? "you") : agentFocus;
-  // Header agent button text. Always shows the agent we'd return to
-  // when the user clicks back out of team mode — so they don't lose
-  // context of which agent they had selected.
-  const agentBtnLabel = agentFocus === "you"
-    ? "You"
-    : team
-    ? displayLabel(agentFocus)
-    : agentFocus;
-  // Header label for the Team button — literal "Team" instead of the
-  // project/team name. The actual team identifier is still visible
-  // elsewhere (LocationRow strip up top); the chat header just wants
-  // the role identifier, not a duplicate of the title.
-  const teamBtnLabel = "Team";
-  // Dynamic pane title — "Orchestrator" when the orchestrator is the
-  // focus (default / no other selection), otherwise the focused
-  // agent's display name. Per user spec 2026-05-28: the page is the
-  // generic chat container; only the orchestrator's identity gets the
-  // role label.
-  const isOrchFocus = agentFocus === orchName && agentFocus !== "you" && orchName != null;
-  const headerTitle = isOrchFocus
-    ? "Orchestrator"
-    : agentFocus === "you"
-      ? "You"
-      : team
-        ? displayLabel(agentFocus)
-        : agentFocus;
-  // Resolved data the reusable widgets bind to. Single source of truth
-  // so we don't render a second Model picker / Info section per mode.
-  const focusModel = mode === "team" ? effectiveTeamModel : modelFor(agentFocus);
-  const onPickFocusModel = mode === "team"
-    ? onPickTeamModel
-    : (id: string) => onPickAgentModel(agentFocus, id);
-  const focusSpec = mode === "agent" ? (team?.agents.find(a => a.name === agentFocus) ?? null) : null;
-  const focusRole = focusSpec ? roleByName.get(focusSpec.base) : null;
-  const focusDescription = mode === "team"
-    ? (team?.description ?? "")
-    : (focusSpec
-      ? ((focusSpec.description && focusSpec.description.trim()) ||
-         (focusRole?.description && focusRole.description.trim()) ||
-         "No description provided.")
-      : "");
-  const focusTint = focusSpec ? tintForGroup(groupForAgent(focusSpec)) : null;
+  // The pane only operates in agent mode now. "focus" maps directly
+  // to the agentFocus computed above; the model/voice/info section
+  // (where mode used to matter) lives in OrchestratorSettings.
+  const focus = agentFocus;
 
   // Filter the focused agent's messages. The "you" buffer always
   // contains just the user goal echo; useful as a sanity check.
@@ -3556,126 +3489,22 @@ function OrchestratorPane({
     finally { setRulesBusy(false); }
   };
 
-  // Phase indicator pill for the header.
-  const phaseColor = phase === "idle" || phase === "done"
-    ? "#7d8595"
-    : phase === "planning"
-    ? "#ffd97a"
-    : phase === "dispatching"
-    ? "#3cf26b"
-    : "#c08aff"; // integrating
-  const phaseText = phase === "idle"
-    ? "Idle"
-    : phase === "planning"
-    ? "Planning…"
-    : phase === "dispatching"
-    ? `Dispatching${activeAgent ? `: ${displayLabel(activeAgent)}` : ""}`
-    : phase === "integrating"
-    ? "Integrating…"
-    : "Done";
+  // Phase pill moved to OrchestratorSettings (top of RightColumnTabs);
+  // this pane is purely the chat container now.
 
   return (
-    <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"var(--bg-elevated)", padding:"0 0 0 8px" }}>
-      <div data-ui="LogHeader" style={{ padding:"8px 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
-        {/* Dynamic title — auto-flips with the focused agent (user
-            spec 2026-05-28). The old agent/team button pair is gone:
-            Team has its own top-level tab, and naming-the-page-after-
-            the-agent is exactly what makes it a generic agent pane. */}
-        <div style={{
-          flex:1, minWidth:0,
-          padding:"4px 10px",
-          background: focusTint ? `linear-gradient(135deg, ${focusTint.bg} 0%, rgba(18,22,34,0.85) 100%)` : "rgba(var(--accent-rgb),0.10)",
-          border: focusTint ? `1px solid ${focusTint.border}` : "1px solid var(--accent)",
-          borderRadius:8,
-          color:"var(--fg-strong)",
-          fontSize:15, fontWeight:700, letterSpacing:0.3,
-          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
-        }} title={headerTitle}>📜 {headerTitle}</div>
-        <span style={{
-          fontSize:10, fontWeight:700, letterSpacing:0.6, textTransform:"uppercase",
-          color: phaseColor,
-          background: `${phaseColor}22`,
-          border: `1px solid ${phaseColor}55`,
-          borderRadius:999, padding:"2px 8px",
-          whiteSpace:"nowrap",
-        }}>{phaseText}</span>
-      </div>
-      <div data-ui="PickerHost" style={{ padding:"0 12px 4px", display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Model</span>
-        <ModelPicker
-          value={focusModel}
-          onChange={onPickFocusModel}
-          models={models}
-          status={accountsStatus}
-          disabled={mode === "agent" && (agentFocus === "you" || agentFocus === "system")}
-          fallbackLabel={
-            mode === "team"
-              ? (serverState.model_id ? `(use server model · ${serverState.model_id})` : "(no server model running)")
-              : (effectiveTeamModel
-                ? `(use team model · ${effectiveTeamModel})`
-                : serverState.model_id
-                  ? `(use team / server model · ${serverState.model_id})`
-                  : "(use team / server model — none running)")
-          }
-        />
-      </div>
-      <div data-ui="VoiceHost" style={{ padding:"0 12px 8px", display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Voice</span>
-        <input type="checkbox" defaultChecked style={{ width:13, height:13, accentColor:"var(--accent)" }} title="Speak this agent's replies aloud" />
-        <button style={{ flex:1, height:28, padding:"0 10px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:12, textAlign:"left" }}>Auto voice</button>
-        <input type="number" defaultValue={0} style={{ width:78, height:28, padding:"0 8px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:12 }} title="Speaking rate (words per minute)" />
-        <button style={{ width:28, height:28, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:12 }} title="Preview this voice">▶</button>
-        <button style={{ width:28, height:28, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:14 }} title="Apply this voice to every agent on the team">➤</button>
-      </div>
-      {/* Info row — single block; what it shows is driven by the
-          header mode (Agent vs Team). Tinted with the focused agent's
-          group colour in agent mode, amber in team mode. */}
-      <div data-ui="InfoHost" style={{ padding:"0 12px 8px", display:"flex", flexDirection:"column", gap:6 }}>
-        <span style={{ fontSize:11, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>Info</span>
-        <div style={{
-          background: mode === "team"
-            ? "var(--bg-surface)"
-            : (focusTint ? `linear-gradient(135deg, ${focusTint.bg} 0%, rgba(18,22,34,0.85) 100%)` : "var(--bg-surface)"),
-          border: mode === "team"
-            ? "1px solid rgba(255,217,122,0.35)"
-            : (focusTint ? `1px solid ${focusTint.border}` : "1px solid var(--border)"),
-          borderRadius:8, padding:"8px 10px", display:"flex", flexDirection:"column", gap:6,
-        }}>
-          {focusDescription ? (
-            <div style={{ fontSize:12, color:"var(--fg)", lineHeight:1.4 }}>
-              {focusDescription.length > 220 ? focusDescription.slice(0, 217) + "…" : focusDescription}
-            </div>
-          ) : (
-            <div style={{ fontSize:11, color:"var(--fg-subtle)", fontStyle:"italic" }}>
-              {mode === "team" ? "(no team description)" : "Click an agent on the canvas (or a chat tile) to see its info here."}
-            </div>
-          )}
-          {mode === "agent" && focusSpec && (
-            <div style={{ display:"flex", gap:14, fontSize:11, color:"var(--fg-muted)", flexWrap:"wrap" }}>
-              <span><b style={{ color:"var(--fg)", textTransform:"capitalize" }}>{focusSpec.base}</b> base</span>
-              <span><b style={{ color:"var(--fg)" }}>{(focusRole?.defaultTemperature ?? 0.4).toFixed(2)}</b> temp</span>
-              {focusTint?.badge && (
-                <span style={{
-                  background: groupForAgent(focusSpec) === "design" ? "rgba(64,168,96,0.95)" : "rgba(58,120,220,0.95)",
-                  color:"#0a1208", fontSize:9, fontWeight:800, letterSpacing:0.4,
-                  padding:"2px 7px", borderRadius:8, textTransform:"uppercase",
-                }}>{focusTint.badge}</span>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
+    <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"var(--bg-elevated)" }}>
       <div data-ui="OrchestratorLogTabs" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:"0 0 8px" }}>
         <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)" }}>
           {([
-            // Rules sits first per user spec 2026-05-28 ("before User
-            // Input, before Clear Chat"). It's red — it's an enforcement
-            // surface, visually distinct from the chat tabs.
-            { id:"rules",   label:"📋 Rules",      accent:"#ff6b6b",       count: directives.length },
-            { id:"reply",   label:"💬 Clear Chat", accent:"var(--accent)", count: messages.length },
-            { id:"thought", label:"🧠 Thought",    accent:"#dcb0ff",       count: thoughts.length },
-            { id:"tools",   label:"🛠 Tool Calls", accent:"#7ff0c5",       count: toolCalls.length },
-            { id:"full",    label:"📜 Full Chat",  accent:"#ffd97a",       count: fullChat.length },
+            // Order per user spec 2026-05-28: Rules → User Input →
+            // Clear Chat → Thought → Tool Calls → Full Chat.
+            { id:"rules",     label:"📋 Rules",      accent:"#ff6b6b",       count: directives.length },
+            { id:"userinput", label:"✏ User Input",  accent:"#ffd97a",       count: 0                  },
+            { id:"reply",     label:"💬 Clear Chat", accent:"var(--accent)", count: messages.length    },
+            { id:"thought",   label:"🧠 Thought",    accent:"#dcb0ff",       count: thoughts.length    },
+            { id:"tools",     label:"🛠 Tool Calls", accent:"#7ff0c5",       count: toolCalls.length   },
+            { id:"full",      label:"📜 Full Chat",  accent:"#ffd97a",       count: fullChat.length    },
           ] as const).map(tab => {
             const active = activeTab === tab.id;
             return (
@@ -3795,6 +3624,55 @@ function OrchestratorPane({
             )}
           </div>
         </div>
+        {/* User Input — second sub-tab. Auto-resizing textarea + send.
+            Per user spec: "we add the chat of the user in the chat
+            container, before the Clear Chat, and we call it User
+            Input". The textarea grows with the typed content up to a
+            cap; Enter sends, Shift+Enter inserts a newline. */}
+        <div data-ui="OrchestratorUserInputView" style={{ flex:1, display: activeTab === "userinput" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
+          <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ffd97a", textTransform:"uppercase" }}>User Input</div>
+          <textarea
+            ref={inputRef}
+            data-ui="UserInputArea"
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submitInput();
+              }
+            }}
+            placeholder="Reply to the team — Enter to send, Shift+Enter for new line"
+            rows={1}
+            style={{
+              flex:1, minHeight:80, maxHeight:480,
+              padding:"10px 12px",
+              borderRadius:8,
+              background:"var(--bg-surface)",
+              color:"var(--fg)",
+              border:"1px solid rgba(255,200,80,0.30)",
+              fontSize:14, lineHeight:1.5,
+              fontFamily:"Segoe UI, sans-serif",
+              resize:"none",
+              outline:"none",
+              overflowY:"auto",
+            }}
+          />
+          <div style={{ display:"flex", justifyContent:"flex-end" }}>
+            <button
+              onClick={submitInput}
+              disabled={!draft.trim() || supSendBusy}
+              style={{
+                height:36, padding:"6px 18px", borderRadius:8,
+                border:"1px solid #ffd97a",
+                background: draft.trim() && !supSendBusy ? "#ffd97a" : "rgba(255,217,122,0.25)",
+                color: draft.trim() && !supSendBusy ? "#1a1404" : "#7d6f4b",
+                fontSize:13, fontWeight:700,
+                cursor: draft.trim() && !supSendBusy ? "pointer" : "not-allowed",
+              }}
+            >{supSendBusy ? "Sending…" : "Send"}</button>
+          </div>
+        </div>
         {/* Clear Chat — the user-facing reply stream only, nothing else. */}
         <div ref={replyRef} data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)" }}>
           {runError ? (<div style={{ border:"1px solid #ff9f9f", background:"rgba(255,80,80,0.10)", color:"#ffb0b0", borderRadius:6, padding:8, fontSize:12 }}>{runError}</div>) : null}
@@ -3841,63 +3719,6 @@ function OrchestratorPane({
           )}
         </div>
       </div>
-      {/* User Input dock — bottom-pinned across all sub-tabs (user spec
-          2026-05-28: the input goes UNDER the chat box, auto-resizing
-          with the typed text). Hidden on the Rules sub-tab where there
-          is no chat to send into. */}
-      {activeTab !== "rules" && (
-        <div data-ui="UserInputDock" style={{
-          borderTop:"1px solid var(--border)",
-          padding:"8px 12px",
-          background:"var(--bg-elevated)",
-          display:"flex", flexDirection:"column", gap:4,
-          flexShrink:0,
-        }}>
-          <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ffd97a", textTransform:"uppercase" }}>User Input</div>
-          <div style={{ display:"flex", alignItems:"flex-end", gap:8 }}>
-            <textarea
-              ref={inputRef}
-              data-ui="UserInputArea"
-              value={draft}
-              onChange={e => setDraft(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  submitInput();
-                }
-              }}
-              placeholder="Reply to the team — Enter to send, Shift+Enter for new line"
-              rows={1}
-              style={{
-                flex:1, minHeight:36, maxHeight:240,
-                padding:"8px 10px",
-                borderRadius:8,
-                background:"var(--bg-surface)",
-                color:"var(--fg)",
-                border:"1px solid rgba(255,200,80,0.30)",
-                fontSize:13, lineHeight:1.4,
-                fontFamily:"Segoe UI, sans-serif",
-                resize:"none",
-                outline:"none",
-                overflowY:"auto",
-              }}
-            />
-            <button
-              onClick={submitInput}
-              disabled={!draft.trim() || supSendBusy}
-              style={{
-                height:36, padding:"6px 14px", borderRadius:8,
-                border:"1px solid #ffd97a",
-                background: draft.trim() && !supSendBusy ? "#ffd97a" : "rgba(255,217,122,0.25)",
-                color: draft.trim() && !supSendBusy ? "#1a1404" : "#7d6f4b",
-                fontSize:13, fontWeight:700,
-                cursor: draft.trim() && !supSendBusy ? "pointer" : "not-allowed",
-                flexShrink:0,
-              }}
-            >{supSendBusy ? "Sending…" : "Send"}</button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -3937,10 +3758,8 @@ const RIGHT_TAB_LABEL: Record<RightTabId, string> = {
 };
 
 function RightColumnTabs(props: {
-  // SuperUserCard / Rules props
   team: Team | null;
   roleByName: Map<string, RoleData>;
-  supChat: GoalMsg[];
   onSupSend: (text: string) => void;
   supSendBusy: boolean;
   autoApprove: boolean;
@@ -3950,7 +3769,6 @@ function RightColumnTabs(props: {
   onDirectivesChanged: () => Promise<void> | void;
   directorMode: boolean;
   onToggleDirectorMode: () => void;
-  // OrchestratorPane props (forwarded verbatim)
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
   runError: string | null;
@@ -3965,38 +3783,45 @@ function RightColumnTabs(props: {
   effectiveTeamModel: string;
   onPickTeamModel: (id: string) => void;
 }) {
+  // The 3 top "pages" are small info containers (~20% of available
+  // height) per user spec 2026-05-28. They swap above the chat
+  // container — which stays put. So the chat is ALWAYS visible no
+  // matter which top tab is active.
   const [tab, setTab] = useState<RightTabId>("orch");
-  // When the user clicks an agent on the canvas / chat grid, snap to
-  // the Orchestrator (generic agent) tab so the selection is visible.
-  // No effect when the selection is null (initial mount).
-  const prevSel = useRef<string | null>(null);
-  useEffect(() => {
-    if (props.selectedAgent && props.selectedAgent !== prevSel.current) {
-      setTab("orch");
-    }
-    prevSel.current = props.selectedAgent;
-  }, [props.selectedAgent]);
 
-  const tabAccent = RIGHT_TAB_COLOR[tab];
+  // Dynamic label for the middle (Orchestrator) tab. The pane *is*
+  // the generic agent page: when the user clicks the orchestrator
+  // node, it reads "Orchestrator"; when they click another agent, it
+  // reads that agent's display name. No more second-line title strip
+  // below the tabs — the title lives on the tab itself.
+  const orchName = props.team ? (findOrchestratorSpec(props.team)?.name ?? null) : null;
+  const focusAgent =
+    props.selectedAgent ??
+    props.activeAgent ??
+    orchName ??
+    null;
+  const orchTabLabel =
+    focusAgent && focusAgent !== orchName && focusAgent !== "you" && props.team
+      ? `📜 ${displayLabel(focusAgent)}`
+      : "📜 Orchestrator";
 
   return (
     <div data-ui="RightColumnTabs" style={{
       display:"flex", flexDirection:"column", height:"100%",
       background:"var(--bg-elevated)",
     }}>
-      {/* Tab strip — 4 coloured tabs. Each tab's active state paints
-          the tab-strip background in its colour family so the user
-          sees at a glance which "page" they're on. */}
+      {/* Tab strip — 3 small coloured "page selectors". */}
       <div data-ui="RightTabs" style={{
         display:"flex", gap:0,
-        borderBottom: `1px solid ${tabAccent}55`,
-        background: `linear-gradient(180deg, ${tabAccent}10 0%, transparent 100%)`,
+        borderBottom: `1px solid ${RIGHT_TAB_COLOR[tab]}55`,
+        background: `linear-gradient(180deg, ${RIGHT_TAB_COLOR[tab]}10 0%, transparent 100%)`,
         flexShrink:0,
       }}>
         {(["super","orch","team"] as const).map(id => {
           const on = tab === id;
           const c  = RIGHT_TAB_COLOR[id];
           const bg = RIGHT_TAB_BG_ON[id];
+          const label = id === "orch" ? orchTabLabel : RIGHT_TAB_LABEL[id];
           return (
             <button
               key={id}
@@ -4010,60 +3835,51 @@ function RightColumnTabs(props: {
                 borderBottom: on ? `2.5px solid ${c}` : "2.5px solid transparent",
                 fontSize:12, fontWeight:700, cursor:"pointer",
                 letterSpacing:0.3,
-              }}
-            >{RIGHT_TAB_LABEL[id]}</button>
+                overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
+              }} title={label}>{label}</button>
           );
         })}
       </div>
-      {/* Tab body — single mounted component per tab. We don't keep the
-          others mounted because OrchestratorPane is expensive (multi-
-          ref scroll panes) and the user wants a clean swap. */}
-      <div data-ui="RightTabBody" style={{ flex:1, minHeight:0, display:"flex", overflow:"hidden" }}>
+      {/* Top settings panel — small info container (~18% of available
+          height). The active tab decides what's in it. The chat
+          container below stays put regardless of which tab is open. */}
+      <div data-ui="RightSettingsPanel" style={{
+        flex:"0 0 auto",
+        maxHeight:"22%",
+        minHeight:120,
+        overflow:"auto",
+        padding:"8px 12px",
+        borderBottom:"1px solid var(--border)",
+        background:"var(--bg-elevated)",
+      }}>
         {tab === "super" && (
-          <SuperUserCard
-            team={props.team}
-            roleByName={props.roleByName}
-            chat={props.supChat}
-            onSend={props.onSupSend}
-            sendBusy={props.supSendBusy}
+          <SuperUserSettings
             autoApprove={props.autoApprove}
             onToggleAutoApprove={props.onToggleAutoApprove}
-            projectId={props.projectId}
-            directives={props.directives}
-            onDirectivesChanged={props.onDirectivesChanged}
             directorMode={props.directorMode}
             onToggleDirectorMode={props.onToggleDirectorMode}
-            mode="super"
+            team={props.team}
+            roleByName={props.roleByName}
           />
         )}
         {tab === "orch" && (
-          <OrchestratorPane
-            agentLogs={props.agentLogs}
-            agentThoughts={props.agentThoughts}
-            runError={props.runError}
-            serverState={props.serverState}
+          <OrchestratorSettings
+            team={props.team}
+            roleByName={props.roleByName}
             selectedAgent={props.selectedAgent}
             activeAgent={props.activeAgent}
-            team={props.team}
-            phase={props.phase}
             models={props.models}
             modelFor={props.modelFor}
             onPickAgentModel={props.onPickAgentModel}
             accountsStatus={props.accountsStatus}
-            roleByName={props.roleByName}
             effectiveTeamModel={props.effectiveTeamModel}
-            onPickTeamModel={props.onPickTeamModel}
-            projectId={props.projectId}
-            directives={props.directives}
-            onDirectivesChanged={props.onDirectivesChanged}
-            onSupSend={props.onSupSend}
-            supSendBusy={props.supSendBusy}
+            serverState={props.serverState}
+            phase={props.phase}
           />
         )}
         {tab === "team" && (
-          <TeamPanel
+          <TeamSettings
             team={props.team}
-            roleByName={props.roleByName}
             models={props.models}
             effectiveTeamModel={props.effectiveTeamModel}
             onPickTeamModel={props.onPickTeamModel}
@@ -4072,6 +3888,220 @@ function RightColumnTabs(props: {
           />
         )}
       </div>
+      {/* Chat container — ALWAYS visible. Sub-tabs Rules | User Input |
+          Clear Chat | Thought | Tool Calls | Full Chat. Does NOT swap
+          when the top tab changes. */}
+      <div data-ui="RightChatHost" style={{ flex:1, minHeight:0, display:"flex", overflow:"hidden" }}>
+        <OrchestratorPane
+          agentLogs={props.agentLogs}
+          agentThoughts={props.agentThoughts}
+          runError={props.runError}
+          serverState={props.serverState}
+          selectedAgent={props.selectedAgent}
+          activeAgent={props.activeAgent}
+          team={props.team}
+          projectId={props.projectId}
+          directives={props.directives}
+          onDirectivesChanged={props.onDirectivesChanged}
+          onSupSend={props.onSupSend}
+          supSendBusy={props.supSendBusy}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ---------- SuperUserSettings ----------
+// Compact yellow info container for the Super User top tab. Shows the
+// avatar + auto-approve + director-mode controls. Sized to ~18% of
+// the right column's available height.
+function SuperUserSettings({
+  autoApprove, onToggleAutoApprove,
+  directorMode, onToggleDirectorMode,
+  team, roleByName,
+}: {
+  autoApprove: boolean;
+  onToggleAutoApprove: () => void;
+  directorMode: boolean;
+  onToggleDirectorMode: () => void;
+  team: Team | null;
+  roleByName: Map<string, RoleData>;
+}) {
+  const peekAgents = (team?.agents ?? []).slice(0, 6);
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <div style={{ width:28, height:28, borderRadius:16, background:"#2a2410", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"var(--fg)" }}>👤</div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:"#ffd97a", lineHeight:"18px" }}>Super User</div>
+          <div style={{ fontSize:10, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase" }}>
+            {team?.agents.length ?? 0} agents on team
+          </div>
+        </div>
+        {peekAgents.length > 0 && (
+          <div style={{ display:"flex", alignItems:"center", gap:4 }}>
+            {peekAgents.map((a, i) => (
+              <img key={i} src={owlSrc(agentIconRef(a, roleByName))} title={displayLabel(a.name)} style={{ width:18, height:18, opacity:0.85 }} />
+            ))}
+          </div>
+        )}
+      </div>
+      <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: autoApprove ? "#ff8c8c" : "#7888a8", cursor:"pointer" }}>
+        <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
+        <span>auto-approve tool requests</span>
+      </label>
+      <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: directorMode ? "#9af0a8" : "#7888a8", cursor:"pointer" }}>
+        <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#60ff80" }} />
+        <span>director mode (critic stands in for me)</span>
+      </label>
+    </div>
+  );
+}
+
+// ---------- OrchestratorSettings ----------
+// Compact blue info container for the Orchestrator (or focused agent)
+// top tab. Model picker + Voice + Info description. The selected
+// agent's name lives in the tab label itself, not here — so there's
+// no duplicate title strip.
+function OrchestratorSettings({
+  team, roleByName, selectedAgent, activeAgent,
+  models, modelFor, onPickAgentModel, accountsStatus,
+  effectiveTeamModel, serverState, phase,
+}: {
+  team: Team | null;
+  roleByName: Map<string, RoleData>;
+  selectedAgent: string | null;
+  activeAgent: string | null;
+  models: ModelInfo[];
+  modelFor: (agentName: string) => string;
+  onPickAgentModel: (agentName: string, modelId: string) => void;
+  accountsStatus: AccountsStatusLite | null;
+  effectiveTeamModel: string;
+  serverState: ServerStatus;
+  phase: DispatchPhase;
+}) {
+  const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
+  const focus = selectedAgent ?? activeAgent ?? orchName ?? "you";
+  const focusSpec = team?.agents.find(a => a.name === focus) ?? null;
+  const focusRole = focusSpec ? roleByName.get(focusSpec.base) : null;
+  const focusDescription = focusSpec
+    ? ((focusSpec.description && focusSpec.description.trim()) ||
+       (focusRole?.description && focusRole.description.trim()) ||
+       "No description provided.")
+    : "";
+  const focusTint = focusSpec ? tintForGroup(groupForAgent(focusSpec)) : null;
+  const focusModel = modelFor(focus);
+
+  const phaseColor = phase === "idle" || phase === "done" ? "#7d8595"
+    : phase === "planning" ? "#ffd97a"
+    : phase === "dispatching" ? "#3cf26b"
+    : "#c08aff";
+  const phaseText = phase === "idle" ? "Idle"
+    : phase === "planning" ? "Planning…"
+    : phase === "dispatching" ? `Dispatching${activeAgent ? `: ${displayLabel(activeAgent)}` : ""}`
+    : phase === "integrating" ? "Integrating…"
+    : "Done";
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+      {/* Phase pill — top-right of the panel since the tab itself
+          shows the focus identity. */}
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <div style={{ flex:1, minWidth:0, fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>
+          Agent settings · {focus === "you" ? "no focus" : focusSpec ? `${focusSpec.base} base · ${(focusRole?.defaultTemperature ?? 0.4).toFixed(2)} temp` : "—"}
+        </div>
+        <span style={{
+          fontSize:10, fontWeight:700, letterSpacing:0.6, textTransform:"uppercase",
+          color: phaseColor, background: `${phaseColor}22`,
+          border: `1px solid ${phaseColor}55`,
+          borderRadius:999, padding:"2px 8px", whiteSpace:"nowrap",
+        }}>{phaseText}</span>
+      </div>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:44 }}>Model</span>
+        <ModelPicker
+          value={focusModel}
+          onChange={(id) => onPickAgentModel(focus, id)}
+          models={models}
+          status={accountsStatus}
+          disabled={focus === "you" || focus === "system"}
+          fallbackLabel={
+            effectiveTeamModel
+              ? `(use team model · ${effectiveTeamModel})`
+              : serverState.model_id
+                ? `(use team / server model · ${serverState.model_id})`
+                : "(use team / server model — none running)"
+          }
+        />
+      </div>
+      <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+        <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:44 }}>Voice</span>
+        <input type="checkbox" defaultChecked style={{ width:12, height:12, accentColor:"var(--accent)" }} title="Speak this agent's replies aloud" />
+        <button style={{ flex:1, height:24, padding:"0 8px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:11, textAlign:"left" }}>Auto voice</button>
+        <input type="number" defaultValue={0} style={{ width:58, height:24, padding:"0 6px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:11 }} title="Speaking rate (words per minute)" />
+        <button style={{ width:24, height:24, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:11 }} title="Preview this voice">▶</button>
+      </div>
+      <div style={{
+        background: focusTint ? `linear-gradient(135deg, ${focusTint.bg} 0%, rgba(18,22,34,0.85) 100%)` : "var(--bg-surface)",
+        border: focusTint ? `1px solid ${focusTint.border}` : "1px solid var(--border)",
+        borderRadius:6, padding:"6px 8px",
+        fontSize:11, color:"var(--fg)", lineHeight:1.4,
+      }}>
+        {focusDescription
+          ? (focusDescription.length > 180 ? focusDescription.slice(0, 177) + "…" : focusDescription)
+          : <span style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>Click an agent on the canvas to see its info here.</span>}
+      </div>
+    </div>
+  );
+}
+
+// ---------- TeamSettings ----------
+// Compact green info container for the Team top tab. Team identity +
+// team-wide model picker.
+function TeamSettings({
+  team, models, effectiveTeamModel, onPickTeamModel,
+  serverModelId, accountsStatus,
+}: {
+  team: Team | null;
+  models: ModelInfo[];
+  effectiveTeamModel: string;
+  onPickTeamModel: (id: string) => void;
+  serverModelId: string | null;
+  accountsStatus: AccountsStatusLite | null;
+}) {
+  if (!team) {
+    return (
+      <div style={{ fontSize:11, color:"var(--fg-subtle)", fontStyle:"italic" }}>
+        Pick a project on the strip up top, or load a team template.
+      </div>
+    );
+  }
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <img src={owlSrc(team.icon)} style={{ width:28, height:28, objectFit:"contain", flexShrink:0 }} />
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:14, fontWeight:700, color:"#6cd28e", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={team.display}>{team.display}</div>
+          <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.4, textTransform:"uppercase" }}>
+            {team.category} · {team.agents.length} agents · {team.edges.length} connections
+          </div>
+        </div>
+      </div>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Team model</span>
+        <ModelPicker
+          value={effectiveTeamModel}
+          onChange={onPickTeamModel}
+          models={models}
+          status={accountsStatus}
+          fallbackLabel={serverModelId ? `(use server model · ${serverModelId})` : "(no server model running)"}
+        />
+      </div>
+      {team.description && (
+        <div style={{ fontSize:11, color:"var(--fg)", lineHeight:1.4, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:6, padding:"6px 8px" }}>
+          {team.description.length > 180 ? team.description.slice(0, 177) + "…" : team.description}
+        </div>
+      )}
     </div>
   );
 }

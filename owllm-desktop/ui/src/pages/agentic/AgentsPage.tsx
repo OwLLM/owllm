@@ -7,7 +7,6 @@
 // bridges.rs, server state via server_status. No hardcoded rosters.
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import NewProjectDialog from "./NewProjectDialog";
@@ -663,54 +662,81 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
 // the graph view. The view toggle flips between the orbital diagram
 // and the editable graph (mirrors agents_page.py:_on_view_toggle).
 function FlowHeader({
-  viewMode, onToggleView,
+  viewMode, onSetView,
   canEdit, onDeleteEdge, onReverseEdge, onResetLayout,
 }: {
-  viewMode: "diagram" | "graph"; onToggleView: () => void;
+  viewMode: "diagram" | "graph" | "chat";
+  /// Three-state segmented switch — caller passes the target mode the
+  /// user clicked. Replaces the binary toggle the page had before the
+  /// 2026-05-28 restructure that added the per-agent chat grid as a
+  /// canvas mode.
+  onSetView: (m: "diagram" | "graph" | "chat") => void;
   canEdit: boolean;
   onDeleteEdge: () => void;
   onReverseEdge: () => void;
   onResetLayout: () => void;
 }) {
-  const toggleLabel = viewMode === "diagram" ? "◐ Graph view" : "◑ Diagram view";
-  const toggleTitle = viewMode === "diagram"
-    ? "Switch to the editable graph (top-down hierarchical layout)"
-    : "Switch back to the live orbital diagram";
+  const seg = (id: "diagram" | "graph" | "chat", label: string, title: string) => {
+    const on = viewMode === id;
+    return (
+      <button
+        key={id}
+        data-ui={`FlowViewBtn-${id}`}
+        className="ghost-btn"
+        onClick={() => onSetView(id)}
+        title={title}
+        style={{
+          height:28, padding:"0 10px", fontSize:11,
+          background: on ? "rgba(var(--accent-rgb),0.22)" : undefined,
+          color: on ? "var(--accent)" : undefined,
+          borderRadius:0,
+        }}
+      >{label}</button>
+    );
+  };
+  // Edge-edit buttons only make sense in graph mode; collapse them
+  // to invisible in the other modes so the toolbar reads cleaner.
+  const showEditBtns = viewMode === "graph";
   return (
     <div style={{ display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid var(--border)" }}>
       <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Flow</div>
       <div style={{ flex:1 }} />
-      <button
-        data-ui="FlowDeleteEdgeBtn"
-        className="ghost-btn"
-        onClick={onDeleteEdge}
-        disabled={!canEdit}
-        title="Delete the selected edge (or press Delete)"
-        style={{ height:28, padding:"0 8px", fontSize:11, opacity: canEdit ? 1 : 0.45, cursor: canEdit ? "pointer" : "not-allowed" }}
-      >✕ Edge</button>
-      <button
-        data-ui="FlowReverseEdgeBtn"
-        className="ghost-btn"
-        onClick={onReverseEdge}
-        disabled={!canEdit}
-        title="Reverse the direction of the selected edge"
-        style={{ height:28, padding:"0 8px", fontSize:11, opacity: canEdit ? 1 : 0.45, cursor: canEdit ? "pointer" : "not-allowed" }}
-      >⇄ Reverse</button>
-      <button
-        data-ui="FlowLayoutBtn"
-        className="ghost-btn"
-        onClick={onResetLayout}
-        title="Reset positions to the auto-layout (top-down hierarchical, orchestrator on top, then specialists in rows by dispatch distance)"
-        style={{ height:28, padding:"0 8px", fontSize:11 }}
-      >⟲ Layout</button>
+      {showEditBtns && (
+        <>
+          <button
+            data-ui="FlowDeleteEdgeBtn"
+            className="ghost-btn"
+            onClick={onDeleteEdge}
+            disabled={!canEdit}
+            title="Delete the selected edge (or press Delete)"
+            style={{ height:28, padding:"0 8px", fontSize:11, opacity: canEdit ? 1 : 0.45, cursor: canEdit ? "pointer" : "not-allowed" }}
+          >✕ Edge</button>
+          <button
+            data-ui="FlowReverseEdgeBtn"
+            className="ghost-btn"
+            onClick={onReverseEdge}
+            disabled={!canEdit}
+            title="Reverse the direction of the selected edge"
+            style={{ height:28, padding:"0 8px", fontSize:11, opacity: canEdit ? 1 : 0.45, cursor: canEdit ? "pointer" : "not-allowed" }}
+          >⇄ Reverse</button>
+          <button
+            data-ui="FlowLayoutBtn"
+            className="ghost-btn"
+            onClick={onResetLayout}
+            title="Reset positions to the auto-layout (top-down hierarchical, orchestrator on top, then specialists in rows by dispatch distance)"
+            style={{ height:28, padding:"0 8px", fontSize:11 }}
+          >⟲ Layout</button>
+        </>
+      )}
       <button data-ui="FlowRefreshBtn" className="ghost-btn" title="Refresh model lists in every picker" style={{ height:28, width:30, padding:0, fontSize:11 }}>⟳</button>
-      <button
-        data-ui="FlowViewToggleBtn"
-        className="ghost-btn"
-        onClick={onToggleView}
-        title={toggleTitle}
-        style={{ height:28, padding:"0 8px", fontSize:11, background: viewMode === "graph" ? "rgba(var(--accent-rgb),0.18)" : undefined, color: viewMode === "graph" ? "var(--accent)" : undefined }}
-      >{toggleLabel}</button>
+      {/* 3-way segmented view switch. Diagram = live orbital,
+          Graph = editable top-down hierarchy, Chat = per-agent grid
+          replacing the canvas entirely. */}
+      <div data-ui="FlowViewSeg" style={{ display:"flex", border:"1px solid var(--border)", borderRadius:6, overflow:"hidden" }}>
+        {seg("diagram", "◑ Diagram", "Live orbital diagram (animated)")}
+        {seg("graph",   "◐ Graph",   "Editable top-down hierarchical graph")}
+        {seg("chat",    "▦ Chat",    "Per-agent chat grid (replaces the canvas with one live transcript per agent)")}
+      </div>
     </div>
   );
 }
@@ -1290,7 +1316,7 @@ function AgentChatTile({
 // (Server, Studio, etc.), so the in-progress message in the input box
 // would otherwise be wiped. Keying by projectId so each project keeps
 // its own draft.
-function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, onToggleAutoApprove, projectId, directives, onDirectivesChanged, directorMode, onToggleDirectorMode, chatSplit, onToggleChatSplit }: {
+function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, onToggleAutoApprove, projectId, directives, onDirectivesChanged, directorMode, onToggleDirectorMode, mode }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
   chat: GoalMsg[];
@@ -1305,11 +1331,13 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
   onDirectivesChanged: () => Promise<void> | void;
   directorMode: boolean;
   onToggleDirectorMode: () => void;
-  /// When true, the right half of the page becomes a grid of per-agent
-  /// chat windows. The button lives to the LEFT of the Super User
-  /// avatar in this header.
-  chatSplit: boolean;
-  onToggleChatSplit: () => void;
+  /// Which face of the card to render. The card now lives inside the
+  /// right-column `RightColumnTabs`; the "Super User" tab passes
+  /// `super` (chat + settings) and the "Rules" tab passes `rules`
+  /// (directives list + explanation). The card no longer ships its
+  /// own internal Chat/Rules tab strip — that's promoted up to the
+  /// right-column-level tabs.
+  mode: "super" | "rules";
 }) {
   const peekAgents = (team?.agents ?? []).slice(0, 6);
   const draftKey = projectId ? `owllm:supdraft:${projectId}` : "";
@@ -1361,11 +1389,12 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
     onSend(t);
     setDraft("");
   };
-  // Two embedded "pages" inside the card (user spec 2026-05-20):
-  //   Chat  — the multi-line input + sent log
-  //   Rules — full inline add / edit / delete UI for project rules
-  // Default to Chat so the SEND-first ergonomics stay intact.
-  const [activeTab, setActiveTab] = useState<"chat" | "rules">("chat");
+  // The card used to host its own internal Chat/Rules tab strip; the
+  // 2026-05-28 restructure promoted those to right-column-level tabs
+  // (RightColumnTabs in AgentsPage). The face to render is now driven
+  // by the parent via the `mode` prop. `activeTab` retained as a local
+  // alias to minimise downstream churn.
+  const activeTab = mode === "rules" ? "rules" : "chat";
   // Inline-rules state — ports the DirectivesPanel modal's add / edit
   // logic into the card so the user never leaves the canvas to manage
   // the project's rules (user spec 2026-05-20).
@@ -1415,35 +1444,25 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
     // card occupies roughly the right ~half of the canvas now that the
     // AgentInfo/TeamInfo cards have been removed below it.
     <div data-ui="SuperUserCard" style={{ flex:1, padding:"10px 12px", borderRadius:12, background:"linear-gradient(135deg, rgba(38,30,10,0.92) 0%, rgba(18,14,4,0.92) 100%)", border:"1px solid rgba(255,200,80,0.35)", width:"100%", minHeight:0, display:"flex", flexDirection:"column", gap:8 }}>
+      {/* Header — title strip for the card's current face. The ▦ chat-
+          split toggle that used to live here moved to the canvas top-
+          right (the "big button" per user spec 2026-05-28). The card
+          itself sits inside RightColumnTabs now, so we don't need any
+          inner mode switcher; just a clear title. */}
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-        {/* Chat-split toggle. Lives to the LEFT of the avatar so the
-            user can flip into the per-agent chat grid without leaving
-            the canvas. Glows yellow when on. */}
-        <button
-          data-ui="suChatSplitToggle"
-          onClick={onToggleChatSplit}
-          title={chatSplit
-            ? "Hide per-agent chat grid (restore full canvas)"
-            : "Show per-agent chat grid on the right half of the page"}
-          style={{
-            width:28, height:28, padding:0,
-            background: chatSplit ? "rgba(255,200,80,0.85)" : "#2a2410",
-            color: chatSplit ? "#1a1408" : "var(--fg)",
-            border: chatSplit ? "1px solid #ffd97a" : "1px solid #3a3018",
-            borderRadius:6, fontSize:14, fontWeight:700, cursor:"pointer",
-          }}
-        >▦</button>
-        <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:16, background:"#2a2410", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"var(--fg)" }}>👤</div>
+        <div data-ui="suAvatar" style={{ width:28, height:28, borderRadius:16, background:"#2a2410", display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, color:"var(--fg)" }}>{mode === "rules" ? "📋" : "👤"}</div>
         <div style={{ flex:1, minWidth:0 }}>
-          <div data-ui="suName" style={{ fontSize:16, fontWeight:700, color:"var(--fg)", lineHeight:"22px" }}>Super User</div>
+          <div data-ui="suName" style={{ fontSize:16, fontWeight:700, color: mode === "rules" ? "#ff6b6b" : "var(--fg)", lineHeight:"22px" }}>
+            {mode === "rules" ? "Rules" : "Super User"}
+          </div>
           <div data-ui="suHint" style={{ fontSize:12, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase", lineHeight:1.4 }}>
-            {chat.length > 0 ? `${chat.length} message${chat.length === 1 ? "" : "s"} in this run` : "idle — team pings you here"}
+            {mode === "rules"
+              ? `${directives.length} project rule${directives.length === 1 ? "" : "s"}`
+              : chat.length > 0 ? `${chat.length} message${chat.length === 1 ? "" : "s"} in this run` : "idle — team pings you here"}
           </div>
         </div>
-        <button data-ui="suIconBtn" title="Open chat in a side panel (4:5, full window height, docked right)" style={{ width:30, height:26, padding:0, background:"#2a2410", color:"var(--fg)", border:"1px solid #3a3018", borderRadius:6, fontSize:14, fontWeight:700 }}>⇱⇲</button>
-        <button data-ui="suIconBtn" title="Notification settings (Telegram, etc.)" style={{ width:26, height:26, padding:0, background:"#2a2410", color:"var(--fg)", border:"1px solid #3a3018", borderRadius:6, fontSize:16, fontWeight:700 }}>⚙</button>
       </div>
-      {peekAgents.length > 0 && (
+      {mode === "super" && peekAgents.length > 0 && (
         <div data-ui="suTeamPeek" style={{ display:"flex", alignItems:"center", gap:4, padding:"0 2px" }}>
           {peekAgents.map((a, i) => (
             <img key={i} src={owlSrc(agentIconRef(a, roleByName))} title={displayLabel(a.name)} style={{ width:20, height:20, opacity:0.85, filter:"drop-shadow(0 1px 1px rgba(0,0,0,0.5))" }} />
@@ -1451,49 +1470,24 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
           <div style={{ fontSize:10, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase", marginLeft:4 }}>{team?.agents.length ?? 0} agents on team</div>
         </div>
       )}
-      {/* Settings strip — auto-approve + director-mode were inside the
-          Chat tab body; user moved them up here so they sit "under the
-          header" like the Orchestrator / Team settings panels.
-          Always visible regardless of which tab is open so the user can
-          flip these flags while editing rules too. */}
-      <div data-ui="suSettings" style={{ display:"flex", flexDirection:"column", gap:4, padding:"4px 2px", borderTop:"1px solid rgba(255,200,80,0.15)", borderBottom:"1px solid rgba(255,200,80,0.15)" }}>
-        <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: autoApprove ? "#ff8c8c" : "#7888a8", cursor:"pointer" }}>
-          <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
-          <span>auto-approve tool requests</span>
-        </label>
-        <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: directorMode ? "#9af0a8" : "#7888a8", cursor:"pointer" }}>
-          <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#60ff80" }} />
-          <span>director mode (critic stands in for me)</span>
-        </label>
-      </div>
-      {/* Tab strip — Chat / Rules. Always rendered so the user sees
-          the count of rules even without opening the tab. The Rules
-          tab is recoloured red per user request — it's a destructive /
-          enforcement-flavour surface, distinct from the friendly
-          yellow of the chat. */}
-      <div data-ui="suTabs" style={{ display:"flex", gap:4, borderBottom:"1px solid rgba(255,200,80,0.22)" }}>
-        {([
-          { id: "chat"  as const, label: "💬 Chat",                       on: "#ffd97a", bgOn: "rgba(255,217,122,0.18)" },
-          { id: "rules" as const, label: `📋 Rules (${directives.length})`, on: "#ff6b6b", bgOn: "rgba(255,107,107,0.18)" },
-        ]).map(t => {
-          const on = activeTab === t.id;
-          return (
-            <button
-              key={t.id}
-              data-ui={`suTab-${t.id}`}
-              onClick={() => setActiveTab(t.id)}
-              style={{
-                flex:1, height:26, padding:"0 10px",
-                background: on ? t.bgOn : "transparent",
-                color: on ? t.on : "var(--fg-muted)",
-                border: "none",
-                borderBottom: on ? `2px solid ${t.on}` : "2px solid transparent",
-                fontSize:12, fontWeight:700, cursor:"pointer",
-              }}
-            >{t.label}</button>
-          );
-        })}
-      </div>
+      {/* Settings strip — auto-approve + director-mode. Only relevant
+          on the "super" face (the user's own controls); hidden on the
+          "rules" face because those flags are user-state, not rule-
+          state. Sits under the header so it visually parallels the
+          Orchestrator / Team tab settings strips per user spec
+          2026-05-28. */}
+      {mode === "super" && (
+        <div data-ui="suSettings" style={{ display:"flex", flexDirection:"column", gap:4, padding:"4px 2px", borderTop:"1px solid rgba(255,200,80,0.15)", borderBottom:"1px solid rgba(255,200,80,0.15)" }}>
+          <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: autoApprove ? "#ff8c8c" : "#7888a8", cursor:"pointer" }}>
+            <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
+            <span>auto-approve tool requests</span>
+          </label>
+          <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: directorMode ? "#9af0a8" : "#7888a8", cursor:"pointer" }}>
+            <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#60ff80" }} />
+            <span>director mode (critic stands in for me)</span>
+          </label>
+        </div>
+      )}
       {activeTab === "chat" ? (
         <>
           {/* Sent-by-you log — replies from the orchestrator/agents are NOT
@@ -3711,6 +3705,277 @@ function OrchestratorPane({
   );
 }
 
+// ---------- RightColumnTabs ----------
+// 4-tab wrapper that replaces the standalone OrchestratorPane in the
+// right column (user spec 2026-05-28). Each tab is colour-coded:
+//   Super User   — yellow #ffd97a  → SuperUserCard mode="super"
+//   Orchestrator — blue   #74a4ff  → existing OrchestratorPane
+//   Team         — green  #6cd28e  → TeamPanel (inline; description +
+//                                    agent grid + team-level model picker)
+//   Rules        — red    #ff6b6b  → SuperUserCard mode="rules"
+//
+// The card's old internal Chat/Rules tab strip is gone; its mode is
+// now driven by which top-level tab is open. The SuperUserCard canvas
+// overlay is gone too — the card lives entirely inside this column.
+
+type RightTabId = "super" | "orch" | "team" | "rules";
+const RIGHT_TAB_COLOR: Record<RightTabId, string> = {
+  super: "#ffd97a",
+  orch:  "#74a4ff",
+  team:  "#6cd28e",
+  rules: "#ff6b6b",
+};
+const RIGHT_TAB_BG_ON: Record<RightTabId, string> = {
+  super: "rgba(255,217,122,0.18)",
+  orch:  "rgba(116,164,255,0.18)",
+  team:  "rgba(108,210,142,0.18)",
+  rules: "rgba(255,107,107,0.18)",
+};
+const RIGHT_TAB_LABEL: Record<RightTabId, string> = {
+  super: "👤 Super User",
+  orch:  "📜 Orchestrator",
+  team:  "🏷 Team",
+  rules: "📋 Rules",
+};
+
+function RightColumnTabs(props: {
+  // SuperUserCard / Rules props
+  team: Team | null;
+  roleByName: Map<string, RoleData>;
+  supChat: GoalMsg[];
+  onSupSend: (text: string) => void;
+  supSendBusy: boolean;
+  autoApprove: boolean;
+  onToggleAutoApprove: () => void;
+  projectId: string;
+  directives: Directive[];
+  onDirectivesChanged: () => Promise<void> | void;
+  directorMode: boolean;
+  onToggleDirectorMode: () => void;
+  // OrchestratorPane props (forwarded verbatim)
+  agentLogs: Map<string, GoalMsg[]>;
+  agentThoughts: Map<string, GoalMsg[]>;
+  runError: string | null;
+  serverState: ServerStatus;
+  selectedAgent: string | null;
+  activeAgent: string | null;
+  phase: DispatchPhase;
+  models: ModelInfo[];
+  modelFor: (agentName: string) => string;
+  onPickAgentModel: (agentName: string, modelId: string) => void;
+  accountsStatus: AccountsStatusLite | null;
+  effectiveTeamModel: string;
+  onPickTeamModel: (id: string) => void;
+}) {
+  const [tab, setTab] = useState<RightTabId>("orch");
+  // When the user clicks an agent on the canvas / chat grid, snap to
+  // the Orchestrator (generic agent) tab so the selection is visible.
+  // No effect when the selection is null (initial mount).
+  const prevSel = useRef<string | null>(null);
+  useEffect(() => {
+    if (props.selectedAgent && props.selectedAgent !== prevSel.current) {
+      setTab("orch");
+    }
+    prevSel.current = props.selectedAgent;
+  }, [props.selectedAgent]);
+
+  const tabAccent = RIGHT_TAB_COLOR[tab];
+
+  return (
+    <div data-ui="RightColumnTabs" style={{
+      display:"flex", flexDirection:"column", height:"100%",
+      background:"var(--bg-elevated)",
+    }}>
+      {/* Tab strip — 4 coloured tabs. Each tab's active state paints
+          the tab-strip background in its colour family so the user
+          sees at a glance which "page" they're on. */}
+      <div data-ui="RightTabs" style={{
+        display:"flex", gap:0,
+        borderBottom: `1px solid ${tabAccent}55`,
+        background: `linear-gradient(180deg, ${tabAccent}10 0%, transparent 100%)`,
+        flexShrink:0,
+      }}>
+        {(["super","orch","team","rules"] as const).map(id => {
+          const on = tab === id;
+          const c  = RIGHT_TAB_COLOR[id];
+          const bg = RIGHT_TAB_BG_ON[id];
+          return (
+            <button
+              key={id}
+              data-ui={`RightTab-${id}`}
+              onClick={() => setTab(id)}
+              style={{
+                flex:1, height:34, padding:"0 10px",
+                background: on ? bg : "transparent",
+                color: on ? c : "var(--fg-muted)",
+                border:"none",
+                borderBottom: on ? `2.5px solid ${c}` : "2.5px solid transparent",
+                fontSize:12, fontWeight:700, cursor:"pointer",
+                letterSpacing:0.3,
+              }}
+            >{RIGHT_TAB_LABEL[id]}{id === "rules" ? ` (${props.directives.length})` : ""}</button>
+          );
+        })}
+      </div>
+      {/* Tab body — single mounted component per tab. We don't keep the
+          others mounted because OrchestratorPane is expensive (multi-
+          ref scroll panes) and the user wants a clean swap. */}
+      <div data-ui="RightTabBody" style={{ flex:1, minHeight:0, display:"flex", overflow:"hidden" }}>
+        {tab === "super" && (
+          <SuperUserCard
+            team={props.team}
+            roleByName={props.roleByName}
+            chat={props.supChat}
+            onSend={props.onSupSend}
+            sendBusy={props.supSendBusy}
+            autoApprove={props.autoApprove}
+            onToggleAutoApprove={props.onToggleAutoApprove}
+            projectId={props.projectId}
+            directives={props.directives}
+            onDirectivesChanged={props.onDirectivesChanged}
+            directorMode={props.directorMode}
+            onToggleDirectorMode={props.onToggleDirectorMode}
+            mode="super"
+          />
+        )}
+        {tab === "rules" && (
+          <SuperUserCard
+            team={props.team}
+            roleByName={props.roleByName}
+            chat={props.supChat}
+            onSend={props.onSupSend}
+            sendBusy={props.supSendBusy}
+            autoApprove={props.autoApprove}
+            onToggleAutoApprove={props.onToggleAutoApprove}
+            projectId={props.projectId}
+            directives={props.directives}
+            onDirectivesChanged={props.onDirectivesChanged}
+            directorMode={props.directorMode}
+            onToggleDirectorMode={props.onToggleDirectorMode}
+            mode="rules"
+          />
+        )}
+        {tab === "orch" && (
+          <OrchestratorPane
+            agentLogs={props.agentLogs}
+            agentThoughts={props.agentThoughts}
+            runError={props.runError}
+            serverState={props.serverState}
+            selectedAgent={props.selectedAgent}
+            activeAgent={props.activeAgent}
+            team={props.team}
+            phase={props.phase}
+            models={props.models}
+            modelFor={props.modelFor}
+            onPickAgentModel={props.onPickAgentModel}
+            accountsStatus={props.accountsStatus}
+            roleByName={props.roleByName}
+            effectiveTeamModel={props.effectiveTeamModel}
+            onPickTeamModel={props.onPickTeamModel}
+          />
+        )}
+        {tab === "team" && (
+          <TeamPanel
+            team={props.team}
+            roleByName={props.roleByName}
+            models={props.models}
+            effectiveTeamModel={props.effectiveTeamModel}
+            onPickTeamModel={props.onPickTeamModel}
+            serverModelId={props.serverState.model_id}
+            accountsStatus={props.accountsStatus}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+// TeamPanel — replaces the canvas-overlay TeamInfoCard for the new
+// right-column "Team" tab. Flex-friendly (the card layout used absolute
+// positioning at fixed 410x412 px, which fights the flex column).
+function TeamPanel({
+  team, roleByName, models, effectiveTeamModel, onPickTeamModel,
+  serverModelId, accountsStatus,
+}: {
+  team: Team | null;
+  roleByName: Map<string, RoleData>;
+  models: ModelInfo[];
+  effectiveTeamModel: string;
+  onPickTeamModel: (id: string) => void;
+  serverModelId: string | null;
+  accountsStatus: AccountsStatusLite | null;
+}) {
+  if (!team) {
+    return (
+      <div style={{ flex:1, padding:24, color:"var(--fg-subtle)", fontSize:12, display:"flex", alignItems:"center", justifyContent:"center", textAlign:"center" }}>
+        Pick a project on the strip up top, or click <b style={{ margin:"0 4px" }}>Team…</b> to load a template.
+      </div>
+    );
+  }
+  return (
+    <div style={{ flex:1, display:"flex", flexDirection:"column", padding:"10px 12px", gap:10, overflow:"auto" }}>
+      {/* Settings header (≈15% of available height per user spec) —
+          team identity + team-wide model picker. */}
+      <div data-ui="teamSettings" style={{
+        display:"flex", flexDirection:"column", gap:8,
+        padding:"8px 10px",
+        background:"rgba(108,210,142,0.06)",
+        border:"1px solid rgba(108,210,142,0.30)",
+        borderRadius:10,
+      }}>
+        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+          <img src={owlSrc(team.icon)} style={{ width:36, height:36, objectFit:"contain", flexShrink:0 }} />
+          <div style={{ flex:1, minWidth:0 }}>
+            <div style={{ fontSize:14, fontWeight:700, color:"#6cd28e", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={team.display}>{team.display}</div>
+            <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.4, textTransform:"uppercase" }}>
+              {team.category} · {team.agents.length} agents · {team.edges.length} connections
+            </div>
+          </div>
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Team model</span>
+          <ModelPicker
+            value={effectiveTeamModel}
+            onChange={onPickTeamModel}
+            models={models}
+            status={accountsStatus}
+            fallbackLabel={serverModelId ? `(use server model · ${serverModelId})` : "(no server model running)"}
+          />
+        </div>
+      </div>
+      {/* Body — description + per-agent mini list. */}
+      {team.description && (
+        <div style={{ fontSize:12, color:"var(--fg)", lineHeight:1.5, padding:"0 4px" }}>
+          {team.description}
+        </div>
+      )}
+      <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"var(--fg-muted)", textTransform:"uppercase", padding:"0 4px" }}>Agents</div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(2, 1fr)", gap:8 }}>
+        {team.agents.map(a => {
+          const tint = tintForGroup(groupForAgent(a));
+          return (
+            <div key={a.name} style={{
+              display:"flex", alignItems:"center", gap:8,
+              padding:"8px 10px",
+              background:`linear-gradient(135deg, ${tint.bg} 0%, rgba(18,22,34,0.85) 100%)`,
+              border:`1px solid ${tint.border}`,
+              borderRadius:8,
+            }}>
+              <img src={owlSrc(agentIconRef(a, roleByName))} style={{ width:24, height:24, objectFit:"contain" }} />
+              <div style={{ flex:1, minWidth:0 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={displayLabel(a.name)}>
+                  {displayLabel(a.name)}
+                </div>
+                <div style={{ fontSize:9, color:"var(--fg-muted)", textTransform:"uppercase", letterSpacing:0.4 }}>{a.base}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ---------- Main ----------
 // ---------- Dispatch loop helpers ----------
 //
@@ -5067,29 +5332,10 @@ export default function AgentsPage() {
   const [busy, setBusy] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  // Chat-split layout — when true, the page splits 40 / 60 (workspace
-  // left, per-agent chat grid right) and the window auto-maximizes so
-  // there's enough room for both. Toggled from the ▦ button on the
-  // left of the SuperUserCard header.
-  const [chatSplit, setChatSplit] = useState<boolean>(false);
-  const toggleChatSplit = () => {
-    setChatSplit(prev => {
-      const next = !prev;
-      // Maximize the window on toggle-on so the grid has room. We
-      // intentionally don't un-maximize on toggle-off — the user can
-      // resize manually if they want the previous size back. wrapped
-      // in try/catch in case we're outside a Tauri context (e.g. dev
-      // browser preview), where getCurrentWindow throws.
-      if (next) {
-        try {
-          getCurrentWindow().isMaximized().then(isMax => {
-            if (!isMax) getCurrentWindow().maximize().catch(() => {});
-          }).catch(() => {});
-        } catch { /* not in Tauri ctx */ }
-      }
-      return next;
-    });
-  };
+  // (The previous `chatSplit` 40/60 layout was removed 2026-05-28 —
+  // the per-agent grid is now a CANVAS view mode rather than a side-
+  // by-side split; see the FlowHeader 3-way segmented switch + the
+  // "▦ Chat grid" canvas button.)
   // Multimodal attachments queued against the next Run. Cleared the
   // moment dispatchGoal kicks off — once the orchestrator has them in
   // its context, the user's chip strip should empty so the next prompt
@@ -5137,10 +5383,13 @@ export default function AgentsPage() {
     : null;
   const [phase, setPhase] = useState<DispatchPhase>("idle");
 
-  // Diagram (orbital) ↔ Graph (top-down hierarchical) toggle. Mirrors
-  // agents_page.py:_on_view_toggle_clicked. Selected node lives here
-  // too so the toggle preserves the selection across views.
-  const [viewMode, setViewMode] = useState<"diagram" | "graph">("diagram");
+  // Canvas view mode — three states (user spec 2026-05-28):
+  //   "diagram" → live orbital animation (TeamCanvas)
+  //   "graph"   → editable top-down hierarchical (GraphCanvas)
+  //   "chat"    → per-agent chat grid REPLACES the canvas (AgentChatGrid)
+  // Selected node lives here so the canvas mode toggle preserves the
+  // selection across views.
+  const [viewMode, setViewMode] = useState<"diagram" | "graph" | "chat">("diagram");
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   // Editable edges + manual node positions, both local-only for now.
   // They reset whenever the active team changes (see effect below).
@@ -6971,20 +7220,17 @@ export default function AgentsPage() {
         flex:1, minHeight:0, margin:"0 23px",
         display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0,
       }}>
-        {/* When chatSplit is on, the existing workspace (canvas +
-            super-user-card overlay + orchestrator pane) compresses to
-            the LEFT half of the page; the RIGHT half becomes a grid
-            of per-agent chat windows. The wrapper below owns the split.
-            When chatSplit is off, the wrapper takes 100 % and renders
-            only the original workspace. */}
-        <div data-ui="WorkspaceCore" style={{
-          flex: chatSplit ? "1 1 40%" : "1 1 100%",
-          minWidth: 0, display:"flex", overflow:"hidden",
-        }}>
+        {/* Canvas column — TeamCanvas / GraphCanvas / AgentChatGrid
+            depending on viewMode. The chat-grid is now a CANVAS MODE
+            (third option in the FlowHeader segmented switch), not a
+            side-by-side split. The "big" chat-toggle button sits on
+            the canvas top-right where the SuperUserCard used to live;
+            it's the shortcut into chat mode without going to the
+            toolbar (user spec 2026-05-28). */}
         <div data-ui="RosterLeft" style={{ flex:"2 1 0", minWidth:0, display:"flex", flexDirection:"column", background:"var(--bg-elevated)" }}>
           <FlowHeader
             viewMode={viewMode}
-            onToggleView={() => setViewMode(v => v === "diagram" ? "graph" : "diagram")}
+            onSetView={setViewMode}
             canEdit={viewMode === "graph" && selectedEdgeIdx != null}
             onDeleteEdge={deleteSelectedEdge}
             onReverseEdge={reverseSelectedEdge}
@@ -7001,7 +7247,7 @@ export default function AgentsPage() {
                 selectedNode={selectedNode}
                 onSelectNode={setSelectedNode}
               />
-            ) : (
+            ) : viewMode === "graph" ? (
               <GraphCanvas
                 width={canvasSize.size.w || 800}
                 height={canvasSize.size.h || 600}
@@ -7017,77 +7263,102 @@ export default function AgentsPage() {
                 positions={nodePositions}
                 onPositionsChange={setNodePositions}
               />
+            ) : (
+              <AgentChatGrid
+                team={renderTeam}
+                roleByName={roleByName}
+                agentLogs={agentLogs}
+                activeAgents={activeAgents}
+                agentIconOverrides={agentIconOverrides}
+                selectedAgent={selectedNode}
+                onSelectAgent={(name) => setSelectedNode(name)}
+              />
             )}
-            {/* Canvas overlay — only the SuperUserCard now (the
-                AgentInfo + TeamInfo cards moved into the right-pane
-                OrchestratorPane "Info" / "Team" tabs, user spec
-                2026-05-26). The card stretches to fill the column so
-                the chat pane gets ~50 % of the canvas height. */}
-            <div style={{
-              position: "absolute",
-              top: 8,
-              right: 8,
-              bottom: 8,
-              width: 450,
-              pointerEvents: "none",
-              display: "flex",
-              flexDirection: "column",
-            }}>
-              <div style={{ pointerEvents: "auto", flex: 1, display: "flex", minHeight: 0 }}>
-                <SuperUserCard
-            team={renderTeam}
-            roleByName={roleByName}
-            chat={supChat}
-            onSend={onSupSend}
-            sendBusy={supSendBusy}
-            autoApprove={autoApprove}
-                  onToggleAutoApprove={() => setAutoApprove(v => !v)}
-                  projectId={selectedProjectId}
-                  directives={directives}
-                  onDirectivesChanged={reloadDirectives}
-                  directorMode={directorMode}
-                  onToggleDirectorMode={() => setDirectorMode(!directorMode)}
-                  chatSplit={chatSplit}
-                  onToggleChatSplit={toggleChatSplit}
-                />
-              </div>
-            </div>
+            {/* Big chat-mode toggle — sits on the canvas top-right
+                where SuperUserCard used to be (user spec 2026-05-28).
+                When the user is already in chat mode, the button
+                flips back to the previous canvas mode (diagram). */}
+            {viewMode !== "chat" ? (
+              <button
+                data-ui="CanvasChatToggleBtn"
+                onClick={() => setViewMode("chat")}
+                title="Open the per-agent chat grid in this canvas (every agent gets its own live transcript window)"
+                style={{
+                  position:"absolute", top:12, right:12,
+                  width:120, height:84,
+                  display:"flex", flexDirection:"column",
+                  alignItems:"center", justifyContent:"center",
+                  gap:4, padding:"6px 8px",
+                  background:"linear-gradient(135deg, rgba(38,30,10,0.92) 0%, rgba(18,14,4,0.92) 100%)",
+                  border:"1px solid rgba(255,200,80,0.55)",
+                  borderRadius:12,
+                  color:"#ffd97a",
+                  fontSize:11, fontWeight:700, letterSpacing:0.4,
+                  cursor:"pointer",
+                  boxShadow:"0 4px 14px rgba(0,0,0,0.45)",
+                  zIndex:5,
+                }}
+              >
+                <span style={{ fontSize:32, lineHeight:1 }}>▦</span>
+                <span style={{ textTransform:"uppercase" }}>Chat grid</span>
+              </button>
+            ) : (
+              <button
+                data-ui="CanvasChatToggleBtn"
+                onClick={() => setViewMode("diagram")}
+                title="Back to the orbital diagram"
+                style={{
+                  position:"absolute", top:12, right:12,
+                  width:120, height:84,
+                  display:"flex", flexDirection:"column",
+                  alignItems:"center", justifyContent:"center",
+                  gap:4, padding:"6px 8px",
+                  background:"linear-gradient(135deg, rgba(10,18,30,0.92) 0%, rgba(4,8,14,0.92) 100%)",
+                  border:"1px solid rgba(var(--accent-rgb),0.55)",
+                  borderRadius:12,
+                  color:"var(--accent)",
+                  fontSize:11, fontWeight:700, letterSpacing:0.4,
+                  cursor:"pointer",
+                  boxShadow:"0 4px 14px rgba(0,0,0,0.45)",
+                  zIndex:5,
+                }}
+              >
+                <span style={{ fontSize:32, lineHeight:1 }}>◑</span>
+                <span style={{ textTransform:"uppercase" }}>Diagram</span>
+              </button>
+            )}
           </div>
         </div>
         <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, flexShrink:0, background:"var(--bg-card)" }} />
         <div style={{ flex:"1 1 0", minWidth:360 }}>
-          <OrchestratorPane
+          <RightColumnTabs
+            team={renderTeam}
+            roleByName={roleByName}
+            supChat={supChat}
+            onSupSend={onSupSend}
+            supSendBusy={supSendBusy}
+            autoApprove={autoApprove}
+            onToggleAutoApprove={() => setAutoApprove(v => !v)}
+            projectId={selectedProjectId}
+            directives={directives}
+            onDirectivesChanged={reloadDirectives}
+            directorMode={directorMode}
+            onToggleDirectorMode={() => setDirectorMode(!directorMode)}
             agentLogs={agentLogs}
             agentThoughts={agentThoughts}
             runError={runError}
             serverState={serverState}
             selectedAgent={selectedNode}
             activeAgent={activeAgent}
-            team={renderTeam}
             phase={phase}
             models={models}
             modelFor={modelFor}
             onPickAgentModel={onPickAgentModel}
             accountsStatus={accountsStatus}
-            roleByName={roleByName}
             effectiveTeamModel={effectiveTeamModel}
             onPickTeamModel={onPickTeamModel}
           />
         </div>
-        </div>
-        {chatSplit && (
-          <div data-ui="ChatGridRight" style={{ flex: "1 1 60%", minWidth: 0, display: "flex" }}>
-            <AgentChatGrid
-              team={renderTeam}
-              roleByName={roleByName}
-              agentLogs={agentLogs}
-              activeAgents={activeAgents}
-              agentIconOverrides={agentIconOverrides}
-              selectedAgent={selectedNode}
-              onSelectAgent={(name) => setSelectedNode(name)}
-            />
-          </div>
-        )}
       </div>
     </div>
   );

@@ -199,6 +199,98 @@ jobs:
         run: npm run tauri -- build ${{ matrix.tauri_args }}
 
       # ---------------------------------------------------------------
+      # Smoke test — launch the built binary and verify it stays alive
+      # for 8 seconds. Catches: missing dylibs / shared libraries, panics
+      # in setup hooks, codesign refusals, Gatekeeper rejection, malformed
+      # binaries (compiled but immediately crashes). Cheap (~10s) and
+      # runs on every build. Doesn't validate anything past the first
+      # frame; that needs human eyes on a real machine.
+      # ---------------------------------------------------------------
+      - name: Smoke test — launch binary
+        working-directory: owllm-desktop
+        shell: bash
+        # continue-on-error so a smoke failure shows as a warning but
+        # doesn't stop the release publish — you can still inspect the
+        # installer manually. Flip to false once smoke tests are
+        # stable to fail the release on regressions.
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          if [ -n "${{ matrix.rust_target }}" ]; then
+            rel_dir="src-tauri/target/${{ matrix.rust_target }}/release"
+          else
+            rel_dir="src-tauri/target/release"
+          fi
+          case "${{ runner.os }}" in
+            Windows)
+              # Windows runners have no console GUI session by default, so
+              # spawning the windowed exe is tricky — we instead do static
+              # validation: PE header parses, expected sections are present.
+              exe="$rel_dir/owllm-desktop.exe"
+              if [ ! -f "$exe" ]; then
+                echo "::error::Windows exe not found at $exe"; exit 1
+              fi
+              # `file` is part of Git for Windows / windows-latest runners.
+              if file "$exe" | grep -qE 'PE32(\+)?'; then
+                echo "[smoke] ✓ $exe is a valid PE binary ($(stat -c%s "$exe" 2>/dev/null || wc -c < "$exe") bytes)"
+              else
+                echo "::error::$exe is not a valid PE binary"; exit 1
+              fi
+              ;;
+            macOS)
+              app=$(find "$rel_dir/bundle/macos" -maxdepth 2 -type d -name '*.app' | head -1)
+              if [ -z "$app" ]; then
+                echo "::error::no .app bundle found under $rel_dir/bundle/macos"; exit 1
+              fi
+              echo "[smoke] launching $app"
+              open "$app"
+              sleep 8
+              if pgrep -f "owllm-desktop|OwLLM Desktop" > /dev/null; then
+                echo "[smoke] ✓ macOS app alive after 8s"
+                pkill -f "owllm-desktop|OwLLM Desktop" 2>/dev/null || true
+              else
+                echo "::error::macOS app died within 8s of launch"
+                # Surface recent crash logs if present (best effort).
+                log show --last 1m --predicate 'process contains "owllm-desktop"' 2>/dev/null | tail -50 || true
+                ls -la "$HOME/Library/Logs/DiagnosticReports" 2>/dev/null | head -10 || true
+                exit 1
+              fi
+              ;;
+            Linux)
+              # Linux runners are headless. Start xvfb so the Tauri webview
+              # has a display to draw on; dbus is needed for webkit2gtk to
+              # come up cleanly. Both are pre-installed on ubuntu-22.04.
+              sudo apt-get install -y -qq xvfb dbus-x11 || true
+              export DISPLAY=:99
+              Xvfb :99 -screen 0 1024x768x24 &
+              xvfb_pid=$!
+              # dbus-launch sets DBUS_SESSION_BUS_ADDRESS so GTK/webkit can
+              # connect to a session bus; without it the webview hangs.
+              eval "$(dbus-launch --sh-syntax)"
+              sleep 2
+              bin="$rel_dir/owllm-desktop"
+              if [ ! -x "$bin" ]; then
+                echo "::error::Linux binary not found or not executable at $bin"; kill $xvfb_pid 2>/dev/null || true; exit 1
+              fi
+              echo "[smoke] launching $bin under Xvfb"
+              "$bin" > /tmp/owllm-stdout.log 2> /tmp/owllm-stderr.log &
+              app_pid=$!
+              sleep 8
+              if kill -0 $app_pid 2>/dev/null; then
+                echo "[smoke] ✓ Linux binary alive after 8s"
+                kill $app_pid 2>/dev/null || true
+              else
+                echo "::error::Linux binary died within 8s of launch"
+                echo "--- stdout ---"; cat /tmp/owllm-stdout.log || true
+                echo "--- stderr ---"; cat /tmp/owllm-stderr.log || true
+                kill $xvfb_pid 2>/dev/null || true
+                exit 1
+              fi
+              kill $xvfb_pid 2>/dev/null || true
+              ;;
+          esac
+
+      # ---------------------------------------------------------------
       # Stage installers from the per-target bundle dir into a single
       # `stage/` folder. We grab every recognised installer extension so
       # this stays robust as bundle.targets="all" evolves (or as Tauri

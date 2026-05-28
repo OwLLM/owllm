@@ -70,6 +70,15 @@ pub struct McpConfig {
     pub servers: Vec<McpServerConfig>,
 }
 
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct McpPackInstallResult {
+    pub added: Vec<String>,
+    pub updated: Vec<String>,
+    pub uv_installed: bool,
+    pub config_path: String,
+}
+
 fn config_path() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
     Some(PathBuf::from(home).join(".owllm").join("mcp_config.json"))
@@ -95,6 +104,55 @@ pub fn mcp_save_config(config: McpConfig) -> Result<(), String> {
         .map_err(|e| format!("serialize: {e}"))?;
     std::fs::write(&path, json)
         .map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+#[tauri::command]
+pub async fn mcp_install_pack(servers: Vec<McpServerConfig>) -> Result<McpPackInstallResult, String> {
+    if servers.is_empty() {
+        return Err("MCP pack has no servers".to_string());
+    }
+
+    let needs_uv = servers.iter().any(|s| matches!(s.command.as_str(), "uv" | "uvx"));
+    let mut uv_installed = false;
+    if needs_uv {
+        install_uv().await?;
+        uv_installed = true;
+    }
+
+    let mut config = mcp_load_config()?;
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+
+    for mut server in servers {
+        server.name = server.name.trim().to_string();
+        server.command = server.command.trim().to_string();
+        if server.name.is_empty() || server.command.is_empty() {
+            return Err("MCP pack contains a server with an empty name or command".to_string());
+        }
+
+        if let Some(existing) = config.servers.iter_mut().find(|s| s.name == server.name) {
+            for (k, v) in existing.env.iter() {
+                if !v.trim().is_empty() {
+                    server.env.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+            *existing = server.clone();
+            updated.push(server.name);
+        } else {
+            added.push(server.name.clone());
+            config.servers.push(server);
+        }
+    }
+
+    mcp_save_config(config)?;
+    Ok(McpPackInstallResult {
+        added,
+        updated,
+        uv_installed,
+        config_path: config_path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    })
 }
 
 // ===== Tool schema (returned to React + injected into agent prompts) =====
@@ -658,8 +716,8 @@ pub fn runtime_status(name: String) -> RuntimeStatus {
 /// uvx.exe is already present we short-circuit. Returns the install
 /// dir path on success.
 ///
-/// Source: github.com/astral-sh/uv/releases/latest/download/uv-<arch>.zip
-/// The zip contains uv.exe and uvx.exe at the root; we extract both.
+/// Source: github.com/astral-sh/uv/releases/latest/download/uv-<arch>.
+/// We extract only the uv/uvx launchers from the host archive.
 #[tauri::command]
 pub async fn install_uv() -> Result<String, String> {
     let dir = runtime_dir("uv").ok_or_else(|| "no LLM root — repo layout unexpected".to_string())?;
@@ -698,8 +756,8 @@ pub async fn install_uv() -> Result<String, String> {
     let bytes = resp.bytes().await
         .map_err(|e| format!("read bytes: {e}"))?;
 
-    // Windows asset is .zip with uv.exe + uvx.exe at root. macOS/Linux
-    // ship .tar.gz — handle in a separate branch when the time comes.
+    // Windows ships a zip; macOS/Linux ship tar.gz archives. Both have
+    // a top-level folder, so match on the file name suffix.
     if asset.ends_with(".zip") {
         let cursor = std::io::Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor)
@@ -723,8 +781,37 @@ pub async fn install_uv() -> Result<String, String> {
             std::io::copy(&mut entry, &mut out_file)
                 .map_err(|e| format!("extract {basename}: {e}"))?;
         }
+    } else if asset.ends_with(".tar.gz") {
+        let cursor = std::io::Cursor::new(bytes);
+        let decoder = flate2::read::GzDecoder::new(cursor);
+        let mut archive = tar::Archive::new(decoder);
+        let entries = archive.entries()
+            .map_err(|e| format!("tar entries: {e}"))?;
+        for entry in entries {
+            let mut entry = entry.map_err(|e| format!("tar entry: {e}"))?;
+            let path = entry.path()
+                .map_err(|e| format!("tar path: {e}"))?
+                .into_owned();
+            let Some(basename) = path.file_name().and_then(|s| s.to_str()) else { continue };
+            if !matches!(basename, "uv" | "uvx") { continue }
+            let out_path = dir.join(basename);
+            let mut out_file = std::fs::File::create(&out_path)
+                .map_err(|e| format!("create {}: {e}", out_path.display()))?;
+            std::io::copy(&mut entry, &mut out_file)
+                .map_err(|e| format!("extract {basename}: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = std::fs::metadata(&out_path)
+                    .map_err(|e| format!("metadata {}: {e}", out_path.display()))?
+                    .permissions();
+                perms.set_mode(0o755);
+                std::fs::set_permissions(&out_path, perms)
+                    .map_err(|e| format!("chmod {}: {e}", out_path.display()))?;
+            }
+        }
     } else {
-        return Err(format!("non-zip uv asset extraction not implemented yet ({asset})"));
+        return Err(format!("unknown uv asset archive type ({asset})"));
     }
 
     if !uvx_exe.is_file() {

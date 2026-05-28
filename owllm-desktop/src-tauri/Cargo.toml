@@ -17,7 +17,14 @@ tauri-build = { version = "2", features = [] }
 # tokio "process" feature stays — future native llama.cpp spawn will
 # use it with CREATE_NO_WINDOW.
 [dependencies]
-tauri = { version = "2", features = [] }
+# macos-private-api unlocks WebviewWindowBuilder::transparent() on
+# macOS — without it Tauri 2 rejects the call at compile time and only
+# Windows/Linux can use transparent windows. The HybridFrame cutaway
+# (decorations:false + transparent:true + cyan corners) is non-negotiable
+# on every OS, so we opt in to the private-API feature. Caveat: apps
+# distributed via the Mac App Store cannot use private APIs; this is a
+# non-issue for OwLLM since we ship via .dmg, not the App Store.
+tauri = { version = "2", features = ["macos-private-api"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "time", "sync"] }
@@ -85,6 +92,8 @@ regex = { version = "1", default-features = false, features = ["std", "perf"] }
 # we extract uvx.exe + uv.exe into LLM/runtime/uv/ so users don't
 # have to touch PowerShell to enable Python-based MCP servers.
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = "0.4"
 
 # Windows-only: needed by overlay_frame to make the cyan chrome window
 # an "owned" window of main via SetWindowLongPtrW(GWLP_HWNDPARENT).

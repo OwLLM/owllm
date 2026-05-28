@@ -3957,13 +3957,45 @@ function RightColumnTabs(props: {
           );
         })}
       </div>
-      {/* The "second line" settings panel that used to live here is
-          GONE per user spec 2026-05-28 — agent settings (Model, Voice,
-          Info) belong on the agent's graph card, not in a duplicate
-          info strip. Global controls (auto-approve, director-mode,
-          team model) moved to a small overlay on the canvas (see
-          CanvasControlsOverlay in AgentsPage). The 3 top tabs stay
-          purely as colour-coded page selectors. */}
+      {/* Top settings panel — only the Orchestrator face is gone now
+          (its per-agent info — Model / Voice / Info — lives on each
+          graph card). Super User and Team are project / team scope
+          and still belong here. The panel is sized to ~22 % of the
+          right column when active; collapses to 0 px when the
+          Orchestrator tab is open. */}
+      <div data-ui="RightSettingsPanel" style={{
+        flex:"0 0 auto",
+        maxHeight:"22%",
+        minHeight: tab === "orch" ? 0 : 120,
+        overflow:"auto",
+        padding: tab === "orch" ? 0 : "8px 12px",
+        borderBottom: tab === "orch" ? "none" : "1px solid var(--border)",
+        background:"var(--bg-elevated)",
+      }}>
+        {tab === "super" && (
+          <SuperUserSettings
+            autoApprove={props.autoApprove}
+            onToggleAutoApprove={props.onToggleAutoApprove}
+            directorMode={props.directorMode}
+            onToggleDirectorMode={props.onToggleDirectorMode}
+            team={props.team}
+            roleByName={props.roleByName}
+          />
+        )}
+        {tab === "team" && (
+          <TeamSettings
+            team={props.team}
+            models={props.models}
+            effectiveTeamModel={props.effectiveTeamModel}
+            onPickTeamModel={props.onPickTeamModel}
+            serverModelId={props.serverState.model_id}
+            accountsStatus={props.accountsStatus}
+          />
+        )}
+        {/* Orchestrator tab intentionally renders nothing here —
+            its per-agent info (Model / Voice / Info) lives on each
+            graph card. */}
+      </div>
       {/* Chat container — ALWAYS visible. Sub-tabs Rules | User Input |
           Clear Chat | Thought | Tool Calls | Full Chat. Does NOT swap
           when the top tab changes. */}
@@ -7702,68 +7734,41 @@ export default function AgentsPage() {
                 onSelectAgent={(name) => setSelectedNode(name)}
               />
             )}
-            {/* Canvas controls overlay — bottom-left of the graph
-                canvas. Holds the global flags that used to live in
-                the right column's "second-line" settings panel
-                (auto-approve, director-mode) plus the team model
-                picker. Visible only in graph mode where the per-agent
-                model info is on the cards. */}
-            {viewMode === "graph" && (
-              <div data-ui="CanvasControlsOverlay" style={{
-                position:"absolute", bottom:12, left:12,
-                background:"linear-gradient(135deg, rgba(18,22,34,0.94) 0%, rgba(8,11,18,0.94) 100%)",
-                border:"1px solid var(--border-strong)",
-                borderRadius:12, padding:"8px 10px",
-                display:"flex", flexDirection:"column", gap:6,
-                minWidth:280, maxWidth:360,
-                boxShadow:"0 4px 14px rgba(0,0,0,0.5)",
-                zIndex:5,
-              }}>
-                <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.6, color:"var(--fg-muted)", textTransform:"uppercase" }}>Project controls</div>
-                <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: autoApprove ? "#ff8c8c" : "var(--fg)", cursor:"pointer" }}>
-                  <input type="checkbox" checked={autoApprove} onChange={() => setAutoApprove(v => !v)} style={{ width:12, height:12, accentColor:"#ff6060" }} />
-                  <span>auto-approve tool requests</span>
-                </label>
-                <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: directorMode ? "#9af0a8" : "var(--fg)", cursor:"pointer" }}>
-                  <input type="checkbox" checked={directorMode} onChange={() => setDirectorMode(!directorMode)} style={{ width:12, height:12, accentColor:"#60ff80" }} />
-                  <span>director mode (critic stands in for me)</span>
-                </label>
-                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-                  <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Team model</span>
-                  <ModelPicker
-                    value={effectiveTeamModel}
-                    onChange={onPickTeamModel}
-                    models={models}
-                    status={accountsStatus}
-                    fallbackLabel={serverState.model_id ? `(use server model · ${serverState.model_id})` : "(no server model running)"}
+            {/* Canvas voice overlay — scoped to whichever agent is
+                selected (or orchestrator by default). The redundant
+                auto-approve / director-mode / team-model controls
+                that used to live here are gone — those live in the
+                Super User and Team top-tab settings panels. Voice
+                stays as a canvas overlay because it's intrinsically
+                tied to clicking an agent on the graph. */}
+            {viewMode === "graph" && (() => {
+              const orchNameLocal = activeTeam ? (findOrchestratorSpec(activeTeam)?.name ?? null) : null;
+              const voiceFocus = selectedNode ?? orchNameLocal;
+              if (!voiceFocus) return null;
+              return (
+                <div data-ui="CanvasVoiceOverlay" style={{
+                  position:"absolute", bottom:12, left:12,
+                  background:"linear-gradient(135deg, rgba(18,22,34,0.94) 0%, rgba(8,11,18,0.94) 100%)",
+                  border:"1px solid var(--border-strong)",
+                  borderRadius:12, padding:"8px 10px",
+                  display:"flex", flexDirection:"column", gap:4,
+                  minWidth:280, maxWidth:360,
+                  boxShadow:"0 4px 14px rgba(0,0,0,0.5)",
+                  zIndex:5,
+                }}>
+                  <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>
+                    Voice · {displayLabel(voiceFocus)}{voiceFocus === orchNameLocal && !selectedNode ? " (default — click an agent to switch)" : ""}
+                  </div>
+                  <AgentVoiceRow
+                    agent={voiceFocus}
+                    cfg={voiceFor(voiceFocus)}
+                    voices={ttsVoices}
+                    onChange={(partial) => onPickAgentVoice(voiceFocus, partial)}
+                    disabled={false}
                   />
                 </div>
-                {/* Per-agent voice — scoped to the selected node (or
-                    orchestrator if nothing is selected). Mirrors the
-                    Qt _AgentVoiceRow widget. The voice config is held
-                    in perAgentVoice and read during dispatch so each
-                    agent speaks its own replies. */}
-                {(() => {
-                  const orchName = activeTeam ? (findOrchestratorSpec(activeTeam)?.name ?? null) : null;
-                  const voiceFocus = selectedNode ?? orchName;
-                  if (!voiceFocus) return null;
-                  return (
-                    <div style={{ display:"flex", flexDirection:"column", gap:4, paddingTop:6, borderTop:"1px solid rgba(255,255,255,0.08)" }}>
-                      <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>
-                        Voice · {displayLabel(voiceFocus)}{voiceFocus === orchName && !selectedNode ? " (default — click an agent to switch)" : ""}
-                      </div>
-                      <AgentVoiceRow
-                        agent={voiceFocus}
-                        cfg={voiceFor(voiceFocus)}
-                        voices={ttsVoices}
-                        onChange={(partial) => onPickAgentVoice(voiceFocus, partial)}
-                        disabled={false}
-                      />
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
+              );
+            })()}
             {/* Big chat-mode toggle — sits on the canvas top-right
                 where SuperUserCard used to be (user spec 2026-05-28).
                 When the user is already in chat mode, the button

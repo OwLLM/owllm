@@ -3555,9 +3555,14 @@ function OrchestratorPane({
   // this pane is purely the chat container now.
 
   return (
-    <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", height:"100%", background:"var(--bg-elevated)" }}>
+    <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", flex:"1 1 0", minWidth:0, height:"100%", background:"var(--bg-elevated)" }}>
       <div data-ui="OrchestratorLogTabs" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:"0 0 8px" }}>
-        <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)" }}>
+        {/* Sub-tab strip — overflowX:auto so a narrow right column
+            scrolls horizontally instead of wrapping labels into 2-line
+            buttons (user reported this happening when the window was
+            smaller than full-screen). flexShrink:0 + whiteSpace:nowrap
+            on each button keeps the labels on one line. */}
+        <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)", flexShrink:0, overflowX:"auto", overflowY:"hidden" }}>
           {([
             // Order per user spec 2026-05-28: Rules → User Input →
             // Clear Chat → Thought → Tool Calls → Full Chat.
@@ -3579,6 +3584,8 @@ function OrchestratorPane({
                   fontSize:13, fontWeight:500,
                   borderBottom: active ? `1.5px solid ${tab.accent}` : "1.5px solid transparent",
                   display:"inline-flex", alignItems:"center", gap:6,
+                  whiteSpace:"nowrap", flexShrink:0,
+                  cursor:"pointer",
                 }}
               >
                 {tab.label}
@@ -3588,7 +3595,6 @@ function OrchestratorPane({
               </button>
             );
           })}
-          <div style={{ flex:1 }} />
         </div>
         {/* Rules — first sub-tab; project directives with inline CRUD.
             Mirrors the previous SuperUserCard rules face but lives in
@@ -3782,7 +3788,7 @@ function OrchestratorPane({
         padding:"8px 12px",
         background:"var(--bg-elevated)",
         display:"flex", alignItems:"flex-end", gap:8,
-        flexShrink:0,
+        flexShrink:0, minWidth:0,
       }}>
         <textarea
           ref={inputRef}
@@ -3798,7 +3804,11 @@ function OrchestratorPane({
           placeholder="Reply to the team — Enter to send, Shift+Enter for new line"
           rows={1}
           style={{
-            flex:1, minHeight:36, maxHeight:240,
+            // minWidth:0 lets the textarea shrink below its placeholder's
+            // natural content width when the right column is narrow;
+            // without this the Send button to its right gets pushed
+            // off-screen on smaller window sizes.
+            flex:1, minWidth:0, minHeight:36, maxHeight:240,
             padding:"8px 10px",
             borderRadius:8,
             background:"var(--bg-surface)",
@@ -6704,14 +6714,13 @@ export default function AgentsPage() {
     return id;
   }
 
+  const [tgStarted, setTgStarted] = useState<boolean>(false);
+
   const bridgeOn = useMemo(() => {
     if (!selectedProject) return false;
     const t = bridges.telegram;
-    const w = bridges.whatsapp;
-    const tOn = !!t?.bot_token && t?.project_id === selectedProject.id;
-    const wOn = !!w?.access_token && w?.project_id === selectedProject.id;
-    return tOn || wOn;
-  }, [bridges, selectedProject]);
+    return tgStarted && !!t?.bot_token && t?.project_id === selectedProject.id;
+  }, [bridges, selectedProject, tgStarted]);
 
   // ===== Dispatch loop =====
   // Run a multi-agent dispatch end-to-end:
@@ -7371,16 +7380,11 @@ export default function AgentsPage() {
   // text into the SuperUser chat WHEN the user is on the agentic tab,
   // bound to the same project the bridge is configured for. The
   // runner handles the actual reply path; this just adds local UX.
-  const TELEGRAM_STARTED_KEY = "owllm:telegram:started";
-  const [tgStarted, setTgStarted] = useState<boolean>(() => {
-    try { return sessionStorage.getItem(TELEGRAM_STARTED_KEY) === "1"; }
-    catch { return false; }
-  });
   useEffect(() => {
     const onStatus = (e: Event) => {
       const detail = (e as CustomEvent).detail;
       const running = detail === "running";
-      setTgStarted(running);
+      if (!running) setTgStarted(false);
       // Re-fetch bridge config from disk so the local echo gate picks
       // up the new project_id when the user starts the bridge while
       // the agentic tab is mounted.
@@ -7388,8 +7392,19 @@ export default function AgentsPage() {
         invoke<BridgeConfigs>("load_bridge_configs").then(c => setBridges(c)).catch(() => {});
       }
     };
+    const onRuntime = (e: Event) => {
+      const detail = (e as CustomEvent).detail || {};
+      setTgStarted(detail.status === "running");
+      if (detail.status === "running") {
+        invoke<BridgeConfigs>("load_bridge_configs").then(c => setBridges(c)).catch(() => {});
+      }
+    };
     window.addEventListener("owllm:telegram:status", onStatus as EventListener);
-    return () => window.removeEventListener("owllm:telegram:status", onStatus as EventListener);
+    window.addEventListener("owllm:telegram:runtime", onRuntime as EventListener);
+    return () => {
+      window.removeEventListener("owllm:telegram:status", onStatus as EventListener);
+      window.removeEventListener("owllm:telegram:runtime", onRuntime as EventListener);
+    };
   }, []);
 
   // (The actual long-poll lives in <TelegramBridgeRunner /> at

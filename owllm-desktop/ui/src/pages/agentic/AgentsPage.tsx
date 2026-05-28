@@ -18,6 +18,16 @@ import IconPickerDialog, {
 } from "./IconPickerDialog";
 import ModelPicker, { AccountsStatusLite } from "./ModelPicker";
 import {
+  type VoiceConfig,
+  DEFAULT_VOICE,
+  listVoices as listTtsVoices,
+  onVoicesChanged as onTtsVoicesChanged,
+  speak as ttsSpeak,
+  preview as ttsPreview,
+  stopAll as ttsStopAll,
+  ttsAvailable,
+} from "./voice";
+import {
   type Attachment,
   type Directive,
   formatDirectivesBlock,
@@ -25,6 +35,7 @@ import {
   extractUserInputRequest,
   transcribeAudioAttachments,
   imageAttachments,
+  appendImageAttachmentNotes,
   openaiUserContent,
   anthropicUserContent,
   parseClaudeModelId,
@@ -495,6 +506,22 @@ function LocationRow({
 
 const MAX_ATTACH_BYTES = 20 * 1024 * 1024; // 20 MB per file, in-memory base64
 
+function mimeFromFilename(name: string): string | null {
+  const ext = name.toLowerCase().split(".").pop() ?? "";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "png") return "image/png";
+  if (ext === "gif") return "image/gif";
+  if (ext === "webp") return "image/webp";
+  if (ext === "heic") return "image/heic";
+  if (ext === "mp3") return "audio/mpeg";
+  if (ext === "wav") return "audio/wav";
+  if (ext === "ogg" || ext === "oga" || ext === "opus") return "audio/ogg";
+  if (ext === "m4a" || ext === "aac") return "audio/aac";
+  if (ext === "webm") return "audio/webm";
+  if (ext === "flac") return "audio/flac";
+  return null;
+}
+
 /// Browser File -> Attachment. Reads as base64 via FileReader. Throws
 /// when the MIME isn't image/* or audio/*, or when the file exceeds
 /// MAX_ATTACH_BYTES (would balloon the request body unmanageably).
@@ -502,7 +529,7 @@ async function fileToAttachment(file: File): Promise<Attachment> {
   if (file.size > MAX_ATTACH_BYTES) {
     throw new Error(`${file.name} is ${(file.size / 1024 / 1024).toFixed(1)} MB — limit is ${MAX_ATTACH_BYTES / 1024 / 1024} MB.`);
   }
-  const mime = file.type || "application/octet-stream";
+  const mime = file.type || mimeFromFilename(file.name) || "application/octet-stream";
   const kind: "image" | "audio" =
     mime.startsWith("image/") ? "image"
     : mime.startsWith("audio/") ? "audio"
@@ -2540,6 +2567,7 @@ function GraphCanvas({
   edges, onEdgesChange,
   selectedEdgeIdx, onSelectEdge,
   positions, onPositionsChange,
+  modelFor,
 }: {
   width: number; height: number;
   team: Team | null; roleByName: Map<string, RoleData>;
@@ -2551,6 +2579,10 @@ function GraphCanvas({
   edges: Edge[]; onEdgesChange: (edges: Edge[]) => void;
   selectedEdgeIdx: number | null; onSelectEdge: (idx: number | null) => void;
   positions: GraphPos | null; onPositionsChange: (p: GraphPos) => void;
+  /// Resolved model id per agent name. Drives the model strip on each
+  /// graph card so the user can see at a glance which model each
+  /// agent is wired to.
+  modelFor: (agentName: string) => string;
 }) {
   const w = width, h = height;
   // Live mouse position for the rubber-band edge while dragging from a
@@ -2597,13 +2629,11 @@ function GraphCanvas({
     "#ff9a3a", "#9aa3b2", "#a578ff", "#ff79c4",
   ];
 
-  // Card geometry — smaller than before (was 180x220) so more of the
-  // team fits on one screen without scrolling. Removed the third text
-  // row (the base-role identifier) so the card can be shorter without
-  // squeezing legibility. Name + team-leader sub-label stay, both at
-  // a larger font size.
-  const NODE_W = 130;
-  const NODE_H = 150;
+  // Card geometry — bumped 2026-05-28 to fit a wrapped full name +
+  // a per-agent info block (base · temp + resolved model id + short
+  // description). Was 130x150 — too tight for the new payload.
+  const NODE_W = 200;
+  const NODE_H = 230;
   const ROW_GAP = 70;
   const COL_GAP = 22;
   // Wider gap at group boundaries (design ↔ build ↔ critic) so the
@@ -3091,21 +3121,53 @@ function GraphCanvas({
                   pointerEvents:"none", textTransform:"uppercase", whiteSpace:"nowrap",
                 }}>{tint.badge}</div>
               )}
-              {/* Icon row — smaller now that the card is 130x150. */}
-              <div style={{ width:"100%", flex:1, minHeight:0, display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:10 }}>
-                <img src={owlSrc(agentIconRef(n.spec, roleByName))} style={{ width:64, height:64, objectFit:"contain" }} />
+              {/* Icon — fixed compact square; the card now also has to
+                  fit a 2-line name + a 3-line info block below. */}
+              <div style={{ width:78, height:78, display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.05)", borderRadius:10, alignSelf:"center", flexShrink:0 }}>
+                <img src={owlSrc(agentIconRef(n.spec, roleByName))} style={{ width:60, height:60, objectFit:"contain" }} />
               </div>
-              {/* Name (was 13px, now 15px = +2 as requested). The base-role
-                  line was removed — it duplicated info already visible in
-                  the team-group badge + the info panel on the right. */}
-              <div style={{ color:"var(--fg-strong)", fontSize:15, fontWeight:700, textAlign:"center", lineHeight:1.2, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+              {/* Full name — wraps to 2 lines (user spec 2026-05-28). */}
+              <div style={{
+                color:"var(--fg-strong)", fontSize:13, fontWeight:700,
+                textAlign:"center", lineHeight:1.2,
+                display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical",
+                overflow:"hidden", wordBreak:"break-word",
+                minHeight:"2.4em",
+              }} title={teamMemberLabel(n.name, group)}>
                 {teamMemberLabel(n.name, group)}
               </div>
               {isOrch && (
-                <div style={{ display:"flex", alignItems:"center", justifyContent:"center", marginTop: 2 }}>
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"center" }}>
                   <span style={{ color: accent, background: "rgba(255,215,106,0.12)", border: `1px solid ${accent}55`, borderRadius: 5, padding: "1px 7px", fontSize: 10, letterSpacing: 0.5, fontWeight: 700 }}>LEADER</span>
                 </div>
               )}
+              {/* Per-agent info — base · default-temp + resolved model
+                  id + short description. Replaces the right-column
+                  "second line" settings panel. */}
+              {(() => {
+                const role = roleByName.get(n.spec.base);
+                const temp = (role?.defaultTemperature ?? 0.4).toFixed(2);
+                const desc = (n.spec.description?.trim() || role?.description?.trim() || "").trim();
+                const shortDesc = desc.length > 70 ? desc.slice(0, 67) + "…" : desc;
+                const modelId = modelFor(n.name);
+                const modelShort = modelId.length > 28 ? modelId.slice(0, 25) + "…" : modelId;
+                return (
+                  <div style={{ display:"flex", flexDirection:"column", gap:3, marginTop:2, paddingTop:6, borderTop:"1px solid rgba(255,255,255,0.06)" }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", gap:6, fontSize:10, color:"var(--fg-muted)", letterSpacing:0.3 }}>
+                      <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textTransform:"capitalize" }} title={n.spec.base}>{n.spec.base}</span>
+                      <span style={{ flexShrink:0 }}>· {temp} temp</span>
+                    </div>
+                    <div style={{ fontSize:10, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={modelId || "(no model)"}>
+                      🧠 {modelShort || "(no model)"}
+                    </div>
+                    {shortDesc && (
+                      <div style={{ fontSize:10, color:"var(--fg-subtle)", lineHeight:1.3, display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" }} title={desc}>
+                        {shortDesc}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Ports.
                   - Every card has its OUTPUT on the BOTTOM so dispatch
@@ -3885,54 +3947,13 @@ function RightColumnTabs(props: {
           );
         })}
       </div>
-      {/* Top settings panel — small info container (~18% of available
-          height). The active tab decides what's in it. The chat
-          container below stays put regardless of which tab is open. */}
-      <div data-ui="RightSettingsPanel" style={{
-        flex:"0 0 auto",
-        maxHeight:"22%",
-        minHeight:120,
-        overflow:"auto",
-        padding:"8px 12px",
-        borderBottom:"1px solid var(--border)",
-        background:"var(--bg-elevated)",
-      }}>
-        {tab === "super" && (
-          <SuperUserSettings
-            autoApprove={props.autoApprove}
-            onToggleAutoApprove={props.onToggleAutoApprove}
-            directorMode={props.directorMode}
-            onToggleDirectorMode={props.onToggleDirectorMode}
-            team={props.team}
-            roleByName={props.roleByName}
-          />
-        )}
-        {tab === "orch" && (
-          <OrchestratorSettings
-            team={props.team}
-            roleByName={props.roleByName}
-            selectedAgent={props.selectedAgent}
-            activeAgent={props.activeAgent}
-            models={props.models}
-            modelFor={props.modelFor}
-            onPickAgentModel={props.onPickAgentModel}
-            accountsStatus={props.accountsStatus}
-            effectiveTeamModel={props.effectiveTeamModel}
-            serverState={props.serverState}
-            phase={props.phase}
-          />
-        )}
-        {tab === "team" && (
-          <TeamSettings
-            team={props.team}
-            models={props.models}
-            effectiveTeamModel={props.effectiveTeamModel}
-            onPickTeamModel={props.onPickTeamModel}
-            serverModelId={props.serverState.model_id}
-            accountsStatus={props.accountsStatus}
-          />
-        )}
-      </div>
+      {/* The "second line" settings panel that used to live here is
+          GONE per user spec 2026-05-28 — agent settings (Model, Voice,
+          Info) belong on the agent's graph card, not in a duplicate
+          info strip. Global controls (auto-approve, director-mode,
+          team model) moved to a small overlay on the canvas (see
+          CanvasControlsOverlay in AgentsPage). The 3 top tabs stay
+          purely as colour-coded page selectors. */}
       {/* Chat container — ALWAYS visible. Sub-tabs Rules | User Input |
           Clear Chat | Thought | Tool Calls | Full Chat. Does NOT swap
           when the top tab changes. */}
@@ -4004,6 +4025,77 @@ function SuperUserSettings({
   );
 }
 
+// ---------- AgentVoiceRow ----------
+// Compact TTS row inside OrchestratorSettings — mirrors the
+// _AgentVoiceRow Qt widget from python-app/desktop_app/pages/agents_page.py:172.
+// Renders: 🔊 enabled checkbox · voice <select> · rate number · ▶ preview.
+// All four are bound to the parent's per-agent VoiceConfig via
+// onChange(partial). When `disabled` is true (focus is "you" or
+// "system") the controls grey out but still render so the row
+// doesn't pop in/out as the user clicks around the canvas.
+function AgentVoiceRow({
+  agent, cfg, voices, onChange, disabled,
+}: {
+  agent: string;
+  cfg: VoiceConfig;
+  voices: SpeechSynthesisVoice[];
+  onChange: (partial: Partial<VoiceConfig>) => void;
+  disabled: boolean;
+}) {
+  const noVoices = voices.length === 0;
+  const effectiveDisabled = disabled || noVoices;
+  const ctlBg = "var(--bg-surface)";
+  const ctlBase = {
+    background: ctlBg, color: "var(--fg)", border: "1px solid var(--border)",
+    borderRadius: 6, fontSize: 11,
+  } as const;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <span style={{ fontSize: 10, color: "var(--fg-muted)", letterSpacing: 0.6, textTransform: "uppercase", width: 44 }}>Voice</span>
+      <input
+        type="checkbox"
+        checked={cfg.enabled}
+        disabled={effectiveDisabled}
+        onChange={(e) => onChange({ enabled: e.target.checked })}
+        style={{ width: 12, height: 12, accentColor: "var(--accent)" }}
+        title={noVoices ? "No TTS voices installed on this system" : "Speak this agent's replies aloud"}
+      />
+      <select
+        value={cfg.voiceURI}
+        disabled={effectiveDisabled}
+        onChange={(e) => onChange({ voiceURI: e.target.value })}
+        style={{ ...ctlBase, flex: 1, height: 24, padding: "0 8px", textAlign: "left" }}
+        title="Pick a voice"
+      >
+        <option value="">Auto voice</option>
+        {voices.map(v => (
+          <option key={v.voiceURI} value={v.voiceURI}>
+            {v.name}{v.lang ? ` · ${v.lang}` : ""}
+          </option>
+        ))}
+      </select>
+      <input
+        type="number"
+        min={0}
+        max={400}
+        step={10}
+        value={cfg.rate}
+        disabled={effectiveDisabled}
+        onChange={(e) => onChange({ rate: Number(e.target.value) || 0 })}
+        style={{ ...ctlBase, width: 58, height: 24, padding: "0 6px" }}
+        title="Speaking rate (words per minute, 0 = default)"
+      />
+      <button
+        type="button"
+        disabled={noVoices}
+        onClick={() => ttsPreview(cfg, agent)}
+        style={{ ...ctlBase, width: 24, height: 24, padding: 0, cursor: noVoices ? "default" : "pointer" }}
+        title={noVoices ? "Install a system voice to enable preview" : "Preview this voice"}
+      >▶</button>
+    </div>
+  );
+}
+
 // ---------- OrchestratorSettings ----------
 // Compact blue info container for the Orchestrator (or focused agent)
 // top tab. Model picker + Voice + Info description. The selected
@@ -4013,6 +4105,7 @@ function OrchestratorSettings({
   team, roleByName, selectedAgent, activeAgent,
   models, modelFor, onPickAgentModel, accountsStatus,
   effectiveTeamModel, serverState, phase,
+  voiceFor, onPickAgentVoice, voices,
 }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
@@ -4025,6 +4118,9 @@ function OrchestratorSettings({
   effectiveTeamModel: string;
   serverState: ServerStatus;
   phase: DispatchPhase;
+  voiceFor: (agentName: string) => VoiceConfig;
+  onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
+  voices: SpeechSynthesisVoice[];
 }) {
   const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
   const focus = selectedAgent ?? activeAgent ?? orchName ?? "you";
@@ -4080,13 +4176,13 @@ function OrchestratorSettings({
           }
         />
       </div>
-      <div style={{ display:"flex", alignItems:"center", gap:6 }}>
-        <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:44 }}>Voice</span>
-        <input type="checkbox" defaultChecked style={{ width:12, height:12, accentColor:"var(--accent)" }} title="Speak this agent's replies aloud" />
-        <button style={{ flex:1, height:24, padding:"0 8px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:11, textAlign:"left" }}>Auto voice</button>
-        <input type="number" defaultValue={0} style={{ width:58, height:24, padding:"0 6px", background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:11 }} title="Speaking rate (words per minute)" />
-        <button style={{ width:24, height:24, padding:0, background:"var(--bg-surface)", color:"var(--fg)", border:"1px solid var(--border)", borderRadius:6, fontSize:11 }} title="Preview this voice">▶</button>
-      </div>
+      <AgentVoiceRow
+        agent={focus}
+        cfg={voiceFor(focus)}
+        voices={voices}
+        onChange={(partial) => onPickAgentVoice(focus, partial)}
+        disabled={focus === "you" || focus === "system"}
+      />
       <div style={{
         background: focusTint ? `linear-gradient(135deg, ${focusTint.bg} 0%, rgba(18,22,34,0.85) 100%)` : "var(--bg-surface)",
         border: focusTint ? `1px solid ${focusTint.border}` : "1px solid var(--border)",
@@ -4756,8 +4852,11 @@ async function streamChatCompletion(
 
   // Audio attachments collapse into the user message via Whisper.
   // Images stay on the side and get a provider-specific encoding.
-  const effectiveText = await transcribeAudioAttachments(userMessage, attachments);
   const images = imageAttachments(attachments);
+  const effectiveText = appendImageAttachmentNotes(
+    await transcribeAudioAttachments(userMessage, attachments),
+    images,
+  );
 
   if (provider === "auto") {
     // Future slot. For now resolve to a local model when one exists,
@@ -5557,6 +5656,17 @@ export default function AgentsPage() {
   /// dropdown. Empty string means "no override" (fall back to the team
   /// default → server model).
   const [perAgentModel, setPerAgentModel] = useState<Map<string, string>>(new Map());
+  /// Per-agent voice picks (TTS). Same lifecycle as perAgentModel — keyed
+  /// by agent name, cleared on project/team flip. Missing key means the
+  /// agent uses DEFAULT_VOICE (disabled / Auto / default rate).
+  const [perAgentVoice, setPerAgentVoice] = useState<Map<string, VoiceConfig>>(new Map());
+  /// Mirror of the OS voice list so the picker re-renders when the
+  /// async `voiceschanged` event arrives after first paint.
+  const [ttsVoices, setTtsVoices] = useState<SpeechSynthesisVoice[]>(() => listTtsVoices());
+  useEffect(() => {
+    setTtsVoices(listTtsVoices());
+    return onTtsVoicesChanged(setTtsVoices);
+  }, []);
   /// Discovered GGUFs from the model registry. Loaded once on mount;
   /// refreshed when the user re-opens the Server tab (the registry
   /// itself is disk-backed and stable for a given session).
@@ -5938,6 +6048,8 @@ export default function AgentsPage() {
       // Wipe per-agent model picks too — they belong to a single
       // project session, not across projects.
       setPerAgentModel(new Map());
+      // Per-agent voice picks live alongside model picks — same scope.
+      setPerAgentVoice(new Map());
       // Restore saved chat + per-agent transcripts. Empty strings or
       // malformed JSON fall back to a fresh chat for the project.
       try {
@@ -5989,6 +6101,7 @@ export default function AgentsPage() {
     // Per-agent model picks reference agent NAMES from the previous
     // team — those names may not exist in the new team. Drop them.
     setPerAgentModel(new Map());
+    setPerAgentVoice(new Map());
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTeam?.id]);
 
@@ -6351,6 +6464,7 @@ export default function AgentsPage() {
       } finally {
         removeActive(CRITIC_NAME);
       }
+      speakAgentReply(CRITIC_NAME, criticReview);
     }
 
     const replyMsg: GoalMsg = { role: orchKey, color: "#ffd97a", text: "" };
@@ -6429,6 +6543,7 @@ export default function AgentsPage() {
     } finally {
       removeActive(orchKey);
     }
+    speakAgentReply(orchKey, streamedReply);
     // Dispatch a chat-appended event with source=desktop so the
     // top-level TelegramBridgeRunner can forward the assistant reply
     // back to the user's phone. The bridge's listener filters on
@@ -6476,6 +6591,31 @@ export default function AgentsPage() {
       else next.set(agentName, modelId);
       return next;
     });
+  };
+
+  /// Resolve voice config for an agent. Falls back to DEFAULT_VOICE
+  /// (disabled / Auto / default rate) when the user hasn't touched
+  /// the controls yet.
+  const voiceFor = (agentName: string): VoiceConfig =>
+    perAgentVoice.get(agentName) ?? DEFAULT_VOICE;
+
+  /// Patch a single agent's voice config. Partial so the checkbox /
+  /// voice picker / rate input can all funnel through one setter.
+  const onPickAgentVoice = (agentName: string, partial: Partial<VoiceConfig>) => {
+    setPerAgentVoice(prev => {
+      const next = new Map(prev);
+      const cur = next.get(agentName) ?? DEFAULT_VOICE;
+      next.set(agentName, { ...cur, ...partial });
+      return next;
+    });
+  };
+
+  /// Speak an agent's full reply if voice is enabled for that agent.
+  /// Called by dispatchGoal after each streamChatCompletion settles
+  /// with the final assistant text. Empty strings and disabled voices
+  /// are no-ops inside ttsSpeak — call sites don't need to guard.
+  const speakAgentReply = (agentName: string, reply: string) => {
+    ttsSpeak(voiceFor(agentName), agentName, reply);
   };
   // Lazy server-start state. The local llama-server is no longer
   // pre-launched when the user opens this page or picks a model —
@@ -6713,6 +6853,7 @@ export default function AgentsPage() {
       } finally {
         removeActive(orch.name);
       }
+      speakAgentReply(orch.name, orchReply);
 
       // Critical-thinker interception: if the orchestrator asks for
       // @critical_thinker or [NEED_USER_INPUT], route it to the real
@@ -6749,6 +6890,7 @@ export default function AgentsPage() {
           } finally {
             removeActive(CRITIC_NAME);
           }
+          speakAgentReply(CRITIC_NAME, criticReply);
           // Replan with the resolved decision in context. The cleaned
           // first reply + critic answer get pushed into the user-input
           // explicitly so the orchestrator sees a coherent thread.
@@ -6771,6 +6913,7 @@ export default function AgentsPage() {
           } finally {
             removeActive(orch.name);
           }
+          speakAgentReply(orch.name, orchReply);
           // Silence unused-warning for cleaned in non-debug builds —
           // we intentionally don't surface it (the cleaned plan is
           // already in the orchestrator's log via streamLog deltas).
@@ -6813,6 +6956,7 @@ export default function AgentsPage() {
         } finally {
           removeActive(CRITIC_NAME);
         }
+        speakAgentReply(CRITIC_NAME, criticReview);
         if (criticReview.trim()) {
           addActive(orch.name);
           appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
@@ -6833,6 +6977,7 @@ export default function AgentsPage() {
           } finally {
             removeActive(orch.name);
           }
+          speakAgentReply(orch.name, orchReply);
         }
       }
 
@@ -7012,6 +7157,7 @@ export default function AgentsPage() {
           }
         }
         removeActive(spec.name);
+        speakAgentReply(spec.name, specText);
         return { name: spec.name, spec, text: specText, ok, worktree: wt, finalize };
       }));
       const outcomes: SpecOutcome[] = [];
@@ -7060,6 +7206,7 @@ export default function AgentsPage() {
       } finally {
         removeActive(orch.name);
       }
+      speakAgentReply(orch.name, finalReply);
       setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim() }]);
 
       // ----- Phase 4: serial squash-merge each committed branch back -----
@@ -7212,6 +7359,9 @@ export default function AgentsPage() {
 
   function onCancel() {
     abortRef.current?.abort();
+    // Kill any in-flight TTS — if the user cancelled the dispatch
+    // they don't want the agent to keep talking from a queued reply.
+    ttsStopAll();
   }
 
   // ===== Telegram bridge — long-poll =====
@@ -7524,6 +7674,7 @@ export default function AgentsPage() {
                 onSelectEdge={setSelectedEdgeIdx}
                 positions={nodePositions}
                 onPositionsChange={setNodePositions}
+                modelFor={modelFor}
               />
             ) : (
               <AgentChatGrid
@@ -7535,6 +7686,68 @@ export default function AgentsPage() {
                 selectedAgent={selectedNode}
                 onSelectAgent={(name) => setSelectedNode(name)}
               />
+            )}
+            {/* Canvas controls overlay — bottom-left of the graph
+                canvas. Holds the global flags that used to live in
+                the right column's "second-line" settings panel
+                (auto-approve, director-mode) plus the team model
+                picker. Visible only in graph mode where the per-agent
+                model info is on the cards. */}
+            {viewMode === "graph" && (
+              <div data-ui="CanvasControlsOverlay" style={{
+                position:"absolute", bottom:12, left:12,
+                background:"linear-gradient(135deg, rgba(18,22,34,0.94) 0%, rgba(8,11,18,0.94) 100%)",
+                border:"1px solid var(--border-strong)",
+                borderRadius:12, padding:"8px 10px",
+                display:"flex", flexDirection:"column", gap:6,
+                minWidth:280, maxWidth:360,
+                boxShadow:"0 4px 14px rgba(0,0,0,0.5)",
+                zIndex:5,
+              }}>
+                <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.6, color:"var(--fg-muted)", textTransform:"uppercase" }}>Project controls</div>
+                <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: autoApprove ? "#ff8c8c" : "var(--fg)", cursor:"pointer" }}>
+                  <input type="checkbox" checked={autoApprove} onChange={() => setAutoApprove(v => !v)} style={{ width:12, height:12, accentColor:"#ff6060" }} />
+                  <span>auto-approve tool requests</span>
+                </label>
+                <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: directorMode ? "#9af0a8" : "var(--fg)", cursor:"pointer" }}>
+                  <input type="checkbox" checked={directorMode} onChange={() => setDirectorMode(!directorMode)} style={{ width:12, height:12, accentColor:"#60ff80" }} />
+                  <span>director mode (critic stands in for me)</span>
+                </label>
+                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                  <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Team model</span>
+                  <ModelPicker
+                    value={effectiveTeamModel}
+                    onChange={onPickTeamModel}
+                    models={models}
+                    status={accountsStatus}
+                    fallbackLabel={serverState.model_id ? `(use server model · ${serverState.model_id})` : "(no server model running)"}
+                  />
+                </div>
+                {/* Per-agent voice — scoped to the selected node (or
+                    orchestrator if nothing is selected). Mirrors the
+                    Qt _AgentVoiceRow widget. The voice config is held
+                    in perAgentVoice and read during dispatch so each
+                    agent speaks its own replies. */}
+                {(() => {
+                  const orchName = activeTeam ? (findOrchestratorSpec(activeTeam)?.name ?? null) : null;
+                  const voiceFocus = selectedNode ?? orchName;
+                  if (!voiceFocus) return null;
+                  return (
+                    <div style={{ display:"flex", flexDirection:"column", gap:4, paddingTop:6, borderTop:"1px solid rgba(255,255,255,0.08)" }}>
+                      <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>
+                        Voice · {displayLabel(voiceFocus)}{voiceFocus === orchName && !selectedNode ? " (default — click an agent to switch)" : ""}
+                      </div>
+                      <AgentVoiceRow
+                        agent={voiceFocus}
+                        cfg={voiceFor(voiceFocus)}
+                        voices={ttsVoices}
+                        onChange={(partial) => onPickAgentVoice(voiceFocus, partial)}
+                        disabled={false}
+                      />
+                    </div>
+                  );
+                })()}
+              </div>
             )}
             {/* Big chat-mode toggle — sits on the canvas top-right
                 where SuperUserCard used to be (user spec 2026-05-28).

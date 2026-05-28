@@ -93,6 +93,7 @@ type AgentSpec = {
   extraPrompt?: string;
 };
 type Edge = { source: string; target: string };
+type TeamVisibility = "recommended" | "more" | "examples" | "legacy" | "custom";
 type Team = {
   id: string;
   name: string;
@@ -102,6 +103,9 @@ type Team = {
   icon: string;
   agents: AgentSpec[];
   edges: Edge[];
+  visibility: TeamVisibility;
+  workflowRank: number;
+  requiredMcp: string[];
 };
 type RoleData = {
   name: string;
@@ -199,6 +203,19 @@ function agentIconRef(
 }
 
 const _ACRONYMS = new Set(["ux","ui","api","mcp","gpu","be","fe","qa","cli","sql","db"]);
+const RECOMMENDED_TEAM_RANK: Record<string, number> = {
+  code_artisan: 10,
+  product_studio: 20,
+  research_lab: 30,
+  secretary: 40,
+  n8n_workflow_builder: 50,
+  data_analyst: 60,
+  writers_room: 70,
+};
+function normalizeTeamVisibility(value: unknown, teamName: string): TeamVisibility {
+  if (value === "recommended" || value === "more" || value === "examples" || value === "legacy") return value;
+  return RECOMMENDED_TEAM_RANK[teamName] ? "recommended" : "examples";
+}
 /// Display label with a special case for the design-team Product Owner,
 /// who appears in the canvas as "Team Leader (Design Team)" instead of
 /// the bare role name. Falls through to displayLabel for everything
@@ -235,15 +252,19 @@ function toTeam(t: TeamTemplateBackend): Team {
       }))
     : [];
   const edges: Edge[] = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
+  const name = d.name ?? t.id;
   return {
     id: t.id,
-    name: d.name ?? t.id,
+    name,
     display: d.display_name ?? t.id,
     category: d.category ?? "Other",
     icon: d.icon ?? "owl:owl_agentic",
     description: d.description ?? "",
     agents,
     edges,
+    visibility: normalizeTeamVisibility(d.visibility, name),
+    workflowRank: typeof d.workflow_rank === "number" ? d.workflow_rank : (RECOMMENDED_TEAM_RANK[name] ?? 999),
+    requiredMcp: Array.isArray(d.required_mcp) ? d.required_mcp : [],
   };
 }
 
@@ -1269,11 +1290,12 @@ function AgentChatTile({
 // (Server, Studio, etc.), so the in-progress message in the input box
 // would otherwise be wiped. Keying by projectId so each project keeps
 // its own draft.
-function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAutoApprove, projectId, directives, onDirectivesChanged, directorMode, onToggleDirectorMode, chatSplit, onToggleChatSplit }: {
+function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, onToggleAutoApprove, projectId, directives, onDirectivesChanged, directorMode, onToggleDirectorMode, chatSplit, onToggleChatSplit }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
   chat: GoalMsg[];
   onSend: (text: string) => void;
+  sendBusy: boolean;
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
   projectId: string;
@@ -1333,6 +1355,7 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
     if (el) el.scrollTop = el.scrollHeight;
   }, [suTailSig, projectId]);
   const submit = () => {
+    if (sendBusy) return;
     const t = draft.trim();
     if (!t) return;
     onSend(t);
@@ -1510,16 +1533,16 @@ function SuperUserCard({ team, roleByName, chat, onSend, autoApprove, onToggleAu
             <button
               data-ui="suSend"
               onClick={submit}
-              disabled={!draft.trim()}
+              disabled={!draft.trim() || sendBusy}
               style={{
                 height:32, padding:"6px 14px", borderRadius:8,
                 border:"1px solid #ffd97a",
-                background: draft.trim() ? "#ffd97a" : "rgba(255,217,122,0.25)",
-                color: draft.trim() ? "#1a1404" : "#7d6f4b",
+                background: draft.trim() && !sendBusy ? "#ffd97a" : "rgba(255,217,122,0.25)",
+                color: draft.trim() && !sendBusy ? "#1a1404" : "#7d6f4b",
                 fontSize:13, fontWeight:700,
-                cursor: draft.trim() ? "pointer" : "not-allowed",
+                cursor: draft.trim() && !sendBusy ? "pointer" : "not-allowed",
               }}
-            >Send</button>
+            >{sendBusy ? "Sending…" : "Send"}</button>
           </div>
           <label data-ui="suTrust" style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: autoApprove ? "#ff8c8c" : "#7888a8", cursor:"pointer" }}>
             <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
@@ -3255,12 +3278,22 @@ function MarkdownBody({ text }: { text: string }) {
 // look is used everywhere.
 function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null) {
   const isUser = m.role === "you";
+  const isOrch = orchName != null && m.role === orchName;
   const placeholder = m.role === focus || focus === orchName ? "…" : "";
+  // Per user request: drop the Y/O avatar disc (the role name in the bubble
+  // header already says "YOU" / "ORCHESTRATOR"); tint the bubble itself —
+  // yellow for the user, blue for the orchestrator. Specialist agents keep
+  // their role-specific accent colour so a 5-agent transcript still reads.
+  const accent = isUser ? "#ffd97a" : isOrch ? "#9ad9ff" : m.color;
+  const tint = isUser
+    ? "rgba(255, 217, 122, 0.12)"
+    : isOrch
+      ? "rgba(154, 217, 255, 0.12)"
+      : "var(--bg-surface)";
   return (
     <div key={`r-${m.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
-      <div style={{ width:28, height:28, flexShrink:0, borderRadius:14, background:m.color, opacity:0.85, display:"flex", alignItems:"center", justifyContent:"center", fontSize:12, fontWeight:700, color:"#06080d", fontFamily:"Segoe UI, sans-serif" }}>{(m.role[0] || "?").toUpperCase()}</div>
-      <div style={{ flex:1, background:"var(--bg-surface)", borderLeft:`3px solid ${m.color}`, borderRadius:8, padding:"6px 12px", minWidth:0 }}>
-        <div style={{ fontSize:10, fontWeight:700, color:m.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif" }}>{m.role}</div>
+      <div style={{ flex:1, background:tint, borderLeft:`3px solid ${accent}`, borderRadius:8, padding:"6px 12px", minWidth:0 }}>
+        <div style={{ fontSize:10, fontWeight:700, color:accent, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif" }}>{m.role}</div>
         {m.text
           // User messages stay literal — they just typed it, don't
           // re-interpret '*' as italics.
@@ -3770,6 +3803,33 @@ const CRITIC_SYNTHETIC_SPEC: AgentSpec = {
   description: "Voice of the user. Reviews the orchestrator's plan, answers [NEED_USER_INPUT] when Director Mode is on.",
   icon: "owl:owl_critic",
 };
+function needsCriticalThinkerReview(text: string): boolean {
+  // `critical[\s_]+thinker` covers "critical thinker", "critical_thinker"
+  // and "@critical_thinker" — the underscore is a word char, so the
+  // previous `\bcritical\s+thinker\b` rejected the very form users
+  // were typing to explicitly invoke the agent.
+  return /\b(critical[\s_]+thinker|critic|architecture|architectural|api|contract|schema|runtime|bootstrap|security|permission|mcp|installer|workflow|orchestrator\s+plan|decision)\b/i.test(text);
+}
+function buildCriticalThinkerReviewPrompt(team: Team | null, directives?: Directive[]): string {
+  const directivesBlock = formatDirectivesBlock(directives);
+  return [
+    `You are Critical Thinker${team ? ` for the '${team.display}' team` : ""}.`,
+    "",
+    "You are a separate reviewer agent, not a mood and not the orchestrator.",
+    "Your job is to challenge the orchestrator before decisions harden.",
+    "",
+    "When reviewing, focus on:",
+    "  - unstated assumptions",
+    "  - architecture or product tradeoffs",
+    "  - simpler reversible alternatives",
+    "  - safety, permissions, and user-control failures",
+    "  - whether the orchestrator is skipping a specialist it should involve",
+    "",
+    directivesBlock || "(No project rules are set yet.)",
+    "",
+    "Reply in 3-6 direct bullets. End with one line: APPROVE, REVISE, or BLOCK.",
+  ].join("\n");
+}
 /// Return a team augmented with the synthetic critic node. Idempotent:
 /// if the team already has an agent literally named "critic" we return
 /// the team unchanged (the team author already accounted for it).
@@ -3811,6 +3871,9 @@ function buildOrchestratorPrompt(
     const desc = a.description ?? roleByName.get(a.base)?.description ?? "";
     return `  - ${a.name} (${a.base}): ${desc}`;
   }).join("\n");
+  const criticRosterLine = specialists.some(a => a.name === CRITIC_AGENT_NAME)
+    ? ""
+    : `  - ${CRITIC_AGENT_NAME} (critic): mandatory reviewer for architecture decisions, MCP/security boundaries, runtime/bootstrap changes, workflow topology, and any user request that mentions "critic" or "critical thinker". Use @${CRITIC_AGENT_NAME}: <question or plan to review>.`;
   const orchRole = roleByName.get(orch.base);
   // Layered guidance: prefer the role yaml's full system_prompt
   // (the canonical playbook), then the team-specific extra_prompt
@@ -3876,11 +3939,12 @@ function buildOrchestratorPrompt(
     directorBlock,
     "",
     `YOUR SPECIALISTS (use their EXACT names when dispatching):`,
-    roster || "  (none — solo)",
+    [roster, criticRosterLine].filter(Boolean).join("\n") || "  (none — solo)",
     "",
     "HOW TO RESPOND:",
     "1. Start with a short paragraph that restates the user's goal in your own words.",
     "2. Sketch a brief plan (2-5 bullet points).",
+    `2a. If the user mentions critic / critical thinker, or the plan makes an architecture decision, emit @${CRITIC_AGENT_NAME}: <the plan or decision to review> before any implementation dispatch.`,
     "3. Dispatch tasks using EXACTLY this format, ONE per line, ONE specialist per line:",
     "      @<agent_name>: <clear, specific instruction>",
     "4. Dispatch only the agents you actually need. Skip dispatches if the goal is trivial enough to answer yourself.",
@@ -3939,6 +4003,7 @@ function parseDispatches(text: string, team: Team, exclude: string): Dispatch[] 
     const m = raw.trim().match(re);
     if (!m) continue;
     const name = m[1];
+    if (/^critical[_\s-]?thinker$/i.test(name)) continue;
     if (!known.has(name)) continue;
     if (name === exclude) continue;          // orchestrator never self-dispatches
     out.push({ agentName: name, instruction: m[2].trim() });
@@ -5046,6 +5111,8 @@ export default function AgentsPage() {
   // Super User card chat (separate from the Run/Goal stream so users
   // can chat alongside a running plan).
   const [supChat, setSupChat] = useState<GoalMsg[]>([]);
+  const [supSendBusy, setSupSendBusy] = useState(false);
+  const supSendBusyRef = useRef(false);
   // Auto-approve flag — persisted per project to localStorage so a
   // user who checks "auto-approve every tool call" doesn't have to
   // re-check it after every app restart (which would otherwise
@@ -5225,7 +5292,11 @@ export default function AgentsPage() {
         setLocationOverride(rawProjects[0].location || "");
         setTrustWritesOverride(null);
       }
-      setTeams(rawTeams.map(toTeam));
+      setTeams(rawTeams.map(toTeam).sort((a, b) =>
+        (a.visibility === "recommended" ? 0 : 1) - (b.visibility === "recommended" ? 0 : 1) ||
+        (a.workflowRank - b.workflowRank) ||
+        a.display.localeCompare(b.display)
+      ));
       const m = new Map<string, RoleData>();
       for (const r of rawRoles) {
         const d = r.data ?? {};
@@ -5615,6 +5686,9 @@ export default function AgentsPage() {
   // log buffer. The dispatch loop above handles the orchestrator-led
   // flow; this lets the user sneak in a side note without re-running.
   const onSupSend = async (text: string) => {
+    if (supSendBusyRef.current) return;
+    supSendBusyRef.current = true;
+    setSupSendBusy(true);
     // Capture prior history BEFORE the new user message lands in
     // supChat so the model gets continuity (otherwise the assistant
     // forgets every restart, which is what users keep hitting).
@@ -5638,6 +5712,7 @@ export default function AgentsPage() {
       if (orchSpec) appendLog(orchSpec.name, userMsg);
     }
 
+    try {
     // Lazy local-server start. If the resolved model is a llama-
     // server-backed local model AND the server isn't running on it,
     // auto-start it and poll until ready — user spec is "start
@@ -5678,6 +5753,54 @@ export default function AgentsPage() {
     // we route the message through.
     const orchSpec = activeTeam ? findOrchestratorSpec(activeTeam) : null;
     const orchKey = orchSpec?.name ?? "orchestrator";
+    // serverState in the React closure is stale after the awaited
+    // ensureLocalServer call above. Pull a fresh status so the port
+    // we hand to streamChatCompletion is the just-started server's
+    // port, not whatever was set when this handler started.
+    const freshServerState = supProvider === "local"
+      ? await invoke<ServerStatus>("server_status").catch(() => serverState)
+      : serverState;
+    let criticReview = "";
+    if (needsCriticalThinkerReview(text)) {
+      const CRITIC_NAME = CRITIC_AGENT_NAME;
+      addActive(CRITIC_NAME);
+      appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
+      appendThought(orchKey, {
+        role: "dispatch",
+        color: "#ff9ad9",
+        text: `critical thinker review requested before orchestrator reply`,
+      });
+      try {
+        criticReview = await streamChatCompletion(
+          freshServerState.port ?? 0,
+          supModelId,
+          supProvider,
+          buildCriticalThinkerReviewPrompt(activeTeam, directives),
+          [
+            "User message:",
+            text,
+            "",
+            "Review what the orchestrator should not miss before it answers.",
+          ].join("\n"),
+          0.3,
+          new AbortController().signal,
+          (delta) => { criticReview += delta; streamLog(CRITIC_NAME, delta); },
+          (locationOverride || selectedProject?.location || "").trim(),
+          priorHistory,
+          autoApprove,
+          (channel, role, delta) => streamThought(CRITIC_NAME, channel, role, delta),
+          undefined,
+          undefined,
+          getClaudeSession(selectedProjectId, CRITIC_NAME),
+        );
+        criticReview = criticReview.trim();
+      } catch (e: any) {
+        criticReview = `(critical thinker failed: ${String(e?.message ?? e)})`;
+        appendLog(CRITIC_NAME, { role: "system", color: "#ff8c8c", text: criticReview });
+      } finally {
+        removeActive(CRITIC_NAME);
+      }
+    }
 
     const replyMsg: GoalMsg = { role: orchKey, color: "#ffd97a", text: "" };
     setSupChat(prev => [...prev, replyMsg]);
@@ -5688,18 +5811,17 @@ export default function AgentsPage() {
     // the stream completes (desktop → phone mirror, opposite direction
     // of the Telegram → desktop mirror the bridge already does).
     let streamedReply = "";
-    // serverState in the React closure is stale after the awaited
-    // ensureLocalServer call above. Pull a fresh status so the port
-    // we hand to streamChatCompletion is the just-started server's
-    // port, not whatever was set when this handler started.
-    const freshServerState = supProvider === "local"
-      ? await invoke<ServerStatus>("server_status").catch(() => serverState)
-      : serverState;
     try {
-      const sys = activeTeam
-        ? `You are the orchestrator of '${activeTeam.display}'. Answer the user concisely.`
-        : "You are the team's orchestrator.";
-      await streamChatCompletion(
+      const sys = [
+        activeTeam
+          ? `You are the orchestrator of '${activeTeam.display}'.`
+          : "You are the team's orchestrator.",
+        "Answer the user concisely.",
+        `Critical Thinker is a real peer agent named ${CRITIC_AGENT_NAME}, not a mode of operation.`,
+        "If the user's message mentions the critic or critical thinker, acknowledge whether that agent was invoked. Never say you are merely doing it implicitly.",
+        criticReview ? `\nCritical Thinker review already produced:\n${criticReview}` : "",
+      ].filter(Boolean).join("\n");
+      const returned = await streamChatCompletion(
         freshServerState.port ?? 0,
         supModelId,
         supProvider,
@@ -5734,6 +5856,21 @@ export default function AgentsPage() {
         // as the team-Run orchestrator — they're the same logical agent.
         getClaudeSession(selectedProjectId, orchKey),
       );
+      if (!streamedReply.trim() && returned.trim()) {
+        streamedReply = returned.trim();
+        setSupChat(curr => {
+          const out = curr.slice();
+          const last = out[out.length - 1];
+          if (last) out[out.length - 1] = { ...last, text: returned.trim() };
+          return out;
+        });
+        streamLog(orchKey, returned.trim());
+      }
+      if (!streamedReply.trim()) {
+        const emptyMsg = "(the model returned an empty response — no answer was produced)";
+        setSupChat(curr => [...curr, { role: "system", color: "#ff8c8c", text: emptyMsg }]);
+        appendLog("system", { role: "system", color: "#ff8c8c", text: emptyMsg });
+      }
     } catch (e: any) {
       const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: String(e?.message ?? e) };
       setSupChat(prev => [...prev, errMsg]);
@@ -5756,6 +5893,10 @@ export default function AgentsPage() {
           },
         }));
       } catch { /* event dispatch failed — desktop UI already shows it, only phone misses */ }
+    }
+    } finally {
+      supSendBusyRef.current = false;
+      setSupSendBusy(false);
     }
   };
 
@@ -6022,13 +6163,16 @@ export default function AgentsPage() {
         removeActive(orch.name);
       }
 
-      // Director-mode interception: if the orchestrator asked the user
-      // a question ([NEED_USER_INPUT] marker), route it to the Critic
-      // (voice-of-user), fold the answer back into context, and re-run
-      // the orchestrator. Only one hop per dispatch to avoid loops.
-      if (directorMode) {
+      // Critical-thinker interception: if the orchestrator asks for
+      // @critical_thinker or [NEED_USER_INPUT], route it to the real
+      // Critical Thinker agent and then re-run the orchestrator with
+      // that answer folded in. This must NOT be gated by Director
+      // Mode; explicit critical-thinker requests should always fire.
+      let criticWasConsulted = false;
+      {
         const { question, cleaned } = extractUserInputRequest(orchReply);
         if (question) {
+          criticWasConsulted = true;
           appendThought(orch.name, {
             role: "dispatch", color: "#ff9ad9",
             text: `❓ → critic: ${question}`,
@@ -6080,6 +6224,64 @@ export default function AgentsPage() {
           // we intentionally don't surface it (the cleaned plan is
           // already in the orchestrator's log via streamLog deltas).
           void cleaned;
+        }
+      }
+
+      if (!criticWasConsulted && needsCriticalThinkerReview(`${text}\n${orchReply}`)) {
+        const CRITIC_NAME = CRITIC_AGENT_NAME;
+        appendThought(orch.name, {
+          role: "dispatch", color: "#ff9ad9",
+          text: `critical thinker brainstorm before specialist dispatch`,
+        });
+        addActive(CRITIC_NAME);
+        appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
+        let criticReview = "";
+        try {
+          const criticModel = modelFor(CRITIC_NAME);
+          criticReview = await streamChatCompletion(
+            port, criticModel, providerFor(criticModel),
+            buildCriticalThinkerReviewPrompt(activeTeam, directives),
+            [
+              "The user's goal:",
+              text,
+              "",
+              "The orchestrator's current plan:",
+              orchReply,
+              "",
+              "Brainstorm with the orchestrator before implementation. Challenge architecture decisions, missing specialists, hidden assumptions, and safer alternatives.",
+            ].join("\n"),
+            0.3, ctrl.signal,
+            (delta) => { criticReview += delta; streamLog(CRITIC_NAME, delta); },
+            projectCwd,
+            undefined, undefined,
+            (channel, role, delta) => streamThought(CRITIC_NAME, channel, role, delta),
+            undefined,
+            undefined,
+            getClaudeSession(selectedProjectId, CRITIC_NAME),
+          );
+        } finally {
+          removeActive(CRITIC_NAME);
+        }
+        if (criticReview.trim()) {
+          addActive(orch.name);
+          appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+          try {
+            orchReply = await streamChatCompletion(
+              port, orchModel, providerFor(orchModel),
+              orchPrompt,
+              `${text}\n\nCritical Thinker review before dispatch:\n${criticReview.trim()}\n\nIncorporate this review, then dispatch specialists.`,
+              tempFor(orch, 0.4), ctrl.signal,
+              (delta) => streamLog(orch.name, delta),
+              projectCwd,
+              undefined, undefined,
+              (channel, role, delta) => streamThought(orch.name, channel, role, delta),
+              undefined,
+              undefined,
+              getClaudeSession(selectedProjectId, orch.name),
+            );
+          } finally {
+            removeActive(orch.name);
+          }
         }
       }
 
@@ -6793,11 +6995,12 @@ export default function AgentsPage() {
             }}>
               <div style={{ pointerEvents: "auto", flex: 1, display: "flex", minHeight: 0 }}>
                 <SuperUserCard
-                  team={renderTeam}
-                  roleByName={roleByName}
-                  chat={supChat}
-                  onSend={onSupSend}
-                  autoApprove={autoApprove}
+            team={renderTeam}
+            roleByName={roleByName}
+            chat={supChat}
+            onSend={onSupSend}
+            sendBusy={supSendBusy}
+            autoApprove={autoApprove}
                   onToggleAutoApprove={() => setAutoApprove(v => !v)}
                   projectId={selectedProjectId}
                   directives={directives}

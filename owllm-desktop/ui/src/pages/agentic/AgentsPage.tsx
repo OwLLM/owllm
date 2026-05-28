@@ -1202,11 +1202,11 @@ function AgentChatTile({
       onClick={onClick}
       style={{
         minWidth: 0, minHeight: 0,
-        // Body fill: was rgba(rgb, 0.06); +10% to 0.16 per user spec.
-        // Background was reading as nearly-black; this lifts the team
-        // colour enough to distinguish design/build/critic tiles at
-        // a glance without drowning out the message text.
-        background: `linear-gradient(180deg, rgba(${rgb},0.16) 0%, rgba(20,23,31,0.95) 100%)`,
+        // Body fill: was rgba(rgb, 0.06); +10% to 0.16, then +20% to
+        // 0.36 per user request "20% less transparent". The team
+        // colour now clearly reads through the tile while message text
+        // stays legible against the darker bottom of the gradient.
+        background: `linear-gradient(180deg, rgba(${rgb},0.36) 0%, rgba(20,23,31,0.95) 100%)`,
         border: isActive
           ? "1px solid rgba(60,242,107,0.85)"
           : isSelected
@@ -1228,14 +1228,14 @@ function AgentChatTile({
           the tile; this is NOT the sender chip for each message (those
           are stripped per user spec — the tile is one agent's voice,
           its messages are just the body text). Header tint: was black
-          rgba(0,0,0,0.25); now uses the team colour at 0.30 alpha
-          (+30 % bump per user spec) so the design/build/critic
-          identity reads at the top of every tile. */}
+          rgba(0,0,0,0.25), then bumped to 0.30, now 0.50 with the
+          "20 % less transparent" request so the team-colour band is a
+          decisive visual identifier instead of a faint wash. */}
       <div style={{
         display: "flex", alignItems: "center", gap: 8,
         padding: "6px 10px",
         borderBottom: `1px solid rgba(${rgb},0.55)`,
-        background: `rgba(${rgb},0.30)`,
+        background: `rgba(${rgb},0.50)`,
         flexShrink: 0,
       }}>
         <img src={owlSrc(icon)} style={{ width: 22, height: 22, objectFit: "contain" }} />
@@ -1451,12 +1451,30 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
           <div style={{ fontSize:10, color:"var(--fg-subtle)", letterSpacing:0.4, textTransform:"uppercase", marginLeft:4 }}>{team?.agents.length ?? 0} agents on team</div>
         </div>
       )}
+      {/* Settings strip — auto-approve + director-mode were inside the
+          Chat tab body; user moved them up here so they sit "under the
+          header" like the Orchestrator / Team settings panels.
+          Always visible regardless of which tab is open so the user can
+          flip these flags while editing rules too. */}
+      <div data-ui="suSettings" style={{ display:"flex", flexDirection:"column", gap:4, padding:"4px 2px", borderTop:"1px solid rgba(255,200,80,0.15)", borderBottom:"1px solid rgba(255,200,80,0.15)" }}>
+        <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: autoApprove ? "#ff8c8c" : "#7888a8", cursor:"pointer" }}>
+          <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
+          <span>auto-approve tool requests</span>
+        </label>
+        <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: directorMode ? "#9af0a8" : "#7888a8", cursor:"pointer" }}>
+          <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#60ff80" }} />
+          <span>director mode (critic stands in for me)</span>
+        </label>
+      </div>
       {/* Tab strip — Chat / Rules. Always rendered so the user sees
-          the count of rules even without opening the tab. */}
+          the count of rules even without opening the tab. The Rules
+          tab is recoloured red per user request — it's a destructive /
+          enforcement-flavour surface, distinct from the friendly
+          yellow of the chat. */}
       <div data-ui="suTabs" style={{ display:"flex", gap:4, borderBottom:"1px solid rgba(255,200,80,0.22)" }}>
         {([
-          { id: "chat" as const,  label: "💬 Chat" },
-          { id: "rules" as const, label: `📋 Rules (${directives.length})` },
+          { id: "chat"  as const, label: "💬 Chat",                       on: "#ffd97a", bgOn: "rgba(255,217,122,0.18)" },
+          { id: "rules" as const, label: `📋 Rules (${directives.length})`, on: "#ff6b6b", bgOn: "rgba(255,107,107,0.18)" },
         ]).map(t => {
           const on = activeTab === t.id;
           return (
@@ -1466,10 +1484,10 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
               onClick={() => setActiveTab(t.id)}
               style={{
                 flex:1, height:26, padding:"0 10px",
-                background: on ? "rgba(255,200,80,0.18)" : "transparent",
-                color: on ? "#ffd97a" : "var(--fg-muted)",
+                background: on ? t.bgOn : "transparent",
+                color: on ? t.on : "var(--fg-muted)",
                 border: "none",
-                borderBottom: on ? "2px solid #ffd97a" : "2px solid transparent",
+                borderBottom: on ? `2px solid ${t.on}` : "2px solid transparent",
                 fontSize:12, fontWeight:700, cursor:"pointer",
               }}
             >{t.label}</button>
@@ -1505,7 +1523,10 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
               prompts wrap and stay fully visible. Enter sends; Shift+
               Enter inserts a newline. Vertical resize lets the user
               expand if their prompt is huge; the default 3 rows + auto
-              overflow keeps short prompts compact. */}
+              overflow keeps short prompts compact. Labelled "User
+              Input" so the section reads clearly when this card lives
+              alongside the orchestrator's Clear-Chat / Thought tabs. */}
+          <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ffd97a", textTransform:"uppercase", marginTop:2 }}>User Input</div>
           <div data-ui="suInputRow" style={{ display:"flex", alignItems:"flex-end", gap:8 }}>
             <textarea
               data-ui="suReply"
@@ -1544,25 +1565,40 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
               }}
             >{sendBusy ? "Sending…" : "Send"}</button>
           </div>
-          <label data-ui="suTrust" style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: autoApprove ? "#ff8c8c" : "#7888a8", cursor:"pointer" }}>
-            <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
-            <span>auto-approve tool requests</span>
-          </label>
-          {/* Director Mode lives here because it's a per-run toggle that
-              belongs next to the chat input. The full add/edit panel is
-              reachable from the Rules tab. */}
-          <div data-ui="suDirectorRow" style={{ display:"flex", alignItems:"center", gap:8, justifyContent:"space-between" }}>
-            <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:13, color: directorMode ? "#9af0a8" : "#7888a8", cursor:"pointer" }}>
-              <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#60ff80" }} />
-              <span>director mode (critic stands in for me)</span>
-            </label>
-          </div>
+          {/* auto-approve + director-mode used to live here below the
+              input; moved up into the settings strip under the card
+              header (see `suSettings` block above) so they sit next to
+              the Chat / Rules tab strip like the Orchestrator and Team
+              setting blocks do. */}
         </>
       ) : (
         // Rules tab — full inline add / edit / delete UI. No more
         // popup modal: the user manages project rules right inside
         // the card (user spec 2026-05-20).
         <div data-ui="suRules" style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {/* Explanation block — three kinds of rule, each with a
+              one-line meaning. The closing sentence states the scope:
+              every agent on the active team sees every rule, so users
+              don't have to wonder whether a rule attached to the
+              orchestrator also reaches the specialists. */}
+          <div data-ui="suRulesHelp" style={{
+            background:"rgba(255,107,107,0.08)",
+            border:"1px solid rgba(255,107,107,0.25)",
+            borderRadius:8,
+            padding:"8px 10px",
+            fontSize:11, lineHeight:1.5,
+            color:"var(--fg)",
+            display:"flex", flexDirection:"column", gap:4,
+          }}>
+            <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ff6b6b", textTransform:"uppercase" }}>About rules</div>
+            <div><b style={{ color:"#ff8c8c" }}>MUST</b> — hard requirement; the team should refuse the goal if it can't comply.</div>
+            <div><b style={{ color:"#9af0a8" }}>PREFER</b> — soft hint; bias the plan toward this when there's a choice.</div>
+            <div><b style={{ color:"#ffd97a" }}>AVOID</b> — anti-pattern; do NOT do this unless the goal is impossible without it.</div>
+            <div style={{ color:"var(--fg-muted)", marginTop:2 }}>
+              Rules are injected into every agent on the active team
+              ({team?.agents.length ?? 0} {team?.agents.length === 1 ? "agent" : "agents"}) — orchestrator, specialists, and the critic all see them on every turn.
+            </div>
+          </div>
           {/* Add-rule row — kind dropdown + text input + + button. */}
           <div data-ui="suRulesAdd" style={{ display:"flex", alignItems:"center", gap:6 }}>
             <select
@@ -3401,7 +3437,11 @@ function OrchestratorPane({
     : team
     ? displayLabel(agentFocus)
     : agentFocus;
-  const teamBtnLabel = team?.display || team?.name || "Team";
+  // Header label for the Team button — literal "Team" instead of the
+  // project/team name. The actual team identifier is still visible
+  // elsewhere (LocationRow strip up top); the chat header just wants
+  // the role identifier, not a duplicate of the title.
+  const teamBtnLabel = "Team";
   // Resolved data the reusable widgets bind to. Single source of truth
   // so we don't render a second Model picker / Info section per mode.
   const focusModel = mode === "team" ? effectiveTeamModel : modelFor(agentFocus);

@@ -766,52 +766,96 @@ export function audioAttachments(atts?: Attachment[]): Attachment[] {
   return (atts ?? []).filter(a => a.kind === "audio");
 }
 
-/// Transcribe every audio attachment via OpenAI Whisper and fold the
-/// transcripts into the user message. Returns the rewritten user
-/// message (unchanged when there are no audio parts). Requires
-/// OPENAI_API_KEY — there is no provider-agnostic local fallback. If
-/// no key is saved the audio parts are surfaced as a `[no transcript]`
-/// note so the model still knows audio was attached, and dispatch
-/// continues.
+export function appendImageAttachmentNotes(userMessage: string, images: Attachment[]): string {
+  if (images.length === 0) return userMessage;
+  const note = images
+    .map((a, i) => `[Image ${i + 1} attached: ${a.filename ?? a.mime}. Vision-capable backends receive the image bytes; otherwise state that you cannot inspect the image instead of guessing.]`)
+    .join("\n");
+  return userMessage ? `${userMessage}\n\n${note}` : note;
+}
+
+/// Transcribe every audio attachment and fold transcripts into the
+/// user message. The product path is native whisper.cpp via Rust
+/// (`audio_transcribe_local`); OpenAI Whisper is only a fallback when
+/// the native runtime is missing and the user has explicitly saved an
+/// API key.
+type LocalAudioTranscription = { text: string; duration_sec: number; model: string };
+
+async function transcribeLocalAudio(a: Attachment): Promise<LocalAudioTranscription> {
+  return invoke<LocalAudioTranscription>("audio_transcribe_local", {
+    dataB64: a.data_b64,
+    mime: a.mime,
+    filename: a.filename ?? null,
+  });
+}
+
+async function transcribeOpenAIAudio(a: Attachment, key: string): Promise<string> {
+  const bin = base64ToBytes(a.data_b64);
+  const blob = new Blob([bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength) as ArrayBuffer], { type: a.mime });
+  const fd = new FormData();
+  const filename = a.filename ?? `audio.${extForMime(a.mime)}`;
+  fd.append("file", blob, filename);
+  fd.append("model", "whisper-1");
+  fd.append("response_format", "text");
+  const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${key}` },
+    body: fd,
+  });
+  if (!resp.ok) {
+    const err = await resp.text().catch(() => `HTTP ${resp.status}`);
+    throw new Error(err.slice(0, 200));
+  }
+  return (await resp.text()).trim();
+}
+
 export async function transcribeAudioAttachments(
   userMessage: string,
   attachments: Attachment[] | undefined,
+  /// Optional surface for transcription failures so the caller can
+  /// render a visible warning (yellow system note in the chat).
+  /// Without this callback the failure just gets folded into the
+  /// user message and the orchestrator parrots "I can't transcribe…"
+  /// without telling the user *why*. The caller passes an error
+  /// string per failure (one per attachment).
+  onWarn?: (text: string) => void,
 ): Promise<string> {
   const auds = audioAttachments(attachments);
   if (auds.length === 0) return userMessage;
-  const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
-  if (!key) {
-    const note = auds.map(a => `[Audio attached: ${a.filename ?? a.mime} — no transcript: save OPENAI_API_KEY on the Accounts page to enable Whisper.]`).join("\n");
-    return userMessage ? `${userMessage}\n\n${note}` : note;
-  }
   const transcripts: string[] = [];
+  const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" }).catch(() => null);
   for (const a of auds) {
+    const filename = a.filename ?? `audio.${extForMime(a.mime)}`;
+    let localError = "";
     try {
-      const bin = base64ToBytes(a.data_b64);
-      // Slice into a fresh ArrayBuffer copy — Blob constructor's
-      // BlobPart type rejects Uint8Array<SharedArrayBuffer>, and TS
-      // can't prove our buffer is the non-shared variant.
-      const blob = new Blob([bin.buffer.slice(bin.byteOffset, bin.byteOffset + bin.byteLength) as ArrayBuffer], { type: a.mime });
-      const fd = new FormData();
-      const filename = a.filename ?? `audio.${extForMime(a.mime)}`;
-      fd.append("file", blob, filename);
-      fd.append("model", "whisper-1");
-      fd.append("response_format", "text");
-      const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${key}` },
-        body: fd,
-      });
-      if (!resp.ok) {
-        const err = await resp.text().catch(() => `HTTP ${resp.status}`);
-        transcripts.push(`[Audio "${filename}" — Whisper error: ${err.slice(0, 200)}]`);
+      const local = await transcribeLocalAudio(a);
+      if (local.text.trim()) {
+        transcripts.push(`[Audio "${filename}" transcript via local Whisper/${local.model}]\n${local.text.trim()}`);
         continue;
       }
-      const text = (await resp.text()).trim();
-      transcripts.push(`[Audio "${filename}" transcript]\n${text}`);
+      localError = "local Whisper returned an empty transcript";
     } catch (e: any) {
-      transcripts.push(`[Audio "${a.filename ?? a.mime}" — transcribe failed: ${String(e?.message ?? e).slice(0, 200)}]`);
+      localError = String(e?.message ?? e).slice(0, 240);
     }
+
+    if (key) {
+      try {
+        const text = await transcribeOpenAIAudio(a, key);
+        transcripts.push(text
+          ? `[Audio "${filename}" transcript via OpenAI Whisper]\n${text}`
+          : `[Audio "${filename}" attached, but Whisper returned an empty transcript.]`);
+        continue;
+      } catch (e: any) {
+        const openaiErr = String(e?.message ?? e).slice(0, 200);
+        const reason = `Local Whisper: ${localError}. OpenAI Whisper: ${openaiErr}.`;
+        transcripts.push(`[Audio "${filename}" transcribe failed. ${reason}]`);
+        onWarn?.(`⚠ Couldn't transcribe "${filename}". ${reason} — open Accounts → "Install voice runtime" if the local Whisper binary or model is missing.`);
+        continue;
+      }
+    }
+
+    transcripts.push(`[Audio "${filename}" attached, but local Whisper could not transcribe it: ${localError}.]`);
+    onWarn?.(`⚠ Couldn't transcribe "${filename}" locally: ${localError}. Set OPENAI_API_KEY on the Accounts page for a cloud fallback, or open Accounts → "Install voice runtime" if the local binary/model is missing.`);
   }
   const block = transcripts.join("\n\n");
   return userMessage ? `${userMessage}\n\n${block}` : block;
@@ -895,8 +939,11 @@ export async function streamChatCompletion(
   // Transcribe any audio parts first (Whisper, one-shot). After this,
   // `effectiveText` carries the original prompt + transcript blocks
   // and we only need to worry about image parts per provider.
-  const effectiveText = await transcribeAudioAttachments(userMessage, attachments);
   const images = imageAttachments(attachments);
+  const effectiveText = appendImageAttachmentNotes(
+    await transcribeAudioAttachments(userMessage, attachments),
+    images,
+  );
 
   if (provider === "auto") {
     throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);

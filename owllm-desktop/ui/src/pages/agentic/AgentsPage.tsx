@@ -4924,7 +4924,7 @@ async function streamChatCompletion(
     );
   }
   const effectiveText = appendImageAttachmentNotes(
-    await transcribeAudioAttachments(userMessage, attachments),
+    await transcribeAudioAttachments(userMessage, attachments, onSystemWarning),
     images,
   );
 

@@ -7506,12 +7506,39 @@ export default function AgentsPage() {
       // thread (user → orchestrator → user → …), not just one side.
       const orchSpec = activeTeam ? findOrchestratorSpec(activeTeam) : null;
       const orchKey = orchSpec?.name ?? "orchestrator";
+      // De-duplication: the bridge streams the orchestrator reply token
+      // by token via owllm:log:delta (which mutates the LAST agentLogs
+      // entry in place), then fires owllm:chat:appended at the end with
+      // the full text. Without this guard we'd APPEND a second
+      // identical entry — that's the "orchestrator replied twice" bug
+      // the user reported.
       for (const m of msgs) {
         if (m.role === "you") {
           appendLog("you", m);
           appendLog(orchKey, m);
         } else {
-          appendLog(orchKey, { ...m, role: orchKey });
+          setAgentLogs(prev => {
+            const cur = prev.get(orchKey) ?? [];
+            const last = cur[cur.length - 1];
+            const incoming = m.text.trim();
+            if (last && last.text.trim() === incoming) {
+              return prev;                              // already streamed
+            }
+            // Streaming sometimes ends with the in-place entry holding a
+            // STRICT PREFIX of the final blob (last few tokens missed by
+            // the delta channel). Replace the last entry with the full
+            // text instead of appending a new one.
+            if (last && incoming.startsWith(last.text.trim()) && last.text.trim().length > 0) {
+              const next = new Map(prev);
+              const updated = [...cur];
+              updated[updated.length - 1] = { ...last, text: m.text };
+              next.set(orchKey, updated);
+              return next;
+            }
+            const next = new Map(prev);
+            next.set(orchKey, [...cur, { ...m, role: orchKey }]);
+            return next;
+          });
         }
       }
       reloadProjects();

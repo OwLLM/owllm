@@ -929,6 +929,12 @@ export async function streamChatCompletion(
   /// caller via getClaudeSession(projectId, agentName). Ignored on
   /// non-Anthropic-CLI paths (OpenAI, local, Anthropic API).
   sessionId?: string | null,
+  /// User-visible warning channel. Fires when something the user asked
+  /// for can't be delivered (CLI image drop, audio transcribe failure).
+  /// The bridge / AgentsPage caller wires this to a chat-log emitter so
+  /// the actual reason surfaces instead of the LLM paraphrasing it as
+  /// "I am still unable to transcribe…".
+  onSystemWarning?: (text: string) => void,
 ): Promise<string> {
   const forceSub = modelId.startsWith("sub/");
   const forceApi = modelId.startsWith("api/");
@@ -941,7 +947,7 @@ export async function streamChatCompletion(
   // and we only need to worry about image parts per provider.
   const images = imageAttachments(attachments);
   const effectiveText = appendImageAttachmentNotes(
-    await transcribeAudioAttachments(userMessage, attachments),
+    await transcribeAudioAttachments(userMessage, attachments, onSystemWarning),
     images,
   );
 
@@ -1512,6 +1518,17 @@ export type DispatchHooks = {
   /// outbound (e.g. Telegram /sendMessage). For the desktop runner
   /// this is a no-op.
   onAgentReply: (agent: string, text: string) => void;
+  /// User-visible warning channel. Fires when a feature the user
+  /// invoked can't be delivered (e.g. audio transcribe failure on
+  /// the bridge path). The bridge wires this to:
+  ///   1. Send a separate Telegram message so the user sees the
+  ///      specific error on their phone instead of the orchestrator's
+  ///      paraphrase.
+  ///   2. Mirror to the desktop chat via owllm:chat:appended so the
+  ///      React UI shows a yellow system note too.
+  /// Optional — older callers can omit it; transcribe failures then
+  /// silently fall back to the model-side paraphrase.
+  onSystemWarning?: (text: string) => void;
 };
 
 export type DispatchInput = {
@@ -1667,6 +1684,11 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       // Persistent CLI session for the orchestrator — memory accumulates
       // across dispatches within the same project.
       getClaudeSession(projectId, orch.name),
+      // Surface transcribe / CLI-image failures the user can act on
+      // (open Accounts → Install voice runtime, or set OPENAI_API_KEY)
+      // instead of letting the orchestrator paraphrase them as "I'm
+      // still unable to transcribe…".
+      hooks.onSystemWarning,
     );
   } finally {
     hooks.onAgentEnd(orch.name);

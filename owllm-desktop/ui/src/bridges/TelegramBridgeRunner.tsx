@@ -83,6 +83,22 @@ type BridgeConfigs = { telegram: TelegramConfig; whatsapp: unknown };
 
 const BRAINSTORM_PROJECT_NAME = "Telegram Brainstorm Inbox";
 
+function mimeFromFilename(name?: string): string | null {
+  const ext = (name ?? "").toLowerCase().split(".").pop() ?? "";
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+  if (ext === "png") return "image/png";
+  if (ext === "gif") return "image/gif";
+  if (ext === "webp") return "image/webp";
+  if (ext === "heic") return "image/heic";
+  if (ext === "mp3") return "audio/mpeg";
+  if (ext === "wav") return "audio/wav";
+  if (ext === "ogg" || ext === "oga" || ext === "opus") return "audio/ogg";
+  if (ext === "m4a" || ext === "aac") return "audio/aac";
+  if (ext === "webm") return "audio/webm";
+  if (ext === "flac") return "audio/flac";
+  return null;
+}
+
 function norm(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
@@ -108,6 +124,12 @@ function getChatProject(chatId: number): string {
 
 function setChatProject(chatId: number, projectId: string) {
   try { localStorage.setItem(chatProjectKey(chatId), projectId); } catch {}
+}
+
+function emitRuntimeStatus(detail: { status: "running" | "stopped" | "error"; lastError?: string; lastUpdateId?: number; seenChatId?: number }) {
+  try {
+    window.dispatchEvent(new CustomEvent("owllm:telegram:runtime", { detail }));
+  } catch {}
 }
 
 function scoreProject(text: string, project: ProjectRow): number {
@@ -797,6 +819,24 @@ export default function TelegramBridgeRunner() {
             // send. Specialists are not relayed to the phone.
             if (isOrch) finalForTelegram = reply;
           },
+          // System warnings (transcribe failure, CLI image drop) get
+          // shipped to BOTH the desktop chat (yellow note) AND Telegram
+          // so the user sees the specific reason on whichever surface
+          // they're looking at — instead of the orchestrator
+          // paraphrasing it as "I'm still unable to transcribe…".
+          onSystemWarning: (warning: string) => {
+            const msg: GoalMsg = { role: "system", color: "#ffd97a", text: warning };
+            try {
+              window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+                detail: { projectId, messages: [msg], source: "telegram" },
+              }));
+            } catch {}
+            if (projectId) persistChat(projectId, [msg]).catch(() => {});
+            // Best-effort Telegram send; don't await so a slow API call
+            // can't stall the dispatch. The "⚠" is enough of a marker
+            // for users skimming on mobile.
+            sendTelegram(tgCfg.bot_token, chatId, warning).catch(() => {});
+          },
         }
       );
       finalForTelegram = finalForTelegram || finalReply;
@@ -844,8 +884,14 @@ export default function TelegramBridgeRunner() {
   // Telegram's getUpdates queues server-side, so we don't lose any
   // inbound by serializing.
   useEffect(() => {
-    if (!started) return;
-    if (!cfg?.bot_token) return;
+    if (!started) {
+      emitRuntimeStatus({ status: "stopped" });
+      return;
+    }
+    if (!cfg?.bot_token) {
+      emitRuntimeStatus({ status: "error", lastError: "Missing Telegram bot token. Save the bridge config, then Start." });
+      return;
+    }
 
     let dead = false;
     let offset = 0;
@@ -861,13 +907,15 @@ export default function TelegramBridgeRunner() {
             timeout: 20,
           });
           if (dead) return;
+          emitRuntimeStatus({ status: "running", lastUpdateId: Math.max(0, offset - 1) });
           for (const upd of (updates || [])) {
             if (typeof upd.update_id === "number") {
               offset = Math.max(offset, upd.update_id + 1);
             }
-            const msg = upd.message;
+            const msg = upd.message || upd.edited_message || upd.channel_post || upd.edited_channel_post;
             const chatId: number | undefined = msg?.chat?.id;
             if (typeof chatId !== "number") continue;
+            emitRuntimeStatus({ status: "running", lastUpdateId: upd.update_id, seenChatId: chatId });
             const allow = Array.isArray(cfg.allowed_chat_ids) ? cfg.allowed_chat_ids : [];
             if (allow.length > 0 && !allow.includes(chatId)) {
               console.warn(`[telegram] chat ${chatId} not on allow-list — ignored.`);
@@ -880,7 +928,8 @@ export default function TelegramBridgeRunner() {
             const hasPhoto = Array.isArray(msg?.photo) && msg.photo.length > 0;
             const hasVoice = !!msg?.voice?.file_id;
             const hasAudio = !!msg?.audio?.file_id;
-            const docMime: string = msg?.document?.mime_type || "";
+            const rawDocName: string = msg?.document?.file_name || "";
+            const docMime: string = msg?.document?.mime_type || mimeFromFilename(rawDocName) || "";
             const docIsImage = !!msg?.document?.file_id && docMime.startsWith("image/");
             const docIsAudio = !!msg?.document?.file_id && docMime.startsWith("audio/");
             const hasMedia = hasPhoto || hasVoice || hasAudio || docIsImage || docIsAudio;
@@ -900,7 +949,7 @@ export default function TelegramBridgeRunner() {
             const audioMime = hasAudio ? (msg.audio.mime_type || null) : null;
             const audioName = hasAudio ? (msg.audio.file_name || undefined) : undefined;
             const docId = (docIsImage || docIsAudio) ? msg.document.file_id : null;
-            const docName = (docIsImage || docIsAudio) ? (msg.document.file_name || undefined) : undefined;
+            const docName = (docIsImage || docIsAudio) ? (rawDocName || undefined) : undefined;
 
             if (immediateCommand) {
               handle(chatId, text, []).catch(e => console.error("[telegram] command failed", e));
@@ -936,6 +985,7 @@ export default function TelegramBridgeRunner() {
           }
         } catch (e: any) {
           console.error("[telegram] poll loop error", e);
+          emitRuntimeStatus({ status: "error", lastError: String(e?.message ?? e) });
           if (dead) return;
           await sleep(5000);
         }
@@ -945,6 +995,7 @@ export default function TelegramBridgeRunner() {
     console.log(`[telegram] bridge polling started for token …${cfg.bot_token.slice(-6)} project=${cfg.project_id || "(any)"}`);
     return () => {
       dead = true;
+      emitRuntimeStatus({ status: "stopped" });
       console.log("[telegram] bridge polling stopped");
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps

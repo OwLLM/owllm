@@ -1002,6 +1002,13 @@ export async function streamChatCompletion(
   ];
   const MAX_TOOL_TURNS = 8;
   let lastReply = "";
+  console.log("[dispatch.local] start", {
+    port, modelId, provider,
+    historyLen: history?.length ?? 0,
+    promptChars: augmentedSystem.length,
+    userChars: effectiveText.length,
+    toolsCount: openaiTools.length,
+  });
   // llama-server returns HTTP 503 {"error":{"message":"Loading model",...}}
   // while the GGUF is still mmap'ing. The Telegram bridge's lazy-start
   // poll only knows the port is bound; on cold cache a 7B+ model can
@@ -1064,12 +1071,29 @@ export async function streamChatCompletion(
       await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
     }
     if (!resp) throw new Error("llama-server never responded — server may have crashed");
+    console.log(`[dispatch.local] turn=${turn} response`, {
+      status: resp.status, ok: resp.ok, hasBody: !!resp.body,
+    });
+    // Non-OK after retries: surface the body. The previous code piped
+    // the response into consumeOpenAISse which silently no-op'd on
+    // bad chunks, so the user got "flashes a start, then nothing" —
+    // no clue why. Now we read the body, throw with the real reason.
+    if (!resp.ok) {
+      const bodyText = await resp.text().catch(() => "");
+      const errMsg = `llama-server ${resp.status}: ${bodyText.slice(0, 500) || "(no body)"}`;
+      console.warn("[dispatch.local] non-OK response", errMsg);
+      throw new Error(errMsg);
+    }
     // consumeOpenAISse calls onDelta for each visible token AND returns
     // the full assembled assistant text. We also collect any native
     // delta.tool_calls into nativeCalls so we can run them straight,
     // before falling back to the XML protocol parser.
     const nativeCalls: ToolCall[] = [];
     lastReply = await consumeOpenAISse(resp, onDelta, onThought, nativeCalls);
+    console.log(`[dispatch.local] turn=${turn} sse done`, {
+      replyChars: lastReply.length, replyPreview: lastReply.slice(0, 200),
+      nativeCalls: nativeCalls.length,
+    });
     if (!toolsBlock && nativeCalls.length === 0) break; // no tools wired → no need to parse
     // Prefer native tool_calls — modern models that emit those would
     // otherwise also leave broken `<|tool_call|>` special-token soup in
@@ -1449,6 +1473,11 @@ async function consumeOpenAISse(
       if (to) clearTimeout(to);
     }
   };
+  // Captured by the inner try/catch when llama-server emits an error
+  // event in the SSE stream — the outer loop checks this AFTER the
+  // catch swallows the throw so we can break + rethrow at the right
+  // level instead of being silently skipped as "malformed chunk".
+  let serverError: string | null = null;
   while (true) {
     let res: ReadableStreamReadResult<Uint8Array>;
     try {
@@ -1474,6 +1503,20 @@ async function consumeOpenAISse(
       if (!body || body === "[DONE]") continue;
       try {
         const j = JSON.parse(body);
+        // llama-server can emit an error mid-stream as
+        // `data: {"error": {"message": "...", "type": "..."}}` (or
+        // similar). The previous code only read `choices[0].delta`
+        // and silently skipped this — that's the "flashes a start
+        // but produces nothing" the user kept hitting. Surface the
+        // error to the caller via onDelta so it lands in the chat.
+        if (j?.error) {
+          const errMsg = typeof j.error === "string"
+            ? j.error
+            : (j.error?.message || JSON.stringify(j.error));
+          console.warn("[dispatch.sse] server error event", errMsg);
+          serverError = errMsg;
+          continue;
+        }
         const delta = j?.choices?.[0]?.delta;
         if (!delta) continue;
         // DeepSeek-R1 / o-series reasoning channel — separate field.
@@ -1513,6 +1556,9 @@ async function consumeOpenAISse(
         }
       } catch { /* skip malformed chunk */ }
     }
+  }
+  if (serverError) {
+    throw new Error(`llama-server returned an error: ${serverError}`);
   }
   // Finalise native tool_calls — convert each (name, accumulated args JSON)
   // into the same ToolCall shape parseToolCalls returns so the caller

@@ -6861,7 +6861,17 @@ export default function AgentsPage() {
   // log buffer. The dispatch loop above handles the orchestrator-led
   // flow; this lets the user sneak in a side note without re-running.
   const onSupSend = async (text: string) => {
-    if (supSendBusyRef.current) return;
+    if (supSendBusyRef.current) {
+      console.log("[onSupSend] ignored — already busy");
+      return;
+    }
+    console.log("[onSupSend] start", {
+      textChars: text.length,
+      teamModel: effectiveTeamModel,
+      serverRunning: serverState.running,
+      serverModelId: serverState.model_id,
+      serverPort: serverState.port,
+    });
     supSendBusyRef.current = true;
     setSupSendBusy(true);
     // Fresh abort controller for THIS run. Any owllm:dispatch-abort
@@ -6941,6 +6951,14 @@ export default function AgentsPage() {
     const freshServerState = supProvider === "local"
       ? await invoke<ServerStatus>("server_status").catch(() => serverState)
       : serverState;
+    console.log("[onSupSend] about to dispatch", {
+      provider: supProvider,
+      modelId: supModelId,
+      orchKey,
+      freshPort: freshServerState.port,
+      freshRunning: freshServerState.running,
+      freshModelId: freshServerState.model_id,
+    });
     let criticReview = "";
     if (needsCriticalThinkerReview(text)) {
       const CRITIC_NAME = CRITIC_AGENT_NAME;

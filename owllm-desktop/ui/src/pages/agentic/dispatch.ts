@@ -1015,12 +1015,13 @@ export async function streamChatCompletion(
   // need another 30-60 s before /v1/chat/completions stops 503'ing.
   // Without this retry the first dispatch after a cold start bubbled
   // the raw 503 body up to the user as "(dispatch error: …)".
-  // 5 min ceiling for the combined "connection refused + 503 Loading
-  // model" retry budget. A 30 B+ GGUF cold-loading off a HDD can take
-  // 2–3 min before /v1/chat/completions accepts the first request,
-  // and the user's been hitting "first message missed" because the
-  // previous 90 s cap fell short of that window.
-  const LOAD_RETRY_MS = 300_000;
+  // 15 min ceiling for the combined "connection refused + 503 Loading
+  // model" retry budget. Qwen 3.6 35B mmap'ing through a 22.5 GB GPU
+  // with -ngl 99 takes 6-12 min on the first cold load (layer paging
+  // while the OS warms the file cache). The previous 5 min cap fell
+  // short and the dispatch threw the raw 503 body. The Stop button
+  // on the dock will abort the wait early if the user gives up.
+  const LOAD_RETRY_MS = 900_000;
   const LOAD_RETRY_DELAY = 1500;
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
@@ -1067,7 +1068,17 @@ export async function streamChatCompletion(
       // retry inside budget. Otherwise this IS the error we throw.
       const errBody = await resp.text().catch(() => "");
       if (resp.status === 503 && /loading model/i.test(errBody) && Date.now() < loadDeadline) {
-        console.log(`[dispatch.local] 503 Loading model — retrying in ${LOAD_RETRY_DELAY}ms`);
+        const elapsedSec = Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000);
+        console.log(`[dispatch.local] 503 Loading model — elapsed ${elapsedSec}s, retrying in ${LOAD_RETRY_DELAY}ms`);
+        // Fire a window event so AgentsPage / ChatPage can show a
+        // "waiting on llama-server N s" status without us needing to
+        // thread a status callback through every signature. Listener
+        // is optional — bridges ignore it.
+        try {
+          window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
+            detail: { elapsedSec, port },
+          }));
+        } catch { /* not in browser */ }
         await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
         continue;
       }

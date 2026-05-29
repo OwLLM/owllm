@@ -1251,7 +1251,13 @@ function AgentChatTile({
   const tailSig = `${messages.length}:${messages[messages.length - 1]?.text?.length ?? 0}`;
   useLayoutEffect(() => {
     const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    // Don't yank the view down while the user is selecting text or
+    // has scrolled up to read earlier turns.
+    const sel = window.getSelection?.();
+    if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
   }, [tailSig]);
   const rgb = hexToRgbStr(accent);
   // Only show this agent's own reply lines. The user's "you" turn and
@@ -1420,7 +1426,14 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
   const suTailSig = `${lastMessages.length}:${lastMessages[lastMessages.length - 1]?.text?.length ?? 0}`;
   useLayoutEffect(() => {
     const el = suChatRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    // Skip the auto-scroll while the user is selecting text inside
+    // this pane — otherwise the every-token scrollTop jump cancels
+    // the drag mid-highlight (user spec 2026-05-29).
+    const sel = window.getSelection?.();
+    if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
   }, [suTailSig, projectId]);
   const submit = () => {
     if (sendBusy) return;
@@ -3823,7 +3836,19 @@ function OrchestratorPane({
       activeTab === "tools"   ? toolsRef   :
                                 fullRef;
     const el = ref.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    // STOP auto-scrolling if (a) the user has scrolled UP to read
+    // earlier text or (b) the user is actively selecting text — the
+    // previous version called el.scrollTop = el.scrollHeight on every
+    // streamed token, which jerked the view down mid-selection and
+    // the user reported 'almost impossible to highlight'. Keep the
+    // auto-scroll only when the viewport is already pinned to the
+    // bottom (within 40 px) AND nothing is selected.
+    const sel = window.getSelection?.();
+    const selectionActive = sel != null && !sel.isCollapsed && el.contains(sel.anchorNode);
+    if (selectionActive) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (nearBottom) el.scrollTop = el.scrollHeight;
   }, [activeTab, focus, tailSig]);
 
   // ---- User-Input dock (bottom of the pane, 2026-05-28 restructure) ----
@@ -6242,6 +6267,21 @@ export default function AgentsPage() {
     window.addEventListener("owllm:dispatch-abort", onAbort);
     return () => window.removeEventListener("owllm:dispatch-abort", onAbort);
   }, []);
+  // Live cold-load status text. dispatch.ts fires owllm:llama:loading
+  // every 1.5 s while llama-server is still mmap'ing the GGUF; we
+  // write the elapsed time onto whatever the supSendBusy run's most-
+  // recent orchestrator entry is so the user sees we're WAITING, not
+  // frozen. Cleared when the stream starts producing real tokens.
+  const [llamaLoadingSec, setLlamaLoadingSec] = useState<number | null>(null);
+  useEffect(() => {
+    const onLoading = (e: Event) => {
+      const detail = (e as CustomEvent<{ elapsedSec: number }>).detail;
+      if (!detail) return;
+      setLlamaLoadingSec(detail.elapsedSec);
+    };
+    window.addEventListener("owllm:llama:loading", onLoading as EventListener);
+    return () => window.removeEventListener("owllm:llama:loading", onLoading as EventListener);
+  }, []);
   // Auto-approve flag — persisted per project to localStorage so a
   // user who checks "auto-approve every tool call" doesn't have to
   // re-check it after every app restart (which would otherwise
@@ -7047,21 +7087,41 @@ export default function AgentsPage() {
       // view of streamedReply and emit only the new tail.
       let displayedClean = "";
       const liveStrip = (delta: string) => {
+        // First real token means the model finished loading — clear
+        // the "still loading" banner.
+        setLlamaLoadingSec(null);
         streamedReply += delta;
         const cleanFull = stripFabricatedToolOutput(streamedReply);
+        if (cleanFull === displayedClean) return;  // pure noise stripped
         const diff = cleanFull.slice(displayedClean.length);
-        if (!diff) {
-          // The delta WAS noise we just stripped — nothing to push.
-          return;
-        }
         displayedClean = cleanFull;
+        // Always SET the entry's text to cleanFull (not append) so
+        // when later chunks complete a `<|tool_call>` block we can
+        // RETROACTIVELY remove it from the visible chat. The
+        // previous append-only approach left partial tool markers
+        // on screen forever.
         setSupChat(curr => {
           const out = curr.slice();
           const last = out[out.length - 1];
           if (last) out[out.length - 1] = { ...last, text: cleanFull };
           return out;
         });
-        streamLog(orchKey, diff);
+        // Same for the agent-log buffer that drives the right pane.
+        setAgentLogs(prev => {
+          const cur = prev.get(orchKey) ?? [];
+          if (cur.length === 0) return prev;
+          let idx = cur.length - 1;
+          while (idx >= 0 && cur[idx].role !== orchKey) idx -= 1;
+          if (idx < 0) return prev;
+          const next = new Map(prev);
+          const updated = [...cur];
+          updated[idx] = { ...updated[idx], text: cleanFull };
+          next.set(orchKey, updated);
+          return next;
+        });
+        // streamLog kept for any side-effects (active-set bookkeeping,
+        // bridge mirroring) but now receives the diff for completeness.
+        if (diff) streamLog(orchKey, "");  // no-op append; cleanFull set above
       };
       const returned = await streamChatCompletion(
         freshServerState.port ?? 0,
@@ -7138,6 +7198,7 @@ export default function AgentsPage() {
     } finally {
       supSendBusyRef.current = false;
       setSupSendBusy(false);
+      setLlamaLoadingSec(null);
       if (supSendAbortRef.current === supSendAbort) {
         supSendAbortRef.current = null;
       }
@@ -8316,6 +8377,21 @@ export default function AgentsPage() {
         models={models}
         onBriefSaved={() => setHasBriefForProject(true)}
       />
+      {llamaLoadingSec !== null && (
+        <div data-ui="LlamaLoadingBanner" style={{
+          margin: "0 23px 6px",
+          padding: "6px 12px",
+          background: "linear-gradient(135deg, rgba(38,30,10,0.95) 0%, rgba(18,14,4,0.95) 100%)",
+          border: "1px solid rgba(255,217,122,0.55)",
+          borderRadius: 8,
+          color: "#ffd97a",
+          fontSize: 12, fontWeight: 600,
+          display: "flex", alignItems: "center", gap: 10,
+        }}>
+          <span style={{ fontSize: 16 }}>⏳</span>
+          <span>llama-server is loading the model — waited {llamaLoadingSec}s. Big GGUFs (30 B+) on a tight GPU can take 5-10 min on the first load. Press the Stop button to abort.</span>
+        </div>
+      )}
       <div data-ui="WorkspaceStack" style={{
         flex:1, minHeight:0, margin:"0 23px",
         display:"flex", overflow:"hidden", background:"var(--bg-app)", padding:0,

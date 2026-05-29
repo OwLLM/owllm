@@ -650,103 +650,114 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
             return Ok(Vec::new());
         }
         let mut out: Vec<DownloadedModel> = Vec::new();
-        for root in roots {
-        for entry in std::fs::read_dir(&root).map_err(|e| format!("readdir: {e}"))? {
-            let entry = match entry { Ok(e) => e, Err(_) => continue };
-            let path = entry.path();
-            let name = match entry.file_name().to_str() {
-                Some(s) if !s.starts_with('.') => s.to_string(),
-                _ => continue,
-            };
-            if path.is_dir() {
-                let (total, _) = dir_summary(&path);
-                let has_config = path.join("config.json").is_file();
-                // Three weight-format probes — a model is "usable" if
-                // it has *any* of these on disk:
-                //   safetensors  : HF transformers format (preferred)
-                //   bin          : legacy pytorch_model.bin / shards
-                //   gguf         : llama.cpp single-file format
-                // The previous heuristic only checked the first two,
-                // so GGUF-only directories (very common — e.g. any
-                // "<repo>-GGUF" mirror) fell through to NEW and
-                // surfaced as "⏬ Incomplete" even though they were
-                // actually ready to run.
-                let mut has_safetensors = false;
-                let mut has_gguf = false;
-                if let Ok(it) = std::fs::read_dir(&path) {
-                    for e in it.flatten() {
-                        let p = e.path();
-                        if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
-                            match ext.to_ascii_lowercase().as_str() {
-                                "safetensors" | "bin" => has_safetensors = true,
-                                "gguf" => has_gguf = true,
-                                _ => {}
+        // Recursive helper. Walks the level under `dir`; for each subdir
+        // either (a) emits a DownloadedModel if it looks like a real
+        // model dir (config.json or weight files at this level), or
+        // (b) RECURSES one level deeper when the subdir is a namespace
+        // (no weights here, only further dirs). hf_download now writes
+        // to <models-root>/<org>/<model>/, so the user's Qwen3.6 lives
+        // at `unsloth/Qwen3.6-35B-A3B-GGUF/...gguf` — invisible to the
+        // old depth-1 scanner. Display name becomes `<org>/<model>` so
+        // the user sees the same id HF shows.
+        fn scan_level(
+            dir: &std::path::Path,
+            prefix: &str,
+            out: &mut Vec<DownloadedModel>,
+            vram_gb: Option<f32>,
+            depth: usize,
+        ) -> std::io::Result<()> {
+            if depth > 3 { return Ok(()); }
+            for entry in std::fs::read_dir(dir)? {
+                let entry = match entry { Ok(e) => e, Err(_) => continue };
+                let path = entry.path();
+                let raw_name = match entry.file_name().to_str() {
+                    Some(s) if !s.starts_with('.') => s.to_string(),
+                    _ => continue,
+                };
+                let display_name = if prefix.is_empty() {
+                    raw_name.clone()
+                } else {
+                    format!("{prefix}/{raw_name}")
+                };
+                if path.is_dir() {
+                    // Probe for weights / config at THIS level.
+                    let has_config = path.join("config.json").is_file();
+                    let mut has_safetensors = false;
+                    let mut has_gguf = false;
+                    let mut has_any_file = false;
+                    let mut has_subdir = false;
+                    if let Ok(it) = std::fs::read_dir(&path) {
+                        for e in it.flatten() {
+                            let p = e.path();
+                            if p.is_dir() {
+                                has_subdir = true;
+                                continue;
+                            }
+                            has_any_file = true;
+                            if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                                match ext.to_ascii_lowercase().as_str() {
+                                    "safetensors" | "bin" => has_safetensors = true,
+                                    "gguf" => has_gguf = true,
+                                    _ => {}
+                                }
                             }
                         }
                     }
+                    let has_weights = has_safetensors || has_gguf;
+                    // Namespace dir: no weights here, only subdirs.
+                    // Recurse and surface each child as
+                    // `<this>/<child>` so the user sees the full id.
+                    if !has_weights && !has_config && !has_any_file && has_subdir {
+                        let _ = scan_level(&path, &display_name, out, vram_gb, depth + 1);
+                        continue;
+                    }
+                    let (total, _) = dir_summary(&path);
+                    let has_marker = path.join(".download").is_file()
+                                  || path.join(".incomplete").is_file();
+                    let is_incomplete = has_marker
+                        || (has_config && !has_weights && total < 100 * 1024 * 1024);
+                    let onboarding = if is_incomplete {
+                        "BROKEN"
+                    } else if has_gguf {
+                        "READY"
+                    } else if has_safetensors {
+                        "RAW"
+                    } else {
+                        "NEW"
+                    };
+                    let compat = crate::recommendations::parse_params_b(&display_name)
+                        .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
+                    out.push(DownloadedModel {
+                        name: display_name.clone(),
+                        path: path.to_string_lossy().into_owned(),
+                        size: fmt_size(total),
+                        icons: icons_for_name(&display_name),
+                        env_key: None,
+                        is_incomplete,
+                        onboarding: onboarding.to_string(),
+                        compat,
+                    });
+                } else if path.extension().map(|e| e == "gguf").unwrap_or(false) {
+                    let meta = entry.metadata().ok();
+                    let sz = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                    let compat = crate::recommendations::parse_params_b(&display_name)
+                        .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
+                    out.push(DownloadedModel {
+                        name: display_name.clone(),
+                        path: path.to_string_lossy().into_owned(),
+                        size: fmt_size(sz),
+                        icons: "📦".to_string(),
+                        env_key: Some("llama.cpp".to_string()),
+                        is_incomplete: false,
+                        onboarding: "READY".to_string(),
+                        compat,
+                    });
                 }
-                let has_weights = has_safetensors || has_gguf;
-                let has_marker = path.join(".download").is_file()
-                              || path.join(".incomplete").is_file();
-                // GGUF mirrors typically have no config.json — that
-                // alone shouldn't flag them as incomplete. The
-                // incomplete heuristic now requires config.json + no
-                // weights (a real "stalled download" signature).
-                let is_incomplete = has_marker
-                    || (has_config && !has_weights && total < 100 * 1024 * 1024);
-                // The Rust+Tauri rewrite ships ONLY llama-server.exe
-                // for inference — it can load GGUF directly but NOT
-                // safetensors / pytorch_model.bin. The old Python app
-                // could load both via a transformers venv; that's
-                // gone. So a dir with .safetensors but no .gguf is
-                // not "ready" — it needs an HF→GGUF conversion (or a
-                // re-download of a -GGUF mirror) before it shows up
-                // in the model picker. RAW makes that visible per
-                // user spec 2026-05-29 ("should put ready if GGUF
-                // format and another tag if it is still raw").
-                let onboarding = if is_incomplete {
-                    "BROKEN"
-                } else if has_gguf {
-                    "READY"
-                } else if has_safetensors {
-                    "RAW"
-                } else {
-                    // No weights yet — still in flight or a partial
-                    // clone. Show as NEW so the user can decide.
-                    "NEW"
-                };
-                // Parse "Nb" / "N.NB" out of the dir name so the GPU-fit
-                // border matches what Browse Recommended shows for the same
-                // model. Best-effort: no match → no badge (default blue).
-                let compat = crate::recommendations::parse_params_b(&name)
-                    .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
-                out.push(DownloadedModel {
-                    name: name.clone(),
-                    path: path.to_string_lossy().into_owned(),
-                    size: fmt_size(total),
-                    icons: icons_for_name(&name),
-                    env_key: None,
-                    is_incomplete,
-                    onboarding: onboarding.to_string(),
-                    compat,
-                });
-            } else if path.extension().map(|e| e == "gguf").unwrap_or(false) {
-                let meta = entry.metadata().ok();
-                let sz = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                let compat = crate::recommendations::parse_params_b(&name)
-                    .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
-                out.push(DownloadedModel {
-                    name: name.clone(),
-                    path: path.to_string_lossy().into_owned(),
-                    size: fmt_size(sz),
-                    icons: "📦".to_string(),
-                    env_key: Some("llama.cpp".to_string()),
-                    is_incomplete: false,
-                    onboarding: "READY".to_string(),
-                    compat,
-                });
             }
+            Ok(())
         }
+        for root in &roots {
+            let _ = scan_level(root, "", &mut out, vram_gb, 0);
         }
         // Dedup by name — same model present in both new and legacy
         // roots would otherwise show twice. Keep the first seen.

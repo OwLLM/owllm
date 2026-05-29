@@ -7006,6 +7006,7 @@ export default function AgentsPage() {
     setSupChat(prev => [...prev, replyMsg]);
     appendLog(orchKey, replyMsg);
     // Active state — drives the per-node pulse in the canvas.
+    console.log("[onSupSend] activating orchestrator", { orchKey });
     addActive(orchKey);
     // Track the streamed reply so we can forward it to Telegram once
     // the stream completes (desktop → phone mirror, opposite direction

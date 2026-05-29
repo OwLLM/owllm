@@ -767,7 +767,20 @@ export default function ModelsPage() {
         overflow: "auto",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, flexWrap: "wrap" }}>
+      {/* Sticky toolbar — tabs + filters + order-by + search live in
+          one block at the top of the page that doesn't scroll with
+          the cards. Per user spec 2026-05-29: filter bar common to
+          Browse / Downloaded / Tuned (was Browse-only); the meaningless
+          'X Downloaded / Y Tuned / 0 Free / 0 Quantized' counts that
+          used to live on the right are gone; Order-by + search row
+          moves up to fill that space. */}
+      <div data-ui="modelsToolbarSticky" style={{
+        position: "sticky", top: 0, zIndex: 40,
+        background: "var(--bg-panel)",
+        paddingBottom: 8,
+        marginBottom: 10,
+      }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
         {([
           { key: "browse",     dataUi: "browseTabBtn",     label: "🚀 Browse Models" },
           { key: "downloaded", dataUi: "downloadedTabBtn", label: "💾 Downloaded"    },
@@ -790,10 +803,10 @@ export default function ModelsPage() {
             </button>
           );
         })}
-        {/* Filter checkbox container — sits on the SAME row as the tab
-            buttons. Browse-only; the other tabs don't filter. The
-            internal 2×4 grid of the container is left untouched. */}
-        {tab === "browse" && (
+        {/* Filter checkbox container — now visible across Browse /
+            Downloaded / Tuned. Cache tab has no concept of these
+            filters so it still skips the block. */}
+        {tab !== "cache" && (
         <div
           data-ui="formatFilterContainer"
           style={{
@@ -862,67 +875,50 @@ export default function ModelsPage() {
           })}
         </div>
         )}
-        <div style={{ marginLeft: "auto", display: "flex", gap: 16, fontSize: 11, color: "var(--fg-muted)" }}>
-          <span>{downloaded.length} Downloaded</span>
-          <span>{tuned.length} Tuned</span>
-          <span>0 Free Models</span>
-          <span>0 Quantized (8bit / 4bit)</span>
-        </div>
       </div>
-      {tab === "browse" && <>
-      {/* Search row — separate from the tab+filter row above so the
-          search field gets full width on narrow viewports. */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-      <div
-        data-ui="searchContainer"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          marginLeft: "auto",
-          width: 430,
-          flexShrink: 0,
-        }}
-      >
+      {/* Order-by + search row — now common to Browse / Downloaded /
+          Tuned (was Browse-only). On Browse, Search hits HuggingFace;
+          on Downloaded / Tuned the query becomes a live filter over
+          the local list (substring match on model name). */}
+      {tab !== "cache" && (
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700 }}>Order by:</span>
         <select
           data-ui="sortSelector"
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
           title="Sort by"
-          // INPUT.field reads --bg-input / --fg / --border-strong so
-          // the select switches with dark/light theme.
-          style={{ ...INPUT.field, padding: "6px 8px", cursor: "pointer" }}
+          style={{ ...INPUT.field, padding: "6px 8px", cursor: "pointer", width: 170, flexShrink: 0 }}
         >
           <option value="downloads">↓ Downloads</option>
           <option value="likes">❤ Likes</option>
           <option value="lastModified">🕓 Uploaded</option>
         </select>
         <input
-          placeholder="Search Hugging Face..."
+          placeholder={tab === "browse" ? "Search Hugging Face…" : "Filter…"}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") runSearch(query); }}
-          style={{ ...INPUT.field, flex: 1, minWidth: 0 }}
+          onKeyDown={(e) => { if (e.key === "Enter" && tab === "browse") runSearch(query); }}
+          style={{ ...INPUT.field, flex: 1, minWidth: 120 }}
         />
         <button
           title="Clear search"
-          onClick={() => { setQuery(""); runSearch(""); }}
-          // Ghost button reads --ghost-bg / --ghost-fg — switches with theme.
-          style={{ ...BUTTON.ghost, padding: "6px 10px" }}
+          onClick={() => { setQuery(""); if (tab === "browse") runSearch(""); }}
+          style={{ ...BUTTON.ghost, padding: "6px 10px", flexShrink: 0 }}
         >
           ×
         </button>
-        <button
-          onClick={() => runSearch(query)}
-          disabled={loadingHits}
-          // Primary action: pulls --accent so the user's colour pick
-          // shows on this one button (intentionally scoped — most of
-          // the UI keeps its violet/blue tone).
-          style={BUTTON.primary}
-        >
-          {loadingHits ? "…" : "Search"}
-        </button>
+        {tab === "browse" && (
+          <button
+            onClick={() => runSearch(query)}
+            disabled={loadingHits}
+            style={{ ...BUTTON.primary, flexShrink: 0 }}
+          >
+            {loadingHits ? "…" : "Search"}
+          </button>
+        )}
       </div>
+      )}
       </div>
 
       {hfError && (
@@ -1004,6 +1000,7 @@ export default function ModelsPage() {
           })}
         </div>
       )}
+      {tab === "browse" && <>
       {/* Qt main.py:8257-8289 — "📚 Recommended Models" at 16pt bold #667eea,
           followed inline (no stretch) by a 3-colour legend row. Dots are
           14pt; labels are 10pt #9aa0a6. legend_row contentsMargins (16,0,0,0)
@@ -1155,7 +1152,32 @@ export default function ModelsPage() {
       </div>
       )}
 
-      {tab === "downloaded" && (
+      {tab === "downloaded" && (() => {
+        // Live filter: substring match on the model name + apply the
+        // top filter checkboxes (gguf / quantized / vision / etc.) so
+        // the user can narrow down a long Downloaded list.
+        const q = query.trim().toLowerCase();
+        const list = downloaded.filter(d => {
+          if (q && !d.name.toLowerCase().includes(q)) return false;
+          if (filters.size > 0) {
+            const nameL = d.name.toLowerCase();
+            for (const f of filters) {
+              const matched = (
+                (f === "gguf"        && (nameL.includes("gguf") || d.envKey === "llama.cpp")) ||
+                (f === "instruct"    && /(\binstruct\b|-it\b|-it-)/.test(nameL)) ||
+                (f === "abliterated" && /(abliter|uncensored|heretic)/.test(nameL)) ||
+                (f === "adapter"     && /(lora|adapter)/.test(nameL)) ||
+                (f === "quantized"   && /(awq|gptq|q[2-8]_)/.test(nameL)) ||
+                (f === "reasoning"   && /(r1\b|qwq|reasoning|thinking)/.test(nameL)) ||
+                (f === "vision"      && /(vision|vl\b|-vl-)/.test(nameL)) ||
+                (f === "trainable"   && d.onboarding === "RAW")
+              );
+              if (!matched) return false;
+            }
+          }
+          return true;
+        });
+        return (
         <div style={CARD_GRID}>
           {downloaded.length === 0 ? (
             <div style={{
@@ -1172,7 +1194,18 @@ export default function ModelsPage() {
                 Switch to the Browse tab and click Download on a model card to add one here.
               </div>
             </div>
-          ) : downloaded.map((d) => (
+          ) : list.length === 0 ? (
+            <div style={{
+              gridColumn: "1 / -1",
+              padding: 24,
+              textAlign: "center",
+              color: "var(--fg-muted)",
+              border: "1px dashed #2a3242",
+              borderRadius: 8,
+            }}>
+              <div style={{ fontSize: 13 }}>No downloaded models match the current filter / search.</div>
+            </div>
+          ) : list.map((d) => (
             <DownloadedModelCard
               key={d.path}
               modelName={d.name}
@@ -1197,7 +1230,8 @@ export default function ModelsPage() {
             />
           ))}
         </div>
-      )}
+        );
+      })()}
 
       {tab === "tuned" && (
         <div style={CARD_GRID}>

@@ -657,11 +657,22 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                 // weights (a real "stalled download" signature).
                 let is_incomplete = has_marker
                     || (has_config && !has_weights && total < 100 * 1024 * 1024);
+                // The Rust+Tauri rewrite ships ONLY llama-server.exe
+                // for inference — it can load GGUF directly but NOT
+                // safetensors / pytorch_model.bin. The old Python app
+                // could load both via a transformers venv; that's
+                // gone. So a dir with .safetensors but no .gguf is
+                // not "ready" — it needs an HF→GGUF conversion (or a
+                // re-download of a -GGUF mirror) before it shows up
+                // in the model picker. RAW makes that visible per
+                // user spec 2026-05-29 ("should put ready if GGUF
+                // format and another tag if it is still raw").
                 let onboarding = if is_incomplete {
                     "BROKEN"
-                } else if has_weights {
-                    // Any usable weight format = READY.
+                } else if has_gguf {
                     "READY"
+                } else if has_safetensors {
+                    "RAW"
                 } else {
                     // No weights yet — still in flight or a partial
                     // clone. Show as NEW so the user can decide.

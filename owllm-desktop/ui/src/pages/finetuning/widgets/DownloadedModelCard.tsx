@@ -12,7 +12,12 @@ import CardShell, { compatBg } from "./CardShell";
 import CornerRibbon from "./CornerRibbon";
 import type { CompatColor, CompatibilityBadge } from "./modelCardShared";
 
-export type OnboardingStatus = "READY" | "BUILDING" | "BROKEN" | "NEW";
+// RAW = HuggingFace transformer-dir (.safetensors + config.json).
+// The new Rust runtime only ships llama-server which loads GGUF;
+// safetensors weights need conversion before they're usable. Old
+// Python app had a transformers venv that could load them in-place,
+// which is why this distinction didn't exist before.
+export type OnboardingStatus = "READY" | "RAW" | "BUILDING" | "BROKEN" | "NEW";
 
 export type DownloadedModelCardProps = {
   modelName: string;
@@ -37,6 +42,11 @@ function statusBadge(status: OnboardingStatus): { bg: string; text: string } | n
     case "BUILDING": return { bg: "#FF9800", text: "⏳ Building…" };
     case "BROKEN":   return { bg: "#f44336", text: "❌ Broken" };
     case "NEW":      return { bg: "#888",    text: "⏬ Incomplete" };
+    // RAW = downloaded but not in a format llama-server can serve
+    // (transformer dir of .safetensors / pytorch_model.bin). Needs
+    // a one-shot HF→GGUF conversion before it appears in the
+    // picker as a selectable model.
+    case "RAW":      return { bg: "#c08aff", text: "🧬 Raw (HF) — convert to GGUF" };
     case "READY":    return null;  // surfaced via the corner ribbon
   }
 }

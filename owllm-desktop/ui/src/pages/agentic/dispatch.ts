@@ -1023,6 +1023,13 @@ export async function streamChatCompletion(
           messages: liveMessages,
           stream: true,
           temperature,
+          // Cap per-turn generation. Without this llama-server can run
+          // until it hits the context window (32K+), which has been
+          // observed when a small model degenerates after a fake
+          // tool_call — the user saw a 5+ min hang with llama-server at
+          // 290 % CPU. 4096 covers any reasonable agent reply; if the
+          // model truly needs more it can dispatch again.
+          max_tokens: 4096,
           tools: openaiTools.length > 0 ? openaiTools : undefined,
         }),
         signal,
@@ -1386,8 +1393,42 @@ async function consumeOpenAISse(
   // string in several fragments — we concatenate so the caller can
   // JSON.parse the complete object when the stream ends.
   const toolArgs = new Map<number, string>();
+  // Idle-token timeout. If llama-server stops shipping chunks for
+  // STREAM_IDLE_MS, abort the read instead of blocking forever. The
+  // user hit a 5+ min hang where the model degenerated mid-tool-loop
+  // and llama-server kept churning without sending anything visible.
+  // Race the reader against a setTimeout that throws.
+  const STREAM_IDLE_MS = 90_000;
+  const readWithTimeout = async (): Promise<ReadableStreamReadResult<Uint8Array>> => {
+    let to: ReturnType<typeof setTimeout> | null = null;
+    try {
+      return await Promise.race([
+        reader.read(),
+        new Promise<ReadableStreamReadResult<Uint8Array>>((_, rej) => {
+          to = setTimeout(
+            () => rej(new Error(`stream idle for ${STREAM_IDLE_MS / 1000}s — aborting`)),
+            STREAM_IDLE_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (to) clearTimeout(to);
+    }
+  };
   while (true) {
-    const { done, value } = await reader.read();
+    let res: ReadableStreamReadResult<Uint8Array>;
+    try {
+      res = await readWithTimeout();
+    } catch (e) {
+      // Cancel the underlying body so llama-server stops generating.
+      try { await reader.cancel(); } catch { /* ignore */ }
+      // Return what we have so far instead of throwing — the caller's
+      // tool loop will see "no tool_calls, no progress" and break out
+      // gracefully, surfacing whatever the model managed to emit.
+      console.warn("[dispatch] SSE timeout:", e);
+      break;
+    }
+    const { done, value } = res;
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;

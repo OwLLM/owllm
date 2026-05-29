@@ -20,6 +20,21 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::ipc::Channel;
 
+/// URL-encode a path-shaped string, preserving slashes as route
+/// separators. `urlencoding::encode` percent-encodes EVERY non-alnum
+/// byte including '/', which breaks HF API routes like
+/// `/api/models/<org>/<model>/tree/<branch>` — the server rejects
+/// `<org>%2F<model>` with "Invalid repo name: repo name includes an
+/// url-encoded slash". Splitting on '/' and encoding each segment
+/// individually keeps the route intact while still escaping any
+/// other special chars in either segment (rare but possible).
+fn encode_path_preserve_slashes(s: &str) -> String {
+    s.split('/')
+        .map(|seg| urlencoding::encode(seg).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// Per-model summary returned by the search endpoint. We only
 /// surface fields the React UI actually renders — the API returns
 /// dozens more but we keep the wire payload small.
@@ -190,10 +205,17 @@ pub async fn hf_model_files(
     branch: Option<String>,
 ) -> Result<Vec<HfFile>, String> {
     let branch = branch.unwrap_or_else(|| "main".to_string());
+    // HF model ids are namespaced as `<org>/<model>` and the slash is a
+    // ROUTE separator, not part of the org name. Encoding it as %2F
+    // makes HF return: 400 "Invalid repo name: ... - repo name includes
+    // an url-encoded slash". urlencoding::encode encodes EVERYTHING
+    // including '/', so we split on '/' and encode each segment
+    // individually, then re-join. Branch names can in principle
+    // contain slashes too (git lets you), so same treatment.
     let url = format!(
         "https://huggingface.co/api/models/{}/tree/{}?recursive=true",
-        urlencoding::encode(&model_id),
-        urlencoding::encode(&branch),
+        encode_path_preserve_slashes(&model_id),
+        encode_path_preserve_slashes(&branch),
     );
     let mut req = client().get(&url);
     if let Some(tok) = hf_token() {
@@ -772,7 +794,7 @@ pub struct HfCacheSummary {
 /// Enumerate every cache root we know about. We probe each env var +
 /// the standard ~/.cache fallback. The same physical dir can be
 /// referenced by multiple env vars; dedupe by canonicalized path.
-fn cache_roots() -> Vec<PathBuf> {
+fn hf_cache_roots() -> Vec<PathBuf> {
     let mut candidates: Vec<PathBuf> = Vec::new();
     let push_if = |v: &mut Vec<PathBuf>, p: PathBuf| {
         if p.is_dir() && !v.iter().any(|x| x == &p) {
@@ -817,6 +839,69 @@ fn cache_roots() -> Vec<PathBuf> {
         })
 }
 
+fn push_dir_unique(out: &mut Vec<PathBuf>, path: PathBuf) {
+    if !path.is_dir() {
+        return;
+    }
+    let p = std::fs::canonicalize(&path).unwrap_or(path);
+    if !out.iter().any(|x| x == &p) {
+        out.push(p);
+    }
+}
+
+fn app_cache_roots() -> Vec<(String, PathBuf)> {
+    let mut roots: Vec<(String, PathBuf)> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut push_labeled = |label: &str, path: PathBuf| {
+        if !path.is_dir() {
+            return;
+        }
+        let canon = std::fs::canonicalize(&path).unwrap_or(path);
+        if !seen.iter().any(|x| x == &canon) {
+            seen.push(canon.clone());
+            roots.push((label.to_string(), canon));
+        }
+    };
+
+    for root in crate::paths::models_dirs_read() {
+        push_labeled("owllm-models", root);
+    }
+    for root in crate::paths::fine_tuned_dirs_read() {
+        push_labeled("owllm-fine-tuned", root);
+    }
+    if let Some(root) = crate::paths::llm_root() {
+        push_labeled("owllm-envs", root.join(".envs"));
+        push_labeled("owllm-wheelhouse", root.join("wheelhouse"));
+        push_labeled("owllm-runtime", root.join("runtime"));
+        push_labeled("owllm-python-runtime", root.join("python_runtime"));
+        push_labeled("owllm-vendor", root.join("vendor"));
+    }
+    if let Some(root) = crate::paths::runtime_cache_root() {
+        push_labeled("owllm-envs", root.join("envs"));
+        push_labeled("owllm-runtime", root.join("runtime"));
+        push_labeled("owllm-models", root.join("models"));
+        push_labeled("owllm-fine-tuned", root.join("fine_tuned"));
+    }
+    if let Some(home) = dirs_home() {
+        push_labeled("pip-cache", home.join("AppData").join("Local").join("pip").join("Cache"));
+        push_labeled("npm-cache", home.join("AppData").join("Local").join("npm-cache"));
+        push_labeled("hf-user-cache", home.join(".cache").join("huggingface"));
+    }
+
+    roots
+}
+
+fn known_delete_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for p in hf_cache_roots() {
+        push_dir_unique(&mut roots, p);
+    }
+    for (_, p) in app_cache_roots() {
+        push_dir_unique(&mut roots, p);
+    }
+    roots
+}
+
 fn dirs_home() -> Option<PathBuf> {
     std::env::var("USERPROFILE")
         .ok()
@@ -859,7 +944,7 @@ fn dir_size_recursive(path: &std::path::Path) -> (u64, Option<i64>) {
 #[tauri::command]
 pub async fn hf_cache_list() -> Result<HfCacheSummary, String> {
     tokio::task::spawn_blocking(|| -> Result<HfCacheSummary, String> {
-        let roots = cache_roots();
+        let roots = hf_cache_roots();
         let mut entries: Vec<HfCacheEntry> = Vec::new();
         let mut total: u64 = 0;
         for root in &roots {
@@ -897,16 +982,52 @@ pub async fn hf_cache_list() -> Result<HfCacheSummary, String> {
                 entries.push(HfCacheEntry {
                     repo_id,
                     path: p.to_string_lossy().into_owned(),
+                    cache_root: format!("hf-{label}"),
+                    size_bytes: size,
+                    modified_at: modified,
+                });
+            }
+        }
+        for (label, root) in app_cache_roots() {
+            let read = match std::fs::read_dir(&root) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            for entry in read.flatten() {
+                let p = entry.path();
+                if !p.is_dir() {
+                    continue;
+                }
+                let name = match p.file_name().and_then(|s| s.to_str()) {
+                    Some(n) => n.to_string(),
+                    None => continue,
+                };
+                if name == ".tmp" || name == ".pytest_cache" || name == "__pycache__" {
+                    continue;
+                }
+                let (size, modified) = dir_size_recursive(&p);
+                if size == 0 {
+                    continue;
+                }
+                total = total.saturating_add(size);
+                entries.push(HfCacheEntry {
+                    repo_id: name.replace("__", "/"),
+                    path: p.to_string_lossy().into_owned(),
                     cache_root: label.clone(),
                     size_bytes: size,
                     modified_at: modified,
                 });
             }
         }
+
         // Biggest first — that's what the user wants to clean.
         entries.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+        let mut all_roots = roots;
+        for (_, p) in app_cache_roots() {
+            push_dir_unique(&mut all_roots, p);
+        }
         Ok(HfCacheSummary {
-            roots: roots.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            roots: all_roots.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
             total_bytes: total,
             entries,
         })
@@ -915,29 +1036,21 @@ pub async fn hf_cache_list() -> Result<HfCacheSummary, String> {
     .map_err(|e| format!("join: {e}"))?
 }
 
-/// Delete a single cached model dir. Path-gated: must be under one of
-/// the cache_roots() we just enumerated, AND must be a "models--*"
-/// dir (no nuking the cache root itself).
+/// Delete a single cache entry dir. Path-gated: must be strictly under
+/// one of the discovered cache roots, so roots themselves cannot be nuked.
 #[tauri::command]
 pub async fn hf_cache_delete(path: String) -> Result<u64, String> {
     let target = PathBuf::from(&path);
     let canon_target = std::fs::canonicalize(&target)
         .map_err(|e| format!("canonicalize {path}: {e}"))?;
-    let name = canon_target
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if !name.starts_with("models--") {
-        return Err(format!(
-            "refused: {} is not a models--*/ cache entry",
-            canon_target.display()
-        ));
-    }
-    let roots = cache_roots();
-    let under_a_root = roots.iter().any(|r| canon_target.starts_with(r));
+    let roots = known_delete_roots();
+    let under_a_root = roots.iter().any(|r| {
+        let canon_root = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+        canon_target.starts_with(&canon_root) && canon_target != canon_root
+    });
     if !under_a_root {
         return Err(format!(
-            "refused: {} is not under any known HF cache root ({})",
+            "refused: {} is not under any known cache root ({})",
             canon_target.display(),
             roots
                 .iter()

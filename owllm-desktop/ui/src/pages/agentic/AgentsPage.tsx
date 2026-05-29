@@ -726,7 +726,7 @@ function FlowHeader({
   const showEditBtns = viewMode === "graph";
   return (
     <div style={{ display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid var(--border)" }}>
-      <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Flow</div>
+      <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Orchestrated Workflow</div>
       <div style={{ flex:1 }} />
       {showEditBtns && (
         <>
@@ -3899,6 +3899,9 @@ function RightColumnTabs(props: {
   accountsStatus: AccountsStatusLite | null;
   effectiveTeamModel: string;
   onPickTeamModel: (id: string) => void;
+  voiceFor: (agentName: string) => VoiceConfig;
+  onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
+  ttsVoices: SpeechSynthesisVoice[];
 }) {
   // The 3 top "pages" are small info containers (~20% of available
   // height) per user spec 2026-05-28. They swap above the chat
@@ -3990,11 +3993,32 @@ function RightColumnTabs(props: {
             onPickTeamModel={props.onPickTeamModel}
             serverModelId={props.serverState.model_id}
             accountsStatus={props.accountsStatus}
+            voiceFor={props.voiceFor}
+            onPickAgentVoice={props.onPickAgentVoice}
+            voices={props.ttsVoices}
           />
         )}
-        {/* Orchestrator tab intentionally renders nothing here —
-            its per-agent info (Model / Voice / Info) lives on each
-            graph card. */}
+        {tab === "orch" && (
+          // Per user spec 2026-05-29: the Orchestrator/agent tab mirrors
+          // the Team tab — two rows: model picker + voice picker. The
+          // focus agent is whatever the user has selected (or the
+          // orchestrator by default), and the model + voice apply to
+          // that agent specifically.
+          <OrchAgentSettings
+            team={props.team}
+            selectedAgent={props.selectedAgent}
+            activeAgent={props.activeAgent}
+            models={props.models}
+            modelFor={props.modelFor}
+            onPickAgentModel={props.onPickAgentModel}
+            accountsStatus={props.accountsStatus}
+            effectiveTeamModel={props.effectiveTeamModel}
+            serverState={props.serverState}
+            voiceFor={props.voiceFor}
+            onPickAgentVoice={props.onPickAgentVoice}
+            voices={props.ttsVoices}
+          />
+        )}
       </div>
       {/* Chat container — ALWAYS visible. Sub-tabs Rules | User Input |
           Clear Chat | Thought | Tool Calls | Full Chat. Does NOT swap
@@ -4242,9 +4266,68 @@ function OrchestratorSettings({
 // ---------- TeamSettings ----------
 // Compact green info container for the Team top tab. Team identity +
 // team-wide model picker.
+// OrchAgentSettings — minimal two-row settings panel for the
+// Orchestrator tab. Same shape as TeamSettings (model + voice), but
+// scoped to whichever agent the user has focused on the canvas.
+// Tab label is handled in RightColumnTabs (it flips to the focus
+// agent's display name when an agent other than the orchestrator
+// is selected).
+function OrchAgentSettings({
+  team, selectedAgent, activeAgent,
+  models, modelFor, onPickAgentModel, accountsStatus,
+  effectiveTeamModel, serverState,
+  voiceFor, onPickAgentVoice, voices,
+}: {
+  team: Team | null;
+  selectedAgent: string | null;
+  activeAgent: string | null;
+  models: ModelInfo[];
+  modelFor: (agentName: string) => string;
+  onPickAgentModel: (agentName: string, modelId: string) => void;
+  accountsStatus: AccountsStatusLite | null;
+  effectiveTeamModel: string;
+  serverState: ServerStatus;
+  voiceFor: (agentName: string) => VoiceConfig;
+  onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
+  voices: SpeechSynthesisVoice[];
+}) {
+  const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
+  const focus = selectedAgent ?? activeAgent ?? orchName ?? "you";
+  const disabled = focus === "you" || focus === "system";
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Model</span>
+        <ModelPicker
+          value={modelFor(focus)}
+          onChange={(id) => onPickAgentModel(focus, id)}
+          models={models}
+          status={accountsStatus}
+          disabled={disabled}
+          fallbackLabel={
+            effectiveTeamModel
+              ? `(use team model · ${effectiveTeamModel})`
+              : serverState.model_id
+                ? `(use team / server model · ${serverState.model_id})`
+                : "(use team / server model — none running)"
+          }
+        />
+      </div>
+      <AgentVoiceRow
+        agent={focus}
+        cfg={voiceFor(focus)}
+        voices={voices}
+        onChange={(partial) => onPickAgentVoice(focus, partial)}
+        disabled={disabled}
+      />
+    </div>
+  );
+}
+
 function TeamSettings({
   team, models, effectiveTeamModel, onPickTeamModel,
   serverModelId, accountsStatus,
+  voiceFor, onPickAgentVoice, voices,
 }: {
   team: Team | null;
   models: ModelInfo[];
@@ -4252,6 +4335,9 @@ function TeamSettings({
   onPickTeamModel: (id: string) => void;
   serverModelId: string | null;
   accountsStatus: AccountsStatusLite | null;
+  voiceFor: (agentName: string) => VoiceConfig;
+  onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
+  voices: SpeechSynthesisVoice[];
 }) {
   if (!team) {
     return (
@@ -4260,17 +4346,16 @@ function TeamSettings({
       </div>
     );
   }
+  // Per user spec 2026-05-29: this panel keeps ONLY the team model
+  // selection + a team voice selection. Identity header, description,
+  // and category/agent/connection counts are dropped (the project strip
+  // up top already shows the project name; users objected to the
+  // duplication). Team voice piggybacks on the orchestrator's voice —
+  // the orchestrator is the agent that addresses the user, so its
+  // voice IS the team's voice for TTS purposes.
+  const orchName = findOrchestratorSpec(team)?.name ?? "orchestrator";
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <img src={owlSrc(team.icon)} style={{ width:28, height:28, objectFit:"contain", flexShrink:0 }} />
-        <div style={{ flex:1, minWidth:0 }}>
-          <div style={{ fontSize:14, fontWeight:700, color:"#6cd28e", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={team.display}>{team.display}</div>
-          <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.4, textTransform:"uppercase" }}>
-            {team.category} · {team.agents.length} agents · {team.edges.length} connections
-          </div>
-        </div>
-      </div>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Team model</span>
         <ModelPicker
@@ -4281,21 +4366,28 @@ function TeamSettings({
           fallbackLabel={serverModelId ? `(use server model · ${serverModelId})` : "(no server model running)"}
         />
       </div>
-      {team.description && (
-        <div style={{ fontSize:11, color:"var(--fg)", lineHeight:1.4, background:"var(--bg-surface)", border:"1px solid var(--border)", borderRadius:6, padding:"6px 8px" }}>
-          {team.description.length > 180 ? team.description.slice(0, 177) + "…" : team.description}
-        </div>
-      )}
+      <AgentVoiceRow
+        agent={orchName}
+        cfg={voiceFor(orchName)}
+        voices={voices}
+        onChange={(partial) => onPickAgentVoice(orchName, partial)}
+        disabled={false}
+      />
     </div>
   );
 }
 
-// TeamPanel — replaces the canvas-overlay TeamInfoCard for the new
-// right-column "Team" tab. Flex-friendly (the card layout used absolute
-// positioning at fixed 410x412 px, which fights the flex column).
+// TeamPanel — minimal two-row settings panel for the right-column
+// "Team" tab. Per user spec 2026-05-29, EVERYTHING except the Team
+// Model selection has been stripped from this panel and a Voice
+// selection row added below. The agent panel (OrchestratorSettings)
+// mirrors the same two-row layout so both tabs feel symmetric. Identity
+// header / description / agent-roster grid are gone — the strip up top
+// already shows the project name; users don't need it duplicated here.
 function TeamPanel({
-  team, roleByName, models, effectiveTeamModel, onPickTeamModel,
+  team, models, effectiveTeamModel, onPickTeamModel,
   serverModelId, accountsStatus,
+  voiceFor, onPickAgentVoice, voices,
 }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
@@ -4304,6 +4396,9 @@ function TeamPanel({
   onPickTeamModel: (id: string) => void;
   serverModelId: string | null;
   accountsStatus: AccountsStatusLite | null;
+  voiceFor: (agentName: string) => VoiceConfig;
+  onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
+  voices: SpeechSynthesisVoice[];
 }) {
   if (!team) {
     return (
@@ -4312,10 +4407,12 @@ function TeamPanel({
       </div>
     );
   }
+  // Team-wide voice is wired to the orchestrator's voice — the
+  // orchestrator is the agent that addresses the user directly, so its
+  // voice IS the team's voice as far as TTS playback is concerned.
+  const orchName = findOrchestratorSpec(team)?.name ?? "orchestrator";
   return (
-    <div style={{ flex:1, display:"flex", flexDirection:"column", padding:"10px 12px", gap:10, overflow:"auto" }}>
-      {/* Settings header (≈15% of available height per user spec) —
-          team identity + team-wide model picker. */}
+    <div style={{ flex:1, display:"flex", flexDirection:"column", padding:"10px 12px", gap:8, overflow:"auto" }}>
       <div data-ui="teamSettings" style={{
         display:"flex", flexDirection:"column", gap:8,
         padding:"8px 10px",
@@ -4323,15 +4420,6 @@ function TeamPanel({
         border:"1px solid rgba(108,210,142,0.30)",
         borderRadius:10,
       }}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <img src={owlSrc(team.icon)} style={{ width:36, height:36, objectFit:"contain", flexShrink:0 }} />
-          <div style={{ flex:1, minWidth:0 }}>
-            <div style={{ fontSize:14, fontWeight:700, color:"#6cd28e", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={team.display}>{team.display}</div>
-            <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.4, textTransform:"uppercase" }}>
-              {team.category} · {team.agents.length} agents · {team.edges.length} connections
-            </div>
-          </div>
-        </div>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
           <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Team model</span>
           <ModelPicker
@@ -4342,35 +4430,13 @@ function TeamPanel({
             fallbackLabel={serverModelId ? `(use server model · ${serverModelId})` : "(no server model running)"}
           />
         </div>
-      </div>
-      {/* Body — description + per-agent mini list. */}
-      {team.description && (
-        <div style={{ fontSize:12, color:"var(--fg)", lineHeight:1.5, padding:"0 4px" }}>
-          {team.description}
-        </div>
-      )}
-      <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"var(--fg-muted)", textTransform:"uppercase", padding:"0 4px" }}>Agents</div>
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(2, 1fr)", gap:8 }}>
-        {team.agents.map(a => {
-          const tint = tintForGroup(groupForAgent(a));
-          return (
-            <div key={a.name} style={{
-              display:"flex", alignItems:"center", gap:8,
-              padding:"8px 10px",
-              background:`linear-gradient(135deg, ${tint.bg} 0%, rgba(18,22,34,0.85) 100%)`,
-              border:`1px solid ${tint.border}`,
-              borderRadius:8,
-            }}>
-              <img src={owlSrc(agentIconRef(a, roleByName))} style={{ width:24, height:24, objectFit:"contain" }} />
-              <div style={{ flex:1, minWidth:0 }}>
-                <div style={{ fontSize:12, fontWeight:700, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={displayLabel(a.name)}>
-                  {displayLabel(a.name)}
-                </div>
-                <div style={{ fontSize:9, color:"var(--fg-muted)", textTransform:"uppercase", letterSpacing:0.4 }}>{a.base}</div>
-              </div>
-            </div>
-          );
-        })}
+        <AgentVoiceRow
+          agent={orchName}
+          cfg={voiceFor(orchName)}
+          voices={voices}
+          onChange={(partial) => onPickAgentVoice(orchName, partial)}
+          disabled={false}
+        />
       </div>
     </div>
   );
@@ -7917,57 +7983,37 @@ export default function AgentsPage() {
             })()}
             {/* Big chat-mode toggle — sits on the canvas top-right
                 where SuperUserCard used to be (user spec 2026-05-28).
-                When the user is already in chat mode, the button
-                flips back to the previous canvas mode (diagram). */}
-            {viewMode !== "chat" ? (
-              <button
-                data-ui="CanvasChatToggleBtn"
-                onClick={() => setViewMode("chat")}
-                title="Open the per-agent chat grid in this canvas (every agent gets its own live transcript window)"
-                style={{
-                  position:"absolute", top:12, right:12,
-                  width:120, height:84,
-                  display:"flex", flexDirection:"column",
-                  alignItems:"center", justifyContent:"center",
-                  gap:4, padding:"6px 8px",
-                  background:"linear-gradient(135deg, rgba(38,30,10,0.92) 0%, rgba(18,14,4,0.92) 100%)",
-                  border:"1px solid rgba(255,200,80,0.55)",
-                  borderRadius:12,
-                  color:"#ffd97a",
-                  fontSize:11, fontWeight:700, letterSpacing:0.4,
-                  cursor:"pointer",
-                  boxShadow:"0 4px 14px rgba(0,0,0,0.45)",
-                  zIndex:5,
-                }}
-              >
-                <span style={{ fontSize:32, lineHeight:1 }}>▦</span>
-                <span style={{ textTransform:"uppercase" }}>Chat grid</span>
-              </button>
-            ) : (
-              <button
-                data-ui="CanvasChatToggleBtn"
-                onClick={() => setViewMode("diagram")}
-                title="Back to the orbital diagram"
-                style={{
-                  position:"absolute", top:12, right:12,
-                  width:120, height:84,
-                  display:"flex", flexDirection:"column",
-                  alignItems:"center", justifyContent:"center",
-                  gap:4, padding:"6px 8px",
-                  background:"linear-gradient(135deg, rgba(10,18,30,0.92) 0%, rgba(4,8,14,0.92) 100%)",
-                  border:"1px solid rgba(var(--accent-rgb),0.55)",
-                  borderRadius:12,
-                  color:"var(--accent)",
-                  fontSize:11, fontWeight:700, letterSpacing:0.4,
-                  cursor:"pointer",
-                  boxShadow:"0 4px 14px rgba(0,0,0,0.45)",
-                  zIndex:5,
-                }}
-              >
-                <span style={{ fontSize:32, lineHeight:1 }}>◑</span>
-                <span style={{ textTransform:"uppercase" }}>Diagram</span>
-              </button>
-            )}
+                Keep the SAME amber styling in both modes so the button
+                stays visible in chat mode too (the previous blue-on-
+                blue variant blended into the dark canvas and the user
+                read it as "disappeared"). Icon + label flip to mirror
+                the current state. zIndex bumped so it always sits
+                above the chat-grid tiles. */}
+            <button
+              data-ui="CanvasChatToggleBtn"
+              onClick={() => setViewMode(viewMode === "chat" ? "diagram" : "chat")}
+              title={viewMode === "chat"
+                ? "Back to the orbital diagram"
+                : "Open the per-agent chat grid in this canvas (every agent gets its own live transcript window)"}
+              style={{
+                position:"absolute", top:12, right:12,
+                width:120, height:84,
+                display:"flex", flexDirection:"column",
+                alignItems:"center", justifyContent:"center",
+                gap:4, padding:"6px 8px",
+                background:"linear-gradient(135deg, rgba(38,30,10,0.96) 0%, rgba(18,14,4,0.96) 100%)",
+                border:"1px solid rgba(255,200,80,0.65)",
+                borderRadius:12,
+                color:"#ffd97a",
+                fontSize:11, fontWeight:700, letterSpacing:0.4,
+                cursor:"pointer",
+                boxShadow:"0 4px 14px rgba(0,0,0,0.55)",
+                zIndex:50,
+              }}
+            >
+              <span style={{ fontSize:32, lineHeight:1 }}>{viewMode === "chat" ? "◑" : "▦"}</span>
+              <span style={{ textTransform:"uppercase" }}>{viewMode === "chat" ? "Diagram" : "Chat grid"}</span>
+            </button>
           </div>
         </div>
         <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, flexShrink:0, background:"var(--bg-card)" }} />
@@ -7998,6 +8044,9 @@ export default function AgentsPage() {
             accountsStatus={accountsStatus}
             effectiveTeamModel={effectiveTeamModel}
             onPickTeamModel={onPickTeamModel}
+            voiceFor={voiceFor}
+            onPickAgentVoice={onPickAgentVoice}
+            ttsVoices={ttsVoices}
           />
         </div>
       </div>

@@ -643,12 +643,31 @@ export default function ModelsPage() {
     setPickerFor(modelId);
   };
 
-  // Step 2: picker resolves with a list. Empty = "download all".
+  // Step 2: picker resolves with a list. Empty = "download all" — in
+  // which case we expand it via hf_model_files first. hf_download is
+  // a SINGLE-FILE Tauri command (takes `file: String`, not `files`),
+  // so we loop on the React side; each call gets its own Channel for
+  // progress events. The previous code was passing `files` as if the
+  // Rust side accepted a Vec — that's why every download instantly
+  // errored with "missing required key file".
   const confirmDownload = async (modelId: string, files: string[]) => {
     setPickerFor(null);
     setDownloading((curr) => new Set(curr).add(modelId));
     try {
-      await invoke("hf_download", { modelId, files: files.length > 0 ? files : null });
+      let toFetch = files;
+      if (toFetch.length === 0) {
+        try {
+          const all = await invoke<Array<{ path: string }>>("hf_model_files", { modelId });
+          toFetch = all.map(f => f.path);
+        } catch (e) {
+          throw new Error(`hf_model_files: ${String(e)}`);
+        }
+      }
+      for (const file of toFetch) {
+        const ch = new Channel<unknown>();
+        // eslint-disable-next-line no-await-in-loop
+        await invoke("hf_download", { modelId, file, branch: null, channel: ch });
+      }
       // Tell the rest of the app (AgentsPage / ChatPage pickers) that
       // a new model has landed on disk and they should re-call
       // list_models. Without this fan-out, freshly downloaded models

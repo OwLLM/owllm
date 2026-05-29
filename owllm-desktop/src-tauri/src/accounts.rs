@@ -391,6 +391,31 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
                 None => (false, "No GEMINI_API_KEY saved".to_string()),
             }
         }
+        // HuggingFace: hit /api/whoami-v2 with the saved HF_TOKEN. The
+        // endpoint returns 200 + the user's profile when the token is
+        // valid, 401 on bad/expired tokens. AccessTokensPane's Test
+        // button calls this; without an HF case here the live probe
+        // returned "Unknown backend 'huggingface'" — the error chain
+        // the user hit alongside the Save bug.
+        "huggingface" => {
+            let map = load_secrets();
+            let key = map.get("HF_TOKEN").cloned().filter(|k| !k.trim().is_empty());
+            match key {
+                Some(k) => {
+                    let bearer = format!("Bearer {k}");
+                    match http_get(
+                        "https://huggingface.co/api/whoami-v2",
+                        Some(("Authorization", bearer)),
+                    ).await {
+                        Ok(200) => (true, "Token valid (HF /whoami-v2 → 200 OK)".to_string()),
+                        Ok(401) => (false, "HF rejected the token (401 Unauthorized — expired or wrong scope)".to_string()),
+                        Ok(s)   => (false, format!("HF responded HTTP {s}")),
+                        Err(e)  => (false, format!("network: {e}")),
+                    }
+                }
+                None => (false, "No HF_TOKEN saved — paste a token and Save first".to_string()),
+            }
+        }
         other => (false, format!("Unknown backend '{other}'")),
     };
     ProbeResult { ok, detail, elapsed_ms: start.elapsed().as_millis() as u64 }

@@ -77,8 +77,11 @@ export default function AccessTokensPane(props: AccessTokensPaneProps) {
     if (props.initialToken !== undefined) return;
     (async () => {
       try {
-        const s = await invoke<{ huggingfaceToken?: string }>("accounts_status");
-        if (s.huggingfaceToken) setToken(s.huggingfaceToken);
+        // accounts_status returns boolean flags only (presence). The
+        // real value lives behind accounts_get_secret, which is the
+        // route the rest of the app uses.
+        const saved = await invoke<string | null>("accounts_get_secret", { name: "HF_TOKEN" });
+        if (saved && saved.trim()) setToken(saved);
       } catch { /* outside Tauri */ }
     })();
   }, [props.initialToken]);
@@ -87,7 +90,10 @@ export default function AccessTokensPane(props: AccessTokensPaneProps) {
     setStatus("saving");
     setErrorMsg("");
     try {
-      await invoke("accounts_set_huggingface_token", { token });
+      // Was calling the non-existent accounts_set_huggingface_token.
+      // Real command is accounts_save_api_key(name, value); HF_TOKEN
+      // is just one of the env-var names it stores.
+      await invoke("accounts_save_api_key", { name: "HF_TOKEN", value: token });
       setStatus("saved");
       props.onSaved?.(token);
       setTimeout(() => setStatus("idle"), 1500);
@@ -100,7 +106,7 @@ export default function AccessTokensPane(props: AccessTokensPaneProps) {
   const clear = async () => {
     setToken("");
     try {
-      await invoke("accounts_set_huggingface_token", { token: "" });
+      await invoke("accounts_delete_secret", { name: "HF_TOKEN" });
       props.onSaved?.("");
     } catch { /* ignore */ }
   };
@@ -108,8 +114,14 @@ export default function AccessTokensPane(props: AccessTokensPaneProps) {
   const test = async () => {
     setProbeResult("Probing…");
     try {
-      const ok = await invoke<boolean>("accounts_probe_huggingface", { token });
-      setProbeResult(ok ? "✓ Token valid" : "✗ Invalid token");
+      // Was calling the non-existent accounts_probe_huggingface.
+      // Live probe lives at accounts_test_probe_live(backend) and
+      // returns { ok, detail }. We surface detail on failure so the
+      // user sees the HF 401 reason instead of a generic "invalid".
+      const r = await invoke<{ ok: boolean; detail: string }>(
+        "accounts_test_probe_live", { backend: "huggingface" },
+      );
+      setProbeResult(r.ok ? `✓ ${r.detail || "Token valid"}` : `✗ ${r.detail || "Invalid token"}`);
     } catch (e: unknown) {
       setProbeResult(`✗ ${String(e)}`);
     }

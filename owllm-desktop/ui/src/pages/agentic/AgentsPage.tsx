@@ -6358,15 +6358,16 @@ export default function AgentsPage() {
       const next = new Map(prev);
       const cur = next.get(agent) ?? [];
       if (cur.length === 0) return prev;
-      // Walk back past any system messages (transcribe warnings, CLI
-      // image notices) so the agent's streamed tokens land on the
-      // entry that was created for THIS turn, not on whichever
-      // warning happened to be appended after it. Without this guard,
-      // a warning emitted between hooks.onLog() and the first stream
-      // delta gets concatenated with the agent's reply — that was the
-      // "orchestrator replied twice" bug the user hit.
+      // Stream tokens for `agent` must land on an entry whose role is
+      // also `agent`. Walk back past system warnings, "you"
+      // transcripts, and anything else that got appended between
+      // hooks.onLog() (which created the empty agent entry) and the
+      // first stream delta. Without this guard the deltas land on
+      // the LAST entry — which might be the transcript YOU bubble —
+      // and the orchestrator's reply gets concatenated onto the
+      // transcript text. That was the visual mash-up the user hit.
       let idx = cur.length - 1;
-      while (idx >= 0 && cur[idx].role === "system") {
+      while (idx >= 0 && cur[idx].role !== agent) {
         idx -= 1;
       }
       if (idx < 0) return prev;
@@ -7534,7 +7535,30 @@ export default function AgentsPage() {
       // identical entry — that's the "orchestrator replied twice" bug
       // the user reported.
       for (const m of msgs) {
-        if (m.role === "you") {
+        // Voice transcripts arrive as role="you" with the 🎤 prefix.
+        // They need to slot in BEFORE the empty orchestrator entry
+        // hooks.onLog() created (so the user reads "they sent voice
+        // → here's what was said → here's the orchestrator's reply"
+        // in that order). Detection is by emoji prefix because
+        // there's no kind tag on GoalMsg yet.
+        const isTranscript = m.role === "you" && m.text.startsWith("🎤 ");
+        if (isTranscript) {
+          appendLog("you", m);
+          setAgentLogs(prev => {
+            const cur = prev.get(orchKey) ?? [];
+            let insertIdx = cur.length;
+            for (let i = cur.length - 1; i >= 0; i -= 1) {
+              const entry = cur[i];
+              if (entry.role === orchKey && entry.text === "") {
+                insertIdx = i;
+                break;
+              }
+            }
+            const next = new Map(prev);
+            next.set(orchKey, [...cur.slice(0, insertIdx), m, ...cur.slice(insertIdx)]);
+            return next;
+          });
+        } else if (m.role === "you") {
           appendLog("you", m);
           appendLog(orchKey, m);
         } else if (m.role === "system") {

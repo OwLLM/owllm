@@ -875,50 +875,50 @@ export default function ModelsPage() {
           })}
         </div>
         )}
-      </div>
-      {/* Order-by + search row — now common to Browse / Downloaded /
-          Tuned (was Browse-only). On Browse, Search hits HuggingFace;
-          on Downloaded / Tuned the query becomes a live filter over
-          the local list (substring match on model name). */}
-      {tab !== "cache" && (
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700 }}>Order by:</span>
-        <select
-          data-ui="sortSelector"
-          value={sortBy}
-          onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-          title="Sort by"
-          style={{ ...INPUT.field, padding: "6px 8px", cursor: "pointer", width: 170, flexShrink: 0 }}
-        >
-          <option value="downloads">↓ Downloads</option>
-          <option value="likes">❤ Likes</option>
-          <option value="lastModified">🕓 Uploaded</option>
-        </select>
-        <input
-          placeholder={tab === "browse" ? "Search Hugging Face…" : "Filter…"}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && tab === "browse") runSearch(query); }}
-          style={{ ...INPUT.field, flex: 1, minWidth: 120 }}
-        />
-        <button
-          title="Clear search"
-          onClick={() => { setQuery(""); if (tab === "browse") runSearch(""); }}
-          style={{ ...BUTTON.ghost, padding: "6px 10px", flexShrink: 0 }}
-        >
-          ×
-        </button>
-        {tab === "browse" && (
-          <button
-            onClick={() => runSearch(query)}
-            disabled={loadingHits}
-            style={{ ...BUTTON.primary, flexShrink: 0 }}
+        {/* Order-by + search — INLINE on the same row as tabs +
+            filter checkboxes, replacing the old counts noise. Per
+            user spec 2026-05-29: "take that noise and replace with…
+            in the fucking SAME place, not the next raw." */}
+        {tab !== "cache" && (
+        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
+          <span style={{ fontSize: 10, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700, whiteSpace: "nowrap" }}>Order by:</span>
+          <select
+            data-ui="sortSelector"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+            title="Sort by"
+            style={{ ...INPUT.field, padding: "6px 8px", cursor: "pointer", width: 140, flexShrink: 0 }}
           >
-            {loadingHits ? "…" : "Search"}
+            <option value="downloads">↓ Downloads</option>
+            <option value="likes">❤ Likes</option>
+            <option value="lastModified">🕓 Uploaded</option>
+          </select>
+          <input
+            placeholder={tab === "browse" ? "Search Hugging Face…" : "Filter…"}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && tab === "browse") runSearch(query); }}
+            style={{ ...INPUT.field, width: 240, flexShrink: 0 }}
+          />
+          <button
+            title="Clear search"
+            onClick={() => { setQuery(""); if (tab === "browse") runSearch(""); }}
+            style={{ ...BUTTON.ghost, padding: "6px 10px", flexShrink: 0 }}
+          >
+            ×
           </button>
+          {tab === "browse" && (
+            <button
+              onClick={() => runSearch(query)}
+              disabled={loadingHits}
+              style={{ ...BUTTON.primary, flexShrink: 0 }}
+            >
+              {loadingHits ? "…" : "Search"}
+            </button>
+          )}
+        </div>
         )}
       </div>
-      )}
       </div>
 
       {hfError && (

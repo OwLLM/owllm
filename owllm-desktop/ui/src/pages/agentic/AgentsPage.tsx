@@ -7002,6 +7002,19 @@ export default function AgentsPage() {
       speakAgentReply(CRITIC_NAME, criticReview);
     }
 
+    // Visible diagnostic — the user reported "no info appearing, no
+    // card highlighting, nothing" because they don't open DevTools
+    // and the empty orchestrator entry just looks like "…". Surface
+    // the routing decision as a system bubble so the user can SEE
+    // which model / port / agent the message is going to BEFORE
+    // streamChatCompletion fires. If the stream fails silently, this
+    // bubble + the error bubble that follows give us a paper trail.
+    const traceMsg: GoalMsg = {
+      role: "system", color: "#9ad9ff",
+      text: `→ dispatching to ${orchKey} · model=${supModelId} · provider=${supProvider}${supProvider === "local" ? ` · port=${freshServerState.port ?? 0}` : ""}`,
+    };
+    setSupChat(prev => [...prev, traceMsg]);
+    appendLog("system", traceMsg);
     const replyMsg: GoalMsg = { role: orchKey, color: "#ffd97a", text: "" };
     setSupChat(prev => [...prev, replyMsg]);
     appendLog(orchKey, replyMsg);
@@ -7073,9 +7086,16 @@ export default function AgentsPage() {
         appendLog("system", { role: "system", color: "#ff8c8c", text: emptyMsg });
       }
     } catch (e: any) {
-      const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: String(e?.message ?? e) };
+      // Loud, on-screen error — the user has been hitting silent
+      // failures on the first message and missing the cause because
+      // it never reached the chat. Now both supChat (left/main) AND
+      // the agent log (right pane) get the error in red.
+      const errText = String(e?.message ?? e);
+      console.error("[onSupSend] streamChatCompletion threw", errText);
+      const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${errText}` };
       setSupChat(prev => [...prev, errMsg]);
       appendLog("system", errMsg);
+      appendLog(orchKey, errMsg);
     } finally {
       removeActive(orchKey);
     }

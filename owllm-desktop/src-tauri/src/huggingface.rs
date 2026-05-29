@@ -725,8 +725,18 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                     } else {
                         "NEW"
                     };
-                    let compat = crate::recommendations::parse_params_b(&display_name)
-                        .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
+                    // Prefer ACTUAL on-disk size for GGUF dirs — the
+                    // file IS the memory footprint at runtime. The
+                    // params-based estimate assumes FP16 and was
+                    // flagging quantised models as 'Too large' even
+                    // when they fit comfortably (e.g. Qwen3.6-35B
+                    // Q4_K_S, 19.5 GB on disk on a 22.5 GB GPU).
+                    let compat = if has_gguf {
+                        crate::recommendations::compat_for_gguf_size(total, vram_gb)
+                    } else {
+                        crate::recommendations::parse_params_b(&display_name)
+                            .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb))
+                    };
                     out.push(DownloadedModel {
                         name: display_name.clone(),
                         path: path.to_string_lossy().into_owned(),
@@ -740,8 +750,7 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                 } else if path.extension().map(|e| e == "gguf").unwrap_or(false) {
                     let meta = entry.metadata().ok();
                     let sz = meta.as_ref().map(|m| m.len()).unwrap_or(0);
-                    let compat = crate::recommendations::parse_params_b(&display_name)
-                        .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
+                    let compat = crate::recommendations::compat_for_gguf_size(sz, vram_gb);
                     out.push(DownloadedModel {
                         name: display_name.clone(),
                         path: path.to_string_lossy().into_owned(),

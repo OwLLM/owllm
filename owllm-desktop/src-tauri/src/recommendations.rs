@@ -185,6 +185,51 @@ pub fn compat_for_params(params_b: f32, vram_gb: Option<f32>) -> Option<CompatTa
     compat_for(inference_gb, lora_train_gb, qlora_gb, vram_gb)
 }
 
+/// Compat tag for a Downloaded GGUF. The .gguf file size IS the
+/// runtime memory footprint (weights mmap'd directly + ~10–15 %
+/// overhead for KV cache, scratch buffers). Using actual bytes here
+/// is far more accurate than `params_b * 2` — that path assumes FP16
+/// and was flagging quantised models like Qwen3.6-35B-A3B-Q4_K_S
+/// (19.5 GB on disk, fits a 22.5 GB GPU comfortably) as 'Too large'
+/// because it read "35B" and decided 70 GB FP16 wouldn't fit. MoE
+/// models hit the same trap — the active-params number doesn't
+/// reduce the weight footprint, but the actual file size already
+/// reflects what's on disk.
+pub fn compat_for_gguf_size(file_bytes: u64, vram_gb: Option<f32>) -> Option<CompatTag> {
+    let v = vram_gb?;
+    let weights_gb = file_bytes as f32 / (1024.0 * 1024.0 * 1024.0);
+    // 15 % headroom for KV cache + scratch.
+    let inference_gb = weights_gb * 1.15;
+    if inference_gb <= v * 0.85 {
+        Some(CompatTag {
+            color: "green".into(),
+            text: "Fits".into(),
+            tooltip: format!(
+                "GGUF on disk {:.1} GB; runtime ≈{:.1} GB fits your {:.1} GB VRAM with headroom.",
+                weights_gb, inference_gb, v,
+            ),
+        })
+    } else if inference_gb <= v * 0.98 {
+        Some(CompatTag {
+            color: "orange".into(),
+            text: "Tight fit".into(),
+            tooltip: format!(
+                "GGUF on disk {:.1} GB; runtime ≈{:.1} GB just under your {:.1} GB VRAM — leave room for the context window.",
+                weights_gb, inference_gb, v,
+            ),
+        })
+    } else {
+        Some(CompatTag {
+            color: "red".into(),
+            text: "Too large".into(),
+            tooltip: format!(
+                "GGUF on disk {:.1} GB; runtime ≈{:.1} GB exceeds your {:.1} GB VRAM. Pick a smaller quant or offload to CPU.",
+                weights_gb, inference_gb, v,
+            ),
+        })
+    }
+}
+
 pub fn compat_for(inference_gb: f32, lora_train_gb: f32, qlora_gb: f32, vram_gb: Option<f32>) -> Option<CompatTag> {
     let v = vram_gb?;
     if lora_train_gb <= v * 0.95 {

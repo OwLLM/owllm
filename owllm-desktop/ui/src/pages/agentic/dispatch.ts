@@ -1028,15 +1028,14 @@ export async function streamChatCompletion(
     const loadDeadline = Date.now() + LOAD_RETRY_MS;
     while (true) {
       if (signal.aborted) throw new DOMException("aborted", "AbortError");
-      // Network-level retry: server_status can flip to "running" the
-      // instant llama-server binds its port, but it can take a few
-      // hundred ms more before /v1/chat/completions actually accepts
-      // a request. In that window fetch() throws TypeError("Failed to
-      // fetch") which is NOT an HTTP error — the old code surfaced
-      // it as "(dispatch error: Failed to fetch)" and the user had
-      // to re-type the message. Now we retry the same way we retry
-      // a 503 "Loading model" body. Same loadDeadline budget covers
-      // both cases.
+      // Network + 503-loading retry in ONE loop. The previous version
+      // called resp.clone().text() to peek at the body and decide
+      // whether to retry, but the clone read is flaky in WebView2 —
+      // it sometimes failed silently and the loop broke OUT on a 503
+      // "Loading model", throwing the error the user finally saw.
+      // New shape: consume the body ONCE per attempt. If 503 +
+      // "loading model" in body, retry within budget. Anything else
+      // 4xx/5xx throws with the actual body.
       try {
         resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
           method: "POST",
@@ -1063,27 +1062,24 @@ export async function streamChatCompletion(
         await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
         continue;
       }
-      if (resp.status !== 503) break;
-      // Peek at the body via clone — if it's "Loading model" we retry,
-      // any other 503 surfaces normally through consumeOpenAISse.
-      const txt = await resp.clone().text().catch(() => "");
-      if (!/loading model/i.test(txt) || Date.now() >= loadDeadline) break;
-      await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
+      if (resp.ok) break;                      // 2xx — good, stream it
+      // Non-OK: consume the body once. If it's the cold-load 503,
+      // retry inside budget. Otherwise this IS the error we throw.
+      const errBody = await resp.text().catch(() => "");
+      if (resp.status === 503 && /loading model/i.test(errBody) && Date.now() < loadDeadline) {
+        console.log(`[dispatch.local] 503 Loading model — retrying in ${LOAD_RETRY_DELAY}ms`);
+        await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
+        continue;
+      }
+      // Real error — throw with status + body so the chat shows it.
+      const errMsg = `llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`;
+      console.warn("[dispatch.local] non-OK response", errMsg);
+      throw new Error(errMsg);
     }
     if (!resp) throw new Error("llama-server never responded — server may have crashed");
     console.log(`[dispatch.local] turn=${turn} response`, {
       status: resp.status, ok: resp.ok, hasBody: !!resp.body,
     });
-    // Non-OK after retries: surface the body. The previous code piped
-    // the response into consumeOpenAISse which silently no-op'd on
-    // bad chunks, so the user got "flashes a start, then nothing" —
-    // no clue why. Now we read the body, throw with the real reason.
-    if (!resp.ok) {
-      const bodyText = await resp.text().catch(() => "");
-      const errMsg = `llama-server ${resp.status}: ${bodyText.slice(0, 500) || "(no body)"}`;
-      console.warn("[dispatch.local] non-OK response", errMsg);
-      throw new Error(errMsg);
-    }
     // consumeOpenAISse calls onDelta for each visible token AND returns
     // the full assembled assistant text. We also collect any native
     // delta.tool_calls into nativeCalls so we can run them straight,

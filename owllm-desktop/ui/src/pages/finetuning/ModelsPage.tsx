@@ -875,47 +875,58 @@ export default function ModelsPage() {
           })}
         </div>
         )}
-        {/* Order-by + search — INLINE on the same row as tabs +
-            filter checkboxes, replacing the old counts noise. Per
-            user spec 2026-05-29: "take that noise and replace with…
-            in the fucking SAME place, not the next raw." */}
+        {/* Order-by row (top) + Search row (below), stacked vertically
+            to fit the SAME 50 px height the checkbox container uses
+            on its left. Width is flexible — no fixed 240 px — so the
+            search input grows / shrinks with the viewport. */}
         {tab !== "cache" && (
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
-          <span style={{ fontSize: 10, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700, whiteSpace: "nowrap" }}>Order by:</span>
-          <select
-            data-ui="sortSelector"
-            value={sortBy}
-            onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
-            title="Sort by"
-            style={{ ...INPUT.field, padding: "6px 8px", cursor: "pointer", width: 140, flexShrink: 0 }}
-          >
-            <option value="downloads">↓ Downloads</option>
-            <option value="likes">❤ Likes</option>
-            <option value="lastModified">🕓 Uploaded</option>
-          </select>
-          <input
-            placeholder={tab === "browse" ? "Search Hugging Face…" : "Filter…"}
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && tab === "browse") runSearch(query); }}
-            style={{ ...INPUT.field, width: 240, flexShrink: 0 }}
-          />
-          <button
-            title="Clear search"
-            onClick={() => { setQuery(""); if (tab === "browse") runSearch(""); }}
-            style={{ ...BUTTON.ghost, padding: "6px 10px", flexShrink: 0 }}
-          >
-            ×
-          </button>
-          {tab === "browse" && (
-            <button
-              onClick={() => runSearch(query)}
-              disabled={loadingHits}
-              style={{ ...BUTTON.primary, flexShrink: 0 }}
+        <div style={{
+          marginLeft: "auto",
+          display: "grid",
+          gridTemplateRows: "1fr 1fr",
+          gap: 4,
+          height: 50,
+          minWidth: 260,
+          flex: "1 1 320px",
+          maxWidth: 520,
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, minHeight: 0 }}>
+            <span style={{ fontSize: 9, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700, whiteSpace: "nowrap" }}>Order by:</span>
+            <select
+              data-ui="sortSelector"
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+              title="Sort by"
+              style={{ ...INPUT.field, flex: 1, minWidth: 0, padding: "2px 6px", height: "100%", cursor: "pointer", fontSize: 11 }}
             >
-              {loadingHits ? "…" : "Search"}
-            </button>
-          )}
+              <option value="downloads">↓ Downloads</option>
+              <option value="likes">❤ Likes</option>
+              <option value="lastModified">🕓 Uploaded</option>
+            </select>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 4, minHeight: 0 }}>
+            <input
+              placeholder={tab === "browse" ? "Search Hugging Face…" : "Filter…"}
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && tab === "browse") runSearch(query); }}
+              style={{ ...INPUT.field, flex: 1, minWidth: 0, padding: "2px 8px", height: "100%", fontSize: 11 }}
+            />
+            <button
+              title="Clear search"
+              onClick={() => { setQuery(""); if (tab === "browse") runSearch(""); }}
+              style={{ ...BUTTON.ghost, padding: "2px 8px", height: "100%", flexShrink: 0, fontSize: 11 }}
+            >×</button>
+            {tab === "browse" && (
+              <button
+                onClick={() => runSearch(query)}
+                disabled={loadingHits}
+                style={{ ...BUTTON.primary, padding: "2px 12px", height: "100%", flexShrink: 0, fontSize: 11 }}
+              >
+                {loadingHits ? "…" : "Search"}
+              </button>
+            )}
+          </div>
         </div>
         )}
       </div>

@@ -397,14 +397,45 @@ export default function ChatPage() {
         let resp: Response | null = null;
         const startedAt = Date.now();
         const READY_TIMEOUT_MS = 180_000;
+        const PER_ATTEMPT_TIMEOUT_MS = 20_000;
         while (true) {
           if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
-          resp = await fetch(`http://127.0.0.1:${activePort}/v1/chat/completions`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-            signal: ctrl.signal,
-          });
+          // Per-attempt timeout. If llama-server accepts the TCP
+          // connection but never replies (we've seen this when the
+          // GGUF is broken / not actually loading), a vanilla fetch
+          // hangs forever and the elapsedSec counter never ticks
+          // past 1 s — which is exactly what the user reported.
+          // Race the fetch against a 20 s clock; on timeout we abort
+          // that single attempt and re-enter the retry loop so the
+          // status text + abort button stay responsive.
+          const attemptCtrl = new AbortController();
+          const tid = setTimeout(() => attemptCtrl.abort(), PER_ATTEMPT_TIMEOUT_MS);
+          const onOuterAbort = () => attemptCtrl.abort();
+          ctrl.signal.addEventListener("abort", onOuterAbort);
+          try {
+            resp = await fetch(`http://127.0.0.1:${activePort}/v1/chat/completions`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+              signal: attemptCtrl.signal,
+            });
+          } catch (e: any) {
+            clearTimeout(tid);
+            ctrl.signal.removeEventListener("abort", onOuterAbort);
+            // Outer abort (user pressed Stop) — surface as-is.
+            if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+            const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+            updateCol(col.id, {
+              error: `⏳ Waiting for llama-server to respond (no reply in ${PER_ATTEMPT_TIMEOUT_MS / 1000}s)… ${elapsedSec}s — check the Server tab logs.`,
+            });
+            if (Date.now() - startedAt > READY_TIMEOUT_MS) {
+              throw new Error(`llama-server unresponsive for ${READY_TIMEOUT_MS / 1000}s — check the Server tab. Common causes: broken GGUF, GPU OOM, missing -ngl support.`);
+            }
+            await new Promise((r) => setTimeout(r, 1500));
+            continue;
+          }
+          clearTimeout(tid);
+          ctrl.signal.removeEventListener("abort", onOuterAbort);
           if (resp.status === 503) {
             // Drain + inspect the error body so an unexpected 503 (not
             // the loading one) doesn't get swallowed.
@@ -760,7 +791,6 @@ export default function ChatPage() {
                 }
               }}
               placeholder="Type your message here..."
-              disabled={anyBusy}
               style={{
                 flex: 1, minHeight: 90, maxHeight: 90,
                 resize: "none",

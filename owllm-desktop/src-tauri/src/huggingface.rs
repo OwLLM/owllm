@@ -290,6 +290,24 @@ pub async fn hf_download(
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
+    // Idempotency guard. If the file is already on disk at a sane
+    // size, treat the request as a no-op success — no re-download.
+    // Cures the user's "rename .gguf.partial → .gguf: cannot find
+    // file (os error 2)": confirmDownload loops once per file, and
+    // when a previous attempt already finished (or a concurrent call
+    // won the race), the second invocation found nothing to rename
+    // and exploded. With this guard we instead emit Finished and
+    // return.
+    if let Ok(meta) = std::fs::metadata(&dest_file) {
+        if meta.is_file() && meta.len() > 0 {
+            let _ = channel.send(DownloadEvent::Started { total: Some(meta.len()) });
+            let _ = channel.send(DownloadEvent::Finished {
+                path: dest_file.to_string_lossy().into_owned(),
+                bytes: meta.len(),
+            });
+            return Ok(());
+        }
+    }
     // Always write to a `.partial` first and rename on success — so
     // a half-done download never leaves a file that scanners might
     // mistake for a complete GGUF. Same atomicity pattern the env
@@ -342,8 +360,27 @@ pub async fn hf_download(
         }
     }
     drop(out);
-    std::fs::rename(&partial, &dest_file)
-        .map_err(|e| format!("rename {} → {}: {e}", partial.display(), dest_file.display()))?;
+    if let Err(e) = std::fs::rename(&partial, &dest_file) {
+        // Race-safe fallback: if a concurrent caller finished the same
+        // file while we were streaming, rename fails (either the
+        // partial vanished or the dest already exists on Windows
+        // where rename refuses to clobber). In both cases the final
+        // file IS on disk at a sane size — treat as success and drop
+        // our redundant partial.
+        if let Ok(meta) = std::fs::metadata(&dest_file) {
+            if meta.is_file() && meta.len() > 0 {
+                let _ = std::fs::remove_file(&partial);
+                let _ = channel.send(DownloadEvent::Finished {
+                    path: dest_file.to_string_lossy().into_owned(),
+                    bytes: meta.len(),
+                });
+                return Ok(());
+            }
+        }
+        let msg = format!("rename {} → {}: {e}", partial.display(), dest_file.display());
+        let _ = channel.send(DownloadEvent::Failed { error: msg.clone() });
+        return Err(msg);
+    }
     let _ = channel.send(DownloadEvent::Finished {
         path: dest_file.to_string_lossy().into_owned(),
         bytes: received,

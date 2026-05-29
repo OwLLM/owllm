@@ -463,6 +463,13 @@ export default function ChatPage() {
         const dec = new TextDecoder();
         let turnReply = "";
         let buffer = "";
+        // Server-level error stash. llama-server can emit
+        // `data: {"error": {...}}` mid-stream when something goes
+        // wrong AFTER the 200 OK (e.g. eval failure). Without this,
+        // the SSE consumer silently skipped the frame and the user
+        // saw 'no reply' with no clue why. Captured here, thrown
+        // after the loop so the column shows the real reason.
+        let serverError: string | null = null;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -476,7 +483,33 @@ export default function ChatPage() {
             if (!body || body === "[DONE]") continue;
             try {
               const j = JSON.parse(body);
-              const delta = j?.choices?.[0]?.delta?.content;
+              if (j?.error) {
+                serverError = typeof j.error === "string"
+                  ? j.error
+                  : (j.error?.message || JSON.stringify(j.error));
+                continue;
+              }
+              const deltaObj = j?.choices?.[0]?.delta;
+              // Qwen 3 / DeepSeek-R1 / o-series emit reasoning on a
+              // separate `reasoning_content` field BEFORE the visible
+              // answer arrives on `content`. The user said 'Qwen 3.6
+              // not even answering' — the model was streaming via the
+              // reasoning channel, ChatPage was ignoring it. Surface
+              // both channels so the user sees activity AND the final
+              // answer. Reasoning gets a 💭 prefix once per stream
+              // so it doesn't blend into the user's chat.
+              const reasoning: string | undefined = deltaObj?.reasoning_content ?? deltaObj?.reasoning;
+              if (typeof reasoning === "string" && reasoning) {
+                if (!turnReply.includes("💭 ")) {
+                  appendAssistant(col.id, "💭 ");
+                  turnReply += "💭 ";
+                  reply += "💭 ";
+                }
+                turnReply += reasoning;
+                reply += reasoning;
+                appendAssistant(col.id, reasoning);
+              }
+              const delta = deltaObj?.content;
               if (typeof delta === "string" && delta) {
                 turnReply += delta;
                 reply += delta;
@@ -484,6 +517,9 @@ export default function ChatPage() {
               }
             } catch { /* skip malformed */ }
           }
+        }
+        if (serverError) {
+          throw new Error(`llama-server stream error: ${serverError}`);
         }
 
         // Plain chat mode → one shot, done.

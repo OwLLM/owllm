@@ -55,6 +55,7 @@ import {
   parseToolCalls,
   executeToolCall,
   renderToolResultsForModel,
+  stripFabricatedToolOutput,
   type ToolExecResult,
 } from "./localTools";
 
@@ -7035,6 +7036,33 @@ export default function AgentsPage() {
         "If the user's message mentions the critic or critical thinker, acknowledge whether that agent was invoked. Never say you are merely doing it implicitly.",
         criticReview ? `\nCritical Thinker review already produced:\n${criticReview}` : "",
       ].filter(Boolean).join("\n");
+      // Live-strip the native `<|tool_call>…<tool_call|>` blocks and
+      // the fabricated `_tool_output` chunks the small Llama-/Gemma-
+      // trained models hallucinate. Without this, every streamed
+      // token leaked the model's fake transcript into the chat — the
+      // user's last paste showed `<tool_call name="glob">…<|tool_call>
+      // call:web_search{…}<tool_call|><|tool_response>…_end_tool_output`
+      // all rendered raw. We track how much CLEAN text has already
+      // been pushed to the UI; on each delta we recompute the clean
+      // view of streamedReply and emit only the new tail.
+      let displayedClean = "";
+      const liveStrip = (delta: string) => {
+        streamedReply += delta;
+        const cleanFull = stripFabricatedToolOutput(streamedReply);
+        const diff = cleanFull.slice(displayedClean.length);
+        if (!diff) {
+          // The delta WAS noise we just stripped — nothing to push.
+          return;
+        }
+        displayedClean = cleanFull;
+        setSupChat(curr => {
+          const out = curr.slice();
+          const last = out[out.length - 1];
+          if (last) out[out.length - 1] = { ...last, text: cleanFull };
+          return out;
+        });
+        streamLog(orchKey, diff);
+      };
       const returned = await streamChatCompletion(
         freshServerState.port ?? 0,
         supModelId,
@@ -7043,16 +7071,7 @@ export default function AgentsPage() {
         text,
         0.5,
         supSendAbort.signal,
-        (delta) => {
-          streamedReply += delta;
-          setSupChat(curr => {
-            const out = curr.slice();
-            const last = out[out.length - 1];
-            if (last) out[out.length - 1] = { ...last, text: last.text + delta };
-            return out;
-          });
-          streamLog(orchKey, delta);
-        },
+        liveStrip,
         // Pin the Claude CLI subscription path (and any future tool-
         // capable backend) to the user's project location instead of
         // letting it inherit the desktop install dir.

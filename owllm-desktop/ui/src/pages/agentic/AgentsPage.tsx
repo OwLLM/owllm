@@ -6086,6 +6086,35 @@ export default function AgentsPage() {
     }
   };
 
+  // Refresh just the models list. Called on mount + on window focus
+  // + on an owllm:models:refresh event (fired by ModelsPage after a
+  // download completes). Without these refresh paths, models
+  // downloaded after the app started never appeared in the picker
+  // until the next app restart — the user reported only 4 of their
+  // ~14 downloaded models showing up.
+  const refreshModels = async () => {
+    try {
+      const m = await invoke<ModelInfo[]>("list_models");
+      console.log(`[AgentsPage] list_models → ${m.length} entries`,
+        m.map(x => `${x.model_id}(${x.provider}${x.port == null ? ":no-port" : ""})`).join(", "));
+      setModels(m);
+    } catch (e) {
+      console.warn("[AgentsPage] list_models failed:", e);
+    }
+  };
+
+  useEffect(() => {
+    const onFocus = () => { refreshModels(); };
+    const onRefresh = () => { refreshModels(); };
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("owllm:models:refresh", onRefresh as EventListener);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("owllm:models:refresh", onRefresh as EventListener);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Initial load — projects, teams, roles, bridges in parallel.
   useEffect(() => {
     let dead = false;
@@ -6101,6 +6130,8 @@ export default function AgentsPage() {
         invoke<ModelInfo[]>("list_models").catch(() => [] as ModelInfo[]),
       ]);
       if (dead) return;
+      console.log(`[AgentsPage] initial list_models → ${rawModels.length} entries`,
+        rawModels.map(x => `${x.model_id}(${x.provider}${x.port == null ? ":no-port" : ""})`).join(", "));
       setProjects(rawProjects);
       setModels(rawModels);
       if (rawProjects.length > 0) {

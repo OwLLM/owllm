@@ -185,15 +185,36 @@ export default function ChatPage() {
 
   // Load READY models + accounts status for the per-column pickers.
   // Same source the Agents page uses so the dropdown stays identical.
+  // Also re-fetch on window focus + owllm:models:refresh so models
+  // downloaded after the page mounted appear without an app restart
+  // (the user reported only 4 of ~14 downloaded models showing up
+  // because list_models only ran once at mount).
   useEffect(() => {
     let dead = false;
-    invoke<ModelInfo[]>("list_models")
-      .then((m) => { if (!dead) setAvailableModels(Array.isArray(m) ? m : []); })
-      .catch(() => { /* leave empty */ });
+    const reloadModels = () => {
+      invoke<ModelInfo[]>("list_models")
+        .then((m) => {
+          if (dead) return;
+          const arr = Array.isArray(m) ? m : [];
+          console.log(`[ChatPage] list_models → ${arr.length} entries`,
+            arr.map(x => `${x.model_id}(${x.provider}${x.port == null ? ":no-port" : ""})`).join(", "));
+          setAvailableModels(arr);
+        })
+        .catch(() => { /* leave empty */ });
+    };
+    reloadModels();
     invoke<AccountsStatusLite>("accounts_status")
       .then((s) => { if (!dead) setAccountsStatus(s); })
       .catch(() => { /* leave null */ });
-    return () => { dead = true; };
+    const onFocus = () => reloadModels();
+    const onRefresh = () => reloadModels();
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("owllm:models:refresh", onRefresh as EventListener);
+    return () => {
+      dead = true;
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("owllm:models:refresh", onRefresh as EventListener);
+    };
   }, []);
 
   // Lazy server-start state. The local llama-server is no longer

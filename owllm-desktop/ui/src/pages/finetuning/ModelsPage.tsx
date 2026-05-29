@@ -649,6 +649,11 @@ export default function ModelsPage() {
     setDownloading((curr) => new Set(curr).add(modelId));
     try {
       await invoke("hf_download", { modelId, files: files.length > 0 ? files : null });
+      // Tell the rest of the app (AgentsPage / ChatPage pickers) that
+      // a new model has landed on disk and they should re-call
+      // list_models. Without this fan-out, freshly downloaded models
+      // only appeared after an app restart.
+      window.dispatchEvent(new CustomEvent("owllm:models:refresh"));
     } catch (e) {
       setHfError(`Download failed: ${e}`);
     } finally {
@@ -1337,11 +1342,11 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
       .filter((e) => selected.has(e.path))
       .map((e) => e.repoId);
     const ok = window.confirm(
-      `Delete ${paths.length} cached model${paths.length === 1 ? "" : "s"} ` +
+      `Delete ${paths.length} cache entr${paths.length === 1 ? "y" : "ies"} ` +
         `(${fmtBytes(selectedSizeBytes)})?\n\n` +
         repoNames.slice(0, 8).join("\n") +
         (repoNames.length > 8 ? `\n…and ${repoNames.length - 8} more` : "") +
-        `\n\nThis is permanent. Anything still in use will be re-downloaded on demand.`,
+        `\n\nThis is permanent. Models may need to be downloaded again; environments may need to be rebuilt.`,
     );
     if (!ok) return;
     setBusy(true);
@@ -1378,17 +1383,17 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
         color: "var(--fg)",
       }}>
         <div style={{ fontWeight: 700, marginBottom: 4 }}>
-          💽 HuggingFace cache —{" "}
+          Disk cache{" "}
           <span style={{ color: "#9cc3ff" }}>
             {summary ? fmtBytes(summary.totalBytes) : "scanning…"}
           </span>{" "}
-          across {summary?.entries.length ?? 0} model
-          {summary?.entries.length === 1 ? "" : "s"}
+          across {summary?.entries.length ?? 0} entr
+          {summary?.entries.length === 1 ? "y" : "ies"}
         </div>
         <div style={{ fontSize: 10, color: "var(--fg-muted)", lineHeight: 1.5 }}>
-          Abliterate / Train / GGUF export read source models from these
-          dirs. Deleting one here doesn't break anything currently loaded —
-          HuggingFace will just re-download next time you ask for it.
+          Shows OwLLM models, fine-tunes, Python environments, wheel caches,
+          and Hugging Face cache roots. Deleting models requires re-download;
+          deleting environments requires rebuild.
         </div>
         {summary && summary.roots.length > 0 && (
           <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 6, wordBreak: "break-all" }}>
@@ -1444,7 +1449,7 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
       }}>
         <div style={cacheRow(true)}>
           <div style={{ width: 28 }}></div>
-          <div style={{ flex: 2 }}>Model</div>
+          <div style={{ flex: 2 }}>Entry</div>
           <div style={{ width: 100, textAlign: "right" }}>Size</div>
           <div style={{ width: 100 }}>Last used</div>
           <div style={{ width: 90 }}>Cache</div>

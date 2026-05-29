@@ -7593,10 +7593,21 @@ export default function AgentsPage() {
             }
             const last = idx >= 0 ? cur[idx] : null;
             const incoming = m.text.trim();
-            if (last && last.text.trim() === incoming) {
+            const lastText = last ? last.text.trim() : "";
+            if (last && lastText === incoming) {
               return prev;                              // already streamed
             }
-            if (last && incoming.startsWith(last.text.trim()) && last.text.trim().length > 0) {
+            // Suffix / contained-in case: multi-turn dispatches (e.g.
+            // brainstorm critic) stream turn1 + turn2 into the SAME
+            // entry (when hooks.onLog for turn2 raced the stream), then
+            // onAgentReply fires with ONLY turn2's text. Without this
+            // check the dedup misses and we get a second bubble that's
+            // a suffix of the first. Skip if the streamed entry already
+            // contains the incoming text anywhere.
+            if (last && lastText.length > 0 && lastText.includes(incoming)) {
+              return prev;
+            }
+            if (last && incoming.startsWith(lastText) && lastText.length > 0) {
               // Streaming ended with the in-place entry holding a strict
               // prefix of the final blob (last few tokens missed by the
               // delta channel). Replace the streamed entry with the full

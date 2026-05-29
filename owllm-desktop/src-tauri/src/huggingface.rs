@@ -725,13 +725,16 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                     } else {
                         "NEW"
                     };
-                    // Prefer ACTUAL on-disk size for GGUF dirs — the
-                    // file IS the memory footprint at runtime. The
+                    // Prefer ACTUAL on-disk size for ANY downloaded
+                    // model — GGUF or HF safetensors. The file IS the
+                    // memory footprint at runtime (or close to it for
+                    // pre-quantised formats like bnb-4bit). The
                     // params-based estimate assumes FP16 and was
-                    // flagging quantised models as 'Too large' even
-                    // when they fit comfortably (e.g. Qwen3.6-35B
-                    // Q4_K_S, 19.5 GB on disk on a 22.5 GB GPU).
-                    let compat = if has_gguf {
+                    // flagging Qwen2.5-32B-Instruct-bnb-4bit (17.9 GB
+                    // on disk) as 'Too large' on a 22.5 GB GPU because
+                    // 32B × 2 = 64 GB. Real footprint of the 4-bit
+                    // checkpoint is what's already on disk.
+                    let compat = if has_weights && total > 0 {
                         crate::recommendations::compat_for_gguf_size(total, vram_gb)
                     } else {
                         crate::recommendations::parse_params_b(&display_name)

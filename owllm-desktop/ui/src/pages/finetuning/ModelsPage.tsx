@@ -877,8 +877,12 @@ export default function ModelsPage() {
         )}
         {/* Order-by row (top) + Search row (below), stacked vertically
             to fit the SAME 50 px height the checkbox container uses
-            on its left. Width is flexible — no fixed 240 px — so the
-            search input grows / shrinks with the viewport. */}
+            on its left. Width is fully flexible (no minWidth so the
+            container can shrink past 260 px when the row would
+            otherwise wrap to two lines — the user complained the
+            search was 'going to next row' even with plenty of
+            horizontal space, because the previous min-width was
+            forcing the wrap). */}
         {tab !== "cache" && (
         <div style={{
           marginLeft: "auto",
@@ -886,9 +890,8 @@ export default function ModelsPage() {
           gridTemplateRows: "1fr 1fr",
           gap: 4,
           height: 50,
-          minWidth: 260,
-          flex: "1 1 320px",
-          maxWidth: 520,
+          flex: "1 1 180px",
+          minWidth: 0,
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, minHeight: 0 }}>
             <span style={{ fontSize: 9, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.6, fontWeight: 700, whiteSpace: "nowrap" }}>Order by:</span>

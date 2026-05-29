@@ -200,16 +200,15 @@ pub fn compat_for_gguf_size(file_bytes: u64, vram_gb: Option<f32>) -> Option<Com
     let weights_gb = file_bytes as f32 / (1024.0 * 1024.0 * 1024.0);
     // 5 % runtime overhead — at the default 4 K context window the KV
     // cache for a 35 B Q4 model is ~0.5 GB; activation buffers another
-    // ~0.2 GB. Anything more is the user enabling a long context (their
-    // call). The previous 15 % overhead + 0.98 ceiling falsely flagged
-    // Qwen3.6-35B-A3B Q4 (19.5 GB on a 22.5 GB GPU) as 'Too large'.
+    // ~0.2 GB. Applies to BOTH GGUF and pre-quantised HF formats
+    // (bnb-4bit, etc.) — the file on disk is the runtime footprint.
     let runtime_gb = weights_gb * 1.05;
     if runtime_gb <= v * 0.95 {
         Some(CompatTag {
             color: "green".into(),
             text: "Fits".into(),
             tooltip: format!(
-                "GGUF on disk {:.1} GB; runtime ≈{:.1} GB fits your {:.1} GB VRAM with room for the default context window.",
+                "On-disk {:.1} GB; runtime ≈{:.1} GB fits your {:.1} GB VRAM with room for the default context window.",
                 weights_gb, runtime_gb, v,
             ),
         })
@@ -218,7 +217,7 @@ pub fn compat_for_gguf_size(file_bytes: u64, vram_gb: Option<f32>) -> Option<Com
             color: "orange".into(),
             text: "Tight fit".into(),
             tooltip: format!(
-                "GGUF on disk {:.1} GB; runtime ≈{:.1} GB just inside your {:.1} GB VRAM — keep the context window short.",
+                "On-disk {:.1} GB; runtime ≈{:.1} GB just inside your {:.1} GB VRAM — keep the context window short.",
                 weights_gb, runtime_gb, v,
             ),
         })
@@ -227,7 +226,7 @@ pub fn compat_for_gguf_size(file_bytes: u64, vram_gb: Option<f32>) -> Option<Com
             color: "red".into(),
             text: "Too large".into(),
             tooltip: format!(
-                "GGUF on disk {:.1} GB; runtime ≈{:.1} GB exceeds your {:.1} GB VRAM. Pick a smaller quant or offload to CPU.",
+                "On-disk {:.1} GB; runtime ≈{:.1} GB exceeds your {:.1} GB VRAM. Pick a smaller quant or offload to CPU.",
                 weights_gb, runtime_gb, v,
             ),
         })

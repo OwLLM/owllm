@@ -468,7 +468,19 @@ function LocationRow({
         Trust writes
       </label>
       <span data-ui="SandboxBadge" style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:sandboxBg, color:sandboxColor, border:`1px solid ${sandboxBorder}`, borderRadius:6, fontSize:11, fontWeight:600, whiteSpace:"nowrap" }}>{sandboxText}</span>
-      <span data-ui="BridgeBadge" style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:bridgeBg, color:bridgeColor, border:`1px solid ${bridgeBorder}`, borderRadius:6, fontSize:11, fontWeight:600, whiteSpace:"nowrap" }}>{bridgeText}</span>
+      <button
+        data-ui="BridgeBadge"
+        type="button"
+        onClick={() => {
+          // Reuse the cross-page navigate hook AppShell already wires
+          // up; key="bridges" is intercepted there and opens the
+          // bridges modal popup (the full configurator). Saves us from
+          // adding a parallel "open bridges modal" event.
+          window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "bridges" } }));
+        }}
+        title="Open the Bridges configurator (Telegram / WhatsApp connections)"
+        style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:bridgeBg, color:bridgeColor, border:`1px solid ${bridgeBorder}`, borderRadius:6, fontSize:11, fontWeight:600, whiteSpace:"nowrap", cursor:"pointer" }}
+      >{bridgeText}</button>
       <span style={{ display:"inline-flex", alignItems:"center", height:32, padding:"0 12px", fontSize:11, color:"var(--fg-muted)", textTransform:"uppercase", letterSpacing:0.6 }}>Project</span>
       <select data-ui="ProjectCombo" value={selectedId} onChange={e => onChangeProject(e.target.value)} style={{ flex:2, minWidth:200, height:32, padding:"0 12px", borderRadius:8, border:"none", background:"var(--bg-input)", color:"var(--fg-strong)", fontSize:13 }}>
         {projects.length === 0
@@ -3969,10 +3981,17 @@ function RightColumnTabs(props: {
       <div data-ui="RightSettingsPanel" style={{
         flex:"0 0 auto",
         maxHeight:"22%",
-        minHeight: tab === "orch" ? 0 : 120,
+        // Natural height (no forced minHeight) so Team + Orch panels
+        // hug their 2-row content. The old 120 px minimum on Team
+        // produced a visible empty gap below the voice row that the
+        // Orch panel didn't have, breaking the symmetric look.
+        minHeight: 0,
         overflow:"auto",
-        padding: tab === "orch" ? 0 : "8px 12px",
-        borderBottom: tab === "orch" ? "none" : "1px solid var(--border)",
+        // Orch + Team get matching padding so the model/voice rows sit
+        // identically on both tabs (used to be 0 on Orch because the
+        // pane rendered nothing; now it has content too).
+        padding: tab === "super" ? "8px 12px" : "8px 12px",
+        borderBottom: "1px solid var(--border)",
         background:"var(--bg-elevated)",
       }}>
         {tab === "super" && (
@@ -7983,37 +8002,36 @@ export default function AgentsPage() {
             })()}
             {/* Big chat-mode toggle — sits on the canvas top-right
                 where SuperUserCard used to be (user spec 2026-05-28).
-                Keep the SAME amber styling in both modes so the button
-                stays visible in chat mode too (the previous blue-on-
-                blue variant blended into the dark canvas and the user
-                read it as "disappeared"). Icon + label flip to mirror
-                the current state. zIndex bumped so it always sits
-                above the chat-grid tiles. */}
-            <button
-              data-ui="CanvasChatToggleBtn"
-              onClick={() => setViewMode(viewMode === "chat" ? "diagram" : "chat")}
-              title={viewMode === "chat"
-                ? "Back to the orbital diagram"
-                : "Open the per-agent chat grid in this canvas (every agent gets its own live transcript window)"}
-              style={{
-                position:"absolute", top:12, right:12,
-                width:120, height:84,
-                display:"flex", flexDirection:"column",
-                alignItems:"center", justifyContent:"center",
-                gap:4, padding:"6px 8px",
-                background:"linear-gradient(135deg, rgba(38,30,10,0.96) 0%, rgba(18,14,4,0.96) 100%)",
-                border:"1px solid rgba(255,200,80,0.65)",
-                borderRadius:12,
-                color:"#ffd97a",
-                fontSize:11, fontWeight:700, letterSpacing:0.4,
-                cursor:"pointer",
-                boxShadow:"0 4px 14px rgba(0,0,0,0.55)",
-                zIndex:50,
-              }}
-            >
-              <span style={{ fontSize:32, lineHeight:1 }}>{viewMode === "chat" ? "◑" : "▦"}</span>
-              <span style={{ textTransform:"uppercase" }}>{viewMode === "chat" ? "Diagram" : "Chat grid"}</span>
-            </button>
+                ONLY shown in diagram / graph modes — in chat mode the
+                user is already in the grid, so the shortcut button is
+                redundant (the FlowHeader tabs at the top handle the
+                way back). Without this guard the user reads it as
+                clutter sitting on top of the chat tiles. */}
+            {viewMode !== "chat" && (
+              <button
+                data-ui="CanvasChatToggleBtn"
+                onClick={() => setViewMode("chat")}
+                title="Open the per-agent chat grid in this canvas (every agent gets its own live transcript window)"
+                style={{
+                  position:"absolute", top:12, right:12,
+                  width:120, height:84,
+                  display:"flex", flexDirection:"column",
+                  alignItems:"center", justifyContent:"center",
+                  gap:4, padding:"6px 8px",
+                  background:"linear-gradient(135deg, rgba(38,30,10,0.96) 0%, rgba(18,14,4,0.96) 100%)",
+                  border:"1px solid rgba(255,200,80,0.65)",
+                  borderRadius:12,
+                  color:"#ffd97a",
+                  fontSize:11, fontWeight:700, letterSpacing:0.4,
+                  cursor:"pointer",
+                  boxShadow:"0 4px 14px rgba(0,0,0,0.55)",
+                  zIndex:50,
+                }}
+              >
+                <span style={{ fontSize:32, lineHeight:1 }}>▦</span>
+                <span style={{ textTransform:"uppercase" }}>Chat grid</span>
+              </button>
+            )}
           </div>
         </div>
         <div data-ui="RosterSplitter" style={{ width:SPLITTER_W, flexShrink:0, background:"var(--bg-card)" }} />

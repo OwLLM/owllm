@@ -15,6 +15,7 @@ import {
   formatToolsForPrompt,
   formatToolsForOpenAI,
   parseToolCalls,
+  stripFabricatedToolOutput,
   unmangleMcpName,
   renderToolResultsForModel,
   type ToolCall,
@@ -1011,29 +1012,45 @@ export async function streamChatCompletion(
   const LOAD_RETRY_DELAY = 1500;
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
-    let resp: Response;
+    let resp: Response | undefined;
     const loadDeadline = Date.now() + LOAD_RETRY_MS;
     while (true) {
       if (signal.aborted) throw new DOMException("aborted", "AbortError");
-      resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: modelId || "local",
-          messages: liveMessages,
-          stream: true,
-          temperature,
-          // Cap per-turn generation. Without this llama-server can run
-          // until it hits the context window (32K+), which has been
-          // observed when a small model degenerates after a fake
-          // tool_call — the user saw a 5+ min hang with llama-server at
-          // 290 % CPU. 4096 covers any reasonable agent reply; if the
-          // model truly needs more it can dispatch again.
-          max_tokens: 4096,
-          tools: openaiTools.length > 0 ? openaiTools : undefined,
-        }),
-        signal,
-      });
+      // Network-level retry: server_status can flip to "running" the
+      // instant llama-server binds its port, but it can take a few
+      // hundred ms more before /v1/chat/completions actually accepts
+      // a request. In that window fetch() throws TypeError("Failed to
+      // fetch") which is NOT an HTTP error — the old code surfaced
+      // it as "(dispatch error: Failed to fetch)" and the user had
+      // to re-type the message. Now we retry the same way we retry
+      // a 503 "Loading model" body. Same loadDeadline budget covers
+      // both cases.
+      try {
+        resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: modelId || "local",
+            messages: liveMessages,
+            stream: true,
+            temperature,
+            // Cap per-turn generation. Without this llama-server can run
+            // until it hits the context window (32K+), which has been
+            // observed when a small model degenerates after a fake
+            // tool_call — the user saw a 5+ min hang with llama-server at
+            // 290 % CPU. 4096 covers any reasonable agent reply; if the
+            // model truly needs more it can dispatch again.
+            max_tokens: 4096,
+            tools: openaiTools.length > 0 ? openaiTools : undefined,
+          }),
+          signal,
+        });
+      } catch (e) {
+        if (signal.aborted) throw e;
+        if (Date.now() >= loadDeadline) throw e;
+        await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
+        continue;
+      }
       if (resp.status !== 503) break;
       // Peek at the body via clone — if it's "Loading model" we retry,
       // any other 503 surfaces normally through consumeOpenAISse.
@@ -1041,6 +1058,7 @@ export async function streamChatCompletion(
       if (!/loading model/i.test(txt) || Date.now() >= loadDeadline) break;
       await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
     }
+    if (!resp) throw new Error("llama-server never responded — server may have crashed");
     // consumeOpenAISse calls onDelta for each visible token AND returns
     // the full assembled assistant text. We also collect any native
     // delta.tool_calls into nativeCalls so we can run them straight,
@@ -1053,7 +1071,15 @@ export async function streamChatCompletion(
     // `content`. Parsing both protocols would double-execute. Native
     // wins; XML is the fallback for older / template-less models.
     const calls: ToolCall[] = nativeCalls.length > 0 ? nativeCalls : parseToolCalls(lastReply);
-    if (calls.length === 0) break; // model is done — final answer
+    if (calls.length === 0) {
+      // Strip any leftover `<|tool_call>` / `<eos>` / fabricated
+      // `_tool_output` blocks from the final reply so the user
+      // doesn't see noise. Only when the model truly emitted nothing
+      // parseable — when calls.length > 0, the loop continues and
+      // the stripped text gets re-derived from a fresh turn anyway.
+      lastReply = stripFabricatedToolOutput(lastReply);
+      break; // model is done — final answer
+    }
     // Run every emitted call (sequentially; matches Python loop's one-
     // at-a-time semantics so each result lands in context before the
     // next executes).
@@ -1064,8 +1090,11 @@ export async function streamChatCompletion(
       results.push(await executeToolCall(c, projectCwd ?? ""));
     }
     // Append the assistant turn + the synthetic user turn carrying
-    // tool results, then loop.
-    liveMessages.push({ role: "assistant", content: lastReply });
+    // tool results. Strip fabricated `_tool_output` blocks from the
+    // assistant turn before pushing — otherwise the model sees its
+    // own fake results in history and assumes they're authoritative,
+    // ignoring the real synthetic-user results we're about to feed.
+    liveMessages.push({ role: "assistant", content: stripFabricatedToolOutput(lastReply) });
     liveMessages.push({ role: "user", content: renderToolResultsForModel(calls, results) });
   }
   return lastReply;

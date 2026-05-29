@@ -35,6 +35,24 @@ const CALL_RE = /<tool_call\b([^>]*)>([\s\S]*?)<\/tool_call>/gi;
 const NAME_ATTR_RE = /\bname\s*=\s*"([^"]+)"/i;
 const ARG_RE = /<arg\b[^>]*\bname\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/arg>/gi;
 
+// Fallback: many small models (Gemma / Llama 3.x / Qwen 2.5 variants)
+// were trained on Llama-3-style native tool tokens and emit
+//   <|tool_call>call:NAME{key:"val",key2:"val2"}<tool_call|>
+// or close variants regardless of system-prompt instructions. The
+// user hit this on a Gemma-class model emitting fabricated `_tool_output`
+// blocks right after each `<|tool_call>` — the model thinks it has
+// already executed the tool. We catch the native format here so the
+// real runtime executes the call and the fabricated output gets
+// stripped before the user sees the reply.
+const NATIVE_CALL_RE = /<\|?\s*tool_call\b[^>]*>?\s*(?:call\s*:\s*)?([a-zA-Z_][a-zA-Z0-9_]*)\s*(\{[\s\S]*?\})\s*<\/?\s*tool_call\s*\|?>/gi;
+// Strip fabricated `<|tool_response>...<_end_tool_output>` blocks
+// from the visible reply. The model invents these to look like it
+// executed the call; the real runtime appends real results in a
+// separate synthetic user turn, so the visible reply should never
+// contain them. Cover the common variants the user has seen.
+const FABRICATED_RESPONSE_RE = /<\|?\s*tool_response\s*\|?>[\s\S]*?(?:_end_tool_output|<\/?\s*tool_response\s*\|?>|<eos>)/gi;
+const STRAY_EOS_RE = /<eos>|<\|?\s*eos\s*\|?>/gi;
+
 /// Extract every well-formed <tool_call> block from a model response.
 /// Malformed blocks are skipped (logged) rather than throwing — bad
 /// model output shouldn't crash the dispatch loop.
@@ -61,7 +79,63 @@ export function parseToolCalls(text: string): ToolCall[] {
     }
     calls.push({ name, args });
   }
+  // Fallback: Llama-3-native tool-token format. Only scan if the XML
+  // parser didn't find anything — avoids double-executing when a model
+  // somehow emits both protocols.
+  if (calls.length === 0) {
+    NATIVE_CALL_RE.lastIndex = 0;
+    while ((m = NATIVE_CALL_RE.exec(text)) !== null) {
+      const name = m[1].trim();
+      const argsBlob = m[2];
+      const args: Record<string, string> = {};
+      // The args blob looks like JSON but small models emit it with
+      // unquoted keys and stray whitespace. Try JSON.parse first; on
+      // failure fall back to a key-by-key regex sweep.
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        parsed = JSON.parse(argsBlob) as Record<string, unknown>;
+      } catch {
+        // Try to coerce to valid JSON: quote unquoted keys.
+        try {
+          const coerced = argsBlob.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
+          parsed = JSON.parse(coerced) as Record<string, unknown>;
+        } catch {
+          // Regex sweep — captures `key:"value"` pairs even if the
+          // surrounding JSON is malformed.
+          const KV_RE = /([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+          let kv: RegExpExecArray | null;
+          while ((kv = KV_RE.exec(argsBlob)) !== null) {
+            args[kv[1]] = kv[2];
+          }
+        }
+      }
+      if (parsed) {
+        for (const [k, v] of Object.entries(parsed)) {
+          args[k] = typeof v === "string" ? v : JSON.stringify(v);
+        }
+      }
+      // Push even with empty args — some tools (list_dir on cwd)
+      // legitimately have no args, and an unparseable args blob
+      // still tells us which tool the model wanted to call.
+      calls.push({ name, args });
+    }
+  }
   return calls;
+}
+
+/// Strip fabricated tool-output blocks and stray native-format
+/// tokens from a model reply before it's shown to the user / fed
+/// back into history. Small models that fabricate tool results
+/// after their own tool_calls leak nonsense JSON into the visible
+/// chat without this filter.
+export function stripFabricatedToolOutput(text: string): string {
+  let out = text;
+  out = out.replace(FABRICATED_RESPONSE_RE, "");
+  out = out.replace(STRAY_EOS_RE, "");
+  // Also drop the dangling `<|tool_call>...<tool_call|>` blocks once
+  // we've parsed them — they're noise in the visible reply.
+  out = out.replace(NATIVE_CALL_RE, "");
+  return out.trim();
 }
 
 /// Render the tools the agent is allowed to call as a system-prompt

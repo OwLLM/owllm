@@ -819,6 +819,13 @@ export async function transcribeAudioAttachments(
   /// without telling the user *why*. The caller passes an error
   /// string per failure (one per attachment).
   onWarn?: (text: string) => void,
+  /// Fires once per successfully transcribed audio attachment so the
+  /// caller can surface the transcribed text in the chat as soon as
+  /// it lands — instead of waiting for the orchestrator to echo it
+  /// back in its reply. Bridge/desktop wire this to a chat:appended
+  /// event that drops a green "🎤 <text>" entry right after the
+  /// user's placeholder.
+  onTranscript?: (filename: string, text: string) => void,
 ): Promise<string> {
   const auds = audioAttachments(attachments);
   if (auds.length === 0) return userMessage;
@@ -831,6 +838,7 @@ export async function transcribeAudioAttachments(
       const local = await transcribeLocalAudio(a);
       if (local.text.trim()) {
         transcripts.push(`[Audio "${filename}" transcript via local Whisper/${local.model}]\n${local.text.trim()}`);
+        onTranscript?.(filename, local.text.trim());
         continue;
       }
       localError = "local Whisper returned an empty transcript";
@@ -841,9 +849,12 @@ export async function transcribeAudioAttachments(
     if (key) {
       try {
         const text = await transcribeOpenAIAudio(a, key);
-        transcripts.push(text
-          ? `[Audio "${filename}" transcript via OpenAI Whisper]\n${text}`
-          : `[Audio "${filename}" attached, but Whisper returned an empty transcript.]`);
+        if (text) {
+          transcripts.push(`[Audio "${filename}" transcript via OpenAI Whisper]\n${text}`);
+          onTranscript?.(filename, text);
+        } else {
+          transcripts.push(`[Audio "${filename}" attached, but Whisper returned an empty transcript.]`);
+        }
         continue;
       } catch (e: any) {
         const openaiErr = String(e?.message ?? e).slice(0, 200);
@@ -935,6 +946,10 @@ export async function streamChatCompletion(
   /// the actual reason surfaces instead of the LLM paraphrasing it as
   /// "I am still unable to transcribe…".
   onSystemWarning?: (text: string) => void,
+  /// Fires once per successful audio transcription so the caller can
+  /// drop the transcribed text into the chat AS the user's input
+  /// (rather than waiting for the orchestrator to echo it back).
+  onTranscript?: (filename: string, text: string) => void,
 ): Promise<string> {
   const forceSub = modelId.startsWith("sub/");
   const forceApi = modelId.startsWith("api/");
@@ -947,7 +962,7 @@ export async function streamChatCompletion(
   // and we only need to worry about image parts per provider.
   const images = imageAttachments(attachments);
   const effectiveText = appendImageAttachmentNotes(
-    await transcribeAudioAttachments(userMessage, attachments, onSystemWarning),
+    await transcribeAudioAttachments(userMessage, attachments, onSystemWarning, onTranscript),
     images,
   );
 
@@ -1529,6 +1544,12 @@ export type DispatchHooks = {
   /// Optional — older callers can omit it; transcribe failures then
   /// silently fall back to the model-side paraphrase.
   onSystemWarning?: (text: string) => void;
+  /// Fires once per successful voice-message transcription so the
+  /// bridge / desktop can write the transcribed text into the chat
+  /// AS the user's own input — surfacing what was said the moment it
+  /// lands, instead of waiting for the orchestrator's reply to echo
+  /// it. Called per attachment with (filename, text).
+  onTranscript?: (filename: string, text: string) => void;
 };
 
 export type DispatchInput = {
@@ -1689,6 +1710,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       // instead of letting the orchestrator paraphrase them as "I'm
       // still unable to transcribe…".
       hooks.onSystemWarning,
+      hooks.onTranscript,
     );
   } finally {
     hooks.onAgentEnd(orch.name);

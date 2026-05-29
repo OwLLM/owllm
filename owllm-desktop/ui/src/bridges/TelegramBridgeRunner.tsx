@@ -837,6 +837,23 @@ export default function TelegramBridgeRunner() {
             // for users skimming on mobile.
             sendTelegram(tgCfg.bot_token, chatId, warning).catch(() => {});
           },
+          // Transcription ready — drop the transcribed text into the
+          // desktop chat as a YOU message (green accent) right after
+          // the "[TG] (media only)…" placeholder, so the user can read
+          // what they said the moment Whisper produces it, without
+          // waiting for the orchestrator to echo it back. Telegram
+          // doesn't get a copy — the user already knows what they
+          // said on their phone, and an echo there would look like
+          // spam.
+          onTranscript: (_filename: string, text: string) => {
+            const msg: GoalMsg = { role: "you", color: "#9af0a8", text: `🎤 ${text}` };
+            try {
+              window.dispatchEvent(new CustomEvent("owllm:chat:appended", {
+                detail: { projectId, messages: [msg], source: "telegram" },
+              }));
+            } catch {}
+            if (projectId) persistChat(projectId, [msg]).catch(() => {});
+          },
         }
       );
       finalForTelegram = finalForTelegram || finalReply;

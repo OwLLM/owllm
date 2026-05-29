@@ -6938,6 +6938,15 @@ export default function AgentsPage() {
             appendLog(orch.name, { role: "system", color: "#ffd97a", text: warning });
             setSupChat(curr => [...curr, { role: "system", color: "#ffd97a", text: warning }]);
           },
+          // Transcription ready — show what the user actually said in
+          // their chat right after the audio attachment placeholder.
+          // Green YOU bubble so it visually parallels their own input.
+          (_filename, text) => {
+            const tMsg: GoalMsg = { role: "you", color: "#9af0a8", text: `🎤 ${text}` };
+            setSupChat(curr => [...curr, tMsg]);
+            appendLog("you", tMsg);
+            appendLog(orch.name, tMsg);
+          },
         );
       } finally {
         removeActive(orch.name);

@@ -6358,9 +6358,21 @@ export default function AgentsPage() {
       const next = new Map(prev);
       const cur = next.get(agent) ?? [];
       if (cur.length === 0) return prev;
-      const last = cur[cur.length - 1];
+      // Walk back past any system messages (transcribe warnings, CLI
+      // image notices) so the agent's streamed tokens land on the
+      // entry that was created for THIS turn, not on whichever
+      // warning happened to be appended after it. Without this guard,
+      // a warning emitted between hooks.onLog() and the first stream
+      // delta gets concatenated with the agent's reply — that was the
+      // "orchestrator replied twice" bug the user hit.
+      let idx = cur.length - 1;
+      while (idx >= 0 && cur[idx].role === "system") {
+        idx -= 1;
+      }
+      if (idx < 0) return prev;
+      const target = cur[idx];
       const updated = [...cur];
-      updated[updated.length - 1] = { ...last, text: last.text + delta };
+      updated[idx] = { ...target, text: target.text + delta };
       next.set(agent, updated);
       return next;
     });
@@ -7516,22 +7528,49 @@ export default function AgentsPage() {
         if (m.role === "you") {
           appendLog("you", m);
           appendLog(orchKey, m);
-        } else {
+        } else if (m.role === "system") {
+          // System warning (transcribe failure, CLI image drop). Insert
+          // it BEFORE the in-flight orchestrator entry so the user sees
+          // the warning ABOVE the reply that explains it, not below.
+          // The empty entry that hooks.onLog created during the stream
+          // is the marker — splice the warning in just before it.
           setAgentLogs(prev => {
             const cur = prev.get(orchKey) ?? [];
-            const last = cur[cur.length - 1];
+            let insertIdx = cur.length;
+            for (let i = cur.length - 1; i >= 0; i -= 1) {
+              const entry = cur[i];
+              if (entry.role !== "system" && entry.text === "") {
+                insertIdx = i;
+                break;
+              }
+            }
+            const next = new Map(prev);
+            next.set(orchKey, [...cur.slice(0, insertIdx), m, ...cur.slice(insertIdx)]);
+            return next;
+          });
+        } else {
+          // Agent reply (orchestrator / specialist / critic). Dedup
+          // against the last NON-system entry — the streamed text — so
+          // the final blob doesn't append a second copy of itself.
+          setAgentLogs(prev => {
+            const cur = prev.get(orchKey) ?? [];
+            let idx = cur.length - 1;
+            while (idx >= 0 && cur[idx].role === "system") {
+              idx -= 1;
+            }
+            const last = idx >= 0 ? cur[idx] : null;
             const incoming = m.text.trim();
             if (last && last.text.trim() === incoming) {
               return prev;                              // already streamed
             }
-            // Streaming sometimes ends with the in-place entry holding a
-            // STRICT PREFIX of the final blob (last few tokens missed by
-            // the delta channel). Replace the last entry with the full
-            // text instead of appending a new one.
             if (last && incoming.startsWith(last.text.trim()) && last.text.trim().length > 0) {
+              // Streaming ended with the in-place entry holding a strict
+              // prefix of the final blob (last few tokens missed by the
+              // delta channel). Replace the streamed entry with the full
+              // text instead of appending a new one.
               const next = new Map(prev);
               const updated = [...cur];
-              updated[updated.length - 1] = { ...last, text: m.text };
+              updated[idx] = { ...last, text: m.text };
               next.set(orchKey, updated);
               return next;
             }

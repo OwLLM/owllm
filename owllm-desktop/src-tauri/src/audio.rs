@@ -24,13 +24,29 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use symphonia::core::audio::{AudioBufferRef, Signal as _};
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::codecs::{CodecRegistry, DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tauri::Emitter;
 use tokio::process::Command;
+
+/// Combined codec registry — symphonia's defaults (mp3, aac, vorbis,
+/// flac, wav, …) PLUS the opus decoder from symphonia-adapter-libopus.
+/// Telegram voice messages are opus-in-ogg; without the opus adapter
+/// they fail decode init with "unsupported codec".
+fn codecs() -> &'static CodecRegistry {
+    static REG: once_cell::sync::OnceCell<CodecRegistry> = once_cell::sync::OnceCell::new();
+    REG.get_or_init(|| {
+        let mut r = CodecRegistry::new();
+        // Populate with every enabled symphonia codec (mp3, aac,
+        // vorbis, …) then layer the opus adapter on top.
+        symphonia::default::register_enabled_codecs(&mut r);
+        r.register_all::<symphonia_adapter_libopus::OpusDecoder>();
+        r
+    })
+}
 
 const WHISPER_MODEL_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
@@ -461,7 +477,7 @@ fn decode_to_pcm(
         .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
         .ok_or_else(|| "no audio track in input".to_string())?;
     let track_id = track.id;
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = codecs()
         .make(&track.codec_params, &DecoderOptions::default())
         .map_err(|e| format!("decoder init: {e}"))?;
 

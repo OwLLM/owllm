@@ -3390,6 +3390,308 @@ function renderThoughtEntry(t: GoalMsg, i: number) {
   );
 }
 
+// ChatInputDock — VS Code Claude Code-style composer (user spec 2026-05-29
+// "make the text input like in VS Code here? included functionality and
+// droplist of functions"). Replaces the old textarea+Send button row:
+//
+//   ┌──────────────────────────────────────────────┐
+//   │  Queue another message…              🎤      │  ← textarea + mic
+//   ├──────────────────────────────────────────────┤
+//   │  + /                       ⚡ Auto mode  ▶   │  ← toolbar
+//   └──────────────────────────────────────────────┘
+//
+// Working functionality:
+//   * "/" — slash-command droplist. Typing / as the first char (or via
+//     the toolbar button) opens a menu of in-app commands. Picking
+//     one fires its action (switch sub-tab, clear chat, focus search,
+//     etc.) instead of inserting the slash literally.
+//   * 🎤 — Web Speech API recognition. Browser-side (WebView2 ships
+//     the Edge SpeechRecognition impl on Windows). Toggles on/off;
+//     transcribed text streams into the textarea.
+//   * ⚡ Auto mode — wires to the project's autoApprove flag. Same
+//     toggle previously surfaced on the Super User settings.
+//   * +    — attach file. Opens the OS picker; the path is appended
+//     to the draft as a markdown link so the user can describe it.
+//     Image / audio attachment routing through dispatch.ts comes via
+//     the Telegram bridge today; the desktop path is text-only.
+//   * Send / Stop — Send when text is present, replaced by a stop
+//     square (orange) while the dispatch is in flight. Tomorrow we
+//     wire the stop button to an AbortController; for now it just
+//     reflects state.
+function ChatInputDock({
+  draft, setDraft, inputRef, onSend, busy,
+  autoApprove, onToggleAutoApprove,
+  onSwitchTab,
+}: {
+  draft: string;
+  setDraft: (v: string) => void;
+  inputRef: React.RefObject<HTMLTextAreaElement | null>;
+  onSend: () => void;
+  busy: boolean;
+  autoApprove: boolean;
+  onToggleAutoApprove: () => void;
+  onSwitchTab: (tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void;
+}) {
+  // Slash-command catalog. Each command exposes a name (the trigger),
+  // a one-line description for the droplist, and an action invoked
+  // when picked. Adding a command = one entry here — no plumbing.
+  type SlashCmd = {
+    name: string;
+    description: string;
+    action: () => void;
+  };
+  const slashCommands: SlashCmd[] = useMemo(() => [
+    { name: "/rules",     description: "Open the Rules sub-tab",            action: () => onSwitchTab("rules") },
+    { name: "/input",     description: "Show the User Input history",       action: () => onSwitchTab("userinput") },
+    { name: "/reply",     description: "Show the Reply (Clear Chat) tab",   action: () => onSwitchTab("reply") },
+    { name: "/thought",   description: "Show the Thought tab",              action: () => onSwitchTab("thought") },
+    { name: "/tools",     description: "Show the Tool Calls tab",           action: () => onSwitchTab("tools") },
+    { name: "/full",      description: "Show the Full Chat tab",            action: () => onSwitchTab("full") },
+    { name: "/bridges",   description: "Open the Bridges configurator",     action: () => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "bridges" } })) },
+    { name: "/server",    description: "Open the Server modal",             action: () => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "server" } })) },
+    { name: "/auto",      description: autoApprove ? "Turn Auto mode OFF"   : "Turn Auto mode ON", action: onToggleAutoApprove },
+    { name: "/clear",     description: "Clear the draft text",              action: () => setDraft("") },
+  ], [autoApprove, onSwitchTab, onToggleAutoApprove, setDraft]);
+
+  // Droplist state — open whenever the draft is exactly "/" or starts
+  // with "/<token>" (matched against command names). We also open
+  // explicitly when the toolbar "/" button is clicked.
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const trimmedFirstLine = draft.split("\n")[0] ?? "";
+  const slashQuery = trimmedFirstLine.startsWith("/") ? trimmedFirstLine.trim() : "";
+  const showPalette = paletteOpen || slashQuery.length > 0;
+  const filteredCmds = useMemo(() => {
+    if (!showPalette) return [];
+    const q = slashQuery.toLowerCase();
+    return slashCommands.filter(c =>
+      !q || c.name.toLowerCase().startsWith(q) || c.description.toLowerCase().includes(q.slice(1))
+    );
+  }, [showPalette, slashQuery, slashCommands]);
+
+  const runCommand = (c: SlashCmd) => {
+    c.action();
+    setDraft("");
+    setPaletteOpen(false);
+  };
+
+  // Web Speech API — toggle dictation. Only used on the desktop;
+  // Telegram path uses the bundled whisper.cpp pipeline already.
+  const recogRef = useRef<any>(null);
+  const [recording, setRecording] = useState(false);
+  const toggleMic = () => {
+    if (recording) {
+      try { recogRef.current?.stop?.(); } catch {}
+      setRecording(false);
+      return;
+    }
+    const Ctor = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
+    if (!Ctor) {
+      console.warn("[ChatInputDock] SpeechRecognition not available in this WebView");
+      return;
+    }
+    const rec = new Ctor();
+    rec.continuous = true;
+    rec.interimResults = true;
+    rec.lang = "en-US";
+    let baseline = draft;
+    rec.onresult = (ev: any) => {
+      let partial = "";
+      for (let i = ev.resultIndex; i < ev.results.length; i++) {
+        partial += ev.results[i][0].transcript;
+      }
+      setDraft((baseline ? baseline.trimEnd() + " " : "") + partial);
+    };
+    rec.onend = () => { setRecording(false); };
+    rec.onerror = () => { setRecording(false); };
+    try { rec.start(); recogRef.current = rec; setRecording(true); }
+    catch (e) { console.warn("[ChatInputDock] mic start failed", e); }
+  };
+
+  // + attach — opens the OS file picker via the rfd-backed Tauri
+  // command we already use elsewhere (Browse… on the LocationRow).
+  // The desktop dispatch path is text-only today, so we drop the
+  // path into the draft as a hint; the orchestrator can read the
+  // file via its read_file tool.
+  const onAttach = async () => {
+    try {
+      const path = await invoke<string | null>("pick_file", { title: "Attach a file", filters: null });
+      if (path && typeof path === "string") {
+        const sep = draft.endsWith("\n") || draft.length === 0 ? "" : "\n";
+        setDraft(`${draft}${sep}Attached file: \`${path}\``);
+      }
+    } catch (e) {
+      console.warn("[ChatInputDock] pick_file unavailable", e);
+    }
+  };
+
+  // Send: also intercepts slash commands so the user can run a
+  // command by typing "/rules" + Enter without clicking the menu.
+  const handleSend = () => {
+    if (busy) return;
+    const t = draft.trim();
+    if (!t) return;
+    if (t.startsWith("/")) {
+      const exact = slashCommands.find(c => c.name.toLowerCase() === t.toLowerCase());
+      if (exact) { runCommand(exact); return; }
+    }
+    onSend();
+  };
+
+  return (
+    <div data-ui="UserInputDock" style={{
+      borderTop:"1px solid var(--border)",
+      padding:"10px 12px 12px",
+      background:"var(--bg-elevated)",
+      flexShrink:0, minWidth:0, position:"relative",
+    }}>
+      {showPalette && filteredCmds.length > 0 && (
+        <div data-ui="SlashPalette" style={{
+          position:"absolute", left:12, right:12, bottom:"calc(100% - 4px)",
+          background:"var(--bg-panel)",
+          border:"1px solid var(--border-strong)",
+          borderRadius:10,
+          boxShadow:"0 -8px 30px rgba(0,0,0,0.55)",
+          maxHeight:260, overflowY:"auto",
+          zIndex:30, padding:"6px 0",
+        }}>
+          <div style={{ padding:"4px 12px 6px", fontSize:10, color:"var(--fg-muted)", letterSpacing:1, textTransform:"uppercase" }}>
+            Slash commands
+          </div>
+          {filteredCmds.map(c => (
+            <button
+              key={c.name}
+              type="button"
+              onClick={() => runCommand(c)}
+              style={{
+                display:"flex", alignItems:"baseline", gap:10, width:"100%",
+                padding:"6px 12px", background:"transparent", border:"none",
+                color:"var(--fg)", textAlign:"left", cursor:"pointer", fontSize:12,
+              }}
+              onMouseEnter={ev => { (ev.currentTarget as HTMLElement).style.background = "var(--bg-surface)"; }}
+              onMouseLeave={ev => { (ev.currentTarget as HTMLElement).style.background = "transparent"; }}
+            >
+              <span style={{ fontWeight:700, color:"#ffd97a", fontFamily:"Consolas, monospace" }}>{c.name}</span>
+              <span style={{ color:"var(--fg-muted)", fontSize:11 }}>{c.description}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{
+        display:"flex", flexDirection:"column",
+        background:"var(--bg-surface)",
+        border:"1px solid rgba(255,200,80,0.40)",
+        borderRadius:12,
+        overflow:"hidden",
+      }}>
+        <div style={{ display:"flex", alignItems:"flex-start", padding:"10px 12px 6px", gap:8 }}>
+          <textarea
+            ref={inputRef}
+            data-ui="UserInputArea"
+            value={draft}
+            onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === "Escape") { setPaletteOpen(false); return; }
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            placeholder="Queue another message…"
+            rows={1}
+            style={{
+              flex:1, minWidth:0, minHeight:24, maxHeight:240,
+              padding:0,
+              background:"transparent",
+              color:"var(--fg)",
+              border:"none",
+              fontSize:13, lineHeight:1.45,
+              fontFamily:"Segoe UI, sans-serif",
+              resize:"none",
+              outline:"none",
+              overflowY:"auto",
+            }}
+          />
+          <button
+            type="button"
+            onClick={toggleMic}
+            title={recording ? "Stop dictation" : "Start dictation (Web Speech)"}
+            style={{
+              flexShrink:0, width:28, height:28,
+              background: recording ? "rgba(255,140,140,0.20)" : "transparent",
+              border:"none", borderRadius:6,
+              color: recording ? "#ff8c8c" : "var(--fg-muted)",
+              cursor:"pointer", fontSize:16,
+              display:"flex", alignItems:"center", justifyContent:"center",
+            }}
+          >🎤</button>
+        </div>
+        <div style={{
+          display:"flex", alignItems:"center", gap:6,
+          padding:"4px 8px 8px",
+          borderTop:"1px solid rgba(255,255,255,0.04)",
+        }}>
+          <button
+            type="button"
+            onClick={onAttach}
+            title="Attach a file"
+            style={{
+              width:28, height:28, background:"transparent",
+              border:"1px solid var(--border)", borderRadius:6,
+              color:"var(--fg-muted)", cursor:"pointer", fontSize:15,
+              display:"flex", alignItems:"center", justifyContent:"center",
+            }}
+          >+</button>
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(v => !v)}
+            title="Slash commands"
+            style={{
+              width:28, height:28, background: showPalette ? "rgba(255,217,122,0.18)" : "transparent",
+              border:"1px solid var(--border)", borderRadius:6,
+              color: showPalette ? "#ffd97a" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
+              display:"flex", alignItems:"center", justifyContent:"center",
+            }}
+          >/</button>
+          <div style={{ flex:1 }} />
+          <button
+            type="button"
+            onClick={onToggleAutoApprove}
+            title={autoApprove ? "Auto mode is ON — agents auto-accept tool calls" : "Auto mode is OFF — agents wait for approval"}
+            style={{
+              height:28, padding:"0 10px",
+              display:"flex", alignItems:"center", gap:6,
+              background: autoApprove ? "rgba(255,217,122,0.18)" : "transparent",
+              border: `1px solid ${autoApprove ? "rgba(255,217,122,0.55)" : "var(--border)"}`,
+              borderRadius:6,
+              color: autoApprove ? "#ffd97a" : "var(--fg-muted)",
+              cursor:"pointer", fontSize:11, fontWeight:600,
+            }}
+          >
+            <span style={{ fontSize:13 }}>⚡</span>
+            <span>Auto mode</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleSend}
+            disabled={!busy && !draft.trim()}
+            title={busy ? "Stop (request will finish, no abort yet)" : (draft.trim() ? "Send message" : "Type something to send")}
+            style={{
+              width:32, height:28,
+              background: busy ? "#ff8c4a" : (draft.trim() ? "#ffd97a" : "rgba(255,217,122,0.18)"),
+              color: busy ? "#1a0e04" : (draft.trim() ? "#1a1404" : "#7d6f4b"),
+              border:"1px solid " + (busy ? "#ff8c4a" : "rgba(255,217,122,0.55)"),
+              borderRadius:6,
+              cursor: (busy || draft.trim()) ? "pointer" : "not-allowed",
+              fontSize:14, fontWeight:800,
+              display:"flex", alignItems:"center", justifyContent:"center",
+            }}
+          >{busy ? "■" : "▶"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // OrchestratorPane — RIGHT pane. Now driven by the active agent's
 // per-agent log buffer; click a node on the canvas to view its log
 // (default = whichever agent the dispatcher is currently driving,
@@ -3400,6 +3702,7 @@ function OrchestratorPane({
   team,
   projectId, directives, onDirectivesChanged,
   supChat, onSupSend, supSendBusy,
+  autoApprove, onToggleAutoApprove,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
@@ -3418,6 +3721,10 @@ function OrchestratorPane({
   supChat: GoalMsg[];
   onSupSend: (text: string) => void;
   supSendBusy: boolean;
+  /// VS Code-style dock's "Auto mode" toggle — wires to the project's
+  /// autoApprove flag (drives the dispatch's auto-accept of tool calls).
+  autoApprove: boolean;
+  onToggleAutoApprove: () => void;
 }) {
   // Sub-tab strip — Rules and User Input precede Clear Chat per user
   // spec ("we add the chat of the user in the chat container, BEFORE
@@ -3789,64 +4096,16 @@ function OrchestratorPane({
           )}
         </div>
       </div>
-      {/* Bottom-pinned input dock — always visible, on every sub-tab
-          (user spec 2026-05-28: "the text input box is in the bottom
-          of the chat box and resizable"). Auto-resizes with content:
-          starts 36 px tall, grows up to 240 px as the user types,
-          shrinks back when text is cleared. Enter sends, Shift+Enter
-          inserts a newline. */}
-      <div data-ui="UserInputDock" style={{
-        borderTop:"1px solid var(--border)",
-        padding:"8px 12px",
-        background:"var(--bg-elevated)",
-        display:"flex", alignItems:"flex-end", gap:8,
-        flexShrink:0, minWidth:0,
-      }}>
-        <textarea
-          ref={inputRef}
-          data-ui="UserInputArea"
-          value={draft}
-          onChange={e => setDraft(e.target.value)}
-          onKeyDown={e => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              submitInput();
-            }
-          }}
-          placeholder="Reply to the team — Enter to send, Shift+Enter for new line"
-          rows={1}
-          style={{
-            // minWidth:0 lets the textarea shrink below its placeholder's
-            // natural content width when the right column is narrow;
-            // without this the Send button to its right gets pushed
-            // off-screen on smaller window sizes.
-            flex:1, minWidth:0, minHeight:36, maxHeight:240,
-            padding:"8px 10px",
-            borderRadius:8,
-            background:"var(--bg-surface)",
-            color:"var(--fg)",
-            border:"1px solid rgba(255,200,80,0.30)",
-            fontSize:13, lineHeight:1.4,
-            fontFamily:"Segoe UI, sans-serif",
-            resize:"none",
-            outline:"none",
-            overflowY:"auto",
-          }}
-        />
-        <button
-          onClick={submitInput}
-          disabled={!draft.trim() || supSendBusy}
-          style={{
-            height:36, padding:"6px 14px", borderRadius:8,
-            border:"1px solid #ffd97a",
-            background: draft.trim() && !supSendBusy ? "#ffd97a" : "rgba(255,217,122,0.25)",
-            color: draft.trim() && !supSendBusy ? "#1a1404" : "#7d6f4b",
-            fontSize:13, fontWeight:700,
-            cursor: draft.trim() && !supSendBusy ? "pointer" : "not-allowed",
-            flexShrink:0,
-          }}
-        >{supSendBusy ? "Sending…" : "Send"}</button>
-      </div>
+      <ChatInputDock
+        draft={draft}
+        setDraft={setDraft}
+        inputRef={inputRef}
+        onSend={submitInput}
+        busy={supSendBusy}
+        autoApprove={autoApprove}
+        onToggleAutoApprove={onToggleAutoApprove}
+        onSwitchTab={setActiveTab}
+      />
     </div>
   );
 }
@@ -4057,6 +4316,8 @@ function RightColumnTabs(props: {
           supChat={props.supChat}
           onSupSend={props.onSupSend}
           supSendBusy={props.supSendBusy}
+          autoApprove={props.autoApprove}
+          onToggleAutoApprove={props.onToggleAutoApprove}
         />
       </div>
     </div>

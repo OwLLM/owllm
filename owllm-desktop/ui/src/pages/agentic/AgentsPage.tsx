@@ -3476,8 +3476,17 @@ function ChatInputDock({
 
   // Web Speech API — toggle dictation. Only used on the desktop;
   // Telegram path uses the bundled whisper.cpp pipeline already.
+  // WebView2 ships SpeechRecognition only when the Edge runtime has
+  // it enabled, which is NOT universal — when it's missing we keep
+  // the button visible but flash a tooltip via dockNote so the user
+  // doesn't think the button is broken.
   const recogRef = useRef<any>(null);
   const [recording, setRecording] = useState(false);
+  const [dockNote, setDockNote] = useState<string | null>(null);
+  const flashNote = (msg: string) => {
+    setDockNote(msg);
+    setTimeout(() => setDockNote(null), 3500);
+  };
   const toggleMic = () => {
     if (recording) {
       try { recogRef.current?.stop?.(); } catch {}
@@ -3486,14 +3495,14 @@ function ChatInputDock({
     }
     const Ctor = (window as any).webkitSpeechRecognition || (window as any).SpeechRecognition;
     if (!Ctor) {
-      console.warn("[ChatInputDock] SpeechRecognition not available in this WebView");
+      flashNote("Mic dictation unavailable in this WebView. Use the Telegram bridge for voice messages.");
       return;
     }
     const rec = new Ctor();
     rec.continuous = true;
     rec.interimResults = true;
     rec.lang = "en-US";
-    let baseline = draft;
+    const baseline = draft;
     rec.onresult = (ev: any) => {
       let partial = "";
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
@@ -3502,9 +3511,14 @@ function ChatInputDock({
       setDraft((baseline ? baseline.trimEnd() + " " : "") + partial);
     };
     rec.onend = () => { setRecording(false); };
-    rec.onerror = () => { setRecording(false); };
+    rec.onerror = (ev: any) => {
+      setRecording(false);
+      flashNote(`Mic error: ${ev?.error ?? "unknown"}`);
+    };
     try { rec.start(); recogRef.current = rec; setRecording(true); }
-    catch (e) { console.warn("[ChatInputDock] mic start failed", e); }
+    catch (e) {
+      flashNote(`Mic start failed: ${String(e)}`);
+    }
   };
 
   // + attach — opens the OS file picker via the rfd-backed Tauri
@@ -3518,16 +3532,29 @@ function ChatInputDock({
       if (path && typeof path === "string") {
         const sep = draft.endsWith("\n") || draft.length === 0 ? "" : "\n";
         setDraft(`${draft}${sep}Attached file: \`${path}\``);
+        flashNote(`Attached: ${path.split(/[/\\]/).pop()}`);
       }
     } catch (e) {
-      console.warn("[ChatInputDock] pick_file unavailable", e);
+      flashNote(`File picker failed: ${String(e)}`);
     }
   };
 
-  // Send: also intercepts slash commands so the user can run a
-  // command by typing "/rules" + Enter without clicking the menu.
+  // Send / Stop: when idle, send the draft (slash commands run
+  // inline). When busy, fire owllm:dispatch-abort which AgentsPage
+  // listens for to call .abort() on the active dispatch's
+  // AbortController — that cancels every in-flight fetch and the
+  // finally{} clears supSendBusy so the dock returns to ready.
+  // Previously this branch did nothing on busy, which is what the
+  // user mistook for "the stop button crashed the app" — the dock
+  // froze with busy stuck on, and the next click looked like a
+  // crash.
   const handleSend = () => {
-    if (busy) return;
+    if (busy) {
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:dispatch-abort"));
+      } catch { /* event dispatch never throws in practice */ }
+      return;
+    }
     const t = draft.trim();
     if (!t) return;
     if (t.startsWith("/")) {
@@ -3625,6 +3652,14 @@ function ChatInputDock({
             }}
           >🎤</button>
         </div>
+        {dockNote && (
+          <div style={{
+            padding:"4px 12px",
+            fontSize:11, color:"#ffd97a",
+            background:"rgba(255,217,122,0.08)",
+            borderTop:"1px solid rgba(255,217,122,0.20)",
+          }}>{dockNote}</div>
+        )}
         <div style={{
           display:"flex", alignItems:"center", gap:6,
           padding:"4px 8px 8px",
@@ -6190,6 +6225,22 @@ export default function AgentsPage() {
   const [supChat, setSupChat] = useState<GoalMsg[]>([]);
   const [supSendBusy, setSupSendBusy] = useState(false);
   const supSendBusyRef = useRef(false);
+  // Shared abort controller for the active onSupSend run. The Stop
+  // button on the ChatInputDock fires owllm:dispatch-abort; we listen
+  // below and call .abort() on this controller, which propagates to
+  // every in-flight streamChatCompletion fetch via the AbortSignal
+  // they share. Without this the Stop button was a no-op (and the
+  // user reported a crash when pressing it, plausibly because the
+  // first-message-cold-start path stuck supSendBusy=true forever
+  // and they hammered the button).
+  const supSendAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    const onAbort = () => {
+      try { supSendAbortRef.current?.abort(); } catch { /* already aborted */ }
+    };
+    window.addEventListener("owllm:dispatch-abort", onAbort);
+    return () => window.removeEventListener("owllm:dispatch-abort", onAbort);
+  }, []);
   // Auto-approve flag — persisted per project to localStorage so a
   // user who checks "auto-approve every tool call" doesn't have to
   // re-check it after every app restart (which would otherwise
@@ -6813,6 +6864,12 @@ export default function AgentsPage() {
     if (supSendBusyRef.current) return;
     supSendBusyRef.current = true;
     setSupSendBusy(true);
+    // Fresh abort controller for THIS run. Any owllm:dispatch-abort
+    // event (Stop button on the dock) will call .abort() on this
+    // and every streamChatCompletion fetch sharing the signal will
+    // unwind with an AbortError, caught below.
+    const supSendAbort = new AbortController();
+    supSendAbortRef.current = supSendAbort;
     // Capture prior history BEFORE the new user message lands in
     // supChat so the model gets continuity (otherwise the assistant
     // forgets every restart, which is what users keep hitting).
@@ -6907,7 +6964,7 @@ export default function AgentsPage() {
             "Review what the orchestrator should not miss before it answers.",
           ].join("\n"),
           0.3,
-          new AbortController().signal,
+          supSendAbort.signal,
           (delta) => { criticReview += delta; streamLog(CRITIC_NAME, delta); },
           (locationOverride || selectedProject?.location || "").trim(),
           priorHistory,
@@ -6953,7 +7010,7 @@ export default function AgentsPage() {
         sys,
         text,
         0.5,
-        new AbortController().signal,
+        supSendAbort.signal,
         (delta) => {
           streamedReply += delta;
           setSupChat(curr => {
@@ -7023,6 +7080,9 @@ export default function AgentsPage() {
     } finally {
       supSendBusyRef.current = false;
       setSupSendBusy(false);
+      if (supSendAbortRef.current === supSendAbort) {
+        supSendAbortRef.current = null;
+      }
     }
   };
 

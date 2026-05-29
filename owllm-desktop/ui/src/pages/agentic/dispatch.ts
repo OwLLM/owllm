@@ -1008,7 +1008,12 @@ export async function streamChatCompletion(
   // need another 30-60 s before /v1/chat/completions stops 503'ing.
   // Without this retry the first dispatch after a cold start bubbled
   // the raw 503 body up to the user as "(dispatch error: …)".
-  const LOAD_RETRY_MS = 90_000;
+  // 5 min ceiling for the combined "connection refused + 503 Loading
+  // model" retry budget. A 30 B+ GGUF cold-loading off a HDD can take
+  // 2–3 min before /v1/chat/completions accepts the first request,
+  // and the user's been hitting "first message missed" because the
+  // previous 90 s cap fell short of that window.
+  const LOAD_RETRY_MS = 300_000;
   const LOAD_RETRY_DELAY = 1500;
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");

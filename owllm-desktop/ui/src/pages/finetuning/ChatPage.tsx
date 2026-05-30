@@ -34,10 +34,12 @@ import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite
 // Agentic team.
 import {
   formatToolsForPrompt,
+  formatToolsForOpenAI,
   parseToolCalls,
   executeToolCall,
   renderToolResultsForModel,
   stripFabricatedToolOutput,
+  unmangleMcpName,
   type ToolCall,
   type ToolExecResult,
 } from "../agentic/localTools";
@@ -315,6 +317,26 @@ function parseAllToolCalls(visibleText: string, thinkingText: string): ToolCall[
     seen.add(key);
     return true;
   });
+}
+
+function parseNativeToolCalls(names: Map<number, string>, argsByIndex: Map<number, string>): ToolCall[] {
+  const calls: ToolCall[] = [];
+  for (const [idx, rawName] of names.entries()) {
+    const argsJson = argsByIndex.get(idx) ?? "{}";
+    const args: Record<string, string> = {};
+    try {
+      const parsed = JSON.parse(argsJson);
+      if (parsed && typeof parsed === "object") {
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+          args[k] = typeof v === "string" ? v : JSON.stringify(v);
+        }
+      }
+    } catch {
+      args.raw = argsJson;
+    }
+    calls.push({ name: unmangleMcpName(rawName), args });
+  }
+  return calls;
 }
 
 export default function ChatPage() {
@@ -636,6 +658,7 @@ export default function ChatPage() {
     // turn, re-stream. Loop ends when the model emits a turn with no
     // tool_call blocks — that's the final answer.
     const toolsBlock = chatMode === "agent" && toolsEnabled ? await formatToolsForPrompt() : "";
+    const openaiTools = chatMode === "agent" && toolsEnabled ? await formatToolsForOpenAI() : [];
     const modeInstruction =
       chatMode === "agent"
         ? "Mode: Agent. Use available tools when they help, then give a concise final answer."
@@ -666,6 +689,7 @@ export default function ChatPage() {
           temperature: col.temperature,
           top_p: col.topP,
           max_tokens: col.maxTokens,
+          tools: openaiTools.length > 0 ? openaiTools : undefined,
         };
 
         // llama-server returns HTTP 503
@@ -750,6 +774,8 @@ export default function ChatPage() {
         let turnReply = "";
         let turnThinking = "";
         let buffer = "";
+        const nativeToolNames = new Map<number, string>();
+        const nativeToolArgs = new Map<number, string>();
         // Track <think>…</think> state across deltas so we can ROUTE
         // reasoning into the 💭 channel even when the model wraps it
         // in tags inside `content` instead of using `reasoning_content`.
@@ -788,6 +814,17 @@ export default function ChatPage() {
                 continue;
               }
               const deltaObj = j?.choices?.[0]?.delta;
+              const nativeToolCalls: any[] | undefined = deltaObj?.tool_calls;
+              if (Array.isArray(nativeToolCalls)) {
+                for (const tc of nativeToolCalls) {
+                  const idx = typeof tc?.index === "number" ? tc.index : 0;
+                  const fn = tc?.function ?? {};
+                  if (typeof fn.name === "string" && fn.name) nativeToolNames.set(idx, fn.name);
+                  if (typeof fn.arguments === "string" && fn.arguments) {
+                    nativeToolArgs.set(idx, (nativeToolArgs.get(idx) ?? "") + fn.arguments);
+                  }
+                }
+              }
               const reasoning: string | undefined = deltaObj?.reasoning_content ?? deltaObj?.reasoning;
               if (typeof reasoning === "string" && reasoning) {
                 // Route reasoning to the SEPARATE thinking buffer
@@ -839,7 +876,8 @@ export default function ChatPage() {
 
         // Plain chat mode → one shot, done.
         if (!toolsBlock) break;
-        const calls = parseAllToolCalls(turnReply, turnThinking);
+        const nativeCalls = parseNativeToolCalls(nativeToolNames, nativeToolArgs);
+        const calls = nativeCalls.length > 0 ? nativeCalls : parseAllToolCalls(turnReply, turnThinking);
         // Model produced no tool calls → that turn IS the final answer.
         if (calls.length === 0) break;
 

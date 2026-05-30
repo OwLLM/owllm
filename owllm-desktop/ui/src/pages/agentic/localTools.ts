@@ -175,10 +175,7 @@ export async function formatToolsForPrompt(_allowed?: string[]): Promise<string>
   // a cheap in-memory aggregation on the Rust side; safe to call per
   // dispatch. Failures fall back to "no MCP tools" — never block the
   // dispatch on an MCP enumeration error.
-  let mcpTools: AggregatedMcpTool[] = [];
-  try {
-    mcpTools = await invoke<AggregatedMcpTool[]>("mcp_list_all_tools");
-  } catch { /* MCP unavailable — proceed with built-ins only */ }
+  const mcpTools = await listAvailableMcpTools();
   const searchMcpTools = mcpTools.filter(isMcpSearchTool);
   const advertisedLocalTools = searchMcpTools.length > 0
     ? tools.filter((t) => t.name !== "web_search")
@@ -257,7 +254,12 @@ export async function formatToolsForPrompt(_allowed?: string[]): Promise<string>
 /// in formatToolsForPrompt still applies as the fallback path.
 export async function formatToolsForOpenAI(_allowed?: string[]): Promise<unknown[]> {
   const out: unknown[] = [];
-  for (const t of LOCAL_TOOL_SPECS) {
+  const mcpTools = await listAvailableMcpTools();
+  const searchMcpTools = mcpTools.filter(isMcpSearchTool);
+  const localTools = searchMcpTools.length > 0
+    ? LOCAL_TOOL_SPECS.filter((t) => t.name !== "web_search")
+    : LOCAL_TOOL_SPECS;
+  for (const t of localTools) {
     const properties: Record<string, unknown> = {};
     const required: string[] = [];
     for (const a of t.args) {
@@ -282,10 +284,6 @@ export async function formatToolsForOpenAI(_allowed?: string[]): Promise<unknown
   // can pass it through almost verbatim. Tool name has to be a valid
   // OpenAI identifier (^[a-zA-Z0-9_-]+$); colons in mcp:<server>:<tool>
   // get rewritten to underscores and back on the way out.
-  let mcpTools: AggregatedMcpTool[] = [];
-  try {
-    mcpTools = await invoke<AggregatedMcpTool[]>("mcp_list_all_tools");
-  } catch { /* MCP unavailable */ }
   for (const m of mcpTools) {
     const safeName = m.qualifiedName.replace(/:/g, "__");
     out.push({
@@ -317,18 +315,24 @@ type AggregatedMcpTool = {
   inputSchema: unknown;
 };
 
+async function listAvailableMcpTools(): Promise<AggregatedMcpTool[]> {
+  try {
+    await invoke("mcp_autostart_all");
+  } catch { /* best-effort: listing may still work if servers are already running */ }
+  try {
+    return await invoke<AggregatedMcpTool[]>("mcp_list_all_tools");
+  } catch {
+    return [];
+  }
+}
+
 function isMcpSearchTool(tool: AggregatedMcpTool): boolean {
   const haystack = `${tool.qualifiedName} ${tool.server} ${tool.tool} ${tool.description}`.toLowerCase();
   return /\b(search|web_search|duckduckgo|brave)\b/.test(haystack);
 }
 
 async function findPreferredMcpSearchTool(): Promise<AggregatedMcpTool | null> {
-  let mcpTools: AggregatedMcpTool[] = [];
-  try {
-    mcpTools = await invoke<AggregatedMcpTool[]>("mcp_list_all_tools");
-  } catch {
-    return null;
-  }
+  const mcpTools = await listAvailableMcpTools();
   const searchTools = mcpTools.filter(isMcpSearchTool);
   if (searchTools.length === 0) return null;
   return searchTools.find((t) => /duckduckgo/i.test(`${t.qualifiedName} ${t.description}`))

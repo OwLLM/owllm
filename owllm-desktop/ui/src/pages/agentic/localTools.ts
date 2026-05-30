@@ -132,9 +132,22 @@ export function stripFabricatedToolOutput(text: string): string {
   let out = text;
   out = out.replace(FABRICATED_RESPONSE_RE, "");
   out = out.replace(STRAY_EOS_RE, "");
-  // Also drop the dangling `<|tool_call>...<tool_call|>` blocks once
+  // Drop the dangling `<|tool_call>...<tool_call|>` blocks once
   // we've parsed them — they're noise in the visible reply.
   out = out.replace(NATIVE_CALL_RE, "");
+  // Drop the well-formed XML tool_call blocks too. parseToolCalls
+  // extracts them from the raw reply and the runtime executes
+  // them; the user shouldn't see the raw '<tool_call name="…">…
+  // </tool_call>' XML rendered as plain text. The previous strip
+  // missed this case and the user saw the whole 'create_dir / shell
+  // / web_search / write_file' XML pasted into the chat.
+  out = out.replace(/<tool_call\b[^>]*>[\s\S]*?<\/tool_call>/gi, "");
+  // Half-formed / nested tool_call openings the model emits when
+  // it confuses itself — single </tool_call>, lone <tool_call ...>
+  // without close, stray <arg> tags. Remove these so the user
+  // doesn't see the leftover XML scaffolding.
+  out = out.replace(/<\/?\s*tool_call\b[^>]*\/?>/gi, "");
+  out = out.replace(/<\/?\s*arg\b[^>]*\/?>/gi, "");
   return out.trim();
 }
 

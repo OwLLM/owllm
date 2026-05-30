@@ -6785,17 +6785,28 @@ export default function AgentsPage() {
     if (!selectedProject) return;
     const next = JSON.stringify(supChat);
     if (next === (selectedProject.chat_json || "[]")) return;
+    const projectId = selectedProject.id;
     const id = window.setTimeout(async () => {
       try {
-        await invoke("update_project", {
-          input: { id: selectedProject.id, chat_json: next },
-        });
+        await invoke("update_project", { input: { id: projectId, chat_json: next } });
         await reloadProjects();
       } catch (e) {
         console.error("persist chat_json failed", e);
       }
     }, 200);
-    return () => window.clearTimeout(id);
+    // On unmount (page change!) ALSO fire the save synchronously
+    // so what was on screen survives the page swap. Previously the
+    // debounce got clearTimeout'd on unmount and the most recent
+    // tokens were lost — user reported 'when i change page the chat
+    // stops working' which is partly this (visible state didn't get
+    // saved) and partly that the in-flight dispatch is orphaned
+    // (see comment below).
+    return () => {
+      window.clearTimeout(id);
+      invoke("update_project", { input: { id: projectId, chat_json: next } })
+        .then(() => reloadProjects())
+        .catch(e => console.warn("flush chat_json on unmount failed", e));
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [supChat, selectedProject?.id]);
 

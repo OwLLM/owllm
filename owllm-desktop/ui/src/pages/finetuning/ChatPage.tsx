@@ -38,6 +38,7 @@ import {
   executeToolCall,
   renderToolResultsForModel,
   stripFabricatedToolOutput,
+  type ToolCall,
   type ToolExecResult,
 } from "../agentic/localTools";
 
@@ -273,6 +274,47 @@ function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: 
       </div>
     </div>
   );
+}
+
+function cleanArgValue(raw: string): string {
+  let v = raw.trim();
+  v = v.replace(/\s+\([^)]*\)\s*$/g, "").trim();
+  v = v.replace(/[,.;]\s*$/g, "").trim();
+  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")) || (v.startsWith("`") && v.endsWith("`"))) {
+    v = v.slice(1, -1);
+  }
+  return v.trim();
+}
+
+function parseProseToolCalls(text: string): ToolCall[] {
+  const nameMatch = /(?:^|\n)\s*Tool\s*:\s*`?([a-zA-Z0-9_:-]+)`?/i.exec(text);
+  if (!nameMatch) return [];
+  const args: Record<string, string> = {};
+  const argsStart = text.slice(nameMatch.index + nameMatch[0].length);
+  const bulletRe = /(?:^|\n)\s*[-*]\s*`?([a-zA-Z0-9_.-]+)`?\s*:\s*([^\n]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = bulletRe.exec(argsStart)) !== null) {
+    const value = cleanArgValue(m[2]);
+    if (!value || /^(?:not specified|none|null|n\/a)\b/i.test(value) || /default is fine/i.test(value)) continue;
+    args[m[1]] = value;
+  }
+  return [{ name: nameMatch[1], args }];
+}
+
+function parseAllToolCalls(visibleText: string, thinkingText: string): ToolCall[] {
+  const calls = [
+    ...parseToolCalls(visibleText),
+    ...parseToolCalls(thinkingText),
+    ...parseProseToolCalls(visibleText),
+    ...parseProseToolCalls(thinkingText),
+  ];
+  const seen = new Set<string>();
+  return calls.filter((c) => {
+    const key = `${c.name}\u0000${JSON.stringify(c.args)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export default function ChatPage() {
@@ -706,6 +748,7 @@ export default function ChatPage() {
         readersRef.current.set(col.id, reader);
         const dec = new TextDecoder();
         let turnReply = "";
+        let turnThinking = "";
         let buffer = "";
         // Track <think>…</think> state across deltas so we can ROUTE
         // reasoning into the 💭 channel even when the model wraps it
@@ -752,6 +795,7 @@ export default function ChatPage() {
                 // turnReply — keeps the visible chat clean AND
                 // keeps parseToolCalls from misreading reasoning as
                 // a tool block.
+                turnThinking += reasoning;
                 appendThinking(col.id, reasoning);
               }
               const delta = deltaObj?.content;
@@ -765,7 +809,10 @@ export default function ChatPage() {
                   if (inThink) {
                     const close = buf.indexOf("</think>");
                     const thoughtPart = close < 0 ? buf : buf.slice(0, close);
-                    if (thoughtPart) appendThinking(col.id, thoughtPart);
+                    if (thoughtPart) {
+                      turnThinking += thoughtPart;
+                      appendThinking(col.id, thoughtPart);
+                    }
                     if (close < 0) break;
                     inThink = false;
                     buf = buf.slice(close + "</think>".length);
@@ -792,7 +839,7 @@ export default function ChatPage() {
 
         // Plain chat mode → one shot, done.
         if (!toolsBlock) break;
-        const calls = parseToolCalls(turnReply);
+        const calls = parseAllToolCalls(turnReply, turnThinking);
         // Model produced no tool calls → that turn IS the final answer.
         if (calls.length === 0) break;
 
@@ -1074,7 +1121,7 @@ export default function ChatPage() {
                             ? "Selected — server will start when you pick model A."
                             : "Pick a model above to start a server."}
                     </div>
-                  ) : col.messages.map((m, i) => m.kind ? renderChatMessage(m, i, col.id, col.busy, i === col.messages.length - 1) : (
+                  ) : col.messages.map((m, i) => renderChatMessage(m, i, col.id, col.busy, i === col.messages.length - 1) || (
                     <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                       <div style={{
                         fontSize: 10, fontWeight: 700, letterSpacing: 0.5,

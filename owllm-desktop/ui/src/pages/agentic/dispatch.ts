@@ -1046,17 +1046,23 @@ export async function streamChatCompletion(
             // dispatch again if a single turn truly needs more.
             max_tokens: 1024,
             // Anti-degeneration sampling. Small local models (Qwen3
-            // ≤14B, Gemma 3, Llama 3.1 8B) routinely lock into a loop
-            // like "I will output the response. The search results
-            // are: 1) … 2) …" repeating until max_tokens. The user has
-            // hit this multiple times. Defaults to 1.0 / 0 / 0 on
-            // llama-server which is "no penalty" — bump them so the
-            // sampler reweights tokens it's already used heavily.
-            // Frontier models tolerate these values fine; small models
-            // become usable.
+            // ≤14B, Gemma 3, Llama 3.1 8B) lock into loops like "I
+            // will write the answer / I will write the answer" until
+            // max_tokens. The plain repeat/frequency penalties alone
+            // (1.15 / 0.4) didn't stop it — Qwen rewords just enough
+            // to dodge them. DRY (Don't Repeat Yourself) is llama.cpp's
+            // purpose-built anti-loop sampler: it penalises any
+            // multi-token sequence that's already appeared. Bumping
+            // repeat_last_n to 256 widens the standard penalty window
+            // from its 64-token default.
             repeat_penalty: 1.15,        // llama.cpp native
+            repeat_last_n: 256,          // llama.cpp native
             frequency_penalty: 0.4,      // OpenAI-compat
             presence_penalty: 0.4,       // OpenAI-compat
+            dry_multiplier: 0.8,         // llama.cpp DRY sampler (off=0)
+            dry_base: 1.75,
+            dry_allowed_length: 4,
+            dry_penalty_last_n: -1,      // -1 = whole context
             tools: openaiTools.length > 0 ? openaiTools : undefined,
           }),
           signal,
@@ -1497,6 +1503,37 @@ async function consumeOpenAISse(
   // catch swallows the throw so we can break + rethrow at the right
   // level instead of being silently skipped as "malformed chunk".
   let serverError: string | null = null;
+  // Client-side loop detector. Server-side DRY + repeat_penalty
+  // catches most cases; this is the backstop. Tracks the last few
+  // non-empty lines of the visible reply; if the last 3 are byte-
+  // identical and non-trivial (>=10 chars), we're in a loop like
+  // "I will write the answer\nI will write the answer\n…". Abort
+  // the stream so the user doesn't have to hit Stop.
+  let loopAborted = false;
+  const checkLineLoop = (full: string): boolean => {
+    // Cheap: only the trailing chunk matters. 600 chars covers 3
+    // copies of a ~200-char line; longer than that the DRY sampler
+    // will have engaged anyway.
+    const tail = full.length > 600 ? full.slice(-600) : full;
+    const lines = tail.split("\n").map(l => l.trim()).filter(l => l.length >= 10);
+    if (lines.length < 3) return false;
+    const [a, b, c] = lines.slice(-3);
+    return a === b && b === c;
+  };
+  // Detect dense intra-line repetition too (model loops without
+  // newlines): if the last 90 chars contain 3 identical 25-char
+  // substrings, that's a loop.
+  const checkInlineLoop = (full: string): boolean => {
+    if (full.length < 90) return false;
+    const tail = full.slice(-90);
+    for (let chunkLen = 25; chunkLen <= 30; chunkLen++) {
+      const a = tail.slice(0, chunkLen);
+      const b = tail.slice(chunkLen, chunkLen * 2);
+      const c = tail.slice(chunkLen * 2, chunkLen * 3);
+      if (a === b && b === c && a.trim().length >= 15) return true;
+    }
+    return false;
+  };
   while (true) {
     let res: ReadableStreamReadResult<Uint8Array>;
     try {
@@ -1572,9 +1609,21 @@ async function consumeOpenAISse(
           inThink = nextInThink;
           if (thought) onThought?.("thinking", "🧠 thinking", thought);
           if (reply)   { acc += reply; onDelta(reply); }
+          // Only worth checking when a newline just landed (line
+          // loop) or after every chunk for inline-loop coverage.
+          if (reply && (reply.includes("\n") || acc.length > 90)) {
+            if (checkLineLoop(acc) || checkInlineLoop(acc)) {
+              console.warn("[dispatch.sse] repetition loop detected — aborting");
+              onDelta("\n\n⚠ Repetition loop detected — stream aborted.");
+              loopAborted = true;
+              try { await reader.cancel("loop"); } catch { /* ignore */ }
+              break;
+            }
+          }
         }
       } catch { /* skip malformed chunk */ }
     }
+    if (loopAborted) break;
   }
   if (serverError) {
     throw new Error(`llama-server returned an error: ${serverError}`);

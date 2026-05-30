@@ -5511,13 +5511,18 @@ async function streamChatCompletion(
             stream: true,
             temperature,
             // Cap + anti-degeneration sampling — matches dispatch.ts.
-            // Small local models lock into "I will output the response"
-            // style loops without these. repeat_penalty is llama.cpp
-            // native; frequency/presence are OpenAI-compat (also honoured).
+            // DRY (Don't Repeat Yourself) is llama.cpp's purpose-built
+            // anti-loop sampler; plain repeat/frequency penalties
+            // alone weren't enough to stop Qwen3 mid-reword loops.
             max_tokens: 1024,
             repeat_penalty: 1.15,
+            repeat_last_n: 256,
             frequency_penalty: 0.4,
             presence_penalty: 0.4,
+            dry_multiplier: 0.8,
+            dry_base: 1.75,
+            dry_allowed_length: 4,
+            dry_penalty_last_n: -1,
           }),
           signal,
         });
@@ -6095,6 +6100,29 @@ async function consumeOpenAISse(
   let acc = "";
   let inThink = false;
   const toolNames = new Map<number, string>();
+  // Client-side repetition-loop detector — backstop for the server-
+  // side DRY/repeat_penalty sampling. Mirrors dispatch.ts. Triggers
+  // on either 3 identical lines (>=10 chars) at the tail, OR 3
+  // identical 25-30 char substrings packed into the last 90 chars.
+  let loopAborted = false;
+  const checkLineLoop = (full: string): boolean => {
+    const tail = full.length > 600 ? full.slice(-600) : full;
+    const lines = tail.split("\n").map(l => l.trim()).filter(l => l.length >= 10);
+    if (lines.length < 3) return false;
+    const [a, b, c] = lines.slice(-3);
+    return a === b && b === c;
+  };
+  const checkInlineLoop = (full: string): boolean => {
+    if (full.length < 90) return false;
+    const tail = full.slice(-90);
+    for (let chunkLen = 25; chunkLen <= 30; chunkLen++) {
+      const a = tail.slice(0, chunkLen);
+      const b = tail.slice(chunkLen, chunkLen * 2);
+      const c = tail.slice(chunkLen * 2, chunkLen * 3);
+      if (a === b && b === c && a.trim().length >= 15) return true;
+    }
+    return false;
+  };
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -6137,9 +6165,19 @@ async function consumeOpenAISse(
           inThink = split.inThink;
           if (split.thought) onThought?.("thinking", "🧠 thinking", split.thought);
           if (split.reply)   { acc += split.reply; onDelta(split.reply); }
+          if (split.reply && (split.reply.includes("\n") || acc.length > 90)) {
+            if (checkLineLoop(acc) || checkInlineLoop(acc)) {
+              console.warn("[AgentsPage.sse] repetition loop detected — aborting");
+              onDelta("\n\n⚠ Repetition loop detected — stream aborted.");
+              loopAborted = true;
+              try { await reader.cancel("loop"); } catch { /* ignore */ }
+              break;
+            }
+          }
         }
       } catch { /* skip malformed chunk */ }
     }
+    if (loopAborted) break;
   }
   return acc;
 }

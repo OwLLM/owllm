@@ -712,14 +712,19 @@ export default function ChatPage() {
           temperature: col.temperature,
           top_p: col.topP,
           max_tokens: col.maxTokens,
-          // Anti-degeneration sampling. Small local models (Qwen3
-          // ≤14B, Gemma 3, Llama 3.1 8B) lock into repetition loops
-          // without these. repeat_penalty is llama.cpp native;
-          // frequency/presence are OpenAI-compat (llama-server honours
-          // both). Frontier models tolerate these values fine.
+          // Anti-degeneration sampling. Plain repeat/frequency penalties
+          // weren't enough on Qwen3 — it loops with slight rewording.
+          // DRY (Don't Repeat Yourself) is llama.cpp's purpose-built
+          // anti-loop sampler; it penalises any multi-token sequence
+          // that's already appeared in the context window.
           repeat_penalty: 1.15,
+          repeat_last_n: 256,
           frequency_penalty: 0.4,
           presence_penalty: 0.4,
+          dry_multiplier: 0.8,
+          dry_base: 1.75,
+          dry_allowed_length: 4,
+          dry_penalty_last_n: -1,
           tools: openaiTools.length > 0 ? openaiTools : undefined,
           tool_choice: openaiTools.length > 0 ? "auto" : undefined,
         };
@@ -814,7 +819,32 @@ export default function ChatPage() {
         let inThink = false;
         let serverError: string | null = null;
         let streamTimedOut = false;
+        let loopAborted = false;
         const STREAM_IDLE_MS = 45_000;
+        // Client-side repetition-loop detector (same shape as
+        // dispatch.ts / AgentsPage). Backstop for the server-side
+        // DRY + repeat_penalty sampling. Fires on either:
+        //   - 3 identical >=10-char lines at the tail, or
+        //   - 3 copies of any 25-30 char substring packed in the
+        //     last 90 chars (catches loops without newlines).
+        const checkLineLoop = (full: string): boolean => {
+          const tail = full.length > 600 ? full.slice(-600) : full;
+          const lines = tail.split("\n").map(l => l.trim()).filter(l => l.length >= 10);
+          if (lines.length < 3) return false;
+          const [a, b, c] = lines.slice(-3);
+          return a === b && b === c;
+        };
+        const checkInlineLoop = (full: string): boolean => {
+          if (full.length < 90) return false;
+          const tail = full.slice(-90);
+          for (let chunkLen = 25; chunkLen <= 30; chunkLen++) {
+            const a = tail.slice(0, chunkLen);
+            const b = tail.slice(chunkLen, chunkLen * 2);
+            const c = tail.slice(chunkLen * 2, chunkLen * 3);
+            if (a === b && b === c && a.trim().length >= 15) return true;
+          }
+          return false;
+        };
         while (true) {
           // Honor the abort flag inline — the user pressed Stop and
           // we should bail out of the read loop even if reader.read()
@@ -888,6 +918,7 @@ export default function ChatPage() {
                 // visible answer. State machine survives chunk
                 // boundaries via `inThink` declared above the loop.
                 let buf = delta;
+                let sawNewlineInVisible = false;
                 while (buf.length > 0) {
                   if (inThink) {
                     const close = buf.indexOf("</think>");
@@ -904,6 +935,7 @@ export default function ChatPage() {
                     const visiblePart = open < 0 ? buf : buf.slice(0, open);
                     if (visiblePart) {
                       turnReply += visiblePart; reply += visiblePart;
+                      if (visiblePart.includes("\n")) sawNewlineInVisible = true;
                       appendAssistant(col.id, visiblePart);
                     }
                     if (open < 0) break;
@@ -911,9 +943,19 @@ export default function ChatPage() {
                     buf = buf.slice(open + "<think>".length);
                   }
                 }
+                if (sawNewlineInVisible || turnReply.length > 90) {
+                  if (checkLineLoop(turnReply) || checkInlineLoop(turnReply)) {
+                    console.warn("[ChatPage.sse] repetition loop detected — aborting");
+                    appendAssistant(col.id, "\n\n⚠ Repetition loop detected — stream aborted.");
+                    loopAborted = true;
+                    try { await reader.cancel("loop"); } catch {}
+                    break;
+                  }
+                }
               }
             } catch { /* skip malformed */ }
           }
+          if (loopAborted) break;
         }
         readersRef.current.delete(col.id);
         if (serverError) {

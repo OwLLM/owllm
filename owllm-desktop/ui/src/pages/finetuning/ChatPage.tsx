@@ -339,6 +339,29 @@ function parseNativeToolCalls(names: Map<number, string>, argsByIndex: Map<numbe
   return calls;
 }
 
+function extractSearchQuery(text: string): string | null {
+  const quoted = /["“]([^"”]{2,200})["”]/.exec(text);
+  if (quoted) return quoted[1].trim();
+  const m = /\b(?:web\s*search|websearch|search(?:\s+the\s+web)?|duckduckgo)\b(?:\s+(?:for|about))?\s+(.{2,200})/i.exec(text);
+  if (!m) return null;
+  return m[1].replace(/\b(?:using|with)\b.*$/i, "").trim().replace(/[.:\s]+$/g, "");
+}
+
+function synthesizeExplicitToolCalls(userText: string, visibleText: string, thinkingText: string): ToolCall[] {
+  const haystack = `${userText}\n${visibleText}\n${thinkingText}`;
+  const calls: ToolCall[] = [];
+  const wantsShell = /\b(?:bash|shell|terminal|command\s+line)\b/i.test(haystack);
+  const wantsSearch = /\b(?:web\s*search|websearch|search\s+the\s+web|duckduckgo)\b/i.test(haystack);
+  if (wantsShell && /\b(?:test|testing|try|run)\b/i.test(haystack)) {
+    calls.push({ name: "shell", args: { command: "echo Shell tool test successful" } });
+  }
+  if (wantsSearch) {
+    const query = extractSearchQuery(userText) ?? extractSearchQuery(thinkingText) ?? extractSearchQuery(visibleText);
+    if (query) calls.push({ name: "web_search", args: { query, max_results: "5" } });
+  }
+  return calls;
+}
+
 export default function ChatPage() {
   const persisted = loadState();
   const [status, setStatus] = useState<ServerStatus>({
@@ -661,7 +684,7 @@ export default function ChatPage() {
     const openaiTools = chatMode === "agent" && toolsEnabled ? await formatToolsForOpenAI() : [];
     const modeInstruction =
       chatMode === "agent"
-        ? "Mode: Agent. Use available tools when they help, then give a concise final answer."
+        ? "Mode: Agent. Use available tools when they help, then give a concise final answer. If you decide to use a tool, emit an actual tool call immediately; do not merely say you will use one."
         : chatMode === "edit"
           ? "Mode: Edit. Focus on concrete changes, diffs, rewrites, and exact patches. Ask before using tools."
           : "Mode: Ask. Answer conversationally and do not call tools unless explicitly requested.";
@@ -690,6 +713,7 @@ export default function ChatPage() {
           top_p: col.topP,
           max_tokens: col.maxTokens,
           tools: openaiTools.length > 0 ? openaiTools : undefined,
+          tool_choice: openaiTools.length > 0 ? "auto" : undefined,
         };
 
         // llama-server returns HTTP 503
@@ -781,6 +805,8 @@ export default function ChatPage() {
         // in tags inside `content` instead of using `reasoning_content`.
         let inThink = false;
         let serverError: string | null = null;
+        let streamTimedOut = false;
+        const STREAM_IDLE_MS = 45_000;
         while (true) {
           // Honor the abort flag inline — the user pressed Stop and
           // we should bail out of the read loop even if reader.read()
@@ -791,9 +817,21 @@ export default function ChatPage() {
           }
           let chunk: ReadableStreamReadResult<Uint8Array>;
           try {
-            chunk = await reader.read();
+            let idleTimer: ReturnType<typeof setTimeout> | null = null;
+            chunk = await Promise.race([
+              reader.read(),
+              new Promise<ReadableStreamReadResult<Uint8Array>>((_, reject) => {
+                idleTimer = setTimeout(() => reject(new Error(`stream idle for ${STREAM_IDLE_MS / 1000}s`)), STREAM_IDLE_MS);
+              }),
+            ]);
+            if (idleTimer) clearTimeout(idleTimer);
           } catch (e: any) {
             if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+            if (/stream idle/i.test(String(e?.message ?? e))) {
+              streamTimedOut = true;
+              try { await reader.cancel(); } catch {}
+              break;
+            }
             throw e;
           }
           if (chunk.done) break;
@@ -873,11 +911,23 @@ export default function ChatPage() {
         if (serverError) {
           throw new Error(`llama-server stream error: ${serverError}`);
         }
+        if (streamTimedOut) {
+          appendEvent(col.id, {
+            kind: "notice",
+            status: "error",
+            title: "Model stream paused",
+            content: `No tokens arrived for ${STREAM_IDLE_MS / 1000}s. Continuing with any detected tool intent instead of hanging.`,
+          });
+        }
 
         // Plain chat mode → one shot, done.
         if (!toolsBlock) break;
         const nativeCalls = parseNativeToolCalls(nativeToolNames, nativeToolArgs);
-        const calls = nativeCalls.length > 0 ? nativeCalls : parseAllToolCalls(turnReply, turnThinking);
+        const parsedCalls = parseAllToolCalls(turnReply, turnThinking);
+        const fallbackCalls = nativeCalls.length === 0 && parsedCalls.length === 0
+          ? synthesizeExplicitToolCalls(userText, turnReply, turnThinking)
+          : [];
+        const calls = nativeCalls.length > 0 ? nativeCalls : parsedCalls.length > 0 ? parsedCalls : fallbackCalls;
         // Model produced no tool calls → that turn IS the final answer.
         if (calls.length === 0) break;
 

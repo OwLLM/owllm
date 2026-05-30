@@ -248,14 +248,12 @@ export default function ChatPage() {
     for (const col of columns) {
       const el = transcriptRefs.current[col.id];
       if (!el) continue;
-      // Skip the auto-scroll while the user is mid-selection inside
-      // this transcript — the previous unconditional scrollTop jump
-      // broke text highlighting (user spec 2026-05-29: 'almost
-      // impossible to highlight with the mouse to copy and paste').
+      // Always auto-scroll to bottom. ONLY skip while the user is
+      // mid-selection inside this transcript — the unconditional
+      // scrollTop jump used to break text highlighting.
       const sel = window.getSelection?.();
       if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) continue;
-      const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-      if (nearBottom) el.scrollTop = el.scrollHeight;
+      el.scrollTop = el.scrollHeight;
     }
   }, [columns]);
 

@@ -1252,12 +1252,11 @@ function AgentChatTile({
   useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    // Don't yank the view down while the user is selecting text or
-    // has scrolled up to read earlier turns.
+    // Auto-scroll to the latest line by default. ONLY suppress
+    // while the user is mid-selection inside this container.
     const sel = window.getSelection?.();
     if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
+    el.scrollTop = el.scrollHeight;
   }, [tailSig]);
   const rgb = hexToRgbStr(accent);
   // Only show this agent's own reply lines. The user's "you" turn and
@@ -1427,13 +1426,11 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
   useLayoutEffect(() => {
     const el = suChatRef.current;
     if (!el) return;
-    // Skip the auto-scroll while the user is selecting text inside
-    // this pane — otherwise the every-token scrollTop jump cancels
-    // the drag mid-highlight (user spec 2026-05-29).
+    // Auto-scroll to latest. ONLY suppress mid-selection so the
+    // user can highlight to copy. No 'near bottom' gate.
     const sel = window.getSelection?.();
     if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
+    el.scrollTop = el.scrollHeight;
   }, [suTailSig, projectId]);
   const submit = () => {
     if (sendBusy) return;
@@ -3436,6 +3433,7 @@ function ChatInputDock({
   draft, setDraft, inputRef, onSend, busy,
   autoApprove, onToggleAutoApprove,
   onSwitchTab,
+  needsLoad, loadingModel, onLoadModel,
 }: {
   draft: string;
   setDraft: (v: string) => void;
@@ -3445,6 +3443,19 @@ function ChatInputDock({
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
   onSwitchTab: (tab: "rules"|"userinput"|"reply"|"thought"|"tools"|"full") => void;
+  /// True when the team's currently-resolved model is local AND
+  /// llama-server isn't already serving it. The send button label
+  /// flips to '⚡ Load' so the user knows the first click will
+  /// trigger the cold-load. Once load completes the button reverts
+  /// to '▶ Send' (next click sends normally).
+  needsLoad: boolean;
+  /// True while the explicit load-then-send is in flight. Renders a
+  /// spinner glyph so the user doesn't double-click.
+  loadingModel: boolean;
+  /// Called when the button is clicked in 'Load' state. Starts the
+  /// server, waits for the model to actually be ready, then dispatches
+  /// the draft as a normal send.
+  onLoadModel: () => void;
 }) {
   // Slash-command catalog. Each command exposes a name (the trigger),
   // a one-line description for the droplist, and an action invoked
@@ -3574,6 +3585,23 @@ function ChatInputDock({
     if (t.startsWith("/")) {
       const exact = slashCommands.find(c => c.name.toLowerCase() === t.toLowerCase());
       if (exact) { runCommand(exact); return; }
+    }
+    // Deterministic local-model path (user spec 2026-05-30): when
+    // the team's local llama-server isn't already serving the
+    // resolved model, the button is in 'Load' mode. First click
+    // boots the server, waits for ready, THEN auto-sends. Once
+    // loaded the next click is a plain Send — no more 503 retry
+    // dance on the user's first message.
+    if (needsLoad) {
+      // Park the draft on a window event so AgentsPage can pick it
+      // up and auto-send once the model finishes loading. Clear the
+      // textarea so the user knows we accepted it.
+      try {
+        window.dispatchEvent(new CustomEvent("owllm:dock:park-draft", { detail: { text: t } }));
+      } catch {}
+      setDraft("");
+      onLoadModel();
+      return;
     }
     onSend();
   };
@@ -3722,19 +3750,33 @@ function ChatInputDock({
           <button
             type="button"
             onClick={handleSend}
-            disabled={!busy && !draft.trim()}
-            title={busy ? "Stop (request will finish, no abort yet)" : (draft.trim() ? "Send message" : "Type something to send")}
+            disabled={!busy && !loadingModel && !draft.trim()}
+            title={busy
+              ? "Stop the in-flight dispatch"
+              : loadingModel
+                ? "Loading model into VRAM — click sends as soon as ready"
+                : needsLoad
+                  ? "First click loads the local model, then auto-sends. Subsequent clicks send immediately."
+                  : (draft.trim() ? "Send message" : "Type something to send")}
             style={{
-              width:32, height:28,
-              background: busy ? "#ff8c4a" : (draft.trim() ? "#ffd97a" : "rgba(255,217,122,0.18)"),
-              color: busy ? "#1a0e04" : (draft.trim() ? "#1a1404" : "#7d6f4b"),
-              border:"1px solid " + (busy ? "#ff8c4a" : "rgba(255,217,122,0.55)"),
+              width: (needsLoad || loadingModel) ? 76 : 32, height:28,
+              background: busy ? "#ff8c4a" : loadingModel ? "rgba(255,217,122,0.40)" : needsLoad ? "#3cf26b" : (draft.trim() ? "#ffd97a" : "rgba(255,217,122,0.18)"),
+              color: busy ? "#1a0e04" : (loadingModel || needsLoad) ? "#0a1505" : (draft.trim() ? "#1a1404" : "#7d6f4b"),
+              border:"1px solid " + (busy ? "#ff8c4a" : needsLoad ? "#3cf26b" : "rgba(255,217,122,0.55)"),
               borderRadius:6,
-              cursor: (busy || draft.trim()) ? "pointer" : "not-allowed",
-              fontSize:14, fontWeight:800,
-              display:"flex", alignItems:"center", justifyContent:"center",
+              cursor: (busy || loadingModel || draft.trim()) ? "pointer" : "not-allowed",
+              fontSize: (needsLoad || loadingModel) ? 11 : 14, fontWeight:800,
+              display:"flex", alignItems:"center", justifyContent:"center", gap: 4,
             }}
-          >{busy ? "■" : "▶"}</button>
+          >
+            {busy
+              ? "■"
+              : loadingModel
+                ? <><span>⏳</span><span>Loading</span></>
+                : needsLoad
+                  ? <><span>⚡</span><span>Load</span></>
+                  : "▶"}
+          </button>
         </div>
       </div>
     </div>
@@ -3752,6 +3794,7 @@ function OrchestratorPane({
   projectId, directives, onDirectivesChanged,
   supChat, onSupSend, supSendBusy,
   autoApprove, onToggleAutoApprove,
+  needsLoad, loadingModel, onLoadModel,
 }: {
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
@@ -3774,6 +3817,11 @@ function OrchestratorPane({
   /// autoApprove flag (drives the dispatch's auto-accept of tool calls).
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
+  /// Send-button → Load-button state. True when the team uses a
+  /// local model that isn't currently served by llama-server.
+  needsLoad: boolean;
+  loadingModel: boolean;
+  onLoadModel: () => void;
 }) {
   // Sub-tab strip — Rules and User Input precede Clear Chat per user
   // spec ("we add the chat of the user in the chat container, BEFORE
@@ -3837,18 +3885,14 @@ function OrchestratorPane({
                                 fullRef;
     const el = ref.current;
     if (!el) return;
-    // STOP auto-scrolling if (a) the user has scrolled UP to read
-    // earlier text or (b) the user is actively selecting text — the
-    // previous version called el.scrollTop = el.scrollHeight on every
-    // streamed token, which jerked the view down mid-selection and
-    // the user reported 'almost impossible to highlight'. Keep the
-    // auto-scroll only when the viewport is already pinned to the
-    // bottom (within 40 px) AND nothing is selected.
+    // Auto-scroll to the latest reply BY DEFAULT (that's the
+    // expected chat behavior). The ONLY suppression: if the user
+    // is currently mid-selection inside this pane — the per-token
+    // scrollTop jump kills the drag and the user can't highlight.
+    // No 'near bottom' gate: the user did not ask for that.
     const sel = window.getSelection?.();
-    const selectionActive = sel != null && !sel.isCollapsed && el.contains(sel.anchorNode);
-    if (selectionActive) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    if (nearBottom) el.scrollTop = el.scrollHeight;
+    if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
+    el.scrollTop = el.scrollHeight;
   }, [activeTab, focus, tailSig]);
 
   // ---- User-Input dock (bottom of the pane, 2026-05-28 restructure) ----
@@ -4166,6 +4210,9 @@ function OrchestratorPane({
         autoApprove={autoApprove}
         onToggleAutoApprove={onToggleAutoApprove}
         onSwitchTab={setActiveTab}
+        needsLoad={needsLoad}
+        loadingModel={loadingModel}
+        onLoadModel={onLoadModel}
       />
     </div>
   );
@@ -4234,6 +4281,9 @@ function RightColumnTabs(props: {
   voiceFor: (agentName: string) => VoiceConfig;
   onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
   ttsVoices: SpeechSynthesisVoice[];
+  needsLoad: boolean;
+  loadingModel: boolean;
+  onLoadModel: () => void;
 }) {
   // The 3 top "pages" are small info containers (~20% of available
   // height) per user spec 2026-05-28. They swap above the chat
@@ -4379,6 +4429,9 @@ function RightColumnTabs(props: {
           supSendBusy={props.supSendBusy}
           autoApprove={props.autoApprove}
           onToggleAutoApprove={props.onToggleAutoApprove}
+          needsLoad={props.needsLoad}
+          loadingModel={props.loadingModel}
+          onLoadModel={props.onLoadModel}
         />
       </div>
     </div>
@@ -7298,6 +7351,74 @@ export default function AgentsPage() {
     return false;
   }
 
+  // ====== Deterministic Load → Send (user spec 2026-05-30) ======
+  // Compute whether the team's currently-resolved orchestrator model
+  // is local AND not already served by llama-server. If yes the dock
+  // button flips to '⚡ Load'. First click starts the server, waits
+  // for ready + a 5 s settle, THEN auto-sends the typed message via
+  // the existing onSupSend path. Subsequent clicks are plain Send.
+  // No more silent retry loops on the user's first message.
+  const dockModelId = (effectiveTeamModel
+    || (activeTeam ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "") : "")
+    || "").trim();
+  const dockProvider = dockModelId ? providerFor(dockModelId) : "local";
+  const dockNeedsLoad =
+    dockProvider === "local" &&
+    dockModelId.length > 0 &&
+    !(serverState.running && serverState.model_id === dockModelId && !!serverState.port);
+  const [dockLoadingModel, setDockLoadingModel] = useState(false);
+  // The pending draft we'll auto-send once the model finishes
+  // loading. Carried via this ref because dock owns its own draft
+  // state; the dock fires owllm:dock:park-draft when Load is
+  // clicked and we stash the text here for the post-load send.
+  const pendingSendRef = useRef<string>("");
+  useEffect(() => {
+    const onPark = (e: Event) => {
+      const detail = (e as CustomEvent<{ text: string }>).detail;
+      if (detail && typeof detail.text === "string") {
+        pendingSendRef.current = detail.text;
+      }
+    };
+    window.addEventListener("owllm:dock:park-draft", onPark as EventListener);
+    return () => window.removeEventListener("owllm:dock:park-draft", onPark as EventListener);
+  }, []);
+  const dockLoadModel = async () => {
+    if (dockLoadingModel) return;
+    if (!dockModelId) return;
+    setDockLoadingModel(true);
+    try {
+      const startMsg: GoalMsg = {
+        role: "system", color: "#9ad9ff",
+        text: `⚡ Loading local model '${dockModelId}' — first send will fire when it's ready.`,
+      };
+      setSupChat(prev => [...prev, startMsg]);
+      const ok = await ensureLocalServer(dockModelId, 180_000);
+      if (!ok) {
+        const errMsg: GoalMsg = {
+          role: "system", color: "#ff8c8c",
+          text: `✗ Failed to start local model '${dockModelId}' — check the Server tab and retry.`,
+        };
+        setSupChat(prev => [...prev, errMsg]);
+        return;
+      }
+      // 5 s settle so llama-server has time to mmap the GGUF.
+      // Without this the first /v1/chat/completions sometimes still
+      // hits 503 'Loading model' and our retry has to take over.
+      await new Promise(r => setTimeout(r, 5000));
+      const ready: GoalMsg = {
+        role: "system", color: "#5af09c",
+        text: `✓ Model '${dockModelId}' ready.`,
+      };
+      setSupChat(prev => [...prev, ready]);
+      // Auto-send if the dock parked a draft for us.
+      const text = pendingSendRef.current.trim();
+      pendingSendRef.current = "";
+      if (text) onSupSend(text);
+    } finally {
+      setDockLoadingModel(false);
+    }
+  };
+
   const onPickTeamModel = (modelId: string) => {
     setTeamModelOverride(modelId);
     // Picking a team-wide model implies "every agent uses this one" —
@@ -8549,6 +8670,9 @@ export default function AgentsPage() {
             accountsStatus={accountsStatus}
             effectiveTeamModel={effectiveTeamModel}
             onPickTeamModel={onPickTeamModel}
+            needsLoad={dockNeedsLoad}
+            loadingModel={dockLoadingModel}
+            onLoadModel={dockLoadModel}
             voiceFor={voiceFor}
             onPickAgentVoice={onPickAgentVoice}
             ttsVoices={ttsVoices}

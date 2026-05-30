@@ -1040,11 +1040,14 @@ export async function streamChatCompletion(
             messages: liveMessages,
             stream: true,
             temperature,
-            // Cap per-turn generation. 1024 covers any reasonable chat
-            // reply or tool-using turn; 4096 was too generous and just
-            // gave small models more rope to ramble. Tool loops can
-            // dispatch again if a single turn truly needs more.
-            max_tokens: 1024,
+            // Per-turn budget. 4096 — needed for thinking-model
+            // variants (Qwen3-Thinking, DeepSeek-R1 distills) that
+            // burn 2-3k tokens on the <think> monologue before a
+            // single visible reply byte. The earlier 1024 clamp
+            // killed reasoning models mid-thought. DRY + the client-
+            // side loop detector now handle the "stop the model from
+            // rambling" job that max_tokens used to.
+            max_tokens: 4096,
             // Anti-degeneration sampling. Small local models (Qwen3
             // ≤14B, Gemma 3, Llama 3.1 8B) lock into loops like "I
             // will write the answer / I will write the answer" until

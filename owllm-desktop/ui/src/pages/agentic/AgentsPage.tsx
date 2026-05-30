@@ -5510,11 +5510,14 @@ async function streamChatCompletion(
             messages: liveMessages,
             stream: true,
             temperature,
-            // Cap + anti-degeneration sampling — matches dispatch.ts.
-            // DRY (Don't Repeat Yourself) is llama.cpp's purpose-built
-            // anti-loop sampler; plain repeat/frequency penalties
-            // alone weren't enough to stop Qwen3 mid-reword loops.
-            max_tokens: 1024,
+            // Anti-degeneration sampling — matches dispatch.ts.
+            // 4096 max_tokens: needed for thinking-model variants
+            // (Qwen3-Thinking, DeepSeek-R1 distills) that spend 2-3k
+            // tokens on the <think> monologue before a single visible
+            // reply byte. A 1024 cap killed those mid-thought. DRY +
+            // the client-side loop detector handle runaway output
+            // without needing the budget as a backstop.
+            max_tokens: 4096,
             repeat_penalty: 1.15,
             repeat_last_n: 256,
             frequency_penalty: 0.4,

@@ -196,7 +196,7 @@ pub async fn server_start(
     }
 
     inner.child = Some(child);
-    inner.model_id = Some(model_id);
+    inner.model_id = Some(model_id.clone());
     inner.port = Some(port);
     inner.message = format!("Starting on http://127.0.0.1:{port}");
     drop(inner);
@@ -210,6 +210,72 @@ pub async fn server_start(
             line: format!("[supervisor] spawned {} on :{port}", exe.display()),
         },
     );
+
+    // Poll llama-server's /health every 500 ms until it flips from
+    // 503 (still loading) to 200 (model resident in VRAM). On first
+    // 200 emit `llama-ready` so the UI's Load button can flip to Send
+    // deterministically instead of guessing with a 5-second timer.
+    // The poll task self-terminates after first success or after
+    // 10 min of consecutive failure (model too large / spawn died).
+    {
+        let app = app.clone();
+        let ready_model = model_id.clone();
+        tokio::spawn(async move {
+            let url = format!("http://127.0.0.1:{port}/health");
+            let client = match reqwest::Client::builder()
+                .timeout(std::time::Duration::from_millis(800))
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let started = std::time::Instant::now();
+            let deadline = std::time::Duration::from_secs(600);
+            loop {
+                if started.elapsed() > deadline {
+                    let _ = app.emit(
+                        "server-log",
+                        ServerLogEvent {
+                            stream: "stderr".into(),
+                            line: format!(
+                                "[supervisor] /health poll gave up after {}s",
+                                started.elapsed().as_secs()
+                            ),
+                        },
+                    );
+                    return;
+                }
+                match client.get(&url).send().await {
+                    Ok(resp) if resp.status().as_u16() == 200 => {
+                        let elapsed_ms = started.elapsed().as_millis() as u64;
+                        let _ = app.emit(
+                            "server-log",
+                            ServerLogEvent {
+                                stream: "stdout".into(),
+                                line: format!(
+                                    "[supervisor] model ready in {} ms",
+                                    elapsed_ms
+                                ),
+                            },
+                        );
+                        let _ = app.emit(
+                            "llama-ready",
+                            serde_json::json!({
+                                "model_id": ready_model,
+                                "port": port,
+                                "elapsed_ms": elapsed_ms,
+                            }),
+                        );
+                        return;
+                    }
+                    _ => {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                }
+            }
+        });
+    }
+
     Ok(())
 }
 

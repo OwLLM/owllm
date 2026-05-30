@@ -7,6 +7,7 @@
 // bridges.rs, server state via server_status. No hardcoded rosters.
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import NewProjectDialog from "./NewProjectDialog";
@@ -3978,7 +3979,7 @@ function OrchestratorPane({
   // this pane is purely the chat container now.
 
   return (
-    <div data-ui="RosterRight" style={{ display:"flex", flexDirection:"column", flex:"1 1 0", minWidth:0, height:"100%", background:"var(--bg-elevated)" }}>
+    <div data-ui="RosterRight" className="selectable-chat" style={{ display:"flex", flexDirection:"column", flex:"1 1 0", minWidth:0, height:"100%", background:"var(--bg-elevated)" }}>
       <div data-ui="OrchestratorLogTabs" style={{ flex:1, display:"flex", flexDirection:"column", overflow:"hidden", padding:"0 0 8px" }}>
         {/* Sub-tab strip — overflowX:auto so a narrow right column
             scrolls horizontally instead of wrapping labels into 2-line
@@ -4309,7 +4310,7 @@ function RightColumnTabs(props: {
       : "📜 Orchestrator";
 
   return (
-    <div data-ui="RightColumnTabs" style={{
+    <div data-ui="RightColumnTabs" className="selectable-chat" style={{
       display:"flex", flexDirection:"column", height:"100%",
       background:"var(--bg-elevated)",
     }}>
@@ -4413,7 +4414,7 @@ function RightColumnTabs(props: {
       {/* Chat container — ALWAYS visible. Sub-tabs Rules | User Input |
           Clear Chat | Thought | Tool Calls | Full Chat. Does NOT swap
           when the top tab changes. */}
-      <div data-ui="RightChatHost" style={{ flex:1, minHeight:0, display:"flex", overflow:"hidden" }}>
+      <div data-ui="RightChatHost" className="selectable-chat" style={{ flex:1, minHeight:0, display:"flex", overflow:"hidden" }}>
         <OrchestratorPane
           agentLogs={props.agentLogs}
           agentThoughts={props.agentThoughts}
@@ -6335,7 +6336,17 @@ export default function AgentsPage() {
       setLlamaLoading({ sec: detail.elapsedSec, reason: detail.reason || "loading model" });
     };
     window.addEventListener("owllm:llama:loading", onLoading as EventListener);
-    return () => window.removeEventListener("owllm:llama:loading", onLoading as EventListener);
+    // Tauri-side llama-ready event: fired the instant /health flips
+    // from 503 → 200. Clear the cold-load banner so the user has a
+    // ground-truth signal that VRAM load finished.
+    let unlistenReady: (() => void) | null = null;
+    listen<{ model_id: string; port: number; elapsed_ms: number }>("llama-ready", () => {
+      setLlamaLoading(null);
+    }).then(u => { unlistenReady = u; });
+    return () => {
+      window.removeEventListener("owllm:llama:loading", onLoading as EventListener);
+      unlistenReady?.();
+    };
   }, []);
   // Auto-approve flag — persisted per project to localStorage so a
   // user who checks "auto-approve every tool call" doesn't have to
@@ -7449,6 +7460,23 @@ export default function AgentsPage() {
         text: `⚡ Loading local model '${dockModelId}' — first send will fire when it's ready.`,
       };
       setSupChat(prev => [...prev, startMsg]);
+      // Attach the llama-ready listener BEFORE starting the server so
+      // we can't miss the event if the model loads very fast. The
+      // backend emits {model_id, port, elapsed_ms} the instant
+      // /health flips 503 → 200.
+      const readyPromise = new Promise<number>((resolve, reject) => {
+        let unlisten: (() => void) | null = null;
+        const t = window.setTimeout(() => {
+          unlisten?.();
+          reject(new Error("Timed out waiting for /health (10 min)"));
+        }, 600_000);
+        listen<{ model_id: string; port: number; elapsed_ms: number }>("llama-ready", (evt) => {
+          if (evt.payload.model_id !== dockModelId) return;
+          window.clearTimeout(t);
+          unlisten?.();
+          resolve(evt.payload.elapsed_ms);
+        }).then(u => { unlisten = u; });
+      });
       const ok = await ensureLocalServer(dockModelId, 180_000);
       if (!ok) {
         const errMsg: GoalMsg = {
@@ -7458,10 +7486,20 @@ export default function AgentsPage() {
         setSupChat(prev => [...prev, errMsg]);
         return;
       }
-      await new Promise(r => setTimeout(r, 5000));
+      let readyMs = 0;
+      try {
+        readyMs = await readyPromise;
+      } catch (e) {
+        const errMsg: GoalMsg = {
+          role: "system", color: "#ff8c8c",
+          text: `✗ Model '${dockModelId}' did not become ready: ${String(e)}`,
+        };
+        setSupChat(prev => [...prev, errMsg]);
+        return;
+      }
       const ready: GoalMsg = {
         role: "system", color: "#5af09c",
-        text: `✓ Model '${dockModelId}' ready.`,
+        text: `✓ Model '${dockModelId}' ready in ${(readyMs / 1000).toFixed(1)}s.`,
       };
       setSupChat(prev => [...prev, ready]);
       const text = pendingSendRef.current.trim();

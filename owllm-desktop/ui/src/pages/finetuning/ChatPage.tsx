@@ -712,6 +712,14 @@ export default function ChatPage() {
           temperature: col.temperature,
           top_p: col.topP,
           max_tokens: col.maxTokens,
+          // Anti-degeneration sampling. Small local models (Qwen3
+          // ≤14B, Gemma 3, Llama 3.1 8B) lock into repetition loops
+          // without these. repeat_penalty is llama.cpp native;
+          // frequency/presence are OpenAI-compat (llama-server honours
+          // both). Frontier models tolerate these values fine.
+          repeat_penalty: 1.15,
+          frequency_penalty: 0.4,
+          presence_penalty: 0.4,
           tools: openaiTools.length > 0 ? openaiTools : undefined,
           tool_choice: openaiTools.length > 0 ? "auto" : undefined,
         };

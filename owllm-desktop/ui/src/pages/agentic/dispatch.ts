@@ -1040,13 +1040,23 @@ export async function streamChatCompletion(
             messages: liveMessages,
             stream: true,
             temperature,
-            // Cap per-turn generation. Without this llama-server can run
-            // until it hits the context window (32K+), which has been
-            // observed when a small model degenerates after a fake
-            // tool_call — the user saw a 5+ min hang with llama-server at
-            // 290 % CPU. 4096 covers any reasonable agent reply; if the
-            // model truly needs more it can dispatch again.
-            max_tokens: 4096,
+            // Cap per-turn generation. 1024 covers any reasonable chat
+            // reply or tool-using turn; 4096 was too generous and just
+            // gave small models more rope to ramble. Tool loops can
+            // dispatch again if a single turn truly needs more.
+            max_tokens: 1024,
+            // Anti-degeneration sampling. Small local models (Qwen3
+            // ≤14B, Gemma 3, Llama 3.1 8B) routinely lock into a loop
+            // like "I will output the response. The search results
+            // are: 1) … 2) …" repeating until max_tokens. The user has
+            // hit this multiple times. Defaults to 1.0 / 0 / 0 on
+            // llama-server which is "no penalty" — bump them so the
+            // sampler reweights tokens it's already used heavily.
+            // Frontier models tolerate these values fine; small models
+            // become usable.
+            repeat_penalty: 1.15,        // llama.cpp native
+            frequency_penalty: 0.4,      // OpenAI-compat
+            presence_penalty: 0.4,       // OpenAI-compat
             tools: openaiTools.length > 0 ? openaiTools : undefined,
           }),
           signal,

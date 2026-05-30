@@ -5510,6 +5510,14 @@ async function streamChatCompletion(
             messages: liveMessages,
             stream: true,
             temperature,
+            // Cap + anti-degeneration sampling — matches dispatch.ts.
+            // Small local models lock into "I will output the response"
+            // style loops without these. repeat_penalty is llama.cpp
+            // native; frequency/presence are OpenAI-compat (also honoured).
+            max_tokens: 1024,
+            repeat_penalty: 1.15,
+            frequency_penalty: 0.4,
+            presence_penalty: 0.4,
           }),
           signal,
         });

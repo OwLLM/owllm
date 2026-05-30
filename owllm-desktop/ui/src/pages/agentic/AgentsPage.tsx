@@ -5485,20 +5485,59 @@ async function streamChatCompletion(
     { role: "user", content: openaiUserContent(effectiveText, images) },
   ];
   const MAX_TOOL_TURNS = 8;
+  // 503 / 502 cold-load retry. llama-server can answer /health 200
+  // (model resident in VRAM) BUT still respond 503 "Loading model"
+  // to the first /v1/chat/completions for a few seconds while it
+  // initialises the slot. Without this retry the user's first send
+  // after llama-ready bubbles up the raw 503 body as a dispatch
+  // error. Mirrors the loop in dispatch.ts.
+  const LOAD_RETRY_MS = 900_000;
+  const LOAD_RETRY_DELAY = 1500;
   let lastReply = "";
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
-    const resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: modelId || "local",
-        messages: liveMessages,
-        stream: true,
-        temperature,
-      }),
-      signal,
-    });
+    let resp: Response | undefined;
+    const loadDeadline = Date.now() + LOAD_RETRY_MS;
+    while (true) {
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
+      try {
+        resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: modelId || "local",
+            messages: liveMessages,
+            stream: true,
+            temperature,
+          }),
+          signal,
+        });
+      } catch (e: any) {
+        if (signal.aborted) throw e;
+        if (Date.now() >= loadDeadline) throw new Error(`network error after ${LOAD_RETRY_MS / 1000}s budget: ${String(e?.message ?? e)}`);
+        try {
+          window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
+            detail: { elapsedSec: Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000), port, reason: `network: ${String(e?.message ?? e).slice(0, 80)}` },
+          }));
+        } catch {}
+        await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
+        continue;
+      }
+      if (resp.ok) break;
+      const errBody = await resp.text().catch(() => "");
+      if ((resp.status === 503 || resp.status === 502) && Date.now() < loadDeadline) {
+        const elapsedSec = Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000);
+        try {
+          window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
+            detail: { elapsedSec, port, reason: `${resp.status}: ${(errBody.slice(0, 80)) || "loading"}` },
+          }));
+        } catch {}
+        await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
+        continue;
+      }
+      throw new Error(`llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`);
+    }
+    if (!resp) throw new Error("llama-server never responded — server may have crashed");
     // consumeOpenAISse streams deltas to onDelta AND returns the full
     // assembled assistant text. We keep both — the deltas reach the
     // canvas in real time, and the assembled string is what we parse

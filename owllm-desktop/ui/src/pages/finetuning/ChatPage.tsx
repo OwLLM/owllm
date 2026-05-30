@@ -161,6 +161,11 @@ export default function ChatPage() {
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
   const abortersRef = useRef<Map<"A" | "B" | "C", AbortController>>(new Map());
+  // Active SSE readers per column. stopAll cancels both the abort
+  // controller AND these readers — WebView2 doesn't always wake the
+  // reader from a signal-only abort, so we force-cancel from the
+  // outside to make the Stop button actually stop the model.
+  const readersRef = useRef<Map<"A" | "B" | "C", ReadableStreamDefaultReader<Uint8Array>>>(new Map());
   const transcriptRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const m2mRunningRef = useRef(false);
 
@@ -466,20 +471,36 @@ export default function ChatPage() {
           throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
         }
         const reader = resp.body.getReader();
+        // Register the reader so stopAll can force-cancel it. fetch
+        // signal abort alone is not reliable in WebView2 — sometimes
+        // the in-flight reader.read() never rejects. Cancelling the
+        // reader from the outside breaks the stream synchronously.
+        readersRef.current.set(col.id, reader);
         const dec = new TextDecoder();
         let turnReply = "";
         let buffer = "";
-        // Server-level error stash. llama-server can emit
-        // `data: {"error": {...}}` mid-stream when something goes
-        // wrong AFTER the 200 OK (e.g. eval failure). Without this,
-        // the SSE consumer silently skipped the frame and the user
-        // saw 'no reply' with no clue why. Captured here, thrown
-        // after the loop so the column shows the real reason.
+        // Track <think>…</think> state across deltas so we can ROUTE
+        // reasoning into the 💭 channel even when the model wraps it
+        // in tags inside `content` instead of using `reasoning_content`.
+        let inThink = false;
         let serverError: string | null = null;
         while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += dec.decode(value, { stream: true });
+          // Honor the abort flag inline — the user pressed Stop and
+          // we should bail out of the read loop even if reader.read()
+          // hasn't seen the abort yet.
+          if (ctrl.signal.aborted) {
+            try { await reader.cancel(); } catch {}
+            throw new DOMException("Aborted", "AbortError");
+          }
+          let chunk: ReadableStreamReadResult<Uint8Array>;
+          try {
+            chunk = await reader.read();
+          } catch (e: any) {
+            if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+            throw e;
+          }
+          if (chunk.done) break;
+          buffer += dec.decode(chunk.value, { stream: true });
           let nl;
           while ((nl = buffer.indexOf("\n")) >= 0) {
             const line = buffer.slice(0, nl).replace(/\r$/, "");
@@ -496,14 +517,6 @@ export default function ChatPage() {
                 continue;
               }
               const deltaObj = j?.choices?.[0]?.delta;
-              // Qwen 3 / DeepSeek-R1 / o-series emit reasoning on a
-              // separate `reasoning_content` field BEFORE the visible
-              // answer arrives on `content`. The user said 'Qwen 3.6
-              // not even answering' — the model was streaming via the
-              // reasoning channel, ChatPage was ignoring it. Surface
-              // both channels so the user sees activity AND the final
-              // answer. Reasoning gets a 💭 prefix once per stream
-              // so it doesn't blend into the user's chat.
               const reasoning: string | undefined = deltaObj?.reasoning_content ?? deltaObj?.reasoning;
               if (typeof reasoning === "string" && reasoning) {
                 if (!turnReply.includes("💭 ")) {
@@ -517,13 +530,42 @@ export default function ChatPage() {
               }
               const delta = deltaObj?.content;
               if (typeof delta === "string" && delta) {
-                turnReply += delta;
-                reply += delta;
-                appendAssistant(col.id, delta);
+                // Split <think>…</think> tags. Inside-tag content
+                // gets sent to the 💭 reasoning channel; everything
+                // outside is the visible answer.
+                let buf = delta;
+                while (buf.length > 0) {
+                  if (inThink) {
+                    const close = buf.indexOf("</think>");
+                    const thoughtPart = close < 0 ? buf : buf.slice(0, close);
+                    if (thoughtPart) {
+                      if (!turnReply.includes("💭 ")) {
+                        appendAssistant(col.id, "💭 ");
+                        turnReply += "💭 "; reply += "💭 ";
+                      }
+                      turnReply += thoughtPart; reply += thoughtPart;
+                      appendAssistant(col.id, thoughtPart);
+                    }
+                    if (close < 0) break;
+                    inThink = false;
+                    buf = buf.slice(close + "</think>".length);
+                  } else {
+                    const open = buf.indexOf("<think>");
+                    const visiblePart = open < 0 ? buf : buf.slice(0, open);
+                    if (visiblePart) {
+                      turnReply += visiblePart; reply += visiblePart;
+                      appendAssistant(col.id, visiblePart);
+                    }
+                    if (open < 0) break;
+                    inThink = true;
+                    buf = buf.slice(open + "<think>".length);
+                  }
+                }
               }
             } catch { /* skip malformed */ }
           }
         }
+        readersRef.current.delete(col.id);
         if (serverError) {
           throw new Error(`llama-server stream error: ${serverError}`);
         }
@@ -608,8 +650,17 @@ export default function ChatPage() {
 
   function stopAll() {
     m2mRunningRef.current = false;
-    for (const a of abortersRef.current.values()) a.abort();
+    // Abort the controllers AND cancel any in-flight stream readers.
+    // Belt-and-suspenders so the Stop button truly stops the model
+    // even when WebView2 swallows the abort signal.
+    for (const a of abortersRef.current.values()) {
+      try { a.abort(); } catch {}
+    }
+    for (const r of readersRef.current.values()) {
+      try { r.cancel("stopAll"); } catch {}
+    }
     abortersRef.current.clear();
+    readersRef.current.clear();
     setColumns((curr) => curr.map((c) => ({ ...c, busy: false })));
   }
 

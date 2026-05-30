@@ -7351,26 +7351,10 @@ export default function AgentsPage() {
     return false;
   }
 
-  // ====== Deterministic Load → Send (user spec 2026-05-30) ======
-  // Compute whether the team's currently-resolved orchestrator model
-  // is local AND not already served by llama-server. If yes the dock
-  // button flips to '⚡ Load'. First click starts the server, waits
-  // for ready + a 5 s settle, THEN auto-sends the typed message via
-  // the existing onSupSend path. Subsequent clicks are plain Send.
-  // No more silent retry loops on the user's first message.
-  const dockModelId = (effectiveTeamModel
-    || (activeTeam ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "") : "")
-    || "").trim();
-  const dockProvider = dockModelId ? providerFor(dockModelId) : "local";
-  const dockNeedsLoad =
-    dockProvider === "local" &&
-    dockModelId.length > 0 &&
-    !(serverState.running && serverState.model_id === dockModelId && !!serverState.port);
+  // Dock Load→Send moved below providerFor definition (see comment
+  // there) to avoid the temporal-dead-zone crash the user hit
+  // ('Cannot access "sn" before initialization').
   const [dockLoadingModel, setDockLoadingModel] = useState(false);
-  // The pending draft we'll auto-send once the model finishes
-  // loading. Carried via this ref because dock owns its own draft
-  // state; the dock fires owllm:dock:park-draft when Load is
-  // clicked and we stash the text here for the post-load send.
   const pendingSendRef = useRef<string>("");
   useEffect(() => {
     const onPark = (e: Event) => {
@@ -7382,42 +7366,6 @@ export default function AgentsPage() {
     window.addEventListener("owllm:dock:park-draft", onPark as EventListener);
     return () => window.removeEventListener("owllm:dock:park-draft", onPark as EventListener);
   }, []);
-  const dockLoadModel = async () => {
-    if (dockLoadingModel) return;
-    if (!dockModelId) return;
-    setDockLoadingModel(true);
-    try {
-      const startMsg: GoalMsg = {
-        role: "system", color: "#9ad9ff",
-        text: `⚡ Loading local model '${dockModelId}' — first send will fire when it's ready.`,
-      };
-      setSupChat(prev => [...prev, startMsg]);
-      const ok = await ensureLocalServer(dockModelId, 180_000);
-      if (!ok) {
-        const errMsg: GoalMsg = {
-          role: "system", color: "#ff8c8c",
-          text: `✗ Failed to start local model '${dockModelId}' — check the Server tab and retry.`,
-        };
-        setSupChat(prev => [...prev, errMsg]);
-        return;
-      }
-      // 5 s settle so llama-server has time to mmap the GGUF.
-      // Without this the first /v1/chat/completions sometimes still
-      // hits 503 'Loading model' and our retry has to take over.
-      await new Promise(r => setTimeout(r, 5000));
-      const ready: GoalMsg = {
-        role: "system", color: "#5af09c",
-        text: `✓ Model '${dockModelId}' ready.`,
-      };
-      setSupChat(prev => [...prev, ready]);
-      // Auto-send if the dock parked a draft for us.
-      const text = pendingSendRef.current.trim();
-      pendingSendRef.current = "";
-      if (text) onSupSend(text);
-    } finally {
-      setDockLoadingModel(false);
-    }
-  };
 
   const onPickTeamModel = (modelId: string) => {
     setTeamModelOverride(modelId);
@@ -7464,6 +7412,53 @@ export default function AgentsPage() {
     }
     return id;
   }
+
+  // ====== Deterministic Load → Send (user spec 2026-05-30) ======
+  // Placed after providerFor/modelFor/effectiveTeamModel so const
+  // refs resolve at module-init time. The previous placement up by
+  // ensureLocalServer triggered a temporal-dead-zone crash
+  // ('Cannot access "sn" before initialization') when React rendered
+  // the right column.
+  const dockModelId = (effectiveTeamModel
+    || (activeTeam ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "") : "")
+    || "").trim();
+  const dockProvider = dockModelId ? providerFor(dockModelId) : "local";
+  const dockNeedsLoad =
+    dockProvider === "local" &&
+    dockModelId.length > 0 &&
+    !(serverState.running && serverState.model_id === dockModelId && !!serverState.port);
+  const dockLoadModel = async () => {
+    if (dockLoadingModel) return;
+    if (!dockModelId) return;
+    setDockLoadingModel(true);
+    try {
+      const startMsg: GoalMsg = {
+        role: "system", color: "#9ad9ff",
+        text: `⚡ Loading local model '${dockModelId}' — first send will fire when it's ready.`,
+      };
+      setSupChat(prev => [...prev, startMsg]);
+      const ok = await ensureLocalServer(dockModelId, 180_000);
+      if (!ok) {
+        const errMsg: GoalMsg = {
+          role: "system", color: "#ff8c8c",
+          text: `✗ Failed to start local model '${dockModelId}' — check the Server tab and retry.`,
+        };
+        setSupChat(prev => [...prev, errMsg]);
+        return;
+      }
+      await new Promise(r => setTimeout(r, 5000));
+      const ready: GoalMsg = {
+        role: "system", color: "#5af09c",
+        text: `✓ Model '${dockModelId}' ready.`,
+      };
+      setSupChat(prev => [...prev, ready]);
+      const text = pendingSendRef.current.trim();
+      pendingSendRef.current = "";
+      if (text) onSupSend(text);
+    } finally {
+      setDockLoadingModel(false);
+    }
+  };
 
   const [tgStarted, setTgStarted] = useState<boolean>(false);
 

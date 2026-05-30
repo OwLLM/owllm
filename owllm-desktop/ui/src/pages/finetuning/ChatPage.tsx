@@ -37,6 +37,7 @@ import {
   parseToolCalls,
   executeToolCall,
   renderToolResultsForModel,
+  stripFabricatedToolOutput,
   type ToolExecResult,
 } from "../agentic/localTools";
 
@@ -271,7 +272,17 @@ export default function ChatPage() {
       const out = c.messages.slice();
       const last = out[out.length - 1];
       if (last && last.role === "assistant") {
-        out[out.length - 1] = { ...last, content: last.content + delta };
+        // Live-strip the native <|tool_call> / <|tool_response>
+        // garbage many small models hallucinate. Strip applied to
+        // the WHOLE accumulated text so partial blocks already
+        // shown get retroactively removed once their close marker
+        // arrives. Same pattern as the AgentsPage dispatch.
+        const raw = last.content + delta;
+        const cleaned = stripFabricatedToolOutput(raw);
+        // Re-add a single trailing space when raw ended with one
+        // so the cursor / streaming feel stays smooth.
+        const newContent = raw.endsWith(" ") && !cleaned.endsWith(" ") ? cleaned + " " : cleaned;
+        out[out.length - 1] = { ...last, content: newContent };
       }
       return { ...c, messages: out };
     }));
@@ -382,7 +393,12 @@ export default function ChatPage() {
       { role: "system", content: augmentedSystem },
       ...next.map((m) => ({ role: m.role, content: m.content })),
     ];
-    const MAX_TOOL_TURNS = 8;
+    // 4 turns is plenty — small local models that don't actually
+    // know the tool protocol will loop emitting fake calls + fake
+    // outputs forever otherwise. Caps the runaway. The user can
+    // raise it via the maxTurns control if they're running a real
+    // tool-trained model that needs more legs.
+    const MAX_TOOL_TURNS = 4;
 
     let reply = "";
     try {

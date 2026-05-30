@@ -1325,9 +1325,10 @@ function AgentChatTile({
           }}>LIVE</span>
         )}
       </div>
-      {/* Log scroll pane — the agent's reply text only, rendered with
-          the main-chat markdown renderer. No avatar / role chip
-          container per message; just the body. */}
+      {/* Log scroll pane — the agent's reply text only, plain pre-wrap
+          so mouse-selection survives streaming token updates (the
+          previous MarkdownBody renderer rebuilt the DOM per token and
+          unhighlighted any drag the user was making). */}
       <div
         ref={scrollRef}
         style={{
@@ -1336,6 +1337,9 @@ function AgentChatTile({
           color: "var(--fg)",
           display: "flex", flexDirection: "column", gap: 6,
           fontFamily: "Segoe UI, sans-serif",
+          userSelect: "text",
+          WebkitUserSelect: "text",
+          cursor: "text",
         }}
       >
         {replyMessages.length === 0 ? (
@@ -1345,7 +1349,7 @@ function AgentChatTile({
         ) : (
           replyMessages.map((m, i) => (
             m.text
-              ? <MarkdownBody key={i} text={m.text} />
+              ? <div key={i} style={{ fontSize: 13, color: "var(--fg)", lineHeight: 1.5, whiteSpace: "pre-wrap", userSelect: "text", WebkitUserSelect: "text", cursor: "text" }}>{m.text}</div>
               : <div key={i} style={{ color: "var(--fg-subtle)", fontStyle: "italic", fontSize: 12 }}>…</div>
           ))
         )}
@@ -1550,7 +1554,7 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
           {(() => {
             const sentByMe = lastMessages.filter(m => m.role === "you");
             return (
-              <div ref={suChatRef} data-ui="suChat" style={{ flex:1, minHeight:120, background:"rgba(20,16,4,0.6)", color:"var(--fg)", border:"1px solid rgba(255,200,80,0.20)", borderRadius:8, padding:"8px 10px", fontSize:13, lineHeight:1.5, overflow:"auto", display:"flex", flexDirection:"column", gap:6 }}>
+              <div ref={suChatRef} data-ui="suChat" style={{ flex:1, minHeight:120, background:"rgba(20,16,4,0.6)", color:"var(--fg)", border:"1px solid rgba(255,200,80,0.20)", borderRadius:8, padding:"8px 10px", fontSize:13, lineHeight:1.5, overflow:"auto", display:"flex", flexDirection:"column", gap:6, userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
                 {sentByMe.length === 0 ? (
                   <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
                     {team
@@ -3342,14 +3346,16 @@ function MarkdownBody({ text }: { text: string }) {
 // Render a reply-stream entry (avatar + role chip + body). Shared by
 // the Clear Chat tab and the reply slots inside Full Chat so a single
 // look is used everywhere.
-function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null, isLive?: boolean) {
+//
+// Selection note: the bubble body is always plain pre-wrap text — no
+// MarkdownBody, no conditional element-type switch. ReactMarkdown
+// rebuilds the DOM tree per token (and per stream-end), wiping any
+// in-progress mouse selection. ChatPage uses the same plain-text
+// renderer and copy-paste works there; we match that.
+function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null) {
   const isUser = m.role === "you";
   const isOrch = orchName != null && m.role === orchName;
   const placeholder = m.role === focus || focus === orchName ? "…" : "";
-  // Per user request: drop the Y/O avatar disc (the role name in the bubble
-  // header already says "YOU" / "ORCHESTRATOR"); tint the bubble itself —
-  // yellow for the user, blue for the orchestrator. Specialist agents keep
-  // their role-specific accent colour so a 5-agent transcript still reads.
   const accent = isUser ? "#ffd97a" : isOrch ? "#9ad9ff" : m.color;
   const tint = isUser
     ? "rgba(255, 217, 122, 0.12)"
@@ -3359,22 +3365,9 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
   return (
     <div key={`r-${m.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
       <div style={{ flex:1, background:tint, borderLeft:`3px solid ${accent}`, borderRadius:8, padding:"6px 12px", minWidth:0 }}>
-        <div style={{ fontSize:10, fontWeight:700, color:accent, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif" }}>{m.role}</div>
+        <div style={{ fontSize:10, fontWeight:700, color:accent, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif", userSelect:"none" }}>{m.role}</div>
         {m.text
-          // User messages stay literal — they just typed it, don't
-          // re-interpret '*' as italics.
-          // Agent replies: ReactMarkdown rebuilds the DOM tree on
-          // every token, which destroys any active mouse selection
-          // mid-stream — the user reported 'Chat in fine-tunes works
-          // for copy, Agentic doesn't'. Workaround: while the message
-          // is STILL streaming (isLive), render plain pre-wrap text
-          // so the underlying text node is reused and selection
-          // survives. Once the run ends, re-render as markdown for
-          // proper headings / code blocks / lists. The visible text
-          // is identical; only the DOM structure differs.
-          ? (isUser || isLive
-            ? <div style={{ fontSize:13, color:"var(--fg)", lineHeight:1.5, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap" }}>{m.text}</div>
-            : <MarkdownBody text={m.text} />)
+          ? <div style={{ fontSize:13, color:"var(--fg)", lineHeight:1.5, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>{m.text}</div>
           : <div style={{ fontSize:12, color:"var(--fg-subtle)" }}>{placeholder}</div>}
       </div>
     </div>
@@ -3387,23 +3380,20 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
 function renderThoughtEntry(t: GoalMsg, i: number) {
   const isThinking = t.kind === "thinking";
   const isTool = t.kind === "tool";
+  // All variants below render plain pre-wrap text (no MarkdownBody)
+  // and force userSelect:text so mouse copy works during streaming.
   return (
     <div key={`t-${t.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
       <div style={{ width:6, alignSelf:"stretch", borderRadius:3, background: t.color, opacity:0.85, flexShrink:0 }} />
       <div style={{ flex:1, background:"var(--bg-surface)", borderRadius:6, padding:"5px 10px", minWidth:0 }}>
-        <div style={{ fontSize:9, fontWeight:700, color:t.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif" }}>{t.role}</div>
+        <div style={{ fontSize:9, fontWeight:700, color:t.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif", userSelect:"none" }}>{t.role}</div>
         {isThinking
-          // Thinking is prose — markdown gives lists, headings, code
-          // blocks. Wrap in italic outer style so the "I'm reasoning"
-          // signal stays.
-          ? (t.text ? <div style={{ fontStyle:"italic", color:"var(--fg-muted)" }}><MarkdownBody text={t.text} /></div> : <div style={{ fontSize:12, color:"var(--fg-subtle)" }}>…</div>)
+          ? (t.text
+              ? <div style={{ fontSize:13, fontStyle:"italic", color:"var(--fg-muted)", whiteSpace:"pre-wrap", fontFamily:"Segoe UI, sans-serif", lineHeight:1.5, userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>{t.text}</div>
+              : <div style={{ fontSize:12, color:"var(--fg-subtle)" }}>…</div>)
           : isTool
-            // Tool calls / results are raw JSON or shell output — keep
-            // monospace verbatim, never markdown (curly braces would
-            // mangle).
-            ? <div style={{ fontSize:12, color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Consolas, 'JetBrains Mono', monospace", lineHeight:1.4, background:"rgba(127,240,197,0.06)", padding:"4px 6px", borderRadius:4 }}>{t.text || "…"}</div>
-            // Dispatches / fleet status / system → plain mono (short)
-            : <div style={{ fontSize:12, color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Consolas, 'JetBrains Mono', monospace" }}>{t.text}</div>
+            ? <div style={{ fontSize:12, color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Consolas, 'JetBrains Mono', monospace", lineHeight:1.4, background:"rgba(127,240,197,0.06)", padding:"4px 6px", borderRadius:4, userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>{t.text || "…"}</div>
+            : <div style={{ fontSize:12, color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Consolas, 'JetBrains Mono', monospace", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>{t.text}</div>
         }
       </div>
     </div>
@@ -4165,7 +4155,7 @@ function OrchestratorPane({
           })()}
         </div>
         {/* Clear Chat — the user-facing reply stream only, nothing else. */}
-        <div ref={replyRef} data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)" }}>
+        <div ref={replyRef} data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {runError ? (<div style={{ border:"1px solid #ff9f9f", background:"rgba(255,80,80,0.10)", color:"#ffb0b0", borderRadius:6, padding:8, fontSize:12 }}>{runError}</div>) : null}
           {messages.length === 0 && !runError ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:12 }}>
@@ -4175,15 +4165,11 @@ function OrchestratorPane({
             </div>
           ) : null}
           {messages.map((m, i) =>
-            // The LAST message while supSendBusy is the in-flight
-            // stream — render it as plain pre-wrap text so mouse
-            // selection survives. Earlier messages render as
-            // markdown like before.
-            renderReplyEntry(m, i, focus, orchName, supSendBusy && i === messages.length - 1)
+            renderReplyEntry(m, i, focus, orchName)
           )}
         </div>
         {/* Thought — reasoning + dispatch directives. Tool entries excluded. */}
-        <div ref={thoughtRef} data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)" }}>
+        <div ref={thoughtRef} data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {thoughts.length === 0 ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
               No reasoning yet — the model's thinking blocks land here
@@ -4192,7 +4178,7 @@ function OrchestratorPane({
           ) : thoughts.map((t, i) => renderThoughtEntry(t, i))}
         </div>
         {/* Tool Calls — every command the agent ran + its result. */}
-        <div ref={toolsRef} data-ui="OrchestratorToolsView" style={{ flex:1, display: activeTab === "tools" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)" }}>
+        <div ref={toolsRef} data-ui="OrchestratorToolsView" style={{ flex:1, display: activeTab === "tools" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {toolCalls.length === 0 ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
               No tool calls yet — every command the agent runs (Bash,
@@ -4202,7 +4188,7 @@ function OrchestratorPane({
           ) : toolCalls.map((t, i) => renderThoughtEntry(t, i))}
         </div>
         {/* Full Chat — replies + thoughts + tools, interleaved by arrival. */}
-        <div ref={fullRef} data-ui="OrchestratorFullView" style={{ flex:1, display: activeTab === "full" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)" }}>
+        <div ref={fullRef} data-ui="OrchestratorFullView" style={{ flex:1, display: activeTab === "full" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {fullChat.length === 0 ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
               Empty — replies, reasoning, and tool calls will all appear
@@ -4212,7 +4198,7 @@ function OrchestratorPane({
             // Reply entries (no `kind`) get the avatar-style render,
             // everything else uses the thought renderer. Same chrono
             // order either way thanks to the `seq` stamp.
-            m.kind ? renderThoughtEntry(m, i) : renderReplyEntry(m, i, focus, orchName, supSendBusy && i === fullChat.length - 1)
+            m.kind ? renderThoughtEntry(m, i) : renderReplyEntry(m, i, focus, orchName)
           )}
         </div>
       </div>

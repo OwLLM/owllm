@@ -1057,34 +1057,42 @@ export async function streamChatCompletion(
           }),
           signal,
         });
-      } catch (e) {
+      } catch (e: any) {
         if (signal.aborted) throw e;
-        if (Date.now() >= loadDeadline) throw e;
+        if (Date.now() >= loadDeadline) throw new Error(`network error after ${LOAD_RETRY_MS / 1000}s budget: ${String(e?.message ?? e)}`);
+        console.log(`[dispatch.local] network error, retrying:`, String(e?.message ?? e));
+        try {
+          window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
+            detail: { elapsedSec: Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000), port, reason: `network: ${String(e?.message ?? e).slice(0, 80)}` },
+          }));
+        } catch {}
         await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
         continue;
       }
-      if (resp.ok) break;                      // 2xx — good, stream it
-      // Non-OK: consume the body once. If it's the cold-load 503,
-      // retry inside budget. Otherwise this IS the error we throw.
+      if (resp.ok) {
+        console.log(`[dispatch.local] OK — streaming begins`);
+        break;
+      }
+      // Non-OK: consume the body once. We retry on ANY 503 (not just
+      // the "loading model" body — small llama.cpp builds sometimes
+      // reply with 503 + a different shape during warm-up too) and
+      // ALSO on 502 (occasionally seen when the spawn races the bind).
       const errBody = await resp.text().catch(() => "");
-      if (resp.status === 503 && /loading model/i.test(errBody) && Date.now() < loadDeadline) {
+      console.log(`[dispatch.local] non-OK ${resp.status}, body slice:`, errBody.slice(0, 200));
+      if ((resp.status === 503 || resp.status === 502) && Date.now() < loadDeadline) {
         const elapsedSec = Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000);
-        console.log(`[dispatch.local] 503 Loading model — elapsed ${elapsedSec}s, retrying in ${LOAD_RETRY_DELAY}ms`);
-        // Fire a window event so AgentsPage / ChatPage can show a
-        // "waiting on llama-server N s" status without us needing to
-        // thread a status callback through every signature. Listener
-        // is optional — bridges ignore it.
+        console.log(`[dispatch.local] ${resp.status} (likely cold-load) — elapsed ${elapsedSec}s, retrying in ${LOAD_RETRY_DELAY}ms`);
         try {
           window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
-            detail: { elapsedSec, port },
+            detail: { elapsedSec, port, reason: `${resp.status}: ${(errBody.slice(0, 80)) || "loading"}` },
           }));
-        } catch { /* not in browser */ }
+        } catch {}
         await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
         continue;
       }
       // Real error — throw with status + body so the chat shows it.
       const errMsg = `llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`;
-      console.warn("[dispatch.local] non-OK response", errMsg);
+      console.warn("[dispatch.local] non-OK response, not retrying:", errMsg);
       throw new Error(errMsg);
     }
     if (!resp) throw new Error("llama-server never responded — server may have crashed");

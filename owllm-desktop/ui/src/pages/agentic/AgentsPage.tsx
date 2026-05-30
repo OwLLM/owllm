@@ -6267,17 +6267,18 @@ export default function AgentsPage() {
     window.addEventListener("owllm:dispatch-abort", onAbort);
     return () => window.removeEventListener("owllm:dispatch-abort", onAbort);
   }, []);
-  // Live cold-load status text. dispatch.ts fires owllm:llama:loading
-  // every 1.5 s while llama-server is still mmap'ing the GGUF; we
-  // write the elapsed time onto whatever the supSendBusy run's most-
-  // recent orchestrator entry is so the user sees we're WAITING, not
-  // frozen. Cleared when the stream starts producing real tokens.
-  const [llamaLoadingSec, setLlamaLoadingSec] = useState<number | null>(null);
+  // Live cold-load status. dispatch.ts fires owllm:llama:loading on
+  // every retry attempt while llama-server is still mmap'ing the
+  // GGUF (or refusing connections). We surface the elapsed time +
+  // last reason so the user can SEE the retry is firing and can
+  // tell whether the issue is network (connection refused) or
+  // 503 (loading) — instead of a frozen screen.
+  const [llamaLoading, setLlamaLoading] = useState<{ sec: number; reason: string } | null>(null);
   useEffect(() => {
     const onLoading = (e: Event) => {
-      const detail = (e as CustomEvent<{ elapsedSec: number }>).detail;
+      const detail = (e as CustomEvent<{ elapsedSec: number; reason?: string }>).detail;
       if (!detail) return;
-      setLlamaLoadingSec(detail.elapsedSec);
+      setLlamaLoading({ sec: detail.elapsedSec, reason: detail.reason || "loading model" });
     };
     window.addEventListener("owllm:llama:loading", onLoading as EventListener);
     return () => window.removeEventListener("owllm:llama:loading", onLoading as EventListener);
@@ -7089,7 +7090,7 @@ export default function AgentsPage() {
       const liveStrip = (delta: string) => {
         // First real token means the model finished loading — clear
         // the "still loading" banner.
-        setLlamaLoadingSec(null);
+        setLlamaLoading(null);
         streamedReply += delta;
         const cleanFull = stripFabricatedToolOutput(streamedReply);
         if (cleanFull === displayedClean) return;  // pure noise stripped
@@ -7198,7 +7199,7 @@ export default function AgentsPage() {
     } finally {
       supSendBusyRef.current = false;
       setSupSendBusy(false);
-      setLlamaLoadingSec(null);
+      setLlamaLoading(null);
       if (supSendAbortRef.current === supSendAbort) {
         supSendAbortRef.current = null;
       }
@@ -8377,7 +8378,7 @@ export default function AgentsPage() {
         models={models}
         onBriefSaved={() => setHasBriefForProject(true)}
       />
-      {llamaLoadingSec !== null && (
+      {llamaLoading !== null && (
         <div data-ui="LlamaLoadingBanner" style={{
           margin: "0 23px 6px",
           padding: "6px 12px",
@@ -8389,7 +8390,7 @@ export default function AgentsPage() {
           display: "flex", alignItems: "center", gap: 10,
         }}>
           <span style={{ fontSize: 16 }}>⏳</span>
-          <span>llama-server is loading the model — waited {llamaLoadingSec}s. Big GGUFs (30 B+) on a tight GPU can take 5-10 min on the first load. Press the Stop button to abort.</span>
+          <span>llama-server still warming up · {llamaLoading.sec}s · last: <code style={{ background:"rgba(0,0,0,0.3)", padding:"1px 4px", borderRadius:3 }}>{llamaLoading.reason}</code> · Press Stop to abort.</span>
         </div>
       )}
       <div data-ui="WorkspaceStack" style={{

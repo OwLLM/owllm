@@ -3342,7 +3342,7 @@ function MarkdownBody({ text }: { text: string }) {
 // Render a reply-stream entry (avatar + role chip + body). Shared by
 // the Clear Chat tab and the reply slots inside Full Chat so a single
 // look is used everywhere.
-function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null) {
+function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null, isLive?: boolean) {
   const isUser = m.role === "you";
   const isOrch = orchName != null && m.role === orchName;
   const placeholder = m.role === focus || focus === orchName ? "…" : "";
@@ -3363,7 +3363,16 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
         {m.text
           // User messages stay literal — they just typed it, don't
           // re-interpret '*' as italics.
-          ? (isUser
+          // Agent replies: ReactMarkdown rebuilds the DOM tree on
+          // every token, which destroys any active mouse selection
+          // mid-stream — the user reported 'Chat in fine-tunes works
+          // for copy, Agentic doesn't'. Workaround: while the message
+          // is STILL streaming (isLive), render plain pre-wrap text
+          // so the underlying text node is reused and selection
+          // survives. Once the run ends, re-render as markdown for
+          // proper headings / code blocks / lists. The visible text
+          // is identical; only the DOM structure differs.
+          ? (isUser || isLive
             ? <div style={{ fontSize:13, color:"var(--fg)", lineHeight:1.5, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap" }}>{m.text}</div>
             : <MarkdownBody text={m.text} />)
           : <div style={{ fontSize:12, color:"var(--fg-subtle)" }}>{placeholder}</div>}
@@ -4165,7 +4174,13 @@ function OrchestratorPane({
                 : "Start a model on the Server tab first, then type a goal above and click Run."}
             </div>
           ) : null}
-          {messages.map((m, i) => renderReplyEntry(m, i, focus, orchName))}
+          {messages.map((m, i) =>
+            // The LAST message while supSendBusy is the in-flight
+            // stream — render it as plain pre-wrap text so mouse
+            // selection survives. Earlier messages render as
+            // markdown like before.
+            renderReplyEntry(m, i, focus, orchName, supSendBusy && i === messages.length - 1)
+          )}
         </div>
         {/* Thought — reasoning + dispatch directives. Tool entries excluded. */}
         <div ref={thoughtRef} data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)" }}>
@@ -4197,7 +4212,7 @@ function OrchestratorPane({
             // Reply entries (no `kind`) get the avatar-style render,
             // everything else uses the thought renderer. Same chrono
             // order either way thanks to the `seq` stamp.
-            m.kind ? renderThoughtEntry(m, i) : renderReplyEntry(m, i, focus, orchName)
+            m.kind ? renderThoughtEntry(m, i) : renderReplyEntry(m, i, focus, orchName, supSendBusy && i === fullChat.length - 1)
           )}
         </div>
       </div>

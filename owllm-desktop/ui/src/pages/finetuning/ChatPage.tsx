@@ -23,7 +23,7 @@
 // who speaks, feeds each model's output to the other as the next user
 // message, until max_turns or Stop.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 // Tool-use loop, always-on. sendOne() appends the same XML <tool_call>
@@ -87,7 +87,15 @@ type ChatMsg = {
   /// as a collapsible '💭 Thinking' block above the answer, default
   /// collapsed.
   thinking?: string;
+  /// VS Code-style rendering hint. Plain assistant/user messages use
+  /// "message"; tool/terminal/notice rows render as expandable event
+  /// blocks instead of being mixed into the answer text.
+  kind?: "message" | "tool" | "terminal" | "notice";
+  title?: string;
+  status?: "running" | "ok" | "error";
 };
+
+type ChatMode = "ask" | "edit" | "agent";
 
 // One side-by-side column. Each carries its own system prompt and
 // sampling params so the user can A/B without leaving the page.
@@ -132,6 +140,31 @@ const TEMPLATES: Array<{ key: string; label: string; system: string }> = [
   { key: "custom",    label: "✏ Custom",               system: "" },
 ];
 
+const miniComposerBtn: CSSProperties = {
+  height: 26,
+  minWidth: 28,
+  padding: "0 8px",
+  borderRadius: 6,
+  border: "1px solid var(--border)",
+  background: "var(--bg-surface)",
+  color: "var(--fg)",
+  fontSize: 12,
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const footerComposerBtn: CSSProperties = {
+  height: 28,
+  padding: "0 12px",
+  borderRadius: 6,
+  border: "1px solid var(--border-strong)",
+  background: "var(--bg-surface)",
+  color: "var(--fg)",
+  fontSize: 12,
+  fontWeight: 700,
+  cursor: "pointer",
+};
+
 type Persisted = {
   count: 1 | 2 | 3;
   columns: Column[];
@@ -150,6 +183,98 @@ function saveState(s: Persisted) {
   try { localStorage.setItem(LS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
 }
 
+function statusColor(status?: ChatMsg["status"]) {
+  if (status === "ok") return "#7ff0c5";
+  if (status === "error") return "#ff8c8c";
+  if (status === "running") return "#ffd97a";
+  return "var(--fg-muted)";
+}
+
+function statusLabel(status?: ChatMsg["status"]) {
+  if (status === "ok") return "Done";
+  if (status === "error") return "Failed";
+  if (status === "running") return "Running";
+  return "Info";
+}
+
+function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: boolean, isLast: boolean) {
+  const isUser = m.role === "user";
+  const sender = isUser ? "You" : m.role === "assistant" ? `Model ${colId}` : "System";
+  const accent = isUser ? "#7aa2ff" : LABEL_TINT[colId];
+
+  if (m.kind === "tool" || m.kind === "terminal" || m.kind === "notice") {
+    const isTerminal = m.kind === "terminal";
+    const c = statusColor(m.status);
+    return (
+      <details key={i} open={m.status === "running" || m.status === "error"} style={{
+        border: `1px solid ${m.kind === "notice" ? "var(--border-strong)" : `${c}66`}`,
+        background: isTerminal ? "rgba(8,12,18,0.86)" : "rgba(127,140,160,0.08)",
+        borderRadius: 6,
+        overflow: "hidden",
+      }}>
+        <summary style={{
+          display: "flex", alignItems: "center", gap: 8,
+          padding: "7px 10px", cursor: "pointer", userSelect: "none",
+          color: c, fontSize: 12, fontWeight: 700,
+        }}>
+          <span style={{ width: 8, height: 8, borderRadius: 4, background: c, display: "inline-block", boxShadow: `0 0 8px ${c}` }} />
+          <span style={{ flex: 1, color: "var(--fg)" }}>{m.title ?? (isTerminal ? "Terminal" : "Tool call")}</span>
+          <span style={{ color: c, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.7 }}>{statusLabel(m.status)}</span>
+        </summary>
+        <pre style={{
+          margin: 0, padding: "8px 10px", maxHeight: 240, overflow: "auto",
+          whiteSpace: "pre-wrap", color: isTerminal ? "#d7ffe8" : "var(--fg)",
+          background: isTerminal ? "#05070a" : "transparent",
+          fontFamily: "Consolas, 'JetBrains Mono', monospace", fontSize: 11.5, lineHeight: 1.45,
+          userSelect: "text", WebkitUserSelect: "text",
+        }}>{m.content}</pre>
+      </details>
+    );
+  }
+
+  return (
+    <div key={i} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{
+          width: 20, height: 20, borderRadius: 4,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: isUser ? "rgba(122,162,255,0.16)" : "rgba(var(--accent-rgb),0.13)",
+          border: `1px solid ${isUser ? "rgba(122,162,255,0.35)" : "rgba(var(--accent-rgb),0.28)"}`,
+          color: accent, fontSize: 11, fontWeight: 800,
+        }}>{isUser ? "U" : colId}</div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: accent }}>{sender}</div>
+      </div>
+      {m.thinking && m.thinking.trim() && (
+        <details style={{
+          marginLeft: 28,
+          background: "rgba(192,138,255,0.06)",
+          border: "1px solid rgba(192,138,255,0.25)",
+          borderRadius: 6,
+          overflow: "hidden",
+        }}>
+          <summary style={{ cursor: "pointer", userSelect: "none", fontWeight: 700, color: "#c08aff", padding: "5px 8px", fontSize: 11 }}>
+            Thinking ({m.thinking.length.toLocaleString()} chars)
+          </summary>
+          <pre style={{ whiteSpace: "pre-wrap", margin: 0, padding: "6px 8px", fontFamily: "Consolas, monospace", fontSize: 10.5, lineHeight: 1.5, color: "var(--fg-muted)" }}>
+            {m.thinking}
+          </pre>
+        </details>
+      )}
+      <div style={{
+        marginLeft: 28,
+        color: "var(--fg)",
+        whiteSpace: "pre-wrap",
+        lineHeight: 1.55,
+        userSelect: "text",
+        WebkitUserSelect: "text",
+        cursor: "text",
+      }}>
+        {m.content || (busy && isLast ? "▍" : "")}
+      </div>
+    </div>
+  );
+}
+
 export default function ChatPage() {
   const persisted = loadState();
   const [status, setStatus] = useState<ServerStatus>({
@@ -162,6 +287,9 @@ export default function ChatPage() {
   const [draft, setDraft] = useState("");
   const [converse, setConverse] = useState<boolean>(persisted.converse ?? false);
   const [maxTurns, setMaxTurns] = useState<number>(persisted.maxTurns ?? 20);
+  const [chatMode, setChatMode] = useState<ChatMode>("agent");
+  const [toolsEnabled, setToolsEnabled] = useState<boolean>(true);
+  const [slashOpen, setSlashOpen] = useState<boolean>(false);
   // Right-side settings panel — Qt main.py:18667-18690 ships a
   // QStackedWidget driven by A/B/C toggle buttons. We mirror that
   // here so a single set of System Prompt / Generation Params
@@ -275,9 +403,66 @@ export default function ChatPage() {
   const updateCol = (id: "A" | "B" | "C", patch: Partial<Column>) =>
     setColumns((curr) => curr.map((c) => c.id === id ? { ...c, ...patch } : c));
 
+  const appendEvent = (
+    id: "A" | "B" | "C",
+    msg: Pick<ChatMsg, "kind" | "title" | "content" | "status">,
+  ) =>
+    setColumns((curr) => curr.map((c) => {
+      if (c.id !== id) return c;
+      return {
+        ...c,
+        messages: [
+          ...c.messages,
+          { role: "system", kind: msg.kind, title: msg.title, content: msg.content, status: msg.status },
+        ],
+      };
+    }));
+
+  const appendNoticeAll = (title: string, content: string) =>
+    setColumns((curr) => curr.map((c) => ({
+      ...c,
+      messages: [...c.messages, { role: "system", kind: "notice", title, content }],
+    })));
+
+  const slashCommands = [
+    { name: "/clear", desc: "Start a fresh chat in every column", run: () => resetAll() },
+    { name: "/compact", desc: "Ask the models to summarize the current context", run: () => setDraft("Summarize this conversation so far into concise context for the next turn.") },
+    { name: "/explain", desc: "Frame the next prompt as an explanation request", run: () => setDraft("Explain the following clearly, with examples:\n\n") },
+    { name: "/fix", desc: "Frame the next prompt as a fix/debug request", run: () => setDraft("Find the issue and propose a concrete fix:\n\n") },
+    { name: "/tests", desc: "Frame the next prompt as a test generation request", run: () => setDraft("Generate focused tests for the following behavior:\n\n") },
+    { name: "/system", desc: "Show system prompt settings for the active column", run: () => setRightTab("logs") },
+    { name: "/help", desc: "Show available chat commands", run: () => appendNoticeAll("Chat commands", "/clear - start fresh\n/compact - summarize context\n/explain - explanation prompt\n/fix - debug prompt\n/tests - test prompt\n/system - show settings") },
+  ];
+
+  const contextTokens = draft.match(/#[\w./:-]+/g) ?? [];
+
+  const runSlashCommand = (cmd: (typeof slashCommands)[number]) => {
+    cmd.run();
+    setSlashOpen(false);
+  };
+
+  const sendComposer = () => {
+    const text = draft.trim();
+    const cmd = slashCommands.find((c) => c.name === text);
+    if (cmd) {
+      runSlashCommand(cmd);
+      return;
+    }
+    sendAll();
+  };
+
   const appendAssistant = (id: "A" | "B" | "C", delta: string) =>
     setColumns((curr) => curr.map((c) => {
       if (c.id !== id) return c;
+      // Legacy tool-loop calls used to append tool calls/results into
+      // the answer text. Those events now render as VS Code-style
+      // expandable blocks, so suppress the old inline decorations.
+      if (
+        (delta.startsWith("\n\n") && /\(.+\)\n$/.test(delta)) ||
+        (/^[✓✗] /.test(delta) && delta.endsWith("\n\n"))
+      ) {
+        return c;
+      }
       const out = c.messages.slice();
       const last = out[out.length - 1];
       if (last && last.role === "assistant") {
@@ -408,8 +593,14 @@ export default function ChatPage() {
     // tool_calls, execute each, fold results back as a synthetic user
     // turn, re-stream. Loop ends when the model emits a turn with no
     // tool_call blocks — that's the final answer.
-    const toolsBlock = await formatToolsForPrompt();
-    const augmentedSystem = toolsBlock ? `${toolsBlock}\n\n${col.system}` : col.system;
+    const toolsBlock = chatMode === "agent" && toolsEnabled ? await formatToolsForPrompt() : "";
+    const modeInstruction =
+      chatMode === "agent"
+        ? "Mode: Agent. Use available tools when they help, then give a concise final answer."
+        : chatMode === "edit"
+          ? "Mode: Edit. Focus on concrete changes, diffs, rewrites, and exact patches. Ask before using tools."
+          : "Mode: Ask. Answer conversationally and do not call tools unless explicitly requested.";
+    const augmentedSystem = [toolsBlock, modeInstruction, col.system].filter(Boolean).join("\n\n");
     const liveMessages: Array<{ role: string; content: string }> = [
       { role: "system", content: augmentedSystem },
       ...next.map((m) => ({ role: m.role, content: m.content })),
@@ -611,6 +802,13 @@ export default function ChatPage() {
         const results: ToolExecResult[] = [];
         for (const c of calls) {
           if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+          const terminalish = /bash|shell|command|terminal|powershell|cmd/i.test(c.name);
+          appendEvent(col.id, {
+            kind: terminalish ? "terminal" : "tool",
+            status: "running",
+            title: terminalish ? `Run command: ${c.name}` : `Used tool: ${c.name}`,
+            content: JSON.stringify(c.args, null, 2),
+          });
           // Surface the tool call inline in the chat so the user sees
           // what the model's doing (formatted as a system message).
           const argLine = Object.entries(c.args)
@@ -620,6 +818,12 @@ export default function ChatPage() {
           // eslint-disable-next-line no-await-in-loop
           const r = await executeToolCall(c, "");
           results.push(r);
+          appendEvent(col.id, {
+            kind: terminalish ? "terminal" : "tool",
+            status: r.ok ? "ok" : "error",
+            title: `${r.ok ? "Completed" : "Failed"}: ${c.name}`,
+            content: r.output || "(no output)",
+          });
           const outSnippet = r.output.slice(0, 240) + (r.output.length > 240 ? "…" : "");
           appendAssistant(col.id, `${r.ok ? "✓" : "✗"} ${outSnippet}\n\n`);
         }
@@ -849,6 +1053,7 @@ export default function ChatPage() {
 
                 {/* Transcript */}
                 <div
+                  className="selectable-chat"
                   ref={(el) => { transcriptRefs.current[col.id] = el; }}
                   style={{
                     flex: 1, overflowY: "auto", minHeight: 0,
@@ -869,7 +1074,7 @@ export default function ChatPage() {
                             ? "Selected — server will start when you pick model A."
                             : "Pick a model above to start a server."}
                     </div>
-                  ) : col.messages.map((m, i) => (
+                  ) : col.messages.map((m, i) => m.kind ? renderChatMessage(m, i, col.id, col.busy, i === col.messages.length - 1) : (
                     <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                       <div style={{
                         fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
@@ -920,7 +1125,7 @@ export default function ChatPage() {
 
           {/* Composer row — textarea + vertical Send/Clear/Save stack
               (Qt main.py:18632-18657 btn_column). */}
-          <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
+          <div style={{ display: "none", gap: 8, alignItems: "stretch" }}>
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
@@ -996,6 +1201,101 @@ export default function ChatPage() {
                 }}
                 title="Save chat as JSON"
               >💾 Save</button>
+            </div>
+          </div>
+          <div style={{
+            position: "relative",
+            border: "1px solid var(--border-strong)",
+            borderRadius: 8,
+            background: "var(--bg-input)",
+            boxShadow: "0 4px 18px rgba(0,0,0,0.18)",
+            overflow: "hidden",
+          }}>
+            {(slashOpen || draft.trim().startsWith("/")) && (
+              <div style={{
+                position: "absolute", left: 10, right: 10, bottom: "calc(100% + 6px)",
+                zIndex: 10, background: "var(--bg-elevated)",
+                border: "1px solid var(--border-strong)", borderRadius: 8,
+                boxShadow: "var(--shadow-lg)", padding: 4,
+              }}>
+                {slashCommands
+                  .filter((c) => c.name.startsWith(draft.trim()) || c.desc.toLowerCase().includes(draft.trim().replace("/", "").toLowerCase()))
+                  .map((cmd) => (
+                    <button key={cmd.name} onMouseDown={(e) => { e.preventDefault(); runSlashCommand(cmd); }} style={{
+                      width: "100%", display: "flex", gap: 10, alignItems: "center",
+                      padding: "7px 9px", border: "none", borderRadius: 6,
+                      background: "transparent", color: "var(--fg)", textAlign: "left",
+                      cursor: "pointer", fontSize: 12,
+                    }}>
+                      <span style={{ width: 70, color: "var(--accent)", fontFamily: "Consolas, monospace", fontWeight: 800 }}>{cmd.name}</span>
+                      <span style={{ color: "var(--fg-muted)", fontWeight: 500 }}>{cmd.desc}</span>
+                    </button>
+                  ))}
+              </div>
+            )}
+            <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderBottom: "1px solid var(--border)" }}>
+              {(["ask", "edit", "agent"] as const).map((m) => (
+                <button key={m} onClick={() => setChatMode(m)} style={{
+                  height: 26, padding: "0 10px", borderRadius: 6,
+                  border: chatMode === m ? "1px solid rgba(var(--accent-rgb),0.55)" : "1px solid transparent",
+                  background: chatMode === m ? "rgba(var(--accent-rgb),0.16)" : "transparent",
+                  color: chatMode === m ? "var(--accent)" : "var(--fg-muted)",
+                  fontSize: 12, fontWeight: 700, textTransform: "capitalize",
+                }}>{m}</button>
+              ))}
+              <button onClick={() => setSlashOpen((v) => !v)} title="Slash commands" style={miniComposerBtn}>/</button>
+              <button onClick={() => setDraft((d) => `${d}${d.endsWith(" ") || !d ? "" : " "}#file `)} title="Add context mention" style={miniComposerBtn}>#</button>
+              <label title="Enable tool calls in Agent mode" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, color: "var(--fg-muted)", fontSize: 11, fontWeight: 700 }}>
+                <input type="checkbox" checked={toolsEnabled} onChange={(e) => setToolsEnabled(e.target.checked)} />
+                Tools
+              </label>
+            </div>
+            {contextTokens.length > 0 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "6px 8px 0" }}>
+                {contextTokens.map((t, i) => (
+                  <span key={`${t}-${i}`} style={{
+                    border: "1px solid rgba(var(--accent-rgb),0.35)",
+                    background: "rgba(var(--accent-rgb),0.10)",
+                    color: "var(--accent)", borderRadius: 12,
+                    padding: "2px 8px", fontSize: 11, fontWeight: 700,
+                  }}>{t}</span>
+                ))}
+              </div>
+            )}
+            <textarea
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey && !anyBusy) {
+                  e.preventDefault();
+                  sendComposer();
+                }
+                if (e.key === "Escape") setSlashOpen(false);
+              }}
+              placeholder="Ask, edit, or run an agent task. Type / for commands, # for context."
+              style={{
+                width: "100%", minHeight: 74, maxHeight: 140, resize: "vertical",
+                padding: "10px 12px", border: "none", outline: "none",
+                background: "transparent", color: "var(--fg)",
+                fontFamily: "inherit", fontSize: 13, lineHeight: 1.5,
+              }}
+            />
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderTop: "1px solid var(--border)" }}>
+              <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{chatMode === "agent" ? "Agent can use tools" : chatMode === "edit" ? "Edit-focused prompt" : "Ask-only prompt"}</span>
+              <div style={{ flex: 1 }} />
+              <button onClick={resetAll} title="Clear all transcripts" style={footerComposerBtn}>Clear</button>
+              <button onClick={saveJson} title="Save chat as JSON" style={footerComposerBtn}>Save</button>
+              {anyBusy ? (
+                <button onClick={stopAll} style={{ ...footerComposerBtn, borderColor: "#f44336", color: "#ffb0b0" }}>Stop</button>
+              ) : (
+                <button onClick={sendComposer} disabled={!draft.trim()} style={{
+                  ...footerComposerBtn,
+                  background: draft.trim() ? "var(--accent)" : "var(--bg-surface)",
+                  borderColor: draft.trim() ? "var(--accent)" : "var(--border)",
+                  color: draft.trim() ? "var(--accent-fg)" : "var(--fg-subtle)",
+                  cursor: draft.trim() ? "pointer" : "not-allowed",
+                }}>Send</button>
+              )}
             </div>
           </div>
         </div>
@@ -1246,4 +1546,3 @@ function ParamRow(p: { label: string; value: string; children: React.ReactNode }
     </div>
   );
 }
-

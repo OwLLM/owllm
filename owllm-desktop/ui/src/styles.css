@@ -20,6 +20,25 @@
   --error: #ef4444;
 }
 
+/* Agent chat panes sit beside draggable graph/canvas surfaces that use
+   user-select:none. WebView2 can let that suppress child selection even
+   when individual message bubbles ask for userSelect:"text". This class
+   gives the chat containers the same mouse-copy behaviour as Fine Tuning
+   Chat without making controls/selects awkward to use. */
+.selectable-chat,
+.selectable-chat * {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+.selectable-chat button,
+.selectable-chat input,
+.selectable-chat textarea,
+.selectable-chat select,
+.selectable-chat option {
+  user-select: auto !important;
+  -webkit-user-select: auto !important;
+}
+
 /* Dark theme — the original look. Each token has a "semantic" name
    describing what it's for, not the literal hex; component code reads
    `var(--bg-panel)` not `#0e1117`.

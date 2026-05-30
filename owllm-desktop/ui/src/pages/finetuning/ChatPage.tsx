@@ -78,7 +78,16 @@ type ServerStatus = {
 type ModelInfo = PickerModelInfo;
 
 type Role = "user" | "assistant" | "system";
-type ChatMsg = { role: Role; content: string };
+type ChatMsg = {
+  role: Role;
+  content: string;
+  /// Qwen 3 / DeepSeek-R1 / o-series reasoning text. Routed here
+  /// instead of into `content` so the wall of "Let me think… Actually
+  /// let me reconsider…" doesn't dump into the visible chat. Rendered
+  /// as a collapsible '💭 Thinking' block above the answer, default
+  /// collapsed.
+  thinking?: string;
+};
 
 // One side-by-side column. Each carries its own system prompt and
 // sampling params so the user can A/B without leaving the page.
@@ -279,10 +288,22 @@ export default function ChatPage() {
         // arrives. Same pattern as the AgentsPage dispatch.
         const raw = last.content + delta;
         const cleaned = stripFabricatedToolOutput(raw);
-        // Re-add a single trailing space when raw ended with one
-        // so the cursor / streaming feel stays smooth.
         const newContent = raw.endsWith(" ") && !cleaned.endsWith(" ") ? cleaned + " " : cleaned;
         out[out.length - 1] = { ...last, content: newContent };
+      }
+      return { ...c, messages: out };
+    }));
+  /// Stream reasoning tokens into the LAST assistant message's
+  /// `thinking` field. Rendered as a collapsible "💭 Thinking"
+  /// block above the visible answer instead of dumping the wall
+  /// of Qwen-3 'let me reconsider' into the chat.
+  const appendThinking = (id: "A" | "B" | "C", delta: string) =>
+    setColumns((curr) => curr.map((c) => {
+      if (c.id !== id) return c;
+      const out = c.messages.slice();
+      const last = out[out.length - 1];
+      if (last && last.role === "assistant") {
+        out[out.length - 1] = { ...last, thinking: (last.thinking ?? "") + delta };
       }
       return { ...c, messages: out };
     }));
@@ -535,33 +556,25 @@ export default function ChatPage() {
               const deltaObj = j?.choices?.[0]?.delta;
               const reasoning: string | undefined = deltaObj?.reasoning_content ?? deltaObj?.reasoning;
               if (typeof reasoning === "string" && reasoning) {
-                if (!turnReply.includes("💭 ")) {
-                  appendAssistant(col.id, "💭 ");
-                  turnReply += "💭 ";
-                  reply += "💭 ";
-                }
-                turnReply += reasoning;
-                reply += reasoning;
-                appendAssistant(col.id, reasoning);
+                // Route reasoning to the SEPARATE thinking buffer
+                // (collapsed by default in the UI). Do NOT mix into
+                // turnReply — keeps the visible chat clean AND
+                // keeps parseToolCalls from misreading reasoning as
+                // a tool block.
+                appendThinking(col.id, reasoning);
               }
               const delta = deltaObj?.content;
               if (typeof delta === "string" && delta) {
-                // Split <think>…</think> tags. Inside-tag content
-                // gets sent to the 💭 reasoning channel; everything
-                // outside is the visible answer.
+                // Split <think>…</think>: inside-tag goes to the
+                // collapsed thinking buffer, outside-tag is the
+                // visible answer. State machine survives chunk
+                // boundaries via `inThink` declared above the loop.
                 let buf = delta;
                 while (buf.length > 0) {
                   if (inThink) {
                     const close = buf.indexOf("</think>");
                     const thoughtPart = close < 0 ? buf : buf.slice(0, close);
-                    if (thoughtPart) {
-                      if (!turnReply.includes("💭 ")) {
-                        appendAssistant(col.id, "💭 ");
-                        turnReply += "💭 "; reply += "💭 ";
-                      }
-                      turnReply += thoughtPart; reply += thoughtPart;
-                      appendAssistant(col.id, thoughtPart);
-                    }
+                    if (thoughtPart) appendThinking(col.id, thoughtPart);
                     if (close < 0) break;
                     inThink = false;
                     buf = buf.slice(close + "</think>".length);
@@ -864,6 +877,24 @@ export default function ChatPage() {
                       }}>
                         {m.role === "user" ? "YOU" : `MODEL ${col.id}`}
                       </div>
+                      {m.thinking && m.thinking.trim() && (
+                        <details style={{
+                          background: "rgba(192,138,255,0.06)",
+                          border: "1px solid rgba(192,138,255,0.25)",
+                          borderRadius: 6,
+                          padding: "4px 8px",
+                          marginBottom: 4,
+                          fontSize: 11,
+                          color: "var(--fg-muted)",
+                        }}>
+                          <summary style={{ cursor: "pointer", userSelect: "none", fontWeight: 600, color: "#c08aff" }}>
+                            💭 Thinking ({m.thinking.length.toLocaleString()} chars)
+                          </summary>
+                          <div style={{ whiteSpace: "pre-wrap", marginTop: 4, fontFamily: "Consolas, monospace", fontSize: 10.5, lineHeight: 1.5 }}>
+                            {m.thinking}
+                          </div>
+                        </details>
+                      )}
                       <div style={{ whiteSpace: "pre-wrap", color: "var(--fg)" }}>
                         {m.content || (col.busy && i === col.messages.length - 1 ? "▍" : "")}
                       </div>

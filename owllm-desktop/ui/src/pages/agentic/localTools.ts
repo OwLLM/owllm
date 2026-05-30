@@ -179,7 +179,11 @@ export async function formatToolsForPrompt(_allowed?: string[]): Promise<string>
   try {
     mcpTools = await invoke<AggregatedMcpTool[]>("mcp_list_all_tools");
   } catch { /* MCP unavailable — proceed with built-ins only */ }
-  if (tools.length === 0 && mcpTools.length === 0) return "";
+  const searchMcpTools = mcpTools.filter(isMcpSearchTool);
+  const advertisedLocalTools = searchMcpTools.length > 0
+    ? tools.filter((t) => t.name !== "web_search")
+    : tools;
+  if (advertisedLocalTools.length === 0 && mcpTools.length === 0) return "";
   const lines: string[] = [
     "",
     "--- TOOL PROTOCOL ---",
@@ -195,16 +199,17 @@ export async function formatToolsForPrompt(_allowed?: string[]): Promise<string>
     "continue. When you have nothing left to do, respond with your final",
     "answer and NO tool_call blocks — that ends the loop.",
     "",
+    "Use only the tools listed below, with the exact tool name shown.",
+    "Do not invent tools, and do not call Brave/web_search unless it is listed.",
+    "",
+    ...(searchMcpTools.length > 0 ? [
+      `Preferred web search tool${searchMcpTools.length > 1 ? "s" : ""}: ${searchMcpTools.map((m) => m.qualifiedName).join(", ")}.`,
+      "For web search or browsing requests, use the preferred MCP search tool instead of web_search/Brave.",
+      "",
+    ] : []),
     "Available tools:",
     "",
   ];
-  for (const t of tools) {
-    lines.push(`- ${t.name}: ${t.description}`);
-    for (const a of t.args) {
-      lines.push(`    - ${a.name} (${a.required ? "required" : "optional"}): ${a.description}`);
-    }
-    lines.push("");
-  }
   if (mcpTools.length > 0) {
     lines.push("MCP tools (from connected Model Context Protocol servers):");
     lines.push("");
@@ -229,6 +234,15 @@ export async function formatToolsForPrompt(_allowed?: string[]): Promise<string>
       }
       lines.push("");
     }
+  }
+  lines.push("Built-in tools:");
+  lines.push("");
+  for (const t of advertisedLocalTools) {
+    lines.push(`- ${t.name}: ${t.description}`);
+    for (const a of t.args) {
+      lines.push(`    - ${a.name} (${a.required ? "required" : "optional"}): ${a.description}`);
+    }
+    lines.push("");
   }
   lines.push("--- END TOOL PROTOCOL ---");
   return lines.join("\n");
@@ -302,6 +316,49 @@ type AggregatedMcpTool = {
   description: string;
   inputSchema: unknown;
 };
+
+function isMcpSearchTool(tool: AggregatedMcpTool): boolean {
+  const haystack = `${tool.qualifiedName} ${tool.server} ${tool.tool} ${tool.description}`.toLowerCase();
+  return /\b(search|web_search|duckduckgo|brave)\b/.test(haystack);
+}
+
+async function findPreferredMcpSearchTool(): Promise<AggregatedMcpTool | null> {
+  let mcpTools: AggregatedMcpTool[] = [];
+  try {
+    mcpTools = await invoke<AggregatedMcpTool[]>("mcp_list_all_tools");
+  } catch {
+    return null;
+  }
+  const searchTools = mcpTools.filter(isMcpSearchTool);
+  if (searchTools.length === 0) return null;
+  return searchTools.find((t) => /duckduckgo/i.test(`${t.qualifiedName} ${t.description}`))
+    ?? searchTools.find((t) => !/brave/i.test(`${t.qualifiedName} ${t.description}`))
+    ?? searchTools[0];
+}
+
+function buildMcpSearchArgs(tool: AggregatedMcpTool, call: ToolCall): Record<string, unknown> {
+  const query = call.args.query ?? call.args.q ?? "";
+  const maxRaw = call.args.max_results ?? call.args.maxResults ?? call.args.limit ?? call.args.count;
+  const max = maxRaw ? Math.max(1, Math.min(20, Number(maxRaw) || 5)) : 5;
+  const schema = tool.inputSchema && typeof tool.inputSchema === "object"
+    ? tool.inputSchema as Record<string, unknown>
+    : {};
+  const props = schema.properties && typeof schema.properties === "object"
+    ? schema.properties as Record<string, unknown>
+    : {};
+  const hasProp = (name: string) => Object.prototype.hasOwnProperty.call(props, name);
+  const out: Record<string, unknown> = {};
+  out[hasProp("q") && !hasProp("query") ? "q" : "query"] = query;
+  for (const key of ["max_results", "maxResults", "limit", "count", "num_results"]) {
+    if (hasProp(key) || key === "max_results") {
+      out[key] = max;
+      break;
+    }
+  }
+  if (call.args.region && hasProp("region")) out.region = call.args.region;
+  if (call.args.safe_search && hasProp("safe_search")) out.safe_search = call.args.safe_search;
+  return out;
+}
 
 type ToolArg = { name: string; required: boolean; description: string };
 type ToolSpec = { name: string; description: string; args: ToolArg[] };
@@ -526,6 +583,15 @@ export async function executeToolCall(call: ToolCall, projectCwd: string): Promi
         return { ok: true, output: truncate(paths.join("\n"), 8000) };
       }
       case "web_search": {
+        const mcpSearch = await findPreferredMcpSearchTool();
+        if (mcpSearch) {
+          const text = await invoke<string>("mcp_call_tool", {
+            server: mcpSearch.server,
+            tool: mcpSearch.tool,
+            arguments: buildMcpSearchArgs(mcpSearch, call),
+          });
+          return { ok: true, output: truncate(text, 8000) };
+        }
         const maxRaw = call.args.max_results;
         const max = maxRaw ? Math.max(1, Math.min(20, Number(maxRaw) || 5)) : 5;
         const hits = await invoke<Array<{ title: string; url: string; description: string }>>(

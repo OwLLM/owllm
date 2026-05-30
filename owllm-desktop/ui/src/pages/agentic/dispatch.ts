@@ -1009,19 +1009,13 @@ export async function streamChatCompletion(
     userChars: effectiveText.length,
     toolsCount: openaiTools.length,
   });
-  // llama-server returns HTTP 503 {"error":{"message":"Loading model",...}}
-  // while the GGUF is still mmap'ing. The Telegram bridge's lazy-start
-  // poll only knows the port is bound; on cold cache a 7B+ model can
-  // need another 30-60 s before /v1/chat/completions stops 503'ing.
-  // Without this retry the first dispatch after a cold start bubbled
-  // the raw 503 body up to the user as "(dispatch error: …)".
-  // 15 min ceiling for the combined "connection refused + 503 Loading
-  // model" retry budget. Qwen 3.6 35B mmap'ing through a 22.5 GB GPU
-  // with -ngl 99 takes 6-12 min on the first cold load (layer paging
-  // while the OS warms the file cache). The previous 5 min cap fell
-  // short and the dispatch threw the raw 503 body. The Stop button
-  // on the dock will abort the wait early if the user gives up.
-  const LOAD_RETRY_MS = 900_000;
+  // 503/502 slot-warmup retry. Cold model load is handled by
+  // server.rs's /health poller (fires llama-ready when the GGUF is
+  // resident in VRAM). After that, /v1/chat/completions can still
+  // 503 for a few seconds while llama-server initialises the slot
+  // (KV cache, sampler state). 2 min is overkill but cheap. Stop
+  // button on the dock aborts early if the user gives up.
+  const LOAD_RETRY_MS = 120_000;
   const LOAD_RETRY_DELAY = 1500;
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");

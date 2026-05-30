@@ -5485,13 +5485,14 @@ async function streamChatCompletion(
     { role: "user", content: openaiUserContent(effectiveText, images) },
   ];
   const MAX_TOOL_TURNS = 8;
-  // 503 / 502 cold-load retry. llama-server can answer /health 200
-  // (model resident in VRAM) BUT still respond 503 "Loading model"
-  // to the first /v1/chat/completions for a few seconds while it
-  // initialises the slot. Without this retry the user's first send
-  // after llama-ready bubbles up the raw 503 body as a dispatch
-  // error. Mirrors the loop in dispatch.ts.
-  const LOAD_RETRY_MS = 900_000;
+  // 503 / 502 slot-warmup retry. llama-server can answer /health 200
+  // (model resident in VRAM, llama-ready already fired) BUT still
+  // respond 503 "Loading model" to the first /v1/chat/completions
+  // for a few seconds while it initialises the slot (KV cache,
+  // sampler state). Cold model load is NOT this loop's job anymore —
+  // the /health poller in server.rs handles that. So we only need
+  // enough headroom for slot init: 2 min is overkill but cheap.
+  const LOAD_RETRY_MS = 120_000;
   const LOAD_RETRY_DELAY = 1500;
   let lastReply = "";
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {

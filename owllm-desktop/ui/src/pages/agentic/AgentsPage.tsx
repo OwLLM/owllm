@@ -53,12 +53,19 @@ import {
 // so the protocol shape is identical across both consumers.
 import {
   formatToolsForPrompt,
+  formatToolsForOpenAI,
   parseToolCalls,
   executeToolCall,
   renderToolResultsForModel,
   stripFabricatedToolOutput,
   type ToolExecResult,
 } from "./localTools";
+
+// Native tool_call shape produced by consumeOpenAISse when the model
+// emits structured delta.tool_calls (Qwen3, Llama 3.1+, Hermes, etc.
+// via --jinja). We hand these to executeToolCall just like XML-parsed
+// calls so the tool runner doesn't care which protocol won.
+type NativeToolCall = { name: string; args: Record<string, string> };
 
 const ICONS = "/Page_icons";
 
@@ -5471,13 +5478,24 @@ async function streamChatCompletion(
   // History (when present) becomes the alternating user/assistant
   // turns preceding the new user message — gives the model continuity
   // across restarts.
+  // Two protocols for local tool calling:
+  //   1. NATIVE: pass `tools: [...]` in the request body. llama-server
+  //      with --jinja translates that into the model's trained tool-call
+  //      special tokens (Qwen3 <tool_call>, Llama 3.1 <|python_tag|>,
+  //      Hermes XML, etc.) and the model's response comes back via
+  //      structured delta.tool_calls — no regex parsing, no model-
+  //      invented `mcp:tool { json }` pseudo-syntax.
+  //   2. XML fallback: a `<tool_call name="X"><arg>...</arg></tool_call>`
+  //      catalog injected into the system prompt. Used by older or
+  //      template-less models that ignore the native `tools` field.
+  // We send BOTH so capable models use the native protocol and the
+  // rest still see the XML catalog. The Qwen3 user hit a loop because
+  // we were only sending the XML catalog — Qwen3 was trained on its
+  // native format and the XML was foreign, so the model invented a
+  // third format inside its thinking block and never emitted a real
+  // call.
+  const openaiTools = await formatToolsForOpenAI(allowedTools);
   const toolsBlock = await formatToolsForPrompt(allowedTools);
-  // Tools block goes BEFORE the role prompt, not after. Small local
-  // models (Qwen3 ≤14B, Gemma 3, Llama 3.1 8B) lose attention to the
-  // tail of a long system prompt and silently skip the tool catalog
-  // if it's at the bottom. Putting it first means the model sees the
-  // available actions before it reads the role instructions and is
-  // far more likely to actually call them.
   const augmentedSystem = toolsBlock ? `${toolsBlock}\n\n${systemPrompt}` : systemPrompt;
   const liveMessages: Array<{ role: string; content: unknown }> = [
     { role: "system", content: augmentedSystem },
@@ -5526,6 +5544,13 @@ async function streamChatCompletion(
             dry_base: 1.75,
             dry_allowed_length: 4,
             dry_penalty_last_n: -1,
+            // Native tool-calling protocol. llama-server with --jinja
+            // routes this through the GGUF's bundled chat template,
+            // so Qwen3 emits <tool_call>, Llama 3.1 emits <|python_tag|>,
+            // Hermes emits its XML, etc. — and the structured calls
+            // come back as delta.tool_calls instead of as free-text
+            // hallucinations.
+            tools: openaiTools.length > 0 ? openaiTools : undefined,
           }),
           signal,
         });
@@ -5555,13 +5580,18 @@ async function streamChatCompletion(
       throw new Error(`llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`);
     }
     if (!resp) throw new Error("llama-server never responded — server may have crashed");
-    // consumeOpenAISse streams deltas to onDelta AND returns the full
-    // assembled assistant text. We keep both — the deltas reach the
-    // canvas in real time, and the assembled string is what we parse
-    // for tool_call blocks.
-    lastReply = await consumeOpenAISse(resp, onDelta, onThought);
-    if (!toolsBlock) break;                       // no tools wired → no loop
-    const calls = parseToolCalls(lastReply);
+    // consumeOpenAISse streams deltas AND harvests any native
+    // delta.tool_calls into `nativeCalls`. Modern templated models
+    // (Qwen3, Llama 3.1+, Hermes, Gemma 3) emit native calls in
+    // response to the `tools:` field; older models fall through to
+    // XML <tool_call> blocks in `lastReply`, parsed below.
+    const nativeCalls: NativeToolCall[] = [];
+    lastReply = await consumeOpenAISse(resp, onDelta, onThought, nativeCalls);
+    if (!toolsBlock && openaiTools.length === 0) break;  // tools fully disabled
+    // Prefer native (already-structured) over XML (regex-parsed) —
+    // when both are present the model usually meant one and emitted
+    // the other as leftover special-token soup. Native wins.
+    const calls = nativeCalls.length > 0 ? nativeCalls : parseToolCalls(lastReply);
     if (calls.length === 0) break;                // model is done — final answer
     // Execute every call sequentially (matches the legacy Python loop's
     // one-at-a-time semantics so each result lands in context before
@@ -6093,6 +6123,7 @@ async function consumeOpenAISse(
   resp: Response,
   onDelta: StreamHandler,
   onThought?: ThoughtHandler,
+  toolCallsOut?: NativeToolCall[],
 ): Promise<string> {
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
@@ -6103,6 +6134,7 @@ async function consumeOpenAISse(
   let acc = "";
   let inThink = false;
   const toolNames = new Map<number, string>();
+  const toolArgsBuf = new Map<number, string>();
   // Client-side repetition-loop detector — backstop for the server-
   // side DRY/repeat_penalty sampling. Mirrors dispatch.ts. Triggers
   // on either 3 identical lines (>=10 chars) at the tail, OR 3
@@ -6159,6 +6191,7 @@ async function consumeOpenAISse(
               const name = toolNames.get(idx) ?? "tool";
               const channel = `tool:${name}:${idx}`;
               onThought?.(channel, `🛠 ${name}`, fn.arguments);
+              toolArgsBuf.set(idx, (toolArgsBuf.get(idx) ?? "") + fn.arguments);
             }
           }
         }
@@ -6181,6 +6214,26 @@ async function consumeOpenAISse(
       } catch { /* skip malformed chunk */ }
     }
     if (loopAborted) break;
+  }
+  // Finalise any native tool_calls: name + accumulated args JSON
+  // → NativeToolCall shape the caller can pass straight to
+  // executeToolCall, same as XML-parsed calls.
+  if (toolCallsOut) {
+    for (const [idx, rawName] of toolNames.entries()) {
+      const argsJson = toolArgsBuf.get(idx) ?? "{}";
+      const args: Record<string, string> = {};
+      try {
+        const parsed = JSON.parse(argsJson);
+        if (parsed && typeof parsed === "object") {
+          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+            args[k] = typeof v === "string" ? v : JSON.stringify(v);
+          }
+        }
+      } catch {
+        args.raw = argsJson;
+      }
+      toolCallsOut.push({ name: rawName, args });
+    }
   }
   return acc;
 }

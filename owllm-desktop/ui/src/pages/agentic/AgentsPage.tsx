@@ -3361,7 +3361,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
       ? "rgba(154, 217, 255, 0.12)"
       : "var(--bg-surface)";
   return (
-    <div key={`r-${m.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+    <div key={`r-${m.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8, flexShrink:0 }}>
       <div style={{ flex:1, background:tint, borderLeft:`3px solid ${accent}`, borderRadius:8, padding:"6px 12px", minWidth:0 }}>
         <div style={{ fontSize:10, fontWeight:700, color:accent, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif", userSelect:"none" }}>{m.role}</div>
         {m.text
@@ -3381,7 +3381,7 @@ function renderThoughtEntry(t: GoalMsg, i: number) {
   // All variants below render plain pre-wrap text (no MarkdownBody)
   // and force userSelect:text so mouse copy works during streaming.
   return (
-    <div key={`t-${t.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8 }}>
+    <div key={`t-${t.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8, flexShrink:0 }}>
       <div style={{ width:6, alignSelf:"stretch", borderRadius:3, background: t.color, opacity:0.85, flexShrink:0 }} />
       <div style={{ flex:1, background:"var(--bg-surface)", borderRadius:6, padding:"5px 10px", minWidth:0 }}>
         <div style={{ fontSize:9, fontWeight:700, color:t.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif", userSelect:"none" }}>{t.role}</div>

@@ -217,6 +217,10 @@ function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: 
         background: isTerminal ? "rgba(8,12,18,0.86)" : "rgba(127,140,160,0.08)",
         borderRadius: 6,
         overflow: "hidden",
+        // In the flex-column transcript, children must not shrink — else
+        // a long run of tool cards gets compressed to fit and overlaps,
+        // and the container stops scrolling (scrollHeight == clientHeight).
+        flexShrink: 0,
       }}>
         <summary style={{
           display: "flex", alignItems: "center", gap: 8,
@@ -239,7 +243,7 @@ function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: 
   }
 
   return (
-    <div key={i} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+    <div key={i} style={{ display: "flex", flexDirection: "column", gap: 5, flexShrink: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <div style={{
           width: 20, height: 20, borderRadius: 4,
@@ -1237,7 +1241,7 @@ export default function ChatPage() {
                             : "Pick a model above to start a server."}
                     </div>
                   ) : col.messages.map((m, i) => renderChatMessage(m, i, col.id, col.busy, i === col.messages.length - 1) || (
-                    <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                    <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
                       <div style={{
                         fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
                         color: m.role === "user" ? "#7aa2ff" : LABEL_TINT[col.id],
@@ -1273,6 +1277,7 @@ export default function ChatPage() {
                       background: "rgba(255,80,80,0.10)",
                       color: "#ffb0b0",
                       borderRadius: 6, padding: 8, fontSize: 11,
+                      flexShrink: 0,
                     }}>{col.error}</div>
                   )}
                 </div>

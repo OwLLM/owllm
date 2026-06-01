@@ -45,6 +45,21 @@ fn resolve(path: &str, cwd: &Option<String>) -> PathBuf {
     }
 }
 
+/// Dedicated scratch directory for the fine-tuning chat playground's
+/// tools. Both the local tool runtime and the Claude CLI subscription
+/// path operate here, so test file writes / shell commands land in a
+/// safe sandbox under the user's home instead of the app install dir or
+/// the source tree. Created on first request.
+#[tauri::command]
+pub async fn chat_scratch_dir() -> Result<String, String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or_else(|| "no home directory (USERPROFILE/HOME unset)".to_string())?;
+    let dir = PathBuf::from(home).join("OwLLM").join("chat-scratch");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub async fn tool_read_file(path: String, cwd: Option<String>) -> Result<String, String> {
     let p = resolve(&path, &cwd);

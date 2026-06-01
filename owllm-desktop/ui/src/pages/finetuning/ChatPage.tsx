@@ -318,6 +318,15 @@ export default function ChatPage() {
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
   const transcriptRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const m2mRunningRef = useRef(false);
+  // Dedicated scratch dir for the chat playground's tools, so writes /
+  // shell land in a sandbox under the user's home (not the install dir).
+  // Used as the cwd for local tools AND the Claude CLI's allowed dir.
+  const scratchDirRef = useRef<string>("");
+  useEffect(() => {
+    invoke<string>("chat_scratch_dir")
+      .then((d) => { scratchDirRef.current = d; })
+      .catch((e) => console.warn("chat_scratch_dir failed", e));
+  }, []);
 
   // ---- ChatRuntime: per-column message streams live in the store ----
   // (above the router) so navigating away mid-generation doesn't orphan
@@ -620,15 +629,22 @@ export default function ChatPage() {
         { role: "assistant", content: "" },
       ]);
       chatRuntime.setError(SID(col.id), null);
+      // Tools-on in the playground means "run them" — the chat has no
+      // per-call approval UI, so the Claude CLI sub path must auto-
+      // approve (bypassPermissions) and be given the scratch dir as its
+      // allowed working directory, or every write/shell/search is
+      // blocked (which is exactly what the user saw on Opus). Mirrors
+      // how local models execute freely here.
+      const toolsOn = chatMode === "agent" && toolsEnabled;
       try {
         reply = await streamChatCompletion(
           0, wantedModelId, wantedProvider,
           col.system || "You are a helpful assistant. Answer directly and concisely.",
           userText, col.temperature, signal,
           (d) => appendAssistant(col.id, d),
-          undefined,                       // projectCwd
+          scratchDirRef.current || undefined,   // projectCwd = scratch sandbox
           historyC,
-          false,                           // autoApprove
+          toolsOn,                              // autoApprove when tools enabled
           (channel, _role, delta) => { if (channel === "thinking") appendThinking(col.id, delta); },
         );
       } catch (e: unknown) {
@@ -1059,7 +1075,7 @@ export default function ChatPage() {
             .join(", ");
           appendAssistant(col.id, `\n\n🛠 ${c.name}(${argLine})\n`);
           // eslint-disable-next-line no-await-in-loop
-          const r = await executeToolCall(c, "");
+          const r = await executeToolCall(c, scratchDirRef.current || "");
           results.push(r);
           appendEvent(col.id, {
             kind: terminalish ? "terminal" : "tool",

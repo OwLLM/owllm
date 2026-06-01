@@ -38,11 +38,16 @@ import {
   parseToolCalls,
   executeToolCall,
   renderToolResultsForModel,
+  renderValidationErrorsForModel,
+  validateCall,
+  firstRequiredArg,
   stripFabricatedToolOutput,
   unmangleMcpName,
   type ToolCall,
   type ToolExecResult,
 } from "../agentic/localTools";
+import { normalizeToolCalls, type RawNativeCall } from "../agentic/toolNormalizer";
+import { samplingFor } from "../agentic/modelProfiles";
 
 const LS_KEY = "owllm:chat:v3";
 
@@ -705,26 +710,19 @@ export default function ChatPage() {
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
         if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
 
+        // Anti-degeneration sampling (repeat_penalty, DRY, frequency/
+        // presence) resolved per model family from modelProfiles.ts.
+        // The user's per-column temperature / top_p / max_tokens win
+        // over the profile defaults (those are explicit UI controls).
+        const profileSampling = samplingFor(status.model_id ?? "");
         const payload = {
           model: status.model_id ?? "local",
           messages: liveMessages,
           stream: true,
+          ...profileSampling,
           temperature: col.temperature,
           top_p: col.topP,
           max_tokens: col.maxTokens,
-          // Anti-degeneration sampling. Plain repeat/frequency penalties
-          // weren't enough on Qwen3 — it loops with slight rewording.
-          // DRY (Don't Repeat Yourself) is llama.cpp's purpose-built
-          // anti-loop sampler; it penalises any multi-token sequence
-          // that's already appeared in the context window.
-          repeat_penalty: 1.15,
-          repeat_last_n: 256,
-          frequency_penalty: 0.4,
-          presence_penalty: 0.4,
-          dry_multiplier: 0.8,
-          dry_base: 1.75,
-          dry_allowed_length: 4,
-          dry_penalty_last_n: -1,
           tools: openaiTools.length > 0 ? openaiTools : undefined,
           tool_choice: openaiTools.length > 0 ? "auto" : undefined,
         };
@@ -972,20 +970,43 @@ export default function ChatPage() {
 
         // Plain chat mode → one shot, done.
         if (!toolsBlock) break;
-        const nativeCalls = parseNativeToolCalls(nativeToolNames, nativeToolArgs);
-        const parsedCalls = parseAllToolCalls(turnReply, turnThinking);
-        const fallbackCalls = nativeCalls.length === 0 && parsedCalls.length === 0
-          ? synthesizeExplicitToolCalls(userText, turnReply, turnThinking)
-          : [];
-        const calls = nativeCalls.length > 0 ? nativeCalls : parsedCalls.length > 0 ? parsedCalls : fallbackCalls;
+        // Universal tool-call normalisation. Feed the native
+        // delta.tool_calls (converted to RawNativeCall) + the visible
+        // and thinking text; the normalizer accepts every dialect
+        // (XML, Llama-native, JSON, ReAct, Python-call) and resolves to
+        // canonical registry tool + arg names. See toolNormalizer.ts.
+        const nativeRaw: RawNativeCall[] = [];
+        for (const [idx, rawName] of nativeToolNames.entries()) {
+          const argsJson = nativeToolArgs.get(idx) ?? "{}";
+          let parsed: Record<string, unknown> = {};
+          try { const p = JSON.parse(argsJson); if (p && typeof p === "object") parsed = p; }
+          catch { parsed = { raw: argsJson }; }
+          nativeRaw.push({ name: unmangleMcpName(rawName), args: parsed });
+        }
+        let calls = normalizeToolCalls(`${turnReply}\n${turnThinking}`, nativeRaw, { firstRequiredArg });
+        // Last-resort: ChatPage's intent-synthesiser for models that
+        // describe a tool in prose without emitting any parseable call
+        // ("let me run a bash test and search for X").
+        if (calls.length === 0) {
+          calls = synthesizeExplicitToolCalls(userText, turnReply, turnThinking);
+        }
         // Model produced no tool calls → that turn IS the final answer.
         if (calls.length === 0) break;
 
-        // Execute every call sequentially so each result lands in
+        // Strict validation before execution; failures go back as
+        // structured schema errors so the model can self-correct.
+        const valid: ToolCall[] = [];
+        const invalid: Array<{ name: string; error: string }> = [];
+        for (const c of calls) {
+          const v = validateCall(c);
+          if (v.ok) valid.push(c);
+          else invalid.push({ name: c.name, error: v.error });
+        }
+        // Execute every VALID call sequentially so each result lands in
         // context before the next tool runs (matches AgentsPage +
         // legacy Python loop).
         const results: ToolExecResult[] = [];
-        for (const c of calls) {
+        for (const c of valid) {
           if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
           const terminalish = /bash|shell|command|terminal|powershell|cmd/i.test(c.name);
           appendEvent(col.id, {
@@ -1012,10 +1033,23 @@ export default function ChatPage() {
           const outSnippet = r.output.slice(0, 240) + (r.output.length > 240 ? "…" : "");
           appendAssistant(col.id, `${r.ok ? "✓" : "✗"} ${outSnippet}\n\n`);
         }
-        // Append the assistant turn + synthetic user turn carrying
-        // the tool results, then iterate.
+        // Surface validation rejections inline too so the user sees the
+        // model fumbled the schema (not a silent no-op).
+        for (const e of invalid) {
+          appendEvent(col.id, {
+            kind: "notice", status: "error",
+            title: `Rejected malformed call: ${e.name}`,
+            content: e.error,
+          });
+        }
+        // Append the assistant turn + synthetic user turn (real results
+        // for valid calls + structured schema errors for invalid ones),
+        // then iterate.
+        const parts: string[] = [];
+        if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
+        if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
         liveMessages.push({ role: "assistant", content: turnReply });
-        liveMessages.push({ role: "user", content: renderToolResultsForModel(calls, results) });
+        liveMessages.push({ role: "user", content: parts.join("\n\n") });
       }
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };

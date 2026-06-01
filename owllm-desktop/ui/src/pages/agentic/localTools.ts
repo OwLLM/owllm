@@ -364,8 +364,24 @@ function buildMcpSearchArgs(tool: AggregatedMcpTool, call: ToolCall): Record<str
   return out;
 }
 
-type ToolArg = { name: string; required: boolean; description: string };
-type ToolSpec = { name: string; description: string; args: ToolArg[] };
+type ToolArg = {
+  name: string;
+  required: boolean;
+  description: string;
+  /// Other names models commonly use for this arg. The normalizer maps
+  /// any of these back to `name` before execution. E.g. web_search's
+  /// `query` accepts `q`, `search_query`, `text`.
+  aliases?: string[];
+};
+type ToolSpec = {
+  name: string;
+  description: string;
+  args: ToolArg[];
+  /// Other names models commonly call this tool. The normalizer maps
+  /// any alias back to `name`. E.g. `web_search` accepts `search`,
+  /// `search_web`, `google`, `browser.search`.
+  aliases?: string[];
+};
 
 /// Tool spec the system prompt advertises. Names match the legacy
 /// Python builtin_registry (LLM/core/agents/tools/builtin.py) so any
@@ -374,52 +390,59 @@ type ToolSpec = { name: string; description: string; args: ToolArg[] };
 export const LOCAL_TOOL_SPECS: ToolSpec[] = [
   {
     name: "read_file",
+    aliases: ["file_read", "open_file", "readfile", "cat", "view_file", "get_file"],
     description: "Read a UTF-8 text file from disk. Returns the contents as a string.",
-    args: [{ name: "path", required: true, description: "Absolute or project-relative file path." }],
+    args: [{ name: "path", required: true, description: "Absolute or project-relative file path.", aliases: ["file", "filename", "file_path", "filepath"] }],
   },
   {
     name: "write_file_with_diff",
+    aliases: ["write_file", "writefile", "create_file", "save_file", "put_file", "new_file"],
     description:
       "Create a NEW file or fully rewrite an existing one. Parent dirs are " +
       "created automatically. Use this when writing fresh code / configs / " +
       "READMEs that don't exist yet.",
     args: [
-      { name: "path", required: true, description: "Absolute or project-relative file path." },
-      { name: "content", required: true, description: "The full file contents to write." },
+      { name: "path", required: true, description: "Absolute or project-relative file path.", aliases: ["file", "filename", "file_path", "filepath"] },
+      { name: "content", required: true, description: "The full file contents to write.", aliases: ["contents", "text", "data", "body"] },
     ],
   },
   {
     name: "edit_file",
+    aliases: ["edit", "replace_in_file", "str_replace", "modify_file", "patch_file"],
     description:
       "Modify an EXISTING file by replacing an exact substring with new " +
       "content. Use for surgical edits — preserves the rest of the file. " +
       "old_string must match the file byte-for-byte (whitespace included).",
     args: [
-      { name: "path", required: true, description: "Absolute or project-relative file path." },
-      { name: "old_string", required: true, description: "Exact text to find and replace." },
-      { name: "new_string", required: true, description: "Replacement text." },
+      { name: "path", required: true, description: "Absolute or project-relative file path.", aliases: ["file", "filename", "file_path", "filepath"] },
+      { name: "old_string", required: true, description: "Exact text to find and replace.", aliases: ["old_str", "old", "find", "search", "old_text", "from"] },
+      { name: "new_string", required: true, description: "Replacement text.", aliases: ["new_str", "new", "replace", "replacement", "new_text", "to"] },
     ],
   },
   {
     name: "list_dir",
+    aliases: ["ls", "listdir", "list_directory", "list_files", "dir", "readdir"],
     description: "List the entries (files + subfolders) of a directory.",
-    args: [{ name: "path", required: true, description: "Absolute or project-relative directory path." }],
+    args: [{ name: "path", required: true, description: "Absolute or project-relative directory path.", aliases: ["dir", "directory", "folder", "dir_path"] }],
   },
   {
     name: "create_dir",
+    aliases: ["mkdir", "makedir", "make_directory", "create_directory", "new_dir"],
     description: "Create a directory (and any missing parent dirs).",
-    args: [{ name: "path", required: true, description: "Absolute or project-relative directory path." }],
+    args: [{ name: "path", required: true, description: "Absolute or project-relative directory path.", aliases: ["dir", "directory", "folder", "dir_path"] }],
   },
   {
     name: "shell",
+    aliases: ["shell_exec", "bash", "sh", "run_command", "run_shell", "exec", "terminal", "cmd", "command", "execute"],
     description:
       "Run a shell command. On Windows uses cmd.exe /c, elsewhere sh -c. " +
       "Returns stdout, stderr, exit_code. Use for git, npm install, python " +
       "scripts, etc.",
-    args: [{ name: "command", required: true, description: "The shell command line to run." }],
+    args: [{ name: "command", required: true, description: "The shell command line to run.", aliases: ["cmd", "cmd_line", "commandline", "script", "code", "input"] }],
   },
   {
     name: "grep",
+    aliases: ["search_files", "search_content", "rg", "ripgrep", "find_in_files", "content_search"],
     description:
       "Regex content search across files under a directory. Returns " +
       "matching {path, line, text} hits. Skips .git / node_modules / " +
@@ -427,57 +450,175 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       "noise is filtered out. Use this to find symbols, callers, " +
       "TODOs, configuration references, anything by content.",
     args: [
-      { name: "pattern", required: true, description: "Rust regex to match against each line." },
-      { name: "path", required: false, description: "Directory to search under. Defaults to '.' (project cwd)." },
-      { name: "glob", required: false, description: "Filename glob filter, e.g. '*.rs' or '*.{ts,tsx}'." },
+      { name: "pattern", required: true, description: "Rust regex to match against each line.", aliases: ["query", "regex", "search", "text", "q"] },
+      { name: "path", required: false, description: "Directory to search under. Defaults to '.' (project cwd).", aliases: ["dir", "directory", "folder"] },
+      { name: "glob", required: false, description: "Filename glob filter, e.g. '*.rs' or '*.{ts,tsx}'.", aliases: ["filter", "include", "file_pattern"] },
     ],
   },
   {
     name: "glob",
+    aliases: ["find_files", "find", "glob_files", "file_search"],
     description:
       "Find files by filename pattern. Walks the tree under `path` " +
       "and returns every file whose name matches `pattern`. Supports " +
       "* (any chars except /), ** (any depth incl. /), ? (one char). " +
       "Use this to discover files when you don't yet know their content.",
     args: [
-      { name: "pattern", required: true, description: "Glob pattern, e.g. 'src/**/*.tsx' or '*.py'." },
-      { name: "path", required: false, description: "Directory root for the search. Defaults to '.' (project cwd)." },
+      { name: "pattern", required: true, description: "Glob pattern, e.g. 'src/**/*.tsx' or '*.py'.", aliases: ["query", "glob", "name", "filename", "q"] },
+      { name: "path", required: false, description: "Directory root for the search. Defaults to '.' (project cwd).", aliases: ["dir", "directory", "folder", "root"] },
     ],
   },
   {
     name: "web_search",
+    aliases: ["search", "search_web", "websearch", "google", "duckduckgo", "ddg", "brave_search", "internet_search", "web"],
     description:
       "Web search via Brave Search API. Returns up to 5 results " +
       "(title + url + description). Requires BRAVE_API_KEY saved in " +
       "Accounts. Use this to find competitor products, prior art, " +
       "documentation, or background research.",
     args: [
-      { name: "query", required: true, description: "Search query string." },
-      { name: "max_results", required: false, description: "How many results to return (1-20, default 5)." },
+      { name: "query", required: true, description: "Search query string.", aliases: ["q", "search_query", "text", "search", "term", "keywords"] },
+      { name: "max_results", required: false, description: "How many results to return (1-20, default 5).", aliases: ["maxResults", "limit", "count", "num_results", "n", "top_k"] },
     ],
   },
   {
     name: "web_fetch",
+    aliases: ["fetch_url", "fetch", "get_url", "open_url", "browse", "http_get", "curl", "visit"],
     description:
       "Fetch a URL and return its readable text (HTML stripped, " +
       "script/style removed, whitespace collapsed). Capped at 60 KB. " +
       "Use this on URLs returned by web_search to extract feature lists, " +
       "documentation, etc.",
-    args: [{ name: "url", required: true, description: "Absolute URL to fetch." }],
+    args: [{ name: "url", required: true, description: "Absolute URL to fetch.", aliases: ["link", "address", "uri", "href", "u"] }],
   },
   {
     name: "screenshot_url",
+    aliases: ["screenshot", "capture_url", "snapshot_url", "render_url"],
     description:
       "Screenshot a URL via headless Chromium (TwinForge web_adapter). " +
       "Returns the saved PNG path. Use this to capture competitor GUIs " +
       "for the brainstorm GUI-direction synthesis. Output PNG should " +
       "go under <project>/brainstorm/.",
     args: [
-      { name: "url", required: true, description: "Absolute URL to screenshot." },
-      { name: "out_png", required: true, description: "Absolute filesystem path for the output PNG." },
+      { name: "url", required: true, description: "Absolute URL to screenshot.", aliases: ["link", "address", "uri", "u"] },
+      { name: "out_png", required: true, description: "Absolute filesystem path for the output PNG.", aliases: ["out", "output", "output_path", "out_path", "png", "path"] },
     ],
   },
 ];
+
+// ---- Canonical-name + arg-alias resolution (the "normalize" half of
+// the universal tool layer). Built once from LOCAL_TOOL_SPECS so the
+// lookups are O(1) and stay in sync with the registry automatically.
+
+const _toolNameIndex: Map<string, string> = (() => {
+  const m = new Map<string, string>();
+  for (const spec of LOCAL_TOOL_SPECS) {
+    m.set(spec.name.toLowerCase(), spec.name);
+    for (const a of spec.aliases ?? []) m.set(a.toLowerCase(), spec.name);
+  }
+  return m;
+})();
+
+// Per-canonical-tool map of { argAlias → canonicalArgName }.
+const _argAliasIndex: Map<string, Map<string, string>> = (() => {
+  const m = new Map<string, Map<string, string>>();
+  for (const spec of LOCAL_TOOL_SPECS) {
+    const inner = new Map<string, string>();
+    for (const arg of spec.args) {
+      inner.set(arg.name.toLowerCase(), arg.name);
+      for (const a of arg.aliases ?? []) inner.set(a.toLowerCase(), arg.name);
+    }
+    m.set(spec.name, inner);
+  }
+  return m;
+})();
+
+/// Resolve a model-emitted tool name to its canonical registry name.
+/// Handles case, dotted namespaces (`browser.search` → `search`),
+/// hyphen/underscore drift (`web-search` → `web_search`), and the
+/// MCP `mcp:server:tool` / `mcp__server__tool` forms (passed through).
+/// Returns null when nothing matches — caller surfaces a structured
+/// "unknown tool" error back to the model.
+export function canonicalToolName(raw: string): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  // MCP tools route by their own qualified name — leave intact.
+  if (trimmed.startsWith("mcp:")) return trimmed;
+  if (trimmed.startsWith("mcp__")) return trimmed.replace(/__/g, ":");
+  const lower = trimmed.toLowerCase();
+  // Direct / alias hit.
+  if (_toolNameIndex.has(lower)) return _toolNameIndex.get(lower)!;
+  // Strip a dotted namespace prefix: `browser.search` → `search`.
+  const lastDot = lower.lastIndexOf(".");
+  if (lastDot >= 0) {
+    const tail = lower.slice(lastDot + 1);
+    if (_toolNameIndex.has(tail)) return _toolNameIndex.get(tail)!;
+  }
+  // Normalise hyphen/space → underscore and retry.
+  const normalized = lower.replace(/[-\s]+/g, "_");
+  if (_toolNameIndex.has(normalized)) return _toolNameIndex.get(normalized)!;
+  return null;
+}
+
+/// Map an args object's keys from whatever the model used to the
+/// canonical arg names for `toolName`. Unknown keys are kept as-is
+/// (some MCP tools have args we don't model) but logged. Values are
+/// coerced to strings to match executeToolCall's Record<string,string>.
+export function resolveArgAliases(toolName: string, rawArgs: Record<string, unknown>): Record<string, string> {
+  const inner = _argAliasIndex.get(toolName);
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rawArgs)) {
+    const canonical = inner?.get(k.toLowerCase()) ?? k;
+    out[canonical] = typeof v === "string" ? v : JSON.stringify(v);
+  }
+  return out;
+}
+
+/// The first required arg name for a tool, or null. Used by the
+/// normalizer to bind a positional value (ReAct `Action Input: foo`,
+/// Python `tool("foo")`) to the right key.
+export function firstRequiredArg(toolName: string): string | null {
+  const spec = LOCAL_TOOL_SPECS.find((s) => s.name === toolName);
+  if (!spec) return null;
+  return spec.args.find((a) => a.required)?.name ?? spec.args[0]?.name ?? null;
+}
+
+export type ValidationResult = {
+  ok: boolean;
+  /// Human-readable, schema-shaped error the model can self-correct
+  /// from. Empty when ok.
+  error: string;
+};
+
+/// Validate a (canonical) call against the registry schema. Checks the
+/// tool exists and every required arg is present + non-empty. Returns a
+/// structured error string (listing the expected schema) so the dispatch
+/// loop can hand it back to the model instead of silently failing or
+/// executing a half-formed call. MCP tools skip arg validation (their
+/// schema lives server-side).
+export function validateCall(call: ToolCall): ValidationResult {
+  if (call.name.startsWith("mcp:")) return { ok: true, error: "" };
+  const spec = LOCAL_TOOL_SPECS.find((s) => s.name === call.name);
+  if (!spec) {
+    const known = LOCAL_TOOL_SPECS.map((s) => s.name).join(", ");
+    return { ok: false, error: `Unknown tool "${call.name}". Available tools: ${known}.` };
+  }
+  const missing = spec.args
+    .filter((a) => a.required && !(call.args[a.name] && String(call.args[a.name]).trim()))
+    .map((a) => a.name);
+  if (missing.length > 0) {
+    const schema = spec.args
+      .map((a) => `${a.name}${a.required ? "" : "?"}: string  // ${a.description}`)
+      .join("\n  ");
+    return {
+      ok: false,
+      error:
+        `Tool "${call.name}" is missing required argument${missing.length > 1 ? "s" : ""}: ` +
+        `${missing.join(", ")}.\nExpected arguments:\n  ${schema}`,
+    };
+  }
+  return { ok: true, error: "" };
+}
 
 export type ToolExecResult = {
   ok: boolean;
@@ -648,6 +789,25 @@ export function renderToolResultsForModel(
     lines.push("");
     lines.push(`▶ ${c.name}(${argsRender}) → ${r.ok ? "ok" : "error"}`);
     lines.push(r.output);
+  }
+  return lines.join("\n");
+}
+
+/// Render a batch of VALIDATION errors (calls that failed schema check
+/// before execution) as a synthetic user turn. Unlike a runtime error,
+/// this tells the model exactly what shape it should have emitted so it
+/// can self-correct on the next turn — the "return structured errors to
+/// the model" half of the universal layer.
+export function renderValidationErrorsForModel(
+  errors: Array<{ name: string; error: string }>,
+): string {
+  const lines = [
+    "[tool call rejected — the call(s) below were malformed and NOT executed.",
+    "Fix the arguments and emit the tool_call again, or give your final answer.]",
+  ];
+  for (const e of errors) {
+    lines.push("");
+    lines.push(`✗ ${e.name}: ${e.error}`);
   }
   return lines.join("\n");
 }

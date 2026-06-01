@@ -54,16 +54,21 @@ import {
 import {
   formatToolsForPrompt,
   formatToolsForOpenAI,
-  parseToolCalls,
   executeToolCall,
   renderToolResultsForModel,
+  renderValidationErrorsForModel,
+  validateCall,
+  firstRequiredArg,
   stripFabricatedToolOutput,
+  type ToolCall,
   type ToolExecResult,
 } from "./localTools";
+import { normalizeToolCalls } from "./toolNormalizer";
+import { samplingFor } from "./modelProfiles";
 
 // Native tool_call shape produced by consumeOpenAISse when the model
 // emits structured delta.tool_calls (Qwen3, Llama 3.1+, Hermes, etc.
-// via --jinja). We hand these to executeToolCall just like XML-parsed
+// via --jinja). We hand these to the normalizer just like XML-parsed
 // calls so the tool runner doesn't care which protocol won.
 type NativeToolCall = { name: string; args: Record<string, string> };
 
@@ -5503,6 +5508,9 @@ async function streamChatCompletion(
     { role: "user", content: openaiUserContent(effectiveText, images) },
   ];
   const MAX_TOOL_TURNS = 8;
+  // Per-family sampling from the data-driven profile layer — no inline
+  // literals so a new model only needs a modelProfiles.ts entry.
+  const sampling = samplingFor(modelId);
   // 503 / 502 slot-warmup retry. llama-server can answer /health 200
   // (model resident in VRAM, llama-ready already fired) BUT still
   // respond 503 "Loading model" to the first /v1/chat/completions
@@ -5528,22 +5536,10 @@ async function streamChatCompletion(
             messages: liveMessages,
             stream: true,
             temperature,
-            // Anti-degeneration sampling — matches dispatch.ts.
-            // 4096 max_tokens: needed for thinking-model variants
-            // (Qwen3-Thinking, DeepSeek-R1 distills) that spend 2-3k
-            // tokens on the <think> monologue before a single visible
-            // reply byte. A 1024 cap killed those mid-thought. DRY +
-            // the client-side loop detector handle runaway output
-            // without needing the budget as a backstop.
-            max_tokens: 4096,
-            repeat_penalty: 1.15,
-            repeat_last_n: 256,
-            frequency_penalty: 0.4,
-            presence_penalty: 0.4,
-            dry_multiplier: 0.8,
-            dry_base: 1.75,
-            dry_allowed_length: 4,
-            dry_penalty_last_n: -1,
+            // Anti-degeneration sampling (max_tokens, repeat_penalty,
+            // DRY, frequency/presence) resolved per model family from
+            // modelProfiles.ts — no inline literals.
+            ...sampling,
             // Native tool-calling protocol. llama-server with --jinja
             // routes this through the GGUF's bundled chat template,
             // so Qwen3 emits <tool_call>, Llama 3.1 emits <|python_tag|>,
@@ -5588,16 +5584,24 @@ async function streamChatCompletion(
     const nativeCalls: NativeToolCall[] = [];
     lastReply = await consumeOpenAISse(resp, onDelta, onThought, nativeCalls);
     if (!toolsBlock && openaiTools.length === 0) break;  // tools fully disabled
-    // Prefer native (already-structured) over XML (regex-parsed) —
-    // when both are present the model usually meant one and emitted
-    // the other as leftover special-token soup. Native wins.
-    const calls = nativeCalls.length > 0 ? nativeCalls : parseToolCalls(lastReply);
+    // Universal normalisation — accept any dialect, resolve to canonical
+    // registry tool + arg names. See toolNormalizer.ts.
+    const calls = normalizeToolCalls(lastReply, nativeCalls, { firstRequiredArg });
     if (calls.length === 0) break;                // model is done — final answer
-    // Execute every call sequentially (matches the legacy Python loop's
-    // one-at-a-time semantics so each result lands in context before
-    // the next tool runs).
-    const results: ToolExecResult[] = [];
+    // Strict validation before execution; failures go back as structured
+    // schema errors so the model can self-correct.
+    const valid: ToolCall[] = [];
+    const invalid: Array<{ name: string; error: string }> = [];
     for (const c of calls) {
+      const v = validateCall(c);
+      if (v.ok) valid.push(c);
+      else invalid.push({ name: c.name, error: v.error });
+    }
+    // Execute every VALID call sequentially (matches the legacy Python
+    // loop's one-at-a-time semantics so each result lands in context
+    // before the next tool runs).
+    const results: ToolExecResult[] = [];
+    for (const c of valid) {
       if (signal.aborted) throw new DOMException("aborted", "AbortError");
       // Surface the tool call on the Thought tab so the user sees what
       // the agent's doing (e.g. `🛠 read_file(path=...)`).
@@ -5605,10 +5609,14 @@ async function streamChatCompletion(
       // eslint-disable-next-line no-await-in-loop
       results.push(await executeToolCall(c, projectCwd ?? ""));
     }
-    // Append the assistant turn + synthetic user turn carrying tool
-    // results, then iterate.
-    liveMessages.push({ role: "assistant", content: lastReply });
-    liveMessages.push({ role: "user", content: renderToolResultsForModel(calls, results) });
+    // Append the assistant turn + synthetic user turn (real results for
+    // valid calls + structured schema errors for invalid ones), then
+    // iterate.
+    const parts: string[] = [];
+    if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
+    if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
+    liveMessages.push({ role: "assistant", content: stripFabricatedToolOutput(lastReply) });
+    liveMessages.push({ role: "user", content: parts.join("\n\n") });
   }
   return lastReply;
 }

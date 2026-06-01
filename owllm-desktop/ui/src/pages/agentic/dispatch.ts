@@ -14,13 +14,17 @@ import {
   executeToolCall,
   formatToolsForPrompt,
   formatToolsForOpenAI,
-  parseToolCalls,
   stripFabricatedToolOutput,
   unmangleMcpName,
   renderToolResultsForModel,
+  renderValidationErrorsForModel,
+  validateCall,
+  firstRequiredArg,
   type ToolCall,
   type ToolExecResult,
 } from "./localTools";
+import { normalizeToolCalls } from "./toolNormalizer";
+import { samplingFor } from "./modelProfiles";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
 // off `kind`; the field name comes from #[serde(tag = "kind")] on the
@@ -1002,12 +1006,17 @@ export async function streamChatCompletion(
   ];
   const MAX_TOOL_TURNS = 8;
   let lastReply = "";
+  // Per-family sampling — resolved from the data-driven model-profile
+  // layer (modelProfiles.ts) so a new model's anti-degeneration knobs
+  // can be tuned without touching this code or rebuilding the .exe.
+  const sampling = samplingFor(modelId);
   console.log("[dispatch.local] start", {
     port, modelId, provider,
     historyLen: history?.length ?? 0,
     promptChars: augmentedSystem.length,
     userChars: effectiveText.length,
     toolsCount: openaiTools.length,
+    sampling,
   });
   // 503/502 slot-warmup retry. Cold model load is handled by
   // server.rs's /health poller (fires llama-ready when the GGUF is
@@ -1040,32 +1049,11 @@ export async function streamChatCompletion(
             messages: liveMessages,
             stream: true,
             temperature,
-            // Per-turn budget. 4096 — needed for thinking-model
-            // variants (Qwen3-Thinking, DeepSeek-R1 distills) that
-            // burn 2-3k tokens on the <think> monologue before a
-            // single visible reply byte. The earlier 1024 clamp
-            // killed reasoning models mid-thought. DRY + the client-
-            // side loop detector now handle the "stop the model from
-            // rambling" job that max_tokens used to.
-            max_tokens: 4096,
-            // Anti-degeneration sampling. Small local models (Qwen3
-            // ≤14B, Gemma 3, Llama 3.1 8B) lock into loops like "I
-            // will write the answer / I will write the answer" until
-            // max_tokens. The plain repeat/frequency penalties alone
-            // (1.15 / 0.4) didn't stop it — Qwen rewords just enough
-            // to dodge them. DRY (Don't Repeat Yourself) is llama.cpp's
-            // purpose-built anti-loop sampler: it penalises any
-            // multi-token sequence that's already appeared. Bumping
-            // repeat_last_n to 256 widens the standard penalty window
-            // from its 64-token default.
-            repeat_penalty: 1.15,        // llama.cpp native
-            repeat_last_n: 256,          // llama.cpp native
-            frequency_penalty: 0.4,      // OpenAI-compat
-            presence_penalty: 0.4,       // OpenAI-compat
-            dry_multiplier: 0.8,         // llama.cpp DRY sampler (off=0)
-            dry_base: 1.75,
-            dry_allowed_length: 4,
-            dry_penalty_last_n: -1,      // -1 = whole context
+            // Anti-degeneration sampling (max_tokens, repeat_penalty,
+            // DRY, frequency/presence) is resolved per model family from
+            // modelProfiles.ts — see the `sampling` object. No inline
+            // literals here so a new model only needs a profile entry.
+            ...sampling,
             tools: openaiTools.length > 0 ? openaiTools : undefined,
           }),
           signal,
@@ -1122,12 +1110,12 @@ export async function streamChatCompletion(
       replyChars: lastReply.length, replyPreview: lastReply.slice(0, 200),
       nativeCalls: nativeCalls.length,
     });
-    if (!toolsBlock && nativeCalls.length === 0) break; // no tools wired → no need to parse
-    // Prefer native tool_calls — modern models that emit those would
-    // otherwise also leave broken `<|tool_call|>` special-token soup in
-    // `content`. Parsing both protocols would double-execute. Native
-    // wins; XML is the fallback for older / template-less models.
-    const calls: ToolCall[] = nativeCalls.length > 0 ? nativeCalls : parseToolCalls(lastReply);
+    if (!toolsBlock && nativeCalls.length === 0 && openaiTools.length === 0) break;
+    // Universal tool-call normalisation: accept native delta.tool_calls,
+    // XML, Llama-native tokens, bare/aliased JSON, ReAct, and Python-call
+    // dialects — whatever the model actually emitted — and resolve to
+    // canonical registry tool + arg names. See toolNormalizer.ts.
+    const calls = normalizeToolCalls(lastReply, nativeCalls, { firstRequiredArg });
     if (calls.length === 0) {
       // Strip any leftover `<|tool_call>` / `<eos>` / fabricated
       // `_tool_output` blocks from the final reply so the user
@@ -1137,22 +1125,34 @@ export async function streamChatCompletion(
       lastReply = stripFabricatedToolOutput(lastReply);
       break; // model is done — final answer
     }
-    // Run every emitted call (sequentially; matches Python loop's one-
-    // at-a-time semantics so each result lands in context before the
-    // next executes).
-    const results: ToolExecResult[] = [];
+    // Strict validation BEFORE execution. Calls that fail schema (unknown
+    // tool, missing required arg) are NOT executed — instead a structured
+    // schema error goes back so the model can self-correct next turn.
+    const valid: ToolCall[] = [];
+    const invalid: Array<{ name: string; error: string }> = [];
     for (const c of calls) {
+      const v = validateCall(c);
+      if (v.ok) valid.push(c);
+      else invalid.push({ name: c.name, error: v.error });
+    }
+    // Run every VALID call (sequentially; matches Python loop's one-at-
+    // a-time semantics so each result lands in context before the next).
+    const results: ToolExecResult[] = [];
+    for (const c of valid) {
       if (signal.aborted) throw new DOMException("aborted", "AbortError");
       // eslint-disable-next-line no-await-in-loop
       results.push(await executeToolCall(c, projectCwd ?? ""));
     }
-    // Append the assistant turn + the synthetic user turn carrying
-    // tool results. Strip fabricated `_tool_output` blocks from the
-    // assistant turn before pushing — otherwise the model sees its
-    // own fake results in history and assumes they're authoritative,
-    // ignoring the real synthetic-user results we're about to feed.
+    // Build the synthetic user turn: real results for valid calls +
+    // structured schema errors for invalid ones.
+    const parts: string[] = [];
+    if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
+    if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
+    // Append the assistant turn + the synthetic user turn. Strip
+    // fabricated `_tool_output` blocks from the assistant turn first so
+    // the model doesn't treat its own fake results as authoritative.
     liveMessages.push({ role: "assistant", content: stripFabricatedToolOutput(lastReply) });
-    liveMessages.push({ role: "user", content: renderToolResultsForModel(calls, results) });
+    liveMessages.push({ role: "user", content: parts.join("\n\n") });
   }
   return lastReply;
 }

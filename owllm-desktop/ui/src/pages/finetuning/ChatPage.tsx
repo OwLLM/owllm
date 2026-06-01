@@ -46,6 +46,13 @@ import {
 } from "../agentic/localTools";
 import { canonicalizeNativeCalls, type RawNativeCall } from "../agentic/toolNormalizer";
 import { samplingFor } from "../agentic/modelProfiles";
+import { chatRuntime } from "../../runtime/chatRuntime";
+import { useChatSession } from "../../runtime/useChatSession";
+
+// Session id for a column's chat stream in the ChatRuntime store. The
+// store lives above the router, so an in-flight stream survives this
+// page unmounting when the user navigates away mid-generation.
+const SID = (id: "A" | "B" | "C") => `chat:${id}`;
 
 const LS_KEY = "owllm:chat:v3";
 
@@ -308,18 +315,58 @@ export default function ChatPage() {
   const [rightTab, setRightTab] = useState<"logs" | "unfiltered">("logs");
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
-  const abortersRef = useRef<Map<"A" | "B" | "C", AbortController>>(new Map());
-  // Active SSE readers per column. stopAll cancels both the abort
-  // controller AND these readers — WebView2 doesn't always wake the
-  // reader from a signal-only abort, so we force-cancel from the
-  // outside to make the Stop button actually stop the model.
-  const readersRef = useRef<Map<"A" | "B" | "C", ReadableStreamDefaultReader<Uint8Array>>>(new Map());
   const transcriptRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const m2mRunningRef = useRef(false);
 
-  // Persist on meaningful change.
+  // ---- ChatRuntime: per-column message streams live in the store ----
+  // (above the router) so navigating away mid-generation doesn't orphan
+  // the in-flight stream. The store holds messages + status + error +
+  // the live AbortController/reader. Columns state below keeps only the
+  // per-column CONFIG (model/system/temperature/etc).
+  const sessA = useChatSession<ChatMsg[]>(SID("A"));
+  const sessB = useChatSession<ChatMsg[]>(SID("B"));
+  const sessC = useChatSession<ChatMsg[]>(SID("C"));
+  const sessByCol = { A: sessA, B: sessB, C: sessC } as const;
+  const colMsgs = (id: "A" | "B" | "C"): ChatMsg[] => (sessByCol[id].payload ?? []);
+  const colBusy = (id: "A" | "B" | "C"): boolean => chatRuntime.isBusy(SID(id));
+  const colErr = (id: "A" | "B" | "C"): string | null => sessByCol[id].error;
+  // Mutate a column's message list in the store.
+  const mutateMsgs = (id: "A" | "B" | "C", fn: (msgs: ChatMsg[]) => ChatMsg[]) =>
+    chatRuntime.setPayload(SID(id), (prev) => fn((prev as ChatMsg[]) ?? []));
+
+  // Hydrate the store from persisted messages once on mount, and wire a
+  // per-column persister so saves continue even after this page unmounts.
+  const hydratedRef = useRef(false);
+  if (!hydratedRef.current) {
+    hydratedRef.current = true;
+    for (const c of (persisted.columns ?? [DEFAULT_COL("A"), DEFAULT_COL("B"), DEFAULT_COL("C")])) {
+      chatRuntime.hydrateIfIdle(SID(c.id), (c as Column).messages ?? []);
+    }
+  }
+  // Persist config + per-column messages together under LS_KEY. Messages
+  // come from the store (source of truth); config from `columns`. Kept in
+  // a ref so the store's debounced persister (which fires even after this
+  // page unmounts) always reads the LATEST config, not a stale closure.
+  const saveRef = useRef<() => void>(() => {});
+  saveRef.current = () => {
+    const merged = columns.map((c) => ({ ...c, messages: colMsgs(c.id), busy: false, error: null }));
+    saveState({ count, columns: merged, converse, maxTurns });
+  };
   useEffect(() => {
-    saveState({ count, columns, converse, maxTurns });
+    for (const id of ["A", "B", "C"] as const) {
+      chatRuntime.registerPersister(SID(id), () => saveRef.current());
+    }
+    return () => {
+      for (const id of ["A", "B", "C"] as const) chatRuntime.registerPersister(SID(id), null);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist on config / count / converse change (message changes persist
+  // via the registered per-column persister).
+  useEffect(() => {
+    saveRef.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [count, columns, converse, maxTurns]);
 
   // Poll server status every 2 s.
@@ -396,10 +443,11 @@ export default function ChatPage() {
     }
   }
 
-  // Auto-scroll each column's transcript when new tokens land.
+  // Auto-scroll each column's transcript when new tokens land. Depends on
+  // the store session versions (messages now live in the store).
   useEffect(() => {
-    for (const col of columns) {
-      const el = transcriptRefs.current[col.id];
+    for (const id of ["A", "B", "C"] as const) {
+      const el = transcriptRefs.current[id];
       if (!el) continue;
       // Always auto-scroll to bottom. ONLY skip while the user is
       // mid-selection inside this transcript — the unconditional
@@ -408,31 +456,33 @@ export default function ChatPage() {
       if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) continue;
       el.scrollTop = el.scrollHeight;
     }
-  }, [columns]);
+  }, [sessA.version, sessB.version, sessC.version]);
 
-  const updateCol = (id: "A" | "B" | "C", patch: Partial<Column>) =>
-    setColumns((curr) => curr.map((c) => c.id === id ? { ...c, ...patch } : c));
+  // Config-only column patch (model/system/temperature/etc). Message,
+  // busy and error patches are routed to the store instead.
+  const updateCol = (id: "A" | "B" | "C", patch: Partial<Column>) => {
+    const { messages, busy: _busy, error, ...config } = patch;
+    if (messages !== undefined) mutateMsgs(id, () => messages);
+    if (error !== undefined) chatRuntime.setError(SID(id), error);
+    if (Object.keys(config).length > 0) {
+      setColumns((curr) => curr.map((c) => c.id === id ? { ...c, ...config } : c));
+    }
+  };
 
   const appendEvent = (
     id: "A" | "B" | "C",
     msg: Pick<ChatMsg, "kind" | "title" | "content" | "status">,
   ) =>
-    setColumns((curr) => curr.map((c) => {
-      if (c.id !== id) return c;
-      return {
-        ...c,
-        messages: [
-          ...c.messages,
-          { role: "system", kind: msg.kind, title: msg.title, content: msg.content, status: msg.status },
-        ],
-      };
-    }));
+    mutateMsgs(id, (msgs) => [
+      ...msgs,
+      { role: "system", kind: msg.kind, title: msg.title, content: msg.content, status: msg.status },
+    ]);
 
-  const appendNoticeAll = (title: string, content: string) =>
-    setColumns((curr) => curr.map((c) => ({
-      ...c,
-      messages: [...c.messages, { role: "system", kind: "notice", title, content }],
-    })));
+  const appendNoticeAll = (title: string, content: string) => {
+    for (const id of ["A", "B", "C"] as const) {
+      mutateMsgs(id, (msgs) => [...msgs, { role: "system", kind: "notice", title, content }]);
+    }
+  };
 
   const slashCommands = [
     { name: "/clear", desc: "Start a fresh chat in every column", run: () => resetAll() },
@@ -462,8 +512,7 @@ export default function ChatPage() {
   };
 
   const appendAssistant = (id: "A" | "B" | "C", delta: string) =>
-    setColumns((curr) => curr.map((c) => {
-      if (c.id !== id) return c;
+    mutateMsgs(id, (msgs) => {
       // Legacy tool-loop calls used to append tool calls/results into
       // the answer text. Those events now render as VS Code-style
       // expandable blocks, so suppress the old inline decorations.
@@ -471,9 +520,9 @@ export default function ChatPage() {
         (delta.startsWith("\n\n") && /\(.+\)\n$/.test(delta)) ||
         (/^[✓✗] /.test(delta) && delta.endsWith("\n\n"))
       ) {
-        return c;
+        return msgs;
       }
-      const out = c.messages.slice();
+      const out = msgs.slice();
       const last = out[out.length - 1];
       if (last && last.role === "assistant") {
         // Live-strip the native <|tool_call> / <|tool_response>
@@ -486,34 +535,39 @@ export default function ChatPage() {
         const newContent = raw.endsWith(" ") && !cleaned.endsWith(" ") ? cleaned + " " : cleaned;
         out[out.length - 1] = { ...last, content: newContent };
       }
-      return { ...c, messages: out };
-    }));
+      return out;
+    });
   /// Stream reasoning tokens into the LAST assistant message's
   /// `thinking` field. Rendered as a collapsible "💭 Thinking"
   /// block above the visible answer instead of dumping the wall
   /// of Qwen-3 'let me reconsider' into the chat.
   const appendThinking = (id: "A" | "B" | "C", delta: string) =>
-    setColumns((curr) => curr.map((c) => {
-      if (c.id !== id) return c;
-      const out = c.messages.slice();
+    mutateMsgs(id, (msgs) => {
+      const out = msgs.slice();
       const last = out[out.length - 1];
       if (last && last.role === "assistant") {
         out[out.length - 1] = { ...last, thinking: (last.thinking ?? "") + delta };
       }
-      return { ...c, messages: out };
-    }));
+      return out;
+    });
 
   // Quick check: did the user hit Stop on this column while we were
-  // waiting for the server to come up? Read the aborter ref so the
-  // boot poll exits cleanly.
+  // waiting for the server to come up? Reads the store's live abort
+  // state so the boot poll exits cleanly.
   function ctrlAborted(id: "A" | "B" | "C"): boolean {
-    const c = abortersRef.current.get(id);
-    return !!c && c.signal.aborted;
+    return chatRuntime.isAborted(SID(id));
   }
 
   // Send the same user text to one column. Returns the assistant
   // reply when the stream completes (used by the M2M loop).
   async function sendOne(col: Column, userText: string): Promise<string> {
+    // The stream runs in the ChatRuntime store (above the router) so it
+    // survives this page unmounting if the user navigates away mid-
+    // generation. The store owns the AbortController + reader + busy
+    // lifecycle; `controls` is how this runner writes back into it.
+    let reply = "";
+    await chatRuntime.startStream(SID(col.id), async (controls) => {
+    const signal = controls.signal;
     // Lazy server start. If the user picked a servable local/tuned
     // model on this column (or column A as the driver), spawn the
     // server now — first send is what kicks the load. The 503 retry
@@ -557,7 +611,7 @@ export default function ChatPage() {
         const ok = await ensureLocalServer(wantedModelId);
         if (!ok) {
           updateCol(col.id, { busy: false });
-          return "";
+          return;
         }
         // Pull a fresh status so we have a real port BEFORE the POST.
         // Server may report running=true with the new port within a
@@ -574,28 +628,28 @@ export default function ChatPage() {
           } catch {
             // ignore, retry
           }
-          if (ctrlAborted(col.id)) return "";
+          if (ctrlAborted(col.id)) return;
           await new Promise((r) => setTimeout(r, 400));
         }
         if (!activePort) {
           updateCol(col.id, { error: "Server start timed out — check the Server tab logs.", busy: false });
-          return "";
+          return;
         }
       }
     }
     if (!activePort) {
       updateCol(col.id, { error: "No server running and no servable model picked. Pick a local/tuned model first." });
-      return "";
+      return;
     }
     const userMsg: ChatMsg = { role: "user", content: userText };
-    const next = [...col.messages, userMsg];
+    // Read the live message list from the store (col.messages from the
+    // captured columns snapshot is stale now that messages live in the
+    // store).
+    const next = [...colMsgs(col.id), userMsg];
     updateCol(col.id, {
       messages: [...next, { role: "assistant", content: "" }],
-      busy: true, error: null,
+      error: null,
     });
-
-    const ctrl = new AbortController();
-    abortersRef.current.set(col.id, ctrl);
 
     // Tools are always-on. System prompt gets the XML <tool_call>
     // catalog so the model knows how to invoke read_file / shell /
@@ -628,10 +682,9 @@ export default function ChatPage() {
     // tool-trained model that needs more legs.
     const MAX_TOOL_TURNS = 4;
 
-    let reply = "";
     try {
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-        if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
 
         // Anti-degeneration sampling (repeat_penalty, DRY, frequency/
         // presence) resolved per model family from modelProfiles.ts.
@@ -662,7 +715,7 @@ export default function ChatPage() {
         const READY_TIMEOUT_MS = 180_000;
         const PER_ATTEMPT_TIMEOUT_MS = 20_000;
         while (true) {
-          if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+          if (signal.aborted) throw new DOMException("Aborted", "AbortError");
           // Per-attempt timeout. If llama-server accepts the TCP
           // connection but never replies (we've seen this when the
           // GGUF is broken / not actually loading), a vanilla fetch
@@ -674,7 +727,7 @@ export default function ChatPage() {
           const attemptCtrl = new AbortController();
           const tid = setTimeout(() => attemptCtrl.abort(), PER_ATTEMPT_TIMEOUT_MS);
           const onOuterAbort = () => attemptCtrl.abort();
-          ctrl.signal.addEventListener("abort", onOuterAbort);
+          signal.addEventListener("abort", onOuterAbort);
           try {
             resp = await fetch(`http://127.0.0.1:${activePort}/v1/chat/completions`, {
               method: "POST",
@@ -684,9 +737,9 @@ export default function ChatPage() {
             });
           } catch (e: any) {
             clearTimeout(tid);
-            ctrl.signal.removeEventListener("abort", onOuterAbort);
+            signal.removeEventListener("abort", onOuterAbort);
             // Outer abort (user pressed Stop) — surface as-is.
-            if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+            if (signal.aborted) throw new DOMException("Aborted", "AbortError");
             const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
             updateCol(col.id, {
               error: `⏳ Waiting for llama-server to respond (no reply in ${PER_ATTEMPT_TIMEOUT_MS / 1000}s)… ${elapsedSec}s — check the Server tab logs.`,
@@ -698,7 +751,7 @@ export default function ChatPage() {
             continue;
           }
           clearTimeout(tid);
-          ctrl.signal.removeEventListener("abort", onOuterAbort);
+          signal.removeEventListener("abort", onOuterAbort);
           if (resp.status === 503) {
             // Drain + inspect the error body so an unexpected 503 (not
             // the loading one) doesn't get swallowed.
@@ -727,7 +780,7 @@ export default function ChatPage() {
         // signal abort alone is not reliable in WebView2 — sometimes
         // the in-flight reader.read() never rejects. Cancelling the
         // reader from the outside breaks the stream synchronously.
-        readersRef.current.set(col.id, reader);
+        controls.onReader(reader);
         const dec = new TextDecoder();
         let turnReply = "";
         let turnThinking = "";
@@ -784,7 +837,7 @@ export default function ChatPage() {
           // Honor the abort flag inline — the user pressed Stop and
           // we should bail out of the read loop even if reader.read()
           // hasn't seen the abort yet.
-          if (ctrl.signal.aborted) {
+          if (signal.aborted) {
             try { await reader.cancel(); } catch {}
             throw new DOMException("Aborted", "AbortError");
           }
@@ -799,7 +852,7 @@ export default function ChatPage() {
             ]);
             if (idleTimer) clearTimeout(idleTimer);
           } catch (e: any) {
-            if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+            if (signal.aborted) throw new DOMException("Aborted", "AbortError");
             if (/stream idle/i.test(String(e?.message ?? e))) {
               streamTimedOut = true;
               try { await reader.cancel(); } catch {}
@@ -909,7 +962,7 @@ export default function ChatPage() {
           }
           if (loopAborted) break;
         }
-        readersRef.current.delete(col.id);
+        controls.onReader(null);
         if (serverError) {
           throw new Error(`llama-server stream error: ${serverError}`);
         }
@@ -954,7 +1007,7 @@ export default function ChatPage() {
         // legacy Python loop).
         const results: ToolExecResult[] = [];
         for (const c of valid) {
-          if (ctrl.signal.aborted) throw new DOMException("Aborted", "AbortError");
+          if (signal.aborted) throw new DOMException("Aborted", "AbortError");
           const terminalish = /bash|shell|command|terminal|powershell|cmd/i.test(c.name);
           appendEvent(col.id, {
             kind: terminalish ? "terminal" : "tool",
@@ -1004,14 +1057,16 @@ export default function ChatPage() {
         updateCol(col.id, { error: String(err.message ?? e) });
       }
     } finally {
-      updateCol(col.id, { busy: false });
-      abortersRef.current.delete(col.id);
+      // Drop the live reader from the store; busy + abort lifecycle is
+      // managed by startStream.
+      controls.onReader(null);
     }
+    });
     return reply;
   }
 
   async function sendAll() {
-    setColumns((curr) => curr.map((c) => ({ ...c, error: null })));
+    for (const id of ["A", "B", "C"] as const) chatRuntime.setError(SID(id), null);
     const text = draft.trim();
     if (!text) return;
     setDraft("");
@@ -1049,23 +1104,17 @@ export default function ChatPage() {
 
   function stopAll() {
     m2mRunningRef.current = false;
-    // Abort the controllers AND cancel any in-flight stream readers.
-    // Belt-and-suspenders so the Stop button truly stops the model
-    // even when WebView2 swallows the abort signal.
-    for (const a of abortersRef.current.values()) {
-      try { a.abort(); } catch {}
-    }
-    for (const r of readersRef.current.values()) {
-      try { r.cancel("stopAll"); } catch {}
-    }
-    abortersRef.current.clear();
-    readersRef.current.clear();
-    setColumns((curr) => curr.map((c) => ({ ...c, busy: false })));
+    // The store's stopStream aborts the controller AND force-cancels the
+    // reader (belt-and-suspenders for WebView2's swallowed abort signal).
+    for (const id of ["A", "B", "C"] as const) chatRuntime.stopStream(SID(id));
   }
 
   function resetAll() {
     stopAll();
-    setColumns((curr) => curr.map((c) => ({ ...c, messages: [], error: null })));
+    for (const id of ["A", "B", "C"] as const) {
+      chatRuntime.setPayload(SID(id), () => []);
+      chatRuntime.setError(SID(id), null);
+    }
   }
 
   function applyTemplate(colId: "A" | "B" | "C", key: string) {
@@ -1087,7 +1136,7 @@ export default function ChatPage() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   }
 
-  const anyBusy = columns.some((c) => c.busy);
+  const anyBusy = (["A", "B", "C"] as const).some((id) => colBusy(id));
 
   return (
     <div style={{
@@ -1230,7 +1279,7 @@ export default function ChatPage() {
                     borderRadius: 6,
                   }}
                 >
-                  {col.messages.length === 0 ? (
+                  {colMsgs(col.id).length === 0 ? (
                     <div style={{ fontSize: 11, color: "#7a7f87" }}>
                       {status.running
                         ? "Send a message below — this column will reply."
@@ -1240,7 +1289,7 @@ export default function ChatPage() {
                             ? "Selected — server will start when you pick model A."
                             : "Pick a model above to start a server."}
                     </div>
-                  ) : col.messages.map((m, i) => renderChatMessage(m, i, col.id, col.busy, i === col.messages.length - 1) || (
+                  ) : colMsgs(col.id).map((m, i) => renderChatMessage(m, i, col.id, colBusy(col.id), i === colMsgs(col.id).length - 1) || (
                     <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2, flexShrink: 0 }}>
                       <div style={{
                         fontSize: 10, fontWeight: 700, letterSpacing: 0.5,
@@ -1267,18 +1316,18 @@ export default function ChatPage() {
                         </details>
                       )}
                       <div style={{ whiteSpace: "pre-wrap", color: "var(--fg)" }}>
-                        {m.content || (col.busy && i === col.messages.length - 1 ? "▍" : "")}
+                        {m.content || (colBusy(col.id) && i === colMsgs(col.id).length - 1 ? "▍" : "")}
                       </div>
                     </div>
                   ))}
-                  {col.error && (
+                  {colErr(col.id) && (
                     <div style={{
                       border: "1px solid #ff9f9f",
                       background: "rgba(255,80,80,0.10)",
                       color: "#ffb0b0",
                       borderRadius: 6, padding: 8, fontSize: 11,
                       flexShrink: 0,
-                    }}>{col.error}</div>
+                    }}>{colErr(col.id)}</div>
                   )}
                 </div>
               </div>

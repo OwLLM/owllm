@@ -151,6 +151,18 @@ export class ChatRuntimeStore {
     this.replaceSnapshot(id, { payload: makePayload(cur.payload) });
   }
 
+  /// Public payload mutation (for writes outside an active stream, e.g.
+  /// seeding the user turn before startStream, or a clear). During a
+  /// stream the runner uses controls.mutate instead.
+  setPayload(id: string, fn: (prev: unknown) => unknown): void {
+    this.replaceSnapshot(id, { payload: fn(this.getSnapshot(id).payload) });
+  }
+
+  /// Public error setter (for pre-stream failures like server start).
+  setError(id: string, error: string | null): void {
+    this.replaceSnapshot(id, { error });
+  }
+
   setLoadingBanner(id: string, banner: { sec: number; reason: string } | null): void {
     this.replaceSnapshot(id, { loadingBanner: banner });
   }
@@ -191,6 +203,13 @@ export class ChatRuntimeStore {
 
   isBusy(id: string): boolean {
     return this.live.get(id)?.busy ?? false;
+  }
+
+  /// True when the in-flight stream's AbortController has been aborted
+  /// (Stop pressed) but the runner hasn't unwound yet. Lets a runner's
+  /// inner poll loops bail out promptly.
+  isAborted(id: string): boolean {
+    return this.live.get(id)?.abort?.signal.aborted ?? false;
   }
 
   /// Start a stream for `id`. No-op if one is already running for this

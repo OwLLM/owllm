@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { listen } from "@tauri-apps/api/event";
 import AppShell from "./AppShell";
 import ErrorBoundary from "./ErrorBoundary";
+import { ChatRuntimeProvider } from "./runtime/ChatRuntimeProvider";
 import { bootstrapTheme } from "./theme";
 import "./styles.css";
 
@@ -76,7 +77,9 @@ function BootCover() {
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <AppShell />
+      <ChatRuntimeProvider>
+        <AppShell />
+      </ChatRuntimeProvider>
     </ErrorBoundary>
     <BootCover />
   </React.StrictMode>,

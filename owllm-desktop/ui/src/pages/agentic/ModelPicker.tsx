@@ -21,6 +21,7 @@
 //   "openai/<id>" same shape
 //   "auto/cheapest" etc       — Auto routing
 import { useEffect, useRef, useState } from "react";
+import { getCloudCatalogue, type CloudModelDef } from "./cloudCatalogue";
 
 export type ModelInfo = {
   model_id: string;
@@ -79,121 +80,20 @@ const SECTION_META: Record<Section, { label: string; color: string }> = {
   other:      { label: "OTHER",         color: "#c08aff" },
 };
 
-// Hardcoded cloud catalogue — keep small + curated rather than
-// trying to fetch a live list. Matches the legacy app's set.
+// Cloud / subscription / API catalogue is DATA-DRIVEN — see
+// cloudCatalogue.ts. Bundled defaults ship in the .exe; a localStorage
+// override (`owllm:cloud-models`) or a remote registry can add/replace
+// models (e.g. Claude Opus 4.8 the day it ships) with no rebuild.
 //
-// `effort` here = extended-thinking budget tier. Translation in
-// dispatch.ts streamAnthropic: low → no thinking (cheapest, fastest);
-// medium/high/extra_high → thinking.budget_tokens of 4k/8k/16k. Same
-// id-suffix encoding as the OpenAI side (`<id>:<level>`) so the
-// dispatch parser stays uniform across providers. Only Opus 4.7 and
-// Sonnet 4.6 expose the tier rows — Haiku 4.5 hasn't been validated
-// with extended thinking by the user yet, so it stays single-row.
-type AnthropicModel = {
-  id: string;
-  display: string;
-  effort?: readonly string[];
-};
-const ANTHROPIC_MODELS: AnthropicModel[] = [
-  { id: "claude-opus-4-7",   display: "Claude Opus 4.7",
-    effort: ["low", "medium", "high", "extra_high"] },
-  { id: "claude-sonnet-4-6", display: "Claude Sonnet 4.6",
-    effort: ["low", "medium", "high", "extra_high"] },
-  { id: "claude-haiku-4-5-20251001", display: "Claude Haiku 4.5" },
-];
-// Per-model flags replace the legacy slice(0, 3) trick. `sub` = show under
-// "(subscription)" via Codex CLI; `api` = show under "(API)" via
-// OPENAI_API_KEY. `effort` = expose a reasoning-effort selector as one
-// row per level (matches the VS Code Copilot Chat dropdown). Encoded into
-// the id as `<id>:<level>` so dispatch can parse it back without a
-// separate UI control.
-type OpenAIModel = {
-  id: string;
-  display: string;
-  sub?: boolean;
-  api?: boolean;
-  effort?: readonly string[];
-};
-// GPT-5.4 family went GA on 2026-03-05 and replaces the prior gpt-5
-// line in this picker. 5.4-pro and 5.4-mini/nano sit alongside the
-// 5.5 Codex pair (which keeps the Codex CLI subscription row). The
-// original "GPT-5" / "GPT-5 Codex" entries are dropped — picking them
-// today resolves to the same underlying model as 5.4 anyway.
-const OPENAI_MODELS: OpenAIModel[] = [
-  { id: "gpt-5.4",       display: "GPT-5.4",        api: true,
-    effort: ["low", "medium", "high", "extra_high"] },
-  { id: "gpt-5.4-mini",  display: "GPT-5.4 mini",   api: true },
-  { id: "gpt-5.4-nano",  display: "GPT-5.4 nano",   api: true },
-  { id: "gpt-5.5-codex", display: "GPT-5.5 Codex",  sub: true,
-    effort: ["low", "medium", "high", "extra_high"] },
-  { id: "gpt-5.5",       display: "GPT-5.5",        api: true,
-    effort: ["low", "medium", "high", "extra_high"] },
-  { id: "gpt-4o",        display: "GPT-4o",         api: true },
-  { id: "gpt-4o-mini",   display: "GPT-4o mini",    api: true },
-];
+// `effort` = extended-thinking budget tier. Translation in dispatch.ts
+// streamAnthropic: low → no thinking; medium/high/extra_high →
+// thinking.budget_tokens 4k/8k/16k. Encoded into the id as `<id>:<level>`
+// so the dispatch parser stays uniform across providers.
+type AnthropicModel = CloudModelDef;
+type OpenAIModel = CloudModelDef;
+type KimiModel = CloudModelDef;
+type CloudModel = CloudModelDef;
 
-// Kimi / Moonshot AI — two routes: (subscription) via Kimi Code CLI
-// at https://github.com/MoonshotAI/kimi-cli (OAuth via `kimi /login`,
-// covered by a Moonshot membership) and (API) at api.moonshot.ai/v1
-// (pay-as-you-go MOONSHOT_API_KEY). K2 preview ids omitted because
-// Moonshot deprecates them 2026-05-25.
-type KimiModel = {
-  id: string;
-  display: string;
-  sub?: boolean;
-  api?: boolean;
-};
-const KIMI_MODELS: KimiModel[] = [
-  { id: "kimi-k2.6",        display: "Kimi K2.6",                  sub: true, api: true },
-  { id: "kimi-k2.5",        display: "Kimi K2.5 (multimodal)",     sub: true, api: true },
-  { id: "moonshot-v1-128k", display: "Moonshot V1 · 128K",         api: true },
-];
-
-// One row per provider catalogue. Each list is the smallest useful
-// set as of 2026-05: flagship + budget tier. Users can plug exact
-// model ids by hand later if they need a niche variant. Keys aren't
-// listed here — see models.rs for the canonical source registered
-// with list_models(); this picker just renders them.
-type CloudModel = { id: string; display: string; sub?: boolean; api?: boolean };
-
-const DEEPSEEK_MODELS: CloudModel[] = [
-  { id: "deepseek-v4-pro",   display: "DeepSeek V4 Pro",   api: true },
-  { id: "deepseek-v4-flash", display: "DeepSeek V4 Flash", api: true },
-];
-const XAI_MODELS: CloudModel[] = [
-  { id: "grok-4.3",       display: "Grok 4.3",       api: true },
-  { id: "grok-4.20",      display: "Grok 4.20",      api: true },
-  { id: "grok-4.1-fast",  display: "Grok 4.1 Fast",  api: true },
-];
-const GROQ_MODELS: CloudModel[] = [
-  { id: "llama-3.3-70b-versatile",         display: "Llama 3.3 70B (fast)",            api: true },
-  { id: "llama-4-scout",                   display: "Llama 4 Scout",                   api: true },
-  { id: "qwen3-32b",                       display: "Qwen 3 32B",                      api: true },
-  { id: "deepseek-r1-distill-llama-70b",   display: "DeepSeek R1 Distill 70B",         api: true },
-  { id: "gpt-oss-120b",                    display: "gpt-oss 120B",                    api: true },
-];
-const PERPLEXITY_MODELS: CloudModel[] = [
-  { id: "sonar-pro",        display: "Sonar Pro (search)",      api: true },
-  { id: "sonar",            display: "Sonar (search)",          api: true },
-  { id: "sonar-reasoning",  display: "Sonar Reasoning",         api: true },
-];
-const MISTRAL_MODELS: CloudModel[] = [
-  { id: "mistral-large-latest",     display: "Mistral Large",      api: true },
-  { id: "magistral-medium-latest",  display: "Magistral (reasoning)", api: true },
-  { id: "codestral-latest",         display: "Codestral",          api: true },
-  { id: "mistral-small-latest",     display: "Mistral Small",      api: true },
-];
-const TOGETHER_MODELS: CloudModel[] = [
-  { id: "meta-llama/Llama-3.3-70B-Instruct-Turbo",  display: "Llama 3.3 70B Turbo",     api: true },
-  { id: "Qwen/Qwen2.5-72B-Instruct-Turbo",          display: "Qwen 2.5 72B Turbo",      api: true },
-  { id: "deepseek-ai/DeepSeek-V3",                  display: "DeepSeek V3",             api: true },
-  { id: "mistralai/Mixtral-8x22B-Instruct-v0.1",    display: "Mixtral 8x22B",           api: true },
-];
-const GEMINI_MODELS: CloudModel[] = [
-  { id: "gemini-2.5-pro",        display: "Gemini 2.5 Pro",         sub: true, api: true },
-  { id: "gemini-2.5-flash",      display: "Gemini 2.5 Flash",       sub: true, api: true },
-  { id: "gemini-2.5-flash-lite", display: "Gemini 2.5 Flash-Lite",  api: true },
-];
 function displayEffort(level: string): string {
   return level === "extra_high" ? "extra high" : level;
 }
@@ -206,6 +106,10 @@ const AUTO_OPTIONS = [
 
 export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | null): ModelPickerEntry[] {
   const out: ModelPickerEntry[] = [];
+  // Data-driven catalogue: bundled defaults + localStorage / remote
+  // overrides (cloudCatalogue.ts). Resolved per render so a freshly
+  // added model (e.g. Opus 4.8) shows without an app restart.
+  const cat = getCloudCatalogue();
 
   // LOCAL — base GGUFs + transformers dirs under LLM/models/. Entries
   // with port=null are transformers-format directories that
@@ -265,10 +169,10 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
       out.push({ id, label, section: "anthropic", variant, available, hint });
     }
   };
-  for (const m of ANTHROPIC_MODELS) {
+  for (const m of cat.anthropic) {
     pushAnthropic(m, "sub", claudeSub, claudeSub ? undefined : "(claude /login)");
   }
-  for (const m of ANTHROPIC_MODELS) {
+  for (const m of cat.anthropic) {
     pushAnthropic(m, "api", claudeApi, claudeApi ? undefined : "(set ANTHROPIC_API_KEY)");
   }
 
@@ -285,7 +189,7 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
       out.push({ id, label, section: "openai", variant, available, hint });
     }
   };
-  for (const m of OPENAI_MODELS) {
+  for (const m of cat.openai) {
     if (m.sub) pushOpenAI(m, "sub", codexSub, codexSub ? undefined : "(codex login)");
     if (m.api) pushOpenAI(m, "api", openaiApi, openaiApi ? undefined : "(set OPENAI_API_KEY)");
   }
@@ -307,7 +211,7 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
       hint,
     });
   };
-  for (const m of KIMI_MODELS) {
+  for (const m of cat.kimi) {
     if (m.sub) pushKimi(m, "sub", kimiSub, kimiSub ? undefined : "(kimi /login)");
     if (m.api) pushKimi(m, "api", kimiApi, kimiApi ? undefined : "(set MOONSHOT_API_KEY)");
   }
@@ -335,19 +239,19 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
   // Gemini: subscription via gemini-cli + API via GEMINI_API_KEY.
   const geminiSub = !!status?.gemini_cli;
   const geminiApi = !!status?.gemini_api_key;
-  for (const m of GEMINI_MODELS) {
+  for (const m of cat.gemini) {
     if (m.sub) pushCloud("gemini", m, "sub", geminiSub, geminiSub ? undefined : "(gemini auth login)");
     if (m.api) pushCloud("gemini", m, "api", geminiApi, geminiApi ? undefined : "(set GEMINI_API_KEY)");
   }
   // API-only providers.
   type ApiOnly = { section: Section; models: CloudModel[]; available: boolean; envHint: string };
   const apiOnly: ApiOnly[] = [
-    { section: "deepseek",   models: DEEPSEEK_MODELS,   available: !!status?.deepseek_api_key,   envHint: "DEEPSEEK_API_KEY" },
-    { section: "xai",        models: XAI_MODELS,        available: !!status?.xai_api_key,        envHint: "XAI_API_KEY" },
-    { section: "groq",       models: GROQ_MODELS,       available: !!status?.groq_api_key,       envHint: "GROQ_API_KEY" },
-    { section: "perplexity", models: PERPLEXITY_MODELS, available: !!status?.perplexity_api_key, envHint: "PERPLEXITY_API_KEY" },
-    { section: "mistral",    models: MISTRAL_MODELS,    available: !!status?.mistral_api_key,    envHint: "MISTRAL_API_KEY" },
-    { section: "together",   models: TOGETHER_MODELS,   available: !!status?.together_api_key,   envHint: "TOGETHER_API_KEY" },
+    { section: "deepseek",   models: cat.deepseek,   available: !!status?.deepseek_api_key,   envHint: "DEEPSEEK_API_KEY" },
+    { section: "xai",        models: cat.xai,        available: !!status?.xai_api_key,        envHint: "XAI_API_KEY" },
+    { section: "groq",       models: cat.groq,       available: !!status?.groq_api_key,       envHint: "GROQ_API_KEY" },
+    { section: "perplexity", models: cat.perplexity, available: !!status?.perplexity_api_key, envHint: "PERPLEXITY_API_KEY" },
+    { section: "mistral",    models: cat.mistral,    available: !!status?.mistral_api_key,    envHint: "MISTRAL_API_KEY" },
+    { section: "together",   models: cat.together,   available: !!status?.together_api_key,   envHint: "TOGETHER_API_KEY" },
   ];
   for (const grp of apiOnly) {
     for (const m of grp.models) {

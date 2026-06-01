@@ -46,6 +46,7 @@ import {
 } from "../agentic/localTools";
 import { canonicalizeNativeCalls, type RawNativeCall } from "../agentic/toolNormalizer";
 import { samplingFor } from "../agentic/modelProfiles";
+import { streamChatCompletion, providerFor, type HistoryItem } from "../agentic/dispatch";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 
@@ -601,6 +602,42 @@ export default function ChatPage() {
       || fallbackLocalId
       || ""
     ).trim();
+
+    // Cloud / subscription / API models (Claude sub, OpenAI, Gemini, …)
+    // route through the full dispatcher — no local llama-server needed.
+    // ChatPage historically only handled local/tuned; this adds parity
+    // with the model picker, which offers subscription + API models.
+    const wantedProvider = providerFor(wantedModelId, availableModels);
+    const isLocalProvider = wantedProvider === "local" || wantedProvider === "tuned";
+    if (wantedModelId && !isLocalProvider) {
+      const priorC = colMsgs(col.id);
+      const historyC: HistoryItem[] = priorC
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      mutateMsgs(col.id, (msgs) => [
+        ...msgs,
+        { role: "user", content: userText },
+        { role: "assistant", content: "" },
+      ]);
+      chatRuntime.setError(SID(col.id), null);
+      try {
+        reply = await streamChatCompletion(
+          0, wantedModelId, wantedProvider,
+          col.system || "You are a helpful assistant. Answer directly and concisely.",
+          userText, col.temperature, signal,
+          (d) => appendAssistant(col.id, d),
+          undefined,                       // projectCwd
+          historyC,
+          false,                           // autoApprove
+          (channel, _role, delta) => { if (channel === "thinking") appendThinking(col.id, delta); },
+        );
+      } catch (e: unknown) {
+        const err = e as { name?: string; message?: string };
+        if (err.name !== "AbortError") updateCol(col.id, { error: String(err.message ?? e) });
+      }
+      return;
+    }
+
     let activePort: number | null = status.port;
     if (wantedModelId) {
       const m = availableModels.find((x) => x.model_id === wantedModelId);

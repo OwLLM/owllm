@@ -52,6 +52,7 @@ import {
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput } from "./localTools";
+import { ChatBubble, ChatMarkdown } from "../../components/ChatBubble";
 
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
@@ -150,6 +151,9 @@ type GoalMsg = {
   /// merge reply + thought streams in arrival order across two Maps.
   /// Stamped at first creation only; streaming deltas don't re-stamp.
   seq?: number;
+  /// Epoch ms when the entry was created — shown next to the role in the
+  /// shared ChatBubble. Stamped at creation; deltas don't re-stamp.
+  ts?: number;
 };
 
 // Module-scoped monotonic sequence — assigns a chronological id to
@@ -1345,11 +1349,16 @@ function AgentChatTile({
             (no messages yet)
           </div>
         ) : (
-          replyMessages.map((m, i) => (
-            m.text
-              ? <div key={i} style={{ fontSize: 13, color: "var(--fg)", lineHeight: 1.5, whiteSpace: "pre-wrap", userSelect: "text", WebkitUserSelect: "text", cursor: "text" }}>{m.text}</div>
-              : <div key={i} style={{ color: "var(--fg-subtle)", fontStyle: "italic", fontSize: 12 }}>…</div>
-          ))
+          replyMessages.map((m, i) => {
+            // Finished agent replies render as markdown (shared renderer);
+            // the live one (agent active + last) stays plain pre-wrap so
+            // streaming doesn't wipe selection.
+            const streaming = isActive && i === replyMessages.length - 1;
+            if (!m.text) return <div key={i} style={{ color: "var(--fg-subtle)", fontStyle: "italic", fontSize: 12 }}>…</div>;
+            return streaming
+              ? <div key={i} style={{ fontSize: 13, color: "var(--fg)", lineHeight: 1.5, whiteSpace: "pre-wrap", userSelect: "text", WebkitUserSelect: "text", cursor: "text" }}>{m.text}<span className="owl-cursor">▍</span></div>
+              : <div key={i} style={{ userSelect: "text", WebkitUserSelect: "text", cursor: "text" }}><ChatMarkdown text={m.text} /></div>;
+          })
         )}
       </div>
     </div>
@@ -3341,33 +3350,27 @@ function MarkdownBody({ text }: { text: string }) {
   );
 }
 
-// Render a reply-stream entry (avatar + role chip + body). Shared by
-// the Clear Chat tab and the reply slots inside Full Chat so a single
-// look is used everywhere.
-//
-// Selection note: the bubble body is always plain pre-wrap text — no
-// MarkdownBody, no conditional element-type switch. ReactMarkdown
-// rebuilds the DOM tree per token (and per stream-end), wiping any
-// in-progress mouse selection. ChatPage uses the same plain-text
-// renderer and copy-paste works there; we match that.
-function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null) {
+// Render a reply-stream entry. Reuses the SAME shared ChatBubble the
+// fine-tuning ChatPage uses, so agentic replies look identical: avatar +
+// sender + generating/done indicator + timestamp, markdown when finished,
+// plain pre-wrap while streaming. `isStreaming` is the live in-flight
+// reply (passed by the caller from supSendBusy && last entry).
+function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string | null, isStreaming = false) {
   const isUser = m.role === "you";
   const isOrch = orchName != null && m.role === orchName;
-  const placeholder = m.role === focus || focus === orchName ? "…" : "";
   const accent = isUser ? "#ffd97a" : isOrch ? "#9ad9ff" : m.color;
-  const tint = isUser
-    ? "rgba(255, 217, 122, 0.12)"
-    : isOrch
-      ? "rgba(154, 217, 255, 0.12)"
-      : "var(--bg-surface)";
+  const avatar = isUser ? "Y" : (m.role || "?").charAt(0).toUpperCase();
   return (
-    <div key={`r-${m.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8, flexShrink:0 }}>
-      <div style={{ flex:1, background:tint, borderLeft:`3px solid ${accent}`, borderRadius:8, padding:"6px 12px", minWidth:0 }}>
-        <div style={{ fontSize:10, fontWeight:700, color:accent, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif", userSelect:"none" }}>{m.role}</div>
-        {m.text
-          ? <div style={{ fontSize:13, color:"var(--fg)", lineHeight:1.5, fontFamily:"Segoe UI, sans-serif", whiteSpace:"pre-wrap", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>{m.text}</div>
-          : <div style={{ fontSize:12, color:"var(--fg-subtle)" }}>{placeholder}</div>}
-      </div>
+    <div key={`r-${m.seq ?? i}`}>
+      <ChatBubble
+        avatar={avatar}
+        sender={displayLabel(m.role)}
+        accent={accent}
+        isUser={isUser}
+        isStreaming={isStreaming && !!m.text}
+        content={m.text}
+        ts={m.ts}
+      />
     </div>
   );
 }
@@ -4163,7 +4166,7 @@ function OrchestratorPane({
             </div>
           ) : null}
           {messages.map((m, i) =>
-            renderReplyEntry(m, i, focus, orchName)
+            renderReplyEntry(m, i, focus, orchName, supSendBusy && i === messages.length - 1)
           )}
         </div>
         {/* Thought — reasoning + dispatch directives. Tool entries excluded. */}
@@ -4196,7 +4199,7 @@ function OrchestratorPane({
             // Reply entries (no `kind`) get the avatar-style render,
             // everything else uses the thought renderer. Same chrono
             // order either way thanks to the `seq` stamp.
-            m.kind ? renderThoughtEntry(m, i) : renderReplyEntry(m, i, focus, orchName)
+            m.kind ? renderThoughtEntry(m, i) : renderReplyEntry(m, i, focus, orchName, supSendBusy && i === fullChat.length - 1)
           )}
         </div>
       </div>
@@ -7033,7 +7036,7 @@ export default function AgentsPage() {
     // forgets every restart, which is what users keep hitting).
     const priorHistory = chatToHistory(supChat);
 
-    const userMsg: GoalMsg = { role: "you", color: "#9ad9ff", text };
+    const userMsg: GoalMsg = { role: "you", color: "#9ad9ff", text, ts: Date.now() };
     setSupChat(prev => [...prev, userMsg]);
     appendLog("you", userMsg);
 
@@ -7170,7 +7173,7 @@ export default function AgentsPage() {
     };
     setSupChat(prev => [...prev, traceMsg]);
     appendLog("system", traceMsg);
-    const replyMsg: GoalMsg = { role: orchKey, color: "#ffd97a", text: "" };
+    const replyMsg: GoalMsg = { role: orchKey, color: "#ffd97a", text: "", ts: Date.now() };
     setSupChat(prev => [...prev, replyMsg]);
     appendLog(orchKey, replyMsg);
     // Active state — drives the per-node pulse in the canvas.

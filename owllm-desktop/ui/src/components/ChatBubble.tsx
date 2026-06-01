@@ -1,0 +1,141 @@
+// ChatBubble — the ONE shared chat-message renderer, used by both the
+// fine-tuning ChatPage and the Agentic chats so every chat surface looks
+// identical: avatar + sender label + generating/done indicator +
+// timestamp, an optional collapsible Thinking block, and the body
+// (markdown when finished, plain pre-wrap while streaming so per-token
+// re-renders don't kill mouse selection).
+//
+// Extracted verbatim from the ChatPage template (don't fork it — reuse).
+
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+
+// Full timestamp next to each turn: "2026/Jun/01 14:32".
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+export function fmtTime(ts?: number): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const yyyy = d.getFullYear();
+  const mon = MONTHS_SHORT[d.getMonth()];
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `${yyyy}/${mon}/${dd} ${hh}:${mm}`;
+}
+
+// Markdown renderer for completed replies so cloud (Claude / GPT) answers
+// render headings, tables, bold, lists, and code blocks like a real chat
+// client instead of a wall of plain text. Used only for FINISHED
+// messages — the streaming one stays plain pre-wrap to preserve selection.
+export function ChatMarkdown({ text }: { text: string }) {
+  return (
+    <div className="md-body" style={{ fontSize: 13, lineHeight: 1.55, color: "var(--fg)" }}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          code({ className, children, ...props }: any) {
+            const isBlock = /language-/.test(className || "") || (typeof children === "string" && children.includes("\n"));
+            if (!isBlock) {
+              return <code style={{ background: "rgba(127,140,160,0.18)", padding: "0.12em 0.38em", borderRadius: 3, fontFamily: "Consolas, monospace", fontSize: "0.92em" }} {...props}>{children}</code>;
+            }
+            return (
+              <pre style={{ margin: "8px 0", padding: 10, background: "rgba(20,28,40,0.6)", border: "1px solid var(--border)", borderRadius: 6, overflowX: "auto", fontFamily: "Consolas, monospace", fontSize: 12, lineHeight: 1.45 }}>
+                <code className={className} {...props}>{children}</code>
+              </pre>
+            );
+          },
+          h1: (p) => <h2 style={{ fontSize: 17, fontWeight: 700, margin: "12px 0 5px", color: "var(--fg-strong)" }} {...(p as any)} />,
+          h2: (p) => <h3 style={{ fontSize: 15, fontWeight: 700, margin: "10px 0 4px", color: "var(--fg-strong)" }} {...(p as any)} />,
+          h3: (p) => <h4 style={{ fontSize: 14, fontWeight: 700, margin: "8px 0 3px", color: "var(--fg-strong)" }} {...(p as any)} />,
+          p: (p) => <p style={{ margin: "5px 0" }} {...(p as any)} />,
+          ul: (p) => <ul style={{ margin: "5px 0", paddingLeft: 20 }} {...(p as any)} />,
+          ol: (p) => <ol style={{ margin: "5px 0", paddingLeft: 20 }} {...(p as any)} />,
+          li: (p) => <li style={{ margin: "2px 0" }} {...(p as any)} />,
+          a: (p) => <a style={{ color: "var(--accent)", textDecoration: "underline" }} target="_blank" rel="noopener noreferrer" {...(p as any)} />,
+          blockquote: (p) => <blockquote style={{ borderLeft: "3px solid var(--accent)", margin: "6px 0", padding: "2px 0 2px 10px", color: "var(--fg-muted)" }} {...(p as any)} />,
+          table: (p) => <div style={{ overflowX: "auto", margin: "8px 0" }}><table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }} {...(p as any)} /></div>,
+          th: (p) => <th style={{ border: "1px solid var(--border)", padding: "4px 8px", background: "var(--bg-surface)", textAlign: "left", fontWeight: 600 }} {...(p as any)} />,
+          td: (p) => <td style={{ border: "1px solid var(--border)", padding: "4px 8px" }} {...(p as any)} />,
+        }}
+      >{text}</ReactMarkdown>
+    </div>
+  );
+}
+
+export type ChatBubbleProps = {
+  /// One-or-two char chip in the avatar box ("U", "A", an emoji…).
+  avatar: string;
+  /// Display name shown next to the avatar ("You", "Model A", agent name).
+  sender: string;
+  /// Accent colour for the avatar + name.
+  accent: string;
+  /// The user's own turn renders literally (no markdown, no done/cursor).
+  isUser: boolean;
+  /// True for the live, still-generating reply: shows the pulsing
+  /// "generating…" chip + blinking cursor and stays plain pre-wrap.
+  isStreaming: boolean;
+  content: string;
+  /// Optional reasoning, shown in a collapsible "Thinking" block.
+  thinking?: string;
+  /// Epoch ms, rendered as the full date/time on the right.
+  ts?: number;
+};
+
+export function ChatBubble({ avatar, sender, accent, isUser, isStreaming, content, thinking, ts }: ChatBubbleProps) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 5, flexShrink: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{
+          width: 20, height: 20, borderRadius: 4,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          background: isUser ? "rgba(122,162,255,0.16)" : "rgba(var(--accent-rgb),0.13)",
+          border: `1px solid ${isUser ? "rgba(122,162,255,0.35)" : "rgba(var(--accent-rgb),0.28)"}`,
+          color: accent, fontSize: 11, fontWeight: 800, flexShrink: 0,
+        }}>{avatar}</div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: accent }}>{sender}</div>
+        {!isUser && (
+          isStreaming
+            ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: "#ffd97a" }}>
+                <span className="owl-pulse-dot" style={{ width: 7, height: 7, borderRadius: 4, background: "#ffd97a", display: "inline-block" }} />
+                generating…
+              </span>
+            : <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: "#7ff0c5" }}>
+                <span style={{ width: 7, height: 7, borderRadius: 4, background: "#7ff0c5", display: "inline-block" }} />
+                done
+              </span>
+        )}
+        <div style={{ flex: 1 }} />
+        {ts ? <span style={{ fontSize: 10, color: "var(--fg-subtle)", fontVariantNumeric: "tabular-nums" }}>{fmtTime(ts)}</span> : null}
+      </div>
+      {thinking && thinking.trim() && (
+        <details style={{
+          marginLeft: 28,
+          background: "rgba(192,138,255,0.06)",
+          border: "1px solid rgba(192,138,255,0.25)",
+          borderRadius: 6,
+          overflow: "hidden",
+        }}>
+          <summary style={{ cursor: "pointer", userSelect: "none", fontWeight: 700, color: "#c08aff", padding: "5px 8px", fontSize: 11 }}>
+            Thinking ({thinking.length.toLocaleString()} chars)
+          </summary>
+          <pre style={{ whiteSpace: "pre-wrap", margin: 0, padding: "6px 8px", fontFamily: "Consolas, monospace", fontSize: 10.5, lineHeight: 1.5, color: "var(--fg-muted)" }}>
+            {thinking}
+          </pre>
+        </details>
+      )}
+      <div style={{
+        marginLeft: 28,
+        color: "var(--fg)",
+        userSelect: "text",
+        WebkitUserSelect: "text",
+        cursor: "text",
+      }}>
+        {!isUser && !isStreaming && content
+          ? <ChatMarkdown text={content} />
+          : <span style={{ whiteSpace: "pre-wrap", lineHeight: 1.55 }}>
+              {content}{isStreaming ? <span className="owl-cursor">▍</span> : null}
+            </span>}
+      </div>
+    </div>
+  );
+}

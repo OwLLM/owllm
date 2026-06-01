@@ -25,8 +25,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import { ChatBubble } from "../../components/ChatBubble";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 // Tool-use loop, always-on. sendOne() appends the same XML <tool_call>
 // catalog the Agentic Team page uses, then parses each streamed reply
@@ -209,59 +208,6 @@ function statusColor(status?: ChatMsg["status"]) {
   return "var(--fg-muted)";
 }
 
-// Full timestamp next to each turn: "2026/Jun/01 14:32".
-const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-function fmtTime(ts?: number): string {
-  if (!ts) return "";
-  const d = new Date(ts);
-  const yyyy = d.getFullYear();
-  const mon = MONTHS_SHORT[d.getMonth()];
-  const dd = String(d.getDate()).padStart(2, "0");
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  return `${yyyy}/${mon}/${dd} ${hh}:${mm}`;
-}
-
-// Markdown renderer for completed assistant replies so cloud (Claude /
-// GPT) answers render headings, tables, bold, lists, and code blocks
-// like a real chat client instead of a wall of plain text. Used only for
-// FINISHED messages — the actively-streaming one stays plain pre-wrap so
-// token-by-token re-renders don't kill mouse selection.
-function ChatMarkdown({ text }: { text: string }) {
-  return (
-    <div className="md-body" style={{ fontSize: 13, lineHeight: 1.55, color: "var(--fg)" }}>
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          code({ className, children, ...props }: any) {
-            const isBlock = /language-/.test(className || "") || (typeof children === "string" && children.includes("\n"));
-            if (!isBlock) {
-              return <code style={{ background: "rgba(127,140,160,0.18)", padding: "0.12em 0.38em", borderRadius: 3, fontFamily: "Consolas, monospace", fontSize: "0.92em" }} {...props}>{children}</code>;
-            }
-            return (
-              <pre style={{ margin: "8px 0", padding: 10, background: "rgba(20,28,40,0.6)", border: "1px solid var(--border)", borderRadius: 6, overflowX: "auto", fontFamily: "Consolas, monospace", fontSize: 12, lineHeight: 1.45 }}>
-                <code className={className} {...props}>{children}</code>
-              </pre>
-            );
-          },
-          h1: (p) => <h2 style={{ fontSize: 17, fontWeight: 700, margin: "12px 0 5px", color: "var(--fg-strong)" }} {...(p as any)} />,
-          h2: (p) => <h3 style={{ fontSize: 15, fontWeight: 700, margin: "10px 0 4px", color: "var(--fg-strong)" }} {...(p as any)} />,
-          h3: (p) => <h4 style={{ fontSize: 14, fontWeight: 700, margin: "8px 0 3px", color: "var(--fg-strong)" }} {...(p as any)} />,
-          p: (p) => <p style={{ margin: "5px 0" }} {...(p as any)} />,
-          ul: (p) => <ul style={{ margin: "5px 0", paddingLeft: 20 }} {...(p as any)} />,
-          ol: (p) => <ol style={{ margin: "5px 0", paddingLeft: 20 }} {...(p as any)} />,
-          li: (p) => <li style={{ margin: "2px 0" }} {...(p as any)} />,
-          a: (p) => <a style={{ color: "var(--accent)", textDecoration: "underline" }} target="_blank" rel="noopener noreferrer" {...(p as any)} />,
-          blockquote: (p) => <blockquote style={{ borderLeft: "3px solid var(--accent)", margin: "6px 0", padding: "2px 0 2px 10px", color: "var(--fg-muted)" }} {...(p as any)} />,
-          table: (p) => <div style={{ overflowX: "auto", margin: "8px 0" }}><table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }} {...(p as any)} /></div>,
-          th: (p) => <th style={{ border: "1px solid var(--border)", padding: "4px 8px", background: "var(--bg-surface)", textAlign: "left", fontWeight: 600 }} {...(p as any)} />,
-          td: (p) => <td style={{ border: "1px solid var(--border)", padding: "4px 8px" }} {...(p as any)} />,
-        }}
-      >{text}</ReactMarkdown>
-    </div>
-  );
-}
-
 function statusLabel(status?: ChatMsg["status"]) {
   if (status === "ok") return "Done";
   if (status === "error") return "Failed";
@@ -308,69 +254,22 @@ function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: 
     );
   }
 
-  // The actively-streaming assistant message (last + column busy). It
-  // stays plain pre-wrap so per-token re-renders don't wipe selection;
-  // finished assistant replies render as markdown.
+  // The actively-streaming assistant message (last + column busy) stays
+  // plain pre-wrap so per-token re-renders don't wipe selection; finished
+  // replies render as markdown. All chrome lives in the shared ChatBubble.
   const isStreaming = !isUser && busy && isLast;
-  const showCursor = isStreaming;
   return (
-    <div key={i} style={{ display: "flex", flexDirection: "column", gap: 5, flexShrink: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div style={{
-          width: 20, height: 20, borderRadius: 4,
-          display: "flex", alignItems: "center", justifyContent: "center",
-          background: isUser ? "rgba(122,162,255,0.16)" : "rgba(var(--accent-rgb),0.13)",
-          border: `1px solid ${isUser ? "rgba(122,162,255,0.35)" : "rgba(var(--accent-rgb),0.28)"}`,
-          color: accent, fontSize: 11, fontWeight: 800,
-        }}>{isUser ? "U" : colId}</div>
-        <div style={{ fontSize: 11, fontWeight: 700, color: accent }}>{sender}</div>
-        {/* Completion / streaming indicator — clear visual feedback for
-            whether the model is still generating or has finished. */}
-        {!isUser && (
-          isStreaming
-            ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: "#ffd97a" }}>
-                <span className="owl-pulse-dot" style={{ width: 7, height: 7, borderRadius: 4, background: "#ffd97a", display: "inline-block" }} />
-                generating…
-              </span>
-            : <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: "#7ff0c5" }}>
-                <span style={{ width: 7, height: 7, borderRadius: 4, background: "#7ff0c5", display: "inline-block" }} />
-                done
-              </span>
-        )}
-        <div style={{ flex: 1 }} />
-        {m.ts ? <span style={{ fontSize: 10, color: "var(--fg-subtle)", fontVariantNumeric: "tabular-nums" }}>{fmtTime(m.ts)}</span> : null}
-      </div>
-      {m.thinking && m.thinking.trim() && (
-        <details style={{
-          marginLeft: 28,
-          background: "rgba(192,138,255,0.06)",
-          border: "1px solid rgba(192,138,255,0.25)",
-          borderRadius: 6,
-          overflow: "hidden",
-        }}>
-          <summary style={{ cursor: "pointer", userSelect: "none", fontWeight: 700, color: "#c08aff", padding: "5px 8px", fontSize: 11 }}>
-            Thinking ({m.thinking.length.toLocaleString()} chars)
-          </summary>
-          <pre style={{ whiteSpace: "pre-wrap", margin: 0, padding: "6px 8px", fontFamily: "Consolas, monospace", fontSize: 10.5, lineHeight: 1.5, color: "var(--fg-muted)" }}>
-            {m.thinking}
-          </pre>
-        </details>
-      )}
-      <div style={{
-        marginLeft: 28,
-        color: "var(--fg)",
-        userSelect: "text",
-        WebkitUserSelect: "text",
-        cursor: "text",
-      }}>
-        {/* Finished assistant replies render as markdown; the user turn
-            and the live streaming message stay literal pre-wrap. */}
-        {!isUser && !isStreaming && m.content
-          ? <ChatMarkdown text={m.content} />
-          : <span style={{ whiteSpace: "pre-wrap", lineHeight: 1.55 }}>
-              {m.content}{showCursor ? <span className="owl-cursor">▍</span> : (!m.content && !isUser ? "" : "")}
-            </span>}
-      </div>
+    <div key={i}>
+      <ChatBubble
+        avatar={isUser ? "U" : colId}
+        sender={sender}
+        accent={accent}
+        isUser={isUser}
+        isStreaming={isStreaming}
+        content={m.content}
+        thinking={m.thinking}
+        ts={m.ts}
+      />
     </div>
   );
 }

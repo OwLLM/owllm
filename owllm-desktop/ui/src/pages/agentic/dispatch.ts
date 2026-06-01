@@ -1470,6 +1470,10 @@ async function consumeOpenAISse(
   const dec = new TextDecoder();
   let buf = "";
   let acc = "";
+  // Bounded tail of ALL generated text (visible + thinking) for the
+  // runaway-degeneration detector. Kept short (sliced per chunk) so a
+  // long stream doesn't grow this unbounded.
+  let genTail = "";
   // Track <think> tag state across deltas — content can split across chunks.
   let inThink = false;
   // Per-tool-call-index → resolved tool name; the model streams the
@@ -1537,6 +1541,19 @@ async function consumeOpenAISse(
     }
     return false;
   };
+  // Runaway non-repeating degeneration: the model spews an endless
+  // run-on of NOVEL tokens (e.g. a wall of unique proper nouns) with
+  // no sentence breaks. DRY and the repeat detectors above miss it
+  // because nothing repeats. Signal: the current line (text since the
+  // last newline) has grown past 2500 chars with no sentence-ending
+  // punctuation in its tail — real prose breaks into sentences /
+  // paragraphs long before that.
+  const checkRunawayLine = (full: string): boolean => {
+    const nl = full.lastIndexOf("\n");
+    const line = nl >= 0 ? full.slice(nl + 1) : full;
+    if (line.length < 2500) return false;
+    return !/[.!?](\s|$)/.test(line.slice(-400));
+  };
   while (true) {
     let res: ReadableStreamReadResult<Uint8Array>;
     try {
@@ -1578,10 +1595,25 @@ async function consumeOpenAISse(
         }
         const delta = j?.choices?.[0]?.delta;
         if (!delta) continue;
+        // Feed ALL generated text (visible + thinking) into a bounded
+        // tail so the runaway detector catches degeneration that
+        // happens inside the <think> channel — which is where the
+        // novel-token name-wall spiral occurred.
+        const noteGen = (s: string): boolean => {
+          genTail = (genTail + s).slice(-3600);
+          return checkRunawayLine(genTail);
+        };
+        const abortRunaway = async () => {
+          console.warn("[dispatch.sse] runaway degeneration — aborting");
+          onDelta("\n\n⚠ Runaway generation detected — stream aborted.");
+          loopAborted = true;
+          try { await reader.cancel("runaway"); } catch { /* ignore */ }
+        };
         // DeepSeek-R1 / o-series reasoning channel — separate field.
         const reasoning: string | undefined = delta?.reasoning_content ?? delta?.reasoning;
         if (typeof reasoning === "string" && reasoning) {
           onThought?.("thinking", "🧠 thinking", reasoning);
+          if (noteGen(reasoning)) { await abortRunaway(); break; }
         }
         // Tool-calls channel — function name + arguments stream in chunks.
         const toolCalls: any[] | undefined = delta?.tool_calls;
@@ -1610,10 +1642,12 @@ async function consumeOpenAISse(
         if (typeof content === "string" && content) {
           const { reply, thought, inThink: nextInThink } = splitThinkTags(content, inThink);
           inThink = nextInThink;
-          if (thought) onThought?.("thinking", "🧠 thinking", thought);
+          if (thought) {
+            onThought?.("thinking", "🧠 thinking", thought);
+            if (noteGen(thought)) { await abortRunaway(); break; }
+          }
           if (reply)   { acc += reply; onDelta(reply); }
-          // Only worth checking when a newline just landed (line
-          // loop) or after every chunk for inline-loop coverage.
+          // Repetition + runaway checks on the visible reply.
           if (reply && (reply.includes("\n") || acc.length > 90)) {
             if (checkLineLoop(acc) || checkInlineLoop(acc)) {
               console.warn("[dispatch.sse] repetition loop detected — aborting");
@@ -1623,6 +1657,7 @@ async function consumeOpenAISse(
               break;
             }
           }
+          if (reply && noteGen(reply)) { await abortRunaway(); break; }
         }
       } catch { /* skip malformed chunk */ }
     }

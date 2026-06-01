@@ -25,19 +25,40 @@ export type ThinkingChannel = "think_tags" | "reasoning_content" | "none" | "aut
 export type SamplingProfile = {
   /// Per-turn token budget. Thinking models need 4k+, plain chat 1k.
   max_tokens: number;
-  /// llama.cpp native repeat penalty (1.0 = off).
+  /// llama.cpp native repeat penalty (1.0 = off). Kept MILD — a high
+  /// value here, like high frequency/presence penalties, pushes the
+  /// model toward rare tokens and can trigger novel-token degeneration
+  /// (the "endless unique proper nouns" spiral). DRY does the heavy
+  /// anti-loop work instead.
   repeat_penalty: number;
   /// How many trailing tokens the repeat penalty considers.
   repeat_last_n: number;
-  /// OpenAI-compat penalties (llama-server honours both).
+  /// OpenAI-compat penalties (llama-server honours both). DANGER: these
+  /// penalise reusing ANY token, so when the model is uncertain they
+  /// drive it toward ever-rarer tokens and it wanders into incoherent
+  /// novel-token rambling. Default 0 — DRY + min_p handle degeneration
+  /// without this side effect. Only raise for a model proven to need it.
   frequency_penalty: number;
   presence_penalty: number;
   /// llama.cpp DRY (Don't Repeat Yourself) sampler — multi-token loop
-  /// suppression. dry_multiplier 0 = off.
+  /// suppression. dry_multiplier 0 = off. This is the PRIMARY anti-loop
+  /// mechanism: it penalises repeated SEQUENCES, not individual tokens,
+  /// so it kills "I will write the answer / I will write the answer"
+  /// loops without pushing the model toward rare tokens.
   dry_multiplier: number;
   dry_base: number;
   dry_allowed_length: number;
   dry_penalty_last_n: number;
+  /// Nucleus / tail cutoffs. min_p is the KEY defence against incoherent
+  /// wandering: it drops every token below `min_p × P(top token)`, so
+  /// once the model enters a degenerate state where no token dominates,
+  /// the rare-token tail is cut and it's forced back toward coherent
+  /// continuations or EOS. top_k caps the candidate set. top_p is the
+  /// usual nucleus. (ChatPage's per-column top_p UI control overrides
+  /// the top_p here; min_p/top_k still apply.)
+  min_p: number;
+  top_k: number;
+  top_p: number;
 };
 
 export type ModelProfile = {
@@ -56,18 +77,27 @@ export type ModelProfile = {
   thinking: ThinkingChannel;
 };
 
-// Baseline sampling shared by most families — anti-degeneration on,
-// generous token budget. Families override only what differs.
+// Baseline sampling shared by most families. Anti-degeneration strategy:
+//   - DRY sampler kills repeated SEQUENCES (the "I will write the
+//     answer ×100" loop) without favouring rare tokens.
+//   - min_p cuts the rare-token tail so the model can't spiral into
+//     incoherent novel-token rambling (the "endless unique names" wall).
+//   - repeat_penalty kept MILD (1.1) and frequency/presence at ZERO,
+//     because high values there CAUSE the novel-token spiral by
+//     penalising reuse of common tokens.
 const BASE_SAMPLING: SamplingProfile = {
   max_tokens: 4096,
-  repeat_penalty: 1.15,
+  repeat_penalty: 1.1,
   repeat_last_n: 256,
-  frequency_penalty: 0.4,
-  presence_penalty: 0.4,
+  frequency_penalty: 0.0,
+  presence_penalty: 0.0,
   dry_multiplier: 0.8,
   dry_base: 1.75,
   dry_allowed_length: 4,
   dry_penalty_last_n: -1,
+  min_p: 0.05,
+  top_k: 40,
+  top_p: 0.95,
 };
 
 // Bundled default profiles. Ordered most-specific → most-generic.
@@ -77,9 +107,14 @@ export const BUNDLED_PROFILES: ModelProfile[] = [
     label: "Qwen 3 (thinking)",
     // Qwen3-Thinking / QwQ variants emit <think> tags and burn a lot
     // of tokens reasoning before the visible reply. They were the
-    // family that exposed the whole tool-dialect problem.
+    // family that exposed the whole tool-dialect problem AND the
+    // catastrophic novel-token degeneration (a wall of unique proper
+    // nouns). Qwen's own recommended sampling is temp 0.6 / top_p 0.95
+    // / top_k 20 / min_p 0 — but min_p 0 lets the degeneration through,
+    // so we floor it at 0.05. top_k 20 per Qwen's guidance tightens the
+    // candidate set further.
     match: ["qwen3", "qwen-3", "qwq", "qwen2.5", "qwen-2.5"],
-    sampling: { ...BASE_SAMPLING, max_tokens: 6144 },
+    sampling: { ...BASE_SAMPLING, max_tokens: 6144, top_k: 20, min_p: 0.05, top_p: 0.95 },
     toolProtocol: "both",
     thinking: "auto",
   },

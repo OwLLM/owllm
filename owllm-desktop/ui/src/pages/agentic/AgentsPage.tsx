@@ -6143,11 +6143,13 @@ async function consumeOpenAISse(
   let inThink = false;
   const toolNames = new Map<number, string>();
   const toolArgsBuf = new Map<number, string>();
-  // Client-side repetition-loop detector — backstop for the server-
-  // side DRY/repeat_penalty sampling. Mirrors dispatch.ts. Triggers
-  // on either 3 identical lines (>=10 chars) at the tail, OR 3
-  // identical 25-30 char substrings packed into the last 90 chars.
+  // Client-side degeneration detectors — backstop for the server-side
+  // DRY/min_p sampling. Mirrors dispatch.ts:
+  //   - checkLineLoop / checkInlineLoop: literal repetition.
+  //   - checkRunawayLine: NON-repeating runaway (a wall of novel tokens
+  //     with no sentence breaks) which the repeat detectors miss.
   let loopAborted = false;
+  let genTail = "";
   const checkLineLoop = (full: string): boolean => {
     const tail = full.length > 600 ? full.slice(-600) : full;
     const lines = tail.split("\n").map(l => l.trim()).filter(l => l.length >= 10);
@@ -6166,6 +6168,16 @@ async function consumeOpenAISse(
     }
     return false;
   };
+  const checkRunawayLine = (full: string): boolean => {
+    const nlIdx = full.lastIndexOf("\n");
+    const lineText = nlIdx >= 0 ? full.slice(nlIdx + 1) : full;
+    if (lineText.length < 2500) return false;
+    return !/[.!?](\s|$)/.test(lineText.slice(-400));
+  };
+  const noteGen = (s: string): boolean => {
+    genTail = (genTail + s).slice(-3600);
+    return checkRunawayLine(genTail);
+  };
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -6181,9 +6193,16 @@ async function consumeOpenAISse(
         const j = JSON.parse(body);
         const delta = j?.choices?.[0]?.delta;
         if (!delta) continue;
+        const abortRunaway = async () => {
+          console.warn("[AgentsPage.sse] runaway degeneration — aborting");
+          onDelta("\n\n⚠ Runaway generation detected — stream aborted.");
+          loopAborted = true;
+          try { await reader.cancel("runaway"); } catch { /* ignore */ }
+        };
         const reasoning: string | undefined = delta?.reasoning_content ?? delta?.reasoning;
         if (typeof reasoning === "string" && reasoning) {
           onThought?.("thinking", "🧠 thinking", reasoning);
+          if (noteGen(reasoning)) { await abortRunaway(); break; }
         }
         const toolCalls: any[] | undefined = delta?.tool_calls;
         if (Array.isArray(toolCalls)) {
@@ -6207,7 +6226,10 @@ async function consumeOpenAISse(
         if (typeof content === "string" && content) {
           const split = splitThinkTags(content, inThink);
           inThink = split.inThink;
-          if (split.thought) onThought?.("thinking", "🧠 thinking", split.thought);
+          if (split.thought) {
+            onThought?.("thinking", "🧠 thinking", split.thought);
+            if (noteGen(split.thought)) { await abortRunaway(); break; }
+          }
           if (split.reply)   { acc += split.reply; onDelta(split.reply); }
           if (split.reply && (split.reply.includes("\n") || acc.length > 90)) {
             if (checkLineLoop(acc) || checkInlineLoop(acc)) {
@@ -6218,6 +6240,7 @@ async function consumeOpenAISse(
               break;
             }
           }
+          if (split.reply && noteGen(split.reply)) { await abortRunaway(); break; }
         }
       } catch { /* skip malformed chunk */ }
     }

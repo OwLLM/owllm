@@ -843,6 +843,20 @@ export default function ChatPage() {
           }
           return false;
         };
+        // Runaway NON-repeating degeneration (wall of novel tokens, no
+        // sentence breaks) — the repeat detectors miss it. Tracks all
+        // generated text (visible + thinking) via genTail/noteGen.
+        let genTail = "";
+        const checkRunawayLine = (full: string): boolean => {
+          const nlIdx = full.lastIndexOf("\n");
+          const lineText = nlIdx >= 0 ? full.slice(nlIdx + 1) : full;
+          if (lineText.length < 2500) return false;
+          return !/[.!?](\s|$)/.test(lineText.slice(-400));
+        };
+        const noteGen = (s: string): boolean => {
+          genTail = (genTail + s).slice(-3600);
+          return checkRunawayLine(genTail);
+        };
         while (true) {
           // Honor the abort flag inline — the user pressed Stop and
           // we should bail out of the read loop even if reader.read()
@@ -908,6 +922,13 @@ export default function ChatPage() {
                 // a tool block.
                 turnThinking += reasoning;
                 appendThinking(col.id, reasoning);
+                if (noteGen(reasoning)) {
+                  console.warn("[ChatPage.sse] runaway degeneration — aborting");
+                  appendAssistant(col.id, "\n\n⚠ Runaway generation detected — stream aborted.");
+                  loopAborted = true;
+                  try { await reader.cancel("runaway"); } catch {}
+                  break;
+                }
               }
               const delta = deltaObj?.content;
               if (typeof delta === "string" && delta) {
@@ -917,6 +938,7 @@ export default function ChatPage() {
                 // boundaries via `inThink` declared above the loop.
                 let buf = delta;
                 let sawNewlineInVisible = false;
+                let runawayHit = false;
                 while (buf.length > 0) {
                   if (inThink) {
                     const close = buf.indexOf("</think>");
@@ -924,6 +946,7 @@ export default function ChatPage() {
                     if (thoughtPart) {
                       turnThinking += thoughtPart;
                       appendThinking(col.id, thoughtPart);
+                      if (noteGen(thoughtPart)) { runawayHit = true; break; }
                     }
                     if (close < 0) break;
                     inThink = false;
@@ -935,11 +958,19 @@ export default function ChatPage() {
                       turnReply += visiblePart; reply += visiblePart;
                       if (visiblePart.includes("\n")) sawNewlineInVisible = true;
                       appendAssistant(col.id, visiblePart);
+                      if (noteGen(visiblePart)) { runawayHit = true; break; }
                     }
                     if (open < 0) break;
                     inThink = true;
                     buf = buf.slice(open + "<think>".length);
                   }
+                }
+                if (runawayHit) {
+                  console.warn("[ChatPage.sse] runaway degeneration — aborting");
+                  appendAssistant(col.id, "\n\n⚠ Runaway generation detected — stream aborted.");
+                  loopAborted = true;
+                  try { await reader.cancel("runaway"); } catch {}
+                  break;
                 }
                 if (sawNewlineInVisible || turnReply.length > 90) {
                   if (checkLineLoop(turnReply) || checkInlineLoop(turnReply)) {

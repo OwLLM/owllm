@@ -415,10 +415,10 @@ export default function ChatPage() {
   // window resizes. Drag the splitter to change it; persisted.
   const splitContainerRef = useRef<HTMLDivElement>(null);
   const [rightPct, setRightPct] = useState<number>(() => {
-    try { const v = localStorage.getItem("owllm:chat:rightPct"); if (v) return Number(v); } catch { /* ignore */ }
-    return 15;
+    try { const v = localStorage.getItem("owllm:chat:rightPct2"); if (v) return Number(v); } catch { /* ignore */ }
+    return 22;
   });
-  useEffect(() => { try { localStorage.setItem("owllm:chat:rightPct", String(rightPct)); } catch { /* ignore */ } }, [rightPct]);
+  useEffect(() => { try { localStorage.setItem("owllm:chat:rightPct2", String(rightPct)); } catch { /* ignore */ } }, [rightPct]);
   const startRightDrag = (e: React.MouseEvent) => {
     e.preventDefault();
     const onMove = (ev: MouseEvent) => {

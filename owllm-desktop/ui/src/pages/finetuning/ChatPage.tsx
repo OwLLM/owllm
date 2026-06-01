@@ -410,22 +410,24 @@ export default function ChatPage() {
       .catch((e) => console.warn("chat_scratch_dir failed", e));
   }, []);
 
-  // Resizable right settings/log panel — default ~15% of the width so the
-  // chat gets ~85%. Drag the splitter to taste; persisted across reloads.
+  // Resizable right settings/log panel — width is a PERCENTAGE of the
+  // container so it stays adaptive (default 15%, chat gets 85%) as the
+  // window resizes. Drag the splitter to change it; persisted.
   const splitContainerRef = useRef<HTMLDivElement>(null);
-  const [rightW, setRightW] = useState<number>(() => {
-    try { const v = localStorage.getItem("owllm:chat:rightW"); if (v) return Number(v); } catch { /* ignore */ }
-    return Math.round(Math.min(560, Math.max(180, (typeof window !== "undefined" ? window.innerWidth : 1400) * 0.15)));
+  const [rightPct, setRightPct] = useState<number>(() => {
+    try { const v = localStorage.getItem("owllm:chat:rightPct"); if (v) return Number(v); } catch { /* ignore */ }
+    return 15;
   });
-  useEffect(() => { try { localStorage.setItem("owllm:chat:rightW", String(rightW)); } catch { /* ignore */ } }, [rightW]);
+  useEffect(() => { try { localStorage.setItem("owllm:chat:rightPct", String(rightPct)); } catch { /* ignore */ } }, [rightPct]);
   const startRightDrag = (e: React.MouseEvent) => {
     e.preventDefault();
     const onMove = (ev: MouseEvent) => {
       const cont = splitContainerRef.current;
       if (!cont) return;
       const rect = cont.getBoundingClientRect();
-      const w = rect.right - ev.clientX;
-      setRightW(Math.round(Math.min(rect.width * 0.6, Math.max(160, w))));
+      if (rect.width <= 0) return;
+      const pct = ((rect.right - ev.clientX) / rect.width) * 100;
+      setRightPct(Math.round(Math.min(45, Math.max(10, pct))));
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
@@ -1703,11 +1705,13 @@ export default function ChatPage() {
         </div>
 
         {/* RIGHT: Instruction Templates / System Prompt / Generation
-            Params / Logs. Resizable; default ~15% of the width. */}
+            Params / Logs. Width is a % of the container so it stays
+            adaptive as the window resizes (default 15%). */}
         <aside style={{
-          width: rightW,
-          minWidth: 0,
+          flexBasis: `${rightPct}%`,
+          flexGrow: 0,
           flexShrink: 0,
+          minWidth: 0,
           display: "flex",
           flexDirection: "column",
           gap: 10,

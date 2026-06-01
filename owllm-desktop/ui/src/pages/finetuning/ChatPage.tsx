@@ -209,17 +209,17 @@ function statusColor(status?: ChatMsg["status"]) {
   return "var(--fg-muted)";
 }
 
-// "14:32" / "14:32 · Jun 1" for the timestamp shown next to each turn.
+// Full timestamp next to each turn: "2026/Jun/01 14:32".
+const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function fmtTime(ts?: number): string {
   if (!ts) return "";
   const d = new Date(ts);
+  const yyyy = d.getFullYear();
+  const mon = MONTHS_SHORT[d.getMonth()];
+  const dd = String(d.getDate()).padStart(2, "0");
   const hh = String(d.getHours()).padStart(2, "0");
   const mm = String(d.getMinutes()).padStart(2, "0");
-  const today = new Date();
-  const sameDay = d.toDateString() === today.toDateString();
-  return sameDay
-    ? `${hh}:${mm}`
-    : `${hh}:${mm} · ${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+  return `${yyyy}/${mon}/${dd} ${hh}:${mm}`;
 }
 
 // Markdown renderer for completed assistant replies so cloud (Claude /

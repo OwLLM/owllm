@@ -12,9 +12,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   executeToolCall,
-  formatToolsForPrompt,
   formatToolsForOpenAI,
-  stripFabricatedToolOutput,
   unmangleMcpName,
   renderToolResultsForModel,
   renderValidationErrorsForModel,
@@ -23,7 +21,7 @@ import {
   type ToolCall,
   type ToolExecResult,
 } from "./localTools";
-import { normalizeToolCalls } from "./toolNormalizer";
+import { canonicalizeNativeCalls, type RawNativeCall } from "./toolNormalizer";
 import { samplingFor } from "./modelProfiles";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
@@ -980,178 +978,155 @@ export async function streamChatCompletion(
   if (provider === "openai") {
     return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
   }
-  // ---- Local llama-server path ----
-  // Port of the legacy Python tool-use loop (LLM/core/agents/agent.py):
-  // the system prompt teaches the model the XML <tool_call> protocol,
-  // each turn is parsed for tool_call blocks, results are fed back as
-  // a synthetic user turn, and the loop ends when the model produces
-  // a turn with no tool_call blocks. That last turn IS the final
-  // answer the caller receives.
-  const toolsBlock = await formatToolsForPrompt(allowedTools);
-  // Pass tools= natively so llama.cpp's chat-template-driven tool
-  // rendering activates for models that support it (Llama 3.1+, Qwen
-  // 2.5+, Gemma 3, Hermes, Mistral Nemo+). Those models then emit
-  // structured delta.tool_calls instead of corrupted `<|tool_call|>`
-  // special-token soup. Models without template support ignore the
-  // field and we still parse the XML <tool_call> protocol block out
-  // of the content channel as the fallback.
-  const openaiTools = await formatToolsForOpenAI(allowedTools);
-  // Tools FIRST so small local models see the catalog before they lose
-  // attention to the tail of a long role+brief+directives prompt.
-  const augmentedSystem = toolsBlock ? `${toolsBlock}\n\n${systemPrompt}` : systemPrompt;
+  // ---- Local llama-server path (GGUF) ----
+  // Native tool-calling ONLY: the model's own chat template (llama-server
+  // --jinja) renders the `tools` array and parses the model's structured
+  // delta.tool_calls back for us. No XML catalog injected, no dialect
+  // parsing. Cloud/sub/API branches above are untouched.
+  return streamLocalChat({
+    port,
+    modelId,
+    systemPrompt,
+    userContent: openaiUserContent(effectiveText, images),
+    temperature,
+    signal,
+    onDelta,
+    onThought,
+    projectCwd,
+    history,
+    allowedTools,
+  });
+}
+
+/// Optional UI hooks so a rich caller (ChatPage) can render per-tool
+/// events inline. AgentsPage/bridge leave these unset and surface tool
+/// activity through onThought instead.
+export type LocalToolEvents = {
+  onToolCall?: (call: ToolCall, turn: number) => void;
+  onToolResult?: (call: ToolCall, result: ToolExecResult, turn: number) => void;
+  onValidationError?: (name: string, error: string) => void;
+};
+
+export type StreamLocalChatParams = {
+  port: number;
+  modelId: string;
+  systemPrompt: string;
+  /// Pre-built OpenAI user content (string, or multimodal parts array).
+  userContent: unknown;
+  temperature: number;
+  signal: AbortSignal;
+  onDelta: StreamHandler;
+  onThought?: ThoughtHandler;
+  projectCwd?: string;
+  history?: HistoryItem[];
+  allowedTools?: string[];
+  /// Per-call sampling overrides (ChatPage's per-column temperature /
+  /// top_p / max_tokens UI controls). Merged over the model-family
+  /// profile from modelProfiles.ts.
+  samplingOverride?: Partial<Record<string, number>>;
+  events?: LocalToolEvents;
+};
+
+/// THE single local-model chat loop. Shared by dispatch.ts (bridge +
+/// team dispatch), AgentsPage (SuperUser chat), and ChatPage. One code
+/// path: native tools, model-family sampling, 503 slot-warmup retry,
+/// validate → execute → feed results back → iterate until the model
+/// answers with no tool calls.
+export async function streamLocalChat(p: StreamLocalChatParams): Promise<string> {
+  const openaiTools = await formatToolsForOpenAI(p.allowedTools);
   const liveMessages: Array<{ role: string; content: unknown }> = [
-    { role: "system", content: augmentedSystem },
-    ...(history ?? []),
-    { role: "user", content: openaiUserContent(effectiveText, images) },
+    { role: "system", content: p.systemPrompt },
+    ...(p.history ?? []),
+    { role: "user", content: p.userContent },
   ];
   const MAX_TOOL_TURNS = 8;
   let lastReply = "";
-  // Per-family sampling — resolved from the data-driven model-profile
-  // layer (modelProfiles.ts) so a new model's anti-degeneration knobs
-  // can be tuned without touching this code or rebuilding the .exe.
-  const sampling = samplingFor(modelId);
-  console.log("[dispatch.local] start", {
-    port, modelId, provider,
-    historyLen: history?.length ?? 0,
-    promptChars: augmentedSystem.length,
-    userChars: effectiveText.length,
-    toolsCount: openaiTools.length,
-    sampling,
-  });
-  // 503/502 slot-warmup retry. Cold model load is handled by
-  // server.rs's /health poller (fires llama-ready when the GGUF is
-  // resident in VRAM). After that, /v1/chat/completions can still
-  // 503 for a few seconds while llama-server initialises the slot
-  // (KV cache, sampler state). 2 min is overkill but cheap. Stop
-  // button on the dock aborts early if the user gives up.
+  // Per-family sampling from the data-driven profile, with optional
+  // caller overrides (ChatPage per-column controls).
+  const sampling = { ...samplingFor(p.modelId), ...(p.samplingOverride ?? {}) };
+  // 503/502 slot-warmup retry — cold model load is handled by server.rs's
+  // /health poller; this only absorbs the few-second slot init after the
+  // model is resident.
   const LOAD_RETRY_MS = 120_000;
   const LOAD_RETRY_DELAY = 1500;
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+    if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
     let resp: Response | undefined;
     const loadDeadline = Date.now() + LOAD_RETRY_MS;
     while (true) {
-      if (signal.aborted) throw new DOMException("aborted", "AbortError");
-      // Network + 503-loading retry in ONE loop. The previous version
-      // called resp.clone().text() to peek at the body and decide
-      // whether to retry, but the clone read is flaky in WebView2 —
-      // it sometimes failed silently and the loop broke OUT on a 503
-      // "Loading model", throwing the error the user finally saw.
-      // New shape: consume the body ONCE per attempt. If 503 +
-      // "loading model" in body, retry within budget. Anything else
-      // 4xx/5xx throws with the actual body.
+      if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
       try {
-        resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        resp = await fetch(`http://127.0.0.1:${p.port}/v1/chat/completions`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            model: modelId || "local",
+            model: p.modelId || "local",
             messages: liveMessages,
             stream: true,
-            temperature,
-            // Anti-degeneration sampling (max_tokens, repeat_penalty,
-            // DRY, frequency/presence) is resolved per model family from
-            // modelProfiles.ts — see the `sampling` object. No inline
-            // literals here so a new model only needs a profile entry.
+            temperature: p.temperature,
             ...sampling,
             tools: openaiTools.length > 0 ? openaiTools : undefined,
           }),
-          signal,
+          signal: p.signal,
         });
       } catch (e: any) {
-        if (signal.aborted) throw e;
+        if (p.signal.aborted) throw e;
         if (Date.now() >= loadDeadline) throw new Error(`network error after ${LOAD_RETRY_MS / 1000}s budget: ${String(e?.message ?? e)}`);
-        console.log(`[dispatch.local] network error, retrying:`, String(e?.message ?? e));
         try {
           window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
-            detail: { elapsedSec: Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000), port, reason: `network: ${String(e?.message ?? e).slice(0, 80)}` },
+            detail: { elapsedSec: Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000), port: p.port, reason: `network: ${String(e?.message ?? e).slice(0, 80)}` },
           }));
         } catch {}
         await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
         continue;
       }
-      if (resp.ok) {
-        console.log(`[dispatch.local] OK — streaming begins`);
-        break;
-      }
-      // Non-OK: consume the body once. We retry on ANY 503 (not just
-      // the "loading model" body — small llama.cpp builds sometimes
-      // reply with 503 + a different shape during warm-up too) and
-      // ALSO on 502 (occasionally seen when the spawn races the bind).
+      if (resp.ok) break;
       const errBody = await resp.text().catch(() => "");
-      console.log(`[dispatch.local] non-OK ${resp.status}, body slice:`, errBody.slice(0, 200));
       if ((resp.status === 503 || resp.status === 502) && Date.now() < loadDeadline) {
         const elapsedSec = Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000);
-        console.log(`[dispatch.local] ${resp.status} (likely cold-load) — elapsed ${elapsedSec}s, retrying in ${LOAD_RETRY_DELAY}ms`);
         try {
           window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
-            detail: { elapsedSec, port, reason: `${resp.status}: ${(errBody.slice(0, 80)) || "loading"}` },
+            detail: { elapsedSec, port: p.port, reason: `${resp.status}: ${(errBody.slice(0, 80)) || "loading"}` },
           }));
         } catch {}
         await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
         continue;
       }
-      // Real error — throw with status + body so the chat shows it.
-      const errMsg = `llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`;
-      console.warn("[dispatch.local] non-OK response, not retrying:", errMsg);
-      throw new Error(errMsg);
+      throw new Error(`llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`);
     }
     if (!resp) throw new Error("llama-server never responded — server may have crashed");
-    console.log(`[dispatch.local] turn=${turn} response`, {
-      status: resp.status, ok: resp.ok, hasBody: !!resp.body,
-    });
-    // consumeOpenAISse calls onDelta for each visible token AND returns
-    // the full assembled assistant text. We also collect any native
-    // delta.tool_calls into nativeCalls so we can run them straight,
-    // before falling back to the XML protocol parser.
-    const nativeCalls: ToolCall[] = [];
-    lastReply = await consumeOpenAISse(resp, onDelta, onThought, nativeCalls);
-    console.log(`[dispatch.local] turn=${turn} sse done`, {
-      replyChars: lastReply.length, replyPreview: lastReply.slice(0, 200),
-      nativeCalls: nativeCalls.length,
-    });
-    if (!toolsBlock && nativeCalls.length === 0 && openaiTools.length === 0) break;
-    // Universal tool-call normalisation: accept native delta.tool_calls,
-    // XML, Llama-native tokens, bare/aliased JSON, ReAct, and Python-call
-    // dialects — whatever the model actually emitted — and resolve to
-    // canonical registry tool + arg names. See toolNormalizer.ts.
-    const calls = normalizeToolCalls(lastReply, nativeCalls, { firstRequiredArg });
-    if (calls.length === 0) {
-      // Strip any leftover `<|tool_call>` / `<eos>` / fabricated
-      // `_tool_output` blocks from the final reply so the user
-      // doesn't see noise. Only when the model truly emitted nothing
-      // parseable — when calls.length > 0, the loop continues and
-      // the stripped text gets re-derived from a fresh turn anyway.
-      lastReply = stripFabricatedToolOutput(lastReply);
-      break; // model is done — final answer
-    }
-    // Strict validation BEFORE execution. Calls that fail schema (unknown
-    // tool, missing required arg) are NOT executed — instead a structured
-    // schema error goes back so the model can self-correct next turn.
+    // consumeOpenAISse streams visible deltas to onDelta, routes
+    // reasoning/thinking to onThought, and harvests native
+    // delta.tool_calls into nativeCalls.
+    const nativeCalls: RawNativeCall[] = [];
+    lastReply = await consumeOpenAISse(resp, p.onDelta, p.onThought, nativeCalls);
+    // No tools available at all → single-shot, done.
+    if (openaiTools.length === 0) break;
+    // Canonicalise native calls to registry tool + arg names.
+    const calls = canonicalizeNativeCalls(nativeCalls, { firstRequiredArg });
+    if (calls.length === 0) break; // model answered with no tool call — final
+    // Strict validation BEFORE execution. Bad calls are not run; a
+    // structured schema error goes back so the model self-corrects.
     const valid: ToolCall[] = [];
     const invalid: Array<{ name: string; error: string }> = [];
     for (const c of calls) {
       const v = validateCall(c);
       if (v.ok) valid.push(c);
-      else invalid.push({ name: c.name, error: v.error });
+      else { invalid.push({ name: c.name, error: v.error }); p.events?.onValidationError?.(c.name, v.error); }
     }
-    // Run every VALID call (sequentially; matches Python loop's one-at-
-    // a-time semantics so each result lands in context before the next).
     const results: ToolExecResult[] = [];
     for (const c of valid) {
-      if (signal.aborted) throw new DOMException("aborted", "AbortError");
+      if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
+      p.events?.onToolCall?.(c, turn);
       // eslint-disable-next-line no-await-in-loop
-      results.push(await executeToolCall(c, projectCwd ?? ""));
+      const r = await executeToolCall(c, p.projectCwd ?? "");
+      results.push(r);
+      p.events?.onToolResult?.(c, r, turn);
     }
-    // Build the synthetic user turn: real results for valid calls +
-    // structured schema errors for invalid ones.
     const parts: string[] = [];
     if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
     if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
-    // Append the assistant turn + the synthetic user turn. Strip
-    // fabricated `_tool_output` blocks from the assistant turn first so
-    // the model doesn't treat its own fake results as authoritative.
-    liveMessages.push({ role: "assistant", content: stripFabricatedToolOutput(lastReply) });
+    liveMessages.push({ role: "assistant", content: lastReply });
     liveMessages.push({ role: "user", content: parts.join("\n\n") });
   }
   return lastReply;
@@ -1460,8 +1435,8 @@ async function consumeOpenAISse(
   /// When provided, completed native tool_calls are pushed here as the
   /// stream finalises. Modern local models (Llama 3.1+, Qwen 2.5+, Gemma
   /// 3, Hermes) emit these instead of inline content; the caller routes
-  /// them through executeToolCall to actually run the tool.
-  toolCallsOut?: ToolCall[],
+  /// them through canonicalizeNativeCalls → executeToolCall.
+  toolCallsOut?: RawNativeCall[],
 ): Promise<string> {
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));

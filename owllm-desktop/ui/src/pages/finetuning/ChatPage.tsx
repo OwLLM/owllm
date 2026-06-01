@@ -33,9 +33,7 @@ import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite
 // experiments in Chat can paste prompts that work the same way in the
 // Agentic team.
 import {
-  formatToolsForPrompt,
   formatToolsForOpenAI,
-  parseToolCalls,
   executeToolCall,
   renderToolResultsForModel,
   renderValidationErrorsForModel,
@@ -46,7 +44,7 @@ import {
   type ToolCall,
   type ToolExecResult,
 } from "../agentic/localTools";
-import { normalizeToolCalls, type RawNativeCall } from "../agentic/toolNormalizer";
+import { canonicalizeNativeCalls, type RawNativeCall } from "../agentic/toolNormalizer";
 import { samplingFor } from "../agentic/modelProfiles";
 
 const LS_KEY = "owllm:chat:v3";
@@ -281,90 +279,6 @@ function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: 
       </div>
     </div>
   );
-}
-
-function cleanArgValue(raw: string): string {
-  let v = raw.trim();
-  v = v.replace(/\s+\([^)]*\)\s*$/g, "").trim();
-  v = v.replace(/[,.;]\s*$/g, "").trim();
-  if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")) || (v.startsWith("`") && v.endsWith("`"))) {
-    v = v.slice(1, -1);
-  }
-  return v.trim();
-}
-
-function parseProseToolCalls(text: string): ToolCall[] {
-  const nameMatch = /(?:^|\n)\s*Tool\s*:\s*`?([a-zA-Z0-9_:-]+)`?/i.exec(text);
-  if (!nameMatch) return [];
-  const args: Record<string, string> = {};
-  const argsStart = text.slice(nameMatch.index + nameMatch[0].length);
-  const bulletRe = /(?:^|\n)\s*[-*]\s*`?([a-zA-Z0-9_.-]+)`?\s*:\s*([^\n]+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = bulletRe.exec(argsStart)) !== null) {
-    const value = cleanArgValue(m[2]);
-    if (!value || /^(?:not specified|none|null|n\/a)\b/i.test(value) || /default is fine/i.test(value)) continue;
-    args[m[1]] = value;
-  }
-  return [{ name: nameMatch[1], args }];
-}
-
-function parseAllToolCalls(visibleText: string, thinkingText: string): ToolCall[] {
-  const calls = [
-    ...parseToolCalls(visibleText),
-    ...parseToolCalls(thinkingText),
-    ...parseProseToolCalls(visibleText),
-    ...parseProseToolCalls(thinkingText),
-  ];
-  const seen = new Set<string>();
-  return calls.filter((c) => {
-    const key = `${c.name}\u0000${JSON.stringify(c.args)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
-function parseNativeToolCalls(names: Map<number, string>, argsByIndex: Map<number, string>): ToolCall[] {
-  const calls: ToolCall[] = [];
-  for (const [idx, rawName] of names.entries()) {
-    const argsJson = argsByIndex.get(idx) ?? "{}";
-    const args: Record<string, string> = {};
-    try {
-      const parsed = JSON.parse(argsJson);
-      if (parsed && typeof parsed === "object") {
-        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
-          args[k] = typeof v === "string" ? v : JSON.stringify(v);
-        }
-      }
-    } catch {
-      args.raw = argsJson;
-    }
-    calls.push({ name: unmangleMcpName(rawName), args });
-  }
-  return calls;
-}
-
-function extractSearchQuery(text: string): string | null {
-  const quoted = /["“]([^"”]{2,200})["”]/.exec(text);
-  if (quoted) return quoted[1].trim();
-  const m = /\b(?:web\s*search|websearch|search(?:\s+the\s+web)?|duckduckgo)\b(?:\s+(?:for|about))?\s+(.{2,200})/i.exec(text);
-  if (!m) return null;
-  return m[1].replace(/\b(?:using|with)\b.*$/i, "").trim().replace(/[.:\s]+$/g, "");
-}
-
-function synthesizeExplicitToolCalls(userText: string, visibleText: string, thinkingText: string): ToolCall[] {
-  const haystack = `${userText}\n${visibleText}\n${thinkingText}`;
-  const calls: ToolCall[] = [];
-  const wantsShell = /\b(?:bash|shell|terminal|command\s+line)\b/i.test(haystack);
-  const wantsSearch = /\b(?:web\s*search|websearch|search\s+the\s+web|duckduckgo)\b/i.test(haystack);
-  if (wantsShell && /\b(?:test|testing|try|run)\b/i.test(haystack)) {
-    calls.push({ name: "shell", args: { command: "echo Shell tool test successful" } });
-  }
-  if (wantsSearch) {
-    const query = extractSearchQuery(userText) ?? extractSearchQuery(thinkingText) ?? extractSearchQuery(visibleText);
-    if (query) calls.push({ name: "web_search", args: { query, max_results: "5" } });
-  }
-  return calls;
 }
 
 export default function ChatPage() {
@@ -685,15 +599,20 @@ export default function ChatPage() {
     // tool_calls, execute each, fold results back as a synthetic user
     // turn, re-stream. Loop ends when the model emits a turn with no
     // tool_call blocks — that's the final answer.
-    const toolsBlock = chatMode === "agent" && toolsEnabled ? await formatToolsForPrompt() : "";
-    const openaiTools = chatMode === "agent" && toolsEnabled ? await formatToolsForOpenAI() : [];
+    // Native tool-calling only: send the OpenAI `tools` array and let
+    // llama-server's --jinja render it via the GGUF's own chat template.
+    // NO XML catalog injected into the system prompt (that foreign
+    // protocol confused template-trained models into inventing a third
+    // format). Tools come back as structured delta.tool_calls.
+    const toolsEnabledNow = chatMode === "agent" && toolsEnabled;
+    const openaiTools = toolsEnabledNow ? await formatToolsForOpenAI() : [];
     const modeInstruction =
       chatMode === "agent"
         ? "Mode: Agent. Use available tools when they help, then give a concise final answer. If you decide to use a tool, emit an actual tool call immediately; do not merely say you will use one."
         : chatMode === "edit"
           ? "Mode: Edit. Focus on concrete changes, diffs, rewrites, and exact patches. Ask before using tools."
           : "Mode: Ask. Answer conversationally and do not call tools unless explicitly requested.";
-    const augmentedSystem = [toolsBlock, modeInstruction, col.system].filter(Boolean).join("\n\n");
+    const augmentedSystem = [modeInstruction, col.system].filter(Boolean).join("\n\n");
     const liveMessages: Array<{ role: string; content: string }> = [
       { role: "system", content: augmentedSystem },
       ...next.map((m) => ({ role: m.role, content: m.content })),
@@ -999,13 +918,12 @@ export default function ChatPage() {
           });
         }
 
-        // Plain chat mode → one shot, done.
-        if (!toolsBlock) break;
-        // Universal tool-call normalisation. Feed the native
-        // delta.tool_calls (converted to RawNativeCall) + the visible
-        // and thinking text; the normalizer accepts every dialect
-        // (XML, Llama-native, JSON, ReAct, Python-call) and resolves to
-        // canonical registry tool + arg names. See toolNormalizer.ts.
+        // No tools wired → single-shot, done.
+        if (openaiTools.length === 0) break;
+        // Native tool calls only: llama-server parsed the model's own
+        // tool-call tokens into delta.tool_calls (harvested above into
+        // nativeToolNames/nativeToolArgs). Canonicalise to registry
+        // tool + arg names. No XML/dialect parsing of the visible text.
         const nativeRaw: RawNativeCall[] = [];
         for (const [idx, rawName] of nativeToolNames.entries()) {
           const argsJson = nativeToolArgs.get(idx) ?? "{}";
@@ -1014,14 +932,8 @@ export default function ChatPage() {
           catch { parsed = { raw: argsJson }; }
           nativeRaw.push({ name: unmangleMcpName(rawName), args: parsed });
         }
-        let calls = normalizeToolCalls(`${turnReply}\n${turnThinking}`, nativeRaw, { firstRequiredArg });
-        // Last-resort: ChatPage's intent-synthesiser for models that
-        // describe a tool in prose without emitting any parseable call
-        // ("let me run a bash test and search for X").
-        if (calls.length === 0) {
-          calls = synthesizeExplicitToolCalls(userText, turnReply, turnThinking);
-        }
-        // Model produced no tool calls → that turn IS the final answer.
+        const calls = canonicalizeNativeCalls(nativeRaw, { firstRequiredArg });
+        // Model produced no tool call → that turn IS the final answer.
         if (calls.length === 0) break;
 
         // Strict validation before execution; failures go back as

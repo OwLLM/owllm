@@ -44,32 +44,17 @@ import {
   getClaudeSession,
   resetClaudeSession,
   clearAllClaudeSessions,
+  streamLocalChat,
 } from "./dispatch";
-// Local-model tool-use loop. The duplicated streamChatCompletion that
-// AgentsPage carries (separate from dispatch.ts's version) had no tool
-// loop at all — local agents were sending one POST to llama-server and
-// returning the raw reply, so they couldn't ever invoke read_file /
-// shell / write_file etc. Importing the same helpers dispatch.ts uses
-// so the protocol shape is identical across both consumers.
-import {
-  formatToolsForPrompt,
-  formatToolsForOpenAI,
-  executeToolCall,
-  renderToolResultsForModel,
-  renderValidationErrorsForModel,
-  validateCall,
-  firstRequiredArg,
-  stripFabricatedToolOutput,
-  type ToolCall,
-  type ToolExecResult,
-} from "./localTools";
-import { normalizeToolCalls } from "./toolNormalizer";
-import { samplingFor } from "./modelProfiles";
+// The local-model tool-use loop now lives in ONE shared place
+// (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
+// keeps only the cloud/sub/API routing and delegates the GGUF path to
+// streamLocalChat. stripFabricatedToolOutput is still used to clean the
+// SuperUser orchestrator's streamed reply.
+import { stripFabricatedToolOutput } from "./localTools";
 
-// Native tool_call shape produced by consumeOpenAISse when the model
-// emits structured delta.tool_calls (Qwen3, Llama 3.1+, Hermes, etc.
-// via --jinja). We hand these to the normalizer just like XML-parsed
-// calls so the tool runner doesn't care which protocol won.
+// Native tool_call shape harvested by consumeOpenAISse from
+// delta.tool_calls (used by the cloud streaming display path).
 type NativeToolCall = { name: string; args: Record<string, string> };
 
 const ICONS = "/Page_icons";
@@ -5473,152 +5458,24 @@ async function streamChatCompletion(
   if (provider === "gemini") {
     return streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images);
   }
-  // Local llama-server — OpenAI-compatible SSE with the same XML
-  // <tool_call> protocol dispatch.ts uses. The loop: append a tool
-  // catalog to the system prompt, stream one model turn, parse for
-  // <tool_call> blocks, execute each, fold the results back into the
-  // conversation as a synthetic user turn, repeat. Loop ends when
-  // the model produces a turn with NO tool_call blocks — that turn
-  // is the final answer. Caps at 8 turns to avoid runaway loops.
-  // History (when present) becomes the alternating user/assistant
-  // turns preceding the new user message — gives the model continuity
-  // across restarts.
-  // Two protocols for local tool calling:
-  //   1. NATIVE: pass `tools: [...]` in the request body. llama-server
-  //      with --jinja translates that into the model's trained tool-call
-  //      special tokens (Qwen3 <tool_call>, Llama 3.1 <|python_tag|>,
-  //      Hermes XML, etc.) and the model's response comes back via
-  //      structured delta.tool_calls — no regex parsing, no model-
-  //      invented `mcp:tool { json }` pseudo-syntax.
-  //   2. XML fallback: a `<tool_call name="X"><arg>...</arg></tool_call>`
-  //      catalog injected into the system prompt. Used by older or
-  //      template-less models that ignore the native `tools` field.
-  // We send BOTH so capable models use the native protocol and the
-  // rest still see the XML catalog. The Qwen3 user hit a loop because
-  // we were only sending the XML catalog — Qwen3 was trained on its
-  // native format and the XML was foreign, so the model invented a
-  // third format inside its thinking block and never emitted a real
-  // call.
-  const openaiTools = await formatToolsForOpenAI(allowedTools);
-  const toolsBlock = await formatToolsForPrompt(allowedTools);
-  const augmentedSystem = toolsBlock ? `${toolsBlock}\n\n${systemPrompt}` : systemPrompt;
-  const liveMessages: Array<{ role: string; content: unknown }> = [
-    { role: "system", content: augmentedSystem },
-    ...(history ?? []),
-    { role: "user", content: openaiUserContent(effectiveText, images) },
-  ];
-  const MAX_TOOL_TURNS = 8;
-  // Per-family sampling from the data-driven profile layer — no inline
-  // literals so a new model only needs a modelProfiles.ts entry.
-  const sampling = samplingFor(modelId);
-  // 503 / 502 slot-warmup retry. llama-server can answer /health 200
-  // (model resident in VRAM, llama-ready already fired) BUT still
-  // respond 503 "Loading model" to the first /v1/chat/completions
-  // for a few seconds while it initialises the slot (KV cache,
-  // sampler state). Cold model load is NOT this loop's job anymore —
-  // the /health poller in server.rs handles that. So we only need
-  // enough headroom for slot init: 2 min is overkill but cheap.
-  const LOAD_RETRY_MS = 120_000;
-  const LOAD_RETRY_DELAY = 1500;
-  let lastReply = "";
-  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-    if (signal.aborted) throw new DOMException("aborted", "AbortError");
-    let resp: Response | undefined;
-    const loadDeadline = Date.now() + LOAD_RETRY_MS;
-    while (true) {
-      if (signal.aborted) throw new DOMException("aborted", "AbortError");
-      try {
-        resp = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: modelId || "local",
-            messages: liveMessages,
-            stream: true,
-            temperature,
-            // Anti-degeneration sampling (max_tokens, repeat_penalty,
-            // DRY, frequency/presence) resolved per model family from
-            // modelProfiles.ts — no inline literals.
-            ...sampling,
-            // Native tool-calling protocol. llama-server with --jinja
-            // routes this through the GGUF's bundled chat template,
-            // so Qwen3 emits <tool_call>, Llama 3.1 emits <|python_tag|>,
-            // Hermes emits its XML, etc. — and the structured calls
-            // come back as delta.tool_calls instead of as free-text
-            // hallucinations.
-            tools: openaiTools.length > 0 ? openaiTools : undefined,
-          }),
-          signal,
-        });
-      } catch (e: any) {
-        if (signal.aborted) throw e;
-        if (Date.now() >= loadDeadline) throw new Error(`network error after ${LOAD_RETRY_MS / 1000}s budget: ${String(e?.message ?? e)}`);
-        try {
-          window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
-            detail: { elapsedSec: Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000), port, reason: `network: ${String(e?.message ?? e).slice(0, 80)}` },
-          }));
-        } catch {}
-        await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
-        continue;
-      }
-      if (resp.ok) break;
-      const errBody = await resp.text().catch(() => "");
-      if ((resp.status === 503 || resp.status === 502) && Date.now() < loadDeadline) {
-        const elapsedSec = Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000);
-        try {
-          window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
-            detail: { elapsedSec, port, reason: `${resp.status}: ${(errBody.slice(0, 80)) || "loading"}` },
-          }));
-        } catch {}
-        await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
-        continue;
-      }
-      throw new Error(`llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`);
-    }
-    if (!resp) throw new Error("llama-server never responded — server may have crashed");
-    // consumeOpenAISse streams deltas AND harvests any native
-    // delta.tool_calls into `nativeCalls`. Modern templated models
-    // (Qwen3, Llama 3.1+, Hermes, Gemma 3) emit native calls in
-    // response to the `tools:` field; older models fall through to
-    // XML <tool_call> blocks in `lastReply`, parsed below.
-    const nativeCalls: NativeToolCall[] = [];
-    lastReply = await consumeOpenAISse(resp, onDelta, onThought, nativeCalls);
-    if (!toolsBlock && openaiTools.length === 0) break;  // tools fully disabled
-    // Universal normalisation — accept any dialect, resolve to canonical
-    // registry tool + arg names. See toolNormalizer.ts.
-    const calls = normalizeToolCalls(lastReply, nativeCalls, { firstRequiredArg });
-    if (calls.length === 0) break;                // model is done — final answer
-    // Strict validation before execution; failures go back as structured
-    // schema errors so the model can self-correct.
-    const valid: ToolCall[] = [];
-    const invalid: Array<{ name: string; error: string }> = [];
-    for (const c of calls) {
-      const v = validateCall(c);
-      if (v.ok) valid.push(c);
-      else invalid.push({ name: c.name, error: v.error });
-    }
-    // Execute every VALID call sequentially (matches the legacy Python
-    // loop's one-at-a-time semantics so each result lands in context
-    // before the next tool runs).
-    const results: ToolExecResult[] = [];
-    for (const c of valid) {
-      if (signal.aborted) throw new DOMException("aborted", "AbortError");
-      // Surface the tool call on the Thought tab so the user sees what
-      // the agent's doing (e.g. `🛠 read_file(path=...)`).
-      onThought?.(`tool:${c.name}:${turn}`, c.name, JSON.stringify(c.args, null, 2));
-      // eslint-disable-next-line no-await-in-loop
-      results.push(await executeToolCall(c, projectCwd ?? ""));
-    }
-    // Append the assistant turn + synthetic user turn (real results for
-    // valid calls + structured schema errors for invalid ones), then
-    // iterate.
-    const parts: string[] = [];
-    if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
-    if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
-    liveMessages.push({ role: "assistant", content: stripFabricatedToolOutput(lastReply) });
-    liveMessages.push({ role: "user", content: parts.join("\n\n") });
-  }
-  return lastReply;
+  // ---- Local llama-server path (GGUF) ----
+  // Native tool-calling only, via the shared streamLocalChat (dispatch.ts).
+  // Tool activity is surfaced on the Thought tab through onThought (which
+  // consumeOpenAISse already drives for delta.tool_calls). The cloud /
+  // sub / API branches above are untouched.
+  return streamLocalChat({
+    port,
+    modelId,
+    systemPrompt,
+    userContent: openaiUserContent(effectiveText, images),
+    temperature,
+    signal,
+    onDelta,
+    onThought,
+    projectCwd,
+    history,
+    allowedTools,
+  });
 }
 
 /// Anthropic Messages API streaming. Format:

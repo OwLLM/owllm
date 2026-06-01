@@ -28,100 +28,15 @@ export type ToolCall = {
   args: Record<string, string>;
 };
 
-// Match a whole <tool_call ...>...</tool_call> block (lazy). DOTALL
-// behavior comes from [\s\S]*? to span newlines without `s` flag
-// support concerns.
-const CALL_RE = /<tool_call\b([^>]*)>([\s\S]*?)<\/tool_call>/gi;
-const NAME_ATTR_RE = /\bname\s*=\s*"([^"]+)"/i;
-const ARG_RE = /<arg\b[^>]*\bname\s*=\s*"([^"]+)"[^>]*>([\s\S]*?)<\/arg>/gi;
-
-// Fallback: many small models (Gemma / Llama 3.x / Qwen 2.5 variants)
-// were trained on Llama-3-style native tool tokens and emit
-//   <|tool_call>call:NAME{key:"val",key2:"val2"}<tool_call|>
-// or close variants regardless of system-prompt instructions. The
-// user hit this on a Gemma-class model emitting fabricated `_tool_output`
-// blocks right after each `<|tool_call>` — the model thinks it has
-// already executed the tool. We catch the native format here so the
-// real runtime executes the call and the fabricated output gets
-// stripped before the user sees the reply.
+// Native special-token tool soup (`<|tool_call>call:NAME{…}<tool_call|>`)
+// and fabricated `<|tool_response>…` blocks that some models still leak
+// into the VISIBLE content even when llama-server parsed the real call
+// natively. stripFabricatedToolOutput scrubs these so the user never
+// sees raw scaffolding. (We no longer PARSE these for execution — that's
+// llama-server's job via the native delta.tool_calls.)
 const NATIVE_CALL_RE = /<\|?\s*tool_call\b[^>]*>?\s*(?:call\s*:\s*)?([a-zA-Z_][a-zA-Z0-9_]*)\s*(\{[\s\S]*?\})\s*<\/?\s*tool_call\s*\|?>/gi;
-// Strip fabricated `<|tool_response>...<_end_tool_output>` blocks
-// from the visible reply. The model invents these to look like it
-// executed the call; the real runtime appends real results in a
-// separate synthetic user turn, so the visible reply should never
-// contain them. Cover the common variants the user has seen.
 const FABRICATED_RESPONSE_RE = /<\|?\s*tool_response\s*\|?>[\s\S]*?(?:_end_tool_output|<\/?\s*tool_response\s*\|?>|<eos>)/gi;
 const STRAY_EOS_RE = /<eos>|<\|?\s*eos\s*\|?>/gi;
-
-/// Extract every well-formed <tool_call> block from a model response.
-/// Malformed blocks are skipped (logged) rather than throwing — bad
-/// model output shouldn't crash the dispatch loop.
-export function parseToolCalls(text: string): ToolCall[] {
-  const calls: ToolCall[] = [];
-  let m: RegExpExecArray | null;
-  // Reset the lastIndex on each call since CALL_RE is the same
-  // module-scoped /g RegExp.
-  CALL_RE.lastIndex = 0;
-  while ((m = CALL_RE.exec(text)) !== null) {
-    const attrs = m[1];
-    const body = m[2];
-    const nameMatch = NAME_ATTR_RE.exec(attrs);
-    if (!nameMatch) {
-      console.warn("[localTools] tool_call without name attr — skipping");
-      continue;
-    }
-    const name = nameMatch[1].trim();
-    const args: Record<string, string> = {};
-    ARG_RE.lastIndex = 0;
-    let am: RegExpExecArray | null;
-    while ((am = ARG_RE.exec(body)) !== null) {
-      args[am[1]] = am[2].trim();
-    }
-    calls.push({ name, args });
-  }
-  // Fallback: Llama-3-native tool-token format. Only scan if the XML
-  // parser didn't find anything — avoids double-executing when a model
-  // somehow emits both protocols.
-  if (calls.length === 0) {
-    NATIVE_CALL_RE.lastIndex = 0;
-    while ((m = NATIVE_CALL_RE.exec(text)) !== null) {
-      const name = m[1].trim();
-      const argsBlob = m[2];
-      const args: Record<string, string> = {};
-      // The args blob looks like JSON but small models emit it with
-      // unquoted keys and stray whitespace. Try JSON.parse first; on
-      // failure fall back to a key-by-key regex sweep.
-      let parsed: Record<string, unknown> | null = null;
-      try {
-        parsed = JSON.parse(argsBlob) as Record<string, unknown>;
-      } catch {
-        // Try to coerce to valid JSON: quote unquoted keys.
-        try {
-          const coerced = argsBlob.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
-          parsed = JSON.parse(coerced) as Record<string, unknown>;
-        } catch {
-          // Regex sweep — captures `key:"value"` pairs even if the
-          // surrounding JSON is malformed.
-          const KV_RE = /([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-          let kv: RegExpExecArray | null;
-          while ((kv = KV_RE.exec(argsBlob)) !== null) {
-            args[kv[1]] = kv[2];
-          }
-        }
-      }
-      if (parsed) {
-        for (const [k, v] of Object.entries(parsed)) {
-          args[k] = typeof v === "string" ? v : JSON.stringify(v);
-        }
-      }
-      // Push even with empty args — some tools (list_dir on cwd)
-      // legitimately have no args, and an unparseable args blob
-      // still tells us which tool the model wanted to call.
-      calls.push({ name, args });
-    }
-  }
-  return calls;
-}
 
 /// Strip fabricated tool-output blocks and stray native-format
 /// tokens from a model reply before it's shown to the user / fed
@@ -151,107 +66,15 @@ export function stripFabricatedToolOutput(text: string): string {
   return out.trim();
 }
 
-/// Render the tools the agent is allowed to call as a system-prompt
-/// block. Matches the format parseToolCalls reads, with one worked
-/// example so the model has a tight reference + example in one place.
-/// Mirrors format_for_prompt in LLM/core/agents/tools/parser.py:69.
-///
-/// Local models get the FULL tool registry — no allowlist filtering,
-/// no read-only gate, no per-role pruning. Matches the Claude Code /
-/// Codex model where every agent has every tool and the role's system
-/// prompt (not the runtime) decides what the agent should do with them.
-/// The `allowed` parameter is accepted for API-compat with the Claude
-/// CLI subscription path (which forwards it as --allowedTools) but is
-/// IGNORED here on purpose.
-///
-/// MCP tools from connected servers are merged in dynamically — every
-/// `mcp_list_all_tools` entry becomes a tool advertised as
-/// `mcp:<server>:<tool>` so models can discover and call them via the
-/// same XML protocol they use for built-in tools.
-export async function formatToolsForPrompt(_allowed?: string[]): Promise<string> {
-  const tools = LOCAL_TOOL_SPECS;
-  // Pull MCP tools at request time so the catalog stays in sync when
-  // the user starts/stops servers mid-session. mcp_list_all_tools is
-  // a cheap in-memory aggregation on the Rust side; safe to call per
-  // dispatch. Failures fall back to "no MCP tools" — never block the
-  // dispatch on an MCP enumeration error.
-  const mcpTools = await listAvailableMcpTools();
-  const searchMcpTools = mcpTools.filter(isMcpSearchTool);
-  const advertisedLocalTools = searchMcpTools.length > 0
-    ? tools.filter((t) => t.name !== "web_search")
-    : tools;
-  if (advertisedLocalTools.length === 0 && mcpTools.length === 0) return "";
-  const lines: string[] = [
-    "",
-    "--- TOOL PROTOCOL ---",
-    "You can invoke tools by emitting blocks of the form:",
-    "",
-    '  <tool_call name="TOOL_NAME">',
-    '    <arg name="ARG_NAME">VALUE</arg>',
-    "    ...",
-    "  </tool_call>",
-    "",
-    "Emit one or more blocks per turn. The runtime executes each, replies",
-    "with the tool output in a synthetic user turn, then asks you to",
-    "continue. When you have nothing left to do, respond with your final",
-    "answer and NO tool_call blocks — that ends the loop.",
-    "",
-    "Use only the tools listed below, with the exact tool name shown.",
-    "Do not invent tools, and do not call Brave/web_search unless it is listed.",
-    "",
-    ...(searchMcpTools.length > 0 ? [
-      `Preferred web search tool${searchMcpTools.length > 1 ? "s" : ""}: ${searchMcpTools.map((m) => m.qualifiedName).join(", ")}.`,
-      "For web search or browsing requests, use the preferred MCP search tool instead of web_search/Brave.",
-      "",
-    ] : []),
-    "Available tools:",
-    "",
-  ];
-  if (mcpTools.length > 0) {
-    lines.push("MCP tools (from connected Model Context Protocol servers):");
-    lines.push("");
-    for (const m of mcpTools) {
-      lines.push(`- ${m.qualifiedName}: ${m.description}`);
-      // Render top-level JSON Schema properties as args. Most MCP tools
-      // use a flat object schema, which maps cleanly to our <arg> tags.
-      const props = (m.inputSchema && typeof m.inputSchema === "object")
-        ? (m.inputSchema as Record<string, unknown>).properties as Record<string, unknown> | undefined
-        : undefined;
-      const required = (m.inputSchema && typeof m.inputSchema === "object")
-        ? (m.inputSchema as Record<string, unknown>).required as string[] | undefined
-        : undefined;
-      if (props && typeof props === "object") {
-        for (const [k, v] of Object.entries(props)) {
-          const desc = (v && typeof v === "object")
-            ? ((v as Record<string, unknown>).description as string | undefined) ?? ""
-            : "";
-          const req = required?.includes(k) ? "required" : "optional";
-          lines.push(`    - ${k} (${req}): ${desc}`);
-        }
-      }
-      lines.push("");
-    }
-  }
-  lines.push("Built-in tools:");
-  lines.push("");
-  for (const t of advertisedLocalTools) {
-    lines.push(`- ${t.name}: ${t.description}`);
-    for (const a of t.args) {
-      lines.push(`    - ${a.name} (${a.required ? "required" : "optional"}): ${a.description}`);
-    }
-    lines.push("");
-  }
-  lines.push("--- END TOOL PROTOCOL ---");
-  return lines.join("\n");
-}
-
-/// OpenAI function-spec tool list — passed as the `tools` parameter on
-/// /v1/chat/completions so llama.cpp activates the model's native chat
-/// template tool-calling. Models with native support (Llama 3.1+, Qwen
-/// 2.5+, Hermes, Mistral Nemo+, Gemma 3) emit clean `delta.tool_calls`
-/// chunks instead of corrupted `<|tool_call|>` special-token soup.
-/// Older / template-less models ignore the field and the XML protocol
-/// in formatToolsForPrompt still applies as the fallback path.
+/// OpenAI function-spec tool list — THE tool protocol. Passed as the
+/// `tools` parameter on /v1/chat/completions so llama-server's --jinja
+/// renders it through the GGUF's own chat template; the model emits its
+/// trained tool-call tokens (Llama 3.1+ <|python_tag|>, Qwen3 <tool_call>,
+/// Hermes/Mistral/Gemma native) and llama-server parses them back into
+/// structured `delta.tool_calls`. No XML catalog, no prompt injection.
+/// MCP tools are merged in; their `mcp:<server>:<tool>` names are
+/// rewritten to `mcp__server__tool` to satisfy the OpenAI name regex and
+/// reversed by unmangleMcpName on the way out.
 export async function formatToolsForOpenAI(_allowed?: string[]): Promise<unknown[]> {
   const out: unknown[] = [];
   const mcpTools = await listAvailableMcpTools();

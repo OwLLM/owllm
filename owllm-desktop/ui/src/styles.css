@@ -236,3 +236,14 @@ input, select, textarea {
   0%   { background-position:  100% 0; }
   100% { background-position: -100% 0; }
 }
+
+/* Chat completion / streaming feedback (ChatPage). The amber dot pulses
+   while a model is generating; the cursor blinks at the end of the live
+   reply. Gives clear "is it still talking?" feedback. */
+@keyframes owl-pulse {
+  0%, 100% { opacity: 1;   transform: scale(1);   }
+  50%      { opacity: 0.35; transform: scale(0.7); }
+}
+.owl-pulse-dot { animation: owl-pulse 1s ease-in-out infinite; }
+@keyframes owl-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+.owl-cursor { animation: owl-blink 1s step-end infinite; color: var(--accent); font-weight: 700; }

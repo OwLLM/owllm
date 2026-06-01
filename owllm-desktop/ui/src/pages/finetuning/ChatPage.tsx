@@ -25,6 +25,8 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 // Tool-use loop, always-on. sendOne() appends the same XML <tool_call>
 // catalog the Agentic Team page uses, then parses each streamed reply
@@ -107,6 +109,9 @@ type ChatMsg = {
   kind?: "message" | "tool" | "terminal" | "notice";
   title?: string;
   status?: "running" | "ok" | "error";
+  /// Epoch ms when the message was created — rendered next to the YOU /
+  /// MODEL label so the user can see when each turn happened.
+  ts?: number;
 };
 
 type ChatMode = "ask" | "edit" | "agent";
@@ -204,6 +209,59 @@ function statusColor(status?: ChatMsg["status"]) {
   return "var(--fg-muted)";
 }
 
+// "14:32" / "14:32 · Jun 1" for the timestamp shown next to each turn.
+function fmtTime(ts?: number): string {
+  if (!ts) return "";
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  return sameDay
+    ? `${hh}:${mm}`
+    : `${hh}:${mm} · ${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })}`;
+}
+
+// Markdown renderer for completed assistant replies so cloud (Claude /
+// GPT) answers render headings, tables, bold, lists, and code blocks
+// like a real chat client instead of a wall of plain text. Used only for
+// FINISHED messages — the actively-streaming one stays plain pre-wrap so
+// token-by-token re-renders don't kill mouse selection.
+function ChatMarkdown({ text }: { text: string }) {
+  return (
+    <div className="md-body" style={{ fontSize: 13, lineHeight: 1.55, color: "var(--fg)" }}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          code({ className, children, ...props }: any) {
+            const isBlock = /language-/.test(className || "") || (typeof children === "string" && children.includes("\n"));
+            if (!isBlock) {
+              return <code style={{ background: "rgba(127,140,160,0.18)", padding: "0.12em 0.38em", borderRadius: 3, fontFamily: "Consolas, monospace", fontSize: "0.92em" }} {...props}>{children}</code>;
+            }
+            return (
+              <pre style={{ margin: "8px 0", padding: 10, background: "rgba(20,28,40,0.6)", border: "1px solid var(--border)", borderRadius: 6, overflowX: "auto", fontFamily: "Consolas, monospace", fontSize: 12, lineHeight: 1.45 }}>
+                <code className={className} {...props}>{children}</code>
+              </pre>
+            );
+          },
+          h1: (p) => <h2 style={{ fontSize: 17, fontWeight: 700, margin: "12px 0 5px", color: "var(--fg-strong)" }} {...(p as any)} />,
+          h2: (p) => <h3 style={{ fontSize: 15, fontWeight: 700, margin: "10px 0 4px", color: "var(--fg-strong)" }} {...(p as any)} />,
+          h3: (p) => <h4 style={{ fontSize: 14, fontWeight: 700, margin: "8px 0 3px", color: "var(--fg-strong)" }} {...(p as any)} />,
+          p: (p) => <p style={{ margin: "5px 0" }} {...(p as any)} />,
+          ul: (p) => <ul style={{ margin: "5px 0", paddingLeft: 20 }} {...(p as any)} />,
+          ol: (p) => <ol style={{ margin: "5px 0", paddingLeft: 20 }} {...(p as any)} />,
+          li: (p) => <li style={{ margin: "2px 0" }} {...(p as any)} />,
+          a: (p) => <a style={{ color: "var(--accent)", textDecoration: "underline" }} target="_blank" rel="noopener noreferrer" {...(p as any)} />,
+          blockquote: (p) => <blockquote style={{ borderLeft: "3px solid var(--accent)", margin: "6px 0", padding: "2px 0 2px 10px", color: "var(--fg-muted)" }} {...(p as any)} />,
+          table: (p) => <div style={{ overflowX: "auto", margin: "8px 0" }}><table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }} {...(p as any)} /></div>,
+          th: (p) => <th style={{ border: "1px solid var(--border)", padding: "4px 8px", background: "var(--bg-surface)", textAlign: "left", fontWeight: 600 }} {...(p as any)} />,
+          td: (p) => <td style={{ border: "1px solid var(--border)", padding: "4px 8px" }} {...(p as any)} />,
+        }}
+      >{text}</ReactMarkdown>
+    </div>
+  );
+}
+
 function statusLabel(status?: ChatMsg["status"]) {
   if (status === "ok") return "Done";
   if (status === "error") return "Failed";
@@ -250,6 +308,11 @@ function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: 
     );
   }
 
+  // The actively-streaming assistant message (last + column busy). It
+  // stays plain pre-wrap so per-token re-renders don't wipe selection;
+  // finished assistant replies render as markdown.
+  const isStreaming = !isUser && busy && isLast;
+  const showCursor = isStreaming;
   return (
     <div key={i} style={{ display: "flex", flexDirection: "column", gap: 5, flexShrink: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -261,6 +324,21 @@ function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: 
           color: accent, fontSize: 11, fontWeight: 800,
         }}>{isUser ? "U" : colId}</div>
         <div style={{ fontSize: 11, fontWeight: 700, color: accent }}>{sender}</div>
+        {/* Completion / streaming indicator — clear visual feedback for
+            whether the model is still generating or has finished. */}
+        {!isUser && (
+          isStreaming
+            ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: "#ffd97a" }}>
+                <span className="owl-pulse-dot" style={{ width: 7, height: 7, borderRadius: 4, background: "#ffd97a", display: "inline-block" }} />
+                generating…
+              </span>
+            : <span style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, color: "#7ff0c5" }}>
+                <span style={{ width: 7, height: 7, borderRadius: 4, background: "#7ff0c5", display: "inline-block" }} />
+                done
+              </span>
+        )}
+        <div style={{ flex: 1 }} />
+        {m.ts ? <span style={{ fontSize: 10, color: "var(--fg-subtle)", fontVariantNumeric: "tabular-nums" }}>{fmtTime(m.ts)}</span> : null}
       </div>
       {m.thinking && m.thinking.trim() && (
         <details style={{
@@ -281,13 +359,17 @@ function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: 
       <div style={{
         marginLeft: 28,
         color: "var(--fg)",
-        whiteSpace: "pre-wrap",
-        lineHeight: 1.55,
         userSelect: "text",
         WebkitUserSelect: "text",
         cursor: "text",
       }}>
-        {m.content || (busy && isLast ? "▍" : "")}
+        {/* Finished assistant replies render as markdown; the user turn
+            and the live streaming message stay literal pre-wrap. */}
+        {!isUser && !isStreaming && m.content
+          ? <ChatMarkdown text={m.content} />
+          : <span style={{ whiteSpace: "pre-wrap", lineHeight: 1.55 }}>
+              {m.content}{showCursor ? <span className="owl-cursor">▍</span> : (!m.content && !isUser ? "" : "")}
+            </span>}
       </div>
     </div>
   );
@@ -327,6 +409,33 @@ export default function ChatPage() {
       .then((d) => { scratchDirRef.current = d; })
       .catch((e) => console.warn("chat_scratch_dir failed", e));
   }, []);
+
+  // Resizable right settings/log panel — default ~15% of the width so the
+  // chat gets ~85%. Drag the splitter to taste; persisted across reloads.
+  const splitContainerRef = useRef<HTMLDivElement>(null);
+  const [rightW, setRightW] = useState<number>(() => {
+    try { const v = localStorage.getItem("owllm:chat:rightW"); if (v) return Number(v); } catch { /* ignore */ }
+    return Math.round(Math.min(560, Math.max(180, (typeof window !== "undefined" ? window.innerWidth : 1400) * 0.15)));
+  });
+  useEffect(() => { try { localStorage.setItem("owllm:chat:rightW", String(rightW)); } catch { /* ignore */ } }, [rightW]);
+  const startRightDrag = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const onMove = (ev: MouseEvent) => {
+      const cont = splitContainerRef.current;
+      if (!cont) return;
+      const rect = cont.getBoundingClientRect();
+      const w = rect.right - ev.clientX;
+      setRightW(Math.round(Math.min(rect.width * 0.6, Math.max(160, w))));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+    };
+    document.body.style.cursor = "col-resize";
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
 
   // ---- ChatRuntime: per-column message streams live in the store ----
   // (above the router) so navigating away mid-generation doesn't orphan
@@ -625,8 +734,8 @@ export default function ChatPage() {
         .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
       mutateMsgs(col.id, (msgs) => [
         ...msgs,
-        { role: "user", content: userText },
-        { role: "assistant", content: "" },
+        { role: "user", content: userText, ts: Date.now() },
+        { role: "assistant", content: "", ts: Date.now() },
       ]);
       chatRuntime.setError(SID(col.id), null);
       // Tools-on in the playground means "run them" — the chat has no
@@ -694,13 +803,13 @@ export default function ChatPage() {
       updateCol(col.id, { error: "No server running and no servable model picked. Pick a local/tuned model first." });
       return;
     }
-    const userMsg: ChatMsg = { role: "user", content: userText };
+    const userMsg: ChatMsg = { role: "user", content: userText, ts: Date.now() };
     // Read the live message list from the store (col.messages from the
     // captured columns snapshot is stale now that messages live in the
     // store).
     const next = [...colMsgs(col.id), userMsg];
     updateCol(col.id, {
-      messages: [...next, { role: "assistant", content: "" }],
+      messages: [...next, { role: "assistant", content: "", ts: Date.now() }],
       error: null,
     });
 
@@ -1269,7 +1378,7 @@ export default function ChatPage() {
       {/* Body — Qt main.py:_build_test_sub_tab splits the chat into a
           LEFT widget (columns grid + composer) and a RIGHT widget
           (~540px settings/templates/logs stack). Mirror that here. */}
-      <div style={{ display: "flex", gap: 12, flex: 1, minHeight: 0 }}>
+      <div ref={splitContainerRef} style={{ display: "flex", gap: 0, flex: 1, minHeight: 0 }}>
         {/* LEFT: columns grid + composer */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10, minWidth: 0, minHeight: 0 }}>
           {/* Columns row */}
@@ -1301,9 +1410,20 @@ export default function ChatPage() {
                   <span style={{ fontSize: 16, fontWeight: 700 }}>
                     {col.emoji} Model {col.id}
                   </span>
-                  <span style={{ fontSize: 16, color: "#000" }}>
-                    (Port: {status.port ?? "-"})
-                  </span>
+                  {/* Port is only meaningful for the local llama-server.
+                      For subscription / API models it's irrelevant, so
+                      show the route instead of a bogus port. */}
+                  {(() => {
+                    const prov = providerFor(col.selectedModel, availableModels);
+                    if (prov === "local" || prov === "tuned") {
+                      return <span style={{ fontSize: 16, color: "#000" }}>(Port: {status.port ?? "-"})</span>;
+                    }
+                    if (!col.selectedModel) return null;
+                    const tag = col.selectedModel.startsWith("sub/") ? "subscription"
+                      : col.selectedModel.startsWith("api/") ? "API"
+                      : "cloud";
+                    return <span style={{ fontSize: 13, color: "rgba(0,0,0,0.7)" }}>({tag})</span>;
+                  })()}
                 </div>
 
                 {/* Per-column model selector — Qt main.py:18548-18557
@@ -1569,12 +1689,25 @@ export default function ChatPage() {
           </div>
         </div>
 
+        {/* Draggable splitter — resize the right panel (default ~15%). */}
+        <div
+          onMouseDown={startRightDrag}
+          title="Drag to resize"
+          style={{
+            width: 8, flexShrink: 0, cursor: "col-resize",
+            margin: "0 2px",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <div style={{ width: 2, height: "100%", borderRadius: 2, background: "var(--border-strong)" }} />
+        </div>
+
         {/* RIGHT: Instruction Templates / System Prompt / Generation
-            Params / Logs. Qt main.py:18666-19011 — min-width 540,
-            stacked per-model settings driven by A/B/C toggles. */}
+            Params / Logs. Resizable; default ~15% of the width. */}
         <aside style={{
-          width: 540,
-          minWidth: 540,
+          width: rightW,
+          minWidth: 0,
+          flexShrink: 0,
           display: "flex",
           flexDirection: "column",
           gap: 10,

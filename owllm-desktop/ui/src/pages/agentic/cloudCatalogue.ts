@@ -161,3 +161,59 @@ export function getCloudCatalogue(): CloudCatalogue {
   }
   return out;
 }
+
+// ---- Remote registry (post-ship model updates) ----
+//
+// The app pulls a JSON catalogue from a URL you host (default: a raw file
+// in the repo) at startup. Push one JSON update and every user gets new
+// models — e.g. Claude Opus 4.9 the day it ships — with no rebuild and no
+// per-user localStorage editing. The last good fetch is cached so it
+// still applies offline.
+
+const REMOTE_CACHE_KEY = "owllm:cloud-models-remote";
+const REMOTE_URL_KEY = "owllm:cloud-models-url";
+const DEFAULT_REMOTE_URL =
+  "https://raw.githubusercontent.com/ruigro/LLM-Studio/main/model-catalogue.json";
+
+function remoteUrl(): string {
+  try { return localStorage.getItem(REMOTE_URL_KEY) || DEFAULT_REMOTE_URL; }
+  catch { return DEFAULT_REMOTE_URL; }
+}
+
+/// Apply the cached remote catalogue immediately (sync, offline-safe).
+/// Call once at startup BEFORE the async refresh so the picker shows the
+/// last-known models even with no network.
+export function applyCachedRemoteCatalogue(): void {
+  try {
+    const raw = localStorage.getItem(REMOTE_CACHE_KEY);
+    if (raw) _remote = JSON.parse(raw) as Partial<CloudCatalogue>;
+  } catch (e) {
+    console.warn("[cloudCatalogue] bad cached remote catalogue", e);
+  }
+}
+
+/// Fetch the remote catalogue via the Rust fetch_remote_text command
+/// (avoids WebView CORS/CSP), validate it's an object, cache + apply it.
+/// Fire-and-forget at startup; failures are logged and ignored (we keep
+/// the cached/bundled catalogue). `invoke` is injected so this module
+/// stays free of a hard @tauri-apps dependency at import time.
+export async function refreshRemoteCatalogue(
+  invoke: <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>,
+): Promise<boolean> {
+  try {
+    const body = await invoke<string>("fetch_remote_text", { url: remoteUrl() });
+    const parsed = JSON.parse(body);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      console.warn("[cloudCatalogue] remote catalogue is not an object — ignoring");
+      return false;
+    }
+    _remote = parsed as Partial<CloudCatalogue>;
+    try { localStorage.setItem(REMOTE_CACHE_KEY, JSON.stringify(parsed)); } catch { /* quota */ }
+    return true;
+  } catch (e) {
+    // Offline / 404 / bad JSON — keep cached + bundled. Not an error worth
+    // bothering the user with.
+    console.info("[cloudCatalogue] remote refresh skipped:", String(e));
+    return false;
+  }
+}

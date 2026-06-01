@@ -1,0 +1,13 @@
+{
+  "_README": "Remote model catalogue for OwLLM Desktop. The app fetches this file at startup and merges it OVER the bundled defaults. To add a model the day it ships (e.g. Claude Opus 4.9) — add an entry under the right provider, commit, push. Every user gets it on next launch, no rebuild. Same id => replaces the bundled entry; new id => added to the top of that provider's list. Fields: id (exact API/CLI model id), display (label), sub (show subscription row), api (show API row), effort (array of reasoning tiers; Anthropic/OpenAI only).",
+  "anthropic": [
+    { "id": "claude-opus-4-8",   "display": "Claude Opus 4.8",   "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-opus-4-7",   "display": "Claude Opus 4.7",   "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-sonnet-4-6", "display": "Claude Sonnet 4.6", "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "claude-haiku-4-5-20251001", "display": "Claude Haiku 4.5" }
+  ],
+  "openai": [
+    { "id": "gpt-5.5",       "display": "GPT-5.5",       "api": true, "effort": ["low", "medium", "high", "extra_high"] },
+    { "id": "gpt-5.5-codex", "display": "GPT-5.5 Codex", "sub": true, "effort": ["low", "medium", "high", "extra_high"] }
+  ]
+}

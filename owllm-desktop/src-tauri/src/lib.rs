@@ -198,6 +198,7 @@ pub fn run() {
             finetuning::export_gguf,
             finetuning::hf_dir_weight_bytes,
             agent_tools::chat_scratch_dir,
+            agent_tools::fetch_remote_text,
             agent_tools::tool_read_file,
             agent_tools::tool_write_file,
             agent_tools::tool_list_dir,

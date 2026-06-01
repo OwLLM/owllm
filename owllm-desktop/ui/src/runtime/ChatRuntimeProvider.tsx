@@ -9,7 +9,14 @@
 
 import React, { createContext, useContext, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { chatRuntime, ChatRuntimeStore } from "./chatRuntime";
+import { applyCachedRemoteCatalogue, refreshRemoteCatalogue } from "../pages/agentic/cloudCatalogue";
+
+// Apply the last cached remote model catalogue synchronously at module
+// load so the picker shows up-to-date models on the very first render,
+// even offline.
+applyCachedRemoteCatalogue();
 
 const ChatRuntimeContext = createContext<ChatRuntimeStore>(chatRuntime);
 
@@ -33,6 +40,12 @@ export function ChatRuntimeProvider({ children }: { children: React.ReactNode })
     listen("llama-ready", () => { /* pages clear their own banner today */ })
       .then((u) => { unlistenReady = u; })
       .catch(() => {});
+
+    // Post-ship model updates: pull the latest cloud catalogue from the
+    // remote registry once at startup. Fire-and-forget; on success new
+    // models (e.g. a newly-released Claude) appear in the picker with no
+    // rebuild. Failures keep the cached/bundled catalogue.
+    refreshRemoteCatalogue(invoke).catch(() => {});
 
     return () => {
       window.removeEventListener("owllm:dispatch-abort", onAbort);

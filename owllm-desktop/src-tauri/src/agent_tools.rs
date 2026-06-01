@@ -382,6 +382,31 @@ pub async fn tool_web_search(
 /// blocks and collapses to plain text — no full Readability port. Cap
 /// at 60 KB returned to keep token budgets sane; the model can paginate
 /// via re-fetches if it really needs more.
+/// Fetch a URL and return its RAW body verbatim (no HTML stripping).
+/// Used to pull the remote model catalogue / profile JSON so new models
+/// can land post-ship without an .exe rebuild. Capped at 512 KB; 10 s
+/// timeout so a slow/unreachable host never blocks startup for long.
+#[tauri::command]
+pub async fn fetch_remote_text(url: String) -> Result<String, String> {
+    const MAX_BYTES: usize = 512 * 1024;
+    let cli = reqwest::Client::builder()
+        .user_agent("OwLLM-Desktop/1.0")
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = cli.get(&url).send().await.map_err(|e| format!("fetch: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("fetch HTTP {status}"));
+    }
+    let body = resp.text().await.map_err(|e| format!("body: {e}"))?;
+    if body.len() > MAX_BYTES {
+        return Err(format!("catalogue too large ({} bytes)", body.len()));
+    }
+    Ok(body)
+}
+
 #[tauri::command]
 pub async fn tool_web_fetch(url: String) -> Result<String, String> {
     const MAX_BYTES: usize = 60 * 1024;

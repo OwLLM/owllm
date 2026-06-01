@@ -7040,7 +7040,14 @@ export default function AgentsPage() {
     // Resolve which model this send will hit, BEFORE checking the
     // local server. A team configured to use Claude or GPT doesn't
     // need llama-server running at all.
-    const supModelId = effectiveTeamModel.trim() || (serverState.model_id ?? "local");
+    //
+    // Resolve it the SAME way the UI shows it: modelFor(orchestrator),
+    // which honours per-agent override > team default > running-server
+    // model. The old code used effectiveTeamModel alone, which ignored
+    // a per-orchestrator model change — so after switching the model
+    // the chat kept dispatching to the previously-set one.
+    const orchKeyForModel = activeTeam ? (findOrchestratorSpec(activeTeam)?.name ?? "orchestrator") : "orchestrator";
+    const supModelId = modelFor(orchKeyForModel);
     const supProvider = providerFor(supModelId);
 
     // Echo the user message into the orchestrator's buffer too so the
@@ -7472,8 +7479,14 @@ export default function AgentsPage() {
   // ensureLocalServer triggered a temporal-dead-zone crash
   // ('Cannot access "sn" before initialization') when React rendered
   // the right column.
-  const dockModelId = (effectiveTeamModel
-    || (activeTeam ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "") : "")
+  // Resolve the dock's model the SAME way onSupSend dispatches it —
+  // modelFor(orchestrator), which honours per-agent override > team
+  // default > server model. (Was effectiveTeamModel-first, which
+  // ignored a per-orchestrator override, so the Load button and the
+  // send could disagree on which model to use.)
+  const dockModelId = (activeTeam
+    ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "orchestrator")
+    : effectiveTeamModel
     || "").trim();
   const dockProvider = dockModelId ? providerFor(dockModelId) : "local";
   const dockNeedsLoad =

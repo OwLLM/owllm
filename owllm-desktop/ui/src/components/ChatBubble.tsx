@@ -62,6 +62,90 @@ export function ChatMarkdown({ text }: { text: string }) {
   );
 }
 
+// ---- Shared thinking + tool-event renderers ---------------------------
+// These are the SAME visuals the fine-tuning ChatPage uses, lifted here so
+// the agentic Clear Chat renders thinking + tool calls identically (the
+// "make it exactly like the fine-tuning chat" ask). Don't fork these.
+
+/// Collapsible reasoning block ("💭 Thinking (N chars)"). Used both inside
+/// ChatBubble (attached to a turn) and standalone in the agentic stream.
+export function ThinkingBlock({ text }: { text: string }) {
+  if (!text || !text.trim()) return null;
+  return (
+    <details style={{
+      marginLeft: 28,
+      background: "rgba(192,138,255,0.06)",
+      border: "1px solid rgba(192,138,255,0.25)",
+      borderRadius: 6,
+      overflow: "hidden",
+      flexShrink: 0,
+    }}>
+      <summary style={{ cursor: "pointer", userSelect: "none", fontWeight: 700, color: "#c08aff", padding: "5px 8px", fontSize: 11 }}>
+        💭 Thinking ({text.length.toLocaleString()} chars)
+      </summary>
+      <pre style={{ whiteSpace: "pre-wrap", margin: 0, padding: "6px 8px", fontFamily: "Consolas, monospace", fontSize: 10.5, lineHeight: 1.5, color: "var(--fg-muted)" }}>
+        {text}
+      </pre>
+    </details>
+  );
+}
+
+export type ToolStatus = "running" | "ok" | "error" | undefined;
+
+export function toolStatusColor(status?: ToolStatus) {
+  if (status === "ok") return "#7ff0c5";
+  if (status === "error") return "#ff8c8c";
+  if (status === "running") return "#ffd97a";
+  return "var(--fg-muted)";
+}
+
+export function toolStatusLabel(status?: ToolStatus) {
+  if (status === "ok") return "Done";
+  if (status === "error") return "Failed";
+  if (status === "running") return "Running";
+  return "Info";
+}
+
+/// Expandable tool / terminal / notice card — the exact ChatPage event row.
+/// `kind` drives the framing: "terminal" gets the dark console look.
+export function ToolEventCard({
+  title, content, status, kind = "tool",
+}: {
+  title: string;
+  content: string;
+  status?: ToolStatus;
+  kind?: "tool" | "terminal" | "notice";
+}) {
+  const isTerminal = kind === "terminal";
+  const c = toolStatusColor(status);
+  return (
+    <details open={status === "running" || status === "error"} style={{
+      border: `1px solid ${kind === "notice" ? "var(--border-strong)" : `${c}66`}`,
+      background: isTerminal ? "rgba(8,12,18,0.86)" : "rgba(127,140,160,0.08)",
+      borderRadius: 6,
+      overflow: "hidden",
+      flexShrink: 0,
+    }}>
+      <summary style={{
+        display: "flex", alignItems: "center", gap: 8,
+        padding: "7px 10px", cursor: "pointer", userSelect: "none",
+        color: c, fontSize: 12, fontWeight: 700,
+      }}>
+        <span style={{ width: 8, height: 8, borderRadius: 4, background: c, display: "inline-block", boxShadow: `0 0 8px ${c}` }} />
+        <span style={{ flex: 1, color: "var(--fg)" }}>{title || (isTerminal ? "Terminal" : "Tool call")}</span>
+        <span style={{ color: c, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.7 }}>{toolStatusLabel(status)}</span>
+      </summary>
+      <pre style={{
+        margin: 0, padding: "8px 10px", maxHeight: 240, overflow: "auto",
+        whiteSpace: "pre-wrap", color: isTerminal ? "#d7ffe8" : "var(--fg)",
+        background: isTerminal ? "#05070a" : "transparent",
+        fontFamily: "Consolas, 'JetBrains Mono', monospace", fontSize: 11.5, lineHeight: 1.45,
+        userSelect: "text", WebkitUserSelect: "text",
+      }}>{content}</pre>
+    </details>
+  );
+}
+
 export type ChatBubbleProps = {
   /// One-or-two char chip in the avatar box ("U", "A", an emoji…).
   avatar: string;
@@ -107,22 +191,7 @@ export function ChatBubble({ avatar, sender, accent, isUser, isStreaming, conten
         <div style={{ flex: 1 }} />
         {ts ? <span style={{ fontSize: 10, color: "var(--fg-subtle)", fontVariantNumeric: "tabular-nums" }}>{fmtTime(ts)}</span> : null}
       </div>
-      {thinking && thinking.trim() && (
-        <details style={{
-          marginLeft: 28,
-          background: "rgba(192,138,255,0.06)",
-          border: "1px solid rgba(192,138,255,0.25)",
-          borderRadius: 6,
-          overflow: "hidden",
-        }}>
-          <summary style={{ cursor: "pointer", userSelect: "none", fontWeight: 700, color: "#c08aff", padding: "5px 8px", fontSize: 11 }}>
-            Thinking ({thinking.length.toLocaleString()} chars)
-          </summary>
-          <pre style={{ whiteSpace: "pre-wrap", margin: 0, padding: "6px 8px", fontFamily: "Consolas, monospace", fontSize: 10.5, lineHeight: 1.5, color: "var(--fg-muted)" }}>
-            {thinking}
-          </pre>
-        </details>
-      )}
+      {thinking && thinking.trim() && <ThinkingBlock text={thinking} />}
       <div style={{
         marginLeft: 28,
         color: "var(--fg)",

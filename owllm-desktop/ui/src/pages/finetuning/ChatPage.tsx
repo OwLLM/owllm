@@ -25,7 +25,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { ChatBubble } from "../../components/ChatBubble";
+import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 // Tool-use loop, always-on. sendOne() appends the same XML <tool_call>
 // catalog the Agentic Team page uses, then parses each streamed reply
@@ -221,36 +221,17 @@ function renderChatMessage(m: ChatMsg, i: number, colId: "A" | "B" | "C", busy: 
   const accent = isUser ? "#7aa2ff" : LABEL_TINT[colId];
 
   if (m.kind === "tool" || m.kind === "terminal" || m.kind === "notice") {
-    const isTerminal = m.kind === "terminal";
-    const c = statusColor(m.status);
+    // Shared with the agentic Clear Chat so both surfaces render tool /
+    // terminal / notice events identically.
     return (
-      <details key={i} open={m.status === "running" || m.status === "error"} style={{
-        border: `1px solid ${m.kind === "notice" ? "var(--border-strong)" : `${c}66`}`,
-        background: isTerminal ? "rgba(8,12,18,0.86)" : "rgba(127,140,160,0.08)",
-        borderRadius: 6,
-        overflow: "hidden",
-        // In the flex-column transcript, children must not shrink — else
-        // a long run of tool cards gets compressed to fit and overlaps,
-        // and the container stops scrolling (scrollHeight == clientHeight).
-        flexShrink: 0,
-      }}>
-        <summary style={{
-          display: "flex", alignItems: "center", gap: 8,
-          padding: "7px 10px", cursor: "pointer", userSelect: "none",
-          color: c, fontSize: 12, fontWeight: 700,
-        }}>
-          <span style={{ width: 8, height: 8, borderRadius: 4, background: c, display: "inline-block", boxShadow: `0 0 8px ${c}` }} />
-          <span style={{ flex: 1, color: "var(--fg)" }}>{m.title ?? (isTerminal ? "Terminal" : "Tool call")}</span>
-          <span style={{ color: c, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.7 }}>{statusLabel(m.status)}</span>
-        </summary>
-        <pre style={{
-          margin: 0, padding: "8px 10px", maxHeight: 240, overflow: "auto",
-          whiteSpace: "pre-wrap", color: isTerminal ? "#d7ffe8" : "var(--fg)",
-          background: isTerminal ? "#05070a" : "transparent",
-          fontFamily: "Consolas, 'JetBrains Mono', monospace", fontSize: 11.5, lineHeight: 1.45,
-          userSelect: "text", WebkitUserSelect: "text",
-        }}>{m.content}</pre>
-      </details>
+      <div key={i}>
+        <ToolEventCard
+          kind={m.kind}
+          title={m.title ?? (m.kind === "terminal" ? "Terminal" : "Tool call")}
+          status={m.status}
+          content={m.content}
+        />
+      </div>
     );
   }
 

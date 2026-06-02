@@ -52,7 +52,7 @@ import {
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput } from "./localTools";
-import { ChatBubble, ChatMarkdown } from "../../components/ChatBubble";
+import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock } from "../../components/ChatBubble";
 
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
@@ -3367,12 +3367,50 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
         sender={displayLabel(m.role)}
         accent={accent}
         isUser={isUser}
-        isStreaming={isStreaming && !!m.text}
+        // Drive the generating/done indicator off the BUSY state alone,
+        // NOT off `!!m.text`. While the model is in its thinking phase the
+        // visible reply is still empty, and gating on m.text flipped the
+        // bubble to "done" exactly when the model was hardest at work.
+        // Empty + streaming renders just the blink cursor, which reads as
+        // "working" — correct.
+        isStreaming={isStreaming}
         content={m.text}
         ts={m.ts}
       />
     </div>
   );
+}
+
+// Render ONE entry of the unified Clear Chat stream so it looks exactly
+// like the fine-tuning ChatPage: thinking → collapsible 💭 block, tool /
+// tool-result → expandable ToolEventCard (terminal-styled for shell), and
+// a normal reply → ChatBubble. Uses the SAME shared components as ChatPage
+// (no fork). `isStreaming` marks the live in-flight reply.
+function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isStreaming = false) {
+  if (m.kind === "thinking") {
+    return <div key={`u-${m.seq ?? i}`}><ThinkingBlock text={m.text} /></div>;
+  }
+  if (m.kind === "tool") {
+    // Agentic tool entries: role is "🛠 <tool>" (call) or "↩ <tool>"
+    // (result). Shell-ish calls get the terminal console look, matching
+    // ChatPage's terminalish detection. Status is inferred from the
+    // result text when present (exit_code / error markers).
+    const label = m.role || "Tool call";
+    const isTerminal = /shell|bash|command|terminal|powershell|cmd|exec/i.test(label);
+    const txt = m.text || "";
+    const status: "ok" | "error" | "running" | undefined =
+      /\b(error|failed|traceback|exit_code:\s*[1-9])/i.test(txt) ? "error"
+      : /exit_code:\s*0|✓|\bok\b|completed/i.test(txt) ? "ok"
+      : m.role.startsWith("↩") ? "ok"
+      : "running";
+    return (
+      <div key={`u-${m.seq ?? i}`}>
+        <ToolEventCard kind={isTerminal ? "terminal" : "tool"} title={label} status={status} content={txt || "…"} />
+      </div>
+    );
+  }
+  // dispatch directives + plain replies → normal chat bubble.
+  return renderReplyEntry(m, i, "", orchName, isStreaming);
 }
 
 // Render a thought-stream entry (rail + role label + kind-styled body).
@@ -4155,18 +4193,22 @@ function OrchestratorPane({
             );
           })()}
         </div>
-        {/* Clear Chat — the user-facing reply stream only, nothing else. */}
+        {/* Clear Chat — the unified stream, rendered EXACTLY like the
+            fine-tuning chat: thinking (💭 collapsible), tool calls/results
+            (expandable cards), and replies (avatar bubbles), interleaved in
+            arrival order via the shared ChatBubble / ToolEventCard /
+            ThinkingBlock components. */}
         <div ref={replyRef} data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {runError ? (<div style={{ border:"1px solid #ff9f9f", background:"rgba(255,80,80,0.10)", color:"#ffb0b0", borderRadius:6, padding:8, fontSize:12 }}>{runError}</div>) : null}
-          {messages.length === 0 && !runError ? (
+          {fullChat.length === 0 && !runError ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:12 }}>
               {serverState.running && serverState.model_id
                 ? `Ready. Type a goal above and press Run — the orchestrator will plan, dispatch, and integrate.`
                 : "Start a model on the Server tab first, then type a goal above and click Run."}
             </div>
           ) : null}
-          {messages.map((m, i) =>
-            renderReplyEntry(m, i, focus, orchName, supSendBusy && i === messages.length - 1)
+          {fullChat.map((m, i) =>
+            renderUnifiedEntry(m, i, orchName, supSendBusy && i === fullChat.length - 1)
           )}
         </div>
         {/* Thought — reasoning + dispatch directives. Tool entries excluded. */}
@@ -7189,6 +7231,15 @@ export default function AgentsPage() {
           ? `You are the orchestrator of '${activeTeam.display}'.`
           : "You are the team's orchestrator.",
         "Answer the user concisely.",
+        // Tool-use directive. Small local models tend to DESCRIBE their
+        // toolbox and say "now let me test them" without ever emitting the
+        // structured tool call, so the turn ends with no action taken (the
+        // user sees a tool list, not results). Spell out that an action
+        // request must be fulfilled BY CALLING THE TOOLS — one step at a
+        // time, using each real result — and closed with a short report.
+        "You have real, working tools: read/write/edit files, list directories, run Windows shell commands, and search/fetch the web. " +
+        "When the user asks you to DO something (create or read a file, run a command, search the web), you MUST actually call the appropriate tool and use its REAL returned result — never just list your tools or describe what you would do. " +
+        "Perform the request one step at a time: call a tool, wait for its result, then move to the next step. When every step is done, give the user a short report of what each tool actually returned.",
         `Critical Thinker is a real peer agent named ${CRITIC_AGENT_NAME}, not a mode of operation.`,
         "If the user's message mentions the critic or critical thinker, acknowledge whether that agent was invoked. Never say you are merely doing it implicitly.",
         criticReview ? `\nCritical Thinker review already produced:\n${criticReview}` : "",

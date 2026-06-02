@@ -1034,13 +1034,37 @@ export type StreamLocalChatParams = {
 /// answers with no tool calls.
 export async function streamLocalChat(p: StreamLocalChatParams): Promise<string> {
   const openaiTools = await formatToolsForOpenAI(p.allowedTools);
+  // Instrumentation: the exact tools advertised to llama-server this turn.
+  // If agentic tool-calling misbehaves, open devtools — this shows whether
+  // the model was even handed tools, and which (an MCP schema that poisons
+  // the grammar will show up here before the model narrates instead of
+  // calling). Kept at debug level so it's silent unless you're looking.
+  try {
+    console.debug(
+      `[streamLocalChat] ${openaiTools.length} tools →`,
+      openaiTools.map((t: any) => t?.function?.name).filter(Boolean),
+    );
+  } catch { /* logging must never break the turn */ }
   const liveMessages: Array<{ role: string; content: unknown }> = [
     { role: "system", content: p.systemPrompt },
     ...(p.history ?? []),
     { role: "user", content: p.userContent },
   ];
-  const MAX_TOOL_TURNS = 8;
+  // One tool round = one model turn. Models like Qwen call tools ONE
+  // per turn, so a 6-step task (mkdir→write→read→list→shell→websearch)
+  // needs 6 rounds JUST for the tools, plus a final turn to write the
+  // answer. The old cap of 8 ran out mid-task and the loop returned with
+  // the model still in tool-calling mode — the user saw only the opening
+  // preamble and never got the report. 16 covers realistic multi-step
+  // sequences; the forced-synthesis pass below guarantees a closing
+  // answer even when the budget IS exhausted.
+  const MAX_TOOL_TURNS = 16;
   let lastReply = "";
+  // True once the model answers WITHOUT a tool call (the clean exit that
+  // means lastReply already holds the user-facing answer). Stays false
+  // if we burn through every turn with tools still pending → triggers the
+  // forced-synthesis pass below.
+  let answeredWithoutTools = false;
   // Per-family sampling from the data-driven profile, with optional
   // caller overrides (ChatPage per-column controls).
   const sampling = { ...samplingFor(p.modelId), ...(p.samplingOverride ?? {}) };
@@ -1066,6 +1090,13 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
             temperature: p.temperature,
             ...sampling,
             tools: openaiTools.length > 0 ? openaiTools : undefined,
+            // tool_choice:"auto" is what the (working) fine-tuning ChatPage
+            // sends. Without it, some GGUF templates under --jinja never
+            // arm the tool-call grammar, so the model just NARRATES ("I'll
+            // create the file…") and ends its turn with no native call —
+            // exactly the agentic-chat failure. Send the identical request
+            // the proven path sends so the same model behaves the same.
+            tool_choice: openaiTools.length > 0 ? "auto" : undefined,
           }),
           signal: p.signal,
         });
@@ -1101,10 +1132,10 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     const nativeCalls: RawNativeCall[] = [];
     lastReply = await consumeOpenAISse(resp, p.onDelta, p.onThought, nativeCalls);
     // No tools available at all → single-shot, done.
-    if (openaiTools.length === 0) break;
+    if (openaiTools.length === 0) { answeredWithoutTools = true; break; }
     // Canonicalise native calls to registry tool + arg names.
     const calls = canonicalizeNativeCalls(nativeCalls, { firstRequiredArg });
-    if (calls.length === 0) break; // model answered with no tool call — final
+    if (calls.length === 0) { answeredWithoutTools = true; break; } // model answered with no tool call — final
     // Strict validation BEFORE execution. Bad calls are not run; a
     // structured schema error goes back so the model self-corrects.
     const valid: ToolCall[] = [];
@@ -1128,6 +1159,45 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
     liveMessages.push({ role: "assistant", content: lastReply });
     liveMessages.push({ role: "user", content: parts.join("\n\n") });
+  }
+  // Forced synthesis: the loop exhausted MAX_TOOL_TURNS while the model
+  // was still calling tools, so it never wrote a user-facing answer (the
+  // bubble would freeze on the opening preamble). Do ONE more turn with
+  // tools OMITTED — the model can't call anything, so it MUST write the
+  // final report from everything it already gathered above. Streams
+  // through onDelta so the answer appends to the visible bubble.
+  if (!answeredWithoutTools && openaiTools.length > 0) {
+    if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
+    liveMessages.push({
+      role: "user",
+      content:
+        "You have reached your tool-call limit — do NOT request any more tools. " +
+        "Using only the tool results already gathered above, write the final answer " +
+        "for the user now: report what each tool returned and the overall outcome.",
+    });
+    try {
+      const fresp = await fetch(`http://127.0.0.1:${p.port}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: p.modelId || "local",
+          messages: liveMessages,
+          stream: true,
+          temperature: p.temperature,
+          ...sampling,
+          // tools deliberately omitted — force a plain text answer.
+        }),
+        signal: p.signal,
+      });
+      if (fresp.ok) {
+        const finalText = await consumeOpenAISse(fresp, p.onDelta, p.onThought, []);
+        if (finalText.trim()) lastReply = finalText;
+      }
+    } catch (e) {
+      // Best-effort — if the synthesis turn fails, keep whatever the
+      // last tool turn produced rather than erroring the whole reply.
+      if (p.signal.aborted) throw e;
+    }
   }
   return lastReply;
 }

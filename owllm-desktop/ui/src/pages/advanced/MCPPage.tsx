@@ -17,6 +17,11 @@
 
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  isMcpMasterEnabled, setMcpMasterEnabled,
+  isMcpToolDisabled, setMcpToolDisabled,
+} from "../agentic/mcpSettings";
+import { sanitizeToolParameters } from "../agentic/localTools";
 
 const ICONS = "/Page_icons";
 
@@ -521,7 +526,7 @@ function ServerDialog({
 // ----- Server card -----
 
 function ServerCard({
-  status, starting, lastError, installing, onStart, onStop, onEdit, onRemove, onInstallRuntime,
+  status, starting, lastError, installing, onStart, onStop, onEdit, onRemove, onInstallRuntime, onToolToggle,
 }: {
   status: McpServerStatus;
   /// True while mcp_start_server is in-flight for this server. Surfaces
@@ -543,6 +548,9 @@ function ServerCard({
   /// Called when the user clicks the runtime-install button. The
   /// caller decides which runtime (uv/node) based on the missing tool.
   onInstallRuntime: (runtime: "uv") => void;
+  /// Fired after a per-tool enable/disable toggle so the parent can
+  /// re-render (the disabled set lives in localStorage, not React state).
+  onToolToggle: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const badgeColor = starting ? "#FFB300"
@@ -669,18 +677,44 @@ function ServerCard({
       {expanded && status.tools.length > 0 && (
         <div style={{
           background: "rgba(0,0,0,0.3)", borderRadius: 6, padding: 10,
-          display: "flex", flexDirection: "column", gap: 6,
+          display: "flex", flexDirection: "column", gap: 8,
         }}>
-          {status.tools.map(t => (
-            <div key={t.name} style={{ fontSize: 11, color: "var(--fg)" }}>
-              <span style={{
-                color: "#9ad9ff", fontFamily: "Consolas, monospace", fontWeight: 600,
-              }}>mcp:{status.name}:{t.name}</span>
-              {t.description && (
-                <span style={{ color: "var(--fg-subtle)" }}> — {t.description}</span>
-              )}
-            </div>
-          ))}
+          {status.tools.map(t => {
+            const qualified = `mcp:${status.name}:${t.name}`;
+            const off = isMcpToolDisabled(qualified);
+            const gate = sanitizeToolParameters(t.inputSchema);
+            return (
+              <div key={t.name} style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 11, opacity: off ? 0.5 : 1 }}>
+                <label title={off ? "Disabled — hidden from agents" : "Enabled — advertised to agents"}
+                  style={{ display: "flex", alignItems: "center", cursor: "pointer", marginTop: 1 }}>
+                  <input
+                    type="checkbox"
+                    checked={!off}
+                    onChange={(e) => { setMcpToolDisabled(qualified, !e.target.checked); onToolToggle(); }}
+                  />
+                </label>
+                <div style={{ flex: 1 }}>
+                  <span style={{ color: "#9ad9ff", fontFamily: "Consolas, monospace", fontWeight: 600 }}>
+                    {qualified}
+                  </span>
+                  {gate.changed && (
+                    <span title={`Schema was auto-sanitized so it can't break tool-calling: ${gate.reason}`}
+                      style={{
+                        marginLeft: 6, fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+                        color: "#ffcc80", background: "rgba(255,179,0,0.14)",
+                        border: "1px solid rgba(255,179,0,0.4)", borderRadius: 3, padding: "1px 5px",
+                      }}>SANITIZED</span>
+                  )}
+                  {off && (
+                    <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#9E9E9E" }}>OFF</span>
+                  )}
+                  {t.description && (
+                    <span style={{ color: "var(--fg-subtle)" }}> — {t.description}</span>
+                  )}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>
@@ -793,6 +827,18 @@ export default function MCPPage() {
   // cards because there's only one uv install regardless of which
   // card triggered it.
   const [installingUv, setInstallingUv] = useState(false);
+  // MCP master switch — when off, formatToolsForOpenAI drops ALL MCP tools
+  // from the model's `tools` array (local tools stay). Mirrors localStorage.
+  const [masterEnabled, setMasterEnabled] = useState<boolean>(() => isMcpMasterEnabled());
+  // Bump to force a re-render after a per-tool toggle (disabled set lives
+  // in localStorage, not React state).
+  const [, setToolTick] = useState(0);
+
+  const toggleMaster = () => {
+    const next = !masterEnabled;
+    setMcpMasterEnabled(next);
+    setMasterEnabled(next);
+  };
 
   /// Quiet refresh — fetches status without toggling the global
   /// `loading` flag. Used by the 3-second background tick so the
@@ -931,8 +977,21 @@ export default function MCPPage() {
           🧩 MCP Servers
         </div>
         <span style={{ color: "var(--fg-subtle)", fontSize: 12 }}>
-          {servers.filter(s => s.running).length} running · {totalTools} tools advertised to agents
+          {servers.filter(s => s.running).length} running · {masterEnabled ? `${totalTools} tools advertised to agents` : "MCP tools OFF"}
         </span>
+        <button
+          onClick={toggleMaster}
+          title={masterEnabled
+            ? "MCP tools are ON — advertised to every agent. Click to turn all MCP tools off (local tools stay)."
+            : "MCP tools are OFF — agents see only built-in tools. Click to turn MCP tools back on."}
+          style={{
+            ...btnGhost,
+            background: masterEnabled ? "rgba(76,175,80,0.30)" : "rgba(158,158,158,0.25)",
+            border: `1px solid ${masterEnabled ? "rgba(76,175,80,0.6)" : "rgba(158,158,158,0.5)"}`,
+          }}
+        >
+          {masterEnabled ? "🟢 MCP tools ON" : "⚪ MCP tools OFF"}
+        </button>
         <button onClick={() => setDialog({ open: true, initial: null })} style={btnPrimary}>
           + Add Server
         </button>
@@ -943,9 +1002,26 @@ export default function MCPPage() {
 
       <div style={{ padding: "0 16px 8px", color: "var(--fg-subtle)", fontSize: 12, lineHeight: 1.5 }}>
         MCP servers are subprocess tool providers (typically npm packages run via npx).
-        Tools from running servers are auto-advertised to every agent as <code>mcp:&lt;server&gt;:&lt;tool&gt;</code>.
+        Servers marked <b>Auto-start</b> launch on app boot; their tools are advertised to
+        every agent as <code>mcp:&lt;server&gt;:&lt;tool&gt;</code>. Use the <b>MCP tools ON/OFF</b>
+        switch to drop all MCP tools at once (local tools stay), or the per-tool checkboxes
+        (<b>Show tools</b>) to silence a single one. Every MCP schema is auto-sanitized before
+        it reaches the model so one bad schema can't break tool-calling.
         Config persisted to <code>~/.owllm/mcp_config.json</code>.
       </div>
+
+      {!masterEnabled && (
+        <div style={{
+          margin: "0 16px 8px", padding: "8px 12px",
+          background: "rgba(158,158,158,0.12)", border: "1px solid rgba(158,158,158,0.4)",
+          borderRadius: 6, color: "var(--fg-subtle)", fontSize: 12, lineHeight: 1.5,
+        }}>
+          ⚪ MCP tools are <b>OFF</b> — agents currently see only built-in tools (read_file,
+          shell, web_search…). This is also the quickest way to test whether an MCP tool is
+          breaking agentic tool-calling: leave it off and re-run; if tools now fire, an MCP
+          schema was the culprit.
+        </div>
+      )}
 
       <div style={{
         flex: 1, overflow: "auto", padding: "0 16px 16px",
@@ -985,6 +1061,7 @@ export default function MCPPage() {
               onEdit={() => edit(s.name)}
               onRemove={() => remove(s.name)}
               onInstallRuntime={(rt) => installRuntime(rt, s.name)}
+              onToolToggle={() => setToolTick(t => t + 1)}
             />
           ))
         )}

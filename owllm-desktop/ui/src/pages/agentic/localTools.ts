@@ -1,27 +1,28 @@
-// XML-tag tool-call protocol for local llama-server.
+// Local tool registry + native tool-array builder for llama-server.
 //
-// Direct TypeScript port of LLM/core/agents/tools/parser.py — the
-// legacy Python desktop app uses this exact protocol because most
-// local GGUF models (GLM / Llama / Qwen / Gemma variants) don't
-// reliably support OpenAI-style function calling. An in-text XML
-// scheme is robust across every model and easy to teach via the
-// system prompt.
+// THE LIVE PROTOCOL IS NATIVE GGUF TOOL-CALLING (see CLAUDE.md). The model
+// gets an OpenAI `tools` array on /v1/chat/completions; llama-server --jinja
+// renders it through the GGUF's own template and parses the trained tool
+// tokens back into structured delta.tool_calls. There is NO XML protocol in
+// the live path — the old XML `<tool_call>` parser was deleted from the React
+// app (commit 129bcb13) and its Python twin quarantined to _legacy/.
 //
-// Protocol:
-//
-//   <tool_call name="write_file">
-//     <arg name="path">project/src/main.py</arg>
-//     <arg name="content">...</arg>
-//   </tool_call>
-//
-// The dispatch loop appends a tool-listing block to the system
-// prompt, streams a model turn, parses every <tool_call> out, runs
-// each one against the Rust commands in agent_tools.rs, appends the
-// results back into the conversation, and re-streams. Loop ends
-// when the model produces a turn with no tool_call blocks — that
-// turn is the final answer.
+// This module owns:
+//   - LOCAL_TOOL_SPECS — the built-in tools, each mapping to a Tauri command
+//     in agent_tools.rs.
+//   - formatToolsForOpenAI() — builds the `tools` array: local tools + MCP
+//     tools, gated by the MCP master switch / per-tool toggles, with every
+//     MCP inputSchema run through a SAFETY GATE so one malformed schema can't
+//     poison llama-server's tool grammar and break ALL tool-calling.
+//   - executeToolCall() — runs one native call against the Rust commands.
+//   - stripFabricatedToolOutput() — scrubs tool scaffolding some models still
+//     leak into visible content even though llama-server parsed the real call.
 
 import { invoke } from "@tauri-apps/api/core";
+import {
+  isMcpMasterEnabled,
+  getDisabledMcpTools,
+} from "./mcpSettings";
 
 export type ToolCall = {
   name: string;
@@ -75,13 +76,31 @@ export function stripFabricatedToolOutput(text: string): string {
 /// MCP tools are merged in; their `mcp:<server>:<tool>` names are
 /// rewritten to `mcp__server__tool` to satisfy the OpenAI name regex and
 /// reversed by unmangleMcpName on the way out.
-export async function formatToolsForOpenAI(_allowed?: string[]): Promise<unknown[]> {
+export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[]> {
   const out: unknown[] = [];
-  const mcpTools = await listAvailableMcpTools();
-  const searchMcpTools = mcpTools.filter(isMcpSearchTool);
-  const localTools = searchMcpTools.length > 0
+  // Allowlist sentinel: undefined / empty / ["all"] = unrestricted (the
+  // orchestrator passes undefined → every tool). A concrete list restricts
+  // to exactly those names (local names like "shell" or MCP qualified names
+  // like "mcp:github:create_issue"), honouring the role's tool_allowlist.
+  const allowSet = (allowed && allowed.length > 0 && !allowed.some((a) => a.toLowerCase() === "all"))
+    ? new Set(allowed)
+    : null;
+
+  // MCP master switch — when off, drop ALL MCP tools from the array (local
+  // tools stay). The schema gate below isolates bad schemas regardless, but
+  // this is the user's one-flip A/B lever from the MCP page.
+  const masterOn = isMcpMasterEnabled();
+  const disabled = getDisabledMcpTools();
+  const allMcp = masterOn ? await listAvailableMcpTools() : [];
+  const activeMcp = allMcp.filter((m) =>
+    !disabled.has(m.qualifiedName) && (!allowSet || allowSet.has(m.qualifiedName)),
+  );
+
+  const searchMcpTools = activeMcp.filter(isMcpSearchTool);
+  const localTools = (searchMcpTools.length > 0
     ? LOCAL_TOOL_SPECS.filter((t) => t.name !== "web_search")
-    : LOCAL_TOOL_SPECS;
+    : LOCAL_TOOL_SPECS
+  ).filter((t) => !allowSet || allowSet.has(t.name));
   for (const t of localTools) {
     const properties: Record<string, unknown> = {};
     const required: string[] = [];
@@ -102,25 +121,149 @@ export async function formatToolsForOpenAI(_allowed?: string[]): Promise<unknown
       },
     });
   }
-  // MCP tools — pull at request time so the catalog stays in sync as
-  // servers start/stop. Their inputSchema is already JSON Schema, so we
-  // can pass it through almost verbatim. Tool name has to be a valid
-  // OpenAI identifier (^[a-zA-Z0-9_-]+$); colons in mcp:<server>:<tool>
-  // get rewritten to underscores and back on the way out.
-  for (const m of mcpTools) {
+  // MCP tools — pulled at request time so the catalog stays in sync as
+  // servers start/stop. Each inputSchema is run through sanitizeToolParameters
+  // FIRST: an MCP server can ship a schema with $ref / oneOf / deep nesting /
+  // a non-object root that llama-server's --jinja tool grammar can't render —
+  // and a single bad schema in the array makes the model emit NO native calls
+  // at all (it falls back to narrating). The gate coerces such schemas to a
+  // safe object shape so one tool can never poison the whole array.
+  // mcp:<server>:<tool> → mcp__server__tool to satisfy the OpenAI name regex
+  // (^[a-zA-Z0-9_-]+$); reversed by unmangleMcpName on the way out.
+  for (const m of activeMcp) {
     const safeName = m.qualifiedName.replace(/:/g, "__");
     out.push({
       type: "function",
       function: {
         name: safeName,
         description: m.description || `MCP tool ${m.qualifiedName}`,
-        parameters: (m.inputSchema && typeof m.inputSchema === "object")
-          ? m.inputSchema
-          : { type: "object", properties: {} },
+        parameters: sanitizeToolParameters(m.inputSchema).schema,
       },
     });
   }
   return out;
+}
+
+// ---- MCP schema safety gate --------------------------------------------
+//
+// llama-server (--jinja) builds a constrained grammar from each tool's
+// `parameters` JSON Schema. It handles the common object-of-scalars shape
+// fine, but chokes on $ref / $defs / oneOf|anyOf|allOf unions / array-typed
+// `type` / deeply-nested or recursive schemas — and when grammar build fails
+// for ANY tool, the model stops emitting native tool_calls entirely (the
+// agentic "it just narrates Step 1…" failure). This gate rewrites any schema
+// into a safe, lossless-enough object shape: unsupported constructs collapse
+// to `{type:"string"}` (the arg still works, just as a string) rather than
+// dropping the tool. A per-call shape mismatch is a graceful single-tool
+// error; a poisoned grammar silently kills every tool. We choose the former.
+
+const SAFE_TYPES = new Set(["string", "number", "integer", "boolean", "array", "object", "null"]);
+const MAX_SCHEMA_DEPTH = 5;
+
+export type SchemaGateResult = {
+  schema: Record<string, unknown>;
+  /// True when the input was rewritten (display as "sanitized" in the UI).
+  changed: boolean;
+  /// Short human reason(s) for the rewrite, for the MCP page badge.
+  reason: string;
+};
+
+function sanitizeSchemaNode(node: unknown, depth: number, notes: Set<string>): Record<string, unknown> {
+  if (depth > MAX_SCHEMA_DEPTH || node == null || typeof node !== "object" || Array.isArray(node)) {
+    if (node != null) notes.add("collapsed unsupported node to string");
+    return { type: "string" };
+  }
+  const n = node as Record<string, unknown>;
+  // References / compositions the grammar can't resolve → collapse to a
+  // string arg, preserving the description so the model still knows intent.
+  if ("$ref" in n || "oneOf" in n || "anyOf" in n || "allOf" in n || "$defs" in n || "definitions" in n || "not" in n) {
+    notes.add("collapsed $ref/union to string");
+    const out: Record<string, unknown> = { type: "string" };
+    if (typeof n.description === "string") out.description = n.description;
+    return out;
+  }
+  let type: unknown = n.type;
+  if (Array.isArray(type)) {
+    type = type.map(String).find((t) => SAFE_TYPES.has(t) && t !== "null") ?? "string";
+    notes.add("narrowed union type");
+  }
+  if (typeof type !== "string" || !SAFE_TYPES.has(type)) {
+    type = (n.properties && typeof n.properties === "object") ? "object" : "string";
+    if (n.type != null) notes.add("replaced unsupported type");
+  }
+  const out: Record<string, unknown> = { type };
+  if (typeof n.description === "string") out.description = n.description;
+  if (Array.isArray(n.enum)) {
+    const safe = n.enum.filter((v) => ["string", "number", "boolean"].includes(typeof v));
+    if (safe.length > 0) out.enum = safe;
+  }
+  if (type === "object") {
+    const props = (n.properties && typeof n.properties === "object" && !Array.isArray(n.properties))
+      ? n.properties as Record<string, unknown> : {};
+    const sp: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(props)) sp[k] = sanitizeSchemaNode(v, depth + 1, notes);
+    out.properties = sp;
+    if (Array.isArray(n.required)) {
+      const req = n.required.filter((r): r is string => typeof r === "string" && r in sp);
+      if (req.length > 0) out.required = req;
+    }
+    out.additionalProperties = false;
+  } else if (type === "array") {
+    out.items = sanitizeSchemaNode(n.items ?? { type: "string" }, depth + 1, notes);
+  }
+  return out;
+}
+
+/// Run an MCP tool's raw inputSchema through the safety gate. Always returns
+/// a usable object-rooted schema; `changed`/`reason` report what was rewritten.
+export function sanitizeToolParameters(input: unknown): SchemaGateResult {
+  const notes = new Set<string>();
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return {
+      schema: { type: "object", properties: {} },
+      changed: input != null,
+      reason: input != null ? "non-object schema replaced with empty object" : "",
+    };
+  }
+  let root = sanitizeSchemaNode(input, 0, notes);
+  // OpenAI function parameters MUST be an object at the root.
+  if (root.type !== "object") {
+    notes.add("non-object root replaced with empty object");
+    root = { type: "object", properties: {} };
+  }
+  return { schema: root, changed: notes.size > 0, reason: [...notes].join("; ") };
+}
+
+/// One row of MCP-tool advertising status, for the MCP page. Combines the
+/// live aggregated tools with the schema-gate verdict and the per-tool
+/// disabled flag so the page can show toggles + "sanitized" badges.
+export type McpToolReportRow = {
+  qualifiedName: string;
+  server: string;
+  tool: string;
+  description: string;
+  disabled: boolean;
+  schemaChanged: boolean;
+  schemaReason: string;
+};
+
+/// Build the advertising report for the MCP page (master switch + per-tool
+/// toggles + schema-gate verdicts). Read-only; does not mutate settings.
+export async function getMcpToolReport(): Promise<McpToolReportRow[]> {
+  const tools = await listAvailableMcpTools();
+  const disabled = getDisabledMcpTools();
+  return tools.map((m) => {
+    const gate = sanitizeToolParameters(m.inputSchema);
+    return {
+      qualifiedName: m.qualifiedName,
+      server: m.server,
+      tool: m.tool,
+      description: m.description,
+      disabled: disabled.has(m.qualifiedName),
+      schemaChanged: gate.changed,
+      schemaReason: gate.reason,
+    };
+  });
 }
 
 /// Reverse the MCP name rewrite from formatToolsForOpenAI. Used by the

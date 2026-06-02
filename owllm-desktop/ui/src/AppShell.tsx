@@ -19,6 +19,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ALL_MODULES,
   ADVANCED,
+  AGENTIC,
   CORE,
   getInstalledModes,
   ModeId,
@@ -881,6 +882,25 @@ export default function AppShell() {
                   ?? visiblePages[0];
   const PageBody = activePage?.component;
 
+  // ----- Keep-alive for the Agentic "Agents" page -----
+  // A running team dispatch lives ENTIRELY inside AgentsPage (the
+  // dispatchGoal loop, its AbortController, and all the streaming state
+  // are component-local). The normal page swap below unmounts the active
+  // page on every tab/mode change, which tore down an in-flight run — the
+  // user came back to a dead, empty page. So once the user has visited the
+  // Agents page we mount it ONCE and keep it alive, toggling visibility
+  // with `display` instead of unmounting. Every other page still swaps.
+  const AgentsComponent = useMemo(
+    () => AGENTIC.pages.find(p => p.key === "agents")?.component ?? null,
+    [],
+  );
+  const agentsActive = activeKey === "agents";
+  const [agentsMounted, setAgentsMounted] = useState(false);
+  useEffect(() => {
+    if (agentsActive) setAgentsMounted(true);
+  }, [agentsActive]);
+  const keepAgentsAlive = agentsMounted && installed.includes("agentic") && AgentsComponent != null;
+
   const vp = useViewportSize();
   const appContent = (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -911,8 +931,22 @@ export default function AppShell() {
               Locate the Qt source for these affordances (search main.py
               for 'Rename' / '+ New' / 'workspace') and fix in the owning
               page file (e.g. TrainPage.tsx), not here in AppShell. */}
-          <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
-            {PageBody ? <PageBody /> : null}
+          <div style={{ flex: 1, overflow: "hidden", minHeight: 0, position: "relative" }}>
+            {/* Normal page swap for everything except the Agents page —
+                when Agents is active its persistent instance below shows
+                instead, so we don't double-mount it. */}
+            {agentsActive ? null : (PageBody ? <PageBody /> : null)}
+            {/* Persistent Agents page: mounted once visited, kept alive so
+                an in-flight team run survives navigation. Hidden (not
+                unmounted) when another page is active. */}
+            {keepAgentsAlive && AgentsComponent && (
+              <div style={{
+                position: "absolute", inset: 0,
+                display: agentsActive ? "block" : "none",
+              }}>
+                <AgentsComponent />
+              </div>
+            )}
           </div>
     </div>
   );

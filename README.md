@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/owl_hero.png" alt="OwLLM" width="450" />
+<img src="assets/owl_hero.png"  width="450" />
 
 # OwLLM
 

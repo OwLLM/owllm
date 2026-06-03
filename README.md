@@ -1,12 +1,12 @@
 <div align="center">
 
-<img src="assets/owl-hero.png" alt="OwLLM" width="160" />
+<img src="assets/owl-hero.svg" alt="OwLLM" width="180" />
 
 # OwLLM
 
-### Your GPU. Your models. Your team of AI agents.
+### Your team of AI agents. Build them. Own them. Run them anywhere.
 
-**Local-first AI workstation — run open-weight models, fine-tune them on your data, and orchestrate entire teams of specialised agents. No cloud required.**
+**OwLLM is an open platform to build, deploy, and run custom AI agent teams — on your hardware, your VPS, or in a VM, 24/7. Bring your own models: local, cloud, or both. Fine-tune. Quantize. Abliterate. Red-team. Automate.**
 
 <p align="center">
   <a href="https://github.com/OwLLM/owllm/releases/latest"><img src="https://img.shields.io/github/v/release/OwLLM/owllm?label=download&style=for-the-badge&color=3ec5d8" alt="Download" /></a>
@@ -15,112 +15,161 @@
   <a href="https://github.com/OwLLM/owllm/stargazers"><img src="https://img.shields.io/github/stars/OwLLM/owllm?style=for-the-badge&color=3ec5d8" alt="Stars" /></a>
 </p>
 
-<img src="assets/demo.gif" alt="OwLLM demo — six agents building a feature in parallel" width="720" />
-
 </div>
 
 ---
 
-## Why OwLLM
+## What makes OwLLM different
 
-- **Stop paying per token.** Your 4090 sits at 5% utilisation while you pay OpenAI. OwLLM puts it to work — open-weight models (Llama, Qwen, Mistral, DeepSeek) running on your GPU.
-- **Privacy by default.** Nothing leaves your machine. Critical for legal, medical, regulated industries — and respectful of everyone else.
-- **Multi-agent teams, not just chat.** 18+ pre-built specialist teams (code, research, design, data, writing, ops). The orchestrator routes work; the critic gates quality.
-- **Fine-tune on your data.** Full LoRA pipeline with Unsloth, TRL, PEFT. Watch loss curves in real time. Graceful Stop saves the checkpoint.
+Most AI tools give you a chatbox. **OwLLM gives you a workforce.**
 
-## What you can do with it
+You compose teams of specialised agents — an orchestrator that plans, a coder that writes, a critic that reviews, a researcher that fact-checks — and they collaborate on real tasks in parallel. Each team is a graph of roles + prompts you define. The 18 teams shipped in this repo are **starter samples**, not the menu.
 
-| | |
+| | What OwLLM gives you that others don't |
 |---|---|
-| 🤖 **Run local models** | Browse HuggingFace, pick a GGUF, click Start. Real `llama-server`, live VRAM monitoring, OOM-friendly hints. |
-| 👥 **Spin up agent teams** | `code_artisan` · `research_lab` · `data_analyst` · `product_studio` · `writers_room` · `secretary` · and 12 more. |
-| 🎓 **Fine-tune** | LoRA + Unsloth, dataset → adapter in your kitchen. Abliteration support for safety research. |
-| 🔌 **MCP-first tooling** | Plug in any MCP server (filesystem, git, browser, Postgres, etc.). One-click curated packs per team. |
-| ☁️ **Cloud as a peer** | Claude, GPT, Gemini, Kimi join the conversation as equals — when you provide keys. Local + cloud, same window. |
-| 📱 **Telegram / WhatsApp bridges** | Your agent team, on your phone. Voice messages transcribed locally with Whisper.cpp. |
-| 🎨 **Native desktop feel** | ~50 MB Tauri shell, not a 200 MB Electron blob. Frameless transparent HybridFrame chrome. Boots in under a second. |
+| 🧩 **Build your own teams** | Compose agents from 8 base roles + custom prompts. Visual graph builder. Hot-updates through this repo — push a team JSON, it lands on every installed app. |
+| ☁️ **Cloud OR local — same teams** | No 4090? Plug in Claude / GPT / Gemini / Kimi keys, teams work identically. Have a GPU? Run open-weight models locally and stop paying per token. Mix both in the same conversation. |
+| 🎓 **Fine-tune any model** | Full LoRA + Unsloth + TRL pipeline. Drop a JSONL, watch loss curves, save adapters. Works on consumer GPUs (8 GB+). |
+| 🔬 **Abliterate for safety research** | Orthogonalise weights against refusal directions. Generate adversarial datasets. Train better safety classifiers. The honest tools the field actually needs. |
+| 🛠 **GGUF + quantization built-in** | Convert HF safetensors → GGUF, quantize Q4/Q5/Q6/Q8/F16. Ship custom models anyone with llama.cpp can run. |
+| 🛡 **Red-team capable** | Compose adversarial agent teams whose *job* is to find vulnerabilities — in models, code, apps. Pair with fine-tuning to train defenders. |
+| 🔌 **MCP-first tooling** | Plug in any Model Context Protocol server (filesystem, git, browser, Postgres, GitHub, Brave…). Curated packs per team. |
+| 🏠 **Run anywhere** | Desktop today. **Headless on a $5/mo VPS, 24/7** — on the roadmap. Containerised / VM — on the roadmap. Your agents, your hardware, your terms. |
 
-## How it compares
+## What teams can do
 
-| | LM Studio | Ollama | Jan | Open WebUI | **OwLLM** |
-|---|:---:|:---:|:---:|:---:|:---:|
-| Local model runtime | ✅ | ✅ | ✅ | (via Ollama) | ✅ |
-| Fine-tuning UI | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Multi-agent teams | ❌ | ❌ | partial | partial | ✅ (18 pre-built) |
-| MCP tool integration | ❌ | ❌ | partial | partial | ✅ |
-| Parallel agents w/ git isolation | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Cloud models as peers | ❌ | ❌ | ✅ | ✅ | ✅ |
-| Telegram/WhatsApp bridges | ❌ | ❌ | ❌ | ❌ | ✅ |
-| Native shell (not Electron) | ✅ | n/a (CLI) | ❌ | ❌ (web) | ✅ |
-| Transparent / frameless UI | ❌ | n/a | ❌ | n/a | ✅ |
+OwLLM ships starter teams in nine categories. **All of them are forkable and remixable** — they're templates, not the menu. The real product is the team builder.
 
-## Install
+| Category | What teams here do | Starter samples |
+|---|---|---|
+| 🛠 **Code** | Architect → code → critic → refactor; bug hunting; reviews | `code_artisan`, `dev_squad`, `code_reviewer`, `bug_hunter` |
+| 🔬 **Research** | Multi-source synthesis with real citations, fact-checking | `research_lab`, `learning_tutor` |
+| 📊 **Data** | SQL → notebook → viz → narrative | `data_analyst` |
+| 🎨 **Design** | Product → UX → tech → critique | `product_studio` |
+| ✍️ **Writing** | Outline → draft → edit → SEO → publish | `writers_room`, `social_desk` |
+| 🤝 **Ops** | Triage → respond → schedule → digest | `secretary`, `concierge`, `customer_support` |
+| 💼 **Personal** | Calendar, finance, health, home automation | `finance`, `health_coach`, `smart_home` |
+| 🌐 **Social** | Outreach, support, community management | `sales_outreach`, `n8n_workflow_builder` |
+| 🛡 **Safety / Red-team** | Adversarial dataset generation, jailbreak research, refusal probing | *(build your own — see [data/teams/SCHEMA.md](data/teams/SCHEMA.md))* |
+| 🎮 **Gamify** | Agent-vs-agent, achievements, arena | *(in progress — Q4 2026)* |
 
-1. **[Download the installer](https://github.com/OwLLM/owllm/releases/latest)** (~30 MB)
-2. Run `OwLLM-Desktop-Setup-x64.exe`. Windows SmartScreen may flag it the first time (the build isn't EV-signed yet) — click "More info" → "Run anyway".
-3. On first launch, a **hardware-aware wizard** opens. It detects your GPU, RAM, disk, and offers the modules that fit:
-   - **Local Inference** (~33 MB CPU / ~32 MB Vulkan / ~285 MB CUDA) — needed to run any local model
-   - **Audio / Speech-to-Text** (~148 MB) — voice messages from Telegram, mic input
-   - **Fine-tuning** (~12 GB) — only if you have an NVIDIA GPU and intend to train
-   - **MCP toolchain** (~260 MB) — only if you want browser/git/postgres MCP servers
-4. Pick what you'll use, click Install, watch progress, done.
+[Browse the 18 starter teams →](data/teams/) · [Build your own →](CONTRIBUTING.md)
 
-If you're cloud-only (Claude/GPT keys, no GPU), you can skip the wizard entirely. The shell alone is enough for cloud-model chat + agent orchestration.
+## Build your own team — 5-minute walkthrough
 
-**System requirements:** Windows 10/11 x64. macOS and Linux planned. NVIDIA GPU with 8 GB+ VRAM recommended for local inference; 12 GB+ for fine-tuning. CPU-only mode works on any modern x64 machine (slower).
+1. Open **Studio** in the desktop app
+2. Drop in agents: orchestrator + 1..N specialists (coder, critic, researcher, brainstormer, devops, documentation, operator, …)
+3. Wire the dispatch graph (orchestrator → coder → critic → back to orchestrator)
+4. Write each agent's system prompt
+5. Save → team appears in your picker
+6. **Publish to the community** via PR against [`data/teams/`](data/teams/) — your team becomes one-click installable for every other user
 
-## Three agent teams you'll actually use on day one
+## Power tools nobody else ships
 
-- **`code_artisan`** — architect → coder → critic → refactorer loop. Drop it on a repo, give it a feature, walk away. Each agent works in its own git worktree.
-- **`research_lab`** — librarian → deep_reader → synthesizer → fact_checker → citer. Multi-source research with real citations, not hallucinated ones.
-- **`secretary`** — triager → responder + scheduler + digest. Hook it to Telegram and your inbox; it learns your style.
+### Fine-tune any open-weight model
+LoRA pipeline with Unsloth, TRL, PEFT, bitsandbytes. Llama / Qwen / Mistral / Gemma — anything on HuggingFace. Live loss curves, graceful Stop preserves checkpoints, resume-from-checkpoint and resume-adapter both supported. Runs on a 12 GB GPU.
 
-[Full team catalogue →](data/teams/)
+### Abliterate (refusal removal for safety research)
+Orthogonalise weight matrices against refusal directions (the Labonne / Arditi technique, packaged). Use cases:
+- AI safety labs training refusal classifiers need cleanly-uncensored teacher models
+- Red teams need models that don't sandbag jailbreak tests
+- Academic research on alignment failure modes
+
+The corpus prep + abliteration script ship together.
+
+### GGUF creation + quantization
+Convert HF safetensors → GGUF, quantize to Q4_K_M / Q5_K_M / Q6_K / Q8_0 / F16. The same pipeline that gives you tiny, fast custom models others can run on llama.cpp / Ollama / LM Studio.
+
+### Adversarial dataset generation
+Build a team whose role is to PROBE another model. Output: a labelled dataset of jailbreak attempts, refusal patterns, edge cases. Sells to AI safety labs. Trains your own filters.
+
+## Cloud or local — same teams, your choice
+
+You don't need a 4090. Many users will never have one.
+
+- **Cloud-only:** Plug in Claude / GPT / Gemini / Kimi API keys. Teams work identically. ~30 MB install, runs on any laptop.
+- **Local + cloud mix:** Have a 3060? Run Llama for the bulk, hand off to Claude for the hard parts in the same conversation. Save 90% on tokens.
+- **Local-only:** Have a 4090? Never touch a cloud API. Privacy by default. Stop paying per token forever.
+
+Same teams. Same agent definitions. Same UI. The model layer is just plumbing.
+
+## Run anywhere
+
+| Mode | Status | Use case |
+|---|:---:|---|
+| **Desktop (Windows)** | ✅ shipped | Daily-driver AI workstation on your laptop |
+| **Desktop (macOS / Linux)** | 🔜 Q3 2026 | Mac / Ubuntu users |
+| **Headless on VPS (24/7)** | 🔜 Q4 2026 | Run your custom teams on a $5/mo box. Reach them via Telegram, web, API. Always-on agentic services. |
+| **Containerised / VM** | 🔜 Q4 2026 | Drop OwLLM into your existing infra. |
+
+The team definitions, role prompts, MCP configs, and model selections are all portable across deployment modes — build a team once, run it anywhere.
+
+## Install (desktop)
+
+1. **[Download](https://github.com/OwLLM/owllm/releases/latest)** the installer (~30 MB)
+2. Run `OwLLM-Desktop-Setup-x64.exe`. Windows SmartScreen may flag it the first time (the binary isn't EV-signed yet) — click "More info" → "Run anyway".
+3. On first launch, a **hardware-aware wizard** opens. It detects your hardware and offers the modules that fit:
+   - **Local Inference** (~33 MB CPU / ~32 MB Vulkan / ~285 MB CUDA) — only needed if you want local models
+   - **Audio / Speech-to-Text** (~148 MB) — for voice messages, mic input
+   - **Fine-tuning** (~12 GB) — only if you'll train models
+   - **MCP toolchain** (~260 MB) — only if you want browser / git / postgres MCP servers
+
+**Cloud-only?** Skip the wizard entirely and just enter your API keys in Settings. The shell alone is enough for cloud-model chat + agent orchestration.
 
 ## How updates work
 
-OwLLM updates in three independent streams:
+Three independent update streams — small, fast, no full reinstalls:
 
-- **Shell** auto-updates on next launch (Tauri's signed updater).
-- **Modules** (llama backend, fine-tune env, audio, MCP toolchain) check for new versions per-launch, download in background, swap on next start. No full reinstalls.
-- **Data layer** (team templates, role prompts, model sampling profiles, MCP recommendations) pulls hot from `data/` in this repo. Push a fix here → it reaches every installed app within minutes, no rebuild.
+- **Shell** auto-updates via Tauri's signed updater
+- **Modules** (llama backend, fine-tune env, audio, MCP) check + swap per-launch
+- **Data layer** (team templates, role prompts, model profiles, MCP recommendations) hot-pulls from `data/` in this repo on launch. **A new team you contribute today reaches every installed app within minutes — no rebuild.**
 
-The data layer is **community-contributable** — see [CONTRIBUTING.md](CONTRIBUTING.md). New agent teams, new role definitions, new model profiles all land via pull request.
+That's why the data/ tree is open and community-driven even though the app binaries are closed-source.
 
 ## Roadmap
 
 - [x] Multi-agent dispatch with worktree isolation
-- [x] Modular installer with hardware-aware wizard
+- [x] Modular installer + hardware-aware wizard
 - [x] MCP-first tool architecture
+- [x] Fine-tuning + abliteration pipeline
+- [x] GGUF / quantization pipeline
 - [x] Telegram bridge
-- [ ] **macOS + Linux builds** — Q3 2026
-- [ ] **WhatsApp bridge** — Q3 2026
-- [ ] **TTS (voice output)** — Q4 2026
-- [ ] **Vision models** (LLaVA, Pixtral) — Q4 2026
-- [ ] **Director-mode approval gates** — Q4 2026
-- [ ] **Kanban-style multi-agent board** — Q1 2027
+- [ ] **Visual team builder** — Q3 2026
+- [ ] **macOS + Linux desktop** — Q3 2026
+- [ ] **24/7 headless / VPS mode** — Q4 2026
+- [ ] **Container / VM deployment** — Q4 2026
+- [ ] **Gamification** (agent-vs-agent arena, achievements) — Q4 2026 *(in progress)*
+- [ ] **WhatsApp bridge** — Q4 2026
+- [ ] **Vision models** (LLaVA / Pixtral) — Q4 2026
+- [ ] **Voice output (TTS)** — Q1 2027
+- [ ] **Public team marketplace** — Q1 2027
 
 Track active work in [Discussions → Roadmap](https://github.com/OwLLM/owllm/discussions).
+
+## Who's this for
+
+- **Indie devs & founders** — your AI workforce, not a SaaS subscription
+- **AI safety researchers** — abliteration, red-team teams, adversarial dataset gen
+- **Model creators** — fine-tune, quantize, ship GGUFs
+- **Automation builders** — replace n8n / Zapier with agents that understand *meaning*
+- **Privacy-bound teams** — legal, medical, defence, regulated industries
+- **Agencies** — run custom client agent teams 24/7 (when VPS mode lands)
+- **Power users** — anyone tired of generic chatboxes
 
 ## Community
 
 - 💬 [GitHub Discussions](https://github.com/OwLLM/owllm/discussions) — Q&A, show what you built, roadmap input
 - 🐛 [Issues](https://github.com/OwLLM/owllm/issues) — bug reports (use the template)
-- 🎨 [Contributing agent teams](CONTRIBUTING.md) — community-curated team packs
+- 🎨 [Contributing](CONTRIBUTING.md) — agent teams, roles, translations, docs
 
 ## License
 
-The contents of this repository (agent team templates, role definitions, registry, schemas, docs) are released under [MIT](LICENSE) — fork, modify, share custom team packs freely.
+Repository contents (agent teams, role definitions, registry, schemas, docs): [MIT](LICENSE) — fork freely, share team packs, build on it.
 
-The compiled OwLLM Desktop application distributed via [Releases](https://github.com/OwLLM/owllm/releases) is governed by its own [end-user license agreement](EULA.md). Source code for the application is not currently public.
+Application binaries via [Releases](https://github.com/OwLLM/owllm/releases): see [EULA.md](EULA.md). Source for the application itself is not currently public.
 
 ## Acknowledgements
 
-OwLLM stands on the shoulders of:
-- [llama.cpp](https://github.com/ggml-org/llama.cpp) (ggml-org) — the inference engine
-- [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (ggerganov) — local speech-to-text
-- [Tauri](https://tauri.app/) — the desktop shell
-- [Unsloth](https://github.com/unslothai/unsloth) — accelerated fine-tuning
-- [Model Context Protocol](https://modelcontextprotocol.io/) (Anthropic) — the tool standard
+Standing on the shoulders of: [llama.cpp](https://github.com/ggml-org/llama.cpp), [whisper.cpp](https://github.com/ggerganov/whisper.cpp), [Tauri](https://tauri.app/), [Unsloth](https://github.com/unslothai/unsloth), [Model Context Protocol](https://modelcontextprotocol.io/), and the open-weight model creators (Meta, Alibaba, Mistral, Google, DeepSeek, Anthropic for their safety research).
 
-If your local-AI work could use a workstation that respects your hardware, your data, and your time — give OwLLM a try. Star the repo if you do; it's the single best signal that this category is worth investing in further.
+**If you build something cool with OwLLM, share it in [Discussions → Show & Tell](https://github.com/OwLLM/owllm/discussions/categories/show-and-tell).** Stars are how this category proves itself worth investing in.

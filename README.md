@@ -9,10 +9,14 @@
 
 <p align="center">
   <a href="https://github.com/OwLLM/owllm/releases/latest"><img src="https://img.shields.io/github/v/release/OwLLM/owllm?label=download&style=for-the-badge&color=3ec5d8" alt="Download" /></a>
+  <img src="https://img.shields.io/badge/platform-Windows%20x64-3ec5d8?style=for-the-badge" alt="Platform: Windows x64" />
   <a href="https://github.com/OwLLM/owllm/discussions"><img src="https://img.shields.io/github/discussions/OwLLM/owllm?style=for-the-badge&color=3ec5d8" alt="Discussions" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/OwLLM/owllm?style=for-the-badge&color=3ec5d8" alt="License" /></a>
   <a href="https://github.com/OwLLM/owllm/stargazers"><img src="https://img.shields.io/github/stars/OwLLM/owllm?style=for-the-badge&color=3ec5d8" alt="Stars" /></a>
 </p>
+
+> [!IMPORTANT]
+> **OwLLM Desktop currently ships for Windows 10/11 (x64) only.** macOS (Apple Silicon + Intel) and Linux (x86_64) builds are on the roadmap for Q3 2026 — the cross-platform CI is already set up; the gating items are macOS code-signing and per-platform module ZIPs. See the [roadmap](#roadmap) below or watch the repo for release notifications.
 
 </div>
 
@@ -103,7 +107,7 @@ Same teams. Same agent definitions. Same UI. The model layer is just plumbing.
 
 The team definitions, role prompts, MCP configs, and model selections are all portable across deployment modes — build a team once, run it anywhere.
 
-## Install (desktop)
+## Install (Windows only — for now)
 
 1. **[Download](https://github.com/OwLLM/owllm/releases/latest)** the installer (~30 MB)
 2. Run `OwLLM-Desktop-Setup-x64.exe`. Windows SmartScreen may flag it the first time (the binary isn't EV-signed yet) — click "More info" → "Run anyway".

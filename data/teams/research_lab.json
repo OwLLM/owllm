@@ -1,0 +1,93 @@
+{
+  "name": "research_lab",
+  "display_name": "Research Lab",
+  "category": "Knowledge",
+  "description": "Deep-research workflow. Finds sources, reads them carefully, synthesises, fact-checks, and cites with source traceability.",
+  "visibility": "recommended",
+  "workflow_rank": 30,
+  "icon": "owl:owl_researcher",
+  "required_mcp": [
+    "mcp.browser",
+    "mcp.files"
+  ],
+  "mcp_pack": {
+    "summary": "Configures no-key search/fetch plus filesystem access for source gathering and local document reading.",
+    "risk": "read_only",
+    "approval_required": [],
+    "servers": [
+      {
+        "name": "duckduckgo",
+        "command": "uvx",
+        "args": ["duckduckgo-mcp-server"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "fetch",
+        "command": "uvx",
+        "args": ["mcp-server-fetch"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "filesystem",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
+        "env": {},
+        "enabled": true
+      }
+    ]
+  },
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Plans the research and assigns sources.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - librarian      : finds and lists candidate sources\n  - deep_reader    : extracts claims and quotes from a single source\n  - synthesizer    : combines extracted claims into a single narrative\n  - fact_checker   : reviews the synthesized output against the underlying sources\n  - citer          : adds citations and renders the final formatted output\n\nFlow: librarian -> for each source: deep_reader -> synthesizer -> fact_checker -> if approved, citer; otherwise back to synthesizer with the critic's notes."
+    },
+    {
+      "name": "librarian",
+      "base": "researcher",
+      "description": "Finds candidate sources for the question.",
+      "mcp_allowlist": ["mcp.browser.*", "mcp.files.*"],
+      "extra_prompt": "Focus: produce a numbered list of 5-10 candidate sources for the orchestrator's question. Each entry: title, URL or path, one-line relevance note. Do not summarise the content — that's the deep_reader's job."
+    },
+    {
+      "name": "deep_reader",
+      "base": "researcher",
+      "description": "Extracts claims and quotes from a single source.",
+      "mcp_allowlist": ["mcp.browser.*", "mcp.files.*"],
+      "extra_prompt": "Focus: given ONE source, produce a structured extract: 5-10 atomic claims with verbatim quotes and locator (page / section / URL fragment). No paraphrasing of the source's wording in quoted material."
+    },
+    {
+      "name": "synthesizer",
+      "base": "documentation",
+      "description": "Combines extracted claims into a single narrative.",
+      "extra_prompt": "Focus: weave the deep_reader's extracts into a coherent answer to the user's question. Keep claim provenance: every claim must trace to a specific source id from the librarian's list."
+    },
+    {
+      "name": "fact_checker",
+      "base": "critic",
+      "description": "Reviews the synthesized output against the underlying sources.",
+      "extra_prompt": "Focus: for each claim in the synthesizer's output, verify it against the deep_reader's extracts. Reply APPROVE / REVISE / REJECT with a list of unsupported or misattributed claims."
+    },
+    {
+      "name": "citer",
+      "base": "documentation",
+      "description": "Adds citations and renders the final output.",
+      "extra_prompt": "Focus: take the approved synthesis and emit final formatted output with inline citations (numbered footnotes) plus a sources block. Citation style: APA unless the user asks otherwise."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "librarian" },
+      { "source": "librarian", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "deep_reader" },
+      { "source": "deep_reader", "target": "synthesizer" },
+      { "source": "synthesizer", "target": "fact_checker" },
+      { "source": "fact_checker", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "citer" }
+    ]
+  }
+}

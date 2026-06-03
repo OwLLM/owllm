@@ -1,0 +1,43 @@
+name: 💡 Feature request
+description: Suggest a new capability for OwLLM Desktop.
+title: "[feat]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For **new agent teams** or **new role definitions**, please open a pull request directly against `data/teams/` or `data/roles/` — see [CONTRIBUTING.md](https://github.com/OwLLM/owllm/blob/main/CONTRIBUTING.md). Feature requests are for new application capabilities.
+
+        For open-ended ideas / discussion, prefer [Discussions → Ideas](https://github.com/OwLLM/owllm/discussions/categories/ideas).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the user goal or frustration. NOT the proposed solution yet.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What would the feature look like?
+      description: How would a user encounter and use it? Mockups / screenshots welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Workarounds you've tried, or related features in other tools.
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope guess
+      options:
+        - Small (a setting, a button, a tweak)
+        - Medium (a new page or a meaningful workflow)
+        - Large (a new module, vision/TTS/image-gen, a new bridge)
+        - Not sure

@@ -1,0 +1,99 @@
+name: 🐛 Bug report
+description: Something in OwLLM Desktop is broken or behaving unexpectedly.
+title: "[bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report! Please fill in as much as you can — the more we have up front, the faster we can fix it.
+
+        For **security vulnerabilities**, do not file here. See [SECURITY.md](https://github.com/OwLLM/owllm/blob/main/SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: OwLLM Desktop version
+      description: Find this on the in-app Info page, or in Settings.
+      placeholder: e.g. 0.2.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (Ubuntu / Debian)
+        - Linux (other)
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: GPU, VRAM, RAM. Find this in the in-app first-run wizard or the Info page.
+      placeholder: e.g. RTX 4090 24 GB · 64 GB RAM
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which area is affected?
+      options:
+        - Installer / first-run wizard
+        - Local model inference (llama-server)
+        - Fine-tuning / abliteration
+        - Agent teams (orchestration / dispatch / critic)
+        - MCP tooling
+        - Telegram / WhatsApp bridge
+        - Audio / Speech-to-Text
+        - UI / window chrome / theming
+        - Auto-update (shell or modules)
+        - Cloud model connector (Claude / GPT / Gemini / Kimi)
+        - Other (describe below)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, what did you get instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Paste relevant output from the in-app **Logs** page, or attach the file at
+        `%LOCALAPPDATA%\OwLLM Desktop\logs\` (Windows).
+      render: shell
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Checked first?
+      options:
+        - label: I searched existing Issues for duplicates.
+          required: true
+        - label: I'm on the latest released version (or noted the version above).
+          required: true

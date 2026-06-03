@@ -1,0 +1,55 @@
+{
+  "name": "learning_tutor",
+  "display_name": "Learning Tutor",
+  "category": "Knowledge",
+  "description": "Builds curricula, explains concepts, runs quizzes, schedules spaced-repetition reviews.",
+  "icon": "owl:owl_documentation",
+  "required_mcp": [
+    "mcp.files",
+    "mcp.calendar"
+  ],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Plans study sessions and routes to the right specialist.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - curriculum_planner : breaks a subject into a learning path\n  - explainer          : teaches one concept at a time, calibrated to the user's level\n  - quiz_master        : tests recall with active retrieval\n  - srs_scheduler      : schedules spaced-repetition reviews on the calendar\n\nFlow: curriculum_planner -> explainer (one concept) -> quiz_master -> srs_scheduler."
+    },
+    {
+      "name": "curriculum_planner",
+      "base": "documentation",
+      "description": "Breaks a subject into an ordered learning path.",
+      "extra_prompt": "Focus: produce a numbered learning path for a subject + level. Each step: concept name, prerequisites, one-line goal, estimated time. Bias toward fundamentals first; flag missing prereqs from the user's stated background."
+    },
+    {
+      "name": "explainer",
+      "base": "documentation",
+      "description": "Teaches one concept at a time, calibrated to the user's level.",
+      "extra_prompt": "Focus: teach ONE concept named by the orchestrator. Use this structure: (1) why it matters, (2) intuition with a concrete example, (3) precise definition, (4) common pitfall. Stop and ask the user if they're ready for the quiz."
+    },
+    {
+      "name": "quiz_master",
+      "base": "documentation",
+      "description": "Tests recall with active retrieval.",
+      "extra_prompt": "Focus: ask 3-5 short questions on the concept the explainer just taught. Mix recall and application. After the user answers, give per-question feedback (correct / partial / wrong) with a one-line correction. End with 'ready / needs review'."
+    },
+    {
+      "name": "srs_scheduler",
+      "base": "operator",
+      "description": "Schedules spaced-repetition reviews on the calendar.",
+      "mcp_allowlist": ["mcp.calendar.*", "mcp.files.*"],
+      "extra_prompt": "Focus: based on the quiz_master's verdict, schedule the next review (1-day if needs review, 3-day if shaky, 7-day if confident, doubling thereafter). Put a 10-minute hold on the user's calendar."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "curriculum_planner" },
+      { "source": "curriculum_planner", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "explainer" },
+      { "source": "explainer", "target": "quiz_master" },
+      { "source": "quiz_master", "target": "srs_scheduler" },
+      { "source": "srs_scheduler", "target": "orchestrator" }
+    ]
+  }
+}

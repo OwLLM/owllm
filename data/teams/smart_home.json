@@ -1,0 +1,59 @@
+{
+  "name": "smart_home",
+  "display_name": "Smart Home",
+  "category": "Ops",
+  "description": "Watches household events, plans automations, keeps a shopping list, announces to the family.",
+  "icon": "owl:owl_operator",
+  "required_mcp": [
+    "mcp.home_assistant",
+    "mcp.calendar",
+    "mcp.whatsapp",
+    "mcp.telegram"
+  ],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Plans household work and routes it.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - event_watcher      : watches Home Assistant events (motion, doors, energy spikes)\n  - automation_planner : drafts and reviews new automations\n  - shopping_keeper    : maintains the household shopping list\n  - family_announcer   : posts announcements to the family chat\n\nNever auto-modify automations. Every change to Home Assistant is approval-gated."
+    },
+    {
+      "name": "event_watcher",
+      "base": "operator",
+      "description": "Watches Home Assistant events.",
+      "mcp_allowlist": ["mcp.home_assistant.*"],
+      "extra_prompt": "Focus: read the event stream from Home Assistant for an interval the orchestrator names. Surface anomalies (door open while everyone's away, energy use 3x baseline, sensor offline). Pure read; never trigger devices."
+    },
+    {
+      "name": "automation_planner",
+      "base": "operator",
+      "description": "Drafts and reviews new automations.",
+      "mcp_allowlist": ["mcp.home_assistant.*"],
+      "extra_prompt": "Focus: turn the user's request ('lights off when nobody's home') into a Home Assistant automation YAML. Show the YAML and a plain-English summary; the user must approve before it's installed."
+    },
+    {
+      "name": "shopping_keeper",
+      "base": "documentation",
+      "description": "Maintains the household shopping list.",
+      "mcp_allowlist": ["mcp.whatsapp.*", "mcp.telegram.*"],
+      "extra_prompt": "Focus: read incoming family messages for shopping additions (regex patterns the user has trained, e.g. 'add X to the list'), append to the canonical list, and confirm in the family chat."
+    },
+    {
+      "name": "family_announcer",
+      "base": "operator",
+      "description": "Posts announcements to the family chat.",
+      "mcp_allowlist": ["mcp.whatsapp.*", "mcp.telegram.*"],
+      "extra_prompt": "Focus: post one-line announcements to the family group chat ('package arrived at the front door', 'leaving for school in 10 min'). Always show the draft for approval first; the message goes to a group, not just the user."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "event_watcher" },
+      { "source": "event_watcher", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "automation_planner" },
+      { "source": "orchestrator", "target": "shopping_keeper" },
+      { "source": "orchestrator", "target": "family_announcer" }
+    ]
+  }
+}

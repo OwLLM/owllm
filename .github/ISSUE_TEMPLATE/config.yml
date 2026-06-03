@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Discussions
+    url: https://github.com/OwLLM/owllm/discussions
+    about: Questions, show-what-you-built, open-ended ideas, roadmap input
+  - name: 🎨 Contribute an agent team or role
+    url: https://github.com/OwLLM/owllm/blob/main/CONTRIBUTING.md
+    about: Pull requests against data/teams/ or data/roles/ are the right path
+  - name: 🔒 Report a security vulnerability
+    url: https://github.com/OwLLM/owllm/security/advisories/new
+    about: Private vulnerability reporting — do NOT use public Issues for this

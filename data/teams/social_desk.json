@@ -1,0 +1,65 @@
+{
+  "name": "social_desk",
+  "display_name": "Social Desk",
+  "category": "Knowledge",
+  "description": "Trend-scout, copywriter, thumbnail briefer, scheduler, DM moderator. Multi-platform.",
+  "icon": "owl:owl_operator",
+  "required_mcp": [
+    "mcp.browser",
+    "mcp.twitter",
+    "mcp.linkedin",
+    "mcp.telegram"
+  ],
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Plans the day's posts and routes to the right specialist.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - trend_scout         : surfaces trending topics in the user's niche\n  - copywriter          : drafts platform-specific posts\n  - thumbnail_briefer   : writes image briefs (the user generates the images elsewhere)\n  - scheduler           : schedules approved posts to each platform\n  - moderator           : answers DMs from a constrained playbook\n\nNever auto-post. Every send is approval-gated."
+    },
+    {
+      "name": "trend_scout",
+      "base": "researcher",
+      "description": "Surfaces trending topics in the user's niche.",
+      "mcp_allowlist": ["mcp.browser.*", "mcp.twitter.*", "mcp.linkedin.*"],
+      "extra_prompt": "Focus: scan the user's configured niche feeds for the last 24h. Produce 3-5 trend candidates: short title, why it's hot, suggested angle for the user's voice."
+    },
+    {
+      "name": "copywriter",
+      "base": "documentation",
+      "description": "Drafts platform-specific posts.",
+      "extra_prompt": "Focus: write one post per requested platform (X, LinkedIn, IG caption, etc.) for the chosen trend. Match each platform's register and length. Include 3-5 hashtag suggestions for IG/X (none for LinkedIn unless the user has used them in the past)."
+    },
+    {
+      "name": "thumbnail_briefer",
+      "base": "documentation",
+      "description": "Writes image briefs for the post.",
+      "extra_prompt": "Focus: write a one-paragraph image brief: subject, composition, mood, color palette, text overlay if any. Output is a brief for image generation — no actual image creation in this step."
+    },
+    {
+      "name": "scheduler",
+      "base": "operator",
+      "description": "Schedules approved posts.",
+      "mcp_allowlist": ["mcp.twitter.*", "mcp.linkedin.*", "mcp.telegram.*"],
+      "extra_prompt": "Focus: schedule the approved post on each platform at the user's preferred time slot. State the platform, scheduled time, and post body for approval before invoking the side-effecting tool."
+    },
+    {
+      "name": "moderator",
+      "base": "operator",
+      "description": "Answers DMs from a constrained playbook.",
+      "mcp_allowlist": ["mcp.twitter.*", "mcp.linkedin.*", "mcp.telegram.*"],
+      "extra_prompt": "Focus: triage incoming DMs into {answer-with-template, escalate-to-user, ignore}. For 'answer-with-template', draft from the user's saved replies — never extemporise on the user's behalf. Always show the draft for approval."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "trend_scout" },
+      { "source": "trend_scout", "target": "copywriter" },
+      { "source": "copywriter", "target": "thumbnail_briefer" },
+      { "source": "thumbnail_briefer", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "scheduler" },
+      { "source": "orchestrator", "target": "moderator" }
+    ]
+  }
+}

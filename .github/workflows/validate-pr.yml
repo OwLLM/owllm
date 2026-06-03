@@ -1,0 +1,74 @@
+name: Validate PR
+
+# Lint + schema-check changes to data/teams/, data/roles/, data/modules/registry.json.
+# Runs on every PR. Comments specific failures so contributors can self-fix.
+
+on:
+  pull_request:
+    paths:
+      - "data/**"
+      - ".github/workflows/validate-pr.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate JSON files
+        run: |
+          set -e
+          fail=0
+          for f in $(find data -name "*.json"); do
+            if ! python3 -c "import json,sys; json.load(open('$f'))" 2>/dev/null; then
+              echo "::error file=$f::invalid JSON"
+              fail=1
+            fi
+          done
+          for f in $(find data -name "*.yaml" -o -name "*.yml"); do
+            if ! python3 -c "import yaml,sys; yaml.safe_load(open('$f'))" 2>/dev/null; then
+              echo "::error file=$f::invalid YAML"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: Lint team schemas
+        run: |
+          python3 <<'EOF'
+          import json, os, sys
+          fails = []
+          allowed_categories = {"code","research","data","design","writing","ops","personal","social","safety"}
+          for path in sorted(os.listdir("data/teams")):
+              if not path.endswith(".json"):
+                  continue
+              filepath = f"data/teams/{path}"
+              with open(filepath) as f:
+                  team = json.load(f)
+              expected_id = path[:-5]
+              if team.get("id") != expected_id:
+                  fails.append(f"{filepath}: id is {team.get('id')!r}, expected {expected_id!r} (must match filename)")
+              for required in ("id","displayName","description","category","agents","graph"):
+                  if required not in team:
+                      fails.append(f"{filepath}: missing required field '{required}'")
+              if team.get("category") not in allowed_categories:
+                  fails.append(f"{filepath}: category {team.get('category')!r} not in {sorted(allowed_categories)}")
+              agent_names = {a.get("name") for a in team.get("agents", [])}
+              for edge in team.get("graph", []):
+                  if edge.get("from") not in agent_names:
+                      fails.append(f"{filepath}: graph edge.from {edge.get('from')!r} is not a defined agent")
+                  if edge.get("to") not in agent_names:
+                      fails.append(f"{filepath}: graph edge.to {edge.get('to')!r} is not a defined agent")
+              for a in team.get("agents", []):
+                  prompt = a.get("systemPrompt", "")
+                  if len(prompt.split()) > 600:
+                      fails.append(f"{filepath}: agent {a.get('name')!r} systemPrompt is {len(prompt.split())} words (soft limit 600)")
+          if fails:
+              print("\n".join(fails))
+              sys.exit(1)
+          print(f"OK: {len(os.listdir('data/teams'))} team files validated")
+          EOF

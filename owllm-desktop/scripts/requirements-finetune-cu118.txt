@@ -1,0 +1,13 @@
+# Fine-tuning: base trainer + CUDA 11.8 (Turing fallback — RTX 20-series, T4, V100)
+# Used by bootstrap manifest variant `finetune-base-cu118`.
+# Unsloth requires newer CUDA, so this profile uses plain transformers+peft+trl.
+# pip download with --extra-index-url https://download.pytorch.org/whl/cu118
+torch==2.5.1
+transformers==4.46.0
+peft==0.13.0
+accelerate==1.1.0
+bitsandbytes==0.44.1
+datasets==3.0.1
+trl==0.11.4
+sentencepiece>=0.2.0
+protobuf>=4.25

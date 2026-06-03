@@ -37,13 +37,28 @@ if errorlevel 1 (
 rustup toolchain install stable-x86_64-pc-windows-gnu
 if errorlevel 1 exit /b 1
 
+rem Ensure module ZIPs exist for the bundle. bootstrap.bat is idempotent
+rem and re-uses cached downloads. Skip if dist\modules\manifest.json
+rem is already present (build-release was run recently) â€” bypass with
+rem `set OWLLM_REBUILD_MODULES=1` to force a refresh.
+if not defined OWLLM_REBUILD_MODULES (
+  if exist "%cd%\dist\modules\manifest.json" goto :modules_ready
+)
+echo [owllm-desktop] Bootstrapping module ZIPs ^(first run or rebuild^)...
+call "%cd%\bootstrap.bat"
+if errorlevel 1 (
+  echo [owllm-desktop] bootstrap.bat failed â€” see error above. Aborting.
+  exit /b 1
+)
+:modules_ready
+
 echo [owllm-desktop] Building web UI...
 call npm run build
 if errorlevel 1 exit /b 1
 
 echo [owllm-desktop] Building Tauri release with GNU toolchain on P-cores only ^(E-cores excluded to dodge CPU TLB errors^)...
 rem PowerShell sets affinity on the cmd that runs npm run tauri build
-rem — same effect as the previous `start /affinity FFFF /b /wait`
+rem â€” same effect as the previous `start /affinity FFFF /b /wait`
 rem invocation but WITHOUT swallowing the child's stdout/stderr (the
 rem old form ate every "Compiling owllm-desktop" + "Finished release"
 rem line, so silent cargo skips were invisible). Affinity FFFF =
@@ -59,14 +74,21 @@ set "DIST=%cd%\dist"
 if not exist "%DIST%" mkdir "%DIST%"
 copy /Y "%RELEASE%\owllm-desktop.exe" "%cd%\OwLLM Desktop.exe" >nul
 copy /Y "%RELEASE%\owllm-desktop.exe" "%DIST%\OwLLM Desktop.exe" >nul
-rem WebView2Loader.dll MUST sit next to the exe — without it Windows
+rem WebView2Loader.dll MUST sit next to the exe â€” without it Windows
 rem aborts startup with "WebView2Loader.dll was not found". The release
 rem build emits it into %RELEASE%; copy alongside both portable exes.
 if exist "%RELEASE%\WebView2Loader.dll" (
   copy /Y "%RELEASE%\WebView2Loader.dll" "%cd%\WebView2Loader.dll" >nul
   copy /Y "%RELEASE%\WebView2Loader.dll" "%DIST%\WebView2Loader.dll" >nul
 )
-copy /Y "%RELEASE%\bundle\nsis\OwLLM Desktop_0.1.0_x64-setup.exe" "%DIST%\OwLLM Desktop Setup.exe" >nul
+rem Pick the newest versioned NSIS installer Tauri's bundler emitted.
+rem Previously hardcoded `_0.1.0_` which silently copied a stale build
+rem after every version bump until v0.3.0 caught it.
+for /F "delims=" %%F in ('dir /B /O-D "%RELEASE%\bundle\nsis\OwLLM Desktop_*_x64-setup.exe" 2^>nul') do (
+  copy /Y "%RELEASE%\bundle\nsis\%%F" "%DIST%\OwLLM Desktop Setup.exe" >nul
+  goto :nsis_done
+)
+:nsis_done
 echo   Run now:       %cd%\OwLLM Desktop.exe
 echo   Dist exe:      %DIST%\OwLLM Desktop.exe
 echo   Dist setup:    %DIST%\OwLLM Desktop Setup.exe

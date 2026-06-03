@@ -31,6 +31,7 @@ import TelegramBridgeRunner from "./bridges/TelegramBridgeRunner";
 import ServerPage from "./pages/core/ServerPage";
 import BridgesPage from "./pages/agentic/BridgesPage";
 import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
+import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWizard";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -109,9 +110,12 @@ function WindowControls() {
     display: "flex", alignItems: "center", justifyContent: "center",
     borderRadius: 4,
   };
+  // Close glyph stays neutral (same colour as minimize/maximize) and
+  // only flushes red on hover — a permanently bright red ✕ read as an
+  // alarm next to the muted siblings.
   const closeBtn: React.CSSProperties = {
     ...fsBtn,
-    color: "#f44336",
+    color: "var(--bg-header-fg)",
     fontSize: 16,
   };
   const tinyBtn: React.CSSProperties = { ...fsBtn, fontSize: 16 };
@@ -159,9 +163,17 @@ function WindowControls() {
         title={tauri ? "Close" : undefined}
         style={closeBtn}
         onClick={tauri ? () => w!.close() : undefined}
-        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "rgba(244,67,54,0.20)"; }}
-        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent"; }}
-      >❌</button>
+        onMouseEnter={(e) => {
+          const b = e.currentTarget as HTMLButtonElement;
+          b.style.background = "rgba(244,67,54,0.85)";
+          b.style.color = "#ffffff";
+        }}
+        onMouseLeave={(e) => {
+          const b = e.currentTarget as HTMLButtonElement;
+          b.style.background = "transparent";
+          b.style.color = "var(--bg-header-fg)";
+        }}
+      >✕</button>
     </div>
   );
 }
@@ -977,6 +989,17 @@ export default function AppShell() {
         </PageModal>
       )}
       <TutorialRecorder enabled={advancedOpen} />
+      <FirstRunWizardMount />
     </>
   );
+}
+
+// First-run module wizard — gated by useNeedsFirstRunWizard. Renders an
+// overlay above the rest of the app on first launch when no modules are
+// installed yet. Dismissing it (Skip or Install) records `wizard.completed`
+// in localStorage so subsequent launches stay clean.
+function FirstRunWizardMount() {
+  const { needed, setDismissed } = useNeedsFirstRunWizard();
+  if (!needed) return null;
+  return <ModuleWizard mode="first-run" onClose={setDismissed} />;
 }

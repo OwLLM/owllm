@@ -145,3 +145,23 @@ LLM/tools/rust/
 # Cargo build output for bootstrap_rs — gigabytes once full deps
 # are downloaded, but trivially rebuildable from Cargo.toml + Cargo.lock.
 LLM/bootstrap/bootstrap_rs/target/
+
+# ---------------------------------------------------------------------
+# Module system (see data/modules/registry.json + SCHEMA.md).
+# Everything under runtime-data/ is downloaded by bootstrap.bat — never
+# commit. Same for the staging area where build-release.bat assembles
+# module ZIPs before upload. Drops ~25k files from the working tree.
+# ---------------------------------------------------------------------
+runtime-data/tools/
+runtime-data/vendor/
+runtime-data/.envs/
+runtime-data/python_runtime/
+runtime-data/runtime/
+runtime-data/models/
+python-app/bootstrap/bootstrap/
+python-app/twinforge_loop_out/
+owllm-desktop/dist/modules/
+owllm-desktop/resources/runtime/llama/
+owllm-desktop/resources/runtime/whisper.cpp/ggml-*.bin
+# Cargo target dir for the desktop crate — gigabytes, trivially rebuildable.
+owllm-desktop/src-tauri/target/

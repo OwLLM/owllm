@@ -34,6 +34,16 @@
 #   Auto-updater (Tauri signing, all platforms):
 #     TAURI_SIGNING_PRIVATE_KEY           — generated via `tauri signer generate`
 #     TAURI_SIGNING_PRIVATE_KEY_PASSWORD  — passphrase
+#
+#   Cross-repo publishing (REQUIRED — release fails without it):
+#     PUBLIC_REPO_TOKEN                   — Personal Access Token with `repo` scope
+#                                           on OwLLM/owllm. Used by the release
+#                                           step to upload installers cross-repo
+#                                           into the public distribution repo.
+#                                           Create at github.com/settings/tokens.
+#                                           This is NOT the default GITHUB_TOKEN
+#                                           because that one is scoped to this
+#                                           private source repo only.
 
 name: Release
 
@@ -465,18 +475,29 @@ jobs:
             echo "version=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create / update GitHub Release
+      - name: Create / update GitHub Release on OwLLM/owllm (public)
         uses: softprops/action-gh-release@v2
         with:
+          # Publish CROSS-REPO into the public distribution repository
+          # OwLLM/owllm — not into this private source repo. The
+          # PUBLIC_REPO_TOKEN secret must be a PAT with `repo` scope on
+          # OwLLM/owllm; create one at github.com/settings/tokens, then
+          # add as a repo secret in Settings -> Secrets -> Actions.
+          repository: OwLLM/owllm
+          token: ${{ secrets.PUBLIC_REPO_TOKEN }}
           name: OwLLM Desktop ${{ steps.resolve_version.outputs.version }}
           tag_name: ${{ steps.resolve_version.outputs.version }}
+          target_commitish: main
           # Always start as draft so a human can spot-check the
           # installers before flipping public. Promote with the gh CLI:
-          #   gh release edit <tag> --draft=false
+          #   gh release edit <tag> --repo OwLLM/owllm --draft=false
           draft: true
           prerelease: ${{ github.event.inputs.prerelease == 'true' }}
-          generate_release_notes: true
+          # generate_release_notes diffs against the previous tag IN THE
+          # TARGET repo. OwLLM/owllm has no source commits, so leave off
+          # and supply notes manually after the draft lands.
+          generate_release_notes: false
+          body: |
+            Auto-generated draft release built by `.github/workflows/release.yml` in the private source repo. Replace this body with real release notes before un-drafting (use the previous release's body as a template).
           files: |
             dist/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

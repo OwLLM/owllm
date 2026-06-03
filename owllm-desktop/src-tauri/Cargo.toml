@@ -1,6 +1,6 @@
 [package]
 name = "owllm-desktop"
-version = "0.1.0"
+version = "0.3.0"
 description = "OwLLM Desktop — Tauri + React. Rust owns the runtime; Python is invited on-demand only for fine-tuning."
 authors = ["LocaLLM"]
 edition = "2021"
@@ -25,6 +25,10 @@ tauri-build = { version = "2", features = [] }
 # distributed via the Mac App Store cannot use private APIs; this is a
 # non-issue for OwLLM since we ship via .dmg, not the App Store.
 tauri = { version = "2", features = ["macos-private-api"] }
+# Shell auto-update — checks a signed endpoint, downloads delta, swaps
+# the binary on next launch. See data/modules/SCHEMA.md "update flow"
+# for how this complements per-module updates.
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "time", "sync"] }

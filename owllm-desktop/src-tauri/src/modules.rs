@@ -1,0 +1,959 @@
+//! Module system — manifest types, resolver, ModuleManager + Tauri commands.
+//!
+//! Spec: `data/modules/SCHEMA.md` at the repo root. The shell ships
+//! ~80 MB; everything else (llama-server binaries, Python runtime,
+//! fine-tuning env, MCP toolchain, audio STT) is downloaded as a
+//! module after install.
+//!
+//! Storage layout under `app_data_dir()/modules/`:
+//!   installed.json                     — what's installed for this user
+//!   <variant-id>-<version>/            — extracted module payload
+//!   .previous/<variant-id>-<old-ver>/  — N-1 cached for rollback
+//!   .staging/<download-id>.zip         — partial downloads
+//!   registry.cache.json                — last successful registry fetch
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager, Runtime};
+
+pub const SCHEMA_VERSION: u32 = 1;
+
+pub const REGISTRY_URL: &str =
+    "https://raw.githubusercontent.com/OwLLM/owllm/main/data/modules/registry.json";
+
+const REGISTRY_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
+// ---------- registry.json (upstream, served via raw.githubusercontent) ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Registry {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: u32,
+    #[serde(rename = "registryVersion")]
+    pub registry_version: String,
+    #[serde(rename = "publishedAt")]
+    pub published_at: String,
+    pub channels: Vec<Channel>,
+    pub modules: Vec<Module>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    Stable,
+    Beta,
+    Nightly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Module {
+    pub id: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    pub description: String,
+    pub category: Category,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(rename = "uiSlots", default)]
+    pub ui_slots: Vec<String>,
+    #[serde(rename = "dependsOn", default)]
+    pub depends_on: Vec<String>,
+    pub variants: Vec<Variant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Category {
+    Runtime,
+    Training,
+    Audio,
+    Bridge,
+    Content,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Variant {
+    pub id: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    pub platform: Platform,
+    #[serde(default)]
+    pub requires: Requirements,
+    #[serde(rename = "sizeBytes")]
+    pub size_bytes: u64,
+    pub channels: BTreeMap<Channel, Release>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Platform {
+    #[serde(rename = "windows-x86_64")]
+    WindowsX86_64,
+    #[serde(rename = "linux-x86_64")]
+    LinuxX86_64,
+    #[serde(rename = "macos-aarch64")]
+    MacOsAarch64,
+}
+
+impl Platform {
+    pub fn host() -> Self {
+        #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+        {
+            Platform::WindowsX86_64
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            Platform::LinuxX86_64
+        }
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        {
+            Platform::MacOsAarch64
+        }
+        #[cfg(not(any(
+            all(target_os = "windows", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )))]
+        {
+            Platform::WindowsX86_64
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Requirements {
+    #[serde(default)]
+    pub gpu: Option<GpuVendor>,
+    #[serde(rename = "vramGb", default)]
+    pub vram_gb: Option<u32>,
+    #[serde(rename = "ramGb", default)]
+    pub ram_gb: Option<u32>,
+    #[serde(rename = "diskGb", default)]
+    pub disk_gb: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuVendor {
+    Nvidia,
+    Amd,
+    Intel,
+    Apple,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Release {
+    pub version: String,
+    #[serde(rename = "releasedAt")]
+    pub released_at: String,
+    #[serde(rename = "downloadUrl")]
+    pub download_url: String,
+    pub sha256: String,
+    #[serde(rename = "minShellVersion")]
+    pub min_shell_version: String,
+    #[serde(default)]
+    pub signature: Option<String>,
+}
+
+// ---------- installed.json (per-user, in app_data_dir/modules/) ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Installed {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: u32,
+    #[serde(rename = "updateChannel")]
+    pub update_channel: Channel,
+    pub modules: BTreeMap<String, InstalledModule>,
+}
+
+impl Default for Installed {
+    fn default() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            update_channel: Channel::Stable,
+            modules: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstalledModule {
+    pub variant: String,
+    pub version: String,
+    #[serde(default)]
+    pub channel: Option<Channel>,
+    #[serde(rename = "installedAt")]
+    pub installed_at: String,
+    pub path: String,
+    pub sha256: String,
+    #[serde(rename = "previousVersion", default)]
+    pub previous_version: Option<String>,
+}
+
+// ---------- hardware snapshot (built from hardware::HardwareInfo) ----------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HardwareSnapshot {
+    pub platform: Platform,
+    pub gpu_vendor: Option<GpuVendor>,
+    pub vram_gb: u32,
+    pub ram_gb: u32,
+    pub free_disk_gb: u32,
+}
+
+impl HardwareSnapshot {
+    pub fn from_probe(hw: &crate::hardware::HardwareInfo) -> Self {
+        let (gpu_vendor, vram_gb) = hw
+            .gpus
+            .iter()
+            .max_by_key(|g| g.vram_gb as u64)
+            .map(|g| {
+                let name = g.name.to_lowercase();
+                let vendor = if name.contains("nvidia") || name.contains("rtx") || name.contains("gtx") {
+                    Some(GpuVendor::Nvidia)
+                } else if name.contains("amd") || name.contains("radeon") {
+                    Some(GpuVendor::Amd)
+                } else if name.contains("intel") || name.contains("arc") {
+                    Some(GpuVendor::Intel)
+                } else {
+                    None
+                };
+                (vendor, g.vram_gb as u32)
+            })
+            .unwrap_or((None, 0));
+        Self {
+            platform: Platform::host(),
+            gpu_vendor,
+            vram_gb,
+            ram_gb: hw.ram_total_gb as u32,
+            free_disk_gb: probe_free_disk_gb().unwrap_or(50), // generous default
+        }
+    }
+}
+
+fn probe_free_disk_gb() -> Option<u32> {
+    // Cheap approach: ignore. Most install failures here would be obvious
+    // (out of disk) and we want to err on the side of showing modules
+    // as installable. Tighten later if needed.
+    None
+}
+
+// ---------- resolver ----------
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum ResolveError {
+    NoMatchingPlatform,
+    NoSatisfiableVariant { failed: Vec<(String, String)> },
+    NoChannelRelease,
+}
+
+pub fn resolve_variant<'m>(
+    module: &'m Module,
+    hardware: &HardwareSnapshot,
+    channel: Channel,
+) -> Result<(&'m Variant, &'m Release), ResolveError> {
+    let on_platform: Vec<&Variant> = module
+        .variants
+        .iter()
+        .filter(|v| v.platform == hardware.platform)
+        .collect();
+    if on_platform.is_empty() {
+        return Err(ResolveError::NoMatchingPlatform);
+    }
+
+    let mut failed: Vec<(String, String)> = Vec::new();
+    let mut scored: Vec<(u32, &Variant)> = Vec::new();
+    for v in on_platform {
+        match check_requirements(&v.requires, hardware) {
+            Ok(()) => scored.push((score_variant(v), v)),
+            Err(reason) => failed.push((v.id.clone(), reason)),
+        }
+    }
+    if scored.is_empty() {
+        return Err(ResolveError::NoSatisfiableVariant { failed });
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    let chosen = scored[0].1;
+    let release = chosen
+        .channels
+        .get(&channel)
+        .ok_or(ResolveError::NoChannelRelease)?;
+    Ok((chosen, release))
+}
+
+fn check_requirements(req: &Requirements, hw: &HardwareSnapshot) -> Result<(), String> {
+    if let Some(gpu) = req.gpu {
+        if hw.gpu_vendor != Some(gpu) {
+            return Err(format!("requires {:?} GPU, found {:?}", gpu, hw.gpu_vendor));
+        }
+    }
+    if let Some(min) = req.vram_gb {
+        if hw.vram_gb < min {
+            return Err(format!("requires {min} GB VRAM, has {}", hw.vram_gb));
+        }
+    }
+    if let Some(min) = req.ram_gb {
+        if hw.ram_gb < min {
+            return Err(format!("requires {min} GB RAM, has {}", hw.ram_gb));
+        }
+    }
+    if let Some(min) = req.disk_gb {
+        if hw.free_disk_gb < min {
+            return Err(format!("requires {min} GB free disk, has {}", hw.free_disk_gb));
+        }
+    }
+    Ok(())
+}
+
+fn score_variant(v: &Variant) -> u32 {
+    if v.id.contains("cuda") {
+        300
+    } else if v.id.contains("vulkan") {
+        200
+    } else if v.id.contains("cpu") {
+        100
+    } else {
+        50
+    }
+}
+
+/// Topo-sort dependencies. Returns module ids in install order (deps first).
+pub fn topo_install_order<'r>(
+    registry: &'r Registry,
+    target: &str,
+) -> Result<Vec<&'r Module>, String> {
+    let by_id: BTreeMap<&str, &Module> = registry.modules.iter().map(|m| (m.id.as_str(), m)).collect();
+    let mut visited: std::collections::BTreeSet<String> = Default::default();
+    let mut visiting: std::collections::BTreeSet<String> = Default::default();
+    let mut out: Vec<&Module> = Vec::new();
+    fn visit<'r>(
+        id: &str,
+        by_id: &BTreeMap<&str, &'r Module>,
+        visited: &mut std::collections::BTreeSet<String>,
+        visiting: &mut std::collections::BTreeSet<String>,
+        out: &mut Vec<&'r Module>,
+    ) -> Result<(), String> {
+        if visited.contains(id) {
+            return Ok(());
+        }
+        if !visiting.insert(id.to_string()) {
+            return Err(format!("dependency cycle through {id}"));
+        }
+        let m = by_id
+            .get(id)
+            .ok_or_else(|| format!("unknown module: {id}"))?;
+        for dep in &m.depends_on {
+            visit(dep, by_id, visited, visiting, out)?;
+        }
+        visiting.remove(id);
+        visited.insert(id.to_string());
+        out.push(m);
+        Ok(())
+    }
+    visit(target, &by_id, &mut visited, &mut visiting, &mut out)?;
+    Ok(out)
+}
+
+// ---------- ModuleStatus (joins registry + installed + hardware) ----------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModuleStatus {
+    pub id: String,
+    #[serde(rename = "displayName")]
+    pub display_name: String,
+    pub description: String,
+    pub category: Category,
+    #[serde(rename = "uiSlots")]
+    pub ui_slots: Vec<String>,
+    #[serde(rename = "dependsOn")]
+    pub depends_on: Vec<String>,
+    pub state: ModuleState,
+    #[serde(rename = "recommendedVariant")]
+    pub recommended_variant: Option<String>,
+    #[serde(rename = "recommendedSizeBytes")]
+    pub recommended_size_bytes: Option<u64>,
+    #[serde(rename = "installedVersion")]
+    pub installed_version: Option<String>,
+    #[serde(rename = "availableVersion")]
+    pub available_version: Option<String>,
+    #[serde(rename = "blockReasons")]
+    pub block_reasons: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModuleState {
+    NotInstalled,
+    Installed,
+    UpdateAvailable,
+    NotSupported, // hardware can't run any variant
+}
+
+// ---------- ModuleManager ----------
+
+pub struct ModuleManager {
+    root: PathBuf,
+    installed: Mutex<Installed>,
+    cached_registry: Mutex<Option<Registry>>,
+}
+
+impl ModuleManager {
+    pub fn new<R: Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
+        let app_data = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app_data_dir: {e}"))?;
+        let root = app_data.join("modules");
+        fs::create_dir_all(&root).map_err(|e| format!("create modules root: {e}"))?;
+        fs::create_dir_all(root.join(".staging")).ok();
+        fs::create_dir_all(root.join(".previous")).ok();
+        let installed = load_installed(&root);
+        Ok(Self {
+            root,
+            installed: Mutex::new(installed),
+            cached_registry: Mutex::new(None),
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn variant_path(&self, module_id: &str) -> Option<PathBuf> {
+        let installed = self.installed.lock().ok()?;
+        let im = installed.modules.get(module_id)?;
+        Some(self.root.join(&im.path))
+    }
+
+    pub fn channel(&self) -> Channel {
+        self.installed
+            .lock()
+            .map(|i| i.update_channel)
+            .unwrap_or(Channel::Stable)
+    }
+
+    pub async fn fetch_registry(&self) -> Result<Registry, String> {
+        let client = reqwest::Client::builder()
+            .timeout(REGISTRY_FETCH_TIMEOUT)
+            .build()
+            .map_err(|e| format!("http client: {e}"))?;
+        match client.get(REGISTRY_URL).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let text = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+                let reg: Registry = serde_json::from_str(&text)
+                    .map_err(|e| format!("parse registry: {e}"))?;
+                // Cache to disk.
+                let cache_path = self.root.join("registry.cache.json");
+                let _ = fs::write(&cache_path, &text);
+                *self.cached_registry.lock().unwrap() = Some(reg.clone());
+                Ok(reg)
+            }
+            _ => {
+                // Network or non-2xx — fall back to disk cache.
+                let cache_path = self.root.join("registry.cache.json");
+                if let Ok(text) = fs::read_to_string(&cache_path) {
+                    if let Ok(reg) = serde_json::from_str::<Registry>(&text) {
+                        return Ok(reg);
+                    }
+                }
+                // Last-ditch: bundled fallback embedded at compile time.
+                let bundled = include_str!("../../../data/modules/registry.json");
+                serde_json::from_str(bundled)
+                    .map_err(|e| format!("bundled registry parse: {e}"))
+            }
+        }
+    }
+
+    pub async fn list(&self, hardware: &HardwareSnapshot) -> Result<Vec<ModuleStatus>, String> {
+        let registry = self.fetch_registry().await?;
+        let channel = self.channel();
+        let installed = self.installed.lock().unwrap().clone();
+        let mut out = Vec::with_capacity(registry.modules.len());
+        for m in &registry.modules {
+            let installed_m = installed.modules.get(&m.id);
+            let resolution = resolve_variant(m, hardware, channel);
+            let (state, recommended_variant, recommended_size, available_version, block_reasons) =
+                match (&resolution, installed_m) {
+                    (Ok((v, r)), Some(im)) => {
+                        let state = if im.version == r.version {
+                            ModuleState::Installed
+                        } else {
+                            ModuleState::UpdateAvailable
+                        };
+                        (
+                            state,
+                            Some(v.id.clone()),
+                            Some(v.size_bytes),
+                            Some(r.version.clone()),
+                            vec![],
+                        )
+                    }
+                    (Ok((v, r)), None) => (
+                        ModuleState::NotInstalled,
+                        Some(v.id.clone()),
+                        Some(v.size_bytes),
+                        Some(r.version.clone()),
+                        vec![],
+                    ),
+                    (Err(ResolveError::NoSatisfiableVariant { failed }), _) => (
+                        ModuleState::NotSupported,
+                        None,
+                        None,
+                        None,
+                        failed.clone(),
+                    ),
+                    (Err(_), _) => (
+                        ModuleState::NotSupported,
+                        None,
+                        None,
+                        None,
+                        vec![("platform".into(), "no variant for this OS".into())],
+                    ),
+                };
+            out.push(ModuleStatus {
+                id: m.id.clone(),
+                display_name: m.display_name.clone(),
+                description: m.description.clone(),
+                category: m.category,
+                ui_slots: m.ui_slots.clone(),
+                depends_on: m.depends_on.clone(),
+                state,
+                recommended_variant,
+                recommended_size_bytes: recommended_size,
+                installed_version: installed_m.map(|im| im.version.clone()),
+                available_version,
+                block_reasons,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn install<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        module_id: &str,
+        hardware: &HardwareSnapshot,
+    ) -> Result<InstalledModule, String> {
+        let registry = self.fetch_registry().await?;
+        let channel = self.channel();
+        let chain = topo_install_order(&registry, module_id)?;
+        let mut last: Option<InstalledModule> = None;
+        for m in chain {
+            let (variant, release) = resolve_variant(m, hardware, channel)
+                .map_err(|e| format!("resolve {}: {:?}", m.id, e))?;
+
+            // Skip if already at same version.
+            {
+                let installed = self.installed.lock().unwrap();
+                if let Some(im) = installed.modules.get(&m.id) {
+                    if im.version == release.version {
+                        last = Some(im.clone());
+                        emit_progress(app, &m.id, ProgressEvent::Skipped { reason: "already at target version".into() });
+                        continue;
+                    }
+                }
+            }
+
+            emit_progress(app, &m.id, ProgressEvent::Started {
+                variant: variant.id.clone(),
+                version: release.version.clone(),
+                size_bytes: variant.size_bytes,
+            });
+
+            // Download to staging.
+            let staging = self.root.join(".staging").join(format!(
+                "{}-{}.zip",
+                variant.id, release.version
+            ));
+            download_with_progress(app, &m.id, &release.download_url, &staging, variant.size_bytes).await?;
+
+            // Verify hash.
+            emit_progress(app, &m.id, ProgressEvent::Verifying);
+            verify_sha256(&staging, &release.sha256)?;
+
+            // Extract to <variant-id>-<version>/.
+            let dest_dir_name = format!("{}-{}", variant.id, release.version);
+            let dest = self.root.join(&dest_dir_name);
+
+            // Rotate existing → .previous/ for rollback.
+            if dest.exists() {
+                let prev = self.root.join(".previous").join(&dest_dir_name);
+                let _ = fs::remove_dir_all(&prev);
+                fs::rename(&dest, &prev).map_err(|e| format!("rotate to previous: {e}"))?;
+            }
+
+            emit_progress(app, &m.id, ProgressEvent::Extracting);
+            extract_zip(&staging, &dest)?;
+            let _ = fs::remove_file(&staging);
+
+            // Record in installed.json.
+            let im = InstalledModule {
+                variant: variant.id.clone(),
+                version: release.version.clone(),
+                channel: Some(channel),
+                installed_at: chrono::Utc::now().to_rfc3339(),
+                path: dest_dir_name.clone(),
+                sha256: release.sha256.clone(),
+                previous_version: self
+                    .installed
+                    .lock()
+                    .unwrap()
+                    .modules
+                    .get(&m.id)
+                    .map(|p| p.version.clone()),
+            };
+            {
+                let mut installed = self.installed.lock().unwrap();
+                installed.modules.insert(m.id.clone(), im.clone());
+                save_installed(&self.root, &installed)?;
+            }
+            emit_progress(app, &m.id, ProgressEvent::Completed);
+            last = Some(im);
+        }
+        last.ok_or_else(|| "no module installed".into())
+    }
+
+    pub fn uninstall(&self, module_id: &str) -> Result<(), String> {
+        let mut installed = self.installed.lock().unwrap();
+        let im = installed
+            .modules
+            .remove(module_id)
+            .ok_or_else(|| format!("not installed: {module_id}"))?;
+        let _ = fs::remove_dir_all(self.root.join(&im.path));
+        save_installed(&self.root, &installed)?;
+        Ok(())
+    }
+
+    pub fn set_channel(&self, channel: Channel) -> Result<(), String> {
+        let mut installed = self.installed.lock().unwrap();
+        installed.update_channel = channel;
+        save_installed(&self.root, &installed)
+    }
+}
+
+// ---------- progress events ----------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "stage", rename_all = "kebab-case")]
+pub enum ProgressEvent {
+    Started {
+        variant: String,
+        version: String,
+        #[serde(rename = "sizeBytes")]
+        size_bytes: u64,
+    },
+    Downloading {
+        #[serde(rename = "bytesDone")]
+        bytes_done: u64,
+        #[serde(rename = "bytesTotal")]
+        bytes_total: u64,
+    },
+    Verifying,
+    Extracting,
+    Completed,
+    Skipped {
+        reason: String,
+    },
+    Failed {
+        error: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProgressPayload {
+    module: String,
+    #[serde(flatten)]
+    event: ProgressEvent,
+}
+
+fn emit_progress<R: Runtime>(app: &AppHandle<R>, module_id: &str, event: ProgressEvent) {
+    let _ = app.emit(
+        "module-progress",
+        ProgressPayload {
+            module: module_id.to_string(),
+            event,
+        },
+    );
+}
+
+// ---------- download / verify / extract helpers ----------
+
+async fn download_with_progress<R: Runtime>(
+    app: &AppHandle<R>,
+    module_id: &str,
+    url: &str,
+    dest: &Path,
+    expected_size: u64,
+) -> Result<(), String> {
+    use futures_util::StreamExt;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(600))
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("GET {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("GET {url}: HTTP {}", resp.status()));
+    }
+    let total = resp.content_length().unwrap_or(expected_size);
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    let mut file = fs::File::create(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let mut last_emit: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("stream chunk: {e}"))?;
+        file.write_all(&chunk).map_err(|e| format!("write: {e}"))?;
+        downloaded += chunk.len() as u64;
+        if downloaded - last_emit > 1_000_000 || downloaded == total {
+            emit_progress(
+                app,
+                module_id,
+                ProgressEvent::Downloading {
+                    bytes_done: downloaded,
+                    bytes_total: total,
+                },
+            );
+            last_emit = downloaded;
+        }
+    }
+    Ok(())
+}
+
+fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
+    // Zero-hash sentinel skips verification — used while registry hashes
+    // are placeholders during initial publish. Once real hashes land,
+    // any tampering or corruption is caught.
+    if expected_hex.chars().all(|c| c == '0') {
+        return Ok(());
+    }
+    let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    let got = h.finalize();
+    let got_hex = got
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    if got_hex.eq_ignore_ascii_case(expected_hex) {
+        Ok(())
+    } else {
+        Err(format!(
+            "sha256 mismatch: expected {expected_hex}, got {got_hex}"
+        ))
+    }
+}
+
+fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    fs::create_dir_all(dest).map_err(|e| format!("create {}: {e}", dest.display()))?;
+    let file = fs::File::open(zip_path).map_err(|e| format!("open {}: {e}", zip_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip open: {e}"))?;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?;
+        let rel = entry
+            .enclosed_name()
+            .ok_or_else(|| format!("unsafe zip entry: {}", entry.name()))?
+            .to_owned();
+        let out_path = dest.join(&rel);
+        if entry.is_dir() {
+            fs::create_dir_all(&out_path).ok();
+        } else {
+            if let Some(parent) = out_path.parent() {
+                fs::create_dir_all(parent).ok();
+            }
+            let mut out = fs::File::create(&out_path)
+                .map_err(|e| format!("create {}: {e}", out_path.display()))?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|e| format!("extract {}: {e}", out_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+// ---------- installed.json IO ----------
+
+fn load_installed(root: &Path) -> Installed {
+    let path = root.join("installed.json");
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_installed(root: &Path, installed: &Installed) -> Result<(), String> {
+    let path = root.join("installed.json");
+    let text = serde_json::to_string_pretty(installed)
+        .map_err(|e| format!("serialize installed.json: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|e| format!("rename installed.json: {e}"))
+}
+
+// ---------- Tauri commands ----------
+
+#[tauri::command]
+pub async fn module_list<R: Runtime>(app: AppHandle<R>) -> Result<Vec<ModuleStatus>, String> {
+    let manager = app.state::<ModuleManager>();
+    let hw = crate::hardware::hardware_info().await.unwrap_or_default();
+    let snap = HardwareSnapshot::from_probe(&hw);
+    manager.list(&snap).await
+}
+
+#[tauri::command]
+pub async fn module_hardware_snapshot() -> Result<HardwareSnapshot, String> {
+    let hw = crate::hardware::hardware_info().await.unwrap_or_default();
+    Ok(HardwareSnapshot::from_probe(&hw))
+}
+
+#[tauri::command]
+pub async fn module_install<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<InstalledModule, String> {
+    let manager = app.state::<ModuleManager>().inner();
+    // Re-fetch hardware so the wizard's earlier snapshot can't go stale.
+    let hw = crate::hardware::hardware_info().await.unwrap_or_default();
+    let snap = HardwareSnapshot::from_probe(&hw);
+    let app2 = app.clone();
+    let id_clone = id.clone();
+    let result = manager.install(&app2, &id, &snap).await;
+    if let Err(e) = &result {
+        emit_progress(&app, &id_clone, ProgressEvent::Failed { error: e.clone() });
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn module_uninstall<R: Runtime>(app: AppHandle<R>, id: String) -> Result<(), String> {
+    app.state::<ModuleManager>().uninstall(&id)
+}
+
+#[tauri::command]
+pub async fn module_set_channel<R: Runtime>(
+    app: AppHandle<R>,
+    channel: Channel,
+) -> Result<(), String> {
+    app.state::<ModuleManager>().set_channel(channel)
+}
+
+#[tauri::command]
+pub async fn module_variant_path<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<Option<String>, String> {
+    Ok(app
+        .state::<ModuleManager>()
+        .variant_path(&id)
+        .map(|p| p.to_string_lossy().to_string()))
+}
+
+// ---------- tests ----------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rtx_3090() -> HardwareSnapshot {
+        HardwareSnapshot {
+            platform: Platform::WindowsX86_64,
+            gpu_vendor: Some(GpuVendor::Nvidia),
+            vram_gb: 24,
+            ram_gb: 64,
+            free_disk_gb: 500,
+        }
+    }
+
+    fn cpu_only_laptop() -> HardwareSnapshot {
+        HardwareSnapshot {
+            platform: Platform::WindowsX86_64,
+            gpu_vendor: None,
+            vram_gb: 0,
+            ram_gb: 16,
+            free_disk_gb: 100,
+        }
+    }
+
+    fn parse_registry() -> Registry {
+        let raw = include_str!("../../../data/modules/registry.json");
+        serde_json::from_str(raw).expect("registry.json parses against types")
+    }
+
+    #[test]
+    fn registry_parses() {
+        let r = parse_registry();
+        assert_eq!(r.schema_version, SCHEMA_VERSION);
+        for id in [
+            "local-inference",
+            "audio-stt",
+            "python-runtime",
+            "finetune",
+            "mcp-toolchain",
+            "tools-python",
+        ] {
+            assert!(r.modules.iter().any(|m| m.id == id), "missing module: {id}");
+        }
+    }
+
+    #[test]
+    fn finetune_depends_on_python_runtime() {
+        let r = parse_registry();
+        let ft = r.modules.iter().find(|m| m.id == "finetune").unwrap();
+        assert!(ft.depends_on.iter().any(|d| d == "python-runtime"));
+    }
+
+    #[test]
+    fn rtx_3090_gets_cuda_inference() {
+        let r = parse_registry();
+        let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
+        let (v, _) = resolve_variant(m, &rtx_3090(), Channel::Stable).unwrap();
+        assert_eq!(v.id, "local-inference-cuda");
+    }
+
+    #[test]
+    fn cpu_laptop_gets_cpu_inference_not_cuda() {
+        let r = parse_registry();
+        let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
+        let (v, _) = resolve_variant(m, &cpu_only_laptop(), Channel::Stable).unwrap();
+        assert_eq!(v.id, "local-inference-cpu");
+    }
+
+    #[test]
+    fn cpu_laptop_cannot_finetune() {
+        let r = parse_registry();
+        let m = r.modules.iter().find(|m| m.id == "finetune").unwrap();
+        let err = resolve_variant(m, &cpu_only_laptop(), Channel::Stable).unwrap_err();
+        match err {
+            ResolveError::NoSatisfiableVariant { failed } => {
+                assert!(failed.iter().any(|(_, why)| why.contains("Nvidia") || why.contains("GPU")));
+            }
+            other => panic!("expected NoSatisfiableVariant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn finetune_topo_includes_python_runtime_first() {
+        let r = parse_registry();
+        let chain = topo_install_order(&r, "finetune").unwrap();
+        assert_eq!(chain[0].id, "python-runtime");
+        assert_eq!(chain.last().unwrap().id, "finetune");
+    }
+
+    #[test]
+    fn mcp_toolchain_topo_includes_python_runtime() {
+        let r = parse_registry();
+        let chain = topo_install_order(&r, "mcp-toolchain").unwrap();
+        let ids: Vec<&str> = chain.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"python-runtime"));
+        assert!(ids.contains(&"mcp-toolchain"));
+    }
+}

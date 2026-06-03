@@ -20,6 +20,7 @@ mod audio;
 mod bootstrap;
 mod bridges;
 mod code;
+mod data_layer;
 mod dialog;
 mod directives;
 mod env_manager;
@@ -29,6 +30,7 @@ mod hardware;
 mod huggingface;
 mod mcp;
 mod models;
+mod modules;
 mod overlay_frame;
 mod paths;
 mod projects;
@@ -41,6 +43,7 @@ mod telegram;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // One-time copy of LLM/data/* into %APPDATA%\OwLLM Desktop\
             // for users coming from the pre-restructure layout. Idempotent —
@@ -79,6 +82,16 @@ pub fn run() {
             // just kicks off the install.
             server::install(app);
             overlay_frame::install(app);
+            // Module system (registry + per-user installed.json under
+            // app_data_dir/modules/). Wizard reads from this; Server /
+            // Train pages resolve binaries through it.
+            match modules::ModuleManager::new(&app.handle()) {
+                Ok(mgr) => {
+                    use tauri::Manager;
+                    app.handle().manage(mgr);
+                }
+                Err(e) => eprintln!("[owllm] ModuleManager init failed: {e}"),
+            }
             Ok(())
         })
         .on_page_load(|webview, payload| {
@@ -110,6 +123,16 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            modules::module_list,
+            modules::module_hardware_snapshot,
+            modules::module_install,
+            modules::module_uninstall,
+            modules::module_set_channel,
+            modules::module_variant_path,
+            data_layer::data_fetch_json,
+            data_layer::data_fetch_yaml,
+            data_layer::data_fetch_text,
+            data_layer::data_cache_list,
             accounts::accounts_status,
             accounts::accounts_save_api_key,
             accounts::accounts_delete_secret,

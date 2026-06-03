@@ -1,0 +1,113 @@
+{
+  "_comment": "Pinned upstream URLs for module ZIP builds. build-modules.ps1 reads this. Bump versions here, re-run bootstrap, re-publish to GitHub Releases, bump version in data/modules/registry.json with the new sha256.",
+  "modules": {
+    "local-inference-cuda": {
+      "moduleVersion": "b9488-cuda12.4",
+      "_comment": "Composite: llama binaries + cudart runtime DLLs. The cudart pack is REQUIRED at runtime — without it llama-server crashes with cudart64_*.dll missing.",
+      "components": [
+        {
+          "name": "llama",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-win-cuda-12.4-x64.zip",
+          "extractStrip": 0
+        },
+        {
+          "name": "cudart",
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/cudart-llama-bin-win-cuda-12.4-x64.zip",
+          "extractStrip": 0
+        }
+      ]
+    },
+    "local-inference-vulkan": {
+      "moduleVersion": "b9488-vulkan",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-win-vulkan-x64.zip",
+      "extractStrip": 0,
+      "include": ["llama-server.exe", "*.dll"]
+    },
+    "local-inference-cpu": {
+      "moduleVersion": "b9488-cpu",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-win-cpu-x64.zip",
+      "extractStrip": 0,
+      "include": ["llama-server.exe", "*.dll"]
+    },
+    "audio-stt-whisper-base": {
+      "moduleVersion": "v1.8.4-base",
+      "components": [
+        {
+          "name": "binary",
+          "url": "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip",
+          "extractStrip": 0
+        },
+        {
+          "name": "model",
+          "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+          "destFile": "ggml-base.bin"
+        }
+      ]
+    },
+    "audio-stt-whisper-large": {
+      "moduleVersion": "v1.8.4-large-v3",
+      "components": [
+        {
+          "name": "binary",
+          "url": "https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip",
+          "extractStrip": 0
+        },
+        {
+          "name": "model",
+          "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin",
+          "destFile": "ggml-large-v3.bin"
+        }
+      ]
+    },
+    "python-3.11-embed-win": {
+      "moduleVersion": "3.11.9",
+      "upstreamUrl": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip",
+      "extractStrip": 0,
+      "postExtract": "unblock-pip"
+    },
+    "mcp-toolchain-node-uv": {
+      "moduleVersion": "node20.18.0-uv0.5.4",
+      "components": [
+        {
+          "name": "node",
+          "url": "https://nodejs.org/dist/v20.18.0/node-v20.18.0-win-x64.zip",
+          "extractStrip": 1,
+          "destDir": "node"
+        },
+        {
+          "name": "uv",
+          "url": "https://github.com/astral-sh/uv/releases/download/0.5.4/uv-x86_64-pc-windows-msvc.zip",
+          "extractStrip": 0,
+          "destDir": "uv"
+        }
+      ]
+    },
+    "finetune-unsloth-cu124": {
+      "moduleVersion": "py311-torch2.5.1-cu124-unsloth20241110",
+      "buildKind": "wheelhouse",
+      "requirementsFile": "owllm-desktop/scripts/requirements-finetune-cu124.txt",
+      "pythonVersion": "3.11",
+      "pipExtraIndexUrl": "https://download.pytorch.org/whl/cu124"
+    },
+    "finetune-unsloth-cu121": {
+      "moduleVersion": "py311-torch2.5.1-cu121-unsloth20241110",
+      "buildKind": "wheelhouse",
+      "requirementsFile": "owllm-desktop/scripts/requirements-finetune-cu121.txt",
+      "pythonVersion": "3.11",
+      "pipExtraIndexUrl": "https://download.pytorch.org/whl/cu121"
+    },
+    "finetune-base-cu118": {
+      "moduleVersion": "py311-torch2.5.1-cu118-base",
+      "buildKind": "wheelhouse",
+      "requirementsFile": "owllm-desktop/scripts/requirements-finetune-cu118.txt",
+      "pythonVersion": "3.11",
+      "pipExtraIndexUrl": "https://download.pytorch.org/whl/cu118"
+    },
+    "tools-python-base": {
+      "moduleVersion": "0.1.0",
+      "buildKind": "wheelhouse",
+      "requirementsFile": "owllm-desktop/scripts/requirements-tools.txt",
+      "pythonVersion": "3.11"
+    }
+  }
+}

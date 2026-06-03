@@ -128,6 +128,13 @@ pub const fn llama_server_filename() -> &'static str {
 
 /// Path to the llama.cpp HTTP server binary. Allows direct override via
 /// OWLLM_LLAMA_SERVER for custom builds.
+///
+/// Resolution order:
+///   1. `OWLLM_LLAMA_SERVER` env var (manual override)
+///   2. **Module install dir** — `app_data_dir/modules/local-inference-*/llama-server.exe`
+///      (new path; populated by the wizard's module installer)
+///   3. Legacy `%LOCALAPPDATA%\OwLLM Desktop\runtime\llama.cpp\`
+///   4. Repo `runtime-data\runtime\llama.cpp\` (dev fallback)
 pub fn llama_server_exe() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_LLAMA_SERVER") {
         let pb = PathBuf::from(p);
@@ -136,6 +143,9 @@ pub fn llama_server_exe() -> Option<PathBuf> {
         }
     }
     let exe_name = llama_server_filename();
+    if let Some(p) = module_binary("local-inference-", exe_name) {
+        return Some(p);
+    }
     // Phase 3: prefer %LOCALAPPDATA%\OwLLM Desktop\runtime\llama.cpp\.
     if let Some(rt) = runtime_root() {
         let exe = rt.join("llama.cpp").join(exe_name);
@@ -152,6 +162,75 @@ pub fn llama_server_exe() -> Option<PathBuf> {
     }
 }
 
+/// Look for `<binary>` under `app_data_dir/modules/<variant-prefix>*\`.
+/// Used by the module system to point legacy paths::* helpers at the
+/// new install location without coupling them to the ModuleManager type.
+///
+/// Returns the first matching binary across all installed variants of
+/// a module family (e.g. `local-inference-cuda-bXXX`, `local-inference-cpu-bXXX`).
+/// Picks the lexicographically latest variant if multiple exist.
+pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf> {
+    let modules_root = appdata_root()?.join("modules");
+    let entries = std::fs::read_dir(&modules_root).ok()?;
+    let mut candidates: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with(variant_prefix))
+                .unwrap_or(false)
+        })
+        .map(|e| e.path())
+        .collect();
+    candidates.sort();
+    candidates.reverse();
+    for dir in candidates {
+        let direct = dir.join(binary_name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        // Allow one level of nesting (some upstream zips wrap their
+        // payload in a top-level folder).
+        if let Ok(sub) = std::fs::read_dir(&dir) {
+            for entry in sub.flatten() {
+                let nested = entry.path().join(binary_name);
+                if nested.is_file() {
+                    return Some(nested);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Repointed for fine-tuning: returns `app_data_dir/modules/python-3.11-embed-win-*/python.exe`
+/// when the python-runtime module is installed. Used by env_manager to
+/// build venvs without depending on a system Python.
+pub fn module_python_exe() -> Option<PathBuf> {
+    let name = if cfg!(target_os = "windows") { "python.exe" } else { "python3" };
+    module_binary("python-3.11-embed-", name)
+}
+
+/// Repointed for MCP toolchain: returns `app_data_dir/modules/mcp-toolchain-*/uv/uv.exe`.
+pub fn module_uv_exe() -> Option<PathBuf> {
+    let name = if cfg!(target_os = "windows") { "uv.exe" } else { "uv" };
+    module_binary("mcp-toolchain-", name)
+}
+
+/// Repointed for MCP toolchain: returns `app_data_dir/modules/mcp-toolchain-*/node/node.exe`.
+pub fn module_node_exe() -> Option<PathBuf> {
+    let name = if cfg!(target_os = "windows") { "node.exe" } else { "node" };
+    module_binary("mcp-toolchain-", name)
+}
+
+fn appdata_root() -> Option<PathBuf> {
+    // %APPDATA%\com.localllm.owllm-desktop  matches Tauri's
+    // app_data_dir() for our identifier without needing the AppHandle
+    // (paths.rs is called from places that don't have one).
+    let appdata = std::env::var_os("APPDATA")?;
+    Some(PathBuf::from(appdata).join("com.localllm.owllm-desktop"))
+}
+
 /// Path to `llama-quantize.exe` — used by the GGUF export pipeline to
 /// turn an f16 intermediate into K-quants (Q4_K_M etc) that the
 /// convert script can't produce directly.
@@ -161,6 +240,9 @@ pub fn llama_quantize_exe() -> Option<PathBuf> {
         if pb.is_file() {
             return Some(pb);
         }
+    }
+    if let Some(p) = module_binary("local-inference-", "llama-quantize.exe") {
+        return Some(p);
     }
     if let Some(rt) = runtime_root() {
         let exe = rt.join("llama.cpp").join("llama-quantize.exe");

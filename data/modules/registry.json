@@ -1,7 +1,7 @@
 {
     "schemaVersion":  1,
-    "registryVersion":  "2026.06.03",
-    "publishedAt":  "2026-06-03T20:35:26Z",
+    "registryVersion":  "2026.06.04",
+    "publishedAt":  "2026-06-04T16:14:02Z",
     "channels":  [
                      "stable",
                      "beta",
@@ -118,26 +118,6 @@
                                                                              "signature":  null
                                                                          }
                                                           }
-                                         },
-                                         {
-                                             "id":  "audio-stt-whisper-large",
-                                             "displayName":  "Whisper large-v3 (highest accuracy)",
-                                             "platform":  "windows-x86_64",
-                                             "requires":  {
-                                                              "diskGb":  4,
-                                                              "ramGb":  8
-                                                          },
-                                             "sizeBytes":  3173552128,
-                                             "channels":  {
-                                                              "stable":  {
-                                                                             "version":  "v1.8.4-large-v3",
-                                                                             "releasedAt":  "2026-05-15T00:00:00Z",
-                                                                             "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/audio-stt-whisper-large-v3.zip",
-                                                                             "sha256":  "0000000000000000000000000000000000000000000000000000000000000000",
-                                                                             "minShellVersion":  "0.1.0",
-                                                                             "signature":  null
-                                                                         }
-                                                          }
                                          }
                                      ]
                     },
@@ -176,90 +156,6 @@
                                      ]
                     },
                     {
-                        "id":  "finetune",
-                        "displayName":  "Fine-Tuning \u0026 Abliteration",
-                        "description":  "Local LoRA fine-tuning, full fine-tuning, and weight-orthogonalisation (abliteration). Includes Unsloth, TRL, PEFT, bitsandbytes. GPU variant matches your CUDA generation.",
-                        "category":  "training",
-                        "required":  false,
-                        "uiSlots":  [
-                                        "train-page",
-                                        "adapters-page",
-                                        "abliterate-tool",
-                                        "dataset-tools"
-                                    ],
-                        "dependsOn":  [
-                                          "python-runtime"
-                                      ],
-                        "variants":  [
-                                         {
-                                             "id":  "finetune-unsloth-cu124",
-                                             "displayName":  "Unsloth + CUDA 12.4 (Blackwell, Ada, Hopper)",
-                                             "platform":  "windows-x86_64",
-                                             "requires":  {
-                                                              "gpu":  "nvidia",
-                                                              "vramGb":  8,
-                                                              "ramGb":  16,
-                                                              "diskGb":  14
-                                                          },
-                                             "sizeBytes":  12884901888,
-                                             "channels":  {
-                                                              "stable":  {
-                                                                             "version":  "py311-torch2.5.1-cu124-unsloth20241110",
-                                                                             "releasedAt":  "2026-05-20T00:00:00Z",
-                                                                             "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/finetune-unsloth-cu124.zip",
-                                                                             "sha256":  "0000000000000000000000000000000000000000000000000000000000000000",
-                                                                             "minShellVersion":  "0.1.0",
-                                                                             "signature":  null
-                                                                         }
-                                                          }
-                                         },
-                                         {
-                                             "id":  "finetune-unsloth-cu121",
-                                             "displayName":  "Unsloth + CUDA 12.1 (Ampere, Ada)",
-                                             "platform":  "windows-x86_64",
-                                             "requires":  {
-                                                              "gpu":  "nvidia",
-                                                              "vramGb":  8,
-                                                              "ramGb":  16,
-                                                              "diskGb":  14
-                                                          },
-                                             "sizeBytes":  12884901888,
-                                             "channels":  {
-                                                              "stable":  {
-                                                                             "version":  "py311-torch2.5.1-cu121-unsloth20241110",
-                                                                             "releasedAt":  "2026-05-20T00:00:00Z",
-                                                                             "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/finetune-unsloth-cu121.zip",
-                                                                             "sha256":  "0000000000000000000000000000000000000000000000000000000000000000",
-                                                                             "minShellVersion":  "0.1.0",
-                                                                             "signature":  null
-                                                                         }
-                                                          }
-                                         },
-                                         {
-                                             "id":  "finetune-base-cu118",
-                                             "displayName":  "Base trainer + CUDA 11.8 (Turing fallback)",
-                                             "platform":  "windows-x86_64",
-                                             "requires":  {
-                                                              "gpu":  "nvidia",
-                                                              "vramGb":  8,
-                                                              "ramGb":  16,
-                                                              "diskGb":  20
-                                                          },
-                                             "sizeBytes":  19327352832,
-                                             "channels":  {
-                                                              "stable":  {
-                                                                             "version":  "py311-torch2.5.1-cu118-base",
-                                                                             "releasedAt":  "2026-05-20T00:00:00Z",
-                                                                             "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/finetune-base-cu118.zip",
-                                                                             "sha256":  "0000000000000000000000000000000000000000000000000000000000000000",
-                                                                             "minShellVersion":  "0.1.0",
-                                                                             "signature":  null
-                                                                         }
-                                                          }
-                                         }
-                                     ]
-                    },
-                    {
                         "id":  "mcp-toolchain",
                         "displayName":  "MCP Server Toolchain",
                         "description":  "Node.js + uv. Required to spawn npx-based MCP servers (filesystem, git, github, brave-search, postgres, puppeteer, sequential-thinking) and uvx-based Python MCP servers. Without this, the MCP runtime can only invoke binary servers.",
@@ -288,40 +184,6 @@
                                                                              "releasedAt":  "2026-06-03T20:35:26Z",
                                                                              "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.06.03/mcp-toolchain-node-uv.zip",
                                                                              "sha256":  "753b5f7f702471041c02f3549bfafad6afcd166674a1501332c15584cc54a5ba",
-                                                                             "minShellVersion":  "0.1.0",
-                                                                             "signature":  null
-                                                                         }
-                                                          }
-                                         }
-                                     ]
-                    },
-                    {
-                        "id":  "tools-python",
-                        "displayName":  "Python Tools (Screenshot)",
-                        "description":  "Small Python utilities the agents call: web-page screenshot (Pillow), abliteration corpus prep. Lightweight — under 50 MB on top of python-runtime.",
-                        "category":  "content",
-                        "required":  false,
-                        "uiSlots":  [
-                                        "agent-tools-screenshot"
-                                    ],
-                        "dependsOn":  [
-                                          "python-runtime"
-                                      ],
-                        "variants":  [
-                                         {
-                                             "id":  "tools-python-base",
-                                             "displayName":  "Pillow + requests bundle",
-                                             "platform":  "windows-x86_64",
-                                             "requires":  {
-                                                              "diskGb":  1
-                                                          },
-                                             "sizeBytes":  41943040,
-                                             "channels":  {
-                                                              "stable":  {
-                                                                             "version":  "0.1.0",
-                                                                             "releasedAt":  "2026-05-15T00:00:00Z",
-                                                                             "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/tools-python-base-0.1.0.zip",
-                                                                             "sha256":  "0000000000000000000000000000000000000000000000000000000000000000",
                                                                              "minShellVersion":  "0.1.0",
                                                                              "signature":  null
                                                                          }
@@ -395,5 +257,148 @@
                                         "kanban-cards-ui-pack",
                                         "director-mode-approval-gates"
                                     ]
-                      }
+                      },
+    "comingSoonModules":  [
+                              {
+                                  "moduleId":  "audio-stt",
+                                  "variant":  {
+                                                  "id":  "audio-stt-whisper-large",
+                                                  "displayName":  "Whisper large-v3 (highest accuracy)",
+                                                  "platform":  "windows-x86_64",
+                                                  "requires":  {
+                                                                   "diskGb":  4,
+                                                                   "ramGb":  8
+                                                               },
+                                                  "sizeBytes":  3173552128,
+                                                  "channels":  {
+                                                                   "stable":  {
+                                                                                  "version":  "v1.8.4-large-v3",
+                                                                                  "releasedAt":  "2026-05-15T00:00:00Z",
+                                                                                  "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/audio-stt-whisper-large-v3.zip",
+                                                                                  "sha256":  "0000000000000000000000000000000000000000000000000000000000000000",
+                                                                                  "minShellVersion":  "0.1.0",
+                                                                                  "signature":  null
+                                                                              }
+                                                               }
+                                              }
+                              },
+                              {
+                                  "id":  "finetune",
+                                  "displayName":  "Fine-Tuning \u0026 Abliteration",
+                                  "description":  "Local LoRA fine-tuning, full fine-tuning, and weight-orthogonalisation (abliteration). Includes Unsloth, TRL, PEFT, bitsandbytes. GPU variant matches your CUDA generation.",
+                                  "category":  "training",
+                                  "required":  false,
+                                  "uiSlots":  [
+                                                  "train-page",
+                                                  "adapters-page",
+                                                  "abliterate-tool",
+                                                  "dataset-tools"
+                                              ],
+                                  "dependsOn":  [
+                                                    "python-runtime"
+                                                ],
+                                  "variants":  [
+                                                   {
+                                                       "id":  "finetune-unsloth-cu124",
+                                                       "displayName":  "Unsloth + CUDA 12.4 (Blackwell, Ada, Hopper)",
+                                                       "platform":  "windows-x86_64",
+                                                       "requires":  {
+                                                                        "gpu":  "nvidia",
+                                                                        "vramGb":  8,
+                                                                        "ramGb":  16,
+                                                                        "diskGb":  14
+                                                                    },
+                                                       "sizeBytes":  12884901888,
+                                                       "channels":  {
+                                                                        "stable":  {
+                                                                                       "version":  "py311-torch2.5.1-cu124-unsloth20241110",
+                                                                                       "releasedAt":  "2026-05-20T00:00:00Z",
+                                                                                       "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/finetune-unsloth-cu124.zip",
+                                                                                       "sha256":  "0000000000000000000000000000000000000000000000000000000000000000",
+                                                                                       "minShellVersion":  "0.1.0",
+                                                                                       "signature":  null
+                                                                                   }
+                                                                    }
+                                                   },
+                                                   {
+                                                       "id":  "finetune-unsloth-cu121",
+                                                       "displayName":  "Unsloth + CUDA 12.1 (Ampere, Ada)",
+                                                       "platform":  "windows-x86_64",
+                                                       "requires":  {
+                                                                        "gpu":  "nvidia",
+                                                                        "vramGb":  8,
+                                                                        "ramGb":  16,
+                                                                        "diskGb":  14
+                                                                    },
+                                                       "sizeBytes":  12884901888,
+                                                       "channels":  {
+                                                                        "stable":  {
+                                                                                       "version":  "py311-torch2.5.1-cu121-unsloth20241110",
+                                                                                       "releasedAt":  "2026-05-20T00:00:00Z",
+                                                                                       "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/finetune-unsloth-cu121.zip",
+                                                                                       "sha256":  "0000000000000000000000000000000000000000000000000000000000000000",
+                                                                                       "minShellVersion":  "0.1.0",
+                                                                                       "signature":  null
+                                                                                   }
+                                                                    }
+                                                   },
+                                                   {
+                                                       "id":  "finetune-base-cu118",
+                                                       "displayName":  "Base trainer + CUDA 11.8 (Turing fallback)",
+                                                       "platform":  "windows-x86_64",
+                                                       "requires":  {
+                                                                        "gpu":  "nvidia",
+                                                                        "vramGb":  8,
+                                                                        "ramGb":  16,
+                                                                        "diskGb":  20
+                                                                    },
+                                                       "sizeBytes":  19327352832,
+                                                       "channels":  {
+                                                                        "stable":  {
+                                                                                       "version":  "py311-torch2.5.1-cu118-base",
+                                                                                       "releasedAt":  "2026-05-20T00:00:00Z",
+                                                                                       "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/finetune-base-cu118.zip",
+                                                                                       "sha256":  "0000000000000000000000000000000000000000000000000000000000000000",
+                                                                                       "minShellVersion":  "0.1.0",
+                                                                                       "signature":  null
+                                                                                   }
+                                                                    }
+                                                   }
+                                               ]
+                              },
+                              {
+                                  "id":  "tools-python",
+                                  "displayName":  "Python Tools (Screenshot)",
+                                  "description":  "Small Python utilities the agents call: web-page screenshot (Pillow), abliteration corpus prep. Lightweight — under 50 MB on top of python-runtime.",
+                                  "category":  "content",
+                                  "required":  false,
+                                  "uiSlots":  [
+                                                  "agent-tools-screenshot"
+                                              ],
+                                  "dependsOn":  [
+                                                    "python-runtime"
+                                                ],
+                                  "variants":  [
+                                                   {
+                                                       "id":  "tools-python-base",
+                                                       "displayName":  "Pillow + requests bundle",
+                                                       "platform":  "windows-x86_64",
+                                                       "requires":  {
+                                                                        "diskGb":  1
+                                                                    },
+                                                       "sizeBytes":  41943040,
+                                                       "channels":  {
+                                                                        "stable":  {
+                                                                                       "version":  "0.1.0",
+                                                                                       "releasedAt":  "2026-05-15T00:00:00Z",
+                                                                                       "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/tools-python-base-0.1.0.zip",
+                                                                                       "sha256":  "0000000000000000000000000000000000000000000000000000000000000000",
+                                                                                       "minShellVersion":  "0.1.0",
+                                                                                       "signature":  null
+                                                                                   }
+                                                                    }
+                                                   }
+                                               ]
+                              }
+                          ]
 }

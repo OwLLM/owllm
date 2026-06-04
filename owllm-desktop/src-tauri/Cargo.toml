@@ -1,6 +1,6 @@
 [package]
 name = "owllm-desktop"
-version = "0.4.2"
+version = "0.4.3"
 description = "OwLLM Desktop — Tauri + React. Rust owns the runtime; Python is invited on-demand only for fine-tuning."
 authors = ["OWLLM"]
 edition = "2021"
@@ -24,11 +24,20 @@ tauri-build = { version = "2", features = [] }
 # on every OS, so we opt in to the private-API feature. Caveat: apps
 # distributed via the Mac App Store cannot use private APIs; this is a
 # non-issue for OwLLM since we ship via .dmg, not the App Store.
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = { version = "2.11", features = ["macos-private-api"] }
 # Shell auto-update — checks a signed endpoint, downloads delta, swaps
 # the binary on next launch. See data/modules/SCHEMA.md "update flow"
 # for how this complements per-module updates.
 tauri-plugin-updater = "2"
+# Native confirmation dialog for the "Update available — Install now?"
+# prompt the React side fires when tauri-plugin-updater reports a new
+# version. Without this Rust counterpart the JS dialog API throws.
+tauri-plugin-dialog = "2"
+# Sane process management for the updater's "restart after install"
+# step. Tauri-plugin-updater spawns a child detached from us, but on
+# Windows the parent (us) needs to exit cleanly so the new binary can
+# take over the install dir. tauri-plugin-process exposes exit().
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "time", "sync"] }

@@ -339,12 +339,22 @@ pub fn resources_root() -> Option<PathBuf> {
             return Some(pb);
         }
     }
-    // Installed-app layout: resources/ sits next to the exe.
+    // Installed-app layout: resources/ sits next to the exe…
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             let cand = parent.join("resources");
             if cand.join("agents").join("roles").is_dir() {
                 return Some(cand);
+            }
+            // …but Tauri's bundler appends `_up_/` to any resource path
+            // that contains `..` in tauri.conf.json (`../resources/...`
+            // gets installed as `$INSTDIR\_up_\resources\...`). The
+            // alternative is to move resources/ inside src-tauri/ which
+            // would churn every other path the app relies on. Checking
+            // both locations is the smaller fix.
+            let up_cand = parent.join("_up_").join("resources");
+            if up_cand.join("agents").join("roles").is_dir() {
+                return Some(up_cand);
             }
         }
     }
@@ -716,19 +726,51 @@ pub fn runtime_root() -> Option<PathBuf> {
     Some(pb)
 }
 
-/// Where downloaded model weights live. Returns
-/// `<runtime_cache_root>/models/`. Falls back via models_dirs_read().
+/// Shared, machine-wide models root at `C:\ProgramData\OwLLM Desktop\models\`.
+/// Created opt-in via the Settings → Storage toggle (the UI fires the
+/// one-time elevated setup that ACLs this directory for everyone).
+/// Returns `Some(...)` only when the folder already exists *and* the
+/// current user can write to it — otherwise downloads must land in the
+/// per-user location.
+pub fn shared_models_root() -> Option<PathBuf> {
+    if !cfg!(target_os = "windows") { return None; }
+    let programdata = std::env::var_os("PROGRAMDATA")?;
+    let dir = PathBuf::from(programdata).join("OwLLM Desktop").join("models");
+    if !dir.is_dir() { return None; }
+    // Write-probe: create + remove a marker. Avoids returning a path
+    // that's read-only for this user (which would surface as a
+    // confusing "download failed" later).
+    let probe = dir.join(".owllm-write-probe");
+    if std::fs::write(&probe, b"").is_ok() {
+        let _ = std::fs::remove_file(&probe);
+        Some(dir)
+    } else {
+        None
+    }
+}
+
+/// Where downloaded model weights live. Prefers the shared
+/// `C:\ProgramData\OwLLM Desktop\models\` when it's been set up (multi-user
+/// PC scenario — every account on the box reads from the same store);
+/// falls back to per-user `<runtime_cache_root>/models/`.
 pub fn models_root_new() -> Option<PathBuf> {
+    if let Some(shared) = shared_models_root() {
+        return Some(shared);
+    }
     Some(runtime_cache_root()?.join("models"))
 }
 
-/// All readable model-tree roots, in priority order. Lets list_models /
-/// huggingface scans surface weights regardless of whether they live
-/// in the new %LOCALAPPDATA% tree or the legacy LLM/models/ tree.
+/// All readable model-tree roots, in priority order. Surfaces weights
+/// whether they live in the shared ProgramData store, the per-user
+/// LOCALAPPDATA tree, or the legacy LLM/models/ tree.
 pub fn models_dirs_read() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(p) = models_root_new() {
-        if p.is_dir() { out.push(p); }
+    if let Some(p) = shared_models_root() {
+        out.push(p);
+    }
+    if let Some(r) = runtime_cache_root() {
+        let p = r.join("models");
+        if p.is_dir() && !out.contains(&p) { out.push(p); }
     }
     if let Some(r) = llm_root() {
         let legacy = r.join("models");

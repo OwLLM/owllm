@@ -2,21 +2,28 @@
 
 <img src="assets/owl_hero.png" alt="OwLLM" width="450">
 
+# ⬇ [Download OwLLM for Windows](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)
+
+### One file · ~30 MB · No admin required · Windows 10 / 11 x64
+
+[![installer](https://img.shields.io/badge/installer-OwLLM.Desktop.Setup.exe-3ec5d8?style=for-the-badge&logo=windows)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)
+[![portable](https://img.shields.io/badge/portable_(zip)-no_install-7e8aa0?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM-Desktop-Portable.zip)
+
+---
 
 ### Your team of AI agents. Build them. Own them. Run them anywhere.
 
 **OwLLM is an open platform to build, deploy, and run custom AI agent teams — on your hardware, your VPS, or in a VM, 24/7. Bring your own models: local, cloud, or both. Fine-tune. Quantize. Abliterate. Red-team. Automate.**
 
 <p align="center">
-  <a href="https://github.com/OwLLM/owllm/releases/latest"><img src="https://img.shields.io/github/v/release/OwLLM/owllm?label=download&style=for-the-badge&color=3ec5d8" alt="Download" /></a>
-  <img src="https://img.shields.io/badge/platform-Windows%20x64-3ec5d8?style=for-the-badge" alt="Platform: Windows x64" />
+  <a href="https://github.com/OwLLM/owllm/releases/latest"><img src="https://img.shields.io/github/v/release/OwLLM/owllm?label=version&style=for-the-badge&color=3ec5d8" alt="Latest version" /></a>
   <a href="https://github.com/OwLLM/owllm/discussions"><img src="https://img.shields.io/github/discussions/OwLLM/owllm?style=for-the-badge&color=3ec5d8" alt="Discussions" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/github/license/OwLLM/owllm?style=for-the-badge&color=3ec5d8" alt="License" /></a>
   <a href="https://github.com/OwLLM/owllm/stargazers"><img src="https://img.shields.io/github/stars/OwLLM/owllm?style=for-the-badge&color=3ec5d8" alt="Stars" /></a>
 </p>
 
 > [!IMPORTANT]
-> **OwLLM Desktop currently ships for Windows 10/11 (x64) only.** macOS (Apple Silicon + Intel) and Linux (x86_64) builds are on the roadmap for Q3 2026 — the cross-platform CI is already set up; the gating items are macOS code-signing and per-platform module ZIPs. See the [roadmap](#roadmap) below or watch the repo for release notifications.
+> **OwLLM Desktop currently ships for Windows 10/11 (x64) only.** macOS (Apple Silicon + Intel) and Linux (x86_64) builds are coming via the already-configured cross-platform CI. Watch the repo for release notifications.
 
 </div>
 

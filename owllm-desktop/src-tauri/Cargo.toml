@@ -1,8 +1,8 @@
 [package]
 name = "owllm-desktop"
-version = "0.3.3"
+version = "0.3.4"
 description = "OwLLM Desktop — Tauri + React. Rust owns the runtime; Python is invited on-demand only for fine-tuning."
-authors = ["LocaLLM"]
+authors = ["OWLLM"]
 edition = "2021"
 
 [lib]

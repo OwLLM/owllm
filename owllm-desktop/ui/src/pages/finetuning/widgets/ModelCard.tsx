@@ -8,12 +8,15 @@ import type { CompatColor, CompatibilityBadge } from "./modelCardShared";
 
 export type { CompatColor, CompatibilityBadge };
 
+export type TagChip = { key: string; label: string; color: string };
+
 export type ModelCardProps = {
   modelName: string;
   modelId: string;
   description?: string;
   size?: string;
   icons?: string;
+  tagChips?: TagChip[];
   isDownloaded?: boolean;
   isNew?: boolean;
   downloads?: string;
@@ -28,7 +31,7 @@ export type ModelCardProps = {
 
 export function ModelCard(props: ModelCardProps) {
   const {
-    modelName, modelId, description, size, icons,
+    modelName, modelId, description, size, icons, tagChips,
     isDownloaded = false, isNew = false,
     downloads, likes, compatibilityBadge, requiresToken = false,
     downloadProgress, selected = false, onDownload, onClick,
@@ -96,6 +99,25 @@ export function ModelCard(props: ModelCardProps) {
       body={<>
         {description && (
           <div style={{ fontSize: 13, color: "#d6d8de", lineHeight: 1.35 }}>{description}</div>
+        )}
+        {tagChips && tagChips.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
+            {tagChips.map((c) => (
+              <span
+                key={c.key}
+                style={{
+                  background: c.color,
+                  color: "white",
+                  padding: "2px 7px",
+                  borderRadius: 10,
+                  fontSize: 10,
+                  fontWeight: 700,
+                  lineHeight: 1.4,
+                  whiteSpace: "nowrap",
+                }}
+              >{c.label}</span>
+            ))}
+          </div>
         )}
         <div style={{ display: "flex", alignItems: "center" }}>
           {size && <span style={{ fontSize: 13, color: "#fafafa" }}>📦 {size}</span>}

@@ -147,6 +147,28 @@ function iconsForTags(tags: string[]): string {
   return out.join(" ");
 }
 
+// Same tag taxonomy as the filter checkboxes — produces a colored chip
+// per matching tag so the user can see at a glance which filter labels
+// each card satisfies. Colors match the filter row's emoji semantics:
+// green=trainable, blue=GGUF, yellow=instruct, red=abliterated,
+// teal=LoRA, orange=quantized, purple=reasoning, magenta=vision.
+type TagChip = { key: string; label: string; color: string };
+export function tagChipsForTags(tags: string[]): TagChip[] {
+  const lower = tags.map((t) => t.toLowerCase());
+  const out: TagChip[] = [];
+  const has = (re: RegExp) => lower.some((t) => re.test(t));
+  // Order matches the filter row top→bottom so visual scanning is consistent.
+  if (has(/^transformers$|trainable/)) out.push({ key: "trainable", label: "✅ Trainable", color: "#22c55e" });
+  if (has(/gguf/)) out.push({ key: "gguf", label: "📦 GGUF", color: "#3b82f6" });
+  if (has(/instruct|^it$|-it$/)) out.push({ key: "instruct", label: "💡 Instruct", color: "#eab308" });
+  if (has(/abliterat|uncensor/)) out.push({ key: "abliterated", label: "🚫 Abliterated", color: "#ef4444" });
+  if (has(/lora|adapter|peft/)) out.push({ key: "adapter", label: "🧩 LoRA", color: "#14b8a6" });
+  if (has(/awq|gptq|quantiz/)) out.push({ key: "quantized", label: "⚡ Quantized", color: "#f97316" });
+  if (has(/reasoning|cot|thinking|r1|o1|qwq/)) out.push({ key: "reasoning", label: "🧠 Reasoning", color: "#a855f7" });
+  if (has(/vision|llava|^vl-|-vl$|multimodal/)) out.push({ key: "vision", label: "👁️ Vision", color: "#ec4899" });
+  return out;
+}
+
 // Kick the Rust export_gguf command against a tuned transformers dir.
 // Lightweight wrapper: spawn, log progress to console + show the user
 // a banner via setError, refresh the tuned list on completion so the
@@ -1105,6 +1127,7 @@ export default function ModelsPage() {
                   modelId={h.id}
                   description={h.pipelineTag ? `Pipeline: ${h.pipelineTag}` : undefined}
                   icons={iconsForTags(h.tags)}
+                  tagChips={tagChipsForTags(h.tags)}
                   isNew={isNewFlag}
                   downloads={fmtCount(h.downloads)}
                   likes={fmtCount(h.likes)}
@@ -1152,6 +1175,7 @@ export default function ModelsPage() {
               description={`${r.description}  ·  ${r.paramsB.toFixed(1)}B params · inference ≈${r.inferenceGb.toFixed(1)} GB · LoRA ≈${r.loraTrainGb.toFixed(1)} GB`}
               size={`${r.paramsB.toFixed(1)}B params`}
               icons={iconsForTags(r.tags)}
+              tagChips={tagChipsForTags(r.tags)}
               isNew={r.isNew}
               downloads={fmtCount(r.downloads)}
               likes={fmtCount(r.likes)}

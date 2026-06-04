@@ -8,6 +8,7 @@
 
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 
 const ICONS = "/Page_icons";
 
@@ -22,7 +23,17 @@ type HardwareInfo = {
 };
 type VramGpu = { index: number; used_mib: number; total_mib: number };
 type VramStatus = { gpus: VramGpu[] };
-type ModelInfo = { model_id: string; port?: number | null; base_model?: string | null; size_mib?: number | null };
+type ModelInfo = {
+  model_id: string;
+  port?: number | null;
+  base_model?: string | null;
+  size_mib?: number | null;
+  provider?: string;
+};
+type PathsDebug = {
+  models_dirs_read?: string[];
+  runtime_root?: string | null;
+};
 
 function Row({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -65,19 +76,28 @@ export default function InfoPage() {
   const [hw, setHw] = useState<HardwareInfo | null>(null);
   const [vram, setVram] = useState<VramStatus>({ gpus: [] });
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [version, setVersion] = useState<string>("…");
+  const [paths, setPaths] = useState<PathsDebug | null>(null);
+  const [llamaPath, setLlamaPath] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function refresh() {
     setError(null);
     try {
-      const [h, v, m] = await Promise.all([
+      const [h, v, m, ver, pd, lp] = await Promise.all([
         invoke<HardwareInfo>("hardware_info"),
         invoke<VramStatus>("vram_status"),
         invoke<ModelInfo[]>("list_models"),
+        getVersion().catch(() => "unknown"),
+        invoke<PathsDebug>("paths_debug").catch(() => null),
+        invoke<string | null>("llama_server_path").catch(() => null),
       ]);
       setHw(h);
       setVram(v);
       setModels(m);
+      setVersion(ver);
+      setPaths(pd);
+      setLlamaPath(lp);
     } catch (e) {
       setError(String(e));
     }
@@ -94,10 +114,14 @@ export default function InfoPage() {
     return () => window.clearInterval(id);
   }, []);
 
-  const totalGgufGiB = models.reduce(
+  const localModels = models.filter(m => m.provider === "local" || m.provider === "tuned");
+  const cloudModels = models.filter(m => m.provider && m.provider !== "local" && m.provider !== "tuned");
+  const totalGgufGiB = localModels.reduce(
     (acc, m) => acc + (m.size_mib ?? 0) / 1024,
     0,
   );
+  const modelsRoot = paths?.models_dirs_read?.[0] ?? "(not detected — first-run install pending)";
+  const llamaRuntime = llamaPath ?? "(module 'local-inference' not installed yet)";
 
   return (
     <div style={{
@@ -134,7 +158,7 @@ export default function InfoPage() {
       }}>
         <Card title="📦 Application">
           <Row label="Product" value="OwLLM Desktop" />
-          <Row label="Version" value="0.1.0" />
+          <Row label="Version" value={version} />
           <Row label="Runtime" value="Tauri 2 · Rust + React" />
           <Row label="Python" value="Invited on-demand only (fine-tuning)" />
         </Card>
@@ -181,15 +205,16 @@ export default function InfoPage() {
         </Card>
 
         <Card title="📁 Models">
-          <Row label="Discovered GGUFs" value={`${models.length}`} />
+          <Row label="Local GGUFs" value={`${localModels.length}`} />
+          <Row label="Cloud peers" value={`${cloudModels.length}`} />
           <Row label="Total on disk" value={`${totalGgufGiB.toFixed(1)} GiB`} />
           <Row
             label="Root"
-            value={<code style={{ color: "var(--accent)" }}>LLM/models/</code>}
+            value={<code style={{ color: "var(--accent)", fontSize: 11, wordBreak: "break-all" }}>{modelsRoot}</code>}
           />
           <Row
             label="Runtime"
-            value={<code style={{ color: "var(--accent)" }}>LLM/runtime/llama.cpp/llama-server.exe</code>}
+            value={<code style={{ color: "var(--accent)", fontSize: 11, wordBreak: "break-all" }}>{llamaRuntime}</code>}
           />
         </Card>
 

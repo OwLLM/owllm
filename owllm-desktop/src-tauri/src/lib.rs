@@ -209,6 +209,7 @@ pub fn run() {
             recommendations::models_recommended,
             paths::shell_open_url,
             paths::paths_debug,
+            paths::llama_server_path,
             env_manager::env_profiles_list,
             env_manager::env_profile_status,
             env_manager::env_profile_install,

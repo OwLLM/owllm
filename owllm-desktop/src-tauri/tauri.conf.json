@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OwLLM Desktop",
-  "version": "0.3.0",
+  "version": "0.3.3",
   "identifier": "com.localllm.owllm-desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -123,7 +123,7 @@
       "nsis": {
         "displayLanguageSelector": false,
         "installerIcon": "icons/icon.ico",
-        "installMode": "perMachine",
+        "installMode": "currentUser",
         "languages": ["English"]
       },
       "allowDowngrades": false
@@ -135,9 +135,9 @@
       "active": true,
       "dialog": true,
       "endpoints": [
-        "https://github.com/OwLLM/owllm/releases/latest/download/latest-{{target}}-{{arch}}.json"
+        "https://github.com/OwLLM/owllm/releases/latest/download/latest.json"
       ],
-      "pubkey": ""
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEIzRkY2MTQ3NDU3NjhEREYKUldUZmpYWkZSMkgvcy9VZktYT0RDVWxoWXZjdEk0ZzNzUG93TERBek1iM2tKS3laZmtIT2g3ekkK"
     }
   }
 }

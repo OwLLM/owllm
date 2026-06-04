@@ -2633,7 +2633,7 @@ dependencies = [
 
 [[package]]
 name = "owllm-desktop"
-version = "0.3.0"
+version = "0.3.3"
 dependencies = [
  "base64 0.22.1",
  "chrono",

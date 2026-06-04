@@ -632,6 +632,14 @@ pub fn paths_debug() -> PathsDebug {
     }
 }
 
+/// Resolved path to llama-server.exe (or the OS-equivalent). None when
+/// the local-inference module hasn't been installed yet. Used by the
+/// Info page so the user can see exactly which binary the app will run.
+#[tauri::command]
+pub fn llama_server_path() -> Option<String> {
+    llama_server_exe().map(|p| p.to_string_lossy().into_owned())
+}
+
 // =====================================================================
 // Runtime root + models root (Phase 3)
 //

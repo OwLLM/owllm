@@ -109,7 +109,7 @@ The team definitions, role prompts, MCP configs, and model selections are all po
 
 ## Install (Windows only — for now)
 
-1. **[Download](https://github.com/OwLLM/owllm/releases/latest)** the installer (~30 MB)
+1. **[Download `OwLLM.Desktop.Setup.exe`](https://github.com/OwLLM/owllm/releases/latest)** (~30 MB — one file, that's it)
 2. Run `OwLLM-Desktop-Setup-x64.exe`. Windows SmartScreen may flag it the first time (the binary isn't EV-signed yet) — click "More info" → "Run anyway".
 3. On first launch, a **hardware-aware wizard** opens. It detects your hardware and offers the modules that fit:
    - **Local Inference** (~33 MB CPU / ~32 MB Vulkan / ~285 MB CUDA) — only needed if you want local models

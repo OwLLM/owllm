@@ -217,10 +217,21 @@ pub fn module_uv_exe() -> Option<PathBuf> {
     module_binary("mcp-toolchain-", name)
 }
 
-/// Repointed for MCP toolchain: returns `app_data_dir/modules/mcp-toolchain-*/node/node.exe`.
+/// Returns the bundled `node.exe` from any installed Node.js module.
+/// Tries the dedicated `nodejs-runtime-` family first (cli_install,
+/// MCP runtime, etc. all use this); falls back to the legacy
+/// `mcp-toolchain-` family for users who still have that module.
 pub fn module_node_exe() -> Option<PathBuf> {
     let name = if cfg!(target_os = "windows") { "node.exe" } else { "node" };
-    module_binary("mcp-toolchain-", name)
+    module_binary("nodejs-runtime-", name).or_else(|| module_binary("mcp-toolchain-", name))
+}
+
+/// Directory containing the bundled Node.js binaries. Used by the CLI
+/// installer's PATH augmentation so `npm.cmd` / `npx.cmd` / `node.exe`
+/// resolve via the bundled runtime even when the host doesn't have
+/// Node installed system-wide.
+pub fn module_node_dir() -> Option<PathBuf> {
+    module_node_exe().and_then(|p| p.parent().map(PathBuf::from))
 }
 
 fn appdata_root() -> Option<PathBuf> {

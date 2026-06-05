@@ -621,6 +621,14 @@ fn extra_search_dirs() -> Vec<PathBuf> {
     let appdata = std::env::var_os("APPDATA");
     let localappdata = std::env::var_os("LOCALAPPDATA");
 
+    // Bundled Node.js runtime (the nodejs-runtime-* module). When the
+    // user installed this from the Modules wizard, node.exe / npm.cmd /
+    // npx.cmd all live in this directory — search it FIRST so a clean
+    // PC with no system Node still resolves the CLI installer.
+    if let Some(d) = crate::paths::module_node_dir() {
+        dirs.push(d);
+    }
+
     // npm global — Windows default for `npm install -g`.
     if let Some(ad) = &appdata {
         dirs.push(PathBuf::from(ad).join("npm"));
@@ -1498,9 +1506,15 @@ pub async fn cli_install_stream(
         let names = [format!("{tool}.exe"), format!("{tool}.cmd"), tool.to_string()];
         names.iter().find_map(|n| which_extended(n))
             .ok_or_else(|| {
-                let runtime = if tool == "npm" { "Node.js (https://nodejs.org/)" }
-                              else            { "Python (https://www.python.org/)" };
-                format!("{tool} not found on PATH — install {runtime} first.")
+                if tool == "npm" {
+                    // Direct the user at OUR module installer instead
+                    // of nodejs.org — the bundled runtime is one click
+                    // away in the Modules wizard and doesn't require
+                    // a manual download / system Node install.
+                    "Node.js runtime not installed. Open Modules and install 'Node.js runtime' (one click, ~30 MB) — then retry. (Or install Node.js system-wide from https://nodejs.org/ if you prefer.)".to_string()
+                } else {
+                    format!("{tool} not found on PATH — install Python (https://www.python.org/) first.")
+                }
             })?
     };
 
@@ -1516,6 +1530,17 @@ pub async fn cli_install_stream(
         let batch = false;
         for a in &args {
             push_arg(&mut cmd, batch, a);
+        }
+        // Prepend the bundled Node.js dir to the child's PATH so
+        // npm's spawned helpers (node-gyp, postinstall scripts, etc.)
+        // can resolve `node` without the user having installed Node
+        // system-wide. Falls through to the inherited PATH for anything
+        // else (git, python for native modules, etc.).
+        if let Some(node_dir) = crate::paths::module_node_dir() {
+            let existing = std::env::var("PATH").unwrap_or_default();
+            #[cfg(windows)] let sep = ";";
+            #[cfg(not(windows))] let sep = ":";
+            cmd.env("PATH", format!("{}{sep}{}", node_dir.display(), existing));
         }
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());

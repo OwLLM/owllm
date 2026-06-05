@@ -1049,8 +1049,38 @@ export default function AccountsPage() {
         setCardState(route.key, { installing: false });
       }
     };
-    invoke("cli_install_stream", { backend: route.backend, onEvent: channel }).catch((e) => {
-      logInfo(route.backend, `[error] ${String(e)}`);
+    invoke("cli_install_stream", { backend: route.backend, onEvent: channel }).catch(async (e) => {
+      const msg = String(e);
+      // Auto-recover from the most common first-run failure: Node.js
+      // not installed. The bundled MCP Server Toolchain module ships
+      // node 20 + uv, so we offer to install it inline and retry the
+      // CLI install without making the user navigate to the Modules
+      // tab manually.
+      const nodeMissing = /node\.?js/i.test(msg) && /not installed|not found/i.test(msg);
+      if (nodeMissing) {
+        logInfo(route.backend, `[error] ${msg}`);
+        setCardState(route.key, { installing: false });
+        try {
+          const { ask } = await import("@tauri-apps/plugin-dialog");
+          const proceed = await ask(
+            `${provider.name} CLI needs Node.js, which isn't installed yet.\n\nInstall the bundled Node.js + uv toolchain now? (~47 MB, one-time download)\n\nAfter it finishes I'll retry the ${provider.name} CLI install automatically.`,
+            { title: "Install Node.js toolchain?", kind: "info" },
+          );
+          if (!proceed) return;
+          logInfo(route.backend, `Installing MCP Server Toolchain (Node.js 20 + uv)…`);
+          setCardState(route.key, { installing: true });
+          await invoke("module_install", { id: "mcp-toolchain" });
+          logInfo(route.backend, `✓ MCP Server Toolchain installed. Retrying ${provider.name} CLI install…`);
+          // Retry — the new module_node_dir() lookup will find the
+          // bundled npm.cmd on this attempt.
+          handleInstall(route, provider);
+        } catch (e2) {
+          logInfo(route.backend, `[error] toolchain install failed: ${String(e2)}`);
+          setCardState(route.key, { installing: false });
+        }
+        return;
+      }
+      logInfo(route.backend, `[error] ${msg}`);
       setCardState(route.key, { installing: false });
     });
   }

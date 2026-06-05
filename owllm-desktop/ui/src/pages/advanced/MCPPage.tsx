@@ -526,7 +526,7 @@ function ServerDialog({
 // ----- Server card -----
 
 function ServerCard({
-  status, starting, lastError, installing, onStart, onStop, onEdit, onRemove, onInstallRuntime, onToolToggle,
+  status, starting, lastError, installing, onStart, onStop, onEdit, onRemove, onInstallRuntime, onToolToggle, onToggleAutostart,
 }: {
   status: McpServerStatus;
   /// True while mcp_start_server is in-flight for this server. Surfaces
@@ -551,6 +551,8 @@ function ServerCard({
   /// Fired after a per-tool enable/disable toggle so the parent can
   /// re-render (the disabled set lives in localStorage, not React state).
   onToolToggle: () => void;
+  /// Flip this server's Auto-start (enabled) flag in mcp_config.json.
+  onToggleAutostart: (enabled: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const badgeColor = starting ? "#FFB300"
@@ -576,6 +578,15 @@ function ServerCard({
             </span>
           )}
         </div>
+        <label
+          title={status.enabled
+            ? "Auto-start ON — this server spins up automatically on the first agent run (or click Start now)."
+            : "Auto-start OFF — this server only runs when you click Start."}
+          style={{ display: "flex", alignItems: "center", gap: 5, cursor: "pointer", fontSize: 11, color: status.enabled ? "#9ad9ff" : "var(--fg-subtle)", userSelect: "none" }}
+        >
+          <input type="checkbox" checked={status.enabled} onChange={e => onToggleAutostart(e.target.checked)} />
+          Auto-start
+        </label>
         <span style={{
           background: badgeColor, color: "#fff",
           padding: "4px 12px", borderRadius: 4,
@@ -654,6 +665,17 @@ function ServerCard({
         }}>
           ⏳ First run downloads the MCP package via npx — usually 20-60s.
           Wait for it; clicking Start again won't help.
+        </div>
+      )}
+
+      {/* When stopped, explain why nothing is running yet — Stopped + "MCP
+          tools ON" otherwise reads as broken. Auto-start = will spin up on
+          the first agent run; not auto-start = manual Start only. */}
+      {!status.running && !starting && !status.error && (
+        <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", lineHeight: 1.4 }}>
+          {status.enabled
+            ? "⏱ Stopped — starts automatically on the first agent run (or click Start to warm it now)."
+            : "⏸ Stopped — Auto-start is off, so it only runs when you click Start."}
         </div>
       )}
 
@@ -913,6 +935,25 @@ export default function MCPPage() {
     }
   };
 
+  /// Flip a server's Auto-start (enabled) flag in mcp_config.json. Does NOT
+  /// start/stop the process — purely whether it spins up by itself on the
+  /// first agent run. Turning it off while running leaves it running (the
+  /// user can Stop separately); turning it on doesn't eagerly launch it.
+  const toggleAutostart = async (name: string, enabled: boolean) => {
+    setError(null);
+    try {
+      const cfg = await invoke<McpConfig>("mcp_load_config");
+      const idx = cfg.servers.findIndex(s => s.name === name);
+      if (idx < 0) return;
+      const next = { servers: cfg.servers.slice() };
+      next.servers[idx] = { ...next.servers[idx], enabled };
+      await invoke("mcp_save_config", { config: next });
+      await refresh();
+    } catch (e: any) {
+      setError(`auto-start ${name}: ${String(e?.message ?? e)}`);
+    }
+  };
+
   const remove = async (name: string) => {
     if (!confirm(`Remove MCP server '${name}'?`)) return;
     try {
@@ -1002,11 +1043,13 @@ export default function MCPPage() {
 
       <div style={{ padding: "0 16px 8px", color: "var(--fg-subtle)", fontSize: 12, lineHeight: 1.5 }}>
         MCP servers are subprocess tool providers (typically npm packages run via npx).
-        Servers marked <b>Auto-start</b> launch on app boot; their tools are advertised to
-        every agent as <code>mcp:&lt;server&gt;:&lt;tool&gt;</code>. Use the <b>MCP tools ON/OFF</b>
-        switch to drop all MCP tools at once (local tools stay), or the per-tool checkboxes
-        (<b>Show tools</b>) to silence a single one. Every MCP schema is auto-sanitized before
-        it reaches the model so one bad schema can't break tool-calling.
+        Two layers: <b>MCP tools ON/OFF</b> is the master gate (off = no MCP tools reach any
+        agent, nothing spawns); each server's <b>Auto-start</b> toggle decides whether it
+        launches by itself. Auto-start servers don't start at app boot — they spin up lazily on
+        the <b>first agent run</b> (then stay resident), or immediately if you click <b>Start</b>.
+        Their tools advertise as <code>mcp:&lt;server&gt;:&lt;tool&gt;</code>. Per-tool checkboxes
+        (<b>Show tools</b>) silence a single one, and every MCP schema is auto-sanitized before it
+        reaches the model so one bad schema can't break tool-calling.
         Config persisted to <code>~/.owllm/mcp_config.json</code>.
       </div>
 
@@ -1062,6 +1105,7 @@ export default function MCPPage() {
               onRemove={() => remove(s.name)}
               onInstallRuntime={(rt) => installRuntime(rt, s.name)}
               onToolToggle={() => setToolTick(t => t + 1)}
+              onToggleAutostart={(enabled) => toggleAutostart(s.name, enabled)}
             />
           ))
         )}

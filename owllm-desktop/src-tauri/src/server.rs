@@ -149,6 +149,11 @@ pub async fn server_start(
     // Hermes 3, Mistral Nemo+). Older models without a jinja template
     // fall back to the same built-in path as before — no regression.
     cmd.arg("--jinja");
+    // Pin inference to the GPU(s) the user picked in gpu_config.json.
+    // Without this, llama.cpp's default split-mode=layer spreads the model
+    // across EVERY visible GPU, so a 4090-only selection still lit up the
+    // A2000 (the "using the A2000 all of a sudden" report).
+    apply_gpu_selection(&mut cmd, &exe);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -300,6 +305,81 @@ pub async fn server_stop(
         },
     );
     Ok(())
+}
+
+/// Restrict the spawned llama-server to ONLY the GPU(s) the user selected
+/// in gpu_config.json. We pin by STABLE identifiers, never the persisted
+/// index — nvidia-smi, CUDA and Vulkan all number GPUs differently (on the
+/// dev box the 4090 is nvidia-smi index 1 but Vulkan index 0, so reusing
+/// the stored index would pin to the WRONG card). No selection → leave the
+/// backend default untouched.
+fn apply_gpu_selection(cmd: &mut Command, exe: &std::path::Path) {
+    let uuids = crate::hardware::selected_gpu_uuids();
+    if uuids.is_empty() {
+        return;
+    }
+    let path_lc = exe.to_string_lossy().to_lowercase();
+
+    // CUDA build: CUDA_VISIBLE_DEVICES accepts GPU UUIDs directly, so this
+    // is ordering-independent — no PCI_BUS_ID dance needed.
+    if path_lc.contains("cuda") {
+        cmd.env("CUDA_VISIBLE_DEVICES", uuids.join(","));
+        return;
+    }
+
+    // Vulkan build (the shipped default): resolve each selected UUID to its
+    // nvidia-smi NAME, then match that name against `--list-devices` to get
+    // the Vulkan device index. GGML_VK_VISIBLE_DEVICES hides every other
+    // GPU so llama.cpp can only use the chosen one(s).
+    if path_lc.contains("vulkan") {
+        let names = crate::hardware::gpu_names_for_uuids(&uuids);
+        if names.is_empty() {
+            return;
+        }
+        let mut idxs: Vec<String> = Vec::new();
+        for (idx, vk_name) in list_vulkan_devices(exe) {
+            if names.iter().any(|n| gpu_name_matches(n, &vk_name)) {
+                idxs.push(idx.to_string());
+            }
+        }
+        if !idxs.is_empty() {
+            cmd.env("GGML_VK_VISIBLE_DEVICES", idxs.join(","));
+        }
+    }
+}
+
+/// Loose GPU-name match (nvidia-smi vs Vulkan can phrase a name slightly
+/// differently). Case-insensitive equality or containment either way.
+fn gpu_name_matches(a: &str, b: &str) -> bool {
+    let (na, nb) = (a.trim().to_lowercase(), b.trim().to_lowercase());
+    !na.is_empty() && (na == nb || na.contains(&nb) || nb.contains(&na))
+}
+
+/// Run `llama-server --list-devices` and parse its
+/// "VulkanN: <name> (<mem>)" lines into (index, name) pairs.
+fn list_vulkan_devices(exe: &std::path::Path) -> Vec<(u32, String)> {
+    let mut c = std::process::Command::new(exe);
+    c.arg("--list-devices");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x08000000);
+    }
+    let Ok(out) = c.output() else { return Vec::new(); };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut devs = Vec::new();
+    for line in text.lines() {
+        let l = line.trim();
+        let Some(rest) = l.strip_prefix("Vulkan") else { continue };
+        let Some(colon) = rest.find(':') else { continue };
+        let Ok(idx) = rest[..colon].parse::<u32>() else { continue };
+        let after = rest[colon + 1..].trim();
+        let name = after.split('(').next().unwrap_or(after).trim().to_string();
+        if !name.is_empty() {
+            devs.push((idx, name));
+        }
+    }
+    devs
 }
 
 /// Translate the most common llama-server crash exit codes into a

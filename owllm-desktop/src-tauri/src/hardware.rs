@@ -329,6 +329,39 @@ fn load_gpu_selection() -> Option<GpuSelection> {
     None
 }
 
+/// The GPU UUIDs the user selected in gpu_config.json (authoritative).
+/// Empty = no explicit selection → callers should leave the backend's
+/// default GPU behaviour untouched. Used by the model-server spawn to pin
+/// inference to the chosen GPU(s).
+pub fn selected_gpu_uuids() -> Vec<String> {
+    load_gpu_selection().map(|s| s.selected_gpu_uuids).unwrap_or_default()
+}
+
+/// Map GPU UUIDs to their nvidia-smi device NAMES. Names are the only
+/// identifier stable across APIs whose device ORDER disagrees (nvidia-smi
+/// vs CUDA vs Vulkan) — the persisted index is NOT safe to reuse as a
+/// Vulkan/CUDA index. Synchronous so the server spawn path can call it
+/// without an async hop. Returns names in nvidia-smi order for the
+/// matching UUIDs; empty when nvidia-smi is unavailable.
+#[cfg(windows)]
+pub fn gpu_names_for_uuids(uuids: &[String]) -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=name,memory.total,uuid", "--format=csv,noheader,nounits"])
+        .creation_flags(0x08000000)
+        .output();
+    let Ok(out) = out else { return Vec::new(); };
+    if !out.status.success() { return Vec::new(); }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    parse_nvidia_smi_gpus(&stdout)
+        .into_iter()
+        .filter(|g| uuids.iter().any(|u| u == &g.uuid))
+        .map(|g| g.name)
+        .collect()
+}
+#[cfg(not(windows))]
+pub fn gpu_names_for_uuids(_uuids: &[String]) -> Vec<String> { Vec::new() }
+
 fn save_gpu_selection(sel: &GpuSelection) -> Result<(), String> {
     let path = gpu_config_path().ok_or_else(|| "LLM/ tree not found".to_string())?;
     if let Some(parent) = path.parent() {

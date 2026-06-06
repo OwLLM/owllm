@@ -332,13 +332,30 @@ fn apply_gpu_selection(cmd: &mut Command, exe: &std::path::Path) {
     // the Vulkan device index. GGML_VK_VISIBLE_DEVICES hides every other
     // GPU so llama.cpp can only use the chosen one(s).
     if path_lc.contains("vulkan") {
+        // One name per SELECTED uuid (duplicates kept). Vulkan's
+        // --list-devices exposes only name+memory — no UUID/PCI — so for
+        // IDENTICAL cards we can't bind a specific physical one, but we
+        // honour the exact COUNT the user picked (select 2 of 4 4090s →
+        // exactly 2 Vulkan 4090s, not all 4). For distinct cards the name
+        // uniquely identifies the device, so selection is exact.
         let names = crate::hardware::gpu_names_for_uuids(&uuids);
         if names.is_empty() {
             return;
         }
+        let mut want: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for n in &names {
+            *want.entry(n.trim().to_lowercase()).or_insert(0) += 1;
+        }
         let mut idxs: Vec<String> = Vec::new();
         for (idx, vk_name) in list_vulkan_devices(exe) {
-            if names.iter().any(|n| gpu_name_matches(n, &vk_name)) {
+            // Consume one budget slot for the first selected name this
+            // Vulkan device matches — so we take exactly `count` of each.
+            let key = want
+                .iter()
+                .find(|(k, c)| **c > 0 && gpu_name_matches(k, &vk_name))
+                .map(|(k, _)| k.clone());
+            if let Some(k) = key {
+                *want.get_mut(&k).unwrap() -= 1;
                 idxs.push(idx.to_string());
             }
         }

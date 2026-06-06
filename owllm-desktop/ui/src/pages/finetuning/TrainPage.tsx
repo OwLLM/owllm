@@ -358,6 +358,34 @@ export default function TrainPage() {
   const outputDir = `LLM/fine_tuned/${safeBase}_${(runName || "finetune").replace(/[^a-zA-Z0-9._-]/g, "_")}/`;
   const [status, setStatus] = React.useState<TrainStatus>(EMPTY_STATUS);
 
+  // Real downloaded base models from the HF cache — the SAME place the Train
+  // flow downloads into — so the dropdown reflects what's actually on disk
+  // instead of offering models that silently trigger a multi-GB HuggingFace
+  // download (or fail) at train time. (huggingface.rs::hf_cache_list)
+  const [downloadedBases, setDownloadedBases] = React.useState<string[]>([]);
+  const [customBase, setCustomBase] = React.useState(false);
+  const downloadedLower = React.useMemo(
+    () => new Set(downloadedBases.map((b) => b.toLowerCase())),
+    [downloadedBases],
+  );
+  const isDownloaded = React.useCallback(
+    (m: string) => downloadedLower.has((m || "").toLowerCase()),
+    [downloadedLower],
+  );
+  // Curated bases + any base the user has actually pulled that isn't curated.
+  const baseOptions = React.useMemo(() => {
+    const curated = new Set(DEFAULT_BASE_MODELS.map((m) => m.toLowerCase()));
+    const extras = downloadedBases.filter((b) => !curated.has(b.toLowerCase()));
+    return [...DEFAULT_BASE_MODELS, ...extras];
+  }, [downloadedBases]);
+  React.useEffect(() => {
+    let dead = false;
+    invoke<{ entries?: { repoId: string }[] }>("hf_cache_list")
+      .then((sum) => { if (!dead) setDownloadedBases((sum.entries || []).map((e) => e.repoId)); })
+      .catch(() => { /* cache scan best-effort; dropdown still shows curated list */ });
+    return () => { dead = true; };
+  }, []);
+
   // Poll training status every 1.5s while a run is in flight.
   React.useEffect(() => {
     let dead = false;
@@ -493,12 +521,47 @@ export default function TrainPage() {
           <div style={cardTitle}>🤖  BASE MODEL</div>
           <select
             data-ui="train_base_model"
-            value={baseModel}
-            onChange={(e) => setBaseModel(e.target.value)}
+            value={customBase ? "__custom__" : baseModel}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === "__custom__") { setCustomBase(true); }
+              else { setCustomBase(false); setBaseModel(v); }
+            }}
             style={inputStyle}
           >
-            {DEFAULT_BASE_MODELS.map((m) => <option key={m} value={m}>{m}</option>)}
+            <optgroup label="Downloaded (ready to train)">
+              {baseOptions.filter((m) => isDownloaded(m)).map((m) => (
+                <option key={m} value={m}>✓ {m}</option>
+              ))}
+              {baseOptions.filter((m) => isDownloaded(m)).length === 0 && (
+                <option disabled>— none downloaded yet —</option>
+              )}
+            </optgroup>
+            <optgroup label="Not downloaded (fetched from HuggingFace at start)">
+              {baseOptions.filter((m) => !isDownloaded(m)).map((m) => (
+                <option key={m} value={m}>⬇ {m}</option>
+              ))}
+            </optgroup>
+            <option value="__custom__">✏️ Custom HuggingFace id…</option>
           </select>
+          {customBase && (
+            <input
+              data-ui="train_base_model_custom"
+              placeholder="owner/model — e.g. unsloth/Llama-3.2-3B-Instruct-bnb-4bit"
+              value={baseModel}
+              onChange={(e) => setBaseModel(e.target.value)}
+              style={inputStyle}
+            />
+          )}
+          {baseModel.trim() && !isDownloaded(baseModel) && (
+            <div style={{
+              color: "#ffcc80", fontSize: 11, lineHeight: 1.4,
+              background: "rgba(255,179,0,0.10)", border: "1px solid rgba(255,179,0,0.35)",
+              borderRadius: 6, padding: "6px 8px",
+            }}>
+              ⚠ Not downloaded — training will fetch this base from HuggingFace (several GB) when you press Start. Needs internet, and a HuggingFace login for gated repos. Download it on the Models tab first to avoid the wait.
+            </div>
+          )}
           <div style={{ color: "#8595ad", fontSize: 11, lineHeight: 1.4 }}>
             {modelCapabilityBlurb(baseModel)}
           </div>

@@ -1,0 +1,327 @@
+{
+  "schemaVersion": 1,
+  "registryVersion": "2026.06.03",
+  "publishedAt": "2026-06-03T00:00:00Z",
+  "channels": ["stable", "beta", "nightly"],
+  "modules": [
+    {
+      "id": "local-inference",
+      "displayName": "Local Inference",
+      "description": "Run GGUF models on your own hardware via llama.cpp.",
+      "category": "runtime",
+      "required": false,
+      "uiSlots": ["server-page", "model-browser", "chat-local-models"],
+      "dependsOn": [],
+      "variants": [
+        {
+          "id": "local-inference-cuda",
+          "displayName": "NVIDIA CUDA build",
+          "platform": "windows-x86_64",
+          "requires": { "gpu": "nvidia", "vramGb": 4, "diskGb": 1 },
+          "sizeBytes": 285212672,
+          "channels": {
+            "stable": {
+              "version": "b3850-cuda12.4",
+              "releasedAt": "2026-05-28T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/local-inference-cuda-b3850.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "local-inference-vulkan",
+          "displayName": "Vulkan build (NVIDIA/AMD/Intel)",
+          "platform": "windows-x86_64",
+          "requires": { "vramGb": 4, "diskGb": 1 },
+          "sizeBytes": 67108864,
+          "channels": {
+            "stable": {
+              "version": "b3850-vulkan",
+              "releasedAt": "2026-05-28T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/local-inference-vulkan-b3850.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "local-inference-cpu",
+          "displayName": "CPU-only build",
+          "platform": "windows-x86_64",
+          "requires": { "diskGb": 1 },
+          "sizeBytes": 33554432,
+          "channels": {
+            "stable": {
+              "version": "b3850-cpu",
+              "releasedAt": "2026-05-28T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/local-inference-cpu-b3850.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "audio-stt",
+      "displayName": "Speech-to-Text",
+      "description": "Voice transcription via whisper.cpp. Enables Telegram voice messages, in-app mic input, audio file ingestion.",
+      "category": "audio",
+      "required": false,
+      "uiSlots": ["voice-input", "telegram-voice-transcribe", "audio-upload"],
+      "dependsOn": [],
+      "variants": [
+        {
+          "id": "audio-stt-whisper-base",
+          "displayName": "Whisper base (multilingual, fast)",
+          "platform": "windows-x86_64",
+          "requires": { "diskGb": 1 },
+          "sizeBytes": 155189248,
+          "channels": {
+            "stable": {
+              "version": "v1.8.4-base",
+              "releasedAt": "2026-05-15T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/audio-stt-whisper-base-v1.8.4.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "audio-stt-whisper-large",
+          "displayName": "Whisper large-v3 (highest accuracy)",
+          "platform": "windows-x86_64",
+          "requires": { "diskGb": 4, "ramGb": 8 },
+          "sizeBytes": 3173552128,
+          "channels": {
+            "stable": {
+              "version": "v1.8.4-large-v3",
+              "releasedAt": "2026-05-15T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/audio-stt-whisper-large-v3.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "python-runtime",
+      "displayName": "Python Runtime",
+      "description": "Embedded Python 3.11. Shared base for fine-tuning, MCP Python servers (uvx), and bundled Python tools (screenshot, abliterate). Installed automatically when any dependent module is selected.",
+      "category": "runtime",
+      "required": false,
+      "uiSlots": [],
+      "dependsOn": [],
+      "variants": [
+        {
+          "id": "python-3.11-embed-win",
+          "displayName": "Python 3.11 embedded distribution",
+          "platform": "windows-x86_64",
+          "requires": { "diskGb": 1 },
+          "sizeBytes": 157286400,
+          "channels": {
+            "stable": {
+              "version": "3.11.9",
+              "releasedAt": "2026-04-02T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/python-3.11.9-embed-win-x64.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "finetune",
+      "displayName": "Fine-Tuning & Abliteration",
+      "description": "Local LoRA fine-tuning, full fine-tuning, and weight-orthogonalisation (abliteration). Includes Unsloth, TRL, PEFT, bitsandbytes. GPU variant matches your CUDA generation.",
+      "category": "training",
+      "required": false,
+      "uiSlots": ["train-page", "adapters-page", "abliterate-tool", "dataset-tools"],
+      "dependsOn": ["python-runtime"],
+      "variants": [
+        {
+          "id": "finetune-unsloth-cu124",
+          "displayName": "Unsloth + CUDA 12.4 (Blackwell, Ada, Hopper)",
+          "platform": "windows-x86_64",
+          "requires": { "gpu": "nvidia", "vramGb": 8, "ramGb": 16, "diskGb": 14 },
+          "sizeBytes": 12884901888,
+          "channels": {
+            "stable": {
+              "version": "py311-torch2.5.1-cu124-unsloth20241110",
+              "releasedAt": "2026-05-20T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/finetune-unsloth-cu124.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "finetune-unsloth-cu121",
+          "displayName": "Unsloth + CUDA 12.1 (Ampere, Ada)",
+          "platform": "windows-x86_64",
+          "requires": { "gpu": "nvidia", "vramGb": 8, "ramGb": 16, "diskGb": 14 },
+          "sizeBytes": 12884901888,
+          "channels": {
+            "stable": {
+              "version": "py311-torch2.5.1-cu121-unsloth20241110",
+              "releasedAt": "2026-05-20T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/finetune-unsloth-cu121.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "finetune-base-cu118",
+          "displayName": "Base trainer + CUDA 11.8 (Turing fallback)",
+          "platform": "windows-x86_64",
+          "requires": { "gpu": "nvidia", "vramGb": 8, "ramGb": 16, "diskGb": 20 },
+          "sizeBytes": 19327352832,
+          "channels": {
+            "stable": {
+              "version": "py311-torch2.5.1-cu118-base",
+              "releasedAt": "2026-05-20T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/finetune-base-cu118.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "mcp-toolchain",
+      "displayName": "MCP Server Toolchain",
+      "description": "Node.js + uv. Required to spawn npx-based MCP servers (filesystem, git, github, brave-search, postgres, puppeteer, sequential-thinking) and uvx-based Python MCP servers. Without this, the MCP runtime can only invoke binary servers.",
+      "category": "runtime",
+      "required": false,
+      "uiSlots": ["mcp-page-full", "mcp-pack-install", "team-mcp-autoinstall"],
+      "dependsOn": ["python-runtime"],
+      "variants": [
+        {
+          "id": "mcp-toolchain-node-uv",
+          "displayName": "Node.js 20 LTS + uv",
+          "platform": "windows-x86_64",
+          "requires": { "diskGb": 1 },
+          "sizeBytes": 272629760,
+          "channels": {
+            "stable": {
+              "version": "node20.18.0-uv0.5.4",
+              "releasedAt": "2026-05-10T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/mcp-toolchain-node20-uv0.5.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "tools-python",
+      "displayName": "Python Tools (Screenshot)",
+      "description": "Small Python utilities the agents call: web-page screenshot (Pillow), abliteration corpus prep. Lightweight — under 50 MB on top of python-runtime.",
+      "category": "content",
+      "required": false,
+      "uiSlots": ["agent-tools-screenshot"],
+      "dependsOn": ["python-runtime"],
+      "variants": [
+        {
+          "id": "tools-python-base",
+          "displayName": "Pillow + requests bundle",
+          "platform": "windows-x86_64",
+          "requires": { "diskGb": 1 },
+          "sizeBytes": 41943040,
+          "channels": {
+            "stable": {
+              "version": "0.1.0",
+              "releasedAt": "2026-05-15T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/tools-python-base-0.1.0.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "shellEmbedded": {
+    "_comment": "Features that ship inside the Tauri exe and are always available. Not modules. Listed here for completeness and for the wizard to know what NOT to offer as installable.",
+    "items": [
+      "cloud-connectors-anthropic",
+      "cloud-connectors-openai",
+      "cloud-connectors-moonshot",
+      "telegram-bridge",
+      "audio-codecs-symphonia",
+      "agent-runtime-orchestrator",
+      "agent-runtime-critic",
+      "agent-runtime-dispatch",
+      "fleet-worktree-substrate",
+      "mcp-runtime-spawner",
+      "pty-terminal",
+      "hardware-probe",
+      "huggingface-browser",
+      "accounts-secrets",
+      "ui-all-pages"
+    ]
+  },
+  "dataLayer": {
+    "_comment": "Files pulled from raw.githubusercontent on launch with local cache fallback. Hot-reloadable without restart. NOT modules; updated by committing to main.",
+    "paths": [
+      "data/teams/*.json",
+      "data/roles/*.yaml",
+      "data/skills/*.md",
+      "data/model-profiles/*.json",
+      "data/mcp-recommendations/*.json",
+      "data/abliteration-corpus/*.md"
+    ]
+  },
+  "systemPrerequisites": {
+    "_comment": "External installs the user must have on PATH. Not modules; the wizard checks for them and surfaces install instructions if missing.",
+    "items": [
+      {
+        "id": "git",
+        "displayName": "Git",
+        "required": true,
+        "reason": "Fleet worktree isolation (per-agent git worktrees) requires git on PATH.",
+        "checkCommand": "git --version",
+        "installHint": "https://git-scm.com/download/win"
+      },
+      {
+        "id": "vscodium-or-cursor-or-vscode",
+        "displayName": "External code editor",
+        "required": false,
+        "reason": "Code page launches your preferred editor. Detection order: VSCodium > Cursor > VS Code on PATH.",
+        "checkCommand": "codium --version || cursor --version || code --version",
+        "installHint": "https://vscodium.com/ or https://cursor.com/ or https://code.visualstudio.com/"
+      }
+    ]
+  },
+  "futureModules": {
+    "_comment": "Features the user has mentioned as roadmap items. NOT shipped yet — listed here so the registry shape is forward-compatible. Add to `modules[]` when implemented.",
+    "items": [
+      "audio-tts-piper",
+      "vision-inference-llava",
+      "image-generation-sdxl",
+      "image-generation-flux",
+      "music-generation",
+      "video-generation",
+      "whatsapp-bridge",
+      "kanban-cards-ui-pack",
+      "director-mode-approval-gates"
+    ]
+  }
+}

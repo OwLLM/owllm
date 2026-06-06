@@ -109,13 +109,45 @@ pub async fn server_start(
         .base_model
         .ok_or_else(|| format!("model {model_id} has no base_model path"))?;
 
-    let exe = paths::llama_server_exe().ok_or_else(|| {
-        let name = paths::llama_server_filename();
-        format!(
-            "{name} not found; set OWLLM_LLAMA_SERVER or place it at \
-             runtime-data/runtime/llama.cpp/{name}"
-        )
-    })?;
+    // The llama.cpp engine (llama-server) ships as the `local-inference`
+    // module — it is NOT bundled. On a fresh machine a user can download a
+    // model but have no engine to run it, which previously dead-ended with a
+    // cryptic "llama-server.exe not found; set OWLLM_LLAMA_SERVER…". This is
+    // the single choke point for every model run (chat / code / agentic /
+    // server tab), so auto-install the engine here instead. Reuses the exact
+    // installer the Modules wizard uses; status surfaces on the server-log.
+    let exe = match paths::llama_server_exe() {
+        Some(p) => p,
+        None => {
+            let _ = app.emit("server-log", ServerLogEvent {
+                stream: "stdout".into(),
+                line: "[supervisor] llama.cpp engine not installed — installing the Local Inference module now (one-time, ~download)…".into(),
+            });
+            let hw = crate::hardware::hardware_info().await.unwrap_or_default();
+            let snap = crate::modules::HardwareSnapshot::from_probe(&hw);
+            let mgr = app.state::<crate::modules::ModuleManager>();
+            mgr.inner()
+                .install(&app, "local-inference", &snap)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "no inference engine and auto-install failed: {e}. \
+                         Open the Modules page and install 'Local Inference' manually."
+                    )
+                })?;
+            let _ = app.emit("server-log", ServerLogEvent {
+                stream: "stdout".into(),
+                line: "[supervisor] Local Inference engine installed — starting the model…".into(),
+            });
+            paths::llama_server_exe().ok_or_else(|| {
+                let name = paths::llama_server_filename();
+                format!(
+                    "{name} still not found after installing Local Inference. \
+                     Open Modules and reinstall the engine."
+                )
+            })?
+        }
+    };
 
     // Take the lock and stop any running child before spawning a new one.
     let mut inner = state.inner.lock().await;

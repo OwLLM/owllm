@@ -128,12 +128,19 @@ export default function CodePage() {
     ]);
   };
 
-  const onToolResult = (_call: ToolCall, result: ToolExecResult) =>
+  const onToolResult = (call: ToolCall, result: ToolExecResult) =>
     setMessages((msgs) => {
       const out = msgs.slice();
+      // Live diff: edit_file carries old/new in the call itself, so render a
+      // real -/+ diff instead of the terse "edited" string. write_file_with_diff
+      // shows whatever diff the backend returned (its output).
+      const content =
+        result.ok && call.name === "edit_file"
+          ? formatEditDiff(call.args.old_string ?? "", call.args.new_string ?? "")
+          : result.output;
       for (let i = out.length - 1; i >= 0; i--) {
         if (out[i].role === "tool" && out[i].status === "running") {
-          out[i] = { ...out[i], status: result.ok ? "ok" : "error", content: result.output };
+          out[i] = { ...out[i], status: result.ok ? "ok" : "error", content };
           break;
         }
       }
@@ -184,6 +191,13 @@ export default function CodePage() {
   const stop = () => { abortRef.current?.abort(); setBusy(false); };
   const clear = () => { if (!busy) { setMessages([]); setStatus(`Workspace: ${workspace || "(none)"}`); } };
 
+  // Clicking a file in the tree drops an @-reference into the composer so the
+  // user can point the agent at it ("fix the bug in @src/foo.ts").
+  const openFile = (abs: string) => {
+    const rel = workspace && abs.startsWith(workspace) ? abs.slice(workspace.length).replace(/^[\\/]+/, "") : abs;
+    setDraft((d) => (d.trim() ? `${d.replace(/\s*$/, "")} @${rel} ` : `@${rel} `));
+  };
+
   const wsShort = workspace ? workspace.replace(/^.*[\\/]/, "") : "No folder";
 
   return (
@@ -207,11 +221,17 @@ export default function CodePage() {
         <button onClick={clear} disabled={busy || messages.length === 0} style={btn}>Clear</button>
       </div>
 
-      {/* Transcript */}
+      {/* Body: file-tree rail + transcript */}
+      <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 8 }}>
+        {workspace && (
+          <div style={{ width: 220, flexShrink: 0, overflowY: "auto", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 4 }}>
+            <TreeDir path={workspace} name={wsShort} depth={0} defaultOpen onOpenFile={openFile} />
+          </div>
+        )}
       <div
         ref={scrollRef}
         className="selectable-chat"
-        style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}
+        style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}
       >
         {messages.length === 0 ? (
           <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 460, lineHeight: 1.6 }}>
@@ -242,6 +262,7 @@ export default function CodePage() {
             );
           })
         )}
+        </div>
       </div>
 
       {/* Status line */}
@@ -279,3 +300,64 @@ const btn: CSSProperties = {
   cursor: "pointer",
   whiteSpace: "nowrap",
 };
+
+// Render an edit_file change as a -/+ diff for the tool card. old/new come
+// straight from the tool call, so this is the actual change the agent made.
+function formatEditDiff(oldStr: string, newStr: string): string {
+  const minus = oldStr.split("\n").map((l) => `- ${l}`);
+  const plus = newStr.split("\n").map((l) => `+ ${l}`);
+  return [...minus, ...plus].join("\n");
+}
+
+type TreeEntry = { name: string; kind: string };
+
+// Lazy file-tree node. Reuses the existing tool_list_dir command (the same
+// one the coding agent uses), so no new backend. Folders expand on click and
+// load their children once; files insert an @-reference into the composer.
+function TreeDir({ path, name, depth, defaultOpen, onOpenFile }: {
+  path: string; name: string; depth: number; defaultOpen?: boolean;
+  onOpenFile: (absPath: string) => void;
+}) {
+  const [open, setOpen] = useState(!!defaultOpen);
+  const [entries, setEntries] = useState<TreeEntry[] | null>(null);
+  useEffect(() => {
+    if (open && entries === null) {
+      invoke<Array<{ name: string; kind: string; size?: number }>>("tool_list_dir", { path, cwd: undefined })
+        .then((e) =>
+          setEntries(
+            e
+              .filter((x) => !x.name.startsWith(".") && x.name !== "node_modules" && x.name !== "target")
+              .sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "dir" ? -1 : 1)),
+          ),
+        )
+        .catch(() => setEntries([]));
+    }
+  }, [open, entries, path]);
+  const rowStyle: CSSProperties = {
+    display: "flex", alignItems: "center", gap: 4, padding: "2px 4px",
+    paddingLeft: 4 + depth * 12, fontSize: 12, cursor: "pointer", borderRadius: 4,
+    color: "var(--fg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+  };
+  return (
+    <div>
+      <div style={rowStyle} onClick={() => setOpen((o) => !o)} title={path}>
+        <span style={{ width: 12, color: "var(--fg-muted)" }}>{open ? "▾" : "▸"}</span>
+        <span>📁 {name}</span>
+      </div>
+      {open && entries === null && <div style={{ ...rowStyle, color: "var(--fg-muted)" }}>…</div>}
+      {open && entries?.map((e) => {
+        const child = `${path}/${e.name}`;
+        if (e.kind === "dir") {
+          return <TreeDir key={child} path={child} name={e.name} depth={depth + 1} onOpenFile={onOpenFile} />;
+        }
+        return (
+          <div key={child} style={{ ...rowStyle, paddingLeft: 4 + (depth + 1) * 12 }} title={child}
+               onClick={() => onOpenFile(child)}>
+            <span style={{ width: 12 }} />
+            <span style={{ color: "var(--fg-muted)" }}>📄 {e.name}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}

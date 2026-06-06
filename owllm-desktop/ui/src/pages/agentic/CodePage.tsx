@@ -31,6 +31,32 @@ const CODING_SYSTEM = (ws: string) =>
   `surrounding code's style, and after editing briefly state what you changed and why. Paths may be given ` +
   `relative to the workspace.`;
 
+// Phase 3 — plan/act Kanban. The model first breaks a goal into ordered steps
+// (cards), then the agent executes each step in turn, moving its card across
+// the board. Inspired by Cline's task UX, built on OWLLM's own engine.
+type Task = { id: number; title: string; status: "pending" | "running" | "done" | "failed" };
+
+const PLAN_SYSTEM = (ws: string, goal: string) =>
+  `You are a senior engineer planning work in the project at ${ws}. Break the goal into 2-6 concrete, ` +
+  `ordered implementation steps. Output ONLY a JSON array of short imperative step strings (one action each), ` +
+  `nothing else — no prose, no code fences. Goal: ${goal}`;
+
+// Tolerant parse: prefer a JSON array; fall back to numbered/bulleted lines.
+function parseSteps(text: string): string[] {
+  const m = text.match(/\[[\s\S]*\]/);
+  if (m) {
+    try {
+      const arr = JSON.parse(m[0]);
+      if (Array.isArray(arr)) return arr.map((x) => String(x).trim()).filter(Boolean).slice(0, 8);
+    } catch { /* fall through to line parsing */ }
+  }
+  return text
+    .split("\n")
+    .map((l) => l.replace(/^\s*(\d+[.)]|[-*])\s*/, "").trim())
+    .filter((l) => l.length > 3 && !l.startsWith("```"))
+    .slice(0, 8);
+}
+
 export default function CodePage() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelId, setModelId] = useState<string>("");
@@ -39,6 +65,7 @@ export default function CodePage() {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("Pick a folder and a local model, then describe what to build or fix.");
+  const [tasks, setTasks] = useState<Task[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -188,8 +215,80 @@ export default function CodePage() {
     }
   };
 
+  // Phase 3: plan the goal into task cards, then execute each step in turn,
+  // moving its card pending → running → done/failed on the Kanban board.
+  const planAndExecute = async () => {
+    const goal = draft.trim();
+    if (!goal || busy) return;
+    if (!workspace) { setStatus("Pick a workspace folder first (Browse)."); return; }
+    if (!modelId) { setStatus("No local model available — load one on the Models page."); return; }
+    setDraft("");
+    setBusy(true);
+    setTasks([]);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setMessages((m) => [...m, { role: "user", content: `📋 Plan & build: ${goal}`, ts: Date.now() }]);
+    try {
+      const port = await ensureServer(modelId);
+      if (!port) { setStatus("Model server didn't come up — check the Server tab."); return; }
+      // 1) PLAN — ask for an ordered step list (no tools needed).
+      setStatus("Planning…");
+      const planReply = await streamLocalChat({
+        port, modelId,
+        systemPrompt: PLAN_SYSTEM(workspace, goal),
+        userContent: "Return the JSON array of steps now.",
+        temperature: 0.2,
+        signal: ctrl.signal,
+        onDelta: () => {}, onThought: () => {},
+        projectCwd: workspace,
+        history: [],
+      });
+      const steps = parseSteps(planReply);
+      if (steps.length === 0) {
+        setMessages((m) => [...m, { role: "assistant", content: "Couldn't produce a plan — try rephrasing the goal, or use Send for a one-shot.", ts: Date.now() }]);
+        return;
+      }
+      const plan: Task[] = steps.map((title, i) => ({ id: i, title, status: "pending" }));
+      setTasks(plan);
+      // 2) ACT — run each step through the coding agent in sequence.
+      for (let i = 0; i < plan.length; i++) {
+        if (ctrl.signal.aborted) break;
+        setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "running" } : t)));
+        setStatus(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
+        setMessages((m) => [...m, { role: "assistant", content: `\n### Step ${i + 1}: ${plan[i].title}\n`, ts: Date.now() }]);
+        try {
+          await streamLocalChat({
+            port, modelId,
+            systemPrompt: CODING_SYSTEM(workspace),
+            userContent: `Overall goal: ${goal}\n\nDo THIS step now (only this step): ${plan[i].title}`,
+            temperature: 0.3,
+            signal: ctrl.signal,
+            onDelta, onThought,
+            projectCwd: workspace,
+            history: [],
+            events: { onToolCall, onToolResult },
+          });
+          setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "done" } : t)));
+        } catch (e) {
+          const err = e as { name?: string };
+          if (err.name === "AbortError") break;
+          setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "failed" } : t)));
+          setMessages((m) => [...m, { role: "assistant", content: `⚠ Step ${i + 1} failed: ${e}`, ts: Date.now() }]);
+          break;
+        }
+      }
+      setStatus("Plan complete.");
+    } catch (e) {
+      const err = e as { name?: string; message?: string };
+      if (err.name !== "AbortError") setMessages((m) => [...m, { role: "assistant", content: `⚠ ${err.message ?? e}`, ts: Date.now() }]);
+    } finally {
+      setBusy(false);
+      abortRef.current = null;
+    }
+  };
+
   const stop = () => { abortRef.current?.abort(); setBusy(false); };
-  const clear = () => { if (!busy) { setMessages([]); setStatus(`Workspace: ${workspace || "(none)"}`); } };
+  const clear = () => { if (!busy) { setMessages([]); setTasks([]); setStatus(`Workspace: ${workspace || "(none)"}`); } };
 
   // Clicking a file in the tree drops an @-reference into the composer so the
   // user can point the agent at it ("fix the bug in @src/foo.ts").
@@ -218,8 +317,33 @@ export default function CodePage() {
           {models.length === 0 && <option value="">No local models</option>}
           {models.map((m) => <option key={m.model_id} value={m.model_id}>{m.model_id}</option>)}
         </select>
-        <button onClick={clear} disabled={busy || messages.length === 0} style={btn}>Clear</button>
+        <button onClick={clear} disabled={busy || (messages.length === 0 && tasks.length === 0)} style={btn}>Clear</button>
       </div>
+
+      {/* Phase 3: Kanban plan/act board (only while a plan is active) */}
+      {tasks.length > 0 && (
+        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+          {([["pending", "📋 To do"], ["running", "⚙ Doing"], ["done", "✓ Done"]] as const).map(([col, label]) => {
+            const inCol = tasks.filter((t) =>
+              col === "done" ? (t.status === "done" || t.status === "failed") : t.status === col,
+            );
+            return (
+              <div key={col} style={{ flex: 1, minWidth: 0, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 6, display: "flex", flexDirection: "column", gap: 5 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", padding: "0 2px" }}>{label} ({inCol.length})</div>
+                {inCol.map((t) => {
+                  const c = t.status === "failed" ? "#ff8c8c" : t.status === "done" ? "#7ff0c5" : t.status === "running" ? "#ffd97a" : "var(--fg-muted)";
+                  const mark = t.status === "failed" ? "✗" : t.status === "done" ? "✓" : t.status === "running" ? "⟳" : "•";
+                  return (
+                    <div key={t.id} title={t.title} style={{ fontSize: 11, lineHeight: 1.35, color: "var(--fg)", background: "var(--bg-surface)", border: `1px solid ${c}55`, borderLeft: `3px solid ${c}`, borderRadius: 5, padding: "5px 7px", overflow: "hidden", textOverflow: "ellipsis", display: "-webkit-box", WebkitLineClamp: 3, WebkitBoxOrient: "vertical" as const }}>
+                      <span style={{ color: c, fontWeight: 700 }}>{mark}</span> {t.title}
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Body: file-tree rail + transcript */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 8 }}>
@@ -281,7 +405,10 @@ export default function CodePage() {
         {busy ? (
           <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
         ) : (
-          <button onClick={send} disabled={!draft.trim()} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: draft.trim() ? 1 : 0.5 }}>Send</button>
+          <>
+            <button onClick={planAndExecute} disabled={!draft.trim()} title="Break the goal into ordered steps, then build them one by one (Kanban)" style={{ ...btn, height: 44, padding: "0 14px", opacity: draft.trim() ? 1 : 0.5 }}>📋 Plan</button>
+            <button onClick={send} disabled={!draft.trim()} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: draft.trim() ? 1 : 0.5 }}>Send</button>
+          </>
         )}
       </div>
     </div>

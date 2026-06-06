@@ -346,8 +346,16 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             find_claude_cli(), &["--print"], "Claude", Some("ok")).await,
         // OpenAI Codex CLI: `codex exec <prompt>` is the non-interactive
         // shape. There's no --print/--prompt; older docs to the contrary.
+        // BUT codex versions disagree on WHERE the prompt comes from:
+        // older builds take the positional arg; newer builds read it from
+        // STDIN (they print "Reading additional input from stdin..." and,
+        // with stdin closed/null, get an empty prompt → exit 1). That's the
+        // cross-machine failure — this box has the arg-style codex, others
+        // have the stdin-style one. Feed the prompt BOTH ways so either
+        // build gets a real prompt; the stdin is closed right after the
+        // write (EOF), so the stdin-style codex proceeds instead of hanging.
         "codex_cli" => probe_cli_subscription(
-            find_codex_cli(), &["exec", "ok"], "Codex", None).await,
+            find_codex_cli(), &["exec", "ok"], "Codex", Some("ok")).await,
         "kimi_cli" => probe_cli_subscription(
             find_kimi_cli(),
             // `--model kimi-latest` so the probe works even when the
@@ -698,9 +706,90 @@ fn extra_search_dirs() -> Vec<PathBuf> {
         if local_bin.is_dir() {
             dirs.push(local_bin);
         }
+        // Rust/cargo-installed binaries (some codex distributions, misc
+        // tools) and Volta-managed Node shims both live under the home dir.
+        let cargo_bin = PathBuf::from(h).join(".cargo").join("bin");
+        if cargo_bin.is_dir() { dirs.push(cargo_bin); }
+        let volta_bin = PathBuf::from(h).join(".volta").join("bin");
+        if volta_bin.is_dir() { dirs.push(volta_bin); }
     }
 
+    // Volta on Windows installs its shims under %LOCALAPPDATA%\Volta\bin.
+    #[cfg(windows)]
+    if let Some(lad) = &localappdata {
+        let volta = PathBuf::from(lad).join("Volta").join("bin");
+        if volta.is_dir() { dirs.push(volta); }
+    }
+
+    // npm's REAL global prefix — THE catch-all for "claude / codex /
+    // gemini not found" on a machine where `npm install -g` put the shim
+    // somewhere none of the hard-coded guesses above cover (custom npmrc
+    // prefix, nvm, fnm, volta, corporate setups). Ask npm itself; cached
+    // to a single subprocess per run, and only reached when a PATH lookup
+    // already missed (which_extended checks PATH first).
+    dirs.extend(npm_global_bin_dirs());
+
     dirs
+}
+
+/// npm's global bin dir(s), resolved by asking npm `config get prefix`.
+/// On Windows the global shims (`claude.cmd`, `codex.cmd`, …) live at
+/// `<prefix>` itself; on POSIX at `<prefix>/bin`. Cached for the process
+/// lifetime so we shell out at most once. Returns empty when npm isn't
+/// reachable (then the other search dirs still apply).
+fn npm_global_bin_dirs() -> Vec<PathBuf> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        // Locate npm: PATH first, then the bundled Node.js runtime.
+        let npm = ["npm.cmd", "npm.exe", "npm"]
+            .iter()
+            .find_map(|n| which_in_path(n).ok())
+            .or_else(|| {
+                crate::paths::module_node_dir().and_then(|d| {
+                    ["npm.cmd", "npm.exe", "npm"]
+                        .iter()
+                        .map(|n| d.join(n))
+                        .find(|c| c.is_file())
+                })
+            });
+        let Some(npm) = npm else { return Vec::new(); };
+
+        let mut cmd = Command::new(&npm);
+        #[cfg(windows)]
+        let batch = is_batch_shim(&npm);
+        #[cfg(not(windows))]
+        let batch = false;
+        push_arg(&mut cmd, batch, "config");
+        push_arg(&mut cmd, batch, "get");
+        push_arg(&mut cmd, batch, "prefix");
+        // Bundled Node on PATH so npm can resolve `node` if needed.
+        if let Some(node_dir) = crate::paths::module_node_dir() {
+            let existing = std::env::var("PATH").unwrap_or_default();
+            #[cfg(windows)] let sep = ";";
+            #[cfg(not(windows))] let sep = ":";
+            cmd.env("PATH", format!("{}{sep}{}", node_dir.display(), existing));
+        }
+        cmd.stdin(Stdio::null());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let Ok(out) = cmd.output() else { return Vec::new(); };
+        if !out.status.success() { return Vec::new(); }
+        let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if prefix.is_empty() { return Vec::new(); }
+
+        let base = PathBuf::from(&prefix);
+        let mut dirs = Vec::new();
+        if base.is_dir() { dirs.push(base.clone()); }   // Windows shims
+        let bin = base.join("bin");
+        if bin.is_dir() { dirs.push(bin); }             // POSIX layout
+        dirs
+    }).clone()
 }
 
 /// PATH search → fallback to extra_search_dirs. Use this anywhere we
@@ -845,6 +934,110 @@ pub async fn claude_cli_complete(
         }
         let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
         Ok(stdout.trim().to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// One-shot completion via the OpenAI Codex CLI — the OpenAI-subscription
+/// analogue of `claude_cli_complete`. Without this the chat fell back to
+/// demanding OPENAI_API_KEY even when a ChatGPT/Codex subscription was
+/// connected (streamOpenAI had no CLI path, only the API one).
+///
+/// `codex exec` is the non-interactive entry point. It has no `--system`
+/// flag, so the system prompt is folded into the prompt as a leading
+/// block. The prompt is passed BOTH as the positional arg AND on stdin so
+/// every codex version gets it (older builds read the arg, newer ones read
+/// stdin — same cross-version split that broke the Test probe). The final
+/// assistant message is captured via `-o <file>` (clean text, no JSONL /
+/// agent-activity noise) and read back. Sandbox is forced read-only so a
+/// chat turn can never mutate the user's disk.
+#[tauri::command]
+pub async fn codex_cli_complete(
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let exe = find_codex_cli()
+            .ok_or_else(|| "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)".to_string())?;
+
+        // Unique temp file for codex's final-message output.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let out_file = std::env::temp_dir().join(format!("owllm-codex-{}-{}.txt", std::process::id(), stamp));
+
+        let mut cmd = Command::new(&exe);
+        #[cfg(windows)]
+        let batch = is_batch_shim(&exe);
+        #[cfg(not(windows))]
+        let batch = false;
+
+        let prompt = if system_prompt.trim().is_empty() {
+            user_message.clone()
+        } else {
+            format!("{}\n\n{}", system_prompt.trim(), user_message)
+        };
+
+        push_arg(&mut cmd, batch, "exec");
+        push_arg(&mut cmd, batch, "--skip-git-repo-check");
+        push_arg(&mut cmd, batch, "--color");
+        push_arg(&mut cmd, batch, "never");
+        // Read-only sandbox: a chat reply never needs to write files or run
+        // commands, and this guarantees codex can't touch the user's disk.
+        push_arg(&mut cmd, batch, "--sandbox");
+        push_arg(&mut cmd, batch, "read-only");
+        push_arg(&mut cmd, batch, "-o");
+        push_arg(&mut cmd, batch, &out_file.to_string_lossy());
+        // Positional prompt (older codex reads it here); stdin carries it
+        // too (newer codex reads it there).
+        push_arg(&mut cmd, batch, &prompt);
+
+        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let p = std::path::Path::new(dir);
+            if p.is_dir() {
+                cmd.current_dir(p);
+            }
+        }
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(prompt.as_bytes());
+            // Drop closes the pipe (EOF) so the stdin-style codex proceeds.
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("wait codex: {e}"))?;
+
+        // Prefer the -o file (final message only). Fall back to stdout.
+        let from_file = std::fs::read_to_string(&out_file).ok();
+        let _ = std::fs::remove_file(&out_file);
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            return Err(format!(
+                "codex CLI exited {} — {}",
+                output.status.code().unwrap_or(-1),
+                if stderr.trim().is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
+            ));
+        }
+        let reply = from_file
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| String::from_utf8_lossy(&output.stdout).trim().to_string());
+        if reply.is_empty() {
+            return Err("codex CLI returned an empty reply".to_string());
+        }
+        Ok(reply)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?

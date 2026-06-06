@@ -1448,7 +1448,7 @@ async function consumeAnthropicSse(
 
 async function streamOpenAI(
   modelId: string,
-  _route: CloudRoute,
+  route: CloudRoute,
   systemPrompt: string,
   userMessage: string,
   temperature: number,
@@ -1459,6 +1459,26 @@ async function streamOpenAI(
   /// Image attachments only — audio is transcribed in streamChatCompletion.
   images?: Attachment[],
 ): Promise<string> {
+  // OpenAI SUBSCRIPTION (ChatGPT / Codex) → run the Codex CLI, exactly as
+  // the Claude subscription routes through claude_cli_complete. Without
+  // this the chat demanded OPENAI_API_KEY even when a Codex subscription
+  // was connected (this WAS the "chat page asks me for the API key" bug).
+  // `api/` models and the default still use the HTTP API-key path below.
+  if (route.forceSub === true) {
+    // codex exec is one-shot (no token stream). Fold prior turns into the
+    // prompt so the CLI has conversation context.
+    const convo = (history ?? [])
+      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)
+      .join("\n\n");
+    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    const reply = await invoke<string>("codex_cli_complete", {
+      systemPrompt,
+      userMessage: prompt,
+      cwd: undefined,
+    });
+    if (reply) onDelta(reply);
+    return reply;
+  }
   // ModelPicker encodes reasoning-effort variants as "<id>:<level>"
   // (e.g. "gpt-5.5:high"). Split it back out here so the wire model id
   // stays clean and the level rides as reasoning_effort. "extra_high"

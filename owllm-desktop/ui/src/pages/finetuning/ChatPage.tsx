@@ -299,6 +299,20 @@ export default function ChatPage() {
     return 22;
   });
   useEffect(() => { try { localStorage.setItem("owllm:chat:rightPct2", String(rightPct)); } catch { /* ignore */ } }, [rightPct]);
+
+  // User-saved instruction templates (💾 Save / Save as…). Persisted
+  // separately from chat state so they survive Clear Chat and show up
+  // in every column's template dropdown alongside the built-in presets.
+  const [customTemplates, setCustomTemplates] = useState<Array<{ key: string; label: string; system: string }>>(() => {
+    try { const v = localStorage.getItem("owllm:chat:templates"); if (v) return JSON.parse(v); } catch { /* ignore */ }
+    return [];
+  });
+  useEffect(() => {
+    try { localStorage.setItem("owllm:chat:templates", JSON.stringify(customTemplates)); } catch { /* ignore */ }
+  }, [customTemplates]);
+  // Which template is currently applied per column, so the dropdown can
+  // reflect the selection and 💾 Save knows which custom template to overwrite.
+  const [appliedTpl, setAppliedTpl] = useState<Record<"A" | "B" | "C", string>>({ A: "", B: "", C: "" });
   const startRightDrag = (e: React.MouseEvent) => {
     e.preventDefault();
     const onMove = (ev: MouseEvent) => {
@@ -533,8 +547,29 @@ export default function ChatPage() {
         // arrives. Same pattern as the AgentsPage dispatch.
         const raw = last.content + delta;
         const cleaned = stripFabricatedToolOutput(raw);
-        const newContent = raw.endsWith(" ") && !cleaned.endsWith(" ") ? cleaned + " " : cleaned;
+        // stripFabricatedToolOutput .trim()s its result, but we re-run it on
+        // the WHOLE buffer every token. The model routinely emits a block
+        // break (\n\n) in one chunk and the next heading / table row in a
+        // later chunk, so the newline sits at the trailing edge and .trim()
+        // eats it PERMANENTLY. Over a full stream that strips every
+        // block-boundary newline, and markdown blocks (## headings, | tables,
+        // --- rules) collapse into one run-on wall with literal ##/**/| shown.
+        // Restore the raw buffer's trailing whitespace run (generalises the
+        // old trailing-space-only band-aid to newlines too).
+        const trail = raw.match(/\s+$/)?.[0] ?? "";
+        const newContent = cleaned ? cleaned + trail : cleaned;
         out[out.length - 1] = { ...last, content: newContent };
+      } else {
+        // The last entry is a tool/notice EVENT card ("Used tool" /
+        // "Completed") — i.e. the model is now writing its post-tool
+        // synthesis answer, which needs its OWN assistant bubble. Without
+        // this branch the delta was silently DROPPED and the answer vanished
+        // behind the tool cards — the "answer hidden in the tool container"
+        // bug. Open a fresh assistant message so the answer renders after
+        // the search results, like the agent chat does.
+        const cleanedFirst = stripFabricatedToolOutput(delta);
+        const trailFirst = delta.match(/\s+$/)?.[0] ?? "";
+        out.push({ role: "assistant", content: cleanedFirst ? cleanedFirst + trailFirst : cleanedFirst, ts: Date.now() });
       }
       return out;
     });
@@ -548,6 +583,11 @@ export default function ChatPage() {
       const last = out[out.length - 1];
       if (last && last.role === "assistant") {
         out[out.length - 1] = { ...last, thinking: (last.thinking ?? "") + delta };
+      } else {
+        // Same fix as appendAssistant: the post-tool synthesis turn streams
+        // reasoning while the last entry is still a tool card. Start a fresh
+        // assistant bubble so the thinking isn't dropped behind the cards.
+        out.push({ role: "assistant", content: "", thinking: delta, ts: Date.now() });
       }
       return out;
     });
@@ -719,12 +759,16 @@ export default function ChatPage() {
       { role: "system", content: augmentedSystem },
       ...next.map((m) => ({ role: m.role, content: m.content })),
     ];
-    // 4 turns is plenty — small local models that don't actually
-    // know the tool protocol will loop emitting fake calls + fake
-    // outputs forever otherwise. Caps the runaway. The user can
-    // raise it via the maxTurns control if they're running a real
-    // tool-trained model that needs more legs.
-    const MAX_TOOL_TURNS = 4;
+    // Tool-turn budget — MUST match the agent chat (streamLocalChat in
+    // dispatch.ts uses 16). The old cap of 4 was why the fine-tuning chat
+    // died while the agent chat worked on the SAME model + tools: a flaky
+    // search that returns empty makes the model re-search a few times, and
+    // 4 turns ran out with no answer. 16 + the forced-synthesis fallback
+    // below (also mirrored from the agent chat) guarantees a final answer.
+    const MAX_TOOL_TURNS = 16;
+    // True once the model answers WITHOUT a tool call (clean exit). Stays
+    // false if we burn every turn with tools pending → forced synthesis.
+    let answeredWithoutTools = false;
 
     try {
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
@@ -1020,7 +1064,7 @@ export default function ChatPage() {
         }
 
         // No tools wired → single-shot, done.
-        if (openaiTools.length === 0) break;
+        if (openaiTools.length === 0) { answeredWithoutTools = true; break; }
         // Native tool calls only: llama-server parsed the model's own
         // tool-call tokens into delta.tool_calls (harvested above into
         // nativeToolNames/nativeToolArgs). Canonicalise to registry
@@ -1035,7 +1079,7 @@ export default function ChatPage() {
         }
         const calls = canonicalizeNativeCalls(nativeRaw, { firstRequiredArg });
         // Model produced no tool call → that turn IS the final answer.
-        if (calls.length === 0) break;
+        if (calls.length === 0) { answeredWithoutTools = true; break; }
 
         // Strict validation before execution; failures go back as
         // structured schema errors so the model can self-correct.
@@ -1094,6 +1138,94 @@ export default function ChatPage() {
         if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
         liveMessages.push({ role: "assistant", content: turnReply });
         liveMessages.push({ role: "user", content: parts.join("\n\n") });
+      }
+      // Forced synthesis — parity with the agent chat (dispatch.ts), but
+      // triggered on the REAL failure signal: NO visible answer was produced.
+      // Two ways that happens with a flaky search: (a) the loop burns through
+      // MAX_TOOL_TURNS still calling tools, or (b) the synthesis turn comes
+      // back EMPTY (e.g. duckduckgo returned nothing, so the model emits no
+      // content and no further tool call → loop exits "clean" but blank).
+      // Both leave `reply` empty. Do ONE final turn with tools OMITTED so the
+      // model MUST answer from what it gathered (or say it found nothing and
+      // answer from its own knowledge) — never a blank column. Streams through
+      // the same sinks so it renders identically to a normal reply.
+      if ((!answeredWithoutTools || !reply.trim()) && openaiTools.length > 0 && !signal.aborted) {
+        liveMessages.push({
+          role: "user",
+          content:
+            "You have reached your tool-call limit — do NOT request any more tools. " +
+            "Using only the information gathered above (even if a search returned nothing useful), " +
+            "write the final answer for the user now. If the tools returned no usable results, say so " +
+            "briefly and answer from your own knowledge.",
+        });
+        try {
+          const fresp = await fetch(`http://127.0.0.1:${activePort}/v1/chat/completions`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: status.model_id ?? "local",
+              messages: liveMessages,
+              stream: true,
+              ...samplingFor(status.model_id ?? ""),
+              temperature: col.temperature,
+              top_p: col.topP,
+              max_tokens: col.maxTokens,
+              // tools omitted on purpose — forces a plain text answer.
+            }),
+            signal,
+          });
+          if (fresp.ok && fresp.body) {
+            const freader = fresp.body.getReader();
+            controls.onReader(freader);
+            const fdec = new TextDecoder();
+            let fbuf = "";
+            let fInThink = false;
+            while (true) {
+              if (signal.aborted) { try { await freader.cancel(); } catch {} break; }
+              const { done, value } = await freader.read();
+              if (done) break;
+              fbuf += fdec.decode(value, { stream: true });
+              let fnl: number;
+              while ((fnl = fbuf.indexOf("\n")) >= 0) {
+                const fline = fbuf.slice(0, fnl).replace(/\r$/, "");
+                fbuf = fbuf.slice(fnl + 1);
+                if (!fline.startsWith("data:")) continue;
+                const fbody = fline.slice(5).trim();
+                if (!fbody || fbody === "[DONE]") continue;
+                try {
+                  const fj = JSON.parse(fbody);
+                  const fd = fj?.choices?.[0]?.delta;
+                  const frc: string | undefined = fd?.reasoning_content ?? fd?.reasoning;
+                  if (typeof frc === "string" && frc) appendThinking(col.id, frc);
+                  const fct: string | undefined = fd?.content;
+                  if (typeof fct === "string" && fct) {
+                    // Route <think>…</think> exactly like the main loop.
+                    let fb = fct;
+                    while (fb.length > 0) {
+                      if (fInThink) {
+                        const close = fb.indexOf("</think>");
+                        const tp = close < 0 ? fb : fb.slice(0, close);
+                        if (tp) appendThinking(col.id, tp);
+                        if (close < 0) break;
+                        fInThink = false; fb = fb.slice(close + "</think>".length);
+                      } else {
+                        const open = fb.indexOf("<think>");
+                        const vp = open < 0 ? fb : fb.slice(0, open);
+                        if (vp) { appendAssistant(col.id, vp); reply += vp; }
+                        if (open < 0) break;
+                        fInThink = true; fb = fb.slice(open + "<think>".length);
+                      }
+                    }
+                  }
+                } catch { /* skip malformed chunk */ }
+              }
+            }
+            controls.onReader(null);
+          }
+        } catch (e: unknown) {
+          // Best-effort: a failed synthesis shouldn't error the whole reply.
+          if ((e as { name?: string })?.name === "AbortError") throw e;
+        }
       }
     } catch (e: unknown) {
       const err = e as { name?: string; message?: string };
@@ -1162,9 +1294,36 @@ export default function ChatPage() {
   }
 
   function applyTemplate(colId: "A" | "B" | "C", key: string) {
-    const t = TEMPLATES.find((x) => x.key === key);
-    if (!t || key === "custom") return;
+    if (!key) { setAppliedTpl((m) => ({ ...m, [colId]: "" })); return; }
+    const t = TEMPLATES.find((x) => x.key === key) || customTemplates.find((x) => x.key === key);
+    if (!t) return;
     updateCol(colId, { system: t.system });
+    setAppliedTpl((m) => ({ ...m, [colId]: key }));
+  }
+
+  // "Save as…" — store the column's current system prompt as a NEW named
+  // custom template (overwriting one with the same name). "💾 Save" updates
+  // the currently-applied custom template in place; if none is applied (or a
+  // built-in is selected, which can't be overwritten) it falls back to Save as.
+  function saveTemplateAs(colId: "A" | "B" | "C") {
+    const col = columns.find((c) => c.id === colId);
+    if (!col) return;
+    if (!col.system.trim()) { window.alert("System prompt is empty — nothing to save."); return; }
+    const name = window.prompt("Save instruction template as:", "");
+    if (!name || !name.trim()) return;
+    const label = name.trim();
+    const key = "user:" + label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    setCustomTemplates((list) => [...list.filter((t) => t.key !== key), { key, label, system: col.system }]);
+    setAppliedTpl((m) => ({ ...m, [colId]: key }));
+  }
+  function saveTemplate(colId: "A" | "B" | "C") {
+    const col = columns.find((c) => c.id === colId);
+    if (!col) return;
+    const key = appliedTpl[colId];
+    const existing = key && customTemplates.find((t) => t.key === key);
+    if (!existing) { saveTemplateAs(colId); return; }
+    if (!col.system.trim()) { window.alert("System prompt is empty — nothing to save."); return; }
+    setCustomTemplates((list) => list.map((t) => (t.key === key ? { ...t, system: col.system } : t)));
   }
 
   function saveJson() {
@@ -1596,6 +1755,10 @@ export default function ChatPage() {
           flexDirection: "column",
           gap: 10,
           minHeight: 0,
+          // The whole right column scrolls as one. Previously only the inner
+          // settings div scrolled while the Logs block was pinned below it,
+          // so on shorter windows the lower controls were unreachable.
+          overflowY: "auto",
         }}>
           {/* A/B/C toggle buttons (Qt main.py:18676-18690) — Qt
               QPushButtons have NO per-button color stylesheet, so all
@@ -1629,16 +1792,16 @@ export default function ChatPage() {
           </div>
 
           {/* Per-model settings page (background tint mirrors Qt
-              modelSettingsPage at 60% alpha). */}
+              modelSettingsPage at 60% alpha). Natural height — the parent
+              <aside> owns the scroll, so this must not grow/shrink or it
+              would swallow the scroll and clip its own contents. */}
           <div style={{
-            flex: 1,
+            flexShrink: 0,
             display: "flex", flexDirection: "column", gap: 10,
             padding: 10,
             background: PANEL_TINT[activePanel],
             border: "1px solid rgba(255,255,255,0.18)",
             borderRadius: 8,
-            minHeight: 0,
-            overflowY: "auto",
           }}>
             {(() => {
               const col = columns.find((c) => c.id === activePanel)!;
@@ -1649,8 +1812,8 @@ export default function ChatPage() {
                     <legend style={panelLegendStyle}>📋 Instruction Templates</legend>
                     <div style={{ display: "flex", gap: 6 }}>
                       <select
-                        defaultValue=""
-                        onChange={(e) => { applyTemplate(col.id, e.target.value); e.currentTarget.value = ""; }}
+                        value={appliedTpl[col.id] || ""}
+                        onChange={(e) => applyTemplate(col.id, e.target.value)}
                         style={{
                           flex: 1,
                           background: "var(--bg-input)",
@@ -1661,17 +1824,13 @@ export default function ChatPage() {
                         }}
                       >
                         <option value="">None</option>
-                        <option value="alpaca">Alpaca</option>
-                        <option value="vicuna">Vicuna</option>
-                        <option value="chatml">ChatML</option>
-                        <option value="llama2">Llama-2</option>
-                        <option value="custom">Custom</option>
-                        <option disabled>──────</option>
                         {TEMPLATES.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
+                        {customTemplates.length > 0 && <option disabled>── Saved ──</option>}
+                        {customTemplates.map((t) => <option key={t.key} value={t.key}>{t.label}</option>)}
                       </select>
                       <div style={{ display: "flex", flexDirection: "column", gap: 4, width: 90 }}>
-                        <button style={smallActionBtn} title="Save current system prompt">💾 Save</button>
-                        <button style={smallActionBtn} title="Save as new template">Save as…</button>
+                        <button style={smallActionBtn} title="Update the selected saved template with the current system prompt" onClick={() => saveTemplate(col.id)}>💾 Save</button>
+                        <button style={smallActionBtn} title="Save the current system prompt as a new named template" onClick={() => saveTemplateAs(col.id)}>Save as…</button>
                       </div>
                     </div>
                   </fieldset>
@@ -1735,7 +1894,7 @@ export default function ChatPage() {
               (Qt main.py:18948-19005). The "Right Panel" label above
               the tab strip mirrors Qt main.py:18948-18951 — 11pt bold
               white QLabel placed immediately before the tab widget. */}
-          <div style={{ display: "flex", flexDirection: "column", minHeight: 200 }}>
+          <div style={{ display: "flex", flexDirection: "column", minHeight: 200, flexShrink: 0 }}>
             <div style={{ color: "var(--fg-strong)", fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
               Right Panel
             </div>

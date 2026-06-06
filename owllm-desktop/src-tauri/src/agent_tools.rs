@@ -45,6 +45,112 @@ fn resolve(path: &str, cwd: &Option<String>) -> PathBuf {
     }
 }
 
+// ----- Safety guard rails -----
+//
+// These are guard rails, NOT a hard security boundary — the shell is
+// Turing-complete, so only OS-level isolation (restricted token / job
+// object / container) is bulletproof. What these DO catch is the common
+// "the model did something dumb and clobbered something outside the
+// workspace" case that matters most for non-expert users:
+//   * write_jail()            — file writes / dir-creates must land inside
+//     the agent's workspace (cwd / worktree), the OS temp dir, or ~/OwLLM.
+//     A write to C:\Windows\... or the user's Documents is refused.
+//   * dangerous_shell_command — refuses a short list of catastrophic,
+//     never-legitimate commands (wipe root/home, format/partition a disk,
+//     fork bomb, HKLM registry delete, shutdown, remote-download piped
+//     into a shell). Scoped work inside the workspace is untouched.
+
+/// Resolve `.`/`..` lexically WITHOUT touching the filesystem, so it works
+/// for not-yet-existing write targets (canonicalize() can't).
+fn normalize_lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => { out.pop(); }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Component key for prefix comparison — case-insensitive on Windows.
+fn comp_key(c: std::path::Component) -> String {
+    let s = c.as_os_str().to_string_lossy().to_string();
+    if cfg!(windows) { s.to_lowercase() } else { s }
+}
+
+/// Is `path` the same as, or nested inside, `root`? Compared component-wise
+/// so a sibling like `C:\foobar` is NOT treated as inside `C:\foo`.
+fn is_within(root: &Path, path: &Path) -> bool {
+    let root_c: Vec<String> = normalize_lexical(root).components().map(comp_key).collect();
+    let path_c: Vec<String> = normalize_lexical(path).components().map(comp_key).collect();
+    if root_c.is_empty() { return false; }
+    path_c.len() >= root_c.len() && root_c.iter().zip(path_c.iter()).all(|(a, b)| a == b)
+}
+
+/// Roots a tool may write under: the agent cwd (worktree / project / scratch),
+/// the OS temp dir, and ~/OwLLM (covers the chat scratch dir; fleet worktrees
+/// already live under the cwd).
+fn write_allowed_roots(cwd: &Option<String>) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(c) = cwd.as_deref().filter(|s| !s.is_empty()) {
+        roots.push(normalize_lexical(Path::new(c)));
+    }
+    roots.push(normalize_lexical(&std::env::temp_dir()));
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        roots.push(normalize_lexical(&PathBuf::from(home).join("OwLLM")));
+    }
+    roots
+}
+
+/// Resolve a write/create target and refuse it if it escapes the allowed
+/// roots. Error text is model-readable so the agent self-corrects.
+fn write_jail(path: &str, cwd: &Option<String>) -> Result<PathBuf, String> {
+    let resolved = normalize_lexical(&resolve(path, cwd));
+    if write_allowed_roots(cwd).iter().any(|r| is_within(r, &resolved)) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "blocked: '{}' is outside the agent workspace. Writes are limited to the project/worktree, the temp dir, and ~/OwLLM — use a path inside the project.",
+            resolved.display()
+        ))
+    }
+}
+
+/// Refuse a narrow set of catastrophic, never-legitimate shell commands.
+/// Returns Some(reason) when the command must be blocked. Intentionally
+/// conservative: scoped deletes inside the workspace (e.g. `rm -rf
+/// node_modules`) are allowed — only whole-disk / system-level destruction
+/// is stopped.
+fn dangerous_shell_command(cmd: &str) -> Option<&'static str> {
+    let c = cmd.to_lowercase();
+    let flat = c.replace(['\t', '\n', '\r'], " ");
+    // Whole-root / home recursive wipes.
+    let trimmed = flat.trim_start();
+    if trimmed.starts_with("rm -rf /") || trimmed.starts_with("rm -fr /")
+        || trimmed.starts_with("rm -rf ~") || flat.contains(" rm -rf /") || flat.contains(" rm -rf ~") {
+        return Some("recursive delete of filesystem root or home");
+    }
+    // Disk format / partition / raw-device write.
+    for pat in ["mkfs", "diskpart", "format c:", "format /", "dd if=", "cipher /w", "> /dev/sd", "of=/dev/"] {
+        if c.contains(pat) { return Some("disk format / partition / raw-device write"); }
+    }
+    // System control.
+    if c.contains("shutdown") || c.contains("reg delete hklm") || c.contains("reg delete \"hklm") {
+        return Some("system shutdown or HKLM registry delete");
+    }
+    // Fork bomb.
+    if flat.replace(' ', "").contains(":(){:|:&};:") { return Some("fork bomb"); }
+    // Remote download piped straight into a shell / eval.
+    let dl = c.contains("curl ") || c.contains("wget ") || c.contains("iwr ") || c.contains("invoke-webrequest");
+    let exec = flat.contains("| sh") || flat.contains("|sh") || flat.contains("| bash") || flat.contains("|bash")
+        || flat.contains("| iex") || flat.contains("|iex") || c.contains("invoke-expression");
+    if dl && exec { return Some("remote download piped directly into a shell"); }
+    None
+}
+
 /// Dedicated scratch directory for the fine-tuning chat playground's
 /// tools. Both the local tool runtime and the Claude CLI subscription
 /// path operate here, so test file writes / shell commands land in a
@@ -72,7 +178,7 @@ pub async fn tool_write_file(
     content: String,
     cwd: Option<String>,
 ) -> Result<(), String> {
-    let p = resolve(&path, &cwd);
+    let p = write_jail(&path, &cwd)?;
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("mkdir parent of {}: {e}", p.display()))?;
@@ -101,7 +207,7 @@ pub async fn tool_list_dir(path: String, cwd: Option<String>) -> Result<Vec<DirE
 
 #[tauri::command]
 pub async fn tool_create_dir(path: String, cwd: Option<String>) -> Result<(), String> {
-    let p = resolve(&path, &cwd);
+    let p = write_jail(&path, &cwd)?;
     std::fs::create_dir_all(&p).map_err(|e| format!("mkdir {}: {e}", p.display()))
 }
 
@@ -117,6 +223,14 @@ pub async fn tool_shell_exec(
     use tokio::process::Command;
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    // Guard rail: refuse catastrophic, never-legitimate commands before
+    // they ever reach the shell. Scoped work inside the workspace is fine.
+    if let Some(reason) = dangerous_shell_command(&command) {
+        return Err(format!(
+            "blocked dangerous command ({reason}). If you truly need this, run it yourself outside the agent."
+        ));
+    }
 
     let cwd_path = cwd
         .as_deref()

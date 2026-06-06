@@ -191,6 +191,8 @@ pub fn run() {
             server::server_status,
             server::server_start,
             server::server_stop,
+            server::inference_expose_get,
+            server::inference_expose_set,
             skill_library::list_skill_sources,
             skill_library::fetch_skill_source,
             skill_library::discover_skills,

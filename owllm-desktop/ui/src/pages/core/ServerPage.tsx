@@ -1002,6 +1002,86 @@ class ServerLogHub {
 
 const SERVER_LOG_HUB = new ServerLogHub();
 
+/// Serve-on-network — the SERVER side of the split: let THIS PC's model
+/// server accept requests from other machines (e.g. a Linux/WSL agent box).
+/// Default OFF (loopback only). Turning it on generates an api-key and binds
+/// 0.0.0.0; it's plain HTTP, so it's for a trusted LAN or a tunnel, never the
+/// internet. Backed by inference_expose_get/set in server.rs.
+function ServeOnNetworkCard() {
+  const [cfg, setCfg] = useState<{ enabled: boolean; apiKey: string }>({ enabled: false, apiKey: "" });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    invoke<{ enabled: boolean; apiKey: string }>("inference_expose_get").then(setCfg).catch(() => {});
+  }, []);
+  const save = async (next: { enabled: boolean; apiKey: string }) => {
+    setBusy(true); setErr(null);
+    try { setCfg(await invoke<{ enabled: boolean; apiKey: string }>("inference_expose_set", { config: next })); }
+    catch (e: any) { setErr(String(e?.message ?? e)); }
+    finally { setBusy(false); }
+  };
+  const toggle = () => {
+    if (cfg.enabled) { save({ enabled: false, apiKey: cfg.apiKey }); return; }
+    const key = cfg.apiKey
+      || (globalThis.crypto?.randomUUID?.() ?? (Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)));
+    save({ enabled: true, apiKey: key });
+  };
+  return (
+    <div data-ui="ServeOnNetworkCard" style={{
+      border: `1px solid ${cfg.enabled ? "rgba(255,179,0,0.45)" : "rgba(var(--accent-rgb),0.30)"}`,
+      borderRadius: 8, padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8,
+      background: "linear-gradient(180deg, rgba(30,30,40,0.6), rgba(20,20,30,0.6))",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)", flex: 1 }}>
+          🌐 Serve inference on the network (this PC)
+        </div>
+        <button onClick={toggle} disabled={busy} style={{
+          padding: "5px 14px", fontSize: 11, fontWeight: 700, borderRadius: 6, cursor: busy ? "wait" : "pointer",
+          border: "none", color: "#fff",
+          background: cfg.enabled ? "rgba(244,67,54,0.6)" : "rgba(76,175,80,0.6)",
+        }}>
+          {cfg.enabled ? "Turn OFF" : "Turn ON"}
+        </button>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--fg-subtle)", lineHeight: 1.45 }}>
+        {cfg.enabled
+          ? "ON — other machines that can reach this PC on the model port can use it, with the key below. Binds 0.0.0.0."
+          : "OFF (default) — the model server is loopback-only; nothing on the network can reach it."}
+      </div>
+      {cfg.enabled && (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <input readOnly value={cfg.apiKey} style={{
+              flex: 1, height: 30, padding: "0 10px", borderRadius: 6,
+              border: "1px solid rgba(var(--accent-rgb),0.30)",
+              background: "var(--bg-elevated)", color: "var(--fg)", fontSize: 11,
+              fontFamily: "Consolas, monospace",
+            }} />
+            <button onClick={() => { navigator.clipboard?.writeText(cfg.apiKey); setCopied(true); setTimeout(() => setCopied(false), 1200); }}
+              style={{ padding: "6px 12px", fontSize: 11, fontWeight: 600, borderRadius: 6, border: "1px solid rgba(var(--accent-rgb),0.5)", background: "rgba(var(--accent-rgb),0.25)", color: "var(--fg)", cursor: "pointer" }}>
+              {copied ? "Copied" : "Copy key"}
+            </button>
+          </div>
+          <div style={{
+            fontSize: 11, color: "#ffcc80", lineHeight: 1.5,
+            background: "rgba(255,179,0,0.10)", border: "1px solid rgba(255,179,0,0.35)",
+            borderRadius: 6, padding: "8px 10px",
+          }}>
+            ⚠️ Plain HTTP — the key and traffic are unencrypted. Use only on a <b>trusted LAN</b>, or put it behind a <b>VPN/SSH tunnel</b> (Tailscale, WireGuard). Never port-forward it to the internet. Scope your Windows Firewall rule to this port + the agent's IP.
+            <div style={{ marginTop: 5, color: "var(--fg-subtle)" }}>
+              On the agent box, set "Inference source" → Remote, host = this PC's IP, port = the model's server port above, and paste this key. <b>Restart the model server</b> to apply.
+              <br/>WSL note: Win11 mirrored networking can use loopback (exposure off); Win10 (NAT) needs this ON.
+            </div>
+          </div>
+        </>
+      )}
+      {err && <div style={{ fontSize: 11, color: "#f87171" }}>{err}</div>}
+    </div>
+  );
+}
+
 export default function ServerPage() {
   const [logs, setLogs] = useState<string[]>(() => SERVER_LOG_HUB.snapshot());
   const [modelId, setModelId] = useState<string>("");
@@ -1112,6 +1192,7 @@ export default function ServerPage() {
       </div>
 
       <InferenceSourceCard />
+      <ServeOnNetworkCard />
 
       <div style={{
         flex: 1,

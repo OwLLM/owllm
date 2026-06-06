@@ -23,6 +23,7 @@ import {
 } from "./localTools";
 import { canonicalizeNativeCalls, type RawNativeCall } from "./toolNormalizer";
 import { samplingFor } from "./modelProfiles";
+import { resolveInferenceBase } from "./inferenceEndpoint";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
 // off `kind`; the field name comes from #[serde(tag = "kind")] on the
@@ -1068,6 +1069,16 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // Per-family sampling from the data-driven profile, with optional
   // caller overrides (ChatPage per-column controls).
   const sampling = { ...samplingFor(p.modelId), ...(p.samplingOverride ?? {}) };
+  // Where to send inference: the local managed server (default) or a remote
+  // llama-server on another host (the Windows-GPU / Linux-agents split).
+  // resolveInferenceBase() reads the persisted endpoint; local mode uses the
+  // managed port passed in `p.port`, remote uses the configured host:port:key.
+  const infer = resolveInferenceBase(p.port);
+  const inferUrl = `${infer.baseUrl}/v1/chat/completions`;
+  const inferHeaders: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...(infer.apiKey ? { Authorization: `Bearer ${infer.apiKey}` } : {}),
+  };
   // 503/502 slot-warmup retry — cold model load is handled by server.rs's
   // /health poller; this only absorbs the few-second slot init after the
   // model is resident.
@@ -1080,9 +1091,9 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     while (true) {
       if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
       try {
-        resp = await fetch(`http://127.0.0.1:${p.port}/v1/chat/completions`, {
+        resp = await fetch(inferUrl, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: inferHeaders,
           body: JSON.stringify({
             model: p.modelId || "local",
             messages: liveMessages,
@@ -1176,9 +1187,9 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         "for the user now: report what each tool returned and the overall outcome.",
     });
     try {
-      const fresp = await fetch(`http://127.0.0.1:${p.port}/v1/chat/completions`, {
+      const fresp = await fetch(inferUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: inferHeaders,
         body: JSON.stringify({
           model: p.modelId || "local",
           messages: liveMessages,

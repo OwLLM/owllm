@@ -17,14 +17,73 @@
 // src-tauri/src/lib.rs. Those commands are currently stubs that
 // return empty/default state; their real implementations will spawn
 // llama.cpp with CREATE_NO_WINDOW directly from Rust.
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
+import { getInferenceEndpoint, setInferenceEndpoint, type InferenceEndpoint } from "../agentic/inferenceEndpoint";
 
 // Real Page_icons PNG served by vite.config.ts middleware
 // (same pattern as AgentsPage.tsx / CodePage.tsx).
 const ICONS = "/Page_icons";
+
+/// Inference source — where the agent loop sends chat requests. Local (this
+/// PC's managed llama-server) or a Remote server on another host (the
+/// Windows-GPU / Linux-agents split: run agents here, model on the GPU box).
+/// Persisted via inferenceEndpoint.ts and read by dispatch.ts at call time.
+function InferenceSourceCard() {
+  const [ep, setEp] = useState<InferenceEndpoint>(() => getInferenceEndpoint());
+  const save = (next: InferenceEndpoint) => { setInferenceEndpoint(next); setEp(next); };
+  const remote = ep.mode === "remote";
+  const inp: CSSProperties = {
+    height: 30, padding: "0 10px", borderRadius: 6,
+    border: "1px solid rgba(var(--accent-rgb),0.30)",
+    background: "var(--bg-elevated)", color: "var(--fg)", fontSize: 12,
+  };
+  return (
+    <div data-ui="InferenceSourceCard" style={{
+      border: "1px solid rgba(var(--accent-rgb),0.30)", borderRadius: 8,
+      padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8,
+      background: "linear-gradient(180deg, rgba(30,30,40,0.6), rgba(20,20,30,0.6))",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)", flex: 1 }}>
+          🛰 Inference source
+        </div>
+        <div style={{ display: "flex", gap: 4, background: "var(--bg-elevated)", borderRadius: 6, padding: 2 }}>
+          {(["local", "remote"] as const).map(m => (
+            <button key={m}
+              onClick={() => save({ ...ep, mode: m })}
+              style={{
+                padding: "4px 12px", fontSize: 11, fontWeight: 700, borderRadius: 4, cursor: "pointer",
+                border: "none",
+                background: ep.mode === m ? "rgba(var(--accent-rgb),0.75)" : "transparent",
+                color: ep.mode === m ? "#fff" : "var(--fg-muted)",
+              }}>
+              {m === "local" ? "Local (this PC)" : "Remote server"}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div style={{ fontSize: 11, color: "var(--fg-subtle)", lineHeight: 1.45 }}>
+        {remote
+          ? "Agents send inference to a llama-server on another host (e.g. your Windows GPU box). Run agents here, model there."
+          : "Agents use this PC's managed llama-server (default)."}
+      </div>
+      {remote && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: 8 }}>
+          <input style={inp} placeholder="host / IP (e.g. 192.168.1.20)" value={ep.host}
+            onChange={e => save({ ...ep, host: e.target.value })} />
+          <input style={inp} placeholder="port" value={ep.port || ""}
+            onChange={e => save({ ...ep, port: Number(e.target.value) || 0 })} />
+          <input style={{ ...inp, gridColumn: "1 / span 2" }} type="password"
+            placeholder="API key (the remote server's --api-key, optional)"
+            value={ep.apiKey} onChange={e => save({ ...ep, apiKey: e.target.value })} />
+        </div>
+      )}
+    </div>
+  );
+}
 
 type ModelInfo = PickerModelInfo;
 type ServerStatus = {
@@ -1051,6 +1110,8 @@ export default function ServerPage() {
             Server lifecycle is now per-model via the Server control panel
             below — there is no longer a background process to start/stop. */}
       </div>
+
+      <InferenceSourceCard />
 
       <div style={{
         flex: 1,

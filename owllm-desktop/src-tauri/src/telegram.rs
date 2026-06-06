@@ -12,6 +12,12 @@ pub struct TelegramUpdate {
     pub update_id: i64,
     #[serde(default)]
     pub message: Option<TelegramMessage>,
+    #[serde(default)]
+    pub edited_message: Option<TelegramMessage>,
+    #[serde(default)]
+    pub channel_post: Option<TelegramMessage>,
+    #[serde(default)]
+    pub edited_channel_post: Option<TelegramMessage>,
 }
 
 #[derive(Deserialize, Serialize)]

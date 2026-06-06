@@ -17,6 +17,9 @@ type Team = {
   icon: string;
   agents: { name: string; base: string; icon?: string | null }[];
   edges: { source: string; target: string }[];
+  visibility?: "recommended" | "more" | "examples" | "legacy" | "custom";
+  workflowRank?: number;
+  requiredMcp?: string[];
 };
 
 type ProjectRow = {
@@ -186,7 +189,9 @@ export default function NewProjectDialog({
             {teams.length === 0
               ? <option value="">(no templates available)</option>
               : teams.map(t => (
-                  <option key={t.id} value={t.name}>{t.display} ({t.agents.length} agents)</option>
+                  <option key={t.id} value={t.name}>
+                    {t.visibility === "recommended" ? "Core: " : ""}{t.display} ({t.agents.length} agents)
+                  </option>
                 ))
             }
           </select>
@@ -200,6 +205,11 @@ export default function NewProjectDialog({
               {team.agents.map(a => (
                 <span key={a.name} style={{ background: "var(--bg-surface)", color: "var(--fg-muted)", fontSize: 10, fontFamily: "Consolas, monospace", borderRadius: 4, padding: "2px 6px" }}>{a.name}</span>
               ))}
+            </div>
+          )}
+          {team && (team.requiredMcp?.length ?? 0) > 0 && (
+            <div style={{ color: "#a8b8ff", fontSize: 11, lineHeight: 1.4, padding: "2px 2px" }}>
+              Uses MCP: {team.requiredMcp!.map(m => m.replace(/^mcp\./, "")).join(", ")}.
             </div>
           )}
         </div>

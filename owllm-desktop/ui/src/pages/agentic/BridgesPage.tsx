@@ -15,7 +15,7 @@
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-type BridgeStatus = "stopped" | "running" | "error";
+type BridgeStatus = "stopped" | "starting" | "running" | "error";
 
 // Shapes mirror src-tauri/src/bridges.rs
 type TelegramConfig = {
@@ -40,6 +40,7 @@ type BridgeConfigs = { telegram: TelegramConfig; whatsapp: WhatsAppConfig };
 // (bridges_page.py:350-352).
 function StatusDot({ state }: { state: BridgeStatus }) {
   const color = state === "running" ? "#4caf50"
+              : state === "starting" ? "#f2c94c"
               : state === "error"   ? "#ef4444"
               : "#5a6376";
   return (
@@ -224,16 +225,34 @@ function TelegramCard() {
     }
   }
   // Last update_id surfaced in the running status text (Qt line 277-279).
-  const [lastUpdateId] = useState<number>(0);
-  const [lastError] = useState<string>("");
+  const [lastUpdateId, setLastUpdateId] = useState<number>(0);
+  const [lastError, setLastError] = useState<string>("");
   // Chats that have actually messaged the bot since start — Qt line
   // 307-335 renders these as clickable chips that add to the allow-list.
-  const [seenIds] = useState<number[]>([]);
+  const [seenIds, setSeenIds] = useState<number[]>([]);
+
+  useEffect(() => {
+    const onRuntime = (e: Event) => {
+      const d = (e as CustomEvent).detail || {};
+      if (d.status === "running" || d.status === "stopped" || d.status === "error") {
+        setStatus(d.status);
+      }
+      if (typeof d.lastUpdateId === "number") setLastUpdateId(d.lastUpdateId);
+      if (typeof d.lastError === "string") setLastError(d.lastError);
+      if (typeof d.seenChatId === "number") {
+        setSeenIds(prev => prev.includes(d.seenChatId) ? prev : [...prev, d.seenChatId]);
+      }
+      if (d.status === "running") setLastError("");
+    };
+    window.addEventListener("owllm:telegram:runtime", onRuntime as EventListener);
+    return () => window.removeEventListener("owllm:telegram:runtime", onRuntime as EventListener);
+  }, []);
 
   // Qt accent for Telegram (#52b4ff, lines 106/112/186).
   const accent = "#52b4ff";
 
   const running = status === "running";
+  const active = status === "starting" || status === "running";
   const existingIds = new Set(
     chatIds.split(",").map(s => s.trim()).filter(Boolean).map(Number).filter(n => !Number.isNaN(n))
   );
@@ -242,7 +261,11 @@ function TelegramCard() {
   // Status text — mirrors _TelegramCard.refresh_status (Qt 270-294).
   const statusText = running
     ? `Running — last update_id ${lastUpdateId}.${allowListActive ? " · allow-list active" : " · open (any chat)"}`
-    : (lastError ? `Stopped — last error: ${lastError}` : "Stopped.");
+    : status === "starting"
+      ? "Starting — waiting for Telegram getUpdates to succeed."
+    : status === "error"
+      ? `Error — ${lastError || "Telegram polling is not connected."}`
+      : (lastError ? `Stopped — last error: ${lastError}` : "Stopped.");
 
   function addSeenId(cid: number) {
     if (existingIds.has(cid)) return;
@@ -375,24 +398,24 @@ function TelegramCard() {
         ) : null}
         <div style={{ flex: 1 }} />
         <button
-          disabled={running}
+          disabled={active}
           onClick={async () => {
             // Save first so the bridge has fresh config to read.
             await persist();
-            setStatus("running");
+            setStatus("starting");
             setTelegramStartedInStorage(true);
           }}
-          style={startButtonStyle(accent, "#62c4ff", running)}
+          style={startButtonStyle(accent, "#62c4ff", active)}
         >
           Start
         </button>
         <button
-          disabled={!running}
+          disabled={!active}
           onClick={() => {
             setStatus("stopped");
             setTelegramStartedInStorage(false);
           }}
-          style={stopButtonStyle(!running)}
+          style={stopButtonStyle(!active)}
         >
           Stop
         </button>

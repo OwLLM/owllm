@@ -3,11 +3,12 @@ import react from "@vitejs/plugin-react";
 import path from "node:path";
 import fs from "node:fs";
 
-// Resolve LocaLLM/icons relative to this config file (apps/owllm-desktop/ui/).
+// Resolve LocaLLM/icons relative to this config file
+// (owllm-desktop/ui/ after Phase 5 dropped the apps/ wrapper).
 // We expose it to the dev server as `/Page_icons/...` etc. so AgentsPage can
 // reference real source PNGs via root-relative URLs without any build step
 // copying them into the project.
-const ICONS_DIR = path.resolve(__dirname, "../../../icons");
+const ICONS_DIR = path.resolve(__dirname, "../../icons");
 
 // https://vitejs.dev/config/
 export default defineConfig({

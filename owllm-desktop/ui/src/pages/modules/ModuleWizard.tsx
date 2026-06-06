@@ -207,12 +207,14 @@ export default function ModuleWizard({ mode, onClose }: ModuleWizardProps) {
 
   const installSelected = async () => {
     setInstalling(true);
+    let anyFailed = false;
     for (const id of selected) {
       try {
         await invoke("module_install", { id });
       } catch (e) {
         // Per-module error already surfaced via progress event; continue
         // with the next module so a single failure doesn't block the rest.
+        anyFailed = true;
       }
     }
     // Refresh status.
@@ -225,6 +227,14 @@ export default function ModuleWizard({ mode, onClose }: ModuleWizardProps) {
     try {
       localStorage.setItem("owllm.wizard.completed", "1");
     } catch {}
+    // Auto-dismiss the wizard so the user lands in the app instead of
+    // staring at the post-install panel. If anything failed, leave the
+    // wizard open so they can see what went wrong and retry. In
+    // settings mode we always stay so they can uninstall / install
+    // more without re-opening Settings.
+    if (!anyFailed && mode === "first-run") {
+      setTimeout(() => onClose?.(), 800); // brief pause so the user sees the green "installed" ticks
+    }
   };
 
   const uninstall = async (id: string) => {

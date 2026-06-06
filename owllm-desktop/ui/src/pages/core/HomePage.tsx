@@ -133,7 +133,7 @@ function LauncherCard({ spec }: { spec: LauncherSpec }) {
           {spec.title}
         </div>
         <div style={{
-          color: "rgba(255,255,255,0.65)",
+          color: "rgba(255,255,255,0.82)",
           fontSize: 12,
           letterSpacing: 0.6,
           textTransform: "uppercase",
@@ -199,7 +199,7 @@ function StatusList({ rows }: { rows: StatusRow[] }) {
               {okStr} {r.icon ? `${r.icon} ` : ""}{r.name}
             </span>
             <span style={{ flex: 1 }} />
-            <span style={{ color: "var(--fg-subtle)", fontSize: 12 }}>{r.value}</span>
+            <span style={{ color: "var(--fg-muted)", fontSize: 12 }}>{r.value}</span>
           </div>
         );
       })}
@@ -316,14 +316,31 @@ function GridPanel({ children, accent }: {
   );
 }
 
+// One-time welcome splash. It used to sit permanently in the grid
+// centre, covering the Refresh button and the Software Requirements
+// header. Now it greets on mount, then fades + scales away and
+// unmounts after ~2.4s so it never obscures the live panels. Always
+// pointer-events:none so it can't eat clicks even mid-fade.
 function WelcomeCircle() {
   const D = 240;  // circle_d in main.py:7969
+  const [phase, setPhase] = useState<"shown" | "fading" | "gone">("shown");
+  useEffect(() => {
+    const t1 = setTimeout(() => setPhase("fading"), 1600);
+    const t2 = setTimeout(() => setPhase("gone"), 2400);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, []);
+  if (phase === "gone") return null;
+  const fading = phase === "fading";
   return (
     <div style={{
       position: "absolute",
       left: "50%",
       top: "50%",
-      transform: "translate(-50%, -50%)",
+      transform: fading
+        ? "translate(-50%, -50%) scale(1.08)"
+        : "translate(-50%, -50%) scale(1)",
+      opacity: fading ? 0 : 1,
+      transition: "opacity 0.8s ease, transform 0.8s ease",
       width: D,
       height: D,
       borderRadius: D / 2,

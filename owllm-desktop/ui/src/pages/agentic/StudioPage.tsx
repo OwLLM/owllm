@@ -74,9 +74,6 @@ const CATEGORY_ACCENT: Record<string, string> = {
   Other:     "#9aa0a6",
   Custom:    "#ff7ed1",
 };
-// team_grid_view.py:48 — fixed display order for category sections.
-const CATEGORY_ORDER = ["Personal", "Knowledge", "Software", "Ops", "Other", "Custom"];
-
 // Base-role → default owl icon. Mirrors what apply_to_label falls back
 // to when an agent spec has no explicit `icon` (the base role's icon
 // from builtin_roles()). Hand-tabulated from the team JSONs + the owl
@@ -102,6 +99,26 @@ function resolveAgentIcon(icon: string | null | undefined, base: string | null |
 // Data — baked from LLM/core/agents/teams/*.json (17 templates).
 // ---------------------------------------------------------------------
 type AgentSpec = { name: string; base: string; icon?: string | null };
+type TeamVisibility = "recommended" | "more" | "examples" | "legacy" | "custom";
+type McpPackServer = {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+  enabled?: boolean;
+};
+type McpPack = {
+  summary: string;
+  risk: "read_only" | "approval_required" | "dangerous";
+  servers: McpPackServer[];
+  approvalRequired: string[];
+};
+type McpPackInstallResult = {
+  added: string[];
+  updated: string[];
+  uvInstalled: boolean;
+  configPath: string;
+};
 type Team = {
   name: string;
   display: string;
@@ -111,10 +128,60 @@ type Team = {
   agents: AgentSpec[];
   edges: { source: string; target: string }[];
   requiredMcp: string[];
+  visibility: TeamVisibility;
+  workflowRank: number;
+  mcpPack: McpPack | null;
   builtIn: boolean;
 };
 
 const TEAMS_FALLBACK: Team[] = [];   // populated at mount from list_team_templates
+const RECOMMENDED_TEAM_RANK: Record<string, number> = {
+  code_artisan: 10,
+  product_studio: 20,
+  research_lab: 30,
+  secretary: 40,
+  n8n_workflow_builder: 50,
+  data_analyst: 60,
+  writers_room: 70,
+};
+const TEAM_SECTION_ORDER = ["recommended", "more", "examples", "legacy", "custom"] as const;
+const TEAM_SECTION_LABEL: Record<TeamVisibility, string> = {
+  recommended: "Recommended workflows",
+  more: "More workflows",
+  examples: "Examples / needs connectors",
+  legacy: "Legacy templates",
+  custom: "Custom",
+};
+const TEAM_SECTION_ACCENT: Record<TeamVisibility, string> = {
+  recommended: "var(--accent)",
+  more: "#74a4ff",
+  examples: "#9aa0a6",
+  legacy: "#7a8a9c",
+  custom: "#ff7ed1",
+};
+function normalizeVisibility(value: unknown, builtIn: boolean, teamName: string): TeamVisibility {
+  if (!builtIn) return "custom";
+  if (value === "recommended" || value === "more" || value === "examples" || value === "legacy") return value;
+  return RECOMMENDED_TEAM_RANK[teamName] ? "recommended" : "examples";
+}
+function normalizeMcpPack(value: unknown): McpPack | null {
+  const raw = value as any;
+  if (!raw || !Array.isArray(raw.servers) || raw.servers.length === 0) return null;
+  return {
+    summary: typeof raw.summary === "string" ? raw.summary : "Install the MCP servers this workflow expects.",
+    risk: raw.risk === "dangerous" || raw.risk === "approval_required" ? raw.risk : "read_only",
+    servers: raw.servers
+      .filter((s: any) => typeof s?.name === "string" && typeof s?.command === "string")
+      .map((s: any) => ({
+        name: s.name,
+        command: s.command,
+        args: Array.isArray(s.args) ? s.args.map(String) : [],
+        env: s.env && typeof s.env === "object" ? s.env : {},
+        enabled: s.enabled !== false,
+      })),
+    approvalRequired: Array.isArray(raw.approval_required) ? raw.approval_required.map(String) : [],
+  };
+}
 
 // Built-in agent definitions (mirrors core/agents/agent_definitions.py
 // list_all_definitions). Real metadata will arrive via
@@ -316,6 +383,13 @@ function TeamCard({
             fontSize: 9, letterSpacing: 0.8,
           }}>CUSTOM</span>
         )}
+        {team.builtIn && team.visibility === "recommended" && (
+          <span style={{
+            color: "#a8b8ff", background: "rgba(116,164,255,0.12)",
+            borderRadius: 5, padding: "2px 6px",
+            fontSize: 9, letterSpacing: 0.8,
+          }}>CORE</span>
+        )}
       </div>
 
       <div style={{
@@ -347,6 +421,14 @@ function TeamCard({
       {/* MCP needs chips — first 4 + "+N" overflow */}
       {team.requiredMcp.length > 0 && (
         <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+          {team.mcpPack && (
+            <span style={{
+              color: "#a8f0d0",
+              background: "rgba(95,210,160,0.10)",
+              borderRadius: 4, padding: "1px 6px",
+              fontSize: 9,
+            }}>pack</span>
+          )}
           {team.requiredMcp.slice(0, 4).map(m => (
             <span key={m} style={{
               color: "var(--fg-muted)",
@@ -394,49 +476,53 @@ function CreateTeamCard({ onClick }: { onClick: () => void }) {
   );
 }
 
-// TeamsGrid — groups teams by category in CATEGORY_ORDER, each section
-// header coloured by its category accent. The "Build your own" section
-// always renders last with the dashed CreateTeamCard. Mirrors
-// team_grid_view.py:280 TeamGridView.set_templates.
-function TeamsGrid({ teams, selected, onSelect, onCreate }: {
+// TeamsGrid — groups teams by product workflow tier so the default view
+// starts with the useful, curated paths instead of every demo template.
+// The "Build your own" section always renders last.
+function TeamsGrid({ teams, selected, onSelect, onCreate, showExamples, onToggleExamples }: {
   teams: Team[];
   selected: string | null;
   onSelect: (name: string) => void;
   onCreate: () => void;
+  showExamples: boolean;
+  onToggleExamples: () => void;
 }) {
-  // Group by category (CUSTOM section for non-built-ins; mirrors
-  // team_grid_view.py:323).
   const groups = useMemo(() => {
-    const g: Record<string, Team[]> = {};
+    const g: Partial<Record<TeamVisibility, Team[]>> = {};
     for (const t of teams) {
-      const cat = t.builtIn ? t.category : "Custom";
-      (g[cat] ??= []).push(t);
+      const section = t.builtIn ? t.visibility : "custom";
+      (g[section] ??= []).push(t);
     }
     for (const k in g) {
-      g[k].sort((a, b) => a.display.toLowerCase().localeCompare(b.display.toLowerCase()));
+      g[k as TeamVisibility]!.sort((a, b) =>
+        (a.workflowRank - b.workflowRank) ||
+        a.display.toLowerCase().localeCompare(b.display.toLowerCase())
+      );
     }
     return g;
   }, [teams]);
 
-  const orderedCats = [
-    ...CATEGORY_ORDER.filter(c => c in groups),
-    ...Object.keys(groups).filter(c => !CATEGORY_ORDER.includes(c)).sort(),
-  ];
+  const exampleCount = groups.examples?.length ?? 0;
+  const orderedSections = TEAM_SECTION_ORDER.filter(section => {
+    if ((groups[section]?.length ?? 0) === 0) return false;
+    return showExamples || section !== "examples";
+  });
 
   return (
     <div style={{
       flex: 1, overflow: "auto", paddingRight: 8, paddingBottom: 12,
       display: "flex", flexDirection: "column", gap: 18,
     }}>
-      {orderedCats.map(cat => {
-        const accent = CATEGORY_ACCENT[cat] ?? "#9aa0a6";
+      {orderedSections.map(section => {
+        const accent = TEAM_SECTION_ACCENT[section];
+        const sectionTeams = groups[section] ?? [];
         return (
-          <div key={cat}>
+          <div key={section}>
             <div style={{
               fontSize: 10, color: accent, textTransform: "uppercase",
               letterSpacing: 1.2, marginBottom: 8, fontWeight: 700,
               padding: "0 2px",
-            }}>{cat}</div>
+            }}>{TEAM_SECTION_LABEL[section]}</div>
             <div style={{
               display: "grid",
               // Qt _COLS = 3 — but we still let the grid wrap on
@@ -444,7 +530,7 @@ function TeamsGrid({ teams, selected, onSelect, onCreate }: {
               gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
               gap: 12,
             }}>
-              {groups[cat].map(t => (
+              {sectionTeams.map(t => (
                 <TeamCard
                   key={t.name}
                   team={t}
@@ -456,6 +542,33 @@ function TeamsGrid({ teams, selected, onSelect, onCreate }: {
           </div>
         );
       })}
+
+      {!showExamples && exampleCount > 0 && (
+        <div>
+          <div style={{
+            fontSize: 10, color: TEAM_SECTION_ACCENT.examples, textTransform: "uppercase",
+            letterSpacing: 1.2, marginBottom: 8, fontWeight: 700,
+            padding: "0 2px",
+          }}>{TEAM_SECTION_LABEL.examples}</div>
+          <button
+            onClick={onToggleExamples}
+            style={{
+              width: "100%",
+              minHeight: 46,
+              background: "rgba(255,255,255,0.04)",
+              color: "var(--fg-muted)",
+              border: "1px dashed rgba(168,184,255,0.35)",
+              borderRadius: 10,
+              cursor: "pointer",
+              fontSize: 12,
+              textAlign: "left",
+              padding: "0 14px",
+            }}
+          >
+            Show {exampleCount} example templates for specialized connectors
+          </button>
+        </div>
+      )}
 
       {/* BUILD YOUR OWN — always last, mirrors _build_create_section. */}
       <div>
@@ -534,12 +647,16 @@ function AgentMiniCard({ spec }: { spec: AgentSpec }) {
 // Delete (custom only) + primary CTA.
 function TeamDetailPanel({
   team, onCreateProject, onEditTemplate, onDuplicateTemplate, onDeleteTemplate,
+  onInstallMcpPack, mcpInstallStatus, installingMcpPack,
 }: {
   team: Team | null;
   onCreateProject: (name: string) => void;
   onEditTemplate: (name: string) => void;
   onDuplicateTemplate: (name: string) => void;
   onDeleteTemplate: (name: string) => void;
+  onInstallMcpPack: (team: Team) => void;
+  mcpInstallStatus: string | null;
+  installingMcpPack: boolean;
 }) {
   if (!team) {
     return (
@@ -651,6 +768,53 @@ function TeamDetailPanel({
             ))}
           </div>
         </>
+      )}
+
+      {team.mcpPack && (
+        <div style={{
+          border: "1px solid rgba(116,164,255,0.28)",
+          background: "rgba(116,164,255,0.08)",
+          borderRadius: 10,
+          padding: 10,
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+        }}>
+          <div style={{
+            color: "#a8b8ff", fontSize: 10, letterSpacing: 1,
+            fontWeight: 700, textTransform: "uppercase",
+          }}>MCP PACK</div>
+          <div style={{ color: "var(--fg)", fontSize: 12, lineHeight: 1.5 }}>
+            {team.mcpPack.summary}
+          </div>
+          {team.mcpPack.approvalRequired.length > 0 && (
+            <div style={{ color: "#ffcf9a", fontSize: 11, lineHeight: 1.4 }}>
+              Approval gated: {team.mcpPack.approvalRequired.join(", ")}
+            </div>
+          )}
+          {mcpInstallStatus && (
+            <div style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.4 }}>
+              {mcpInstallStatus}
+            </div>
+          )}
+          <div>
+            <button
+              onClick={() => onInstallMcpPack(team)}
+              disabled={installingMcpPack}
+              style={{
+                minHeight: 32,
+                background: installingMcpPack ? "var(--bg-surface)" : "rgba(116,164,255,0.18)",
+                color: "#dde3ff",
+                border: "1px solid rgba(116,164,255,0.35)",
+                borderRadius: 8,
+                padding: "0 12px",
+                cursor: installingMcpPack ? "default" : "pointer",
+                fontSize: 12,
+                fontWeight: 600,
+              }}
+            >{installingMcpPack ? "Installing..." : "Install MCP pack"}</button>
+          </div>
+        </div>
       )}
 
       <div style={{ flex: 1 }} />
@@ -1358,8 +1522,10 @@ function toTeam(t: TeamTemplateBackend): Team {
     ? d.agents.map((a: any) => ({ name: a.name, base: a.base, icon: a.icon ?? null }))
     : [];
   const edges = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
+  const name = d.name ?? t.id;
+  const mcpPack = normalizeMcpPack(d.mcp_pack);
   return {
-    name: d.name ?? t.id,
+    name,
     display: d.display_name ?? t.id,
     category: d.category ?? "Other",
     icon: d.icon ?? "owl:owl_asssitant",
@@ -1367,6 +1533,9 @@ function toTeam(t: TeamTemplateBackend): Team {
     agents,
     edges,
     requiredMcp: Array.isArray(d.required_mcp) ? d.required_mcp : [],
+    visibility: normalizeVisibility(d.visibility, t.built_in, name),
+    workflowRank: typeof d.workflow_rank === "number" ? d.workflow_rank : (RECOMMENDED_TEAM_RANK[name] ?? 999),
+    mcpPack,
     builtIn: t.built_in,
   };
 }
@@ -1426,6 +1595,7 @@ export default function StudioPage() {
   const [bannerVisible, setBannerVisible] = useState(true);
   const [teamQuery, setTeamQuery] = useState("");
   const [agentQuery, setAgentQuery] = useState("");
+  const [showExampleTeams, setShowExampleTeams] = useState(false);
   // "Skill Library" filter — flips on when the user clicks the
   // banner CTA / 📚 Skill Library button. Hides plain roles so only
   // SKILL.md packs remain.
@@ -1439,6 +1609,8 @@ export default function StudioPage() {
   // localStorage on mount and merged onto every agent's icon at render.
   const [iconOverrides, setIconOverrides] = useState<Record<string, string>>(() => loadStudioOverrides());
   const [iconPickerAgent, setIconPickerAgent] = useState<string | null>(null);
+  const [mcpInstallingTeam, setMcpInstallingTeam] = useState<string | null>(null);
+  const [mcpInstallStatusByTeam, setMcpInstallStatusByTeam] = useState<Record<string, string>>({});
 
   // Layer overrides on top of backend-loaded agent icons. Cheap pass
   // over the list whenever either dataset changes.
@@ -1481,9 +1653,17 @@ export default function StudioPage() {
       t.display.toLowerCase().includes(q) ||
       t.description.toLowerCase().includes(q) ||
       t.category.toLowerCase().includes(q) ||
+      t.requiredMcp.some(m => m.toLowerCase().includes(q)) ||
+      (t.mcpPack?.servers.some(s => s.name.toLowerCase().includes(q)) ?? false) ||
       t.agents.some(a => a.name.toLowerCase().includes(q))
     );
   }, [teamQuery, teams]);
+
+  const visibleTeams = useMemo(() => {
+    if (teamQuery.trim()) return filteredTeams;
+    if (showExampleTeams) return filteredTeams;
+    return filteredTeams.filter(t => !t.builtIn || t.visibility !== "examples");
+  }, [filteredTeams, showExampleTeams, teamQuery]);
 
   const filteredAgents = useMemo(() => {
     const q = agentQuery.trim().toLowerCase();
@@ -1500,7 +1680,7 @@ export default function StudioPage() {
 
   // Sub-label text per view — verbatim from agent_studio_page.py:1126-1136.
   const subLabel = view === "teams"
-    ? "Pick a team template — pre-built collections of agents wired to do a kind of work (Secretary, Bug Hunter, Research Lab, …). One click spawns a project with the team ready to run."
+    ? "Pick a workflow: Code Operator, Product Studio, Research Lab, Chief of Staff, n8n Workflow Builder, Data Room, or Content Studio. MCP packs configure the tools those workflows need."
     : "Design individual agents — pick an avatar, a job, the tools they get to use. Built-ins ship with OWLLM and can't be edited; click Duplicate on any built-in to make your own copy.";
 
   // Navigate to another top-level tab. AppShell listens for this
@@ -1515,6 +1695,32 @@ export default function StudioPage() {
     // future hook on AgentsPage pre-populate the team picker.
     sessionStorage.setItem("owllm:agents:pending-team", name);
     navTo("agents");
+  };
+  const handleInstallMcpPack = async (team: Team) => {
+    if (!team.mcpPack) return;
+    setMcpInstallingTeam(team.name);
+    setMcpInstallStatusByTeam(prev => ({ ...prev, [team.name]: "Installing runtime helpers and merging MCP server config..." }));
+    try {
+      const result = await invoke<McpPackInstallResult>("mcp_install_pack", {
+        servers: team.mcpPack.servers,
+      });
+      const changes = [
+        result.added.length ? `added ${result.added.join(", ")}` : "",
+        result.updated.length ? `updated ${result.updated.join(", ")}` : "",
+        result.uvInstalled ? "uv ready" : "",
+      ].filter(Boolean).join("; ");
+      setMcpInstallStatusByTeam(prev => ({
+        ...prev,
+        [team.name]: changes ? `Pack installed: ${changes}.` : "Pack installed.",
+      }));
+    } catch (e: any) {
+      setMcpInstallStatusByTeam(prev => ({
+        ...prev,
+        [team.name]: `Install failed: ${String(e?.message ?? e)}`,
+      }));
+    } finally {
+      setMcpInstallingTeam(null);
+    }
   };
   const handleEditTemplate = (name: string) => {
     const t = teams.find(x => x.name === name);
@@ -1593,10 +1799,12 @@ export default function StudioPage() {
           <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>
             <div style={{ flex: 6, display: "flex", flexDirection: "column", minWidth: 0 }}>
               <TeamsGrid
-                teams={filteredTeams}
+                teams={visibleTeams}
                 selected={selectedTeam}
                 onSelect={setSelectedTeam}
                 onCreate={handleCreateTeam}
+                showExamples={showExampleTeams || teamQuery.trim().length > 0}
+                onToggleExamples={() => setShowExampleTeams(v => !v)}
               />
             </div>
             <div style={{ flex: 4, display: "flex", minWidth: 0 }}>
@@ -1606,6 +1814,9 @@ export default function StudioPage() {
                 onEditTemplate={handleEditTemplate}
                 onDuplicateTemplate={handleDuplicateTemplate}
                 onDeleteTemplate={handleDeleteTemplate}
+                onInstallMcpPack={handleInstallMcpPack}
+                mcpInstallStatus={team ? (mcpInstallStatusByTeam[team.name] ?? null) : null}
+                installingMcpPack={team ? mcpInstallingTeam === team.name : false}
               />
             </div>
           </div>

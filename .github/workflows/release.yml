@@ -268,6 +268,11 @@ jobs:
       # ---------------------------------------------------------------
       - name: Build Tauri (${{ matrix.label }})
         working-directory: owllm-desktop
+        # bash on ALL three OSes so the inline --config JSON below quotes
+        # identically (PowerShell mangles the escaped quotes). GitHub's
+        # windows runner has bash + the MSVC toolchain on the system PATH,
+        # so the Windows build is unaffected.
+        shell: bash
         env:
           # Tauri auto-updater signing (cross-platform).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -280,7 +285,12 @@ jobs:
           # Windows Authenticode.
           TAURI_WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           TAURI_WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-        run: npm run tauri -- build ${{ matrix.tauri_args }}
+        # --config forces createUpdaterArtifacts=true for the CI build ONLY,
+        # so tauri emits the signed .sig + latest.json the updater needs. The
+        # committed tauri.conf.json keeps it false so local key-less builds
+        # (build-release.bat) still work without a signing key. Requires the
+        # TAURI_SIGNING_PRIVATE_KEY secret to be set, or this build fails.
+        run: npm run tauri -- build ${{ matrix.tauri_args }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
 
       # ---------------------------------------------------------------
       # Smoke test — launch the built binary and verify it stays alive

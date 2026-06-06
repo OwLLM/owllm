@@ -126,14 +126,19 @@ pub async fn server_start(
             let hw = crate::hardware::hardware_info().await.unwrap_or_default();
             let snap = crate::modules::HardwareSnapshot::from_probe(&hw);
             let mgr = app.state::<crate::modules::ModuleManager>();
+            // SELF-HEAL: clear any prior local-inference record first. install()
+            // skips re-download when the recorded version matches — even if a
+            // previous attempt extracted an INCOMPLETE payload (e.g. a momentarily
+            // broken/cached download with no llama-server.exe). Without this, a
+            // single bad download poisons the install permanently: every retry
+            // "succeeds" (skipped) yet the binary is still missing. uninstall is
+            // a no-op if nothing's recorded.
+            let _ = mgr.inner().uninstall("local-inference");
             mgr.inner()
                 .install(&app, "local-inference", &snap)
                 .await
                 .map_err(|e| {
-                    format!(
-                        "no inference engine and auto-install failed: {e}. \
-                         Open the Modules page and install 'Local Inference' manually."
-                    )
+                    format!("no inference engine and auto-install failed: {e}.")
                 })?;
             let _ = app.emit("server-log", ServerLogEvent {
                 stream: "stdout".into(),
@@ -142,8 +147,8 @@ pub async fn server_start(
             paths::llama_server_exe().ok_or_else(|| {
                 let name = paths::llama_server_filename();
                 format!(
-                    "{name} still not found after installing Local Inference. \
-                     Open Modules and reinstall the engine."
+                    "{name} still missing after installing the engine — the module \
+                     download may have failed. Check your internet connection and try again."
                 )
             })?
         }

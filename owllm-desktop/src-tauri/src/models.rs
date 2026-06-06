@@ -283,7 +283,17 @@ fn walk_gguf(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
         let path = entry.path();
         if path.is_dir() {
             walk_gguf(&path, out, depth + 1);
-        } else if path.extension().and_then(|s| s.to_str()) == Some("gguf") {
+        } else if path
+            .extension()
+            .and_then(|s| s.to_str())
+            // Case-INSENSITIVE: a `.GGUF` / `.Gguf` file is still a GGUF.
+            // The downloaded-models scanner (huggingface.rs) already lower-
+            // cases the ext, so a mixed-case file showed as a card but was
+            // invisible to the chat list — "model downloaded but not in the
+            // chats" on machines whose file happened not to be all-lowercase.
+            .map(|e| e.eq_ignore_ascii_case("gguf"))
+            .unwrap_or(false)
+        {
             let stem = path
                 .file_stem()
                 .and_then(|s| s.to_str())

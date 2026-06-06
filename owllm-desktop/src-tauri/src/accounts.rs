@@ -346,16 +346,26 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             find_claude_cli(), &["--print"], "Claude", Some("ok")).await,
         // OpenAI Codex CLI: `codex exec <prompt>` is the non-interactive
         // shape. There's no --print/--prompt; older docs to the contrary.
-        // BUT codex versions disagree on WHERE the prompt comes from:
-        // older builds take the positional arg; newer builds read it from
-        // STDIN (they print "Reading additional input from stdin..." and,
-        // with stdin closed/null, get an empty prompt → exit 1). That's the
-        // cross-machine failure — this box has the arg-style codex, others
-        // have the stdin-style one. Feed the prompt BOTH ways so either
-        // build gets a real prompt; the stdin is closed right after the
-        // write (EOF), so the stdin-style codex proceeds instead of hanging.
+        // Two things have to be right or it exits 1 with "Reading additional
+        // input from stdin...":
+        //   1. The prompt is fed BOTH as the positional arg AND on stdin —
+        //      older builds read the arg, newer ones read stdin; stdin is
+        //      closed right after the write (EOF) so the stdin-style codex
+        //      proceeds instead of hanging.
+        //   2. The SAME non-interactive flags codex_cli_complete uses must be
+        //      present. Without --skip-git-repo-check, codex run outside a git
+        //      repo stops to read a confirmation from stdin (that "Reading
+        //      additional input from stdin..." line) and exits 1 when it gets
+        //      the prompt instead of a yes/no. --sandbox read-only + --color
+        //      never keep the probe side-effect-free and unescaped. This is
+        //      why the chat path worked but Test didn't — Test was missing
+        //      the flags.
         "codex_cli" => probe_cli_subscription(
-            find_codex_cli(), &["exec", "ok"], "Codex", Some("ok")).await,
+            find_codex_cli(),
+            &["exec", "--skip-git-repo-check", "--color", "never",
+              "--sandbox", "read-only", "ok"],
+            "Codex", Some("ok"),
+        ).await,
         "kimi_cli" => probe_cli_subscription(
             find_kimi_cli(),
             // `--model kimi-latest` so the probe works even when the

@@ -20,6 +20,7 @@ import TunedModelCard from "./widgets/TunedModelCard";
 import AccessTokensPane from "./widgets/AccessTokensPane";
 import WeightPickerDialog from "./widgets/WeightPickerDialog";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import * as downloadStore from "./downloadStore";
 import { chip, INPUT, BUTTON, banner } from "../../theme/styles";
 
 type SubTab = "browse" | "downloaded" | "tuned" | "cache";
@@ -473,23 +474,13 @@ export default function ModelsPage() {
   }, [exportLogs, exportLogsOpen, exportStatus]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
-  const [downloading, setDownloading] = React.useState<Set<string>>(new Set());
-  // Per-model download progress. Populated by channel events from
-  // hf_download — the user reported "no visual feedback, no
-  // notifications, no trackbar, nothing" because the previous code
-  // never wired ch.onmessage. Now each (modelId → DownloadProgress)
-  // row holds the latest event so the UI can render a bar + filename
-  // + bytes received / total + error text without polling.
-  type DownloadProgress = {
-    file: string;
-    received: number;
-    total: number | null;
-    fileIndex: number;
-    fileCount: number;
-    done: boolean;
-    error: string | null;
-  };
-  const [downloadProgress, setDownloadProgress] = React.useState<Map<string, DownloadProgress>>(new Map());
+  // Download state lives in a MODULE-LEVEL store (downloadStore.ts) so the
+  // progress bar survives leaving the Models page and coming back — the
+  // download keeps running in Rust regardless of this component's lifecycle.
+  // Subscribing here re-reads the in-flight progress on every (re)mount.
+  const dlSnap = React.useSyncExternalStore(downloadStore.subscribe, downloadStore.getSnapshot);
+  const downloading = dlSnap.downloading;
+  const downloadProgress = dlSnap.progress;
   // Weight-picker modal: when set, opens for that model id.
   const [pickerFor, setPickerFor] = React.useState<string | null>(null);
   // VRAM + GPU name resolved from the same source the rest of the
@@ -688,94 +679,12 @@ export default function ModelsPage() {
   // progress events. The previous code was passing `files` as if the
   // Rust side accepted a Vec — that's why every download instantly
   // errored with "missing required key file".
-  type DownloadEvent =
-    | { kind: "started"; total: number | null }
-    | { kind: "progress"; received: number; total: number | null }
-    | { kind: "finished"; path: string; bytes: number }
-    | { kind: "failed"; error: string };
+  // Delegates to the module-level store so the download (and its progress
+  // bar) survive navigating away from this page and back. All the channel /
+  // looping / progress logic now lives in downloadStore.ts.
   const confirmDownload = async (modelId: string, files: string[]) => {
     setPickerFor(null);
-    setDownloading((curr) => new Set(curr).add(modelId));
-    try {
-      let toFetch = files;
-      if (toFetch.length === 0) {
-        try {
-          const all = await invoke<Array<{ path: string }>>("hf_model_files", { modelId });
-          toFetch = all.map(f => f.path);
-        } catch (e) {
-          throw new Error(`hf_model_files: ${String(e)}`);
-        }
-      }
-      let failed: string | null = null;
-      for (let i = 0; i < toFetch.length; i++) {
-        const file = toFetch[i];
-        const ch = new Channel<DownloadEvent>();
-        // Wire progress channel — pushes the latest event into
-        // downloadProgress[modelId] so the model card can render a
-        // bar + bytes + current filename + index/total without
-        // polling. Channel events come in ~5/s (Rust throttle).
-        ch.onmessage = (ev) => {
-          setDownloadProgress(prev => {
-            const next = new Map(prev);
-            const curRow = prev.get(modelId);
-            const base: DownloadProgress = curRow ?? {
-              file, received: 0, total: null,
-              fileIndex: i, fileCount: toFetch.length,
-              done: false, error: null,
-            };
-            if (ev.kind === "started") {
-              next.set(modelId, { ...base, file, total: ev.total, received: 0, fileIndex: i, fileCount: toFetch.length, done: false, error: null });
-            } else if (ev.kind === "progress") {
-              next.set(modelId, { ...base, received: ev.received, total: ev.total });
-            } else if (ev.kind === "finished") {
-              next.set(modelId, { ...base, received: ev.bytes, total: ev.bytes, done: i + 1 >= toFetch.length });
-            } else if (ev.kind === "failed") {
-              next.set(modelId, { ...base, error: ev.error });
-            }
-            return next;
-          });
-        };
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          await invoke("hf_download", { modelId, file, branch: null, channel: ch });
-        } catch (e) {
-          failed = String(e);
-          break;
-        }
-      }
-      if (failed) throw new Error(failed);
-      // Tell the rest of the app (AgentsPage / ChatPage pickers) that
-      // a new model has landed on disk and they should re-call
-      // list_models. Without this fan-out, freshly downloaded models
-      // only appeared after an app restart.
-      window.dispatchEvent(new CustomEvent("owllm:models:refresh"));
-    } catch (e) {
-      setHfError(`Download failed: ${e}`);
-      setDownloadProgress(prev => {
-        const next = new Map(prev);
-        const cur = next.get(modelId);
-        if (cur) next.set(modelId, { ...cur, error: String(e) });
-        return next;
-      });
-    } finally {
-      setDownloading((curr) => {
-        const next = new Set(curr);
-        next.delete(modelId);
-        return next;
-      });
-      // Clear the progress row after a brief delay so the user sees
-      // "Done" before it disappears. On error we leave it so the
-      // failure text stays visible.
-      setTimeout(() => {
-        setDownloadProgress(prev => {
-          const cur = prev.get(modelId);
-          if (!cur || cur.error) return prev;
-          const next = new Map(prev);
-          next.delete(modelId);
-          return next;
-        });
-      }, 4000);
-    }
+    await downloadStore.startDownload(modelId, files);
   };
 
   return (

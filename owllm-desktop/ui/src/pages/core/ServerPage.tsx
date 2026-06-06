@@ -171,7 +171,12 @@ function MCPServerColumn({ appendLog }: { appendLog: (s: string) => void }) {
   const [lan, setLan] = useState(false);
   const [token, setToken] = useState("");
   const [tokenVisible, setTokenVisible] = useState(false);
-  const [root, setRoot] = useState("C:/1_Git/LocaLLM");
+  // Default to a real per-user dir, not the dev repo path. Editable below
+  // (folder picker); this is just the initial value on a fresh machine.
+  const [root, setRoot] = useState("");
+  useEffect(() => {
+    invoke<string>("chat_scratch_dir").then((d) => setRoot((r) => r || d)).catch(() => { /* leave blank */ });
+  }, []);
   const [running, setRunning] = useState(false);
   const [transitioning, setTransitioning] = useState(false);
   const [address, setAddress] = useState<string>("");   // "127.0.0.1:8763"

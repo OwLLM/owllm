@@ -138,7 +138,7 @@ const PRESETS: Array<Preset & { category: PresetCategory }> = [
     category: "Files",
     name: "filesystem", icon: "📁",
     description: "Sandboxed file ops. Edit the LAST positional arg to set the allowed root dir.",
-    command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
+    command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "{{WORKSPACE}}"],
     envHints: [],
   },
 
@@ -211,7 +211,7 @@ const PRESETS: Array<Preset & { category: PresetCategory }> = [
     category: "Dev",
     name: "git", icon: "🔀",
     description: "Local git ops — log, diff, blame, branches. Edit --repository to your repo.",
-    command: "uvx", args: ["mcp-server-git", "--repository", "C:/1_Git/LocaLLM"],
+    command: "uvx", args: ["mcp-server-git", "--repository", "{{WORKSPACE}}"],
     envHints: [],
   },
   {
@@ -836,6 +836,13 @@ export default function MCPPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<{ open: boolean; initial: McpServerConfig | null; envHints?: EnvHint[] }>({ open: false, initial: null });
+  // Per-user default dir for preset pre-fills that need a path (filesystem /
+  // git). Replaces the old hardcoded "C:/1_Git" dev path so a fresh machine
+  // gets a real, existing folder instead of a nonexistent one.
+  const [wsDefault, setWsDefault] = useState<string>("");
+  useEffect(() => {
+    invoke<string>("chat_scratch_dir").then((d) => setWsDefault(d)).catch(() => { /* leave blank */ });
+  }, []);
   // Per-server "starting" flag. mcp_start_server can hang for up to
   // ~3 minutes on first run while npx downloads the package; without
   // this the card just shows Stopped during the wait and the user
@@ -985,9 +992,12 @@ export default function MCPPage() {
   const addFromPreset = (p: Preset) => {
     const env: Record<string, string> = {};
     for (const h of p.envHints) env[h.name] = "";
+    // Substitute the {{WORKSPACE}} token (filesystem/git presets) with the
+    // user's real scratch dir so the pre-fill points somewhere that exists.
+    const args = p.args.map((a) => (a === "{{WORKSPACE}}" ? (wsDefault || ".") : a));
     setDialog({
       open: true,
-      initial: { name: p.name, command: p.command, args: p.args, env, enabled: true },
+      initial: { name: p.name, command: p.command, args, env, enabled: true },
       envHints: p.envHints,
     });
   };

@@ -350,10 +350,12 @@ export default function TrainPage() {
   const [ckptEvery, setCkptEvery] = React.useState(100);
   // batch_size_auto — port of main.py:14881-14900 (✅ Optimal batch size toggle).
   const [batchSizeAuto, setBatchSizeAuto] = React.useState(true);
-  // Output dir — wrapping muted label below the params grid (main.py:14908-14935).
-  const [outputDir] = React.useState(
-    "C:/Users/mc/.owllm_studio/finetuned/unsloth_Qwen2.5-7B-Instruct-bnb-4bit_2026-05-21_finetune_qwen",
-  );
+  // Output dir — RELATIVE so the backend resolves it under the user's
+  // fine_tuned root on ANY machine. Was hardcoded to a dev-only absolute path
+  // (C:/Users/mc/.owllm_studio/…), so every training run on every other PC
+  // wrote to a nonexistent dir. Derive it from the base model + run name.
+  const safeBase = baseModel.replace(/\//g, "__").replace(/[^a-zA-Z0-9._-]/g, "_");
+  const outputDir = `LLM/fine_tuned/${safeBase}_${(runName || "finetune").replace(/[^a-zA-Z0-9._-]/g, "_")}/`;
   const [status, setStatus] = React.useState<TrainStatus>(EMPTY_STATUS);
 
   // Poll training status every 1.5s while a run is in flight.

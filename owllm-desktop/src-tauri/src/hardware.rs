@@ -181,7 +181,11 @@ fn bytes_to_gb(b: u64) -> f64 {
 /// because it returns the real total memory (wmic's AdapterRAM is a
 /// 32-bit DWORD that wraps to 4 GiB) and skips virtual display
 /// adapters. The `uuid` is what we persist in gpu_config.json.
-#[cfg(windows)]
+/// nvidia-smi GPU discovery. `nvidia-smi` is identical on Windows and Linux,
+/// so this runs on both (and is harmless on macOS — the binary is absent, so
+/// `.output()` errors → None, and we fall through to no NVIDIA GPUs). The only
+/// platform-specific bit is the Windows CREATE_NO_WINDOW flag (tokio exposes
+/// `creation_flags` inherently on Windows).
 async fn gpus_via_nvidia_smi() -> Option<Vec<GpuInfo>> {
     use tokio::process::Command;
     let mut cmd = Command::new("nvidia-smi");
@@ -189,6 +193,7 @@ async fn gpus_via_nvidia_smi() -> Option<Vec<GpuInfo>> {
         "--query-gpu=name,memory.total,uuid",
         "--format=csv,noheader,nounits",
     ]);
+    #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     let out = cmd.output().await.ok()?;
     if !out.status.success() {
@@ -198,9 +203,6 @@ async fn gpus_via_nvidia_smi() -> Option<Vec<GpuInfo>> {
     let parsed = parse_nvidia_smi_gpus(&stdout);
     if parsed.is_empty() { None } else { Some(parsed) }
 }
-
-#[cfg(not(windows))]
-async fn gpus_via_nvidia_smi() -> Option<Vec<GpuInfo>> { None }
 
 fn parse_nvidia_smi_gpus(text: &str) -> Vec<GpuInfo> {
     text.lines()

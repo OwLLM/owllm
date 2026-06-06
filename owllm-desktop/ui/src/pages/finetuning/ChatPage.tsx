@@ -26,6 +26,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
+import { resolveInferenceBase } from "../agentic/inferenceEndpoint";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 // Tool-use loop, always-on. sendOne() appends the same XML <tool_call>
 // catalog the Agentic Team page uses, then parses each streamed reply
@@ -817,9 +818,10 @@ export default function ChatPage() {
           const onOuterAbort = () => attemptCtrl.abort();
           signal.addEventListener("abort", onOuterAbort);
           try {
-            resp = await fetch(`http://127.0.0.1:${activePort}/v1/chat/completions`, {
+            const _infer = resolveInferenceBase(activePort);
+            resp = await fetch(`${_infer.baseUrl}/v1/chat/completions`, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: { "Content-Type": "application/json", ...(_infer.apiKey ? { Authorization: `Bearer ${_infer.apiKey}` } : {}) },
               body: JSON.stringify(payload),
               signal: attemptCtrl.signal,
             });
@@ -1159,9 +1161,10 @@ export default function ChatPage() {
             "briefly and answer from your own knowledge.",
         });
         try {
-          const fresp = await fetch(`http://127.0.0.1:${activePort}/v1/chat/completions`, {
+          const _infer2 = resolveInferenceBase(activePort);
+          const fresp = await fetch(`${_infer2.baseUrl}/v1/chat/completions`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...(_infer2.apiKey ? { Authorization: `Bearer ${_infer2.apiKey}` } : {}) },
             body: JSON.stringify({
               model: status.model_id ?? "local",
               messages: liveMessages,

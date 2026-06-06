@@ -38,7 +38,7 @@
                                                                              "version":  "b3850-cuda12.4",
                                                                              "releasedAt":  "2026-06-03T20:35:26Z",
                                                                              "downloadUrl":  "https://github.com/OwLLM/owllm/releases/download/modules-2026.06.03/local-inference-cuda.zip",
-                                                                             "sha256":  "b7c63d27aad42645fb7228b66a60b13805277b56a3db876157996718132115d0",
+                                                                             "sha256":  "1637f1eff5f86a1585cbc284f6e111e6126fae9fb004227b6601d801cd791018",
                                                                              "minShellVersion":  "0.1.0",
                                                                              "signature":  null
                                                                          }

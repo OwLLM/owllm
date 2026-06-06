@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
+import ModelPicker from "./ModelPicker";
 import { streamLocalChat, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
 
@@ -58,7 +59,7 @@ function parseSteps(text: string): string[] {
 }
 
 export default function CodePage() {
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [modelId, setModelId] = useState<string>("");
   const [workspace, setWorkspace] = useState<string>("");
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -69,15 +70,30 @@ export default function CodePage() {
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  // Real local/tuned models (the coding agent runs against a served GGUF).
+  // SAME model source as every other page — the full list_models result fed
+  // to the shared ModelPicker (localOnly does the filtering). Refresh on focus
+  // and on the app-wide models:refresh event (fired after a download) so newly
+  // installed models appear without restart — identical to ChatPage.
   useEffect(() => {
-    invoke<ModelInfo[]>("list_models")
-      .then((all) => {
-        const local = all.filter((m) => m.provider === "local" || m.provider === "tuned");
-        setModels(local);
-        setModelId((cur) => cur || local[0]?.model_id || "");
-      })
-      .catch((e) => setStatus(`Couldn't load models: ${e}`));
+    let dead = false;
+    const reload = () => {
+      invoke<ModelInfo[]>("list_models")
+        .then((all) => {
+          if (dead) return;
+          setAvailableModels(all);
+          setModelId((cur) => cur || all.find((m) => m.provider === "local" || m.provider === "tuned")?.model_id || "");
+        })
+        .catch((e) => setStatus(`Couldn't load models: ${e}`));
+    };
+    reload();
+    const onRefresh = () => reload();
+    window.addEventListener("focus", onRefresh);
+    window.addEventListener("owllm:models:refresh", onRefresh as EventListener);
+    return () => {
+      dead = true;
+      window.removeEventListener("focus", onRefresh);
+      window.removeEventListener("owllm:models:refresh", onRefresh as EventListener);
+    };
   }, []);
 
   // Auto-scroll the transcript as tokens / tool events land.
@@ -308,15 +324,21 @@ export default function CodePage() {
         <button onClick={pickWorkspace} title={workspace || "Pick a project folder"} style={btn}>📁 {wsShort}</button>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
-        <select
-          value={modelId}
-          onChange={(e) => setModelId(e.target.value)}
-          disabled={busy}
-          style={{ background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border-strong)", borderRadius: 6, fontSize: 12, padding: "6px 8px", maxWidth: 280 }}
-        >
-          {models.length === 0 && <option value="">No local models</option>}
-          {models.map((m) => <option key={m.model_id} value={m.model_id}>{m.model_id}</option>)}
-        </select>
+        <div style={{ minWidth: 260, maxWidth: 360 }}>
+          {/* THE shared model picker — same component + same list_models source
+              as Chat / Server / Agents. localOnly = the coding agent runs a
+              served GGUF, so restrict to the LOCAL section (shared flag, not a
+              recoded filter). */}
+          <ModelPicker
+            value={modelId}
+            onChange={setModelId}
+            models={availableModels}
+            status={null}
+            localOnly
+            disabled={busy}
+            fallbackLabel="(pick a local model)"
+          />
+        </div>
         <button onClick={clear} disabled={busy || (messages.length === 0 && tasks.length === 0)} style={btn}>Clear</button>
       </div>
 

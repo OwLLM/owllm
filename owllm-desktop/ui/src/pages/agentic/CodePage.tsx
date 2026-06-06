@@ -1,394 +1,281 @@
-﻿// CodePage — ported from LLM/desktop_app/pages/code_page.py
-// (CodePage.__init__ + UI scaffolding, line 217).
+// CodePage — OWLLM-native coding agent.
 //
-// The PySide6 version embeds a bundled VSCodium top-level window inside
-// the Qt host via Win32 ``SetParent`` reparenting (see _embed_hwnd,
-// line 745). Tauri's webview can NOT reparent a native window, so the
-// React port keeps the exact same header controls (workspace picker,
-// ``Cline →`` model selector, ``Launch / Re-embed`` primary button,
-// status line) and renders a launcher CTA panel where Qt would have
-// embedded the VSCodium HWND. The actual ``vscodium_manager.launch``
-// call will become a Tauri command — for now the click handlers are
-// stubs that only update the status line, mirroring the Qt status
-// transitions verbatim.
-import { useState } from "react";
+// Rebuilt 2026-06-06 from a mock VSCodium/Cline launcher into a REAL
+// coding agent on OWLLM's own engine. No bundled IDE, no Cline embed —
+// it drives the shared `streamLocalChat` loop (native GGUF tool-calling)
+// against the user's chosen workspace, so the local model can read,
+// search, edit and create files and run shell commands in that folder.
+// Cline's card-based UX is inspiration for later phases (file tree, live
+// diffs, task Kanban); Phase 1 is the working agent core.
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
+import { streamLocalChat, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import type { ToolCall, ToolExecResult } from "./localTools";
 
-type EditorLaunch = {
-  editor: string;
-  command: string;
-  workspace: string;
-  message: string;
+type Msg = {
+  role: "user" | "assistant" | "tool";
+  content: string;
+  thinking?: string;
+  kind?: "tool" | "terminal";
+  title?: string;
+  status?: "ok" | "error" | "running";
+  ts: number;
 };
 
-const ICONS = "/Page_icons";
-
-// ---------------------------------------------------------------------
-// Verbatim strings + sizes from code_page.py — keep these literal so
-// future diffs against the Qt source stay easy.
-// ---------------------------------------------------------------------
-
-// QLabel text from line 248: f"Workspace: {self._workspace}"
-// QLabel stylesheet from line 249: color: #b0b0b0
-const WORKSPACE_LABEL_COLOR = "#b0b0b0";
-
-// QComboBox.setMinimumWidth(420) — line 254. Qt comment explains this is
-// wide enough to show "<Pretty Model Name> — <MAKER>  -  running" without
-// the truncating ellipsis the previous 220px gave us.
-const MODEL_COMBO_MIN_WIDTH = 420;
-
-// QComboBox.setToolTip(...) — lines 256-259.
-const MODEL_COMBO_TOOLTIP =
-  "Pick which currently-loaded OWLLM model Cline should talk to. " +
-  "Refreshes when models start or stop in the Server tab.";
-
-// QPushButton text — line 262.
-const LAUNCH_BTN_TEXT = "Launch / Re-embed";
-
-// Header label between workspace and combo — line 268.
-const CLINE_ARROW_LABEL = "Cline →";
-
-// Status label initial color — lines 264-265.
-const STATUS_COLOR = "#888";
-
-// Status transitions — quoted verbatim from code_page.py. STATUS_INITIAL
-// ("Idle.") and STATUS_PREPARING were defined here but never reached by
-// the React port (the user enters the page after bootstrap; the
-// preparing state belongs to the launcher worker we haven't ported).
-// Keeping only the strings the React state machine actually emits.
-const STATUS_BUNDLE_READY = "Bundle ready. Click Launch / Re-embed."; // line 299, 322
-const STATUS_LAUNCHING = "Launching VSCodium…";                   // line 732
-
-// _BootstrapWorker progress messages — lines 177-184.
-const BOOTSTRAP_CHECKING = "Checking VSCodium bundle…";
-const BOOTSTRAP_DOWNLOADING =
-  "Downloading VSCodium portable (~180 MB) — first run only…";
-const BOOTSTRAP_INSTALL_CLINE = "Installing Cline extension…";
-const BOOTSTRAP_SEED = "Seeding settings…";
-
-// Empty-dropdown placeholder — line 501.
-const NO_MODEL_PLACEHOLDER =
-  "(no model onboarded - download one in the Models tab)";
-
-// "  -  running" suffix appended to running models — line 506.
-const RUNNING_SUFFIX = "  -  running";
-
-// QMessageBox copy from _on_bootstrap_done — lines 326-333.
-const BOOTSTRAP_FAILED_INTRO =
-  "Could not prepare the bundled code editor.";
-const BOOTSTRAP_FAILED_HINT =
-  "Check your internet connection (first run downloads VSCodium " +
-  "from GitHub) and try again.";
-
-// ---------------------------------------------------------------------
-// Mock model rows — match the shape produced by
-// CodePage._list_available_models (line 364): {display, model_id,
-// base_path, running, url}. Once a /v1/models endpoint exists this
-// will be a useEffect + fetch; for now we hand-roll two entries so the
-// dropdown visibly reflects the Qt sort order (running first, then
-// alphabetical) and the running suffix.
-// ---------------------------------------------------------------------
-type ModelRow = {
-  display: string;
-  model_id: string;
-  base_path: string;
-  running: boolean;
-  url: string | null;
-};
-
-const MOCK_MODELS: ModelRow[] = [
-  {
-    display: "Phi-4 Q4 K M — UNSLOTH",
-    model_id: "unsloth/phi-4-GGUF",
-    base_path: "C:/models/unsloth/phi-4-GGUF",
-    running: true,
-    url: "http://127.0.0.1:8001/v1",
-  },
-  {
-    display: "Qwen2.5 Coder 14B Q4 — UNSLOTH",
-    model_id: "unsloth/Qwen2.5-Coder-14B-Instruct-GGUF",
-    base_path: "C:/models/unsloth/Qwen2.5-Coder-14B-Instruct-GGUF",
-    running: false,
-    url: null,
-  },
-];
-
-// Mirrors _list_available_models sort key (line 474):
-//   (not running, display.lower())
-function sortModels(models: ModelRow[]): ModelRow[] {
-  return [...models].sort((a, b) => {
-    if (a.running !== b.running) return a.running ? -1 : 1;
-    return a.display.toLowerCase().localeCompare(b.display.toLowerCase());
-  });
-}
+const CODING_SYSTEM = (ws: string) =>
+  `You are OWLLM's coding agent, working directly inside the user's project at:\n${ws}\n\n` +
+  `You have real tools: read_file, grep, glob, list_dir, edit_file, write_file_with_diff, ` +
+  `create_dir and shell. Use them — do NOT ask the user to paste files or run commands you can run yourself. ` +
+  `Read and search before you edit. Make the smallest correct change that satisfies the request, keep the ` +
+  `surrounding code's style, and after editing briefly state what you changed and why. Paths may be given ` +
+  `relative to the workspace.`;
 
 export default function CodePage() {
-  // QSettings("LocaLLM", "OWLLM").value("code_page/workspace", ...) — line 229.
-  // The Qt code falls back to ``Path.cwd()`` when no remembered workspace
-  // exists; we use the repo root as a sensible default until a Tauri
-  // command exposes the real persisted setting.
-  // setWorkspace will be hooked up once a Tauri command exposes the
-  // real persisted setting + a native folder-picker dialog.
-  const [workspace] = useState<string>("C:/1_Git/LocaLLM");
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [modelId, setModelId] = useState<string>("");
+  const [workspace, setWorkspace] = useState<string>("");
+  const [messages, setMessages] = useState<Msg[]>([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("Pick a folder and a local model, then describe what to build or fix.");
+  const abortRef = useRef<AbortController | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
-  const sortedModels = sortModels(MOCK_MODELS);
-  const [modelBasePath, setModelBasePath] = useState<string>(
-    sortedModels[0]?.base_path ?? "",
-  );
-  const [status, setStatus] = useState<string>(STATUS_BUNDLE_READY);
+  // Real local/tuned models (the coding agent runs against a served GGUF).
+  useEffect(() => {
+    invoke<ModelInfo[]>("list_models")
+      .then((all) => {
+        const local = all.filter((m) => m.provider === "local" || m.provider === "tuned");
+        setModels(local);
+        setModelId((cur) => cur || local[0]?.model_id || "");
+      })
+      .catch((e) => setStatus(`Couldn't load models: ${e}`));
+  }, []);
 
-  // ``_launch_or_relaunch`` (line 703) kills any existing bundled
-  // VSCodium, seeds Cline's settings + globalState with the proxy URL,
-  // spawns VSCodium pointed at the workspace, and then polls for the
-  // top-level HWND so it can reparent it. None of that is reachable
-  // from a Tauri webview, so this stub only mirrors the visible status
-  // transitions: ``Launching VSCodium…`` then a faux ``embedded`` line.
-  const onLaunch = async () => {
-    setStatus(STATUS_LAUNCHING);
+  // Auto-scroll the transcript as tokens / tool events land.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [messages]);
+
+  const pickWorkspace = async () => {
     try {
-      const res = await invoke<EditorLaunch>("launch_external_editor", { workspace });
-      setStatus(`${res.editor} launched in its own window. (${res.command})`);
+      const { open } = await import("@tauri-apps/plugin-dialog");
+      const dir = await open({ directory: true, multiple: false, title: "Pick a project folder" });
+      if (typeof dir === "string" && dir) {
+        setWorkspace(dir);
+        setStatus(`Workspace: ${dir}`);
+      }
     } catch (e) {
-      setStatus(`Launch failed: ${e}`);
+      setStatus(`Folder picker failed: ${e}`);
     }
   };
 
-  const onBrowseWorkspace = () => {
-    // Will become invoke("pick_directory") via Tauri's dialog plugin.
-    // No-op stub — the Qt side uses a QFileDialog.getExistingDirectory
-    // in callers, but code_page.py itself only reads/writes the
-    // QSettings value, so there's no Qt source to quote here.
+  // Start (or reuse) the llama-server for the chosen model; return its port.
+  async function ensureServer(id: string): Promise<number | null> {
+    const s = await invoke<ServerStatus>("server_status").catch(() => null);
+    if (s && s.running && s.model_id === id && s.port) return s.port;
+    setStatus(`Starting ${id}…`);
+    await invoke("server_start", { modelId: id });
+    for (let i = 0; i < 120 && !abortRef.current?.signal.aborted; i++) {
+      const st = await invoke<ServerStatus>("server_status").catch(() => null);
+      if (st && st.running && st.port) return st.port;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return null;
+  }
+
+  // ----- streaming sinks (newline-safe append; same lesson as ChatPage) -----
+  const onDelta = (d: string) =>
+    setMessages((msgs) => {
+      const out = msgs.slice();
+      const last = out[out.length - 1];
+      if (last && last.role === "assistant" && !last.kind) {
+        out[out.length - 1] = { ...last, content: last.content + d };
+      } else {
+        out.push({ role: "assistant", content: d, ts: Date.now() });
+      }
+      return out;
+    });
+
+  const onThought = (channel: string, _role: string, delta: string) => {
+    if (channel !== "thinking") return;
+    setMessages((msgs) => {
+      const out = msgs.slice();
+      const last = out[out.length - 1];
+      if (last && last.role === "assistant" && !last.kind) {
+        out[out.length - 1] = { ...last, thinking: (last.thinking ?? "") + delta };
+      } else {
+        out.push({ role: "assistant", content: "", thinking: delta, ts: Date.now() });
+      }
+      return out;
+    });
   };
 
-  const onModelChanged = (basePath: string) => {
-    setModelBasePath(basePath);
-    const row = sortedModels.find((m) => m.base_path === basePath);
-    if (!row) return;
-    // Status copy mirrors _on_model_changed (line 645) for the
-    // already-running branch and (line 661) for the start-needed branch.
-    if (row.running) {
-      setStatus(`Cline -> ${row.display} (already running).`);
-    } else {
-      setStatus(`Starting ${row.display}…`);
+  const onToolCall = (call: ToolCall) => {
+    const firstArg = Object.values(call.args)[0] ?? "";
+    setMessages((msgs) => [
+      ...msgs,
+      {
+        role: "tool",
+        kind: call.name === "shell" ? "terminal" : "tool",
+        title: `${call.name}${firstArg ? `(${String(firstArg)})` : ""}`.slice(0, 100),
+        content: "",
+        status: "running",
+        ts: Date.now(),
+      },
+    ]);
+  };
+
+  const onToolResult = (_call: ToolCall, result: ToolExecResult) =>
+    setMessages((msgs) => {
+      const out = msgs.slice();
+      for (let i = out.length - 1; i >= 0; i--) {
+        if (out[i].role === "tool" && out[i].status === "running") {
+          out[i] = { ...out[i], status: result.ok ? "ok" : "error", content: result.output };
+          break;
+        }
+      }
+      return out;
+    });
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || busy) return;
+    if (!workspace) { setStatus("Pick a workspace folder first (Browse)."); return; }
+    if (!modelId) { setStatus("No local model available — load one on the Models page."); return; }
+    setDraft("");
+    setBusy(true);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    const history: HistoryItem[] = messages
+      .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && m.content.trim()))
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+    setMessages((msgs) => [...msgs, { role: "user", content: text, ts: Date.now() }]);
+    try {
+      const port = await ensureServer(modelId);
+      if (!port) { setStatus("Model server didn't come up — check the Server tab."); return; }
+      setStatus(`Coding in ${workspace}`);
+      await streamLocalChat({
+        port,
+        modelId,
+        systemPrompt: CODING_SYSTEM(workspace),
+        userContent: text,
+        temperature: 0.3,
+        signal: ctrl.signal,
+        onDelta,
+        onThought,
+        projectCwd: workspace,
+        history,
+        events: { onToolCall, onToolResult },
+      });
+    } catch (e) {
+      const err = e as { name?: string; message?: string };
+      if (err.name !== "AbortError") {
+        setMessages((msgs) => [...msgs, { role: "assistant", content: `⚠ ${err.message ?? e}`, ts: Date.now() }]);
+      }
+    } finally {
+      setBusy(false);
+      abortRef.current = null;
     }
   };
 
-  const noModels = sortedModels.length === 0;
+  const stop = () => { abortRef.current?.abort(); setBusy(false); };
+  const clear = () => { if (!busy) { setMessages([]); setStatus(`Workspace: ${workspace || "(none)"}`); } };
+
+  const wsShort = workspace ? workspace.replace(/^.*[\\/]/, "") : "No folder";
 
   return (
-    <div
-      style={{
-        // QVBoxLayout.setContentsMargins(8, 6, 8, 8) + setSpacing(6) — lines 242-243.
-        padding: "6px 8px 8px 8px",
-        height: "100%",
-        background: "var(--bg-panel)",
-        display: "flex",
-        flexDirection: "column",
-        gap: 6,
-      }}
-    >
-      {/* Header row — QHBoxLayout with spacing 8 (line 246). Order matches
-          lines 267-270:
-            workspace_label (stretch=1)  "Cline →"  model_combo  launch_btn */}
+    <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-panel)", color: "var(--fg)" }}>
+      {/* Header: workspace · model · status */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <div
-          style={{
-            flex: 1,
-            color: WORKSPACE_LABEL_COLOR,
-            fontSize: 12,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-          title={workspace}
-        >
-          {/* Verbatim from QLabel(f"Workspace: {self._workspace}") — line 248. */}
-          Workspace:{" "}
-          <span style={{ color: "var(--fg)", fontFamily: "Consolas, monospace" }}>
-            {workspace}
-          </span>
-        </div>
-
-        {/* Browse — not in code_page.py itself (the Qt page only reads
-            QSettings), but the webview port needs an explicit picker
-            because we can't write a default Path.cwd() from JS. Kept
-            small + ghost-styled so it doesn't visually compete with the
-            primary Launch button. */}
-        <button
-          onClick={onBrowseWorkspace}
-          className="ghost-btn"
-          style={{
-            height: 28,
-            padding: "0 10px",
-            borderRadius: 6,
-            border: "1px solid var(--border-strong)",
-            background: "transparent",
-            color: "#cfd2d6",
-            fontSize: 12,
-            cursor: "pointer",
-          }}
-        >
-          Browse
-        </button>
-
-        <div style={{ fontSize: 13, color: "#cfd2d6", fontWeight: 600 }}>
-          {CLINE_ARROW_LABEL}
-        </div>
-
+        <span style={{ fontSize: 16 }}>🦉</span>
+        <span style={{ fontWeight: 700, fontSize: 14, color: "var(--fg-strong)" }}>Code</span>
+        <button onClick={pickWorkspace} title={workspace || "Pick a project folder"} style={btn}>📁 {wsShort}</button>
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
         <select
-          value={modelBasePath}
-          disabled={noModels}
-          title={MODEL_COMBO_TOOLTIP}
-          onChange={(e) => onModelChanged(e.target.value)}
-          style={{
-            // QComboBox.setMinimumWidth(420) — line 254.
-            minWidth: MODEL_COMBO_MIN_WIDTH,
-            height: 30,
-            padding: "0 10px",
-            borderRadius: 6,
-            border: "1px solid var(--border-strong)",
-            background: "var(--bg-input)",
-            color: "var(--fg-strong)",
-            fontSize: 13,
-          }}
+          value={modelId}
+          onChange={(e) => setModelId(e.target.value)}
+          disabled={busy}
+          style={{ background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border-strong)", borderRadius: 6, fontSize: 12, padding: "6px 8px", maxWidth: 280 }}
         >
-          {noModels ? (
-            <option value="">{NO_MODEL_PLACEHOLDER}</option>
-          ) : (
-            sortedModels.map((m) => (
-              <option key={m.base_path} value={m.base_path}>
-                {/* Visible label uses the "  -  running" suffix from line 506. */}
-                {m.display + (m.running ? RUNNING_SUFFIX : "")}
-              </option>
-            ))
-          )}
+          {models.length === 0 && <option value="">No local models</option>}
+          {models.map((m) => <option key={m.model_id} value={m.model_id}>{m.model_id}</option>)}
         </select>
-
-        <button
-          onClick={onLaunch}
-          style={{
-            height: 32,
-            padding: "0 16px",
-            borderRadius: 8,
-            background: "linear-gradient(180deg, var(--accent), var(--accent))",
-            color: "var(--fg-strong)",
-            border: "none",
-            fontWeight: 700,
-            cursor: "pointer",
-            fontSize: 13,
-          }}
-        >
-          {LAUNCH_BTN_TEXT}
-        </button>
+        <button onClick={clear} disabled={busy || messages.length === 0} style={btn}>Clear</button>
       </div>
 
-      {/* Status label — QLabel("Idle.") with stylesheet color: #888,
-          lines 264-265. Sits directly under the header before the host
-          stack (outer.addWidget(self.status_label) — line 272). */}
-      <div style={{ fontSize: 11, color: STATUS_COLOR }}>{status}</div>
-
-      {/* Host stack — in PySide6 this is a QStackedWidget whose only page
-          is ``self.host`` (lines 282-288). On embed_hwnd (line 745) the
-          foreign VSCodium QWindow is added into ``self.host_layout``.
-          The webview can't host a foreign HWND, so we render a CTA panel
-          here that explains what the Qt version does and offers the
-          same Launch button. */}
+      {/* Transcript */}
       <div
-        style={{
-          flex: 1,
-          background: "var(--bg-app)",
-          border: "1px dashed rgba(var(--accent-rgb),0.18)",
-          borderRadius: 12,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          gap: 16,
-          padding: 40,
-        }}
+        ref={scrollRef}
+        className="selectable-chat"
+        style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}
       >
-        {/* Real Page_icons PNG — same asset the sidebar uses for the
-            Code tab (AppShell.tsx line 36 = 💻 emoji label, real owl
-            artwork lives at /Page_icons/owl_coding.png). */}
-        <img
-          src={`${ICONS}/owl_coding.png`}
-          alt="VSCodium / Cline"
-          style={{
-            width: 160,
-            height: 160,
-            objectFit: "contain",
-            opacity: 0.92,
-            filter: "drop-shadow(0 6px 18px rgba(0,0,0,0.6))",
-          }}
+        {messages.length === 0 ? (
+          <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 460, lineHeight: 1.6 }}>
+            <div style={{ fontSize: 30, marginBottom: 8 }}>🛠️</div>
+            Your local model codes directly in <b>{workspace || "a folder you pick"}</b>.<br />
+            It can read, search, edit and create files and run commands there.<br />
+            <span style={{ fontSize: 12 }}>Pick a folder, choose a model, and describe the change.</span>
+          </div>
+        ) : (
+          messages.map((m, i) => {
+            if (m.role === "tool") {
+              return <ToolEventCard key={i} kind={m.kind ?? "tool"} title={m.title ?? "tool"} status={m.status} content={m.content} />;
+            }
+            const isUser = m.role === "user";
+            const isStreaming = busy && i === messages.length - 1 && m.role === "assistant";
+            return (
+              <ChatBubble
+                key={i}
+                avatar={isUser ? "U" : "C"}
+                sender={isUser ? "You" : "Coder"}
+                accent={isUser ? "#7aa2ff" : "#7ff0c5"}
+                isUser={isUser}
+                isStreaming={isStreaming}
+                content={m.content}
+                thinking={m.thinking}
+                ts={m.ts}
+              />
+            );
+          })
+        )}
+      </div>
+
+      {/* Status line */}
+      <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
+
+      {/* Composer */}
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          placeholder={workspace ? "Describe the change, bug, or feature…  (Enter to send, Shift+Enter for newline)" : "Pick a workspace folder first…"}
+          rows={2}
+          style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 160, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }}
         />
-        <div style={{ fontSize: 18, fontWeight: 700, color: "var(--fg)" }}>
-          Bundled VSCodium with Cline
-        </div>
-        <div
-          style={{
-            fontSize: 13,
-            color: "var(--fg-muted)",
-            maxWidth: 620,
-            textAlign: "center",
-            lineHeight: 1.6,
-          }}
-        >
-          {/* Paraphrase of the module-level docstring (lines 1-12) and
-              the _on_bootstrap_done copy (lines 327-332). */}
-          First open runs ``vscodium_manager.ensure_ready`` — it
-          bootstraps a portable VSCodium, installs the Cline extension,
-          and seeds Cline's settings so the OpenAI-Compatible provider
-          is pre-pointed at the OWLLM proxy. Pick a loaded model in the
-          dropdown above and click {LAUNCH_BTN_TEXT.toLowerCase()} to
-          spawn VSCodium pinned to your workspace.
-        </div>
-        <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-          <button
-            onClick={onLaunch}
-            style={{
-              height: 42,
-              padding: "0 22px",
-              borderRadius: 10,
-              background: "linear-gradient(180deg, #4CAF50, #388E3C)",
-              color: "var(--fg-strong)",
-              border: "none",
-              fontWeight: 700,
-              fontSize: 14,
-              cursor: "pointer",
-            }}
-          >
-            {LAUNCH_BTN_TEXT}
-          </button>
-        </div>
-        <div
-          style={{
-            fontSize: 11,
-            color: "var(--fg-muted)",
-            marginTop: 8,
-            textAlign: "center",
-            maxWidth: 560,
-          }}
-        >
-          {/* Verbatim from _BootstrapWorker.run progress sequence — the
-              ~180 MB figure is the literal string at line 179. */}
-          {BOOTSTRAP_DOWNLOADING}
-          <br />
-          Subsequent launches reuse the bundle ({BOOTSTRAP_CHECKING}{" "}
-          {BOOTSTRAP_INSTALL_CLINE} {BOOTSTRAP_SEED}).
-        </div>
-        <div
-          style={{
-            fontSize: 11,
-            color: "#5a6478",
-            marginTop: 4,
-            textAlign: "center",
-            maxWidth: 560,
-          }}
-        >
-          {/* QMessageBox.warning copy from _on_bootstrap_done (lines 326-333). */}
-          If the bootstrap fails: {BOOTSTRAP_FAILED_INTRO} {BOOTSTRAP_FAILED_HINT}
-        </div>
+        {busy ? (
+          <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
+        ) : (
+          <button onClick={send} disabled={!draft.trim()} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: draft.trim() ? 1 : 0.5 }}>Send</button>
+        )}
       </div>
     </div>
   );
 }
+
+const btn: CSSProperties = {
+  height: 30,
+  padding: "0 10px",
+  borderRadius: 6,
+  border: "1px solid var(--border-strong)",
+  background: "var(--bg-surface)",
+  color: "var(--fg)",
+  fontSize: 12,
+  fontWeight: 600,
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+};

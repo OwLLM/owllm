@@ -27,6 +27,33 @@ type Update = {
   downloadAndInstall: (cb?: (event: any) => void) => Promise<void>;
 };
 
+/// Turn a release-notes body into a clean bullet list so the modal reads
+/// like a professional changelog instead of a wall of prose. Handles both
+/// shapes: notes already authored with markdown bullets/numbers (one bullet
+/// per marker, kept verbatim), and unstructured prose (split into bullets on
+/// sentence + semicolon boundaries). The period split is conservative — it
+/// only fires on ". " that follows a word/paren and precedes a capital, so
+/// version numbers (0.4.8), URLs (claude.com/x) and abbreviations don't get
+/// chopped.
+function toReleaseBullets(body: string): string[] {
+  const out: string[] = [];
+  for (let line of body.replace(/\r/g, "").split("\n")) {
+    line = line.trim();
+    if (!line) continue;
+    // A markdown heading becomes its own (bold-ish) lead line, kept whole.
+    if (/^#{1,6}\s+/.test(line)) { out.push(line.replace(/^#{1,6}\s+/, "")); continue; }
+    const stripped = line.replace(/^([-*•]|\d+[.)])\s+/, "").trim();
+    if (stripped !== line) { if (stripped) out.push(stripped.replace(/[.;]\s*$/, "")); continue; }
+    // Unstructured prose → split into clause/sentence bullets.
+    const parts = stripped
+      .split(/;\s+|(?<=[a-z0-9)\]"'])\.\s+(?=[A-Z])/g)
+      .map(s => s.trim())
+      .filter(Boolean);
+    for (const p of parts) out.push(p.replace(/[.;]\s*$/, ""));
+  }
+  return out;
+}
+
 export default function UpdateController() {
   const [phase, setPhase] = useState<Phase>("hidden");
   const [update, setUpdate] = useState<Update | null>(null);
@@ -146,24 +173,46 @@ export default function UpdateController() {
           </div>
         </div>
 
-        {/* Release notes */}
-        {update.body ? (
+        {/* Release notes — rendered as a structured "What's new" list. */}
+        {update.body && update.body.trim() ? (
           <div
             style={{
-              fontSize: 13,
-              lineHeight: 1.55,
-              color: "rgba(255,255,255,0.82)",
               background: "rgba(255,255,255,0.04)",
               border: "1px solid rgba(255,255,255,0.08)",
               borderRadius: 8,
               padding: "12px 14px",
-              maxHeight: 180,
+              maxHeight: 210,
               overflow: "auto",
               marginBottom: 18,
-              whiteSpace: "pre-wrap",
             }}
           >
-            {update.body}
+            <div style={{
+              fontSize: 10.5, fontWeight: 700, letterSpacing: 1.2,
+              textTransform: "uppercase", color: "rgba(255,255,255,0.45)",
+              marginBottom: 9,
+            }}>
+              What's new
+            </div>
+            {(() => {
+              const bullets = toReleaseBullets(update.body!);
+              if (bullets.length === 0) {
+                return (
+                  <div style={{ fontSize: 13, lineHeight: 1.55, color: "rgba(255,255,255,0.82)", whiteSpace: "pre-wrap" }}>
+                    {update.body}
+                  </div>
+                );
+              }
+              return (
+                <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 7 }}>
+                  {bullets.map((b, i) => (
+                    <li key={i} style={{ display: "flex", gap: 9, fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.85)" }}>
+                      <span style={{ color: "var(--accent)", flexShrink: 0, fontWeight: 700, lineHeight: 1.5 }}>▸</span>
+                      <span>{b}</span>
+                    </li>
+                  ))}
+                </ul>
+              );
+            })()}
           </div>
         ) : null}
 

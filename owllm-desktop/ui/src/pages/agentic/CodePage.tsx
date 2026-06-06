@@ -11,6 +11,8 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import ModelPicker from "./ModelPicker";
+import { chatRuntime } from "../../runtime/chatRuntime";
+import { useChatSession } from "../../runtime/useChatSession";
 import { streamLocalChat, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
 
@@ -37,6 +39,24 @@ const CODING_SYSTEM = (ws: string) =>
 // the board. Inspired by Cline's task UX, built on OWLLM's own engine.
 type Task = { id: number; title: string; status: "pending" | "running" | "done" | "failed" };
 
+// The whole Code-page session lives in the shared chatRuntime store under this
+// id, so it survives navigating away and back (same mechanism the Chat page
+// uses — the store keeps the snapshot in memory across unmount/remount).
+const SID = "code:main";
+type CodeState = {
+  messages: Msg[];
+  tasks: Task[];
+  workspace: string;
+  modelId: string;
+  draft: string;
+  busy: boolean;
+  status: string;
+};
+const DEFAULT_CODE_STATE: CodeState = {
+  messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
+  status: "Pick a folder and a local model, then describe what to build or fix.",
+};
+
 const PLAN_SYSTEM = (ws: string, goal: string) =>
   `You are a senior engineer planning work in the project at ${ws}. Break the goal into 2-6 concrete, ` +
   `ordered implementation steps. Output ONLY a JSON array of short imperative step strings (one action each), ` +
@@ -59,16 +79,34 @@ function parseSteps(text: string): string[] {
 }
 
 export default function CodePage() {
+  // The model LIST is re-fetched on mount, so it stays plain component state.
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
-  const [modelId, setModelId] = useState<string>("");
-  const [workspace, setWorkspace] = useState<string>("");
-  const [messages, setMessages] = useState<Msg[]>([]);
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState("Pick a folder and a local model, then describe what to build or fix.");
-  const [tasks, setTasks] = useState<Task[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  // SESSION state (conversation, Kanban, workspace, model, draft) lives in the
+  // shared chatRuntime store so it survives leaving this page and coming back.
+  // Setter shims keep the same signatures as useState so the rest of the file
+  // is unchanged.
+  const sess = useChatSession<CodeState>(SID);
+  const hydratedRef = useRef(false);
+  if (!hydratedRef.current) { hydratedRef.current = true; chatRuntime.hydrateIfIdle(SID, DEFAULT_CODE_STATE); }
+  const stx = sess.payload ?? DEFAULT_CODE_STATE;
+  const { messages, tasks, workspace, modelId, draft, busy, status } = stx;
+  function setField<K extends keyof CodeState>(k: K, v: CodeState[K] | ((p: CodeState[K]) => CodeState[K])) {
+    chatRuntime.setPayload(SID, (prev) => {
+      const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
+      const nv = typeof v === "function" ? (v as (p: CodeState[K]) => CodeState[K])(cur[k]) : v;
+      return { ...cur, [k]: nv };
+    });
+  }
+  const setMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) => setField("messages", v);
+  const setTasks = (v: Task[] | ((t: Task[]) => Task[])) => setField("tasks", v);
+  const setWorkspace = (v: string) => setField("workspace", v);
+  const setModelId = (v: string | ((s: string) => string)) => setField("modelId", v);
+  const setDraft = (v: string | ((s: string) => string)) => setField("draft", v);
+  const setBusy = (v: boolean) => setField("busy", v);
+  const setStatus = (v: string) => setField("status", v);
 
   // SAME model source as every other page — the full list_models result fed
   // to the shared ModelPicker (localOnly does the filtering). Refresh on focus

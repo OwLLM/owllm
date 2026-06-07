@@ -86,6 +86,24 @@ pub struct DiscordConfig {
     pub auto_approve: bool,
 }
 
+/// Slack — connects OUTBOUND via Socket Mode (no public URL). Needs an
+/// app-level token (xapp-…, connections:write) to open the socket and a bot
+/// token (xoxb-…) to post. `allowed_channel_ids` are channel ids (C…/G…/D…);
+/// empty = any channel the bot is in.
+#[derive(Default, Serialize, Deserialize, Clone)]
+pub struct SlackConfig {
+    #[serde(default)]
+    pub app_token: String,
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub allowed_channel_ids: Vec<String>,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub auto_approve: bool,
+}
+
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct BridgeConfigs {
     #[serde(default)]
@@ -94,6 +112,8 @@ pub struct BridgeConfigs {
     pub whatsapp: WhatsAppConfig,
     #[serde(default)]
     pub discord: DiscordConfig,
+    #[serde(default)]
+    pub slack: SlackConfig,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -133,6 +153,13 @@ pub async fn save_whatsapp_config(cfg: WhatsAppConfig) -> Result<(), String> {
 pub async fn save_discord_config(cfg: DiscordConfig) -> Result<(), String> {
     let mut current = load_bridge_configs().await?;
     current.discord = cfg;
+    write(&current)
+}
+
+#[tauri::command]
+pub async fn save_slack_config(cfg: SlackConfig) -> Result<(), String> {
+    let mut current = load_bridge_configs().await?;
+    current.slack = cfg;
     write(&current)
 }
 

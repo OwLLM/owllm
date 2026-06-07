@@ -40,6 +40,7 @@ mod pty;
 mod recommendations;
 mod server;
 mod skill_library;
+mod slack;
 mod telegram;
 mod wsl;
 
@@ -169,8 +170,12 @@ pub fn run() {
             bridges::save_telegram_config,
             bridges::save_whatsapp_config,
             bridges::save_discord_config,
+            bridges::save_slack_config,
             discord::discord_send_message,
             discord::discord_download_file,
+            slack::slack_open_connection,
+            slack::slack_send_message,
+            slack::slack_download_file,
             git::git_status,
             git::git_branches,
             git::git_checkout,
@@ -255,6 +260,9 @@ pub fn run() {
             wsl::wsl_isolation_set,
             wsl::wsl_create_project,
             wsl::wsl_list_projects,
+            wsl::wsl_toolchain_status,
+            wsl::wsl_provision,
+            wsl::wsl_install,
             mcp::mcp_load_config,
             mcp::mcp_save_config,
             mcp::mcp_start_server,

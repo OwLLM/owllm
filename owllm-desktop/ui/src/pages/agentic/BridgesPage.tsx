@@ -40,7 +40,14 @@ type DiscordConfig = {
   project_id: string;
   auto_approve: boolean;
 };
-type BridgeConfigs = { telegram: TelegramConfig; whatsapp: WhatsAppConfig; discord: DiscordConfig };
+type SlackConfig = {
+  app_token: string;
+  bot_token: string;
+  allowed_channel_ids: string[];
+  project_id: string;
+  auto_approve: boolean;
+};
+type BridgeConfigs = { telegram: TelegramConfig; whatsapp: WhatsAppConfig; discord: DiscordConfig; slack: SlackConfig };
 
 // Qt: 10x10 dot, running color #4caf50, stopped color #5a6376
 // (bridges_page.py:350-352).
@@ -852,6 +859,138 @@ function DiscordCard() {
 }
 
 // ---------------------------------------------------------------------
+// Slack card — connects outbound via Socket Mode (no public URL). Drives
+// SlackBridgeRunner via the owllm:slack:started flag + status/runtime events.
+// ---------------------------------------------------------------------
+const SLACK_STARTED_KEY = "owllm:slack:started";
+function isSlackStartedFromStorage(): boolean {
+  try { return sessionStorage.getItem(SLACK_STARTED_KEY) === "1"; } catch { return false; }
+}
+function setSlackStartedInStorage(running: boolean) {
+  try { sessionStorage.setItem(SLACK_STARTED_KEY, running ? "1" : "0"); } catch {}
+  try { window.dispatchEvent(new CustomEvent("owllm:slack:status", { detail: running ? "running" : "stopped" })); } catch {}
+}
+
+function SlackCard() {
+  const [appToken, setAppToken] = useState("");
+  const [botToken, setBotToken] = useState("");
+  const [channelIds, setChannelIds] = useState("");
+  const [project, setProject] = useState("");
+  const [autoApprove, setAutoApprove] = useState(false);
+  const [status, setStatus] = useState<BridgeStatus>(() => isSlackStartedFromStorage() ? "running" : "stopped");
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [projects, setProjects] = useState<ProjectLite[]>([]);
+  const [lastError, setLastError] = useState<string>("");
+
+  useEffect(() => {
+    let dead = false;
+    invoke<BridgeConfigs>("load_bridge_configs").then(c => {
+      if (dead) return;
+      const s = c.slack;
+      setAppToken(s.app_token || "");
+      setBotToken(s.bot_token || "");
+      setChannelIds((s.allowed_channel_ids || []).join(", "));
+      setProject(s.project_id || "");
+      setAutoApprove(!!s.auto_approve);
+    }).catch(() => {});
+    invoke<ProjectLite[]>("list_projects").then(rows => { if (!dead) setProjects(rows.map(r => ({ id: r.id, name: r.name }))); }).catch(() => {});
+    return () => { dead = true; };
+  }, []);
+
+  useEffect(() => {
+    const onRuntime = (e: Event) => {
+      const d = (e as CustomEvent).detail || {};
+      if (d.status === "running" || d.status === "stopped" || d.status === "error") setStatus(d.status);
+      if (typeof d.lastError === "string") setLastError(d.lastError);
+      if (d.status === "running") setLastError("");
+    };
+    window.addEventListener("owllm:slack:runtime", onRuntime as EventListener);
+    return () => window.removeEventListener("owllm:slack:runtime", onRuntime as EventListener);
+  }, []);
+
+  async function persist() {
+    setSaveError(null);
+    const ids = channelIds.split(",").map(s => s.trim()).filter(Boolean);
+    try {
+      await invoke("save_slack_config", {
+        cfg: { app_token: appToken, bot_token: botToken, allowed_channel_ids: ids, project_id: project, auto_approve: autoApprove } as SlackConfig,
+      });
+      setSavedFlash(true);
+      window.setTimeout(() => setSavedFlash(false), 1600);
+    } catch (e) { setSaveError(String(e)); }
+  }
+
+  const accent = "#8a4ea3"; // Slack aubergine (lightened for dark theme)
+  const active = status === "starting" || status === "running";
+  const running = status === "running";
+  const allowListActive = channelIds.split(",").map(s => s.trim()).filter(Boolean).length > 0;
+  const statusText = running
+    ? `Running — Socket Mode connected.${allowListActive ? " · allow-list active" : " · open (any channel the bot is in)"}`
+    : status === "starting" ? "Starting — opening Socket Mode connection."
+    : status === "error" ? `Error — ${lastError || "Not connected."}`
+    : (lastError ? `Stopped — last error: ${lastError}` : "Stopped.");
+
+  return (
+    <div style={{
+      flex: 1,
+      background: "linear-gradient(180deg, #2e1b33 0%, #0e1117 60%, #0e1117 100%)",
+      border: "none", borderRadius: 16, padding: "18px 20px",
+      boxShadow: "0 4px 24px rgba(0,0,0,0.43)", display: "flex", flexDirection: "column", gap: 10, minWidth: 320,
+    }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+        <div style={{ fontSize: 26, color: accent, lineHeight: 1, fontWeight: 800 }}>#</div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: accent }}>Slack</div>
+          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+            Socket Mode · app + bot token · no public URL needed
+          </div>
+        </div>
+        <StatusDot state={status} />
+      </div>
+
+      <SectionLabel text="App-level token (xapp-…)" />
+      <BridgeInput type="password" placeholder="xapp-… (Socket Mode, connections:write)" value={appToken} onChange={e => setAppToken(e.target.value)} />
+
+      <SectionLabel text="Bot token (xoxb-…)" />
+      <BridgeInput type="password" placeholder="xoxb-… (chat:write, files:read)" value={botToken} onChange={e => setBotToken(e.target.value)} />
+
+      <SectionLabel text="Allowed channel IDs (optional)" />
+      <BridgeInput placeholder="(leave empty = any channel the bot is in) · C0123…, D0456…" value={channelIds} onChange={e => setChannelIds(e.target.value)} />
+
+      <SectionLabel text="Project" />
+      <ProjectSelect value={project} onChange={e => setProject(e.target.value)}>
+        <option value="">(no project)</option>
+        {projects.map(p => (<option key={p.id} value={p.id}>{p.name}</option>))}
+      </ProjectSelect>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg)" }}>
+        <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)} style={{ accentColor: accent }} />
+        Auto-approve every tool call (only for personal bots)
+      </label>
+
+      <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.4 }}>
+        In your Slack app: turn on <b>Socket Mode</b>, and under Event Subscriptions
+        subscribe the bot to <code>message.channels</code> / <code>message.im</code>.
+      </div>
+
+      <div style={{ flex: 1 }} />
+
+      <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>{statusText}</div>
+      {saveError ? (<div style={{ fontSize: 11, color: "#ffb0b0" }}>{saveError}</div>) : null}
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button onClick={persist} style={{ height: BTN_HEIGHT, padding: "0 14px", background: "var(--bg-surface)", color: "var(--fg)", border: "1px solid var(--border-strong)", borderRadius: 8, fontWeight: 600, fontSize: 12, cursor: "pointer" }} title="Persist to ~/.owllm/bridge_config.json">💾 Save</button>
+        {savedFlash ? (<span style={{ fontSize: 11, color: "#4caf50", fontWeight: 700 }}>✓ Saved</span>) : null}
+        <div style={{ flex: 1 }} />
+        <button disabled={active} onClick={async () => { await persist(); setStatus("starting"); setSlackStartedInStorage(true); }} style={startButtonStyle(accent, "#a165bb", active)}>Start</button>
+        <button disabled={!active} onClick={() => { setStatus("stopped"); setSlackStartedInStorage(false); }} style={stopButtonStyle(!active)}>Stop</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
 // Page — Qt BridgesPage._build_ui (bridges_page.py:589)
 // ---------------------------------------------------------------------
 export default function BridgesPage() {
@@ -881,6 +1020,7 @@ export default function BridgesPage() {
       <div style={{ flex: 1, display: "flex", flexWrap: "wrap", gap: 18, minHeight: 0, alignContent: "flex-start" }}>
         <TelegramCard />
         <DiscordCard />
+        <SlackCard />
         <WhatsAppCard />
       </div>
     </div>

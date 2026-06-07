@@ -43,6 +43,7 @@ mod server;
 mod skill_library;
 mod slack;
 mod telegram;
+mod webhook;
 mod wsl;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -173,8 +174,15 @@ pub fn run() {
             bridges::save_discord_config,
             bridges::save_slack_config,
             bridges::save_email_config,
+            bridges::save_line_config,
+            bridges::save_kakao_config,
             email::email_poll,
             email::email_send,
+            webhook::webhook_start,
+            webhook::webhook_stop,
+            webhook::whatsapp_send,
+            webhook::line_push,
+            webhook::kakao_callback,
             discord::discord_send_message,
             discord::discord_download_file,
             slack::slack_open_connection,

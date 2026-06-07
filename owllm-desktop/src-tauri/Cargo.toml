@@ -75,6 +75,11 @@ imap = "2.4"
 native-tls = "0.2"
 mailparse = "0.15"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "native-tls", "builder", "hostname"] }
+# Tiny blocking HTTP server for the inbound webhook bridges (WhatsApp / LINE /
+# KakaoTalk). default-features=false drops its optional TLS — the public URL is
+# provided by the user's tunnel (cloudflared/ngrok), which terminates TLS, so
+# the local listener is plain HTTP.
+tiny_http = { version = "0.12", default-features = false }
 # URL-encode HF model ids before stitching them into REST paths so
 # names like "TheBloke/Llama-2-7B-GGUF" survive the round-trip (the
 # slash needs to stay as a slash for the route, but anything else

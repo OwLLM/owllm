@@ -156,6 +156,36 @@ impl Default for EmailConfig {
     }
 }
 
+/// LINE — INBOUND webhook (needs a public URL). `channel_access_token` posts
+/// replies; `channel_secret` would verify the X-Line-Signature (not enforced
+/// in v1). `allowed_users` are LINE userIds; empty = any.
+#[derive(Default, Serialize, Deserialize, Clone)]
+pub struct LineConfig {
+    #[serde(default)]
+    pub channel_access_token: String,
+    #[serde(default)]
+    pub channel_secret: String,
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub auto_approve: bool,
+}
+
+/// KakaoTalk — INBOUND skill webhook (needs a public URL). Replies go to the
+/// per-request callbackUrl (no stored token). `allowed_users` are Kakao user
+/// ids; empty = any.
+#[derive(Default, Serialize, Deserialize, Clone)]
+pub struct KakaoConfig {
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub auto_approve: bool,
+}
+
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct BridgeConfigs {
     #[serde(default)]
@@ -168,6 +198,10 @@ pub struct BridgeConfigs {
     pub slack: SlackConfig,
     #[serde(default)]
     pub email: EmailConfig,
+    #[serde(default)]
+    pub line: LineConfig,
+    #[serde(default)]
+    pub kakao: KakaoConfig,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -221,6 +255,20 @@ pub async fn save_slack_config(cfg: SlackConfig) -> Result<(), String> {
 pub async fn save_email_config(cfg: EmailConfig) -> Result<(), String> {
     let mut current = load_bridge_configs().await?;
     current.email = cfg;
+    write(&current)
+}
+
+#[tauri::command]
+pub async fn save_line_config(cfg: LineConfig) -> Result<(), String> {
+    let mut current = load_bridge_configs().await?;
+    current.line = cfg;
+    write(&current)
+}
+
+#[tauri::command]
+pub async fn save_kakao_config(cfg: KakaoConfig) -> Result<(), String> {
+    let mut current = load_bridge_configs().await?;
+    current.kakao = cfg;
     write(&current)
 }
 

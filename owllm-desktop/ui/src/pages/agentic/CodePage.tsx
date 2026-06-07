@@ -10,6 +10,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
+import GitBar from "./GitBar";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
@@ -74,7 +75,26 @@ const DEFAULT_CODE_STATE: CodeState = {
 const CODE_SESSION_PREFIX = "owllm:code:session:";
 const CODE_LAST_KEY = "owllm:code:last";
 const CODE_RECENTS_KEY = "owllm:code:recents";
+const CODE_RECENTS_META_KEY = "owllm:code:recents:meta";
 const CODE_RECENTS_MAX = 12;
+
+// Per-recent metadata: a friendly name and a pin flag. Stored separately from
+// the recents array so the array stays a plain path list.
+type RecentMeta = { name?: string; pinned?: boolean };
+function getRecentsMeta(): Record<string, RecentMeta> {
+  try {
+    const m = JSON.parse(localStorage.getItem(CODE_RECENTS_META_KEY) || "{}");
+    return m && typeof m === "object" ? (m as Record<string, RecentMeta>) : {};
+  } catch { return {}; }
+}
+function patchRecentMeta(ws: string, patch: RecentMeta): Record<string, RecentMeta> {
+  const all = getRecentsMeta();
+  all[ws] = { ...all[ws], ...patch };
+  // Drop empty entries so the store doesn't accumulate {} blobs.
+  if (!all[ws].name && !all[ws].pinned) delete all[ws];
+  try { localStorage.setItem(CODE_RECENTS_META_KEY, JSON.stringify(all)); } catch { /* best effort */ }
+  return all;
+}
 
 function codeSessionKey(ws: string): string {
   return CODE_SESSION_PREFIX + encodeURIComponent(ws);
@@ -120,6 +140,7 @@ function forgetCodeProject(ws: string): string[] {
     localStorage.setItem(CODE_RECENTS_KEY, JSON.stringify(next));
     localStorage.removeItem(codeSessionKey(ws));
     if ((localStorage.getItem(CODE_LAST_KEY) || "") === ws) localStorage.removeItem(CODE_LAST_KEY);
+    patchRecentMeta(ws, {}); // drops name/pin for the forgotten project
   } catch { /* best effort */ }
   return next;
 }
@@ -176,6 +197,10 @@ export default function CodePage() {
   }
   // Recent projects, for the onboarding screen shown when no folder is open.
   const [recents, setRecents] = useState<string[]>(getCodeRecents);
+  const [recentsMeta, setRecentsMeta] = useState<Record<string, RecentMeta>>(getRecentsMeta);
+  // Inline rename: which recent is being renamed + the draft text.
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
   // WSL isolation: when on, projects live inside Ubuntu and the model's tools
   // run there, off the Windows drive. `wslStat` reports availability.
   const [wslStat, setWslStat] = useState<WslStatus | null>(null);
@@ -268,7 +293,20 @@ export default function CodePage() {
     try { localStorage.removeItem(CODE_LAST_KEY); } catch { /* best effort */ }
   };
 
-  const removeRecent = (ws: string) => setRecents(forgetCodeProject(ws));
+  const removeRecent = (ws: string) => { setRecents(forgetCodeProject(ws)); setRecentsMeta(getRecentsMeta()); };
+  const togglePin = (ws: string) => setRecentsMeta(patchRecentMeta(ws, { pinned: !recentsMeta[ws]?.pinned }));
+  const startRename = (ws: string) => { setRenaming(ws); setRenameDraft(recentsMeta[ws]?.name ?? ""); };
+  const commitRename = () => {
+    if (renaming === null) return;
+    setRecentsMeta(patchRecentMeta(renaming, { name: renameDraft.trim() || undefined }));
+    setRenaming(null);
+  };
+  // Pinned projects float to the top; recency order is preserved within groups.
+  const orderedRecents = [...recents].sort(
+    (a, b) => Number(!!recentsMeta[b]?.pinned) - Number(!!recentsMeta[a]?.pinned),
+  );
+  const recentLabel = (ws: string) =>
+    recentsMeta[ws]?.name || ws.replace(/^.*[\\/]/, "") || ws;
 
   // Load WSL availability + isolation setting on mount; refresh the isolated
   // project list when isolation is on so onboarding can offer them.
@@ -606,30 +644,42 @@ export default function CodePage() {
             {recents.length > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>Recent projects</div>
-                {recents.map((ws) => (
-                  <div
-                    key={ws}
-                    style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px" }}
-                  >
-                    <button
-                      onClick={() => openWorkspace(ws)}
-                      title={ws}
-                      style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", color: "var(--fg)", cursor: "pointer", padding: 0 }}
+                {orderedRecents.map((ws) => {
+                  const pinned = !!recentsMeta[ws]?.pinned;
+                  const isRenaming = renaming === ws;
+                  return (
+                    <div
+                      key={ws}
+                      style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: `1px solid ${pinned ? "var(--accent)" : "var(--border-strong)"}`, borderRadius: 8, padding: "8px 10px" }}
                     >
-                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                        📂 {ws.replace(/^.*[\\/]/, "") || ws}
-                      </div>
-                      <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ws}</div>
-                    </button>
-                    <button
-                      onClick={() => removeRecent(ws)}
-                      title="Remove from recent projects (keeps files on disk)"
-                      style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
+                      {isRenaming ? (
+                        <input
+                          autoFocus
+                          value={renameDraft}
+                          onChange={(e) => setRenameDraft(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenaming(null); }}
+                          onBlur={commitRename}
+                          placeholder={ws.replace(/^.*[\\/]/, "") || ws}
+                          style={{ flex: 1, minWidth: 0, height: 30, background: "var(--bg-surface)", border: "1px solid var(--accent)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 8px" }}
+                        />
+                      ) : (
+                        <button
+                          onClick={() => openWorkspace(ws)}
+                          title={ws}
+                          style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", color: "var(--fg)", cursor: "pointer", padding: 0 }}
+                        >
+                          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            {pinned ? "📌" : "📂"} {recentLabel(ws)}
+                          </div>
+                          <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ws}</div>
+                        </button>
+                      )}
+                      <button onClick={() => togglePin(ws)} title={pinned ? "Unpin" : "Pin to top"} style={{ ...btn, height: 26, padding: "0 8px", color: pinned ? "var(--accent)" : "var(--fg-muted)" }}>📌</button>
+                      <button onClick={() => startRename(ws)} title="Rename (display only — folder is unchanged)" style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}>✎</button>
+                      <button onClick={() => removeRecent(ws)} title="Remove from recent projects (keeps files on disk)" style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}>✕</button>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -659,6 +709,7 @@ export default function CodePage() {
         >
           {isolatedNow ? "🛡 Isolated" : "⚠ Not isolated"}
         </span>
+        <GitBar workspace={workspace} busy={busy} />
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
         <div style={{ minWidth: 260, maxWidth: 360 }}>

@@ -27,6 +27,7 @@ mod discord;
 mod env_manager;
 mod finetuning;
 mod fleet;
+mod git;
 mod hardware;
 mod huggingface;
 mod mcp;
@@ -170,6 +171,11 @@ pub fn run() {
             bridges::save_discord_config,
             discord::discord_send_message,
             discord::discord_download_file,
+            git::git_status,
+            git::git_branches,
+            git::git_checkout,
+            git::git_commit,
+            git::git_diff,
             code::launch_external_editor,
             dialog::pick_folder,
             dialog::pick_file,

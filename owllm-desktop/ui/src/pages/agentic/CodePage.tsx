@@ -482,6 +482,20 @@ export default function CodePage() {
 
   const isolatedNow = isWslPath(workspace);
 
+  // Auto-sync host cloud logins (codex/claude/gemini/kimi OAuth + every API key)
+  // into the sandbox whenever an isolated project is active, so cloud agents are
+  // authenticated with ZERO manual steps. Once per session; re-running is cheap
+  // and keeps refreshed tokens current. Best-effort, silent on failure.
+  const autoSyncedRef = useRef(false);
+  useEffect(() => {
+    if (autoSyncedRef.current || !isolatedNow) return;
+    autoSyncedRef.current = true;
+    sandboxSyncLogins(wslStat?.defaultDistro ?? null)
+      .then((s) => { if (s.length) setStatus(`🔑 Synced cloud logins into the sandbox: ${s.join(", ")}.`); })
+      .catch(() => { /* best-effort */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isolatedNow, wslStat]);
+
   // Start (or reuse) the llama-server for the chosen model; return its port.
   async function ensureServer(id: string): Promise<number | null> {
     const s = await invoke<ServerStatus>("server_status").catch(() => null);
@@ -914,6 +928,15 @@ export default function CodePage() {
         >
           {isolatedNow ? "🛡 Isolated" : "⚠ Not isolated"}
         </span>
+        {isolatedNow && (
+          <button
+            onClick={syncLogins}
+            title="Sync your cloud logins (codex/claude/gemini/kimi + API keys) from Windows into the sandbox. Runs automatically too — use this to re-sync after logging in to a new provider."
+            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
+          >
+            🔑 Sync logins
+          </button>
+        )}
         <GitBar workspace={workspace} busy={busy} />
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>

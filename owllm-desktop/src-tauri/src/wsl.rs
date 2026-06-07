@@ -106,6 +106,37 @@ pub fn build_wsl_bash_script(linux_cwd: &str, command: &str) -> String {
     format!("cd {quoted_cwd} && ({command})")
 }
 
+/// Single-quote a string for bash (`'` → `'\''`). Safe for arbitrary content
+/// including newlines and quotes.
+pub fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Build a `wsl.exe` Command that runs `program args...` INSIDE the distro at
+/// `linux_cwd`, each arg shell-quoted for bash. This is how the subscription
+/// CLIs (claude/codex/gemini/kimi) get routed into the sandbox when a project
+/// lives in WSL — the CLI runs as a Linux process that can't touch Windows.
+/// `exec` replaces bash so the CLI's stdin/stdout flow straight through (the
+/// caller writes the prompt to stdin and parses stdout exactly as before).
+/// The CLI must be installed + logged-in inside the distro (Phase-2 provision
+/// installs it; the user logs in once with `wsl -d <distro> -- <cli> login`).
+/// Caller still configures stdin/stdout/stderr + creation_flags.
+pub fn wsl_program_command(
+    distro: &str,
+    linux_cwd: &str,
+    program: &str,
+    args: &[String],
+) -> std::process::Command {
+    let mut script = format!("cd {} && exec {}", sh_quote(linux_cwd), sh_quote(program));
+    for a in args {
+        script.push(' ');
+        script.push_str(&sh_quote(a));
+    }
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.arg("-d").arg(distro).arg("--").arg("bash").arg("-lc").arg(script);
+    cmd
+}
+
 // ---- internal command runners --------------------------------------------
 
 /// Run a bash script in the given distro (optionally as a specific user, e.g.

@@ -859,56 +859,56 @@ pub async fn claude_cli_complete(
     session_id: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        let exe = find_claude_cli()
-            .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
-        let mut cmd = Command::new(&exe);
-
-        // On Windows, npm installs `claude.cmd`. Rust 1.77 rejects
-        // multi-line args to .cmd files via `arg()`. Route every arg
-        // through `raw_arg` with our own quoting when the shim is a
-        // batch file. Non-Windows / `.exe` use the normal arg() path.
-        #[cfg(windows)]
-        let batch = is_batch_shim(&exe);
-        #[cfg(not(windows))]
-        let batch = false;
-
-        push_arg(&mut cmd, batch, "--print");
+        // Collect args once → run as the Windows CLI or inside WSL (isolated).
+        let mut args: Vec<String> = Vec::new();
+        args.push("--print".into());
         if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            push_arg(&mut cmd, batch, "--model");
-            push_arg(&mut cmd, batch, m);
+            args.push("--model".into());
+            args.push(m.to_string());
         }
         if let Some(e) = effort.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            push_arg(&mut cmd, batch, "--effort");
-            push_arg(&mut cmd, batch, e);
+            args.push("--effort".into());
+            args.push(e.to_string());
         }
         if let Some(sid) = session_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            push_arg(&mut cmd, batch, "--session-id");
-            push_arg(&mut cmd, batch, sid);
+            args.push("--session-id".into());
+            args.push(sid.to_string());
         }
         if auto_approve.unwrap_or(false) {
-            // `--permission-mode bypassPermissions` is the canonical
-            // modern flag (see `claude --help`). Older `--dangerously-
-            // skip-permissions` requires a one-time interactive
-            // acknowledgement that --print mode never gets to perform,
-            // so it ends up not applying. permission-mode just sets
-            // the session mode and skips every prompt for this run.
-            push_arg(&mut cmd, batch, "--permission-mode");
-            push_arg(&mut cmd, batch, "bypassPermissions");
+            args.push("--permission-mode".into());
+            args.push("bypassPermissions".into());
         }
         if !system_prompt.trim().is_empty() {
-            push_arg(&mut cmd, batch, "--append-system-prompt");
-            push_arg(&mut cmd, batch, &system_prompt);
+            args.push("--append-system-prompt".into());
+            args.push(system_prompt.clone());
         }
-        // Pin the CLI to the project's location. Skip silently if the
-        // path is empty / non-existent so a misconfigured project
-        // falls back to the inherited cwd instead of failing the
-        // dispatch outright.
-        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            let p = std::path::Path::new(dir);
-            if p.is_dir() {
-                cmd.current_dir(p);
+
+        // WSL-isolated project → run `claude` inside the distro; else the
+        // Windows CLI exactly as before. (On Windows, npm installs claude.cmd;
+        // push_arg routes multi-line args via raw_arg quoting for batch shims.)
+        let mut cmd = if let Some((distro, linux_cwd)) =
+            cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+        {
+            crate::wsl::wsl_program_command(&distro, &linux_cwd, "claude", &args)
+        } else {
+            let exe = find_claude_cli()
+                .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
+            #[cfg(windows)]
+            let batch = is_batch_shim(&exe);
+            #[cfg(not(windows))]
+            let batch = false;
+            let mut c = Command::new(&exe);
+            for a in &args {
+                push_arg(&mut c, batch, a);
             }
-        }
+            if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let p = std::path::Path::new(dir);
+                if p.is_dir() {
+                    c.current_dir(p);
+                }
+            }
+            c
+        };
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -969,42 +969,77 @@ pub async fn codex_cli_complete(
     cwd: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        let exe = find_codex_cli()
-            .ok_or_else(|| "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)".to_string())?;
-
-        // Unique temp file for codex's final-message output.
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let out_file = std::env::temp_dir().join(format!("owllm-codex-{}-{}.txt", std::process::id(), stamp));
-
-        let mut cmd = Command::new(&exe);
-        #[cfg(windows)]
-        let batch = is_batch_shim(&exe);
-        #[cfg(not(windows))]
-        let batch = false;
-
         let prompt = if system_prompt.trim().is_empty() {
             user_message.clone()
         } else {
             format!("{}\n\n{}", system_prompt.trim(), user_message)
         };
+        // Base args shared by both paths (no -o — see per-branch handling).
+        let base_args: Vec<String> = vec![
+            "exec".into(),
+            "--skip-git-repo-check".into(),
+            "--color".into(),
+            "never".into(),
+            // Read-only sandbox: a chat reply never needs to write to disk.
+            "--sandbox".into(),
+            "read-only".into(),
+        ];
 
-        push_arg(&mut cmd, batch, "exec");
-        push_arg(&mut cmd, batch, "--skip-git-repo-check");
-        push_arg(&mut cmd, batch, "--color");
-        push_arg(&mut cmd, batch, "never");
-        // Read-only sandbox: a chat reply never needs to write files or run
-        // commands, and this guarantees codex can't touch the user's disk.
-        push_arg(&mut cmd, batch, "--sandbox");
-        push_arg(&mut cmd, batch, "read-only");
+        // WSL-isolated project → run `codex` inside the distro and read the
+        // final message from stdout (a Windows -o tempfile path is meaningless
+        // inside the distro, so we omit -o on this path).
+        if let Some((distro, linux_cwd)) = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc) {
+            let mut args = base_args.clone();
+            args.push(prompt.clone());
+            let mut cmd = crate::wsl::wsl_program_command(&distro, &linux_cwd, "codex", &args);
+            cmd.stdin(Stdio::piped());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(prompt.as_bytes());
+            }
+            let output = child.wait_with_output().map_err(|e| format!("wait codex: {e}"))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                return Err(format!(
+                    "codex CLI exited {} — {}",
+                    output.status.code().unwrap_or(-1),
+                    if stderr.trim().is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
+                ));
+            }
+            let reply = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if reply.is_empty() {
+                return Err("codex CLI returned an empty reply".to_string());
+            }
+            return Ok(reply);
+        }
+
+        // Windows path (unchanged): -o <tempfile> captures the clean final msg.
+        let exe = find_codex_cli()
+            .ok_or_else(|| "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)".to_string())?;
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let out_file = std::env::temp_dir().join(format!("owllm-codex-{}-{}.txt", std::process::id(), stamp));
+        #[cfg(windows)]
+        let batch = is_batch_shim(&exe);
+        #[cfg(not(windows))]
+        let batch = false;
+        let mut cmd = Command::new(&exe);
+        for a in &base_args {
+            push_arg(&mut cmd, batch, a);
+        }
         push_arg(&mut cmd, batch, "-o");
         push_arg(&mut cmd, batch, &out_file.to_string_lossy());
-        // Positional prompt (older codex reads it here); stdin carries it
-        // too (newer codex reads it there).
+        // Positional prompt (older codex reads it here); stdin carries it too.
         push_arg(&mut cmd, batch, &prompt);
-
         if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let p = std::path::Path::new(dir);
             if p.is_dir() {
@@ -1022,16 +1057,12 @@ pub async fn codex_cli_complete(
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
-            // Drop closes the pipe (EOF) so the stdin-style codex proceeds.
         }
         let output = child
             .wait_with_output()
             .map_err(|e| format!("wait codex: {e}"))?;
-
-        // Prefer the -o file (final message only). Fall back to stdout.
         let from_file = std::fs::read_to_string(&out_file).ok();
         let _ = std::fs::remove_file(&out_file);
-
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             return Err(format!(
@@ -1140,50 +1171,33 @@ pub async fn claude_cli_stream(
     on_event: Channel<ClaudeStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        let exe = find_claude_cli()
-            .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
-        let mut cmd = Command::new(&exe);
-
-        #[cfg(windows)]
-        let batch = is_batch_shim(&exe);
-        #[cfg(not(windows))]
-        let batch = false;
-
-        push_arg(&mut cmd, batch, "--print");
+        // Collect the CLI args once so we can run the SAME invocation either as
+        // the Windows CLI (default) or — for a WSL-isolated project — inside the
+        // distro (so the agent's tools can't touch the Windows drive).
+        let mut args: Vec<String> = Vec::new();
+        args.push("--print".into());
         if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            push_arg(&mut cmd, batch, "--model");
-            push_arg(&mut cmd, batch, m);
+            args.push("--model".into());
+            args.push(m.to_string());
         }
         if let Some(e) = effort.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            push_arg(&mut cmd, batch, "--effort");
-            push_arg(&mut cmd, batch, e);
+            args.push("--effort".into());
+            args.push(e.to_string());
         }
         if let Some(sid) = session_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            push_arg(&mut cmd, batch, "--session-id");
-            push_arg(&mut cmd, batch, sid);
+            args.push("--session-id".into());
+            args.push(sid.to_string());
         }
         if brief_mode.unwrap_or(false) {
-            // --brief enables the SendUserMessage tool so the model
-            // can mid-turn ask the user a question. The streaming
-            // consumer below routes those to the UI as a prompt.
-            push_arg(&mut cmd, batch, "--brief");
+            args.push("--brief".into());
         }
-        // stream-json + --verbose: the CLI emits one NDJSON event per
-        // line. Without --verbose, stream-json suppresses assistant
-        // messages and only the final result event is produced —
-        // exactly what we don't want.
-        push_arg(&mut cmd, batch, "--output-format");
-        push_arg(&mut cmd, batch, "stream-json");
-        push_arg(&mut cmd, batch, "--verbose");
+        args.push("--output-format".into());
+        args.push("stream-json".into());
+        args.push("--verbose".into());
         if auto_approve.unwrap_or(false) {
-            push_arg(&mut cmd, batch, "--permission-mode");
-            push_arg(&mut cmd, batch, "bypassPermissions");
+            args.push("--permission-mode".into());
+            args.push("bypassPermissions".into());
         }
-        // Hard tool gate: each agent role declares a tool_allowlist
-        // (read_file, shell, …). Translate to CLI tool names and pass
-        // as --allowedTools so the CLI rejects anything outside the
-        // allowed set. The `operator` role uses ["all"] → skip the
-        // flag so it gets the full CLI surface.
         if let Some(allowed) = allowed_tools.as_ref() {
             let wants_all = allowed.iter().any(|t| t == "all");
             if !wants_all && !allowed.is_empty() {
@@ -1192,21 +1206,41 @@ pub async fn claude_cli_stream(
                     .filter_map(|t| map_owllm_tool_to_cli(t))
                     .collect();
                 if !cli_tools.is_empty() {
-                    push_arg(&mut cmd, batch, "--allowedTools");
-                    push_arg(&mut cmd, batch, &cli_tools.join(" "));
+                    args.push("--allowedTools".into());
+                    args.push(cli_tools.join(" "));
                 }
             }
         }
         if !system_prompt.trim().is_empty() {
-            push_arg(&mut cmd, batch, "--append-system-prompt");
-            push_arg(&mut cmd, batch, &system_prompt);
+            args.push("--append-system-prompt".into());
+            args.push(system_prompt.clone());
         }
-        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            let p = std::path::Path::new(dir);
-            if p.is_dir() {
-                cmd.current_dir(p);
+
+        // WSL-isolated project → run `claude` inside the distro; else the
+        // Windows CLI exactly as before (no regression for normal folders).
+        let mut cmd = if let Some((distro, linux_cwd)) =
+            cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+        {
+            crate::wsl::wsl_program_command(&distro, &linux_cwd, "claude", &args)
+        } else {
+            let exe = find_claude_cli()
+                .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
+            #[cfg(windows)]
+            let batch = is_batch_shim(&exe);
+            #[cfg(not(windows))]
+            let batch = false;
+            let mut c = Command::new(&exe);
+            for a in &args {
+                push_arg(&mut c, batch, a);
             }
-        }
+            if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let p = std::path::Path::new(dir);
+                if p.is_dir() {
+                    c.current_dir(p);
+                }
+            }
+            c
+        };
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -1454,43 +1488,54 @@ pub async fn codex_cli_stream(
     on_event: Channel<CodexStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        let exe = find_codex_cli().ok_or_else(|| {
-            "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)"
-                .to_string()
-        })?;
-
-        let mut cmd = Command::new(&exe);
-        #[cfg(windows)]
-        let batch = is_batch_shim(&exe);
-        #[cfg(not(windows))]
-        let batch = false;
-
         let prompt = if system_prompt.trim().is_empty() {
             user_message.clone()
         } else {
             format!("{}\n\n{}", system_prompt.trim(), user_message)
         };
 
-        // Same non-interactive flags as codex_cli_complete, plus --json for
-        // the NDJSON event stream. Read-only sandbox: a chat/agent reply on
-        // this path never writes to disk (matches codex_cli_complete).
-        push_arg(&mut cmd, batch, "exec");
-        push_arg(&mut cmd, batch, "--json");
-        push_arg(&mut cmd, batch, "--skip-git-repo-check");
-        push_arg(&mut cmd, batch, "--color");
-        push_arg(&mut cmd, batch, "never");
-        push_arg(&mut cmd, batch, "--sandbox");
-        push_arg(&mut cmd, batch, "read-only");
-        // Positional prompt (older codex reads it here); stdin carries it
-        // too (newer codex reads it there).
-        push_arg(&mut cmd, batch, &prompt);
+        // Same non-interactive flags as codex_cli_complete, plus --json for the
+        // NDJSON event stream. Collected once so the same invocation runs as the
+        // Windows CLI or inside WSL for an isolated project.
+        let args: Vec<String> = vec![
+            "exec".into(),
+            "--json".into(),
+            "--skip-git-repo-check".into(),
+            "--color".into(),
+            "never".into(),
+            "--sandbox".into(),
+            "read-only".into(),
+            // Positional prompt (older codex reads it here); stdin carries it
+            // too (newer codex reads it there).
+            prompt.clone(),
+        ];
 
-        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            let p = std::path::Path::new(dir);
-            if p.is_dir() {
-                cmd.current_dir(p);
+        // WSL-isolated project → run `codex` inside the distro; else Windows CLI.
+        let mut cmd = if let Some((distro, linux_cwd)) =
+            cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+        {
+            crate::wsl::wsl_program_command(&distro, &linux_cwd, "codex", &args)
+        } else {
+            let exe = find_codex_cli().ok_or_else(|| {
+                "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)"
+                    .to_string()
+            })?;
+            #[cfg(windows)]
+            let batch = is_batch_shim(&exe);
+            #[cfg(not(windows))]
+            let batch = false;
+            let mut c = Command::new(&exe);
+            for a in &args {
+                push_arg(&mut c, batch, a);
             }
-        }
+            if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let p = std::path::Path::new(dir);
+                if p.is_dir() {
+                    c.current_dir(p);
+                }
+            }
+            c
+        };
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -2199,15 +2244,6 @@ pub async fn gemini_cli_complete(
     model: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        let exe = find_gemini_cli()
-            .ok_or_else(|| "gemini CLI not found on PATH — install gemini-cli (https://github.com/google-gemini/gemini-cli) first".to_string())?;
-        let mut cmd = Command::new(&exe);
-
-        #[cfg(windows)]
-        let batch = is_batch_shim(&exe);
-        #[cfg(not(windows))]
-        let batch = false;
-
         let composed = if system_prompt.trim().is_empty() {
             user_message
         } else {
@@ -2216,19 +2252,38 @@ pub async fn gemini_cli_complete(
 
         // gemini-cli accepts --prompt (-p) for non-interactive output
         // (matches Claude/Kimi conventions). --model picks the variant.
+        let mut args: Vec<String> = Vec::new();
         if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            push_arg(&mut cmd, batch, "--model");
-            push_arg(&mut cmd, batch, m);
+            args.push("--model".into());
+            args.push(m.to_string());
         }
-        push_arg(&mut cmd, batch, "--prompt");
-        push_arg(&mut cmd, batch, &composed);
+        args.push("--prompt".into());
+        args.push(composed);
 
-        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            let p = std::path::Path::new(dir);
-            if p.is_dir() {
-                cmd.current_dir(p);
+        // WSL-isolated project → run `gemini` inside the distro; else Windows CLI.
+        let mut cmd = if let Some((distro, linux_cwd)) =
+            cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+        {
+            crate::wsl::wsl_program_command(&distro, &linux_cwd, "gemini", &args)
+        } else {
+            let exe = find_gemini_cli()
+                .ok_or_else(|| "gemini CLI not found on PATH — install gemini-cli (https://github.com/google-gemini/gemini-cli) first".to_string())?;
+            #[cfg(windows)]
+            let batch = is_batch_shim(&exe);
+            #[cfg(not(windows))]
+            let batch = false;
+            let mut c = Command::new(&exe);
+            for a in &args {
+                push_arg(&mut c, batch, a);
             }
-        }
+            if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let p = std::path::Path::new(dir);
+                if p.is_dir() {
+                    c.current_dir(p);
+                }
+            }
+            c
+        };
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -2277,15 +2332,6 @@ pub async fn kimi_cli_complete(
     model: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
-        let exe = find_kimi_cli()
-            .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code (https://github.com/MoonshotAI/kimi-cli) first".to_string())?;
-        let mut cmd = Command::new(&exe);
-
-        #[cfg(windows)]
-        let batch = is_batch_shim(&exe);
-        #[cfg(not(windows))]
-        let batch = false;
-
         // Compose system + user into a single prompt — Kimi --print
         // mode doesn't expose a system-message flag.
         let composed = if system_prompt.trim().is_empty() {
@@ -2294,25 +2340,45 @@ pub async fn kimi_cli_complete(
             format!("{system_prompt}\n\n---\n\n{user_message}")
         };
 
-        push_arg(&mut cmd, batch, "--print");
-        // Suppress everything except the final assistant message so
-        // the React side gets a clean blob, not a streaming preamble.
-        push_arg(&mut cmd, batch, "--output-format");
-        push_arg(&mut cmd, batch, "text");
-        push_arg(&mut cmd, batch, "--final-message-only");
+        let mut args: Vec<String> = vec![
+            "--print".into(),
+            // Suppress everything except the final assistant message so
+            // the React side gets a clean blob, not a streaming preamble.
+            "--output-format".into(),
+            "text".into(),
+            "--final-message-only".into(),
+        ];
         if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            push_arg(&mut cmd, batch, "--model");
-            push_arg(&mut cmd, batch, m);
+            args.push("--model".into());
+            args.push(m.to_string());
         }
-        push_arg(&mut cmd, batch, "--prompt");
-        push_arg(&mut cmd, batch, &composed);
+        args.push("--prompt".into());
+        args.push(composed);
 
-        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            let p = std::path::Path::new(dir);
-            if p.is_dir() {
-                cmd.current_dir(p);
+        // WSL-isolated project → run `kimi` inside the distro; else Windows CLI.
+        let mut cmd = if let Some((distro, linux_cwd)) =
+            cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+        {
+            crate::wsl::wsl_program_command(&distro, &linux_cwd, "kimi", &args)
+        } else {
+            let exe = find_kimi_cli()
+                .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code (https://github.com/MoonshotAI/kimi-cli) first".to_string())?;
+            #[cfg(windows)]
+            let batch = is_batch_shim(&exe);
+            #[cfg(not(windows))]
+            let batch = false;
+            let mut c = Command::new(&exe);
+            for a in &args {
+                push_arg(&mut c, batch, a);
             }
-        }
+            if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let p = std::path::Path::new(dir);
+                if p.is_dir() {
+                    c.current_dir(p);
+                }
+            }
+            c
+        };
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());

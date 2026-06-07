@@ -10,10 +10,10 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
-import ModelPicker from "./ModelPicker";
+import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
-import { streamLocalChat, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
 
 type Msg = {
@@ -81,6 +81,7 @@ function parseSteps(text: string): string[] {
 export default function CodePage() {
   // The model LIST is re-fetched on mount, so it stays plain component state.
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -122,6 +123,9 @@ export default function CodePage() {
           setModelId((cur) => cur || all.find((m) => m.provider === "local" || m.provider === "tuned")?.model_id || "");
         })
         .catch((e) => setStatus(`Couldn't load models: ${e}`));
+      invoke<AccountsStatusLite>("accounts_status")
+        .then((s) => { if (!dead) setAccountsStatus(s); })
+        .catch(() => { /* leave null */ });
     };
     reload();
     const onRefresh = () => reload();
@@ -228,11 +232,38 @@ export default function CodePage() {
       return out;
     });
 
+  // One agent turn against the SELECTED model. Routes by provider exactly like
+  // ChatPage/AgentsPage: local/tuned → streamLocalChat (renders tool cards);
+  // cloud/subscription → the shared streamChatCompletion. `silent` suppresses
+  // streaming for the planning turn.
+  const runTurn = async (
+    system: string,
+    user: string,
+    history: HistoryItem[],
+    signal: AbortSignal,
+    opts?: { silent?: boolean; withEvents?: boolean },
+  ): Promise<string> => {
+    const provider = providerFor(modelId, availableModels);
+    const isLocal = provider === "local" || provider === "tuned";
+    const dDelta = opts?.silent ? () => {} : onDelta;
+    const dThought = opts?.silent ? () => {} : onThought;
+    if (isLocal) {
+      const port = await ensureServer(modelId);
+      if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+      return streamLocalChat({
+        port, modelId, systemPrompt: system, userContent: user, temperature: 0.3,
+        signal, onDelta: dDelta, onThought: dThought, projectCwd: workspace,
+        history, events: opts?.withEvents ? { onToolCall, onToolResult } : undefined,
+      });
+    }
+    return streamChatCompletion(0, modelId, provider, system, user, 0.3, signal, dDelta, workspace, history, true, dThought);
+  };
+
   const send = async () => {
     const text = draft.trim();
     if (!text || busy) return;
     if (!workspace) { setStatus("Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { setStatus("No local model available — load one on the Models page."); return; }
+    if (!modelId) { setStatus("No model selected — pick one above."); return; }
     setDraft("");
     setBusy(true);
     const ctrl = new AbortController();
@@ -242,22 +273,8 @@ export default function CodePage() {
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
     setMessages((msgs) => [...msgs, { role: "user", content: text, ts: Date.now() }]);
     try {
-      const port = await ensureServer(modelId);
-      if (!port) { setStatus("Model server didn't come up — check the Server tab."); return; }
       setStatus(`Coding in ${workspace}`);
-      await streamLocalChat({
-        port,
-        modelId,
-        systemPrompt: CODING_SYSTEM(workspace),
-        userContent: text,
-        temperature: 0.3,
-        signal: ctrl.signal,
-        onDelta,
-        onThought,
-        projectCwd: workspace,
-        history,
-        events: { onToolCall, onToolResult },
-      });
+      await runTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
     } catch (e) {
       const err = e as { name?: string; message?: string };
       if (err.name !== "AbortError") {
@@ -283,20 +300,9 @@ export default function CodePage() {
     abortRef.current = ctrl;
     setMessages((m) => [...m, { role: "user", content: `📋 Plan & build: ${goal}`, ts: Date.now() }]);
     try {
-      const port = await ensureServer(modelId);
-      if (!port) { setStatus("Model server didn't come up — check the Server tab."); return; }
-      // 1) PLAN — ask for an ordered step list (no tools needed).
+      // 1) PLAN — ordered step list (silent; no tool execution / streaming).
       setStatus("Planning…");
-      const planReply = await streamLocalChat({
-        port, modelId,
-        systemPrompt: PLAN_SYSTEM(workspace, goal),
-        userContent: "Return the JSON array of steps now.",
-        temperature: 0.2,
-        signal: ctrl.signal,
-        onDelta: () => {}, onThought: () => {},
-        projectCwd: workspace,
-        history: [],
-      });
+      const planReply = await runTurn(PLAN_SYSTEM(workspace, goal), "Return the JSON array of steps now.", [], ctrl.signal, { silent: true });
       const steps = parseSteps(planReply);
       if (steps.length === 0) {
         setMessages((m) => [...m, { role: "assistant", content: "Couldn't produce a plan — try rephrasing the goal, or use Send for a one-shot.", ts: Date.now() }]);
@@ -311,17 +317,11 @@ export default function CodePage() {
         setStatus(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
         setMessages((m) => [...m, { role: "assistant", content: `\n### Step ${i + 1}: ${plan[i].title}\n`, ts: Date.now() }]);
         try {
-          await streamLocalChat({
-            port, modelId,
-            systemPrompt: CODING_SYSTEM(workspace),
-            userContent: `Overall goal: ${goal}\n\nDo THIS step now (only this step): ${plan[i].title}`,
-            temperature: 0.3,
-            signal: ctrl.signal,
-            onDelta, onThought,
-            projectCwd: workspace,
-            history: [],
-            events: { onToolCall, onToolResult },
-          });
+          await runTurn(
+            CODING_SYSTEM(workspace),
+            `Overall goal: ${goal}\n\nDo THIS step now (only this step): ${plan[i].title}`,
+            [], ctrl.signal, { withEvents: true },
+          );
           setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "done" } : t)));
         } catch (e) {
           const err = e as { name?: string };
@@ -363,18 +363,17 @@ export default function CodePage() {
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
         <div style={{ minWidth: 260, maxWidth: 360 }}>
-          {/* THE shared model picker — same component + same list_models source
-              as Chat / Server / Agents. localOnly = the coding agent runs a
-              served GGUF, so restrict to the LOCAL section (shared flag, not a
-              recoded filter). */}
+          {/* THE shared model picker — same component, same list_models source,
+              and the SAME full set (local + cloud + subscriptions) as AgentsPage.
+              No localOnly: the agentic Code page offers every model the other
+              agentic surfaces do; execution routes by provider below. */}
           <ModelPicker
             value={modelId}
             onChange={setModelId}
             models={availableModels}
-            status={null}
-            localOnly
+            status={accountsStatus}
             disabled={busy}
-            fallbackLabel="(pick a local model)"
+            fallbackLabel="(pick a model)"
           />
         </div>
         <button onClick={clear} disabled={busy || (messages.length === 0 && tasks.length === 0)} style={btn}>Clear</button>

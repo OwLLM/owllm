@@ -97,9 +97,37 @@ Any `<tool_call>` XML / `parse_tool_calls` / `format_for_prompt` you find is
   remote-download-piped-to-shell). Scoped ops (`rm -rf node_modules`) are fine.
 
 These are guard rails, **not** a hard boundary — the shell is Turing-complete.
-For true containment, run the agent runtime in **WSL/Linux** (the split makes
-this practical) where the OS provides real isolation (separate users,
-namespaces, disposable distros).
+For true containment, OwLLM now executes the tools themselves inside Linux:
+
+### OS-level isolation — `src-tauri/src/wsl.rs` (shipped, Phase 1)
+Every tool-using surface funnels its tools through one place — `executeToolCall`
+→ the `agent_tools.rs` commands — so isolating *those* isolates the Code page,
+the agentic teams, **and** the fine-tuning chat at once (chats use tools too).
+
+The model: an isolated project lives **inside the WSL distro** at
+`~/owllm/<project>`. The Windows UI uses that project's
+`\\wsl.localhost\<distro>\…` UNC path as its workspace. Then:
+- **File tools isolate for free.** `tool_read_file`/`write`/`list`/`create_dir`/
+  `grep`/`glob` are plain `std::fs` on the workspace path — and a UNC path
+  resolves into the **distro filesystem**, off the Windows `C:` drive. No code
+  change needed; the path placement does the work.
+- **The shell tool is the one that must cross in.** `cmd.exe` can't even `cd`
+  into a UNC path, so `tool_shell_exec` detects a WSL-UNC cwd
+  (`wsl::parse_wsl_unc`) and runs the command inside the distro via
+  `wsl -d <distro> -- bash -lc 'cd <linux_cwd> && (<command>)'`
+  (`wsl::build_wsl_bash_script`). A model that runs `rm -rf` only touches the
+  Linux project, never Windows. The `--cd` flag is intentionally avoided (it
+  errors on real distros); the `bash -lc 'cd …'` form is portable.
+- **The fine-tuning chat scratch dir** becomes a WSL project when isolation is
+  on (`chat_scratch_dir`), so that surface is sandboxed too.
+- `wsl.rs` exposes `wsl_status` (distro detection), `wsl_isolation_get/set`
+  (persisted), and `wsl_create_project` / `wsl_list_projects`. The Code page
+  shows a **🛡 Isolated / ⚠ Not isolated** badge and, when WSL is absent, a loud
+  warning with **graceful host fallback** (guard rails above still apply).
+
+**Next (Phase 2):** run the subscription CLIs (Claude/Codex/Gemini) inside the
+distro too (they execute their *own* tools today), and onboarding that offers
+`wsl --install` + provisions the in-distro toolchain.
 
 ### Concurrency isolation — `src-tauri/src/fleet.rs`
 Each specialist in a team runs in its **own `git worktree`** on branch
@@ -108,13 +136,12 @@ squash-merges back with conflict detection (conflicts keep the worktree for
 resolution). This is isolation-by-copy + merge, not real-time locking — the
 right model for autonomous agents (no deadlocks, clean rollback).
 
-### Tiers (design)
+### Tiers
 - **Safe (default):** guard rails + worktrees + (roadmap) plain-language
   conflict resolution and one-click undo.
+- **Hardened (shipped, Phase 1):** tools execute inside WSL/Ubuntu — see above.
 - **Guru (roadmap):** one switch flips the rails off for experienced users
   (generalizes the existing per-project `trust_writes`).
-- **Hardened (roadmap):** run the agent runtime in WSL/Linux or a container for
-  OS-level isolation.
 
 ---
 

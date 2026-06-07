@@ -21,8 +21,14 @@ You get the speed of native GPU inference **and** the isolation of running auton
 ### 🛡 True OS-level isolation: agents run inside Linux, not on your PC
 Autonomous agents that edit files and run shell commands are powerful and risky — and **every tool-using surface has this risk**: the Code page, the agentic teams, *and* the fine-tuning chat (chats use tools too). OwLLM's answer is real OS-level isolation, not just guard rails:
 
-- **🐧 WSL/Ubuntu sandbox (shipping).** Flip on isolation and every tool a model runs — `shell`, file writes, edits, `grep`, everything — executes **inside a WSL/Ubuntu distro**, in a project that lives in the Linux filesystem (`~/owllm/<project>`). A model that decides to `rm -rf` or write outside the project **physically cannot reach your Windows `C:` drive.** The Windows app, your GPU model server, and fine-tuning stay native and fast; only the dangerous *tool execution* is sandboxed. A header badge shows **🛡 Isolated** vs **⚠ Not isolated** at all times.
-- **Graceful fallback.** No WSL (locked-down PC, virtualization off)? The app stays fully usable on the host with the guard rails below and a loud "not isolated" warning — your call.
+- **🐧 Real Linux sandbox.** Flip on isolation and every tool a model runs — `shell`, file writes, edits, `grep`, **and the cloud subscription CLIs (Claude/Codex/Gemini/Kimi)** — executes **inside a Linux sandbox**, in a project that lives in the sandbox filesystem (`~/owllm/<project>`). A model that decides to `rm -rf` or write outside the project **physically cannot reach your real drive or home.** The desktop app, your GPU model server, and fine-tuning stay native and fast; only the dangerous *tool execution* is sandboxed. A header badge shows **🛡 Isolated** vs **⚠ Not isolated** at all times.
+- **One engine per OS, same isolation:**
+  - **Windows → WSL2** *(shipping)* — a real Linux VM. Tools run inside Ubuntu; nothing touches `C:`.
+  - **macOS → Lima** *(beta)* — a lightweight Linux VM on Apple's Virtualization.framework, the same VM-grade boundary as WSL.
+  - **Linux → bubblewrap** *(beta)* — namespace sandbox with a private filesystem view + a dedicated sandbox-home, so the rest of `~` (`~/.ssh`, `~/.aws`) is invisible.
+- **Auto-provisioning.** With isolation on, OwLLM installs the in-sandbox toolchain (node, uv, git, the agent CLIs, `gh`) for you in the background — no manual setup. On a PC without WSL, one-click `wsl --install`.
+- **🐙 Connect GitHub.** Because the agents run *inside* the sandbox, your host git credentials don't reach them — so OwLLM writes your connected GitHub token into the **sandbox's** git + `gh` credential store. Isolated agents clone private repos and push commits, with nothing leaking to the host.
+- **Graceful fallback.** No sandbox engine present (locked-down PC, virtualization off)? The app stays fully usable on the host with the guard rails below and a loud "not isolated" warning — your call.
 
 And the guard rails apply on the host path too:
 
@@ -30,7 +36,7 @@ And the guard rails apply on the host path too:
 - **Catastrophic-command block** — never-legitimate commands (wipe root/home, format a disk, fork bomb, registry delete, remote-download-piped-to-shell) are stopped; normal scoped work is untouched.
 - **Worktree isolation** — every agent in a team runs in its **own git worktree on its own branch**, so parallel agents never clobber each other; results merge back with conflict detection.
 
-*Next:* running the cloud subscription CLIs (Claude/Codex/Gemini) inside the sandbox too, and one-click `wsl --install` provisioning during onboarding.
+> **Strength tiers:** WSL2 and Lima are real VMs (separate kernel + filesystem) — the strong tier. bubblewrap shares the host kernel but gives a private filesystem view. macOS/Linux engines are **beta** (compile-verified per-OS; runtime hardening in progress); Windows/WSL is the proven path.
 
 ### 🧩 Native GGUF tool-calling + web search that just works
 Tool-calling uses the model's **own chat template** (`llama-server --jinja` → native `tools` array → structured `delta.tool_calls`) — **no XML hacks, no dialect parsing**. MCP servers (filesystem, search, GitHub, etc.) auto-start, with a **master on/off switch**, **per-tool toggles**, and a **schema-safety gate** so one malformed MCP schema can't break tool-calling for everything. **Web search works out of the box** — on first run OwLLM auto-installs the **keyless DuckDuckGo** search server (no API key, no credit card); it's engine-agnostic, so any search MCP you add is used automatically.

@@ -103,6 +103,13 @@ fn load_secrets() -> BTreeMap<String, String> {
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
+/// All saved secrets (API keys + tokens). Used by the sandbox to mirror keys
+/// into the isolated environment so isolated agents/CLIs can reach every
+/// provider, not just the ones with an OAuth login file.
+pub fn all_secrets() -> BTreeMap<String, String> {
+    load_secrets()
+}
+
 fn nonempty(map: &BTreeMap<String, String>, key: &str) -> bool {
     map.get(key).map(|s| !s.trim().is_empty()).unwrap_or(false)
 }

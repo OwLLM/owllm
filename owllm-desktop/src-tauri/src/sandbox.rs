@@ -577,11 +577,36 @@ fn sync_logins_impl(distro: Option<String>) -> Result<Vec<String>, String> {
         .ok_or_else(|| "no WSL distro".to_string())?;
     let home = std::env::var("USERPROFILE").map_err(|_| "no USERPROFILE".to_string())?;
     let m = win_to_mnt(&home)?;
+
+    // Build the API-key env file: every saved provider key becomes an
+    // `export` so any CLI/agent in the distro can reach it (covers key-authed
+    // CLIs + the OpenAI-compatible providers that have no OAuth login file).
+    let secrets = crate::accounts::all_secrets();
+    let mut env_lines = String::new();
+    for k in [
+        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "MOONSHOT_API_KEY", "DEEPSEEK_API_KEY",
+        "XAI_API_KEY", "GROQ_API_KEY", "PERPLEXITY_API_KEY", "MISTRAL_API_KEY",
+        "TOGETHER_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "HF_TOKEN",
+    ] {
+        if let Some(v) = secrets.get(k) {
+            if !v.trim().is_empty() {
+                env_lines.push_str(&format!("export {k}={}\n", crate::wsl::sh_quote(v.trim())));
+            }
+        }
+    }
+    let env_quoted = crate::wsl::sh_quote(&env_lines);
+
+    // OAuth login files for the four subscription CLIs (codex/claude/gemini/kimi),
+    // plus the key env file, plus a one-time hook so login shells source it.
     let script = format!(
-        "syn=''; mkdir -p ~/.codex ~/.claude ~/.gemini; \
+        "syn=''; mkdir -p ~/.codex ~/.claude ~/.gemini ~/.kimi ~/.owllm; \
          if [ -f '{m}/.codex/auth.json' ]; then cp -f '{m}/.codex/auth.json' ~/.codex/ && cp -f '{m}/.codex/config.toml' ~/.codex/ 2>/dev/null; chmod 600 ~/.codex/auth.json 2>/dev/null; syn=\"$syn codex\"; fi; \
          if [ -f '{m}/.claude/.credentials.json' ]; then cp -f '{m}/.claude/.credentials.json' ~/.claude/.credentials.json; cp -f '{m}/.claude.json' ~/.claude.json 2>/dev/null; chmod 600 ~/.claude/.credentials.json 2>/dev/null; syn=\"$syn claude\"; fi; \
-         if [ -f '{m}/.gemini/oauth_creds.json' ]; then cp -f '{m}/.gemini/oauth_creds.json' ~/.gemini/ 2>/dev/null; syn=\"$syn gemini\"; fi; \
+         if [ -d '{m}/.gemini' ]; then cp -rf '{m}/.gemini/.' ~/.gemini/ 2>/dev/null && syn=\"$syn gemini\"; fi; \
+         if [ -f '{m}/.kimi/config.toml' ]; then cp -rf '{m}/.kimi/.' ~/.kimi/ 2>/dev/null; chmod 600 ~/.kimi/config.toml 2>/dev/null; syn=\"$syn kimi\"; fi; \
+         printf '%s' {env_quoted} > ~/.owllm/agent_env.sh; chmod 600 ~/.owllm/agent_env.sh; \
+         [ -s ~/.owllm/agent_env.sh ] && syn=\"$syn keys\"; \
+         grep -q 'owllm/agent_env.sh' ~/.profile 2>/dev/null || echo '[ -f \"$HOME/.owllm/agent_env.sh\" ] && . \"$HOME/.owllm/agent_env.sh\"' >> ~/.profile; \
          echo \"SYNCED:$syn\""
     );
     let out = crate::wsl::run_in_distro(&distro, &script)?;

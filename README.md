@@ -43,7 +43,8 @@ You compose teams of specialised agents — an orchestrator that plans, a coder 
 | 🔬 **Abliterate for safety research** | Orthogonalise weights against refusal directions. Generate adversarial datasets. Train better safety classifiers. The honest tools the field actually needs. |
 | 🛠 **GGUF + quantization built-in** | Convert HF safetensors → GGUF, quantize Q4/Q5/Q6/Q8/F16. Ship custom models anyone with llama.cpp can run. |
 | 🛡 **Red-team capable** | Compose adversarial agent teams whose *job* is to find vulnerabilities — in models, code, apps. Pair with fine-tuning to train defenders. |
-| 🔌 **MCP-first tooling** | Plug in any Model Context Protocol server (filesystem, git, browser, Postgres, GitHub, Brave…). Curated packs per team. |
+| 🔒 **OS-level isolation (WSL)** | Flip on isolation and every tool your agents run — shell, file writes, edits, search — executes **inside Ubuntu (WSL)**, in a project on the Linux filesystem. A model that runs `rm -rf` or writes outside the project **cannot touch your Windows `C:` drive**. Code page, agentic teams, **and** the fine-tuning chat are all covered; the rest of the app stays native. |
+| 🔌 **MCP-first tooling** | Plug in any Model Context Protocol server (filesystem, git, browser, Postgres, GitHub…). **Keyless DuckDuckGo web search is auto-installed on first run** — no API key, no card. Engine-agnostic: any search MCP you add is used automatically. Curated packs per team. |
 | 🏠 **Run anywhere** | Desktop today. **Headless on a $5/mo VPS, 24/7** — on the roadmap. Containerised / VM — on the roadmap. Your agents, your hardware, your terms. |
 
 ## What teams can do
@@ -144,6 +145,7 @@ That's why the data/ tree is open and community-driven even though the app binar
 - [x] Fine-tuning + abliteration pipeline
 - [x] GGUF / quantization pipeline
 - [x] Telegram bridge
+- [x] **WSL tool isolation** — agents run their tools inside Ubuntu, off your Windows drive
 - [ ] **Visual team builder** — Q3 2026
 - [ ] **macOS + Linux desktop** — Q3 2026
 - [ ] **24/7 headless / VPS mode** — Q4 2026

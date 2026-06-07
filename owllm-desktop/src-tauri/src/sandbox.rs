@@ -34,9 +34,64 @@
 // are surfaced to the user as "beta — not yet hardware-verified". The pure
 // helpers below ARE unit-tested (and compile on every OS leg).
 
+use serde::Serialize;
+
 /// Sub-directory of the sandbox user's home that holds isolated projects
 /// (~/owllm/<name>). Matches the WSL backend layout so the concept is uniform.
 pub const ISO_SUBDIR: &str = "owllm";
+
+/// Cross-platform sandbox availability, surfaced to the UI so it can show the
+/// right engine + honest strength/beta labelling on every OS.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxStatus {
+    /// An isolation engine is installed and runnable.
+    pub available: bool,
+    /// "wsl" | "lima" | "bubblewrap" | "none".
+    pub kind: String,
+    /// VM-grade boundary (separate kernel + FS): WSL, Lima. False for bwrap.
+    pub strong: bool,
+    /// Engine not yet runtime-verified on real hardware (Lima/bwrap).
+    pub beta: bool,
+    /// WSL distros / Lima instances (empty for bubblewrap).
+    pub targets: Vec<String>,
+    /// Preferred target (default distro / instance).
+    pub default_target: Option<String>,
+}
+
+impl Default for SandboxStatus {
+    fn default() -> Self {
+        SandboxStatus {
+            available: false,
+            kind: "none".into(),
+            strong: false,
+            beta: false,
+            targets: Vec::new(),
+            default_target: None,
+        }
+    }
+}
+
+/// An isolated project. On Windows `path` is the `\\wsl.localhost\…` UNC the UI
+/// uses as the workspace and `inner_path` the Linux path; on Linux/macOS both
+/// are the same host path under `~/owllm`.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxProject {
+    pub name: String,
+    pub path: String,
+    pub inner_path: String,
+    pub kind: String,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn sanitize_name(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
+}
 
 // ---- pure helpers (unit-tested; compiled on every OS) ---------------------
 
@@ -268,6 +323,234 @@ pub fn program_argv(_cwd: Option<&str>, _program: &str, _args: &[String]) -> Opt
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub fn shell_argv(_cwd: Option<&str>, _command: &str) -> Option<(String, Vec<String>)> {
     None
+}
+
+// ---- Tauri commands (cross-platform) --------------------------------------
+
+#[cfg(windows)]
+fn status_impl() -> SandboxStatus {
+    let w = crate::wsl::wsl_status();
+    SandboxStatus {
+        available: w.available,
+        kind: "wsl".into(),
+        strong: true,
+        beta: false,
+        targets: w.distros,
+        default_target: w.default_distro,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn status_impl() -> SandboxStatus {
+    let ok = engine_available("bwrap");
+    SandboxStatus {
+        available: ok,
+        kind: if ok { "bubblewrap".into() } else { "none".into() },
+        strong: false,
+        beta: true,
+        targets: Vec::new(),
+        default_target: None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn status_impl() -> SandboxStatus {
+    let ok = engine_available("limactl");
+    SandboxStatus {
+        available: ok,
+        kind: if ok { "lima".into() } else { "none".into() },
+        strong: true,
+        beta: true,
+        targets: Vec::new(),
+        default_target: None,
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn status_impl() -> SandboxStatus {
+    SandboxStatus::default()
+}
+
+#[tauri::command]
+pub fn sandbox_status() -> SandboxStatus {
+    status_impl()
+}
+
+#[cfg(windows)]
+fn create_impl(name: String) -> Result<SandboxProject, String> {
+    let p = crate::wsl::wsl_create_project(name, None)?;
+    Ok(SandboxProject {
+        name: p.name,
+        path: p.unc_path,
+        inner_path: p.linux_path,
+        kind: "wsl".into(),
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn create_impl(name: String) -> Result<SandboxProject, String> {
+    let safe = sanitize_name(&name);
+    if safe.is_empty() {
+        return Err("invalid project name".into());
+    }
+    let home = std::env::var("HOME").map_err(|_| "no HOME directory".to_string())?;
+    let path = format!("{home}/{ISO_SUBDIR}/{safe}");
+    std::fs::create_dir_all(&path).map_err(|e| format!("mkdir {path}: {e}"))?;
+    Ok(SandboxProject {
+        name: safe,
+        path: path.clone(),
+        inner_path: path,
+        kind: status_impl().kind,
+    })
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn create_impl(_name: String) -> Result<SandboxProject, String> {
+    Err("isolation is not supported on this platform".into())
+}
+
+#[tauri::command]
+pub fn sandbox_create_project(name: String) -> Result<SandboxProject, String> {
+    create_impl(name)
+}
+
+#[cfg(windows)]
+fn list_impl() -> Vec<SandboxProject> {
+    crate::wsl::wsl_list_projects(None)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| SandboxProject {
+            name: p.name,
+            path: p.unc_path,
+            inner_path: p.linux_path,
+            kind: "wsl".into(),
+        })
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn list_impl() -> Vec<SandboxProject> {
+    let Ok(home) = std::env::var("HOME") else {
+        return Vec::new();
+    };
+    let root = format!("{home}/{ISO_SUBDIR}");
+    let kind = status_impl().kind;
+    let mut v = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&root) {
+        for e in rd.flatten() {
+            if e.path().is_dir() {
+                let path = e.path().to_string_lossy().to_string();
+                v.push(SandboxProject {
+                    name: e.file_name().to_string_lossy().to_string(),
+                    path: path.clone(),
+                    inner_path: path,
+                    kind: kind.clone(),
+                });
+            }
+        }
+    }
+    v
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn list_impl() -> Vec<SandboxProject> {
+    Vec::new()
+}
+
+#[tauri::command]
+pub fn sandbox_list_projects() -> Vec<SandboxProject> {
+    list_impl()
+}
+
+// ---- provisioning ---------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+fn which(p: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("command -v {p}"))
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn run_capture(exe: &str, args: &[&str]) -> Result<String, String> {
+    let out = std::process::Command::new(exe)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{exe}: {e}"))?;
+    let so = String::from_utf8_lossy(&out.stdout);
+    let se = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        Ok(format!("{so}{se}"))
+    } else {
+        Err(format!(
+            "{exe} exited {}: {}",
+            out.status.code().unwrap_or(-1),
+            if se.trim().is_empty() { so.trim() } else { se.trim() }
+        ))
+    }
+}
+
+/// Install the bubblewrap engine + agent toolchain on Linux. Elevation via
+/// pkexec (the desktop sudo prompt); falls back to printable instructions when
+/// pkexec is absent. BETA — not yet runtime-verified on real hardware.
+#[cfg(target_os = "linux")]
+fn linux_provision() -> Result<String, String> {
+    let inst = if which("apt-get") {
+        "apt-get update -y && apt-get install -y bubblewrap nodejs npm git curl ca-certificates"
+    } else if which("dnf") {
+        "dnf install -y bubblewrap nodejs npm git curl"
+    } else if which("pacman") {
+        "pacman -Sy --noconfirm bubblewrap nodejs npm git curl"
+    } else {
+        return Err("No supported package manager (apt/dnf/pacman). Install bubblewrap, node, git manually.".into());
+    };
+    let script = format!(
+        "set -e; {inst}; export UV_INSTALL_DIR=/usr/local/bin; \
+         (curl -LsSf https://astral.sh/uv/install.sh | sh) || true; \
+         npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli || true; \
+         echo PROVISION_DONE"
+    );
+    if which("pkexec") {
+        run_capture("pkexec", &["bash", "-lc", &script])
+    } else {
+        Err(format!("Root required and pkexec not found. Run in a terminal:\n  sudo bash -lc '{script}'"))
+    }
+}
+
+#[cfg(target_os = "macos")]
+const MAC_PROVISION_HELP: &str = "macOS isolation (beta) uses a Lima Linux VM. One-time setup:\n\
+    1) brew install lima\n\
+    2) limactl start --name owllm\n\
+    3) (inside) install node, git and the agent CLIs\n\
+Once `limactl` is present, OwLLM routes isolated projects through it automatically.\n\
+Note: harden the Lima mounts to expose only ~/owllm before trusting isolation.";
+
+/// Install/repair the isolation engine + toolchain. Windows delegates to the
+/// live WSL provisioner; Linux attempts bubblewrap + toolchain via pkexec;
+/// macOS returns Lima setup instructions (beta).
+#[tauri::command]
+pub async fn sandbox_provision() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        crate::wsl::wsl_provision(None).await
+    }
+    #[cfg(target_os = "linux")]
+    {
+        tokio::task::spawn_blocking(linux_provision)
+            .await
+            .map_err(|e| format!("join error: {e}"))?
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Ok(MAC_PROVISION_HELP.to_string())
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        Err("isolation is not supported on this platform".to_string())
+    }
 }
 
 #[cfg(test)]

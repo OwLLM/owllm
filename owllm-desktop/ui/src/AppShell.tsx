@@ -30,6 +30,7 @@ import { headerPill } from "./theme/styles";
 import TelegramBridgeRunner from "./bridges/TelegramBridgeRunner";
 import DiscordBridgeRunner from "./bridges/DiscordBridgeRunner";
 import SlackBridgeRunner from "./bridges/SlackBridgeRunner";
+import EmailBridgeRunner from "./bridges/EmailBridgeRunner";
 import ServerPage from "./pages/core/ServerPage";
 import BridgesPage from "./pages/agentic/BridgesPage";
 import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
@@ -1003,6 +1004,7 @@ export default function AppShell() {
       <TelegramBridgeRunner />
       <DiscordBridgeRunner />
       <SlackBridgeRunner />
+      <EmailBridgeRunner />
       <ResizeEdges />
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>

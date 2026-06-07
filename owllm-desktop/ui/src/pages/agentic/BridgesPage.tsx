@@ -47,7 +47,20 @@ type SlackConfig = {
   project_id: string;
   auto_approve: boolean;
 };
-type BridgeConfigs = { telegram: TelegramConfig; whatsapp: WhatsAppConfig; discord: DiscordConfig; slack: SlackConfig };
+type EmailConfig = {
+  imap_host: string;
+  imap_port: number;
+  smtp_host: string;
+  smtp_port: number;
+  username: string;
+  password: string;
+  from_addr: string;
+  allowed_senders: string[];
+  poll_seconds: number;
+  project_id: string;
+  auto_approve: boolean;
+};
+type BridgeConfigs = { telegram: TelegramConfig; whatsapp: WhatsAppConfig; discord: DiscordConfig; slack: SlackConfig; email: EmailConfig };
 
 // Qt: 10x10 dot, running color #4caf50, stopped color #5a6376
 // (bridges_page.py:350-352).
@@ -991,6 +1004,178 @@ function SlackCard() {
 }
 
 // ---------------------------------------------------------------------
+// Email card — IMAP receive + SMTP send (no public URL). Drives
+// EmailBridgeRunner via owllm:email:started + status/runtime events.
+// ---------------------------------------------------------------------
+const EMAIL_STARTED_KEY = "owllm:email:started";
+function isEmailStartedFromStorage(): boolean {
+  try { return sessionStorage.getItem(EMAIL_STARTED_KEY) === "1"; } catch { return false; }
+}
+function setEmailStartedInStorage(running: boolean) {
+  try { sessionStorage.setItem(EMAIL_STARTED_KEY, running ? "1" : "0"); } catch {}
+  try { window.dispatchEvent(new CustomEvent("owllm:email:status", { detail: running ? "running" : "stopped" })); } catch {}
+}
+
+function EmailCard() {
+  const [imapHost, setImapHost] = useState("");
+  const [imapPort, setImapPort] = useState<number>(993);
+  const [smtpHost, setSmtpHost] = useState("");
+  const [smtpPort, setSmtpPort] = useState<number>(587);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [fromAddr, setFromAddr] = useState("");
+  const [senders, setSenders] = useState("");
+  const [pollSeconds, setPollSeconds] = useState<number>(30);
+  const [project, setProject] = useState("");
+  const [autoApprove, setAutoApprove] = useState(false);
+  const [status, setStatus] = useState<BridgeStatus>(() => isEmailStartedFromStorage() ? "running" : "stopped");
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [projects, setProjects] = useState<ProjectLite[]>([]);
+  const [lastError, setLastError] = useState<string>("");
+
+  useEffect(() => {
+    let dead = false;
+    invoke<BridgeConfigs>("load_bridge_configs").then(c => {
+      if (dead) return;
+      const e = c.email;
+      setImapHost(e.imap_host || ""); setImapPort(e.imap_port || 993);
+      setSmtpHost(e.smtp_host || ""); setSmtpPort(e.smtp_port || 587);
+      setUsername(e.username || ""); setPassword(e.password || "");
+      setFromAddr(e.from_addr || "");
+      setSenders((e.allowed_senders || []).join(", "));
+      setPollSeconds(e.poll_seconds || 30);
+      setProject(e.project_id || ""); setAutoApprove(!!e.auto_approve);
+    }).catch(() => {});
+    invoke<ProjectLite[]>("list_projects").then(rows => { if (!dead) setProjects(rows.map(r => ({ id: r.id, name: r.name }))); }).catch(() => {});
+    return () => { dead = true; };
+  }, []);
+
+  useEffect(() => {
+    const onRuntime = (e: Event) => {
+      const d = (e as CustomEvent).detail || {};
+      if (d.status === "running" || d.status === "stopped" || d.status === "error") setStatus(d.status);
+      if (typeof d.lastError === "string") setLastError(d.lastError);
+      if (d.status === "running") setLastError("");
+    };
+    window.addEventListener("owllm:email:runtime", onRuntime as EventListener);
+    return () => window.removeEventListener("owllm:email:runtime", onRuntime as EventListener);
+  }, []);
+
+  async function persist() {
+    setSaveError(null);
+    const allow = senders.split(",").map(s => s.trim()).filter(Boolean);
+    try {
+      await invoke("save_email_config", {
+        cfg: {
+          imap_host: imapHost, imap_port: imapPort, smtp_host: smtpHost, smtp_port: smtpPort,
+          username, password, from_addr: fromAddr, allowed_senders: allow,
+          poll_seconds: pollSeconds, project_id: project, auto_approve: autoApprove,
+        } as EmailConfig,
+      });
+      setSavedFlash(true);
+      window.setTimeout(() => setSavedFlash(false), 1600);
+    } catch (e) { setSaveError(String(e)); }
+  }
+
+  const accent = "#e0884a"; // amber/envelope
+  const active = status === "starting" || status === "running";
+  const running = status === "running";
+  const allowListActive = senders.split(",").map(s => s.trim()).filter(Boolean).length > 0;
+  const statusText = running
+    ? `Running — polling ${imapHost} every ${pollSeconds}s.${allowListActive ? " · sender allow-list active" : " · any sender"}`
+    : status === "starting" ? "Starting — connecting to IMAP."
+    : status === "error" ? `Error — ${lastError || "Not connected."}`
+    : (lastError ? `Stopped — last error: ${lastError}` : "Stopped.");
+
+  return (
+    <div style={{
+      flex: 1,
+      background: "linear-gradient(180deg, #33271a 0%, #0e1117 60%, #0e1117 100%)",
+      border: "none", borderRadius: 16, padding: "18px 20px",
+      boxShadow: "0 4px 24px rgba(0,0,0,0.43)", display: "flex", flexDirection: "column", gap: 10, minWidth: 320,
+    }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+        <div style={{ fontSize: 26, lineHeight: 1 }}>✉️</div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: accent }}>Email</div>
+          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>IMAP + SMTP · use a dedicated mailbox · no public URL</div>
+        </div>
+        <StatusDot state={status} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel text="IMAP host" />
+          <BridgeInput placeholder="imap.gmail.com" value={imapHost} onChange={e => setImapHost(e.target.value)} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel text="IMAP port" />
+          <BridgeInput type="number" value={imapPort} onChange={e => { const n = parseInt(e.target.value, 10); if (!Number.isNaN(n)) setImapPort(n); }} />
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel text="SMTP host" />
+          <BridgeInput placeholder="smtp.gmail.com" value={smtpHost} onChange={e => setSmtpHost(e.target.value)} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel text="SMTP port" />
+          <BridgeInput type="number" value={smtpPort} onChange={e => { const n = parseInt(e.target.value, 10); if (!Number.isNaN(n)) setSmtpPort(n); }} />
+        </div>
+      </div>
+
+      <SectionLabel text="Username / email" />
+      <BridgeInput placeholder="bot@example.com" value={username} onChange={e => setUsername(e.target.value)} />
+
+      <SectionLabel text="Password (app password recommended)" />
+      <BridgeInput type="password" value={password} onChange={e => setPassword(e.target.value)} />
+
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel text="Allowed senders (optional)" />
+          <BridgeInput placeholder="(empty = any) alice@x.com, bob@y.com" value={senders} onChange={e => setSenders(e.target.value)} />
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <SectionLabel text="Poll (sec)" />
+          <BridgeInput type="number" min={10} value={pollSeconds} onChange={e => { const n = parseInt(e.target.value, 10); if (!Number.isNaN(n)) setPollSeconds(Math.max(10, n)); }} />
+        </div>
+      </div>
+
+      <SectionLabel text="Project" />
+      <ProjectSelect value={project} onChange={e => setProject(e.target.value)}>
+        <option value="">(no project)</option>
+        {projects.map(p => (<option key={p.id} value={p.id}>{p.name}</option>))}
+      </ProjectSelect>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg)" }}>
+        <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)} style={{ accentColor: accent }} />
+        Auto-approve every tool call (only for personal bots)
+      </label>
+
+      <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.4 }}>
+        Use a <b>dedicated mailbox</b> — the bridge marks inbound mail as read as
+        it processes it. For Gmail/Outlook, create an <b>app password</b>.
+      </div>
+
+      <div style={{ flex: 1 }} />
+
+      <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>{statusText}</div>
+      {saveError ? (<div style={{ fontSize: 11, color: "#ffb0b0" }}>{saveError}</div>) : null}
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button onClick={persist} style={{ height: BTN_HEIGHT, padding: "0 14px", background: "var(--bg-surface)", color: "var(--fg)", border: "1px solid var(--border-strong)", borderRadius: 8, fontWeight: 600, fontSize: 12, cursor: "pointer" }} title="Persist to ~/.owllm/bridge_config.json">💾 Save</button>
+        {savedFlash ? (<span style={{ fontSize: 11, color: "#4caf50", fontWeight: 700 }}>✓ Saved</span>) : null}
+        <div style={{ flex: 1 }} />
+        <button disabled={active} onClick={async () => { await persist(); setStatus("starting"); setEmailStartedInStorage(true); }} style={startButtonStyle(accent, "#ec9b5f", active)}>Start</button>
+        <button disabled={!active} onClick={() => { setStatus("stopped"); setEmailStartedInStorage(false); }} style={stopButtonStyle(!active)}>Stop</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
 // Page — Qt BridgesPage._build_ui (bridges_page.py:589)
 // ---------------------------------------------------------------------
 export default function BridgesPage() {
@@ -1021,6 +1206,7 @@ export default function BridgesPage() {
         <TelegramCard />
         <DiscordCard />
         <SlackCard />
+        <EmailCard />
         <WhatsAppCard />
       </div>
     </div>

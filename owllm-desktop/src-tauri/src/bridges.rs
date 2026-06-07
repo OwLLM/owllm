@@ -104,6 +104,58 @@ pub struct SlackConfig {
     pub auto_approve: bool,
 }
 
+/// Email — IMAP receive + SMTP send. No public URL. Use a DEDICATED mailbox:
+/// the bridge marks inbound mail \Seen as it processes it. `allowed_senders`
+/// are bare addresses; empty = accept any sender.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct EmailConfig {
+    #[serde(default)]
+    pub imap_host: String,
+    #[serde(default = "default_imap_port")]
+    pub imap_port: u16,
+    #[serde(default)]
+    pub smtp_host: String,
+    #[serde(default = "default_smtp_port")]
+    pub smtp_port: u16,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub password: String,
+    /// Reply-from address; defaults to `username` when empty.
+    #[serde(default)]
+    pub from_addr: String,
+    #[serde(default)]
+    pub allowed_senders: Vec<String>,
+    #[serde(default = "default_poll_seconds")]
+    pub poll_seconds: u32,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub auto_approve: bool,
+}
+
+fn default_imap_port() -> u16 { 993 }
+fn default_smtp_port() -> u16 { 587 }
+fn default_poll_seconds() -> u32 { 30 }
+
+impl Default for EmailConfig {
+    fn default() -> Self {
+        Self {
+            imap_host: String::new(),
+            imap_port: default_imap_port(),
+            smtp_host: String::new(),
+            smtp_port: default_smtp_port(),
+            username: String::new(),
+            password: String::new(),
+            from_addr: String::new(),
+            allowed_senders: Vec::new(),
+            poll_seconds: default_poll_seconds(),
+            project_id: String::new(),
+            auto_approve: false,
+        }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct BridgeConfigs {
     #[serde(default)]
@@ -114,6 +166,8 @@ pub struct BridgeConfigs {
     pub discord: DiscordConfig,
     #[serde(default)]
     pub slack: SlackConfig,
+    #[serde(default)]
+    pub email: EmailConfig,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -160,6 +214,13 @@ pub async fn save_discord_config(cfg: DiscordConfig) -> Result<(), String> {
 pub async fn save_slack_config(cfg: SlackConfig) -> Result<(), String> {
     let mut current = load_bridge_configs().await?;
     current.slack = cfg;
+    write(&current)
+}
+
+#[tauri::command]
+pub async fn save_email_config(cfg: EmailConfig) -> Result<(), String> {
+    let mut current = load_bridge_configs().await?;
+    current.email = cfg;
     write(&current)
 }
 

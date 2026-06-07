@@ -67,6 +67,14 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # for the JS-side Attachment carrier. No-default-features keeps the dep
 # lean (we don't need the alloc/std features for this single helper).
 base64 = "0.22"
+# Email bridge: IMAP receive + SMTP send. native-tls here resolves to schannel
+# on Windows (a system lib — no OpenSSL on the build host, consistent with the
+# rustls choice above). mailparse pulls the plain-text body out of the fetched
+# MIME message; lettre sends replies over SMTP.
+imap = "2.4"
+native-tls = "0.2"
+mailparse = "0.15"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "native-tls", "builder", "hostname"] }
 # URL-encode HF model ids before stitching them into REST paths so
 # names like "TheBloke/Llama-2-7B-GGUF" survive the round-trip (the
 # slash needs to stay as a slash for the route, but anything else

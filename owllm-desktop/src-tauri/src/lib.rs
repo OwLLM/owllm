@@ -24,6 +24,7 @@ mod data_layer;
 mod dialog;
 mod directives;
 mod discord;
+mod email;
 mod env_manager;
 mod finetuning;
 mod fleet;
@@ -171,6 +172,9 @@ pub fn run() {
             bridges::save_whatsapp_config,
             bridges::save_discord_config,
             bridges::save_slack_config,
+            bridges::save_email_config,
+            email::email_poll,
+            email::email_send,
             discord::discord_send_message,
             discord::discord_download_file,
             slack::slack_open_connection,

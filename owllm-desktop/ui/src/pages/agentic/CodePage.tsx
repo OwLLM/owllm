@@ -21,6 +21,7 @@ import {
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
   isWslPath, type WslStatus, type WslIsolation, type WslProject, type WslToolchain,
 } from "./wslIsolation";
+import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, type GithubStatus } from "./github";
 
 type Msg = {
   role: "user" | "assistant" | "tool";
@@ -377,6 +378,50 @@ export default function CodePage() {
     }
   };
 
+  // ---- GitHub connection --------------------------------------------------
+  // Agents run inside the sandbox; the host's GitHub creds don't cross in.
+  // Connecting writes the token into the sandbox git/gh credential store so an
+  // isolated agent can clone private repos and push.
+  const [gh, setGh] = useState<GithubStatus | null>(null);
+  const [ghToken, setGhToken] = useState("");
+  const [ghBusy, setGhBusy] = useState(false);
+  const [ghMsg, setGhMsg] = useState("");
+  const [ghOpen, setGhOpen] = useState(false);
+  useEffect(() => {
+    let dead = false;
+    githubStatus().then((s) => { if (!dead) setGh(s); });
+    return () => { dead = true; };
+  }, []);
+  const connectGithub = async () => {
+    if (ghBusy || !ghToken.trim()) return;
+    setGhBusy(true);
+    setGhMsg("Validating token with GitHub…");
+    try {
+      const r = await githubConnect(ghToken.trim(), wslStat?.defaultDistro ?? null);
+      setGh({ connected: true, login: r.login });
+      setGhToken("");
+      setGhOpen(false);
+      const where = [r.sandboxConfigured && "WSL", r.hostConfigured && "Windows"].filter(Boolean).join(" + ");
+      setGhMsg(`✓ Connected as ${r.login}${where ? ` — git ready in ${where}` : ""}${r.ghConfigured ? " (gh logged in)" : ""}.`);
+    } catch (e) {
+      setGhMsg(`Couldn't connect: ${e}`);
+    } finally {
+      setGhBusy(false);
+    }
+  };
+  const disconnectGithub = async () => {
+    setGhBusy(true);
+    try {
+      await githubDisconnect(wslStat?.defaultDistro ?? null);
+      setGh({ connected: false, login: null });
+      setGhMsg("Disconnected — token removed and credentials scrubbed.");
+    } catch (e) {
+      setGhMsg(`Couldn't disconnect: ${e}`);
+    } finally {
+      setGhBusy(false);
+    }
+  };
+
   // Auto-provision the in-WSL toolchain so an isolated project "just works"
   // without the user ever pressing "Install agent tools". Fires once per app
   // session, in the background, ONLY when isolation is ON, a distro exists, and
@@ -687,6 +732,46 @@ export default function CodePage() {
                 {toolchain && !(toolchain.claude && toolchain.codex) ? " — for cloud agents, log in once inside WSL (e.g. `wsl -d Ubuntu -- claude /login`)." : "."}
               </div>
             )}
+
+            {/* Connect GitHub — so isolated agents can clone private repos and
+                push from inside the sandbox (host creds don't cross the WSL
+                boundary). Also configures the Windows host for normal folders. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
+              {gh?.connected ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span style={{ fontSize: 13, color: "var(--fg-strong)", flex: 1, minWidth: 0 }}>🐙 GitHub connected as <b>{gh.login}</b></span>
+                  <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 28, padding: "0 10px", color: "var(--fg-muted)" }}>Disconnect</button>
+                </div>
+              ) : ghOpen ? (
+                <>
+                  <div style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.5 }}>
+                    Paste a GitHub token so agents can clone private repos and push from inside the sandbox.
+                  </div>
+                  <button onClick={() => { invoke("shell_open_url", { url: GITHUB_TOKEN_URL }).catch(() => {}); }} style={{ ...btn, height: 30, justifyContent: "center", color: "var(--accent)" }}>
+                    ↗ Create a token on GitHub (repo scope)
+                  </button>
+                  <input
+                    type="password"
+                    value={ghToken}
+                    onChange={(e) => setGhToken(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }}
+                    placeholder="ghp_… or github_pat_…"
+                    style={{ height: 34, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }}
+                  />
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={connectGithub} disabled={ghBusy || !ghToken.trim()} style={{ ...btn, height: 34, flex: 1, justifyContent: "center", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: ghBusy || !ghToken.trim() ? 0.6 : 1 }}>
+                      {ghBusy ? "⏳ Connecting…" : "Connect GitHub"}
+                    </button>
+                    <button onClick={() => { setGhOpen(false); setGhMsg(""); }} disabled={ghBusy} style={{ ...btn, height: 34, padding: "0 12px", color: "var(--fg-muted)" }}>Cancel</button>
+                  </div>
+                </>
+              ) : (
+                <button onClick={() => { setGhOpen(true); setGhMsg(""); }} style={{ ...btn, height: 34, justifyContent: "center", color: "var(--fg-strong)" }}>
+                  🐙 Connect GitHub — clone &amp; push from inside the sandbox
+                </button>
+              )}
+              {ghMsg && <div style={{ fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
+            </div>
 
             {isolation.enabled && wslStat?.available ? (
               <>

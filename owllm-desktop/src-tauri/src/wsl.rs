@@ -173,6 +173,14 @@ fn run_wsl_capture(distro: &str, script: &str) -> Result<String, String> {
     run_wsl_user(distro, None, script)
 }
 
+/// Public wrapper: run a bash script in the distro as the normal user and
+/// capture output. Used by sibling modules (e.g. `github` credential setup)
+/// that need to configure things inside the sandbox without duplicating the
+/// wsl.exe plumbing. Errors on a nonzero exit.
+pub fn run_in_distro(distro: &str, script: &str) -> Result<String, String> {
+    run_wsl_capture(distro, script)
+}
+
 /// List installed distros. `wsl.exe -l -q` emits UTF-16LE; we strip null
 /// bytes to recover the ASCII names rather than pulling in a UTF-16 decoder.
 fn list_distros() -> Vec<String> {
@@ -361,6 +369,11 @@ pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
                   export UV_INSTALL_DIR=/usr/local/bin; \
                   (curl -LsSf https://astral.sh/uv/install.sh | sh) || true; \
                   npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli || true; \
+                  (command -v gh >/dev/null 2>&1 || ( \
+                     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+                     chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
+                     echo \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" > /etc/apt/sources.list.d/github-cli.list && \
+                     apt-get update -y && apt-get install -y gh )) || true; \
                   echo PROVISION_DONE";
     tokio::task::spawn_blocking(move || run_wsl_user(&distro, Some("root"), script))
         .await

@@ -41,6 +41,7 @@ mod pty;
 mod recommendations;
 mod server;
 mod skill_library;
+mod github;
 mod slack;
 mod telegram;
 mod webhook;
@@ -275,6 +276,9 @@ pub fn run() {
             wsl::wsl_toolchain_status,
             wsl::wsl_provision,
             wsl::wsl_install,
+            github::github_status,
+            github::github_connect,
+            github::github_disconnect,
             mcp::mcp_load_config,
             mcp::mcp_save_config,
             mcp::mcp_start_server,

@@ -158,6 +158,25 @@ fn dangerous_shell_command(cmd: &str) -> Option<&'static str> {
 /// the source tree. Created on first request.
 #[tauri::command]
 pub async fn chat_scratch_dir() -> Result<String, String> {
+    // ISOLATION: the fine-tuning chat has tools too, so when WSL isolation is
+    // on its scratch dir is a WSL project — writes + shell run inside the
+    // distro (off the Windows disk), exactly like the Code page and agents.
+    // wsl_create_project spawns wsl.exe (blocking), so run it off the async
+    // executor; fall back to the host scratch dir if WSL provisioning fails.
+    let iso = crate::wsl::wsl_isolation_get();
+    if iso.enabled {
+        let distro = iso.distro.clone();
+        let provisioned = tokio::task::spawn_blocking(move || {
+            crate::wsl::wsl_create_project("chat-scratch".to_string(), distro)
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok());
+        if let Some(p) = provisioned {
+            return Ok(p.unc_path);
+        }
+        // else: WSL unavailable/failed — fall through to the host scratch dir.
+    }
     let home = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .ok_or_else(|| "no home directory (USERPROFILE/HOME unset)".to_string())?;
@@ -230,6 +249,35 @@ pub async fn tool_shell_exec(
         return Err(format!(
             "blocked dangerous command ({reason}). If you truly need this, run it yourself outside the agent."
         ));
+    }
+
+    // ISOLATION: if the project cwd lives inside a WSL distro (a
+    // \\wsl.localhost\<distro>\... path), run the command INSIDE that distro so
+    // it executes as a Linux process that cannot touch the Windows C: drive.
+    // This is also required for correctness — cmd.exe cannot `cd` into a UNC
+    // path, so a WSL-hosted project would otherwise fail outright. Every
+    // surface (Code page, agentic teams, fine-tuning chat) inherits this the
+    // moment its project lives in WSL.
+    if let Some((distro, linux_cwd)) =
+        cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+    {
+        let script = crate::wsl::build_wsl_bash_script(&linux_cwd, &command);
+        let mut wcmd = Command::new("wsl.exe");
+        wcmd.arg("-d").arg(&distro).arg("--").arg("bash").arg("-lc").arg(&script);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            wcmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let output = wcmd
+            .output()
+            .await
+            .map_err(|e| format!("spawn wsl shell: {e}"))?;
+        return Ok(ShellResult {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: output.status.code().unwrap_or(-1),
+        });
     }
 
     let cwd_path = cwd

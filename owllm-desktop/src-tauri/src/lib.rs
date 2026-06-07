@@ -23,6 +23,7 @@ mod code;
 mod data_layer;
 mod dialog;
 mod directives;
+mod discord;
 mod env_manager;
 mod finetuning;
 mod fleet;
@@ -39,6 +40,7 @@ mod recommendations;
 mod server;
 mod skill_library;
 mod telegram;
+mod wsl;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -165,6 +167,9 @@ pub fn run() {
             bridges::load_bridge_configs,
             bridges::save_telegram_config,
             bridges::save_whatsapp_config,
+            bridges::save_discord_config,
+            discord::discord_send_message,
+            discord::discord_download_file,
             code::launch_external_editor,
             dialog::pick_folder,
             dialog::pick_file,
@@ -239,6 +244,11 @@ pub fn run() {
             agent_tools::tool_web_search,
             agent_tools::tool_web_fetch,
             agent_tools::tool_screenshot_url,
+            wsl::wsl_status,
+            wsl::wsl_isolation_get,
+            wsl::wsl_isolation_set,
+            wsl::wsl_create_project,
+            wsl::wsl_list_projects,
             mcp::mcp_load_config,
             mcp::mcp_save_config,
             mcp::mcp_start_server,

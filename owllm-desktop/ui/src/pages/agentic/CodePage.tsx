@@ -15,6 +15,10 @@ import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import { streamLocalChat, streamChatCompletion, providerFor, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
+import {
+  wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
+  isWslPath, type WslStatus, type WslIsolation, type WslProject,
+} from "./wslIsolation";
 
 type Msg = {
   role: "user" | "assistant" | "tool";
@@ -172,6 +176,11 @@ export default function CodePage() {
   }
   // Recent projects, for the onboarding screen shown when no folder is open.
   const [recents, setRecents] = useState<string[]>(getCodeRecents);
+  // WSL isolation: when on, projects live inside Ubuntu and the model's tools
+  // run there, off the Windows drive. `wslStat` reports availability.
+  const [wslStat, setWslStat] = useState<WslStatus | null>(null);
+  const [isolation, setIsolation] = useState<WslIsolation>({ enabled: false, distro: null });
+  const [wslProjects, setWslProjects] = useState<WslProject[]>([]);
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
   const { messages, tasks, workspace, modelId, draft, busy, status } = stx;
   function setField<K extends keyof CodeState>(k: K, v: CodeState[K] | ((p: CodeState[K]) => CodeState[K])) {
@@ -260,6 +269,53 @@ export default function CodePage() {
   };
 
   const removeRecent = (ws: string) => setRecents(forgetCodeProject(ws));
+
+  // Load WSL availability + isolation setting on mount; refresh the isolated
+  // project list when isolation is on so onboarding can offer them.
+  const refreshWslProjects = (iso: WslIsolation, st: WslStatus | null) => {
+    if (iso.enabled && st?.available) {
+      wslListProjects(iso.distro ?? st.defaultDistro).then(setWslProjects).catch(() => setWslProjects([]));
+    } else {
+      setWslProjects([]);
+    }
+  };
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      const [st, iso] = await Promise.all([wslStatus(), wslIsolationGet()]);
+      if (dead) return;
+      setWslStat(st);
+      setIsolation(iso);
+      refreshWslProjects(iso, st);
+    })();
+    return () => { dead = true; };
+  }, []);
+
+  const toggleIsolation = async (on: boolean) => {
+    try {
+      const iso = await wslIsolationSet(on, wslStat?.defaultDistro ?? null);
+      setIsolation(iso);
+      refreshWslProjects(iso, wslStat);
+    } catch (e) {
+      setStatus(`Couldn't change isolation: ${e}`);
+    }
+  };
+
+  // Create a fresh isolated project inside Ubuntu and open it.
+  const newIsolatedProject = async () => {
+    if (busy) return;
+    const name = window.prompt("Name for the isolated project (created inside Ubuntu, off your Windows drive):", "project");
+    if (!name) return;
+    try {
+      setStatus("Creating isolated project in WSL…");
+      const p = await wslCreateProject(name, wslStat?.defaultDistro ?? null);
+      openWorkspace(p.uncPath);
+    } catch (e) {
+      setStatus(`Couldn't create isolated project: ${e}`);
+    }
+  };
+
+  const isolatedNow = isWslPath(workspace);
 
   // Start (or reuse) the llama-server for the chosen model; return its port.
   async function ensureServer(id: string): Promise<number | null> {
@@ -479,12 +535,74 @@ export default function CodePage() {
                 its conversation and plan come back when you reopen it.
               </div>
             </div>
-            <button
-              onClick={pickWorkspace}
-              style={{ ...btn, height: 46, fontSize: 14, fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", justifyContent: "center" }}
-            >
-              📁 Open a project folder…
-            </button>
+            {/* Isolation toggle — run the model's tools inside Ubuntu (WSL),
+                off the Windows drive. */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: wslStat?.available ? "pointer" : "default", flex: 1, minWidth: 0 }}>
+                <input
+                  type="checkbox"
+                  checked={isolation.enabled}
+                  disabled={!wslStat?.available}
+                  onChange={(e) => toggleIsolation(e.target.checked)}
+                />
+                <span style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>🛡 Isolate agents in Linux (WSL)</div>
+                  <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+                    {wslStat?.available
+                      ? `Tools run inside ${wslStat.defaultDistro ?? "Ubuntu"} — they cannot touch your Windows files.`
+                      : "WSL not detected on this PC — tools will run on Windows (NOT isolated)."}
+                  </div>
+                </span>
+              </label>
+            </div>
+
+            {isolation.enabled && !wslStat?.available && (
+              <div style={{ fontSize: 12, lineHeight: 1.5, color: "#06080d", background: "#ffd97a", border: "1px solid #d9b24a", borderRadius: 8, padding: "10px 12px" }}>
+                ⚠ Isolation is ON but <b>WSL isn't installed</b>, so agents will run directly on Windows (your existing safety guards still apply, but they are not sandboxed). Install it with <code>wsl --install</code> in an admin PowerShell, reboot, then reopen this page.
+              </div>
+            )}
+
+            {isolation.enabled && wslStat?.available ? (
+              <>
+                <button
+                  onClick={newIsolatedProject}
+                  style={{ ...btn, height: 46, fontSize: 14, fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", justifyContent: "center" }}
+                >
+                  🛡 New isolated project (in {wslStat.defaultDistro ?? "Ubuntu"})
+                </button>
+                <button
+                  onClick={pickWorkspace}
+                  title="Open a folder on your Windows drive — NOT isolated"
+                  style={{ ...btn, height: 38, justifyContent: "center", color: "var(--fg-muted)" }}
+                >
+                  📁 Open a Windows folder (not isolated)
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={pickWorkspace}
+                style={{ ...btn, height: 46, fontSize: 14, fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", justifyContent: "center" }}
+              >
+                📁 Open a project folder…
+              </button>
+            )}
+
+            {isolation.enabled && wslProjects.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>🛡 Isolated projects</div>
+                {wslProjects.map((p) => (
+                  <button
+                    key={p.uncPath}
+                    onClick={() => openWorkspace(p.uncPath)}
+                    title={p.linuxPath}
+                    style={{ display: "block", textAlign: "left", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", color: "var(--fg)", cursor: "pointer" }}
+                  >
+                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)" }}>🐧 {p.name}</div>
+                    <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.linuxPath}</div>
+                  </button>
+                ))}
+              </div>
+            )}
             {recents.length > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>Recent projects</div>
@@ -528,6 +646,19 @@ export default function CodePage() {
         <span style={{ fontWeight: 700, fontSize: 14, color: "var(--fg-strong)" }}>Code</span>
         <button onClick={pickWorkspace} disabled={busy} title={workspace || "Switch project folder"} style={btn}>📁 {wsShort}</button>
         <button onClick={closeProject} disabled={busy} title="Close this project (back to project list — files stay on disk)" style={btn}>✕</button>
+        <span
+          title={isolatedNow
+            ? "Isolated: tools run inside Linux (WSL) and cannot touch your Windows files."
+            : "Not isolated: tools run on Windows (write-jail + dangerous-command guard still apply)."}
+          style={{
+            fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, whiteSpace: "nowrap",
+            background: isolatedNow ? "rgba(127,240,197,0.15)" : "rgba(255,217,122,0.15)",
+            color: isolatedNow ? "#7ff0c5" : "#ffd97a",
+            border: `1px solid ${isolatedNow ? "#7ff0c5" : "#ffd97a"}55`,
+          }}
+        >
+          {isolatedNow ? "🛡 Isolated" : "⚠ Not isolated"}
+        </span>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
         <div style={{ minWidth: 260, maxWidth: 360 }}>

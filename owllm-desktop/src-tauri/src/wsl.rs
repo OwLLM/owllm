@@ -63,6 +63,19 @@ pub struct WslIsolation {
     pub distro: Option<String>,
 }
 
+/// Which agent-toolchain programs are installed INSIDE the distro (real Linux
+/// installs — Windows binaries leaking through /mnt/c are NOT counted).
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WslToolchain {
+    pub node: bool,
+    pub uv: bool,
+    pub git: bool,
+    pub claude: bool,
+    pub codex: bool,
+    pub gemini: bool,
+}
+
 // ---- pure helpers (unit-tested; used by agent_tools shell routing) --------
 
 /// Parse a Windows path and, if it points inside a WSL distro, return
@@ -95,12 +108,17 @@ pub fn build_wsl_bash_script(linux_cwd: &str, command: &str) -> String {
 
 // ---- internal command runners --------------------------------------------
 
-/// Run a bash script in the given distro and capture stdout. Errors on a
-/// nonzero exit (with stderr). Synchronous; callers are commands or run on a
-/// blocking context. Always uses CREATE_NO_WINDOW so no console flashes.
-fn run_wsl_capture(distro: &str, script: &str) -> Result<String, String> {
+/// Run a bash script in the given distro (optionally as a specific user, e.g.
+/// "root" for passwordless apt) and capture stdout+stderr. Errors on a nonzero
+/// exit. Synchronous; callers are commands or run on a blocking context. Always
+/// uses CREATE_NO_WINDOW so no console flashes.
+fn run_wsl_user(distro: &str, user: Option<&str>, script: &str) -> Result<String, String> {
     let mut cmd = std::process::Command::new("wsl.exe");
-    cmd.arg("-d").arg(distro).arg("--").arg("bash").arg("-lc").arg(script);
+    cmd.arg("-d").arg(distro);
+    if let Some(u) = user {
+        cmd.arg("-u").arg(u);
+    }
+    cmd.arg("--").arg("bash").arg("-lc").arg(script);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
@@ -108,14 +126,20 @@ fn run_wsl_capture(distro: &str, script: &str) -> Result<String, String> {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let out = cmd.output().map_err(|e| format!("spawn wsl: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {
         return Err(format!(
             "wsl exited {}: {}",
             out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).trim()
+            if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    Ok(if stderr.trim().is_empty() { stdout } else { format!("{stdout}\n{stderr}") })
+}
+
+fn run_wsl_capture(distro: &str, script: &str) -> Result<String, String> {
+    run_wsl_user(distro, None, script)
 }
 
 /// List installed distros. `wsl.exe -l -q` emits UTF-16LE; we strip null
@@ -258,9 +282,85 @@ pub fn wsl_list_projects(distro: Option<String>) -> Result<Vec<WslProject>, Stri
     Ok(v)
 }
 
+/// Report which toolchain programs are really installed inside the distro.
+/// A binary that resolves under /mnt/ is a Windows leak via PATH interop — it
+/// would NOT run correctly in the distro, so it doesn't count as installed.
+#[tauri::command]
+pub fn wsl_toolchain_status(distro: Option<String>) -> WslToolchain {
+    let Some(distro) = distro.or_else(|| wsl_status().default_distro) else {
+        return WslToolchain::default();
+    };
+    let script = "for c in node uv git claude codex gemini; do \
+                  p=$(command -v \"$c\" 2>/dev/null); \
+                  if [ -n \"$p\" ] && [ \"${p#/mnt/}\" = \"$p\" ]; then echo \"$c=1\"; else echo \"$c=0\"; fi; \
+                  done";
+    let out = run_wsl_capture(&distro, script).unwrap_or_default();
+    let mut t = WslToolchain::default();
+    for line in out.lines() {
+        match line.trim() {
+            "node=1" => t.node = true,
+            "uv=1" => t.uv = true,
+            "git=1" => t.git = true,
+            "claude=1" => t.claude = true,
+            "codex=1" => t.codex = true,
+            "gemini=1" => t.gemini = true,
+            _ => {}
+        }
+    }
+    t
+}
+
+/// Install the agent toolchain inside the distro: node/npm, git, curl, uv, and
+/// the subscription CLIs (Claude/Codex/Gemini). Runs as root — WSL allows
+/// `-u root` with no password, so apt needs no sudo prompt. Idempotent: apt
+/// install / npm -g are safe to re-run. Long-running (downloads); run off the
+/// async executor. Returns the install log. The CLIs still need a one-time
+/// login INSIDE the distro (`wsl -d <distro> -- claude /login`, etc.) — paid
+/// credentials can't be copied from the Windows install.
+#[tauri::command]
+pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
+    let distro = distro
+        .or_else(|| wsl_status().default_distro)
+        .ok_or_else(|| "no WSL distro available — install WSL first".to_string())?;
+    // Heredoc-free script (single bash -lc arg). `|| true` on the optional
+    // pieces so a CLI npm hiccup doesn't fail the whole provision.
+    let script = "set -e; export DEBIAN_FRONTEND=noninteractive; \
+                  apt-get update -y; \
+                  apt-get install -y nodejs npm git curl ca-certificates; \
+                  export UV_INSTALL_DIR=/usr/local/bin; \
+                  (curl -LsSf https://astral.sh/uv/install.sh | sh) || true; \
+                  npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli || true; \
+                  echo PROVISION_DONE";
+    tokio::task::spawn_blocking(move || run_wsl_user(&distro, Some("root"), script))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Install WSL itself on a PC that doesn't have it. `wsl --install` needs admin
+/// elevation and a reboot, so we launch it elevated via PowerShell
+/// (Start-Process -Verb RunAs → UAC prompt). Returns once launched; the actual
+/// install + reboot is user-driven.
+#[tauri::command]
+pub fn wsl_install() -> Result<String, String> {
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args([
+        "-NoProfile",
+        "-Command",
+        "Start-Process wsl -ArgumentList '--install' -Verb RunAs",
+    ]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd.spawn().map_err(|e| format!("launch `wsl --install`: {e}"))?;
+    Ok("Launching WSL install — accept the UAC prompt, then reboot when it finishes. Reopen OwLLM afterwards.".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn parses_modern_unc() {

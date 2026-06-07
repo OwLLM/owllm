@@ -18,7 +18,8 @@ import { streamLocalChat, streamChatCompletion, providerFor, type ModelInfo, typ
 import type { ToolCall, ToolExecResult } from "./localTools";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
-  isWslPath, type WslStatus, type WslIsolation, type WslProject,
+  wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
+  isWslPath, type WslStatus, type WslIsolation, type WslProject, type WslToolchain,
 } from "./wslIsolation";
 
 type Msg = {
@@ -206,6 +207,8 @@ export default function CodePage() {
   const [wslStat, setWslStat] = useState<WslStatus | null>(null);
   const [isolation, setIsolation] = useState<WslIsolation>({ enabled: false, distro: null });
   const [wslProjects, setWslProjects] = useState<WslProject[]>([]);
+  const [toolchain, setToolchain] = useState<WslToolchain | null>(null);
+  const [provisionLog, setProvisionLog] = useState<string>("");
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
   const { messages, tasks, workspace, modelId, draft, busy, status } = stx;
   function setField<K extends keyof CodeState>(k: K, v: CodeState[K] | ((p: CodeState[K]) => CodeState[K])) {
@@ -317,6 +320,13 @@ export default function CodePage() {
       setWslProjects([]);
     }
   };
+  const refreshToolchain = (st: WslStatus | null) => {
+    if (st?.available) {
+      wslToolchainStatus(st.defaultDistro).then(setToolchain).catch(() => setToolchain(null));
+    } else {
+      setToolchain(null);
+    }
+  };
   useEffect(() => {
     let dead = false;
     (async () => {
@@ -325,9 +335,37 @@ export default function CodePage() {
       setWslStat(st);
       setIsolation(iso);
       refreshWslProjects(iso, st);
+      refreshToolchain(st);
     })();
     return () => { dead = true; };
   }, []);
+
+  // Install WSL itself (elevated; needs reboot) for PCs without it.
+  const installWsl = async () => {
+    try {
+      setStatus("Launching WSL install — accept the UAC prompt, then reboot…");
+      const msg = await wslInstall();
+      setStatus(msg);
+    } catch (e) {
+      setStatus(`Couldn't launch WSL install: ${e}`);
+    }
+  };
+
+  // Provision node/uv/git + the agent CLIs inside the distro. Long-running.
+  const provisionTools = async () => {
+    if (provisionLog === "running") return;
+    setProvisionLog("running");
+    setStatus("Installing agent tools in Ubuntu (node, uv, git, CLIs)… this can take a few minutes.");
+    try {
+      await wslProvision(wslStat?.defaultDistro ?? null);
+      setProvisionLog("done");
+      setStatus("Agent tools installed in Ubuntu. For cloud agents, log in once inside WSL (e.g. `wsl -d Ubuntu -- claude /login`).");
+      refreshToolchain(wslStat);
+    } catch (e) {
+      setProvisionLog("");
+      setStatus(`Tool install failed: ${e}`);
+    }
+  };
 
   const toggleIsolation = async (on: boolean) => {
     try {
@@ -594,9 +632,39 @@ export default function CodePage() {
               </label>
             </div>
 
-            {isolation.enabled && !wslStat?.available && (
-              <div style={{ fontSize: 12, lineHeight: 1.5, color: "#06080d", background: "#ffd97a", border: "1px solid #d9b24a", borderRadius: 8, padding: "10px 12px" }}>
-                ⚠ Isolation is ON but <b>WSL isn't installed</b>, so agents will run directly on Windows (your existing safety guards still apply, but they are not sandboxed). Install it with <code>wsl --install</code> in an admin PowerShell, reboot, then reopen this page.
+            {!wslStat?.available && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, color: "#06080d", background: "#ffd97a", border: "1px solid #d9b24a", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: 12, lineHeight: 1.5 }}>
+                  ⚠ <b>WSL isn't installed</b>, so agents would run directly on Windows (guards still apply, but not sandboxed). Install WSL + Ubuntu to sandbox them.
+                </div>
+                <button
+                  onClick={installWsl}
+                  style={{ ...btn, height: 36, justifyContent: "center", background: "#06080d", color: "#ffd97a", border: "none", fontWeight: 700 }}
+                >
+                  ⬇ Install WSL (needs admin + reboot)
+                </button>
+              </div>
+            )}
+
+            {wslStat?.available && !toolchainReady(toolchain) && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: 12, lineHeight: 1.5, color: "var(--fg-muted)" }}>
+                  Isolation works now for local models. For <b>agent tooling + cloud CLIs inside WSL</b>, install the toolchain (node, uv, git, Claude/Codex/Gemini) into {wslStat.defaultDistro ?? "Ubuntu"}.
+                </div>
+                <button
+                  onClick={provisionTools}
+                  disabled={provisionLog === "running"}
+                  style={{ ...btn, height: 36, justifyContent: "center", fontWeight: 700, opacity: provisionLog === "running" ? 0.6 : 1 }}
+                >
+                  {provisionLog === "running" ? "⏳ Installing agent tools…" : "⬇ Install agent tools in " + (wslStat.defaultDistro ?? "Ubuntu")}
+                </button>
+              </div>
+            )}
+
+            {wslStat?.available && toolchainReady(toolchain) && (
+              <div style={{ fontSize: 11, color: "#7ff0c5" }}>
+                ✓ Agent toolchain ready in {wslStat.defaultDistro ?? "Ubuntu"}
+                {toolchain && !(toolchain.claude && toolchain.codex) ? " — for cloud agents, log in once inside WSL (e.g. `wsl -d Ubuntu -- claude /login`)." : "."}
               </div>
             )}
 

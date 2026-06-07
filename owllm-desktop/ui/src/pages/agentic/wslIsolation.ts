@@ -27,6 +27,15 @@ export type WslIsolation = {
   distro: string | null;
 };
 
+export type WslToolchain = {
+  node: boolean;
+  uv: boolean;
+  git: boolean;
+  claude: boolean;
+  codex: boolean;
+  gemini: boolean;
+};
+
 /// True when a workspace path lives inside a WSL distro (i.e. is isolated).
 export function isWslPath(p: string | null | undefined): boolean {
   if (!p) return false;
@@ -64,4 +73,27 @@ export async function wslListProjects(distro?: string | null): Promise<WslProjec
   } catch {
     return [];
   }
+}
+
+export async function wslToolchainStatus(distro?: string | null): Promise<WslToolchain> {
+  try {
+    return await invoke<WslToolchain>("wsl_toolchain_status", { distro: distro ?? null });
+  } catch {
+    return { node: false, uv: false, git: false, claude: false, codex: false, gemini: false };
+  }
+}
+
+/// Install node/uv/git + the agent CLIs inside the distro. Long-running.
+export async function wslProvision(distro?: string | null): Promise<string> {
+  return invoke<string>("wsl_provision", { distro: distro ?? null });
+}
+
+/// Launch `wsl --install` (elevated; needs a reboot). For PCs without WSL.
+export async function wslInstall(): Promise<string> {
+  return invoke<string>("wsl_install");
+}
+
+/// Core toolchain ready = node + git present (the minimum for agent tooling).
+export function toolchainReady(t: WslToolchain | null): boolean {
+  return !!t && t.node && t.git;
 }

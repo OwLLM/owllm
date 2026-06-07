@@ -886,10 +886,12 @@ pub async fn claude_cli_complete(
         // WSL-isolated project → run `claude` inside the distro; else the
         // Windows CLI exactly as before. (On Windows, npm installs claude.cmd;
         // push_arg routes multi-line args via raw_arg quoting for batch shims.)
-        let mut cmd = if let Some((distro, linux_cwd)) =
-            cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+        let mut cmd = if let Some((exe, sargs)) =
+            crate::sandbox::program_argv(cwd.as_deref(), "claude", &args)
         {
-            crate::wsl::wsl_program_command(&distro, &linux_cwd, "claude", &args)
+            let mut c = Command::new(exe);
+            c.args(sargs);
+            c
         } else {
             let exe = find_claude_cli()
                 .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
@@ -985,13 +987,16 @@ pub async fn codex_cli_complete(
             "read-only".into(),
         ];
 
-        // WSL-isolated project → run `codex` inside the distro and read the
-        // final message from stdout (a Windows -o tempfile path is meaningless
-        // inside the distro, so we omit -o on this path).
-        if let Some((distro, linux_cwd)) = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc) {
+        // Isolated project → run `codex` inside the sandbox and read the final
+        // message from stdout (a Windows -o tempfile path is meaningless inside
+        // the sandbox, so we omit -o on this path).
+        if let Some((exe, sargs)) = {
             let mut args = base_args.clone();
             args.push(prompt.clone());
-            let mut cmd = crate::wsl::wsl_program_command(&distro, &linux_cwd, "codex", &args);
+            crate::sandbox::program_argv(cwd.as_deref(), "codex", &args)
+        } {
+            let mut cmd = Command::new(exe);
+            cmd.args(sargs);
             cmd.stdin(Stdio::piped());
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
@@ -1218,10 +1223,12 @@ pub async fn claude_cli_stream(
 
         // WSL-isolated project → run `claude` inside the distro; else the
         // Windows CLI exactly as before (no regression for normal folders).
-        let mut cmd = if let Some((distro, linux_cwd)) =
-            cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+        let mut cmd = if let Some((exe, sargs)) =
+            crate::sandbox::program_argv(cwd.as_deref(), "claude", &args)
         {
-            crate::wsl::wsl_program_command(&distro, &linux_cwd, "claude", &args)
+            let mut c = Command::new(exe);
+            c.args(sargs);
+            c
         } else {
             let exe = find_claude_cli()
                 .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
@@ -1511,10 +1518,12 @@ pub async fn codex_cli_stream(
         ];
 
         // WSL-isolated project → run `codex` inside the distro; else Windows CLI.
-        let mut cmd = if let Some((distro, linux_cwd)) =
-            cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+        let mut cmd = if let Some((exe, sargs)) =
+            crate::sandbox::program_argv(cwd.as_deref(), "codex", &args)
         {
-            crate::wsl::wsl_program_command(&distro, &linux_cwd, "codex", &args)
+            let mut c = Command::new(exe);
+            c.args(sargs);
+            c
         } else {
             let exe = find_codex_cli().ok_or_else(|| {
                 "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)"
@@ -2261,10 +2270,12 @@ pub async fn gemini_cli_complete(
         args.push(composed);
 
         // WSL-isolated project → run `gemini` inside the distro; else Windows CLI.
-        let mut cmd = if let Some((distro, linux_cwd)) =
-            cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+        let mut cmd = if let Some((exe, sargs)) =
+            crate::sandbox::program_argv(cwd.as_deref(), "gemini", &args)
         {
-            crate::wsl::wsl_program_command(&distro, &linux_cwd, "gemini", &args)
+            let mut c = Command::new(exe);
+            c.args(sargs);
+            c
         } else {
             let exe = find_gemini_cli()
                 .ok_or_else(|| "gemini CLI not found on PATH — install gemini-cli (https://github.com/google-gemini/gemini-cli) first".to_string())?;
@@ -2356,10 +2367,12 @@ pub async fn kimi_cli_complete(
         args.push(composed);
 
         // WSL-isolated project → run `kimi` inside the distro; else Windows CLI.
-        let mut cmd = if let Some((distro, linux_cwd)) =
-            cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
+        let mut cmd = if let Some((exe, sargs)) =
+            crate::sandbox::program_argv(cwd.as_deref(), "kimi", &args)
         {
-            crate::wsl::wsl_program_command(&distro, &linux_cwd, "kimi", &args)
+            let mut c = Command::new(exe);
+            c.args(sargs);
+            c
         } else {
             let exe = find_kimi_cli()
                 .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code (https://github.com/MoonshotAI/kimi-cli) first".to_string())?;

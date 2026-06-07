@@ -121,6 +121,7 @@ pub fn sh_quote(s: &str) -> String {
 /// The CLI must be installed + logged-in inside the distro (Phase-2 provision
 /// installs it; the user logs in once with `wsl -d <distro> -- <cli> login`).
 /// Caller still configures stdin/stdout/stderr + creation_flags.
+#[allow(dead_code)] // superseded by crate::sandbox::program_argv; kept for reference/tests
 pub fn wsl_program_command(
     distro: &str,
     linux_cwd: &str,

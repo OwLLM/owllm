@@ -42,6 +42,7 @@ mod recommendations;
 mod server;
 mod skill_library;
 mod github;
+mod sandbox;
 mod slack;
 mod telegram;
 mod webhook;

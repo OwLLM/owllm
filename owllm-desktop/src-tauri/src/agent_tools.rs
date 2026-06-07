@@ -251,19 +251,16 @@ pub async fn tool_shell_exec(
         ));
     }
 
-    // ISOLATION: if the project cwd lives inside a WSL distro (a
-    // \\wsl.localhost\<distro>\... path), run the command INSIDE that distro so
-    // it executes as a Linux process that cannot touch the Windows C: drive.
-    // This is also required for correctness — cmd.exe cannot `cd` into a UNC
-    // path, so a WSL-hosted project would otherwise fail outright. Every
-    // surface (Code page, agentic teams, fine-tuning chat) inherits this the
-    // moment its project lives in WSL.
-    if let Some((distro, linux_cwd)) =
-        cwd.as_deref().and_then(crate::wsl::parse_wsl_unc)
-    {
-        let script = crate::wsl::build_wsl_bash_script(&linux_cwd, &command);
-        let mut wcmd = Command::new("wsl.exe");
-        wcmd.arg("-d").arg(&distro).arg("--").arg("bash").arg("-lc").arg(&script);
+    // ISOLATION: route the command into the sandbox — WSL on Windows,
+    // bubblewrap on Linux, Lima on macOS — when the project lives in an
+    // isolated workspace, so it runs as a process that cannot touch the host
+    // home/system. On Windows this is also required for correctness: cmd.exe
+    // cannot `cd` into a \\wsl.localhost UNC path. Every surface (Code page,
+    // agentic teams, fine-tuning chat) inherits this the moment its project is
+    // isolated. None → the command falls through to the native host path below.
+    if let Some((exe, sargs)) = crate::sandbox::shell_argv(cwd.as_deref(), &command) {
+        let mut wcmd = Command::new(exe);
+        wcmd.args(sargs);
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -272,7 +269,7 @@ pub async fn tool_shell_exec(
         let output = wcmd
             .output()
             .await
-            .map_err(|e| format!("spawn wsl shell: {e}"))?;
+            .map_err(|e| format!("spawn sandbox shell: {e}"))?;
         return Ok(ShellResult {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),

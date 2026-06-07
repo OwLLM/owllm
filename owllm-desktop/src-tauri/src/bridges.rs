@@ -71,12 +71,29 @@ impl Default for WhatsAppConfig {
 fn default_webhook_port() -> u16 { 8911 }
 fn default_webhook_host() -> String { "0.0.0.0".to_string() }
 
+/// Discord — connects OUTBOUND via the gateway WebSocket (no public URL).
+/// `allowed_channel_ids` are Discord snowflakes (kept as strings: they exceed
+/// JS safe-integer range). Empty = any channel/DM the bot can see.
+#[derive(Default, Serialize, Deserialize, Clone)]
+pub struct DiscordConfig {
+    #[serde(default)]
+    pub bot_token: String,
+    #[serde(default)]
+    pub allowed_channel_ids: Vec<String>,
+    #[serde(default)]
+    pub project_id: String,
+    #[serde(default)]
+    pub auto_approve: bool,
+}
+
 #[derive(Default, Serialize, Deserialize, Clone)]
 pub struct BridgeConfigs {
     #[serde(default)]
     pub telegram: TelegramConfig,
     #[serde(default)]
     pub whatsapp: WhatsAppConfig,
+    #[serde(default)]
+    pub discord: DiscordConfig,
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -109,6 +126,13 @@ pub async fn save_telegram_config(cfg: TelegramConfig) -> Result<(), String> {
 pub async fn save_whatsapp_config(cfg: WhatsAppConfig) -> Result<(), String> {
     let mut current = load_bridge_configs().await?;
     current.whatsapp = cfg;
+    write(&current)
+}
+
+#[tauri::command]
+pub async fn save_discord_config(cfg: DiscordConfig) -> Result<(), String> {
+    let mut current = load_bridge_configs().await?;
+    current.discord = cfg;
     write(&current)
 }
 

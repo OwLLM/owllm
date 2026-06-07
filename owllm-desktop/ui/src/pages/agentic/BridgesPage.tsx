@@ -34,7 +34,13 @@ type WhatsAppConfig = {
   project_id: string;
   auto_approve: boolean;
 };
-type BridgeConfigs = { telegram: TelegramConfig; whatsapp: WhatsAppConfig };
+type DiscordConfig = {
+  bot_token: string;
+  allowed_channel_ids: string[];
+  project_id: string;
+  auto_approve: boolean;
+};
+type BridgeConfigs = { telegram: TelegramConfig; whatsapp: WhatsAppConfig; discord: DiscordConfig };
 
 // Qt: 10x10 dot, running color #4caf50, stopped color #5a6376
 // (bridges_page.py:350-352).
@@ -288,7 +294,7 @@ function TelegramCard() {
       display: "flex",
       flexDirection: "column",
       gap: 10,
-      minWidth: 0,
+      minWidth: 320,
     }}>
       {/* Header — icon + title + subtitle + dot (Qt 101-121). */}
       <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
@@ -503,7 +509,7 @@ function WhatsAppCard() {
       display: "flex",
       flexDirection: "column",
       gap: 10,
-      minWidth: 0,
+      minWidth: 320,
     }}>
       {/* Header — Qt 380-399. WhatsApp uses the 💬 glyph (no color tint
           on the icon — Qt line 384). */}
@@ -633,6 +639,219 @@ function WhatsAppCard() {
 }
 
 // ---------------------------------------------------------------------
+// Discord card — connects outbound via the gateway WebSocket (no public URL).
+// Drives DiscordBridgeRunner the same way TelegramCard drives its runner:
+// a sessionStorage flag + an "owllm:discord:status" event, with live state
+// fed back via "owllm:discord:runtime".
+// ---------------------------------------------------------------------
+const DISCORD_STARTED_KEY = "owllm:discord:started";
+
+function isDiscordStartedFromStorage(): boolean {
+  try { return sessionStorage.getItem(DISCORD_STARTED_KEY) === "1"; } catch { return false; }
+}
+function setDiscordStartedInStorage(running: boolean) {
+  try { sessionStorage.setItem(DISCORD_STARTED_KEY, running ? "1" : "0"); } catch {}
+  try { window.dispatchEvent(new CustomEvent("owllm:discord:status", { detail: running ? "running" : "stopped" })); } catch {}
+}
+
+function DiscordCard() {
+  const [token, setToken] = useState("");
+  const [channelIds, setChannelIds] = useState("");
+  const [project, setProject] = useState("");
+  const [autoApprove, setAutoApprove] = useState(false);
+  const [status, setStatus] = useState<BridgeStatus>(() =>
+    isDiscordStartedFromStorage() ? "running" : "stopped"
+  );
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [projects, setProjects] = useState<ProjectLite[]>([]);
+  const [lastError, setLastError] = useState<string>("");
+  const [seenIds, setSeenIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    let dead = false;
+    invoke<BridgeConfigs>("load_bridge_configs").then(c => {
+      if (dead) return;
+      const d = c.discord;
+      setToken(d.bot_token || "");
+      setChannelIds((d.allowed_channel_ids || []).join(", "));
+      setProject(d.project_id || "");
+      setAutoApprove(!!d.auto_approve);
+    }).catch(() => {});
+    invoke<ProjectLite[]>("list_projects").then(rows => {
+      if (dead) return;
+      setProjects(rows.map(r => ({ id: r.id, name: r.name })));
+    }).catch(() => {});
+    return () => { dead = true; };
+  }, []);
+
+  useEffect(() => {
+    const onRuntime = (e: Event) => {
+      const d = (e as CustomEvent).detail || {};
+      if (d.status === "running" || d.status === "stopped" || d.status === "error") setStatus(d.status);
+      if (typeof d.lastError === "string") setLastError(d.lastError);
+      if (typeof d.seenChannelId === "string") {
+        setSeenIds(prev => prev.includes(d.seenChannelId) ? prev : [...prev, d.seenChannelId]);
+      }
+      if (d.status === "running") setLastError("");
+    };
+    window.addEventListener("owllm:discord:runtime", onRuntime as EventListener);
+    return () => window.removeEventListener("owllm:discord:runtime", onRuntime as EventListener);
+  }, []);
+
+  async function persist() {
+    setSaveError(null);
+    const ids = channelIds.split(",").map(s => s.trim()).filter(Boolean);
+    try {
+      await invoke("save_discord_config", {
+        cfg: {
+          bot_token: token,
+          allowed_channel_ids: ids,
+          project_id: project,
+          auto_approve: autoApprove,
+        } as DiscordConfig,
+      });
+      setSavedFlash(true);
+      window.setTimeout(() => setSavedFlash(false), 1600);
+    } catch (e) {
+      setSaveError(String(e));
+    }
+  }
+
+  // Discord blurple.
+  const accent = "#5865F2";
+  const running = status === "running";
+  const active = status === "starting" || status === "running";
+  const existingIds = new Set(channelIds.split(",").map(s => s.trim()).filter(Boolean));
+  const allowListActive = existingIds.size > 0;
+
+  const statusText = running
+    ? `Running — gateway connected.${allowListActive ? " · allow-list active" : " · open (any channel the bot sees)"}`
+    : status === "starting"
+      ? "Starting — connecting to the Discord gateway."
+    : status === "error"
+      ? `Error — ${lastError || "Gateway not connected."}`
+      : (lastError ? `Stopped — last error: ${lastError}` : "Stopped.");
+
+  function addSeenId(cid: string) {
+    if (existingIds.has(cid)) return;
+    const next = [...existingIds, cid].join(", ");
+    setChannelIds(next);
+  }
+
+  return (
+    <div style={{
+      flex: 1,
+      background: "linear-gradient(180deg, #2b2d52 0%, #0e1117 60%, #0e1117 100%)",
+      border: "none",
+      borderRadius: 16,
+      padding: "18px 20px",
+      boxShadow: "0 4px 24px rgba(0,0,0,0.43)",
+      display: "flex",
+      flexDirection: "column",
+      gap: 10,
+      minWidth: 320,
+    }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+        <div style={{ fontSize: 26, color: accent, lineHeight: 1, fontFamily: "Segoe UI Emoji, sans-serif" }}>🎮</div>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: accent }}>Discord</div>
+          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+            Bot token · gateway WebSocket · no public URL needed
+          </div>
+        </div>
+        <StatusDot state={status} />
+      </div>
+
+      <SectionLabel text="Bot token" />
+      <BridgeInput
+        type="password"
+        placeholder="Bot token from the Developer Portal"
+        value={token}
+        onChange={e => setToken(e.target.value)}
+      />
+
+      <SectionLabel text="Allowed channel IDs (optional)" />
+      <BridgeInput
+        placeholder="(leave empty = any channel) · 112233445566778899, …"
+        value={channelIds}
+        onChange={e => setChannelIds(e.target.value)}
+      />
+
+      {seenIds.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span style={{ color: "var(--fg-muted)", fontSize: 11 }}>Seen channels:</span>
+          {seenIds.slice(0, 5).map(cid => {
+            const known = existingIds.has(cid);
+            return (
+              <button
+                key={cid}
+                disabled={known}
+                onClick={() => addSeenId(cid)}
+                style={{
+                  background: "rgba(88,101,242,0.18)",
+                  color: accent, border: "none", borderRadius: 10,
+                  padding: "2px 8px", fontSize: 10,
+                  cursor: known ? "default" : "pointer", opacity: known ? 0.6 : 1,
+                }}
+              >
+                {cid}{known ? "  ✓" : "  + add"}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      <SectionLabel text="Project" />
+      <ProjectSelect value={project} onChange={e => setProject(e.target.value)}>
+        <option value="">(no project)</option>
+        {projects.map(p => (<option key={p.id} value={p.id}>{p.name}</option>))}
+      </ProjectSelect>
+
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg)" }}>
+        <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)} style={{ accentColor: accent }} />
+        Auto-approve every tool call (only for personal bots)
+      </label>
+
+      <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.4 }}>
+        Enable the <b>Message Content</b> intent for this bot in the Discord
+        Developer Portal, or message text arrives empty.
+      </div>
+
+      <div style={{ flex: 1 }} />
+
+      <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>{statusText}</div>
+      {saveError ? (<div style={{ fontSize: 11, color: "#ffb0b0" }}>{saveError}</div>) : null}
+
+      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button
+          onClick={persist}
+          style={{
+            height: BTN_HEIGHT, padding: "0 14px",
+            background: "var(--bg-surface)", color: "var(--fg)",
+            border: "1px solid var(--border-strong)", borderRadius: 8,
+            fontWeight: 600, fontSize: 12, cursor: "pointer",
+          }}
+          title="Persist these settings to ~/.owllm/bridge_config.json"
+        >💾 Save</button>
+        {savedFlash ? (<span style={{ fontSize: 11, color: "#4caf50", fontWeight: 700 }}>✓ Saved</span>) : null}
+        <div style={{ flex: 1 }} />
+        <button
+          disabled={active}
+          onClick={async () => { await persist(); setStatus("starting"); setDiscordStartedInStorage(true); }}
+          style={startButtonStyle(accent, "#6b78f5", active)}
+        >Start</button>
+        <button
+          disabled={!active}
+          onClick={() => { setStatus("stopped"); setDiscordStartedInStorage(false); }}
+          style={stopButtonStyle(!active)}
+        >Stop</button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------
 // Page — Qt BridgesPage._build_ui (bridges_page.py:589)
 // ---------------------------------------------------------------------
 export default function BridgesPage() {
@@ -658,9 +877,10 @@ export default function BridgesPage() {
         URL into the Meta App webhook config.
       </div>
 
-      {/* Two cards side by side, spacing 18 (Qt 610-616). */}
-      <div style={{ flex: 1, display: "flex", gap: 18, minHeight: 0 }}>
+      {/* Bridge cards — wrap so more than two fit on narrow widths. */}
+      <div style={{ flex: 1, display: "flex", flexWrap: "wrap", gap: 18, minHeight: 0, alignContent: "flex-start" }}>
         <TelegramCard />
+        <DiscordCard />
         <WhatsAppCard />
       </div>
     </div>

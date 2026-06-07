@@ -801,6 +801,39 @@ export default function AppShell() {
       .catch(() => setOverlayFrame(false));
   }, []);
 
+  // First-run MCP provisioning: give the app a keyless web-search tool out of
+  // the box. DuckDuckGo (`uvx duckduckgo-mcp-server`) needs no API key and no
+  // card, so web search "just works" without the user wiring up Brave. Runs
+  // ONCE (guarded), in the background, and only when NO search server is
+  // configured yet — it never clobbers a user's own MCP setup. mcp_install_pack
+  // installs `uv` if missing; the server itself lazy-starts on first tool use.
+  // On failure (offline, etc.) the guard is left unset so the next launch
+  // retries; the user can always add a search server on the MCP page.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const GUARD = "owllm:mcp:default_search_provisioned";
+    try { if (localStorage.getItem(GUARD)) return; } catch { /* ignore */ }
+    let cancelled = false;
+    (async () => {
+      try {
+        const cfg = await invoke<{ servers?: Array<{ name?: string; args?: string[] }> }>("mcp_load_config");
+        if (cancelled) return;
+        const servers = cfg?.servers ?? [];
+        const hasSearch = servers.some((s) => {
+          const hay = `${s.name ?? ""} ${(s.args ?? []).join(" ")}`.toLowerCase();
+          return /(search|duckduckgo|ddg|brave|tavily|exa)/.test(hay);
+        });
+        if (!hasSearch) {
+          await invoke("mcp_install_pack", {
+            servers: [{ name: "duckduckgo", command: "uvx", args: ["duckduckgo-mcp-server"], env: {}, enabled: true }],
+          });
+        }
+        try { localStorage.setItem(GUARD, "1"); } catch { /* ignore */ }
+      } catch { /* best-effort — retry next launch */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
   // Compose the visible page list: Core always, plus the active
   // mode's pages, plus Advanced's pages when advancedOpen.
   // Order mirrors Qt: base buttons first, then group buttons, then

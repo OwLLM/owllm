@@ -438,10 +438,11 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     name: "web_search",
     aliases: ["search", "search_web", "websearch", "google", "duckduckgo", "ddg", "brave_search", "internet_search", "web"],
     description:
-      "Web search via Brave Search API. Returns up to 5 results " +
-      "(title + url + description). Requires BRAVE_API_KEY saved in " +
-      "Accounts. Use this to find competitor products, prior art, " +
-      "documentation, or background research.",
+      "Search the web. Returns up to 5 results (title, url, snippet). " +
+      "Automatically uses whichever search backend is configured — an " +
+      "installed search MCP server (e.g. DuckDuckGo, which needs no key) is " +
+      "preferred, falling back to Brave Search when a key is saved. Use this " +
+      "to find competitor products, prior art, documentation, or research.",
     args: [
       { name: "query", required: true, description: "Search query string.", aliases: ["q", "search_query", "text", "search", "term", "keywords"] },
       { name: "max_results", required: false, description: "How many results to return (1-20, default 5).", aliases: ["maxResults", "limit", "count", "num_results", "n", "top_k"] },

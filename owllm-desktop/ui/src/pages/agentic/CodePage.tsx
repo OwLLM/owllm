@@ -377,6 +377,26 @@ export default function CodePage() {
     }
   };
 
+  // Auto-provision the in-WSL toolchain so an isolated project "just works"
+  // without the user ever pressing "Install agent tools". Fires once per app
+  // session, in the background, ONLY when isolation is ON, a distro exists, and
+  // the core tools (node/git) are missing — so it never re-runs apt on a
+  // healthy machine. A failed run (offline, apt lock) simply retries on the
+  // next launch (the ref resets), and the manual button stays as a fallback.
+  // WSL itself can't be auto-installed (needs UAC elevation + a reboot), so the
+  // "Install WSL" button remains the one explicit step on PCs without it.
+  const autoProvisionTried = useRef(false);
+  useEffect(() => {
+    if (autoProvisionTried.current) return;
+    if (!isolation?.enabled || !wslStat?.available) return;
+    if (toolchain === null) return;            // status not loaded yet
+    if (toolchainReady(toolchain)) return;     // already provisioned
+    if (provisionLog === "running") return;
+    autoProvisionTried.current = true;
+    void provisionTools();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isolation?.enabled, wslStat?.available, toolchain, provisionLog]);
+
   // Create a fresh isolated project inside Ubuntu and open it.
   const newIsolatedProject = async () => {
     if (busy) return;

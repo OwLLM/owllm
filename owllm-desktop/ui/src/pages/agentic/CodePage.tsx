@@ -644,8 +644,8 @@ export default function CodePage() {
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 16 }}>🦉</span>
         <span style={{ fontWeight: 700, fontSize: 14, color: "var(--fg-strong)" }}>Code</span>
-        <button onClick={pickWorkspace} disabled={busy} title={workspace || "Switch project folder"} style={btn}>📁 {wsShort}</button>
-        <button onClick={closeProject} disabled={busy} title="Close this project (back to project list — files stay on disk)" style={btn}>✕</button>
+        <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
+        <button onClick={pickWorkspace} disabled={busy} title={workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
         <span
           title={isolatedNow
             ? "Isolated: tools run inside Linux (WSL) and cannot touch your Windows files."

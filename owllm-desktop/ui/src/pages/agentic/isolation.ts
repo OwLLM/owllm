@@ -52,6 +52,13 @@ export async function sandboxProvision(): Promise<string> {
   return invoke<string>("sandbox_provision");
 }
 
+/// Mirror the host's CLI logins (codex/claude/gemini) into the sandbox so
+/// isolated agents are authenticated — without a separate in-sandbox login.
+/// Returns the providers that were synced. WSL (Windows) only for now.
+export async function sandboxSyncLogins(distro?: string | null): Promise<string[]> {
+  return invoke<string[]>("sandbox_sync_logins", { distro: distro ?? null });
+}
+
 /// Human label for an engine kind.
 export function engineLabel(kind: string): string {
   switch (kind) {

@@ -284,6 +284,7 @@ pub fn run() {
             sandbox::sandbox_create_project,
             sandbox::sandbox_list_projects,
             sandbox::sandbox_provision,
+            sandbox::sandbox_sync_logins,
             mcp::mcp_load_config,
             mcp::mcp_save_config,
             mcp::mcp_start_server,

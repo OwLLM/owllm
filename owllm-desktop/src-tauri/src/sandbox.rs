@@ -553,9 +553,68 @@ pub async fn sandbox_provision() -> Result<String, String> {
     }
 }
 
+// ---- login sync (host CLI creds → sandbox) --------------------------------
+
+#[cfg(windows)]
+fn win_to_mnt(p: &str) -> Result<String, String> {
+    let p = p.replace('\\', "/");
+    let b = p.as_bytes();
+    if b.len() >= 2 && b[1] == b':' {
+        Ok(format!("/mnt/{}{}", (b[0] as char).to_ascii_lowercase(), &p[2..]))
+    } else {
+        Err(format!("not a Windows path: {p}"))
+    }
+}
+
+/// Mirror the user's host CLI logins (codex/claude/gemini) into the sandbox so
+/// isolated agents are authenticated without a separate in-sandbox login —
+/// the same consented host→sandbox bridge as GitHub connect. Windows copies
+/// the auth files from the Windows home (reached via /mnt) into the distro home.
+#[cfg(windows)]
+fn sync_logins_impl(distro: Option<String>) -> Result<Vec<String>, String> {
+    let distro = distro
+        .or_else(|| crate::wsl::wsl_status().default_distro)
+        .ok_or_else(|| "no WSL distro".to_string())?;
+    let home = std::env::var("USERPROFILE").map_err(|_| "no USERPROFILE".to_string())?;
+    let m = win_to_mnt(&home)?;
+    let script = format!(
+        "syn=''; mkdir -p ~/.codex ~/.claude ~/.gemini; \
+         if [ -f '{m}/.codex/auth.json' ]; then cp -f '{m}/.codex/auth.json' ~/.codex/ && cp -f '{m}/.codex/config.toml' ~/.codex/ 2>/dev/null; chmod 600 ~/.codex/auth.json 2>/dev/null; syn=\"$syn codex\"; fi; \
+         if [ -f '{m}/.claude/.credentials.json' ]; then cp -f '{m}/.claude/.credentials.json' ~/.claude/.credentials.json; cp -f '{m}/.claude.json' ~/.claude.json 2>/dev/null; chmod 600 ~/.claude/.credentials.json 2>/dev/null; syn=\"$syn claude\"; fi; \
+         if [ -f '{m}/.gemini/oauth_creds.json' ]; then cp -f '{m}/.gemini/oauth_creds.json' ~/.gemini/ 2>/dev/null; syn=\"$syn gemini\"; fi; \
+         echo \"SYNCED:$syn\""
+    );
+    let out = crate::wsl::run_in_distro(&distro, &script)?;
+    Ok(out
+        .lines()
+        .find_map(|l| l.strip_prefix("SYNCED:"))
+        .unwrap_or("")
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect())
+}
+
+#[cfg(not(windows))]
+fn sync_logins_impl(_distro: Option<String>) -> Result<Vec<String>, String> {
+    Err("login sync is currently implemented for WSL (Windows) only".to_string())
+}
+
+/// Returns the list of providers whose login was mirrored (e.g. ["codex","claude"]).
+#[tauri::command]
+pub fn sandbox_sync_logins(distro: Option<String>) -> Result<Vec<String>, String> {
+    sync_logins_impl(distro)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn win_path_to_mnt() {
+        assert_eq!(win_to_mnt("C:\\Users\\mc").unwrap(), "/mnt/c/Users/mc");
+        assert_eq!(win_to_mnt("D:\\a\\b").unwrap(), "/mnt/d/a/b");
+    }
 
     #[test]
     fn iso_root_matching() {

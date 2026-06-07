@@ -22,6 +22,7 @@ import {
   isWslPath, type WslStatus, type WslIsolation, type WslProject, type WslToolchain,
 } from "./wslIsolation";
 import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, type GithubStatus } from "./github";
+import { sandboxSyncLogins } from "./isolation";
 
 type Msg = {
   role: "user" | "assistant" | "tool";
@@ -360,11 +361,34 @@ export default function CodePage() {
     try {
       await wslProvision(wslStat?.defaultDistro ?? null);
       setProvisionLog("done");
-      setStatus("Agent tools installed in Ubuntu. For cloud agents, log in once inside WSL (e.g. `wsl -d Ubuntu -- claude /login`).");
       refreshToolchain(wslStat);
+      // Auto-mirror host CLI logins so cloud agents are authenticated inside
+      // the sandbox without a separate login (best-effort).
+      try {
+        const synced = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
+        setStatus(synced.length
+          ? `Agent tools installed; synced logins: ${synced.join(", ")}.`
+          : "Agent tools installed. Log in to a provider via Accounts, then click 'Sync logins'.");
+      } catch {
+        setStatus("Agent tools installed in Ubuntu.");
+      }
     } catch (e) {
       setProvisionLog("");
       setStatus(`Tool install failed: ${e}`);
+    }
+  };
+
+  // Mirror host CLI logins (codex/claude/gemini) into the sandbox so isolated
+  // cloud agents are authenticated — no separate in-WSL login needed.
+  const syncLogins = async () => {
+    setStatus("Mirroring your Windows logins into the sandbox…");
+    try {
+      const synced = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
+      setStatus(synced.length
+        ? `✓ Synced logins: ${synced.join(", ")} — isolated agents are authenticated.`
+        : "No host logins found. Log in to a provider via Accounts first, then retry.");
+    } catch (e) {
+      setStatus(`Login sync failed: ${e}`);
     }
   };
 
@@ -727,9 +751,17 @@ export default function CodePage() {
             )}
 
             {wslStat?.available && toolchainReady(toolchain) && (
-              <div style={{ fontSize: 11, color: "#7ff0c5" }}>
-                ✓ Agent toolchain ready in {wslStat.defaultDistro ?? "Ubuntu"}
-                {toolchain && !(toolchain.claude && toolchain.codex) ? " — for cloud agents, log in once inside WSL (e.g. `wsl -d Ubuntu -- claude /login`)." : "."}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ fontSize: 11, color: "#7ff0c5" }}>
+                  ✓ Agent toolchain ready in {wslStat.defaultDistro ?? "Ubuntu"}
+                </div>
+                <button
+                  onClick={syncLogins}
+                  title="Copy your codex/claude/gemini logins from Windows into the sandbox so isolated cloud agents are authenticated"
+                  style={{ ...btn, height: 32, justifyContent: "center", color: "var(--fg-strong)" }}
+                >
+                  🔑 Sync my cloud logins into the sandbox
+                </button>
               </div>
             )}
 

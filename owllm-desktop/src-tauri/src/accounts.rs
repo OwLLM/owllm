@@ -446,6 +446,60 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
     ProbeResult { ok, detail, elapsed_ms: start.elapsed().as_millis() as u64 }
 }
 
+/// Probe whether a backend's credentials are present INSIDE the WSL sandbox —
+/// i.e. whether an *isolated* agent will be able to use it. Complements
+/// accounts_test_probe (which tests the Windows host). CLIs → the in-distro
+/// login file; API keys → the key in the sandbox env file (~/.owllm/agent_env.sh).
+#[tauri::command]
+pub async fn accounts_test_probe_wsl(backend: String) -> ProbeResult {
+    let start = Instant::now();
+    let (ok, detail) = tokio::task::spawn_blocking(move || wsl_probe(&backend))
+        .await
+        .unwrap_or((false, "probe failed".to_string()));
+    ProbeResult { ok, detail, elapsed_ms: start.elapsed().as_millis() as u64 }
+}
+
+#[cfg(windows)]
+fn wsl_probe(backend: &str) -> (bool, String) {
+    let Some(distro) = crate::wsl::wsl_status().default_distro else {
+        return (false, "No WSL distro installed".to_string());
+    };
+    let check = match backend {
+        "claude_cli" => "[ -f ~/.claude/.credentials.json ]".to_string(),
+        "codex_cli" => "[ -f ~/.codex/auth.json ]".to_string(),
+        "kimi_cli" => "[ -f ~/.kimi/config.toml ]".to_string(),
+        "gemini_cli" => "[ -d ~/.gemini ] && [ -n \"$(ls -A ~/.gemini 2>/dev/null)\" ]".to_string(),
+        other => {
+            let var = match other {
+                "claude_api" => "ANTHROPIC_API_KEY",
+                "openai_api" => "OPENAI_API_KEY",
+                "moonshot_api" => "MOONSHOT_API_KEY",
+                "deepseek_api" => "DEEPSEEK_API_KEY",
+                "xai_api" => "XAI_API_KEY",
+                "groq_api" => "GROQ_API_KEY",
+                "perplexity_api" => "PERPLEXITY_API_KEY",
+                "mistral_api" => "MISTRAL_API_KEY",
+                "together_api" => "TOGETHER_API_KEY",
+                "gemini_api" => "GEMINI_API_KEY|GOOGLE_API_KEY",
+                "huggingface" => "HF_TOKEN",
+                _ => return (false, format!("No WSL check for '{other}'")),
+            };
+            format!("grep -qE '{var}' ~/.owllm/agent_env.sh 2>/dev/null")
+        }
+    };
+    let script = format!("if {check}; then echo YES; else echo NO; fi");
+    match crate::wsl::run_in_distro(&distro, &script) {
+        Ok(o) if o.contains("YES") => (true, "Present in WSL sandbox — isolated agents can use it".to_string()),
+        Ok(_) => (false, "Not in the WSL sandbox yet — open an isolated project or click 'Sync logins'".to_string()),
+        Err(e) => (false, format!("WSL check failed: {e}")),
+    }
+}
+
+#[cfg(not(windows))]
+fn wsl_probe(_backend: &str) -> (bool, String) {
+    (false, "WSL test is available on Windows only".to_string())
+}
+
 /// Real CLI round-trip. Runs the CLI with a tiny prompt and reads its
 /// stdout + stderr. Heuristic for "subscription works":
 ///   * exit 0 AND stdout non-empty AND no subscription-error pattern

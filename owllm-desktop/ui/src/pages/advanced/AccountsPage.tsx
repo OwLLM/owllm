@@ -398,8 +398,10 @@ const PROVIDERS: ProviderSpec[] = [
 type CardState = {
   connected: boolean;
   testing: boolean;
-  testText: string;
+  testText: string;       // Windows / host probe result
   testOk: boolean | null;
+  wslText: string;        // WSL sandbox probe result (isolated agents)
+  wslOk: boolean | null;
   installing: boolean; // true while cli_install_stream is in-flight
 };
 const initialCardState: CardState = {
@@ -407,6 +409,8 @@ const initialCardState: CardState = {
   testing: false,
   testText: "",
   testOk: null,
+  wslText: "",
+  wslOk: null,
   installing: false,
 };
 
@@ -595,7 +599,15 @@ function RouteRow({
           fontSize: 11, marginLeft: 17, wordBreak: "break-word",
           color: state.testing ? "#dcb0ff" : state.testOk ? "#4caf50" : "#ff8c8c",
         }}>
-          {state.testing ? "Running probe…" : state.testText}
+          {state.testing ? "Running probe…" : <><b>Windows:</b> {state.testText}</>}
+        </div>
+      )}
+      {!state.testing && state.wslText && (
+        <div style={{
+          fontSize: 11, marginLeft: 17, wordBreak: "break-word",
+          color: state.wslOk ? "#4caf50" : "#ff8c8c",
+        }}>
+          <b>Linux (WSL):</b> {state.wslText}
         </div>
       )}
       <div style={{ display: "flex", gap: 8, marginLeft: 17, marginTop: 4 }}>
@@ -1133,7 +1145,7 @@ export default function AccountsPage() {
   }
 
   async function handleTest(route: RouteSpec) {
-    setCardState(route.key, { testing: true, testText: "", testOk: null });
+    setCardState(route.key, { testing: true, testText: "", testOk: null, wslText: "", wslOk: null });
     logInfo(route.backend, `Running live round-trip probe (this calls the actual API / CLI)…`);
     try {
       // accounts_test_probe_live actually round-trips: API keys hit
@@ -1145,11 +1157,21 @@ export default function AccountsPage() {
       const prefix = r.ok ? "✓" : "✗";
       const line = `${prefix}  ${r.detail}  ·  ${r.elapsed_ms} ms`;
       setCardState(route.key, { testing: false, testText: line, testOk: r.ok });
-      logInfo(route.backend, line);
+      logInfo(route.backend, `Windows: ${line}`);
     } catch (e: any) {
       const line = `✗  ${String(e?.message ?? e)}`;
       setCardState(route.key, { testing: false, testText: line, testOk: false });
-      logInfo(route.backend, line);
+      logInfo(route.backend, `Windows: ${line}`);
+    }
+    // Also probe the WSL sandbox — tells the user whether ISOLATED agents can
+    // use this provider (creds mirrored into the distro). Non-fatal.
+    try {
+      const w = await invoke<ProbeResult>("accounts_test_probe_wsl", { backend: route.backend });
+      const wline = `${w.ok ? "✓" : "✗"}  ${w.detail}`;
+      setCardState(route.key, { wslText: wline, wslOk: w.ok });
+      logInfo(route.backend, `WSL sandbox: ${wline}`);
+    } catch (e: any) {
+      setCardState(route.key, { wslText: `✗  ${String(e?.message ?? e)}`, wslOk: false });
     }
   }
 

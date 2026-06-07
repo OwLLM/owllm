@@ -59,6 +59,22 @@ export async function sandboxSyncLogins(distro?: string | null): Promise<string[
   return invoke<string[]>("sandbox_sync_logins", { distro: distro ?? null });
 }
 
+/// Which provider logins are present INSIDE the sandbox now (e.g.
+/// ["codex","claude","keys"]). Used for account status + to confirm a sync.
+export async function sandboxLoginStatus(distro?: string | null): Promise<string[]> {
+  try {
+    return await invoke<string[]>("sandbox_login_status", { distro: distro ?? null });
+  } catch {
+    return [];
+  }
+}
+
+/// Convert a project between isolated and host (copies the files across the
+/// boundary and returns the new project to open; the original is left intact).
+export async function sandboxConvertProject(current: string): Promise<SandboxProject> {
+  return invoke<SandboxProject>("sandbox_convert_project", { current });
+}
+
 /// Human label for an engine kind.
 export function engineLabel(kind: string): string {
   switch (kind) {

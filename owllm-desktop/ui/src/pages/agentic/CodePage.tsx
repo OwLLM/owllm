@@ -24,7 +24,8 @@ import {
 import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, type GithubStatus } from "./github";
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
-  sandboxProvision, engineLabel, type SandboxStatus, type SandboxProject,
+  sandboxProvision, sandboxLoginStatus, sandboxConvertProject,
+  engineLabel, type SandboxStatus, type SandboxProject,
 } from "./isolation";
 
 type Msg = {
@@ -423,6 +424,31 @@ export default function CodePage() {
     }
   };
 
+  // Convert the current project between isolated and host (copies files across
+  // the boundary; the original is left intact). Opens the new copy.
+  const [convertBusy, setConvertBusy] = useState(false);
+  const convertProject = async () => {
+    if (convertBusy || !workspace) return;
+    const toIso = !isWslPath(workspace);
+    const ok = window.confirm(
+      toIso
+        ? "Copy this project INTO the Linux sandbox (isolated) and open the copy?\n\nThe original folder stays where it is."
+        : "Copy this isolated project OUT to a normal folder (NOT isolated) and open the copy?\n\nThe isolated original stays in the sandbox.",
+    );
+    if (!ok) return;
+    setConvertBusy(true);
+    setStatus(toIso ? "Copying into the sandbox…" : "Copying out of the sandbox…");
+    try {
+      const p = await sandboxConvertProject(workspace);
+      setStatus(`Converted — opened ${p.name}.`);
+      openWorkspace(p.path);
+    } catch (e) {
+      setStatus(`Convert failed: ${e}`);
+    } finally {
+      setConvertBusy(false);
+    }
+  };
+
   const toggleIsolation = async (on: boolean) => {
     try {
       const iso = await wslIsolationSet(on, wslStat?.defaultDistro ?? null);
@@ -504,6 +530,7 @@ export default function CodePage() {
   const [npIsolate, setNpIsolate] = useState(true);
   const [npFolder, setNpFolder] = useState("");
   const [npBusy, setNpBusy] = useState(false);
+  const [npLogins, setNpLogins] = useState<string[]>([]); // providers present in the sandbox
 
   const openNewProject = () => {
     setNpName("");
@@ -511,6 +538,9 @@ export default function CodePage() {
     setNpIsolate(!!sbox?.available); // default isolated whenever an engine exists
     setNpBusy(false);
     setNpOpen(true);
+    // Account status inside the sandbox (which logins are synced).
+    if (sbox?.available) sandboxLoginStatus(wslStat?.defaultDistro ?? null).then(setNpLogins).catch(() => setNpLogins([]));
+    else setNpLogins([]);
   };
   const npBrowseFolder = async () => {
     try {
@@ -972,6 +1002,31 @@ export default function CodePage() {
                     <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>Lets the agent clone private repos and push from inside the sandbox.</div>
                   </div>
 
+                  {/* Cloud account status inside the sandbox (#8) */}
+                  {sbox?.available && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Cloud accounts in sandbox</label>
+                      {npLogins.filter((l) => l !== "keys").length > 0 ? (
+                        <div style={{ fontSize: 12, color: "#7ff0c5" }}>
+                          ✓ {npLogins.filter((l) => l !== "keys").join(", ")} synced{npLogins.includes("keys") ? " · API keys synced" : ""}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
+                          {npLogins.includes("keys") ? "API keys synced — no CLI logins yet." : "No cloud logins synced yet."}
+                        </div>
+                      )}
+                      <button
+                        onClick={async () => { const s = await sandboxSyncLogins(wslStat?.defaultDistro ?? null); setNpLogins(await sandboxLoginStatus(wslStat?.defaultDistro ?? null)); setStatus(s.length ? `🔑 Synced: ${s.join(", ")}.` : "No host logins found to sync."); }}
+                        style={{ ...btn, height: 30, justifyContent: "center", color: "var(--fg-strong)" }}
+                      >
+                        🔑 Sync my cloud logins now
+                      </button>
+                      <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>
+                        Your Accounts logins are mirrored into the sandbox once and persist — isolated agents use them automatically.
+                      </div>
+                    </div>
+                  )}
+
                   <div style={{ display: "flex", flexDirection: "column", gap: 6, background: "var(--bg-input)", border: `1px solid ${npIsolate ? "var(--border-strong)" : "#d9b24a"}`, borderRadius: 8, padding: "10px 12px" }}>
                     <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: sbox?.available ? "pointer" : "default" }}>
                       <input type="checkbox" checked={npIsolate} disabled={!sbox?.available} onChange={(e) => setNpIsolate(e.target.checked)} />
@@ -1036,6 +1091,18 @@ export default function CodePage() {
             style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
           >
             🔑 Sync logins
+          </button>
+        )}
+        {sbox?.available && (
+          <button
+            onClick={convertProject}
+            disabled={convertBusy}
+            title={isolatedNow
+              ? "Copy this project OUT to a normal (not isolated) folder and open it"
+              : "Copy this project INTO the Linux sandbox (isolated) and open it"}
+            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "var(--fg-muted)", opacity: convertBusy ? 0.6 : 1 }}
+          >
+            {convertBusy ? "⏳…" : isolatedNow ? "⇲ Make not-isolated" : "⇱ Make isolated"}
           </button>
         )}
         <GitBar workspace={workspace} busy={busy} />

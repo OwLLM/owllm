@@ -619,6 +619,83 @@ fn sync_logins_impl(distro: Option<String>) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// Which provider logins are present INSIDE the sandbox right now (codex/claude/
+/// gemini/kimi files + "keys" if the API-key env file is non-empty). Used by the
+/// New-project dialog to show account status, and to confirm a sync landed.
+#[cfg(windows)]
+fn login_status_impl(distro: Option<String>) -> Vec<String> {
+    let Some(distro) = distro.or_else(|| crate::wsl::wsl_status().default_distro) else {
+        return Vec::new();
+    };
+    let script = "s=''; \
+        [ -f ~/.codex/auth.json ] && s=\"$s codex\"; \
+        [ -f ~/.claude/.credentials.json ] && s=\"$s claude\"; \
+        [ -d ~/.gemini ] && [ -n \"$(ls -A ~/.gemini 2>/dev/null)\" ] && s=\"$s gemini\"; \
+        [ -f ~/.kimi/config.toml ] && s=\"$s kimi\"; \
+        [ -s ~/.owllm/agent_env.sh ] && s=\"$s keys\"; \
+        echo \"LOGINS:$s\"";
+    crate::wsl::run_in_distro(&distro, script)
+        .ok()
+        .and_then(|o| o.lines().find_map(|l| l.strip_prefix("LOGINS:")).map(|s| s.to_string()))
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn login_status_impl(_distro: Option<String>) -> Vec<String> {
+    Vec::new()
+}
+
+#[tauri::command]
+pub fn sandbox_login_status(distro: Option<String>) -> Vec<String> {
+    login_status_impl(distro)
+}
+
+/// Convert a project between isolated and host. COPIES (never moves) the files
+/// across the boundary and returns the new project to open; the original is left
+/// intact for the user to remove. Isolated→host copies into
+/// %USERPROFILE%\OwLLM-Projects\<name>; host→isolated copies into ~/owllm/<name>
+/// in the distro. WSL (Windows) only for now.
+#[cfg(windows)]
+fn convert_impl(current: String) -> Result<SandboxProject, String> {
+    let q = crate::wsl::sh_quote;
+    if let Some((d, linux)) = crate::wsl::parse_wsl_unc(&current) {
+        // isolated → host
+        let name = linux.trim_end_matches('/').rsplit('/').next().unwrap_or("project").to_string();
+        let home = std::env::var("USERPROFILE").map_err(|_| "no USERPROFILE".to_string())?;
+        let dest_win = format!("{home}\\OwLLM-Projects\\{name}");
+        let dest_mnt = win_to_mnt(&dest_win)?;
+        let script = format!("mkdir -p {dst} && cp -rf {src}/. {dst}/ && echo OK",
+            src = q(linux.trim_end_matches('/')), dst = q(&dest_mnt));
+        crate::wsl::run_in_distro(&d, &script)?;
+        Ok(SandboxProject { name, path: dest_win.clone(), inner_path: dest_win, kind: "none".into() })
+    } else {
+        // host → isolated
+        let distro = crate::wsl::wsl_status().default_distro
+            .ok_or_else(|| "no WSL distro".to_string())?;
+        let base = current.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or("project");
+        // create_impl on Windows delegates to wsl_create_project, which sanitizes.
+        let p = create_impl(base.to_string())?;
+        let src_mnt = win_to_mnt(&current)?;
+        let script = format!("cp -rf {src}/. {dst}/ && echo OK",
+            src = q(src_mnt.trim_end_matches('/')), dst = q(&p.inner_path));
+        crate::wsl::run_in_distro(&distro, &script)?;
+        Ok(p)
+    }
+}
+
+#[cfg(not(windows))]
+fn convert_impl(_current: String) -> Result<SandboxProject, String> {
+    Err("project conversion is currently implemented for WSL (Windows) only".to_string())
+}
+
+#[tauri::command]
+pub fn sandbox_convert_project(current: String) -> Result<SandboxProject, String> {
+    convert_impl(current)
+}
+
 #[cfg(not(windows))]
 fn sync_logins_impl(_distro: Option<String>) -> Result<Vec<String>, String> {
     Err("login sync is currently implemented for WSL (Windows) only".to_string())

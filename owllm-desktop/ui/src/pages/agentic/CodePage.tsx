@@ -351,8 +351,16 @@ export default function CodePage() {
   useEffect(() => {
     let dead = false;
     (async () => {
-      const [st, iso, s] = await Promise.all([wslStatus(), wslIsolationGet(), sandboxStatus()]);
+      const [st, iso0, s] = await Promise.all([wslStatus(), wslIsolationGet(), sandboxStatus()]);
       if (dead) return;
+      // If a sandbox engine is present, isolation is ON by default — every new
+      // project is isolated automatically (the user can still opt out per
+      // project in the New-project dialog).
+      let iso = iso0;
+      if (s.available && !iso0.enabled) {
+        try { iso = await wslIsolationSet(true, s.defaultTarget ?? null); } catch { iso = iso0; }
+        if (dead) return;
+      }
       setWslStat(st);
       setIsolation(iso);
       setSbox(s);
@@ -490,20 +498,47 @@ export default function CodePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isolation?.enabled, wslStat?.available, toolchain, provisionLog]);
 
-  // Create a fresh isolated project inside the sandbox and open it.
-  // Cross-platform via sandbox_create_project (Windows → ~/owllm in WSL as a
-  // UNC path; macOS/Linux → ~/owllm host dir bound into the sandbox).
-  const newIsolatedProject = async () => {
-    if (busy) return;
-    const eng = sbox ? engineLabel(sbox.kind) : "the sandbox";
-    const name = window.prompt(`Name for the isolated project (created inside ${eng}, off your host drive):`, "project");
-    if (!name) return;
+  // ---- New-project modal --------------------------------------------------
+  const [npOpen, setNpOpen] = useState(false);
+  const [npName, setNpName] = useState("");
+  const [npIsolate, setNpIsolate] = useState(true);
+  const [npFolder, setNpFolder] = useState("");
+  const [npBusy, setNpBusy] = useState(false);
+
+  const openNewProject = () => {
+    setNpName("");
+    setNpFolder("");
+    setNpIsolate(!!sbox?.available); // default isolated whenever an engine exists
+    setNpBusy(false);
+    setNpOpen(true);
+  };
+  const npBrowseFolder = async () => {
     try {
-      setStatus(`Creating isolated project in ${eng}…`);
-      const p = await sandboxCreateProject(name);
-      openWorkspace(p.path);
+      const picked = await invoke<string | null>("pick_folder", { title: "Pick a project folder" });
+      if (picked) setNpFolder(picked);
+    } catch (e) { setStatus(`Folder pick failed: ${e}`); }
+  };
+  // Create from the modal: isolated → fresh ~/owllm project in the sandbox;
+  // otherwise open the chosen host folder (NOT isolated).
+  const createNewProject = async () => {
+    if (npBusy) return;
+    setNpBusy(true);
+    try {
+      if (npIsolate && sbox?.available) {
+        const p = await sandboxCreateProject(npName.trim() || "project");
+        setNpOpen(false);
+        openWorkspace(p.path);
+      } else if (npFolder.trim()) {
+        setNpOpen(false);
+        openWorkspace(npFolder.trim());
+      } else {
+        setNpBusy(false);
+        return;
+      }
     } catch (e) {
-      setStatus(`Couldn't create isolated project: ${e}`);
+      setStatus(`Couldn't create project: ${e}`);
+    } finally {
+      setNpBusy(false);
     }
   };
 
@@ -730,8 +765,8 @@ export default function CodePage() {
           <span style={{ fontSize: 16 }}>🦉</span>
           <span style={{ fontWeight: 700, fontSize: 14, color: "var(--fg-strong)" }}>Code</span>
         </div>
-        <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <div style={{ width: "100%", maxWidth: 560, display: "flex", flexDirection: "column", gap: 18, padding: 24 }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "auto" }}>
+          <div style={{ width: "100%", maxWidth: 880, display: "flex", flexDirection: "column", gap: 18, padding: 24 }}>
             <div style={{ textAlign: "center" }}>
               <div style={{ fontSize: 40, marginBottom: 8 }}>🛠️</div>
               <div style={{ fontSize: 20, fontWeight: 700, color: "var(--fg-strong)" }}>Open a project to start coding</div>
@@ -741,219 +776,234 @@ export default function CodePage() {
                 its conversation and plan come back when you reopen it.
               </div>
             </div>
-            {/* Isolation toggle — run the model's tools inside a Linux sandbox:
-                WSL on Windows, Lima on macOS, bubblewrap on Linux. */}
-            <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: sbox?.available ? "pointer" : "default", flex: 1, minWidth: 0 }}>
-                <input
-                  type="checkbox"
-                  checked={isolation.enabled}
-                  disabled={!sbox?.available}
-                  onChange={(e) => toggleIsolation(e.target.checked)}
-                />
-                <span style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>
-                    🛡 Isolate agents in Linux{sbox?.available && sbox.beta ? " (beta)" : ""}
-                  </div>
-                  <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
-                    {sbox?.available
-                      ? `Tools run inside ${engineLabel(sbox.kind)}${sbox.strong ? " (VM)" : ""} — they cannot touch your ${isWsl ? "Windows" : "host"} files.`
-                      : "No sandbox engine detected — tools will run on the host (NOT isolated)."}
-                  </div>
-                </span>
-              </label>
-            </div>
-
-            {!sbox?.available && (
+            {/* Isolation is automatic when an engine is present; the toolchain
+                installs itself in the background. A manual prompt appears only
+                when no engine exists. */}
+            {sbox?.available ? (
+              <div style={{ fontSize: 12, color: "#7ff0c5", textAlign: "center", lineHeight: 1.5 }}>
+                🛡 Isolation on — new projects run inside {engineLabel(sbox.kind)}{sbox.strong ? " (VM)" : ""}{sbox.beta ? " · beta" : ""}, off your {isWsl ? "Windows" : "host"} files.
+                {isWsl && provisionLog === "running" ? " Installing agent tools…" : ""}
+              </div>
+            ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, color: "#06080d", background: "#ffd97a", border: "1px solid #d9b24a", borderRadius: 8, padding: "10px 12px" }}>
                 <div style={{ fontSize: 12, lineHeight: 1.5 }}>
-                  ⚠ <b>No isolation engine installed</b>, so agents would run on the host (guards still apply, but not sandboxed).{" "}
-                  {isWsl ? "Install WSL + Ubuntu to sandbox them." : "Install the sandbox engine (Lima on macOS, bubblewrap on Linux)."}
+                  ⚠ <b>No isolation engine installed</b> — agents would run on the host (guards still apply, but not sandboxed).{" "}
+                  {isWsl ? "Install WSL + Ubuntu to sandbox them." : "Install the sandbox engine (Lima/bubblewrap)."}
                 </div>
                 {isWsl ? (
-                  <button
-                    onClick={installWsl}
-                    style={{ ...btn, height: 36, justifyContent: "center", background: "#06080d", color: "#ffd97a", border: "none", fontWeight: 700 }}
-                  >
-                    ⬇ Install WSL (needs admin + reboot)
-                  </button>
+                  <button onClick={installWsl} style={{ ...btn, height: 36, justifyContent: "center", background: "#06080d", color: "#ffd97a", border: "none", fontWeight: 700 }}>⬇ Install WSL (needs admin + reboot)</button>
                 ) : (
-                  <button
-                    onClick={provisionTools}
-                    disabled={provisionLog === "running"}
-                    style={{ ...btn, height: 36, justifyContent: "center", background: "#06080d", color: "#ffd97a", border: "none", fontWeight: 700, opacity: provisionLog === "running" ? 0.6 : 1 }}
-                  >
-                    {provisionLog === "running" ? "⏳ Installing…" : "⬇ Install sandbox engine + agent tools"}
-                  </button>
+                  <button onClick={provisionTools} disabled={provisionLog === "running"} style={{ ...btn, height: 36, justifyContent: "center", background: "#06080d", color: "#ffd97a", border: "none", fontWeight: 700, opacity: provisionLog === "running" ? 0.6 : 1 }}>{provisionLog === "running" ? "⏳ Installing…" : "⬇ Install sandbox engine + agent tools"}</button>
                 )}
               </div>
             )}
 
-            {sbox?.available && isWsl && !toolchainReady(toolchain) && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ fontSize: 12, lineHeight: 1.5, color: "var(--fg-muted)" }}>
-                  Isolation works now for local models. For <b>agent tooling + cloud CLIs inside {engineLabel(sbox.kind)}</b>, install the toolchain (node, uv, git, Claude/Codex/Gemini/Kimi).
-                </div>
+            {/* Two columns: primary actions (left) · recent projects + GitHub (right). */}
+            <div style={{ display: "flex", gap: 16, alignItems: "stretch", width: "100%" }}>
+              {/* LEFT — start a project */}
+              <div style={{ flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 10 }}>
                 <button
-                  onClick={provisionTools}
-                  disabled={provisionLog === "running"}
-                  style={{ ...btn, height: 36, justifyContent: "center", fontWeight: 700, opacity: provisionLog === "running" ? 0.6 : 1 }}
+                  onClick={openNewProject}
+                  style={{ ...btn, height: 48, fontSize: 14, fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", justifyContent: "center" }}
                 >
-                  {provisionLog === "running" ? "⏳ Installing agent tools…" : "⬇ Install agent tools in " + engineLabel(sbox.kind)}
-                </button>
-              </div>
-            )}
-
-            {sbox?.available && (isWsl ? toolchainReady(toolchain) : true) && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ fontSize: 11, color: "#7ff0c5" }}>
-                  ✓ {engineLabel(sbox.kind)} ready{sbox.beta ? " — beta (not yet hardware-verified)" : ""}
-                </div>
-                {!isWsl && (
-                  <button
-                    onClick={provisionTools}
-                    disabled={provisionLog === "running"}
-                    style={{ ...btn, height: 32, justifyContent: "center", color: "var(--fg-strong)", opacity: provisionLog === "running" ? 0.6 : 1 }}
-                  >
-                    {provisionLog === "running" ? "⏳ Installing…" : "⬇ (Re)install agent tools"}
-                  </button>
-                )}
-                {isWsl && (
-                  <button
-                    onClick={syncLogins}
-                    title="Copy your codex/claude/gemini/kimi logins + API keys from Windows into the sandbox so isolated cloud agents are authenticated"
-                    style={{ ...btn, height: 32, justifyContent: "center", color: "var(--fg-strong)" }}
-                  >
-                    🔑 Sync my cloud logins into the sandbox
-                  </button>
-                )}
-              </div>
-            )}
-
-            {/* Connect GitHub — so isolated agents can clone private repos and
-                push from inside the sandbox (host creds don't cross the WSL
-                boundary). Also configures the Windows host for normal folders. */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
-              {gh?.connected ? (
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 13, color: "var(--fg-strong)", flex: 1, minWidth: 0 }}>🐙 GitHub connected as <b>{gh.login}</b></span>
-                  <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 28, padding: "0 10px", color: "var(--fg-muted)" }}>Disconnect</button>
-                </div>
-              ) : ghOpen ? (
-                <>
-                  <div style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.5 }}>
-                    Paste a GitHub token so agents can clone private repos and push from inside the sandbox.
-                  </div>
-                  <button onClick={() => { invoke("shell_open_url", { url: GITHUB_TOKEN_URL }).catch(() => {}); }} style={{ ...btn, height: 30, justifyContent: "center", color: "var(--accent)" }}>
-                    ↗ Create a token on GitHub (repo scope)
-                  </button>
-                  <input
-                    type="password"
-                    value={ghToken}
-                    onChange={(e) => setGhToken(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }}
-                    placeholder="ghp_… or github_pat_…"
-                    style={{ height: 34, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }}
-                  />
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={connectGithub} disabled={ghBusy || !ghToken.trim()} style={{ ...btn, height: 34, flex: 1, justifyContent: "center", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: ghBusy || !ghToken.trim() ? 0.6 : 1 }}>
-                      {ghBusy ? "⏳ Connecting…" : "Connect GitHub"}
-                    </button>
-                    <button onClick={() => { setGhOpen(false); setGhMsg(""); }} disabled={ghBusy} style={{ ...btn, height: 34, padding: "0 12px", color: "var(--fg-muted)" }}>Cancel</button>
-                  </div>
-                </>
-              ) : (
-                <button onClick={() => { setGhOpen(true); setGhMsg(""); }} style={{ ...btn, height: 34, justifyContent: "center", color: "var(--fg-strong)" }}>
-                  🐙 Connect GitHub — clone &amp; push from inside the sandbox
-                </button>
-              )}
-              {ghMsg && <div style={{ fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
-            </div>
-
-            {isolation.enabled && sbox?.available ? (
-              <>
-                <button
-                  onClick={newIsolatedProject}
-                  style={{ ...btn, height: 46, fontSize: 14, fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", justifyContent: "center" }}
-                >
-                  🛡 New isolated project (in {engineLabel(sbox.kind)})
+                  {sbox?.available ? "🛡 New project" : "＋ New project"}
                 </button>
                 <button
                   onClick={pickWorkspace}
-                  title={`Open a folder on your ${isWsl ? "Windows" : "host"} drive — NOT isolated`}
-                  style={{ ...btn, height: 38, justifyContent: "center", color: "var(--fg-muted)" }}
+                  title="Open an existing folder on your drive"
+                  style={{ ...btn, height: 44, justifyContent: "center" }}
                 >
-                  📁 Open a {isWsl ? "Windows" : "host"} folder (not isolated)
+                  📁 Open a project folder…
                 </button>
-              </>
-            ) : (
-              <button
-                onClick={pickWorkspace}
-                style={{ ...btn, height: 46, fontSize: 14, fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", justifyContent: "center" }}
-              >
-                📁 Open a project folder…
-              </button>
-            )}
+                <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.6, marginTop: 2 }}>
+                  Your model reads, searches, edits and runs commands directly inside the project.
+                  {sbox?.available ? ` New projects are created inside ${engineLabel(sbox.kind)} and isolated from your ${isWsl ? "Windows" : "host"} system.` : ""}
+                </div>
+              </div>
 
-            {isolation.enabled && sboxProjects.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>🛡 Isolated projects</div>
-                {sboxProjects.map((p) => (
-                  <button
-                    key={p.path}
-                    onClick={() => openWorkspace(p.path)}
-                    title={p.innerPath}
-                    style={{ display: "block", textAlign: "left", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", color: "var(--fg)", cursor: "pointer" }}
-                  >
-                    <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)" }}>🐧 {p.name}</div>
-                    <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.innerPath}</div>
-                  </button>
-                ))}
-              </div>
-            )}
-            {recents.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {/* RIGHT — recent projects (scrollable) + GitHub underneath */}
+              <div style={{ flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>Recent projects</div>
-                {orderedRecents.map((ws) => {
-                  const pinned = !!recentsMeta[ws]?.pinned;
-                  const isRenaming = renaming === ws;
-                  return (
-                    <div
-                      key={ws}
-                      style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: `1px solid ${pinned ? "var(--accent)" : "var(--border-strong)"}`, borderRadius: 8, padding: "8px 10px" }}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 300, overflowY: "auto", paddingRight: 2 }}>
+                  {orderedRecents.length === 0 && (!isolation.enabled || sboxProjects.filter(p => !recents.includes(p.path)).length === 0) && (
+                    <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — create one on the left to get started.</div>
+                  )}
+                  {/* Isolated projects that aren't already in recents */}
+                  {isolation.enabled && sboxProjects.filter((p) => !recents.includes(p.path)).map((p) => (
+                    <button
+                      key={p.path}
+                      onClick={() => openWorkspace(p.path)}
+                      title={p.innerPath}
+                      style={{ display: "block", textAlign: "left", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", color: "var(--fg)", cursor: "pointer" }}
                     >
-                      {isRenaming ? (
-                        <input
-                          autoFocus
-                          value={renameDraft}
-                          onChange={(e) => setRenameDraft(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenaming(null); }}
-                          onBlur={commitRename}
-                          placeholder={ws.replace(/^.*[\\/]/, "") || ws}
-                          style={{ flex: 1, minWidth: 0, height: 30, background: "var(--bg-surface)", border: "1px solid var(--accent)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 8px" }}
-                        />
-                      ) : (
-                        <button
-                          onClick={() => openWorkspace(ws)}
-                          title={ws}
-                          style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", color: "var(--fg)", cursor: "pointer", padding: 0 }}
-                        >
-                          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                            {pinned ? "📌" : "📂"} {recentLabel(ws)}
-                          </div>
-                          <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ws}</div>
-                        </button>
-                      )}
-                      <button onClick={() => togglePin(ws)} title={pinned ? "Unpin" : "Pin to top"} style={{ ...btn, height: 26, padding: "0 8px", color: pinned ? "var(--accent)" : "var(--fg-muted)" }}>📌</button>
-                      <button onClick={() => startRename(ws)} title="Rename (display only — folder is unchanged)" style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}>✎</button>
-                      <button onClick={() => removeRecent(ws)} title="Remove from recent projects (keeps files on disk)" style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}>✕</button>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)" }}>🐧 {p.name}</div>
+                      <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.innerPath}</div>
+                    </button>
+                  ))}
+                  {orderedRecents.map((ws) => {
+                    const pinned = !!recentsMeta[ws]?.pinned;
+                    const isRenaming = renaming === ws;
+                    return (
+                      <div
+                        key={ws}
+                        style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: `1px solid ${pinned ? "var(--accent)" : "var(--border-strong)"}`, borderRadius: 8, padding: "8px 10px" }}
+                      >
+                        {isRenaming ? (
+                          <input
+                            autoFocus
+                            value={renameDraft}
+                            onChange={(e) => setRenameDraft(e.target.value)}
+                            onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRenaming(null); }}
+                            onBlur={commitRename}
+                            placeholder={ws.replace(/^.*[\\/]/, "") || ws}
+                            style={{ flex: 1, minWidth: 0, height: 30, background: "var(--bg-surface)", border: "1px solid var(--accent)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 8px" }}
+                          />
+                        ) : (
+                          <button
+                            onClick={() => openWorkspace(ws)}
+                            title={ws}
+                            style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", color: "var(--fg)", cursor: "pointer", padding: 0 }}
+                          >
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {pinned ? "📌" : "📂"} {recentLabel(ws)}
+                            </div>
+                            <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ws}</div>
+                          </button>
+                        )}
+                        <button onClick={() => togglePin(ws)} title={pinned ? "Unpin" : "Pin to top"} style={{ ...btn, height: 26, padding: "0 8px", color: pinned ? "var(--accent)" : "var(--fg-muted)" }}>📌</button>
+                        <button onClick={() => startRename(ws)} title="Rename (display only — folder is unchanged)" style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}>✎</button>
+                        <button onClick={() => removeRecent(ws)} title="Remove from recent projects (keeps files on disk)" style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}>✕</button>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* GitHub — under the recents list. Lets isolated agents clone
+                    private repos + push (host creds don't cross the sandbox). */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
+                  {gh?.connected ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 13, color: "var(--fg-strong)", flex: 1, minWidth: 0 }}>🐙 GitHub connected as <b>{gh.login}</b></span>
+                      <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 28, padding: "0 10px", color: "var(--fg-muted)" }}>Disconnect</button>
                     </div>
-                  );
-                })}
+                  ) : ghOpen ? (
+                    <>
+                      <div style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.5 }}>
+                        Paste a GitHub token so agents can clone private repos and push from inside the sandbox.
+                      </div>
+                      <button onClick={() => { invoke("shell_open_url", { url: GITHUB_TOKEN_URL }).catch(() => {}); }} style={{ ...btn, height: 30, justifyContent: "center", color: "var(--accent)" }}>
+                        ↗ Create a token on GitHub (repo scope)
+                      </button>
+                      <input
+                        type="password"
+                        value={ghToken}
+                        onChange={(e) => setGhToken(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }}
+                        placeholder="ghp_… or github_pat_…"
+                        style={{ height: 34, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }}
+                      />
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <button onClick={connectGithub} disabled={ghBusy || !ghToken.trim()} style={{ ...btn, height: 34, flex: 1, justifyContent: "center", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: ghBusy || !ghToken.trim() ? 0.6 : 1 }}>
+                          {ghBusy ? "⏳ Connecting…" : "Connect GitHub"}
+                        </button>
+                        <button onClick={() => { setGhOpen(false); setGhMsg(""); }} disabled={ghBusy} style={{ ...btn, height: 34, padding: "0 12px", color: "var(--fg-muted)" }}>Cancel</button>
+                      </div>
+                    </>
+                  ) : (
+                    <button onClick={() => { setGhOpen(true); setGhMsg(""); }} style={{ ...btn, height: 34, justifyContent: "center", color: "var(--fg-strong)" }}>
+                      🐙 Connect GitHub — clone &amp; push from inside the sandbox
+                    </button>
+                  )}
+                  {ghMsg && <div style={{ fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
+                </div>
               </div>
-            )}
+            </div>
           </div>
         </div>
+
+        {npOpen && (
+          <div onClick={() => { if (!npBusy) setNpOpen(false); }} style={{ position: "fixed", inset: 0, background: "var(--bg-overlay)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ width: "min(760px, 94vw)", maxHeight: "92vh", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 14, padding: 22, display: "flex", flexDirection: "column", gap: 14, boxShadow: "var(--shadow-lg)", overflow: "auto" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ fontSize: 20, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>🛡 New project</div>
+                <button onClick={() => setNpOpen(false)} title="Cancel" style={{ width: 32, height: 32, border: "none", background: "var(--bg-surface)", color: "var(--fg)", borderRadius: 8, fontSize: 16, cursor: "pointer" }}>✕</button>
+              </div>
+
+              <div style={{ display: "flex", gap: 18, alignItems: "flex-start" }}>
+                {/* LEFT — name/folder, model, info */}
+                <div style={{ flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+                  {npIsolate && sbox?.available ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Project name</label>
+                      <input autoFocus value={npName} onChange={(e) => setNpName(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") createNewProject(); }} placeholder="e.g. my-app"
+                        style={{ height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", fontSize: 14 }} />
+                      <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>Created inside {engineLabel(sbox.kind)} at ~/owllm/{npName.trim() || "…"}</div>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Folder</label>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <input value={npFolder} onChange={(e) => setNpFolder(e.target.value)} placeholder="Pick a folder on your drive…"
+                          style={{ flex: 1, minWidth: 0, height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", fontSize: 14 }} />
+                        <button onClick={npBrowseFolder} style={{ ...btn, height: 38, padding: "0 14px" }}>Browse…</button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Model</label>
+                    <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
+                  </div>
+
+                  <div style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.6, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
+                    Your model works directly in this project — reading, searching, editing files and running commands. The conversation and plan are saved and return when you reopen it.
+                  </div>
+                </div>
+
+                {/* RIGHT — GitHub status + isolation */}
+                <div style={{ flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>GitHub</label>
+                    {gh?.connected ? (
+                      <div style={{ fontSize: 13, color: "#7ff0c5" }}>🐙 Connected as <b>{gh.login}</b></div>
+                    ) : (
+                      <button onClick={() => { setNpOpen(false); setGhOpen(true); setGhMsg(""); }} style={{ ...btn, height: 34, justifyContent: "center", color: "var(--fg-strong)" }}>🐙 Connect GitHub</button>
+                    )}
+                    <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>Lets the agent clone private repos and push from inside the sandbox.</div>
+                  </div>
+
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6, background: "var(--bg-input)", border: `1px solid ${npIsolate ? "var(--border-strong)" : "#d9b24a"}`, borderRadius: 8, padding: "10px 12px" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: sbox?.available ? "pointer" : "default" }}>
+                      <input type="checkbox" checked={npIsolate} disabled={!sbox?.available} onChange={(e) => setNpIsolate(e.target.checked)} />
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>🛡 Run isolated{sbox?.available ? "" : " (engine not installed)"}</span>
+                    </label>
+                    {npIsolate ? (
+                      <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>
+                        The agent's tools run inside {sbox ? engineLabel(sbox.kind) : "a Linux sandbox"} and can't reach your {isWsl ? "Windows" : "host"} files — recommended.
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: 11, color: "#caa84a", lineHeight: 1.5 }}>
+                        Heads up: without isolation the agent runs directly on your system and can read or modify any file your account can. The write-jail and dangerous-command guards still apply, and OWLLM is designed to be safely used by anyone — but unless you have a specific reason, we suggest keeping isolation on. The Linux VM adds a much stronger layer of protection.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                <button onClick={() => setNpOpen(false)} disabled={npBusy} style={{ ...btn, height: 38, padding: "0 14px" }}>Cancel</button>
+                <div style={{ flex: 1 }} />
+                <button
+                  onClick={createNewProject}
+                  disabled={npBusy || (!npIsolate && !npFolder.trim())}
+                  style={{ height: 38, padding: "0 22px", border: "none", borderRadius: 9, background: "var(--accent)", color: "#06080d", fontWeight: 700, fontSize: 14, cursor: npBusy ? "not-allowed" : "pointer", opacity: npBusy || (!npIsolate && !npFolder.trim()) ? 0.6 : 1 }}
+                >
+                  {npBusy ? "Creating…" : (npIsolate ? "Create isolated project" : "Open folder")}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }

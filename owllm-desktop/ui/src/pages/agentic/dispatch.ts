@@ -130,6 +130,56 @@ async function runClaudeCliStream(args: {
   });
 }
 
+/// Run `codex exec --json` and route its event stream to the reply
+/// (onDelta) + Thought tab (onThought), mirroring runClaudeCliStream.
+/// Codex does NOT stream assistant text token-by-token (the agent_message
+/// arrives whole), but it DOES stream reasoning / command / MCP-tool /
+/// web-search events — so the user sees live activity instead of a frozen
+/// blank until the one-shot codex_cli_complete returned the whole blob.
+/// Reuses the ClaudeStreamEvent wire shape (codex_cli_stream emits the
+/// identical tagged JSON) so there's one handler for both CLIs.
+export async function runCodexCliStream(args: {
+  systemPrompt: string;
+  userMessage: string;
+  cwd?: string | null;
+  onDelta: (delta: string) => void;
+  onThought: (channel: string, role: string, delta: string) => void;
+}): Promise<string> {
+  const ch = new Channel<ClaudeStreamEvent>();
+  ch.onmessage = (msg) => {
+    switch (msg.kind) {
+      case "text":
+        args.onDelta(msg.delta);
+        break;
+      case "thinking":
+        args.onThought("thinking", "🧠 thinking", msg.delta);
+        break;
+      case "toolUse": {
+        const channel = `tool:${msg.name}:${msg.toolUseId}`;
+        args.onThought(channel, `🛠 ${msg.name}`, msg.input ? `${msg.input}` : "");
+        break;
+      }
+      case "toolResult": {
+        const channel = `tool-result:${msg.toolUseId}`;
+        const snippet = msg.content.length > 800
+          ? msg.content.slice(0, 800) + "\n…(truncated)"
+          : msg.content;
+        args.onThought(channel, "↩ result", snippet);
+        break;
+      }
+      case "error":
+        args.onThought("cli-error", "⚠ cli", msg.message);
+        break;
+    }
+  };
+  return await invoke<string>("codex_cli_stream", {
+    systemPrompt: args.systemPrompt,
+    userMessage: args.userMessage,
+    cwd: args.cwd ?? null,
+    onEvent: ch,
+  });
+}
+
 /// Best-effort extraction of the message text from a SendUserMessage
 /// tool call's input. The CLI stringifies the JSON input; the schema
 /// is `{ message: string }` for this tool. Falls back to the raw
@@ -977,7 +1027,7 @@ export async function streamChatCompletion(
     return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
   }
   if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
+    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd);
   }
   // ---- Local llama-server path (GGUF) ----
   // Native tool-calling ONLY: the model's own chat template (llama-server
@@ -1469,6 +1519,9 @@ async function streamOpenAI(
   onThought?: ThoughtHandler,
   /// Image attachments only — audio is transcribed in streamChatCompletion.
   images?: Attachment[],
+  /// Project working dir. Threaded to the Codex CLI so it runs IN the
+  /// project (can read the codebase) instead of an arbitrary cwd.
+  projectCwd?: string,
 ): Promise<string> {
   // OpenAI SUBSCRIPTION (ChatGPT / Codex) → run the Codex CLI, exactly as
   // the Claude subscription routes through claude_cli_complete. Without
@@ -1476,16 +1529,27 @@ async function streamOpenAI(
   // was connected (this WAS the "chat page asks me for the API key" bug).
   // `api/` models and the default still use the HTTP API-key path below.
   if (route.forceSub === true) {
-    // codex exec is one-shot (no token stream). Fold prior turns into the
-    // prompt so the CLI has conversation context.
+    // Fold prior turns into the prompt so the CLI has conversation context.
     const convo = (history ?? [])
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)
       .join("\n\n");
     const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    // Stream live activity (reasoning, commands, tools, web searches) when
+    // the caller wants thought traffic — AgentsPage / ChatPage / CodePage.
+    // Bridge callers (no Thought pane) fall back to the one-shot blob.
+    if (onThought) {
+      return await runCodexCliStream({
+        systemPrompt,
+        userMessage: prompt,
+        cwd: projectCwd ?? null,
+        onDelta,
+        onThought,
+      });
+    }
     const reply = await invoke<string>("codex_cli_complete", {
       systemPrompt,
       userMessage: prompt,
-      cwd: undefined,
+      cwd: projectCwd ?? undefined,
     });
     if (reply) onDelta(reply);
     return reply;

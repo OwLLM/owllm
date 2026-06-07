@@ -1403,6 +1403,294 @@ pub async fn claude_cli_stream(
 }
 
 // ---------------------------------------------------------------------
+// Streaming Codex CLI dispatch — runs `codex exec --json` so the UI
+// shows live activity (reasoning summaries, command runs, MCP tool
+// calls, web searches) as the agent works, instead of freezing on a
+// blank reply until the one-shot `codex_cli_complete` returns the whole
+// blob at the end. Codex does NOT stream the assistant text token by
+// token (the `agent_message` arrives whole on `item.completed`), but it
+// DOES stream every other item event — which is exactly the missing
+// "no thinking, no tools, nothing until the end" feedback.
+// ---------------------------------------------------------------------
+
+/// One streaming event from the Codex CLI. Deliberately the SAME wire
+/// shape as ClaudeStreamEvent (tag "kind", camelCase) so the frontend
+/// reuses one handler: text → reply pane, thinking → Thought tab,
+/// toolUse/toolResult → tool blocks (paired by tool_use_id).
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CodexStreamEvent {
+    Text { delta: String },
+    Thinking { delta: String },
+    ToolUse { tool_use_id: String, name: String, input: String },
+    ToolResult { tool_use_id: String, content: String },
+    Error { message: String },
+}
+
+/// Flatten an MCP tool `result` value (string, or an array of content
+/// blocks like `{type:"text",text:"…"}`) into a single display string.
+fn codex_result_text(r: &serde_json::Value) -> String {
+    if let Some(s) = r.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = r.as_array() {
+        let joined = arr
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !joined.is_empty() {
+            return joined;
+        }
+    }
+    serde_json::to_string(r).unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn codex_cli_stream(
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    on_event: Channel<CodexStreamEvent>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let exe = find_codex_cli().ok_or_else(|| {
+            "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)"
+                .to_string()
+        })?;
+
+        let mut cmd = Command::new(&exe);
+        #[cfg(windows)]
+        let batch = is_batch_shim(&exe);
+        #[cfg(not(windows))]
+        let batch = false;
+
+        let prompt = if system_prompt.trim().is_empty() {
+            user_message.clone()
+        } else {
+            format!("{}\n\n{}", system_prompt.trim(), user_message)
+        };
+
+        // Same non-interactive flags as codex_cli_complete, plus --json for
+        // the NDJSON event stream. Read-only sandbox: a chat/agent reply on
+        // this path never writes to disk (matches codex_cli_complete).
+        push_arg(&mut cmd, batch, "exec");
+        push_arg(&mut cmd, batch, "--json");
+        push_arg(&mut cmd, batch, "--skip-git-repo-check");
+        push_arg(&mut cmd, batch, "--color");
+        push_arg(&mut cmd, batch, "never");
+        push_arg(&mut cmd, batch, "--sandbox");
+        push_arg(&mut cmd, batch, "read-only");
+        // Positional prompt (older codex reads it here); stdin carries it
+        // too (newer codex reads it there).
+        push_arg(&mut cmd, batch, &prompt);
+
+        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let p = std::path::Path::new(dir);
+            if p.is_dir() {
+                cmd.current_dir(p);
+            }
+        }
+        cmd.stdin(Stdio::piped());
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(prompt.as_bytes());
+            // Drop closes the pipe (EOF) so the stdin-style codex proceeds.
+        }
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "no stdout pipe".to_string())?;
+        let reader = BufReader::new(stdout);
+        let mut assembled = String::new();
+
+        for line_res in reader.lines() {
+            let line = match line_res {
+                Ok(l) => l,
+                Err(e) => {
+                    let _ = on_event.send(CodexStreamEvent::Error {
+                        message: format!("read stdout: {e}"),
+                    });
+                    continue;
+                }
+            };
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let v: serde_json::Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let etype = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match etype {
+                "item.started" | "item.updated" | "item.completed" => {
+                    let completed = etype == "item.completed";
+                    let item = match v.get("item") {
+                        Some(i) => i,
+                        None => continue,
+                    };
+                    let itype = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    let id = item
+                        .get("id")
+                        .and_then(|i| i.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    match itype {
+                        // Final assistant message — only on completion, whole text.
+                        "agent_message" => {
+                            if completed {
+                                if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                                    if !t.is_empty() {
+                                        assembled.push_str(t);
+                                        let _ = on_event
+                                            .send(CodexStreamEvent::Text { delta: t.to_string() });
+                                    }
+                                }
+                            }
+                        }
+                        // Reasoning summary — Thought tab.
+                        "reasoning" => {
+                            if completed {
+                                if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                                    if !t.is_empty() {
+                                        let _ = on_event
+                                            .send(CodexStreamEvent::Thinking { delta: t.to_string() });
+                                    }
+                                }
+                            }
+                        }
+                        // Shell command: start → ToolUse, completion → ToolResult.
+                        "command_execution" => {
+                            if !completed {
+                                let command = item
+                                    .get("command")
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let _ = on_event.send(CodexStreamEvent::ToolUse {
+                                    tool_use_id: id,
+                                    name: "shell".to_string(),
+                                    input: command,
+                                });
+                            } else {
+                                let out = item
+                                    .get("aggregated_output")
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("");
+                                let content = match item.get("exit_code").and_then(|c| c.as_i64()) {
+                                    Some(code) => format!("{out}\n(exit {code})"),
+                                    None => out.to_string(),
+                                };
+                                let _ = on_event
+                                    .send(CodexStreamEvent::ToolResult { tool_use_id: id, content });
+                            }
+                        }
+                        // MCP tool call: start → ToolUse, completion → ToolResult.
+                        "mcp_tool_call" => {
+                            let server = item.get("server").and_then(|c| c.as_str()).unwrap_or("");
+                            let tool = item.get("tool").and_then(|c| c.as_str()).unwrap_or("tool");
+                            if !completed {
+                                let args = item
+                                    .get("arguments")
+                                    .map(|a| {
+                                        serde_json::to_string_pretty(a)
+                                            .unwrap_or_else(|_| a.to_string())
+                                    })
+                                    .unwrap_or_default();
+                                let _ = on_event.send(CodexStreamEvent::ToolUse {
+                                    tool_use_id: id,
+                                    name: format!("{server}.{tool}"),
+                                    input: args,
+                                });
+                            } else {
+                                let content = if let Some(err) =
+                                    item.get("error").and_then(|e| e.as_str())
+                                {
+                                    format!("error: {err}")
+                                } else {
+                                    item.get("result").map(codex_result_text).unwrap_or_default()
+                                };
+                                let _ = on_event
+                                    .send(CodexStreamEvent::ToolResult { tool_use_id: id, content });
+                            }
+                        }
+                        // Web search — surface the query as a tool invocation.
+                        "web_search" => {
+                            if completed {
+                                let q = item
+                                    .get("query")
+                                    .and_then(|c| c.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let _ = on_event.send(CodexStreamEvent::ToolUse {
+                                    tool_use_id: id,
+                                    name: "web_search".to_string(),
+                                    input: q,
+                                });
+                            }
+                        }
+                        // Non-fatal item warning.
+                        "error" => {
+                            if let Some(m) = item.get("message").and_then(|c| c.as_str()) {
+                                let _ = on_event
+                                    .send(CodexStreamEvent::Error { message: m.to_string() });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                // Stream-level / turn-level failures.
+                "error" => {
+                    if let Some(m) = v.get("message").and_then(|t| t.as_str()) {
+                        let _ = on_event.send(CodexStreamEvent::Error { message: m.to_string() });
+                    }
+                }
+                "turn.failed" => {
+                    if let Some(m) = v
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|t| t.as_str())
+                    {
+                        let _ = on_event.send(CodexStreamEvent::Error { message: m.to_string() });
+                    }
+                }
+                _ => {}
+            }
+        }
+        let status = child.wait().map_err(|e| format!("wait codex: {e}"))?;
+        if !status.success() && assembled.trim().is_empty() {
+            // Only an error if we got NO usable reply — codex can exit
+            // nonzero after the read-only sandbox denies a write it tried,
+            // even though it produced a perfectly good message.
+            let mut stderr_buf = String::new();
+            if let Some(mut stderr) = child.stderr.take() {
+                let _ = stderr.read_to_string(&mut stderr_buf);
+            }
+            return Err(format!(
+                "codex CLI exited {} — {}",
+                status.code().unwrap_or(-1),
+                if stderr_buf.trim().is_empty() {
+                    "no stderr".to_string()
+                } else {
+                    stderr_buf.trim().to_string()
+                }
+            ));
+        }
+        Ok(assembled.trim().to_string())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+// ---------------------------------------------------------------------
 // Subscription-CLI detection helpers
 // ---------------------------------------------------------------------
 

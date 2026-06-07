@@ -45,6 +45,7 @@ import {
   resetClaudeSession,
   clearAllClaudeSessions,
   streamLocalChat,
+  runCodexCliStream,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -5441,7 +5442,7 @@ async function streamChatCompletion(
     return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
   }
   if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images);
+    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd);
   }
   if (provider === "moonshot") {
     return streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images);
@@ -5791,7 +5792,7 @@ async function consumeAnthropicSse(
 /// OpenAI chat-completions streaming. Same SSE shape as llama-server.
 async function streamOpenAI(
   modelId: string,
-  _route: CloudRoute,
+  route: CloudRoute,
   systemPrompt: string,
   userMessage: string,
   temperature: number,
@@ -5801,10 +5802,33 @@ async function streamOpenAI(
   onThought?: ThoughtHandler,
   /// Image attachments only — audio was transcribed in streamChatCompletion.
   images?: Attachment[],
+  /// Project working dir — threaded to the Codex CLI so it runs IN the project.
+  projectCwd?: string,
 ): Promise<string> {
-  // Codex CLI subscription support is a future slot — for now both
-  // forceSub and the default flow route through the API path, so this
-  // throws cleanly when no key is saved.
+  // OpenAI SUBSCRIPTION (ChatGPT / Codex) → run the Codex CLI, exactly as
+  // the Claude / Kimi subscriptions route through their CLIs. Without this,
+  // a `sub/` codex model on the Agents page demanded OPENAI_API_KEY and
+  // failed with "No OPENAI_API_KEY saved" even when a Codex subscription was
+  // logged in — codex was the one provider left stubbed to the API path.
+  if (route.forceSub === true) {
+    const convo = (history ?? [])
+      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
+      .join("\n\n");
+    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    // Stream live activity (reasoning/commands/tools/web-search) into the
+    // Thought tab when present; fall back to the one-shot blob otherwise.
+    if (onThought) {
+      return await runCodexCliStream({
+        systemPrompt, userMessage: prompt, cwd: projectCwd ?? null, onDelta, onThought,
+      });
+    }
+    const reply = await invoke<string>("codex_cli_complete", {
+      systemPrompt, userMessage: prompt, cwd: projectCwd ?? undefined,
+    });
+    if (reply) onDelta(reply);
+    return reply;
+  }
+  // API path — needs a saved key.
   const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
   if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
   const resp = await fetch("https://api.openai.com/v1/chat/completions", {

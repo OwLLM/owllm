@@ -142,6 +142,7 @@ pub fn run() {
             accounts::accounts_test_probe,
             accounts::claude_cli_complete,
             accounts::codex_cli_complete,
+            accounts::codex_cli_stream,
             accounts::claude_cli_stream,
             accounts::kimi_cli_complete,
             accounts::gemini_cli_complete,

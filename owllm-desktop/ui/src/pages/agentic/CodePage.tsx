@@ -57,6 +57,73 @@ const DEFAULT_CODE_STATE: CodeState = {
   status: "Pick a folder and a local model, then describe what to build or fix.",
 };
 
+// ---- Per-project persistence (the thing that was missing) ------------------
+//
+// The Code page used to keep its whole conversation ONLY in the in-memory
+// chatRuntime store, with no persister registered — so closing the app threw
+// the session away. Now every workspace folder is its OWN saved project: the
+// conversation, Kanban, draft and chosen model are written to localStorage
+// keyed by the folder path, and restored when you reopen that folder (or
+// relaunch the app onto the last folder you had open). `busy` is never
+// persisted — an in-flight stream cannot survive a restart, so it's forced
+// false on load to avoid a permanently-stuck Stop button.
+const CODE_SESSION_PREFIX = "owllm:code:session:";
+const CODE_LAST_KEY = "owllm:code:last";
+const CODE_RECENTS_KEY = "owllm:code:recents";
+const CODE_RECENTS_MAX = 12;
+
+function codeSessionKey(ws: string): string {
+  return CODE_SESSION_PREFIX + encodeURIComponent(ws);
+}
+
+function loadCodeSession(ws: string): CodeState | null {
+  if (!ws) return null;
+  try {
+    const raw = localStorage.getItem(codeSessionKey(ws));
+    if (!raw) return null;
+    const s = JSON.parse(raw) as Partial<CodeState>;
+    return { ...DEFAULT_CODE_STATE, ...s, workspace: ws, busy: false };
+  } catch { return null; }
+}
+
+function saveCodeSession(s: CodeState | null | undefined): void {
+  if (!s || !s.workspace) return; // no folder → nothing to save (onboarding state)
+  try {
+    localStorage.setItem(codeSessionKey(s.workspace), JSON.stringify({ ...s, busy: false }));
+  } catch { /* quota / unavailable — best effort */ }
+}
+
+function getCodeRecents(): string[] {
+  try {
+    const r = JSON.parse(localStorage.getItem(CODE_RECENTS_KEY) || "[]");
+    return Array.isArray(r) ? r.filter((x): x is string => typeof x === "string") : [];
+  } catch { return []; }
+}
+
+function rememberCodeProject(ws: string): string[] {
+  if (!ws) return getCodeRecents();
+  const next = [ws, ...getCodeRecents().filter((x) => x !== ws)].slice(0, CODE_RECENTS_MAX);
+  try {
+    localStorage.setItem(CODE_RECENTS_KEY, JSON.stringify(next));
+    localStorage.setItem(CODE_LAST_KEY, ws);
+  } catch { /* best effort */ }
+  return next;
+}
+
+function forgetCodeProject(ws: string): string[] {
+  const next = getCodeRecents().filter((x) => x !== ws);
+  try {
+    localStorage.setItem(CODE_RECENTS_KEY, JSON.stringify(next));
+    localStorage.removeItem(codeSessionKey(ws));
+    if ((localStorage.getItem(CODE_LAST_KEY) || "") === ws) localStorage.removeItem(CODE_LAST_KEY);
+  } catch { /* best effort */ }
+  return next;
+}
+
+function getLastCodeProject(): string {
+  try { return localStorage.getItem(CODE_LAST_KEY) || ""; } catch { return ""; }
+}
+
 const PLAN_SYSTEM = (ws: string, goal: string) =>
   `You are a senior engineer planning work in the project at ${ws}. Break the goal into 2-6 concrete, ` +
   `ordered implementation steps. Output ONLY a JSON array of short imperative step strings (one action each), ` +
@@ -91,7 +158,20 @@ export default function CodePage() {
   // is unchanged.
   const sess = useChatSession<CodeState>(SID);
   const hydratedRef = useRef(false);
-  if (!hydratedRef.current) { hydratedRef.current = true; chatRuntime.hydrateIfIdle(SID, DEFAULT_CODE_STATE); }
+  if (!hydratedRef.current) {
+    hydratedRef.current = true;
+    // Restore the last project the user had open (its saved conversation,
+    // Kanban, draft, model) — or fall back to the empty onboarding state.
+    const restored = loadCodeSession(getLastCodeProject());
+    chatRuntime.hydrateIfIdle(SID, restored ?? DEFAULT_CODE_STATE);
+    // Register the persister so EVERY mutation is debounce-saved to
+    // localStorage (per workspace), and a final flush fires even after the
+    // page unmounts or a stream ends. This is the fix for "I coded for an
+    // hour, closed the app, and nothing was saved".
+    chatRuntime.registerPersister(SID, (payload) => saveCodeSession(payload as CodeState));
+  }
+  // Recent projects, for the onboarding screen shown when no folder is open.
+  const [recents, setRecents] = useState<string[]>(getCodeRecents);
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
   const { messages, tasks, workspace, modelId, draft, busy, status } = stx;
   function setField<K extends keyof CodeState>(k: K, v: CodeState[K] | ((p: CodeState[K]) => CodeState[K])) {
@@ -144,18 +224,42 @@ export default function CodePage() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
+  // Switch the page to a project folder: save whatever's open now, then load
+  // THAT folder's saved session (conversation + Kanban + draft + model), or
+  // start a fresh one carrying the current model selection over. Updates the
+  // recent-projects list so the onboarding screen can offer it next time.
+  const openWorkspace = (dir: string) => {
+    if (!dir || busy) return;
+    saveCodeSession(stx); // flush the outgoing project before we swap it out
+    const restored = loadCodeSession(dir);
+    chatRuntime.setPayload(SID, () =>
+      restored ?? { ...DEFAULT_CODE_STATE, workspace: dir, modelId, status: `Workspace: ${dir}` },
+    );
+    setRecents(rememberCodeProject(dir));
+  };
+
   const pickWorkspace = async () => {
+    if (busy) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const dir = await open({ directory: true, multiple: false, title: "Pick a project folder" });
-      if (typeof dir === "string" && dir) {
-        setWorkspace(dir);
-        setStatus(`Workspace: ${dir}`);
-      }
+      if (typeof dir === "string" && dir) openWorkspace(dir);
     } catch (e) {
       setStatus(`Folder picker failed: ${e}`);
     }
   };
+
+  // Close the current project back to the onboarding screen (its session stays
+  // saved on disk and reappears in Recent projects).
+  const closeProject = () => {
+    if (busy) return;
+    saveCodeSession(stx);
+    setRecents(getCodeRecents());
+    chatRuntime.setPayload(SID, () => ({ ...DEFAULT_CODE_STATE }));
+    try { localStorage.removeItem(CODE_LAST_KEY); } catch { /* best effort */ }
+  };
+
+  const removeRecent = (ws: string) => setRecents(forgetCodeProject(ws));
 
   // Start (or reuse) the llama-server for the chosen model; return its port.
   async function ensureServer(id: string): Promise<number | null> {
@@ -353,13 +457,77 @@ export default function CodePage() {
 
   const wsShort = workspace ? workspace.replace(/^.*[\\/]/, "") : "No folder";
 
+  // ---- Onboarding: no folder open -----------------------------------------
+  // The coding agent does nothing without a workspace, so instead of showing
+  // the full (dead) IDE chrome that silently ignores input, show a real
+  // get-started screen: open a folder, or reopen a recent project.
+  if (!workspace) {
+    return (
+      <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 16 }}>🦉</span>
+          <span style={{ fontWeight: 700, fontSize: 14, color: "var(--fg-strong)" }}>Code</span>
+        </div>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ width: "100%", maxWidth: 560, display: "flex", flexDirection: "column", gap: 18, padding: 24 }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 40, marginBottom: 8 }}>🛠️</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--fg-strong)" }}>Open a project to start coding</div>
+              <div style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8, lineHeight: 1.6 }}>
+                Your model works directly inside a folder — reading, searching, editing and
+                creating files and running commands there. Each folder is a saved project:
+                its conversation and plan come back when you reopen it.
+              </div>
+            </div>
+            <button
+              onClick={pickWorkspace}
+              style={{ ...btn, height: 46, fontSize: 14, fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", justifyContent: "center" }}
+            >
+              📁 Open a project folder…
+            </button>
+            {recents.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>Recent projects</div>
+                {recents.map((ws) => (
+                  <div
+                    key={ws}
+                    style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px" }}
+                  >
+                    <button
+                      onClick={() => openWorkspace(ws)}
+                      title={ws}
+                      style={{ flex: 1, minWidth: 0, textAlign: "left", background: "none", border: "none", color: "var(--fg)", cursor: "pointer", padding: 0 }}
+                    >
+                      <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                        📂 {ws.replace(/^.*[\\/]/, "") || ws}
+                      </div>
+                      <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ws}</div>
+                    </button>
+                    <button
+                      onClick={() => removeRecent(ws)}
+                      title="Remove from recent projects (keeps files on disk)"
+                      style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-panel)", color: "var(--fg)" }}>
       {/* Header: workspace · model · status */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <span style={{ fontSize: 16 }}>🦉</span>
         <span style={{ fontWeight: 700, fontSize: 14, color: "var(--fg-strong)" }}>Code</span>
-        <button onClick={pickWorkspace} title={workspace || "Pick a project folder"} style={btn}>📁 {wsShort}</button>
+        <button onClick={pickWorkspace} disabled={busy} title={workspace || "Switch project folder"} style={btn}>📁 {wsShort}</button>
+        <button onClick={closeProject} disabled={busy} title="Close this project (back to project list — files stay on disk)" style={btn}>✕</button>
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
         <div style={{ minWidth: 260, maxWidth: 360 }}>

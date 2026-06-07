@@ -380,8 +380,20 @@ export default function TrainPage() {
   }, [downloadedBases]);
   React.useEffect(() => {
     let dead = false;
-    invoke<{ entries?: { repoId: string }[] }>("hf_cache_list")
-      .then((sum) => { if (!dead) setDownloadedBases((sum.entries || []).map((e) => e.repoId)); })
+    invoke<{ entries?: { repoId: string; cacheRoot?: string }[] }>("hf_cache_list")
+      .then((sum) => {
+        if (dead) return;
+        // hf_cache_list is the disk-CLEANUP enumerator: it also returns every
+        // top-level dir in the pip / npm / runtime caches (_npx, _cacache,
+        // _logs, http-v2, …) so a "manage disk" UI can delete them. Those are
+        // NOT models. A fine-tunable base is an HF model repo: "owner/name"
+        // form, living under an hf-* cache root. Filter to exactly those so
+        // the dropdown stops listing cache junk as downloaded bases.
+        const bases = (sum.entries || [])
+          .filter((e) => (e.cacheRoot || "").startsWith("hf-") && e.repoId.includes("/"))
+          .map((e) => e.repoId);
+        setDownloadedBases(bases);
+      })
       .catch(() => { /* cache scan best-effort; dropdown still shows curated list */ });
     return () => { dead = true; };
   }, []);

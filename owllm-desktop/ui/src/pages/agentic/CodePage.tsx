@@ -22,7 +22,10 @@ import {
   isWslPath, type WslStatus, type WslIsolation, type WslProject, type WslToolchain,
 } from "./wslIsolation";
 import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, type GithubStatus } from "./github";
-import { sandboxSyncLogins } from "./isolation";
+import {
+  sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
+  sandboxProvision, engineLabel, type SandboxStatus, type SandboxProject,
+} from "./isolation";
 
 type Msg = {
   role: "user" | "assistant" | "tool";
@@ -211,6 +214,13 @@ export default function CodePage() {
   const [wslProjects, setWslProjects] = useState<WslProject[]>([]);
   const [toolchain, setToolchain] = useState<WslToolchain | null>(null);
   const [provisionLog, setProvisionLog] = useState<string>("");
+  // Cross-platform sandbox status (WSL on Windows, Lima on macOS, bubblewrap on
+  // Linux). Drives the onboarding availability/labels on every OS; on Windows
+  // it mirrors wslStat (the Rust command delegates to wsl_status).
+  const [sbox, setSbox] = useState<SandboxStatus | null>(null);
+  const [sboxProjects, setSboxProjects] = useState<SandboxProject[]>([]);
+  // True on Windows, where the WSL-specific toolchain probe + installer apply.
+  const isWsl = sbox ? sbox.kind === "wsl" : true;
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
   const { messages, tasks, workspace, modelId, draft, busy, status } = stx;
   function setField<K extends keyof CodeState>(k: K, v: CodeState[K] | ((p: CodeState[K]) => CodeState[K])) {
@@ -329,15 +339,26 @@ export default function CodePage() {
       setToolchain(null);
     }
   };
+  // Cross-platform isolated-project list (used on macOS/Linux; on Windows it
+  // returns the same WSL projects via delegation).
+  const refreshSboxProjects = (iso: WslIsolation, s: SandboxStatus | null) => {
+    if (iso.enabled && s?.available) {
+      sandboxListProjects().then(setSboxProjects).catch(() => setSboxProjects([]));
+    } else {
+      setSboxProjects([]);
+    }
+  };
   useEffect(() => {
     let dead = false;
     (async () => {
-      const [st, iso] = await Promise.all([wslStatus(), wslIsolationGet()]);
+      const [st, iso, s] = await Promise.all([wslStatus(), wslIsolationGet(), sandboxStatus()]);
       if (dead) return;
       setWslStat(st);
       setIsolation(iso);
+      setSbox(s);
       refreshWslProjects(iso, st);
       refreshToolchain(st);
+      refreshSboxProjects(iso, s);
     })();
     return () => { dead = true; };
   }, []);
@@ -353,24 +374,26 @@ export default function CodePage() {
     }
   };
 
-  // Provision node/uv/git + the agent CLIs inside the distro. Long-running.
+  // Provision node/uv/git + the agent CLIs inside the sandbox (WSL/Lima/
+  // bubblewrap). Long-running. Cross-platform via sandbox_provision.
   const provisionTools = async () => {
     if (provisionLog === "running") return;
+    const eng = sbox ? engineLabel(sbox.kind) : "the sandbox";
     setProvisionLog("running");
-    setStatus("Installing agent tools in Ubuntu (node, uv, git, CLIs)… this can take a few minutes.");
+    setStatus(`Installing agent tools in ${eng} (node, uv, git, CLIs)… this can take a few minutes.`);
     try {
-      await wslProvision(wslStat?.defaultDistro ?? null);
+      const log = await sandboxProvision();
       setProvisionLog("done");
-      refreshToolchain(wslStat);
+      if (isWsl) refreshToolchain(wslStat);
       // Auto-mirror host CLI logins so cloud agents are authenticated inside
-      // the sandbox without a separate login (best-effort).
+      // the sandbox without a separate login (best-effort, WSL only for now).
       try {
         const synced = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
         setStatus(synced.length
           ? `Agent tools installed; synced logins: ${synced.join(", ")}.`
-          : "Agent tools installed. Log in to a provider via Accounts, then click 'Sync logins'.");
+          : (log && !isWsl ? log : "Agent tools installed. Log in via Accounts, then click 'Sync logins'."));
       } catch {
-        setStatus("Agent tools installed in Ubuntu.");
+        setStatus(log && !isWsl ? log : `Agent tools installed in ${eng}.`);
       }
     } catch (e) {
       setProvisionLog("");
@@ -397,6 +420,7 @@ export default function CodePage() {
       const iso = await wslIsolationSet(on, wslStat?.defaultDistro ?? null);
       setIsolation(iso);
       refreshWslProjects(iso, wslStat);
+      refreshSboxProjects(iso, sbox);
     } catch (e) {
       setStatus(`Couldn't change isolation: ${e}`);
     }
@@ -466,15 +490,18 @@ export default function CodePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isolation?.enabled, wslStat?.available, toolchain, provisionLog]);
 
-  // Create a fresh isolated project inside Ubuntu and open it.
+  // Create a fresh isolated project inside the sandbox and open it.
+  // Cross-platform via sandbox_create_project (Windows → ~/owllm in WSL as a
+  // UNC path; macOS/Linux → ~/owllm host dir bound into the sandbox).
   const newIsolatedProject = async () => {
     if (busy) return;
-    const name = window.prompt("Name for the isolated project (created inside Ubuntu, off your Windows drive):", "project");
+    const eng = sbox ? engineLabel(sbox.kind) : "the sandbox";
+    const name = window.prompt(`Name for the isolated project (created inside ${eng}, off your host drive):`, "project");
     if (!name) return;
     try {
-      setStatus("Creating isolated project in WSL…");
-      const p = await wslCreateProject(name, wslStat?.defaultDistro ?? null);
-      openWorkspace(p.uncPath);
+      setStatus(`Creating isolated project in ${eng}…`);
+      const p = await sandboxCreateProject(name);
+      openWorkspace(p.path);
     } catch (e) {
       setStatus(`Couldn't create isolated project: ${e}`);
     }
@@ -714,68 +741,92 @@ export default function CodePage() {
                 its conversation and plan come back when you reopen it.
               </div>
             </div>
-            {/* Isolation toggle — run the model's tools inside Ubuntu (WSL),
-                off the Windows drive. */}
+            {/* Isolation toggle — run the model's tools inside a Linux sandbox:
+                WSL on Windows, Lima on macOS, bubblewrap on Linux. */}
             <div style={{ display: "flex", alignItems: "center", gap: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: wslStat?.available ? "pointer" : "default", flex: 1, minWidth: 0 }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: sbox?.available ? "pointer" : "default", flex: 1, minWidth: 0 }}>
                 <input
                   type="checkbox"
                   checked={isolation.enabled}
-                  disabled={!wslStat?.available}
+                  disabled={!sbox?.available}
                   onChange={(e) => toggleIsolation(e.target.checked)}
                 />
                 <span style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>🛡 Isolate agents in Linux (WSL)</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>
+                    🛡 Isolate agents in Linux{sbox?.available && sbox.beta ? " (beta)" : ""}
+                  </div>
                   <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
-                    {wslStat?.available
-                      ? `Tools run inside ${wslStat.defaultDistro ?? "Ubuntu"} — they cannot touch your Windows files.`
-                      : "WSL not detected on this PC — tools will run on Windows (NOT isolated)."}
+                    {sbox?.available
+                      ? `Tools run inside ${engineLabel(sbox.kind)}${sbox.strong ? " (VM)" : ""} — they cannot touch your ${isWsl ? "Windows" : "host"} files.`
+                      : "No sandbox engine detected — tools will run on the host (NOT isolated)."}
                   </div>
                 </span>
               </label>
             </div>
 
-            {!wslStat?.available && (
+            {!sbox?.available && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, color: "#06080d", background: "#ffd97a", border: "1px solid #d9b24a", borderRadius: 8, padding: "10px 12px" }}>
                 <div style={{ fontSize: 12, lineHeight: 1.5 }}>
-                  ⚠ <b>WSL isn't installed</b>, so agents would run directly on Windows (guards still apply, but not sandboxed). Install WSL + Ubuntu to sandbox them.
+                  ⚠ <b>No isolation engine installed</b>, so agents would run on the host (guards still apply, but not sandboxed).{" "}
+                  {isWsl ? "Install WSL + Ubuntu to sandbox them." : "Install the sandbox engine (Lima on macOS, bubblewrap on Linux)."}
                 </div>
-                <button
-                  onClick={installWsl}
-                  style={{ ...btn, height: 36, justifyContent: "center", background: "#06080d", color: "#ffd97a", border: "none", fontWeight: 700 }}
-                >
-                  ⬇ Install WSL (needs admin + reboot)
-                </button>
+                {isWsl ? (
+                  <button
+                    onClick={installWsl}
+                    style={{ ...btn, height: 36, justifyContent: "center", background: "#06080d", color: "#ffd97a", border: "none", fontWeight: 700 }}
+                  >
+                    ⬇ Install WSL (needs admin + reboot)
+                  </button>
+                ) : (
+                  <button
+                    onClick={provisionTools}
+                    disabled={provisionLog === "running"}
+                    style={{ ...btn, height: 36, justifyContent: "center", background: "#06080d", color: "#ffd97a", border: "none", fontWeight: 700, opacity: provisionLog === "running" ? 0.6 : 1 }}
+                  >
+                    {provisionLog === "running" ? "⏳ Installing…" : "⬇ Install sandbox engine + agent tools"}
+                  </button>
+                )}
               </div>
             )}
 
-            {wslStat?.available && !toolchainReady(toolchain) && (
+            {sbox?.available && isWsl && !toolchainReady(toolchain) && (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
                 <div style={{ fontSize: 12, lineHeight: 1.5, color: "var(--fg-muted)" }}>
-                  Isolation works now for local models. For <b>agent tooling + cloud CLIs inside WSL</b>, install the toolchain (node, uv, git, Claude/Codex/Gemini) into {wslStat.defaultDistro ?? "Ubuntu"}.
+                  Isolation works now for local models. For <b>agent tooling + cloud CLIs inside {engineLabel(sbox.kind)}</b>, install the toolchain (node, uv, git, Claude/Codex/Gemini/Kimi).
                 </div>
                 <button
                   onClick={provisionTools}
                   disabled={provisionLog === "running"}
                   style={{ ...btn, height: 36, justifyContent: "center", fontWeight: 700, opacity: provisionLog === "running" ? 0.6 : 1 }}
                 >
-                  {provisionLog === "running" ? "⏳ Installing agent tools…" : "⬇ Install agent tools in " + (wslStat.defaultDistro ?? "Ubuntu")}
+                  {provisionLog === "running" ? "⏳ Installing agent tools…" : "⬇ Install agent tools in " + engineLabel(sbox.kind)}
                 </button>
               </div>
             )}
 
-            {wslStat?.available && toolchainReady(toolchain) && (
+            {sbox?.available && (isWsl ? toolchainReady(toolchain) : true) && (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <div style={{ fontSize: 11, color: "#7ff0c5" }}>
-                  ✓ Agent toolchain ready in {wslStat.defaultDistro ?? "Ubuntu"}
+                  ✓ {engineLabel(sbox.kind)} ready{sbox.beta ? " — beta (not yet hardware-verified)" : ""}
                 </div>
-                <button
-                  onClick={syncLogins}
-                  title="Copy your codex/claude/gemini logins from Windows into the sandbox so isolated cloud agents are authenticated"
-                  style={{ ...btn, height: 32, justifyContent: "center", color: "var(--fg-strong)" }}
-                >
-                  🔑 Sync my cloud logins into the sandbox
-                </button>
+                {!isWsl && (
+                  <button
+                    onClick={provisionTools}
+                    disabled={provisionLog === "running"}
+                    style={{ ...btn, height: 32, justifyContent: "center", color: "var(--fg-strong)", opacity: provisionLog === "running" ? 0.6 : 1 }}
+                  >
+                    {provisionLog === "running" ? "⏳ Installing…" : "⬇ (Re)install agent tools"}
+                  </button>
+                )}
+                {isWsl && (
+                  <button
+                    onClick={syncLogins}
+                    title="Copy your codex/claude/gemini/kimi logins + API keys from Windows into the sandbox so isolated cloud agents are authenticated"
+                    style={{ ...btn, height: 32, justifyContent: "center", color: "var(--fg-strong)" }}
+                  >
+                    🔑 Sync my cloud logins into the sandbox
+                  </button>
+                )}
               </div>
             )}
 
@@ -819,20 +870,20 @@ export default function CodePage() {
               {ghMsg && <div style={{ fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
             </div>
 
-            {isolation.enabled && wslStat?.available ? (
+            {isolation.enabled && sbox?.available ? (
               <>
                 <button
                   onClick={newIsolatedProject}
                   style={{ ...btn, height: 46, fontSize: 14, fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", justifyContent: "center" }}
                 >
-                  🛡 New isolated project (in {wslStat.defaultDistro ?? "Ubuntu"})
+                  🛡 New isolated project (in {engineLabel(sbox.kind)})
                 </button>
                 <button
                   onClick={pickWorkspace}
-                  title="Open a folder on your Windows drive — NOT isolated"
+                  title={`Open a folder on your ${isWsl ? "Windows" : "host"} drive — NOT isolated`}
                   style={{ ...btn, height: 38, justifyContent: "center", color: "var(--fg-muted)" }}
                 >
-                  📁 Open a Windows folder (not isolated)
+                  📁 Open a {isWsl ? "Windows" : "host"} folder (not isolated)
                 </button>
               </>
             ) : (
@@ -844,18 +895,18 @@ export default function CodePage() {
               </button>
             )}
 
-            {isolation.enabled && wslProjects.length > 0 && (
+            {isolation.enabled && sboxProjects.length > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>🛡 Isolated projects</div>
-                {wslProjects.map((p) => (
+                {sboxProjects.map((p) => (
                   <button
-                    key={p.uncPath}
-                    onClick={() => openWorkspace(p.uncPath)}
-                    title={p.linuxPath}
+                    key={p.path}
+                    onClick={() => openWorkspace(p.path)}
+                    title={p.innerPath}
                     style={{ display: "block", textAlign: "left", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", color: "var(--fg)", cursor: "pointer" }}
                   >
                     <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)" }}>🐧 {p.name}</div>
-                    <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.linuxPath}</div>
+                    <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.innerPath}</div>
                   </button>
                 ))}
               </div>

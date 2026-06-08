@@ -382,13 +382,11 @@ function HybridFrame({ children, outerW, outerH }: {
 type ActiveMode = "home" | "finetuning" | "agentic" | "gamify";
 
 function ModeBar({
-  mode, setMode, advancedOpen, setAdvancedOpen, installed,
+  mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, onOpenServer,
 }: {
   mode: ActiveMode;
   setMode: (m: ActiveMode) => void;
-  advancedOpen: boolean;
-  setAdvancedOpen: (v: boolean) => void;
   installed: ModeId[];
   themeMode: Mode;
   onToggleThemeMode: () => void;
@@ -444,8 +442,12 @@ function ModeBar({
           title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
           style={{
             width: 70, height: 50, borderRadius: 6,
-            background: "linear-gradient(180deg, rgba(60,60,80,0.8), rgba(40,40,60,0.8))",
-            border: "1px solid rgba(255,255,255,0.20)",
+            // Theme-aware (was a fixed dark gradient → looked like a dark blob
+            // with dark text on the LIGHT-mode header). --header-pill-base is
+            // dark in dark mode, light-grey in light mode, exactly like the nav
+            // pills — so this button now matches the header band in both.
+            background: "linear-gradient(180deg, color-mix(in srgb, var(--header-pill-base) 82%, var(--accent)), var(--header-pill-base))",
+            border: "1px solid var(--border-strong)",
             display: "flex", flexDirection: "column",
             alignItems: "center", justifyContent: "center", lineHeight: 1.0,
             cursor: "pointer", padding: 0,
@@ -460,7 +462,10 @@ function ModeBar({
         <div data-ui="ColorSelector" style={{
           width: 70, height: 50, padding: 4,
           display: "grid", gridTemplateColumns: "repeat(3, 18px)", gridTemplateRows: "repeat(2, 18px)",
-          gap: 3, background: "rgba(60,60,80,0.4)", borderRadius: 6,
+          gap: 3,
+          // Theme-aware to match the toggle button (was fixed dark).
+          background: "color-mix(in srgb, var(--header-pill-base) 60%, transparent)",
+          borderRadius: 6,
         }}>
           {ACCENTS.map(a => {
             const selected = a.key === accentKey;
@@ -484,27 +489,8 @@ function ModeBar({
           })}
         </div>
 
-        {/* Advanced toggle — independent. Reveals advanced pages. */}
-        <button
-          data-ui="AdvancedToggle"
-          onClick={() => setAdvancedOpen(!advancedOpen)}
-          style={{ ...(advancedOpen ? active : baseBtn), width: 114 }}
-        >
-          <span style={{ fontSize: 14 }}>⚙</span>
-          <span>Advanced</span>
-        </button>
-
-        {advancedOpen && (
-          <button
-            data-ui="TutorialRecorderToggle"
-            onClick={toggleTutorialRecorder}
-            title="Open tutorial recorder"
-            style={{ ...baseBtn, width: 88 }}
-          >
-            <span style={{ fontSize: 14 }}>●</span>
-            <span>Record</span>
-          </button>
-        )}
+        {/* Advanced toggle removed — MCP/Accounts are always visible in the
+            SubTabs right cluster, and Record moved there too. */}
 
         {/* Mode toggles — single-active. Click toggles back to "home" if
             the same mode is clicked twice. Hidden when the mode isn't
@@ -644,7 +630,13 @@ function SubTabs({
   };
 
   const leftTabs  = pages.filter(p => !RIGHT_ALIGNED_KEYS.has(p.key));
-  const rightTabs = pages.filter(p =>  RIGHT_ALIGNED_KEYS.has(p.key));
+  const rightRaw  = pages.filter(p =>  RIGHT_ALIGNED_KEYS.has(p.key));
+  // Info is ALWAYS the rightmost item; the rest (MCP, Accounts) keep order.
+  // Final right cluster: ● Record · MCP · Accounts · Info.
+  const rightTabs = [
+    ...rightRaw.filter(p => p.key !== "info"),
+    ...rightRaw.filter(p => p.key === "info"),
+  ];
 
   return (
     <div style={{
@@ -655,6 +647,18 @@ function SubTabs({
     }}>
       {leftTabs.map(renderTab)}
       <div style={{ flex: 1 }} />
+      <div
+        data-ui="TutorialRecorderToggle"
+        onClick={toggleTutorialRecorder}
+        title="Tutorial recorder"
+        style={{
+          padding: "5px 12px", borderRadius: 8, fontWeight: 600,
+          color: "var(--fg-muted)", cursor: "pointer", userSelect: "none",
+          display: "flex", alignItems: "center", gap: 6,
+        }}
+      >
+        <span style={{ fontSize: 12, color: "#e0556a" }}>●</span> Record
+      </div>
       {rightTabs.map(renderTab)}
     </div>
   );
@@ -786,13 +790,7 @@ export default function AppShell() {
     const k = readPageFromUrl();
     return k ? resolveDeepLink(k) : null;
   }, []);
-  const initialAdvanced = useMemo(() => {
-    const k = readPageFromUrl();
-    if (!k) return false;
-    return ADVANCED.pages.some(p => p.key === k);
-  }, []);
   const [mode, setMode] = useState<ActiveMode>(initialDeep?.mode ?? "home");
-  const [advancedOpen, setAdvancedOpen] = useState<boolean>(initialAdvanced);
   const [serverModalOpen, setServerModalOpen] = useState<boolean>(false);
   const [bridgesModalOpen, setBridgesModalOpen] = useState<boolean>(false);
   const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
@@ -854,11 +852,13 @@ export default function AppShell() {
         out.push(...m.pages);
       }
     }
-    if (advancedOpen && installed.includes("advanced")) {
+    // Advanced pages (MCP / Accounts) are ALWAYS visible now — the old
+    // ⚙ Advanced toggle is gone; they live in the right cluster of SubTabs.
+    if (installed.includes("advanced")) {
       out.push(...ADVANCED.pages);
     }
     return out;
-  }, [mode, advancedOpen, installed]);
+  }, [mode, installed]);
 
   // When mode changes, jump to that mode's firstTab. When mode is
   // 'home' (no group active), default to the Core firstTab ('home').
@@ -878,16 +878,6 @@ export default function AppShell() {
     setActiveKey(defaultKeyForMode(m));
   };
 
-  // If the user toggles Advanced off while looking at an Advanced
-  // page, snap back to the mode's first tab so they're not stranded.
-  const handleSetAdvanced = (v: boolean) => {
-    setAdvancedOpen(v);
-    if (!v) {
-      const onAdvancedPage = ADVANCED.pages.some(p => p.key === activeKey);
-      if (onAdvancedPage) setActiveKey(defaultKeyForMode(mode));
-    }
-  };
-
   // Cross-page navigation hook. StudioPage etc. dispatch
   // `new CustomEvent('owllm:navigate', { detail: { key } })` to jump
   // between tabs (e.g. "+ New project from <team>" → Agents). We also
@@ -905,9 +895,8 @@ export default function AppShell() {
       // Find which module owns this page key so we can light up the
       // matching ModeBar toggle alongside the SubTabs row.
       for (const m of ALL_MODULES) {
-        if (m.pages.some(p => p.key === key) && m.id !== "core") {
-          if (m.id === "advanced") setAdvancedOpen(true);
-          else if (m.id === "finetuning" || m.id === "agentic" || m.id === "gamify") setMode(m.id);
+        if (m.pages.some(p => p.key === key) && m.id !== "core" && m.id !== "advanced") {
+          if (m.id === "finetuning" || m.id === "agentic" || m.id === "gamify") setMode(m.id);
           break;
         }
       }
@@ -956,8 +945,6 @@ export default function AppShell() {
           <ModeBar
             mode={mode}
             setMode={handleSetMode}
-            advancedOpen={advancedOpen}
-            setAdvancedOpen={handleSetAdvanced}
             installed={installed}
             themeMode={theme.mode}
             onToggleThemeMode={theme.toggleMode}
@@ -1029,7 +1016,7 @@ export default function AppShell() {
           <BridgesPage />
         </PageModal>
       )}
-      <TutorialRecorder enabled={advancedOpen} />
+      <TutorialRecorder enabled={true} />
       <FirstRunWizardMount />
     </>
   );

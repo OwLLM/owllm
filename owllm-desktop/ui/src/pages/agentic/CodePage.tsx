@@ -575,18 +575,25 @@ export default function CodePage() {
   const isolatedNow = isWslPath(workspace);
 
   // Auto-sync host cloud logins (codex/claude/gemini/kimi OAuth + every API key)
-  // into the sandbox whenever an isolated project is active, so cloud agents are
-  // authenticated with ZERO manual steps. Once per session; re-running is cheap
-  // and keeps refreshed tokens current. Best-effort, silent on failure.
+  // into the sandbox PROACTIVELY — as soon as a sandbox engine is present and
+  // isolation is on, not only once a project is open. So by the time you open
+  // the New-project dialog the logins are already there (no manual "Sync"
+  // needed). Once per session; cheap to re-run; best-effort, silent on failure.
   const autoSyncedRef = useRef(false);
   useEffect(() => {
-    if (autoSyncedRef.current || !isolatedNow) return;
+    if (autoSyncedRef.current) return;
+    const should = isolatedNow || (!!sbox?.available && isolation.enabled);
+    if (!should) return;
     autoSyncedRef.current = true;
     sandboxSyncLogins(wslStat?.defaultDistro ?? null)
-      .then((s) => { if (s.length) setStatus(`🔑 Synced cloud logins into the sandbox: ${s.join(", ")}.`); })
+      .then((s) => {
+        if (s.length) setStatus(`🔑 Synced cloud logins into the sandbox: ${s.join(", ")}.`);
+        // Refresh the dialog's status if it's open.
+        sandboxLoginStatus(wslStat?.defaultDistro ?? null).then(setNpLogins).catch(() => {});
+      })
       .catch(() => { /* best-effort */ });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isolatedNow, wslStat]);
+  }, [isolatedNow, sbox?.available, isolation.enabled, wslStat]);
 
   // Start (or reuse) the llama-server for the chosen model; return its port.
   async function ensureServer(id: string): Promise<number | null> {

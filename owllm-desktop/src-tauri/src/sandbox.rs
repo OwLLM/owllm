@@ -576,7 +576,6 @@ fn sync_logins_impl(distro: Option<String>) -> Result<Vec<String>, String> {
         .or_else(|| crate::wsl::wsl_status().default_distro)
         .ok_or_else(|| "no WSL distro".to_string())?;
     let home = std::env::var("USERPROFILE").map_err(|_| "no USERPROFILE".to_string())?;
-    let m = win_to_mnt(&home)?;
 
     // Build the API-key env file: every saved provider key becomes an
     // `export` so any CLI/agent in the distro can reach it (covers key-authed
@@ -595,16 +594,25 @@ fn sync_logins_impl(distro: Option<String>) -> Result<Vec<String>, String> {
         }
     }
     let env_quoted = crate::wsl::sh_quote(&env_lines);
-
-    // OAuth login files for the four subscription CLIs (codex/claude/gemini/kimi),
-    // plus the key env file, plus a one-time hook so login shells source it.
+    // Convert the Windows home to /mnt via wslpath INSIDE the distro — canonical,
+    // avoids any hand-rolled path quirk. Copy unconditionally (best-effort), then
+    // report `syn` from what actually LANDED in the distro home, so the status is
+    // always truthful (never claims a sync that didn't copy).
+    let up = crate::wsl::sh_quote(&home);
     let script = format!(
-        "syn=''; mkdir -p ~/.codex ~/.claude ~/.gemini ~/.kimi ~/.owllm; \
-         if [ -f '{m}/.codex/auth.json' ]; then cp -f '{m}/.codex/auth.json' ~/.codex/ && cp -f '{m}/.codex/config.toml' ~/.codex/ 2>/dev/null; chmod 600 ~/.codex/auth.json 2>/dev/null; syn=\"$syn codex\"; fi; \
-         if [ -f '{m}/.claude/.credentials.json' ]; then cp -f '{m}/.claude/.credentials.json' ~/.claude/.credentials.json; cp -f '{m}/.claude.json' ~/.claude.json 2>/dev/null; chmod 600 ~/.claude/.credentials.json 2>/dev/null; syn=\"$syn claude\"; fi; \
-         if [ -d '{m}/.gemini' ]; then cp -rf '{m}/.gemini/.' ~/.gemini/ 2>/dev/null && syn=\"$syn gemini\"; fi; \
-         if [ -f '{m}/.kimi/config.toml' ]; then cp -rf '{m}/.kimi/.' ~/.kimi/ 2>/dev/null; chmod 600 ~/.kimi/config.toml 2>/dev/null; syn=\"$syn kimi\"; fi; \
-         printf '%s' {env_quoted} > ~/.owllm/agent_env.sh; chmod 600 ~/.owllm/agent_env.sh; \
+        "WH=$(wslpath -u {up} 2>/dev/null); \
+         mkdir -p ~/.codex ~/.claude ~/.gemini ~/.kimi ~/.owllm; \
+         cp -f \"$WH/.codex/auth.json\" ~/.codex/ 2>/dev/null; cp -f \"$WH/.codex/config.toml\" ~/.codex/ 2>/dev/null; \
+         cp -f \"$WH/.claude/.credentials.json\" ~/.claude/.credentials.json 2>/dev/null; cp -f \"$WH/.claude.json\" ~/.claude.json 2>/dev/null; \
+         cp -rf \"$WH/.gemini/.\" ~/.gemini/ 2>/dev/null; \
+         cp -rf \"$WH/.kimi/.\" ~/.kimi/ 2>/dev/null; \
+         printf '%s' {env_quoted} > ~/.owllm/agent_env.sh; chmod 600 ~/.owllm/agent_env.sh 2>/dev/null; \
+         chmod 600 ~/.codex/auth.json ~/.claude/.credentials.json ~/.kimi/config.toml 2>/dev/null; \
+         syn=''; \
+         [ -f ~/.codex/auth.json ] && syn=\"$syn codex\"; \
+         [ -f ~/.claude/.credentials.json ] && syn=\"$syn claude\"; \
+         [ -d ~/.gemini ] && [ -n \"$(ls -A ~/.gemini 2>/dev/null)\" ] && syn=\"$syn gemini\"; \
+         [ -f ~/.kimi/config.toml ] && syn=\"$syn kimi\"; \
          [ -s ~/.owllm/agent_env.sh ] && syn=\"$syn keys\"; \
          grep -q 'owllm/agent_env.sh' ~/.profile 2>/dev/null || echo '[ -f \"$HOME/.owllm/agent_env.sh\" ] && . \"$HOME/.owllm/agent_env.sh\"' >> ~/.profile; \
          echo \"SYNCED:$syn\""

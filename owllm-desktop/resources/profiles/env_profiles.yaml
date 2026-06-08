@@ -2,33 +2,39 @@
 # fine-tuning page. Each top-level dict is one environment the user
 # can install via the Train page's "Environment" picker.
 #
+# On Windows these envs are built and run INSIDE WSL (fine-tuning needs
+# a real Linux CUDA stack); on native Linux they're local venvs. Same
+# manifest either way.
+#
 # Pinning rules:
 #   * Every package needs an exact version (== X.Y.Z). No floating
 #     ranges — installs must be reproducible.
-#   * Use `index_url:` for packages that don't live on PyPI (PyTorch
-#     CUDA wheels in particular).
-#   * Order matters — pip installs in declaration order so a
-#     specific-index `torch` lands before any transformers transitive
-#     would otherwise pull a CPU build.
+#   * For PyTorch, set `cuda_wheel: true` and give a PLAIN version
+#     ("2.5.1", no +cuXXX tag). The app detects the machine's CUDA
+#     (driver) and installs the matching cu118 / cu121 / cu124 build —
+#     so one profile fits every NVIDIA card instead of a per-CUDA copy.
+#     (Use `index_url:` instead only for a fixed non-PyPI wheel.)
+#   * Order matters — torch (with its resolved index) installs before
+#     transformers, which would otherwise pull a CPU torch transitively.
 #   * `probe:` must print "OK\n" on success. The probe stdout is
 #     surfaced verbatim to the user on failure, so write helpful
 #     error messages.
 #
-# To add a new profile (e.g. CUDA 12.4): append a new entry, commit,
-# push. The app fetches this file from GitHub Raw on launch (cached
-# 24 h) so users see new envs without reinstalling the app.
+# To add a profile: append an entry, commit, push. The app fetches this
+# file from GitHub Raw on launch (cached 24 h) so users see new envs
+# without reinstalling the app.
 
-- name: gemma-finetune-cu121
-  display: "Gemma fine-tuning · CUDA 12.1"
+- name: gemma-finetune
+  display: "Gemma fine-tuning · auto-CUDA"
   description: >-
     Compatible with Gemma 2 / 2B / 9B base models on RTX 30xx / 40xx
     GPUs. Uses peft + transformers for LoRA training, bitsandbytes
-    for 4-bit quantised loading.
+    for 4-bit quantised loading. torch matches your driver's CUDA.
   python: "3.11"
   packages:
     - name: torch
-      version: "2.5.1+cu121"
-      index_url: "https://download.pytorch.org/whl/cu121"
+      version: "2.5.1"
+      cuda_wheel: true
     - name: transformers
       version: "4.46.0"
     - name: peft
@@ -50,8 +56,8 @@
     print(f"cuda {torch.version.cuda} · device {torch.cuda.get_device_name(0)}")
     print("OK")
 
-- name: llama-finetune-cu121
-  display: "Llama / Mistral fine-tuning · CUDA 12.1"
+- name: llama-finetune
+  display: "Llama / Mistral fine-tuning · auto-CUDA"
   description: >-
     Same toolchain as the Gemma profile, plus flash-attn for the
     longer-context Llama-3 variants. Use this for any LLaMA-family
@@ -59,8 +65,8 @@
   python: "3.11"
   packages:
     - name: torch
-      version: "2.5.1+cu121"
-      index_url: "https://download.pytorch.org/whl/cu121"
+      version: "2.5.1"
+      cuda_wheel: true
     - name: transformers
       version: "4.46.0"
     - name: peft
@@ -76,9 +82,9 @@
     - name: trl
       version: "0.11.4"
     # flash-attn must build against the exact torch ABI above; the
-    # wheel below is the prebuilt one matching torch 2.5 / cu121 /
-    # py3.11. If pip can't find it, fall back to building from
-    # source (slow, requires CUDA toolkit).
+    # wheel below is the prebuilt one matching torch 2.5 / py3.11. If
+    # pip can't find it, fall back to building from source (slow,
+    # requires CUDA toolkit).
     - name: flash-attn
       version: "2.7.0.post2"
   probe: |
@@ -93,17 +99,17 @@
     print(fa_ok)
     print("OK")
 
-- name: unsloth-cu121
-  display: "Unsloth (fast Llama / Gemma) · CUDA 12.1"
+- name: unsloth
+  display: "Unsloth (fast Llama / Gemma) · auto-CUDA"
   description: >-
     Unsloth-accelerated LoRA training. 2-5× faster than the vanilla
-    transformers loop at the cost of pinning specific torch + cuda
-    combos. Pick this for the quickest experimentation cycle.
+    transformers loop. Linux-first, so on Windows it runs in WSL.
+    Pick this for the quickest experimentation cycle.
   python: "3.11"
   packages:
     - name: torch
-      version: "2.5.1+cu121"
-      index_url: "https://download.pytorch.org/whl/cu121"
+      version: "2.5.1"
+      cuda_wheel: true
     - name: unsloth
       version: "2024.11.10"
     - name: peft

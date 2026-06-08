@@ -46,6 +46,15 @@ pub struct PackageSpec {
     /// the CUDA-12.1 wheel build of torch.
     #[serde(default)]
     pub index_url: Option<String>,
+    /// When true, `index_url` is computed at install time from the
+    /// machine's detected CUDA (driver) version rather than hardcoded —
+    /// e.g. torch resolves to .../whl/cu118|cu121|cu124 to match the
+    /// user's GPU instead of shipping one fixed build. The package
+    /// `version` should then carry NO `+cuXXX` local tag (just "2.5.1");
+    /// pip picks the right build from the resolved index. Ignored on a
+    /// machine with no detectable NVIDIA CUDA (falls back to cu121).
+    #[serde(default)]
+    pub cuda_wheel: bool,
 }
 
 /// One declarative environment profile. Lives in env_profiles.yaml
@@ -118,6 +127,10 @@ fn profile_hash(p: &EnvProfile) -> String {
         if let Some(idx) = &pkg.index_url {
             h.update(idx.as_bytes());
         }
+        h.update(b"\0");
+        if pkg.cuda_wheel {
+            h.update(b"cuda");
+        }
         h.update(b"\n");
     }
     format!("{:x}", h.finalize())
@@ -134,6 +147,7 @@ fn local_profiles_path() -> Option<PathBuf> {
 /// `<runtime_cache_root>/envs/<profile-name>/`; legacy LLM/.envs/ is
 /// still recognised so users coming from the Python app find their
 /// envs in the same place.
+#[cfg_attr(windows, allow(dead_code))] // host path only; Windows envs live in WSL
 fn envs_root() -> Option<PathBuf> {
     // Prefer the legacy LLM/.envs/ when it already has populated
     // profiles — otherwise new installs go straight into the
@@ -188,44 +202,83 @@ pub async fn env_profiles_list() -> Result<Vec<EnvProfile>, String> {
 /// finetune.py.
 #[tauri::command]
 pub async fn env_profile_status(name: String) -> Result<EnvProfileState, String> {
+    let profile = {
+        let n = name.clone();
+        tokio::task::spawn_blocking(move || -> Result<EnvProfile, String> {
+            read_profiles_yaml()?
+                .into_iter()
+                .find(|p| p.name == n)
+                .ok_or_else(|| format!("no env profile named {n}"))
+        })
+        .await
+        .map_err(|e| format!("join error: {e}"))??
+    };
+    status_impl(profile).await
+}
+
+/// Host (native Linux / fallback) status: the venv lives on the local
+/// filesystem under `envs_root()`. On native Linux this IS the Linux env;
+/// on Windows the WSL impl below shadows it.
+#[cfg(not(windows))]
+async fn status_impl(profile: EnvProfile) -> Result<EnvProfileState, String> {
     tokio::task::spawn_blocking(move || -> Result<EnvProfileState, String> {
-        let profiles = read_profiles_yaml()?;
-        let profile = profiles
-            .iter()
-            .find(|p| p.name == name)
-            .ok_or_else(|| format!("no env profile named {name}"))?;
         let venv = match envs_root() {
             Some(r) => r.join(&profile.name),
             None => return Ok(EnvProfileState::NotInstalled),
         };
-        let python_exe = if cfg!(windows) {
-            venv.join("Scripts").join("python.exe")
-        } else {
-            venv.join("bin").join("python")
-        };
+        let python_exe = venv.join("bin").join("python");
         if !python_exe.is_file() {
             return Ok(EnvProfileState::NotInstalled);
         }
-        let hash_file = venv.join(".owllm_manifest.sha256");
-        let current_hash = profile_hash(profile);
-        let installed_hash = std::fs::read_to_string(&hash_file)
+        let installed_hash = std::fs::read_to_string(venv.join(".owllm_manifest.sha256"))
             .unwrap_or_default()
             .trim()
             .to_string();
+        let current_hash = profile_hash(&profile);
+        let python_exe = python_exe.to_string_lossy().into_owned();
         if installed_hash != current_hash {
-            return Ok(EnvProfileState::Stale {
-                python_exe: python_exe.to_string_lossy().into_owned(),
-                installed_hash,
-                current_hash,
-            });
+            return Ok(EnvProfileState::Stale { python_exe, installed_hash, current_hash });
         }
-        // Probe scripts are the next slice — for now if the hash
-        // matches we trust the install. Wiring the probe through is
-        // a one-liner once the install command exists, because the
-        // install path already runs the probe and stamps the hash.
-        Ok(EnvProfileState::Ready {
-            python_exe: python_exe.to_string_lossy().into_owned(),
-        })
+        Ok(EnvProfileState::Ready { python_exe })
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Windows status: the env lives INSIDE the default WSL distro
+/// (`$HOME/.owllm/envs/<name>`), because fine-tuning runs in WSL. The
+/// returned `python_exe` is a POSIX path; consumers (finetuning.rs) run
+/// it in-distro. Returns NotInstalled (not an error) when WSL is absent
+/// so the UI shows an Install button rather than a red error.
+#[cfg(windows)]
+async fn status_impl(profile: EnvProfile) -> Result<EnvProfileState, String> {
+    tokio::task::spawn_blocking(move || -> Result<EnvProfileState, String> {
+        let Some(distro) = crate::wsl::wsl_status().default_distro else {
+            return Ok(EnvProfileState::NotInstalled);
+        };
+        let Ok(home) = wsl_backend::wsl_home(&distro) else {
+            return Ok(EnvProfileState::NotInstalled);
+        };
+        let env = wsl_backend::env_dir(&home, &profile.name);
+        let python_exe = format!("{env}/bin/python");
+        // One round-trip: report the python's existence + the stamped hash.
+        let q = crate::wsl::sh_quote;
+        let script = format!(
+            "if [ -x {py} ]; then printf 'OK\\n'; cat {hf} 2>/dev/null; else printf 'NONE\\n'; fi",
+            py = q(&python_exe),
+            hf = q(&format!("{env}/.owllm_manifest.sha256")),
+        );
+        let out = crate::wsl::run_in_distro(&distro, &script).unwrap_or_default();
+        let mut lines = out.lines().map(str::trim);
+        if lines.next() != Some("OK") {
+            return Ok(EnvProfileState::NotInstalled);
+        }
+        let installed_hash = lines.next().unwrap_or("").trim().to_string();
+        let current_hash = profile_hash(&profile);
+        if installed_hash != current_hash {
+            return Ok(EnvProfileState::Stale { python_exe, installed_hash, current_hash });
+        }
+        Ok(EnvProfileState::Ready { python_exe })
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -296,9 +349,189 @@ pub async fn env_profile_install(
     }
 }
 
-/// Core install logic. Returns the final python.exe path on success
-/// (after the atomic rename). Held in its own helper so `?` can
-/// short-circuit on any step without losing the channel-emit pattern.
+// ---- Windows: the fine-tuning env lives INSIDE WSL --------------------------
+
+#[cfg(windows)]
+mod wsl_backend {
+    /// Default distro, or an actionable error pointing at provisioning.
+    pub fn default_distro() -> Result<String, String> {
+        crate::wsl::wsl_status().default_distro.ok_or_else(|| {
+            "Fine-tuning runs inside WSL, but no WSL distro is installed. Install Ubuntu first (Code page → enable isolation, or run `wsl --install`).".to_string()
+        })
+    }
+    /// Absolute `$HOME` inside the distro (e.g. /home/mc) — so the env
+    /// paths we hand back are absolute, not `$HOME`-relative.
+    pub fn wsl_home(distro: &str) -> Result<String, String> {
+        let out = crate::wsl::run_in_distro(distro, "printf %s \"$HOME\"")?;
+        let h = out.lines().next().unwrap_or("").trim().to_string();
+        if h.is_empty() {
+            return Err("could not resolve $HOME inside WSL".into());
+        }
+        Ok(h)
+    }
+    pub fn env_dir(home: &str, name: &str) -> String {
+        format!("{home}/.owllm/envs/{name}")
+    }
+    /// Detect the driver's CUDA version (via `nvidia-smi` in the distro)
+    /// and map it to a torch wheel index. None → no NVIDIA GPU visible.
+    pub fn resolve_cuda_index(distro: &str) -> Option<String> {
+        let out = crate::wsl::run_in_distro(
+            distro,
+            "nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: [0-9]+\\.[0-9]+' | head -1",
+        )
+        .ok()?;
+        let ver = out
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("CUDA Version:").map(|s| s.trim().to_string()))?;
+        let mut it = ver.split('.');
+        let maj: u32 = it.next()?.parse().ok()?;
+        let min: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
+        let n = maj * 100 + min;
+        let cu = if n >= 1204 {
+            "cu124"
+        } else if n >= 1201 {
+            "cu121"
+        } else if n >= 1108 {
+            "cu118"
+        } else {
+            return None;
+        };
+        Some(format!("https://download.pytorch.org/whl/{cu}"))
+    }
+}
+
+/// `wsl.exe` argv to run a bash login-shell script in `distro`.
+#[cfg(windows)]
+fn wsl_invocation(distro: &str, script: &str) -> Vec<String> {
+    vec![
+        "-d".into(), distro.into(), "--".into(),
+        "bash".into(), "-lc".into(), script.into(),
+    ]
+}
+
+/// Core install logic (Windows → inside WSL). Mirrors the host pipeline,
+/// but every step runs in the distro via `wsl.exe -- bash -lc`. Uses `uv`
+/// (provisioned with the sandbox) to build the venv on the requested
+/// Python — uv fetches the interpreter if the distro lacks it, sidestepping
+/// the python3-venv/ensurepip dance. pip/uv output streams to the channel;
+/// the install is atomic (tmp dir → mv on success).
+#[cfg(windows)]
+async fn run_install(
+    profile: &EnvProfile,
+    hash: &str,
+    channel: &tauri::ipc::Channel<InstallEvent>,
+) -> Result<String, String> {
+    use std::path::Path;
+    let wsl = Path::new("wsl.exe");
+    let q = crate::wsl::sh_quote;
+
+    let distro = wsl_backend::default_distro()?;
+    let home = {
+        let d = distro.clone();
+        tokio::task::spawn_blocking(move || wsl_backend::wsl_home(&d))
+            .await
+            .map_err(|e| format!("join: {e}"))??
+    };
+    let env = wsl_backend::env_dir(&home, &profile.name);
+    let tmp = format!("{env}.tmp.{}", std::process::id());
+    let venv_py = format!("{tmp}/bin/python");
+
+    // Resolve the CUDA wheel index once, if any package needs it.
+    let cuda_index = if profile.packages.iter().any(|p| p.cuda_wheel) {
+        let d = distro.clone();
+        let idx = tokio::task::spawn_blocking(move || wsl_backend::resolve_cuda_index(&d))
+            .await
+            .map_err(|e| format!("join: {e}"))?;
+        match &idx {
+            Some(u) => {
+                let _ = channel.send(InstallEvent::Log { stream: "info".into(), line: format!("Detected CUDA → torch index {u}") });
+            }
+            None => {
+                let _ = channel.send(InstallEvent::Log { stream: "info".into(), line: "No NVIDIA CUDA visible in WSL — defaulting torch to cu121. Update the NVIDIA Windows driver for GPU training.".into() });
+            }
+        }
+        idx.or_else(|| Some("https://download.pytorch.org/whl/cu121".to_string()))
+    } else {
+        None
+    };
+
+    // 1) Create the venv (uv preferred, python3-venv fallback).
+    let _ = channel.send(InstallEvent::Step { label: format!("Creating venv in WSL: {env}") });
+    let mk = format!(
+        "set -e; mkdir -p {root}; rm -rf {t}; \
+         if command -v uv >/dev/null 2>&1; then uv venv --python {pyv} {t}; \
+         else python3 -m venv {t}; fi",
+        root = q(&format!("{home}/.owllm/envs")),
+        t = q(&tmp),
+        pyv = q(&profile.python),
+    );
+    run_subprocess(channel, wsl, &wsl_invocation(&distro, &mk), None)
+        .await
+        .map_err(|e| {
+            let _ = crate::wsl::run_in_distro(&distro, &format!("rm -rf {}", q(&tmp)));
+            format!("venv creation failed in WSL: {e}")
+        })?;
+
+    // 2) Install each package in declared order.
+    for pkg in &profile.packages {
+        let spec = format!("{}=={}", pkg.name, pkg.version);
+        let index = if pkg.cuda_wheel { cuda_index.clone() } else { pkg.index_url.clone() };
+        let _ = channel.send(InstallEvent::Step {
+            label: format!("Installing {spec}{}", index.as_ref().map(|u| format!(" (index {u})")).unwrap_or_default()),
+        });
+        let idx_arg = index.as_ref().map(|u| format!(" --index-url {}", q(u))).unwrap_or_default();
+        let install = format!(
+            "if command -v uv >/dev/null 2>&1; then uv pip install --python {py}{idx} {spec}; \
+             else {py} -m pip install --disable-pip-version-check --no-input{idx} {spec}; fi",
+            py = q(&venv_py),
+            idx = idx_arg,
+            spec = q(&spec),
+        );
+        run_subprocess(channel, wsl, &wsl_invocation(&distro, &install), None)
+            .await
+            .map_err(|e| {
+                let _ = crate::wsl::run_in_distro(&distro, &format!("rm -rf {}", q(&tmp)));
+                format!("pip install {spec} failed: {e}")
+            })?;
+    }
+
+    // 3) Probe (must print "OK").
+    let _ = channel.send(InstallEvent::Step { label: "Running verification probe".into() });
+    let probe = format!("{py} -c {code}", py = q(&venv_py), code = q(&profile.probe));
+    let probe_out = run_subprocess_capture(wsl, &wsl_invocation(&distro, &probe))
+        .await
+        .map_err(|e| format!("probe spawn failed: {e}"))?;
+    for line in probe_out.stdout.lines() {
+        let _ = channel.send(InstallEvent::Log { stream: "probe".into(), line: line.to_string() });
+    }
+    for line in probe_out.stderr.lines() {
+        let _ = channel.send(InstallEvent::Log { stream: "probe-err".into(), line: line.to_string() });
+    }
+    if !probe_out.success || !probe_out.stdout.contains("OK") {
+        let _ = crate::wsl::run_in_distro(&distro, &format!("rm -rf {}", q(&tmp)));
+        return Err(format!(
+            "probe failed (exit {}). stderr: {}",
+            probe_out.code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+            probe_out.stderr.lines().last().unwrap_or("(empty)")
+        ));
+    }
+
+    // 4) Stamp the manifest hash + atomically swap tmp → final, in-distro.
+    let swap = format!(
+        "set -e; printf '%s' {h} > {t}/.owllm_manifest.sha256; rm -rf {f}; mv {t} {f}",
+        h = q(hash),
+        t = q(&tmp),
+        f = q(&env),
+    );
+    crate::wsl::run_in_distro(&distro, &swap).map_err(|e| format!("atomic swap failed: {e}"))?;
+
+    Ok(format!("{env}/bin/python"))
+}
+
+/// Core install logic (host / native Linux). Returns the final
+/// python path on success (after the atomic rename). On Windows the
+/// WSL impl above shadows this.
+#[cfg(not(windows))]
 async fn run_install(
     profile: &EnvProfile,
     hash: &str,
@@ -583,6 +816,11 @@ async fn run_subprocess(
 /// venv isn't there.
 #[tauri::command]
 pub async fn env_profile_uninstall(name: String) -> Result<(), String> {
+    uninstall_impl(name).await
+}
+
+#[cfg(not(windows))]
+async fn uninstall_impl(name: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let venv = match envs_root() {
             Some(r) => r.join(&name),
@@ -592,6 +830,22 @@ pub async fn env_profile_uninstall(name: String) -> Result<(), String> {
             return Ok(());
         }
         std::fs::remove_dir_all(&venv).map_err(|e| format!("rmdir {}: {e}", venv.display()))?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Windows: the env is in WSL — remove it there. No-ops if WSL is gone.
+#[cfg(windows)]
+async fn uninstall_impl(name: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let Some(distro) = crate::wsl::wsl_status().default_distro else {
+            return Ok(());
+        };
+        let home = wsl_backend::wsl_home(&distro)?;
+        let env = wsl_backend::env_dir(&home, &name);
+        crate::wsl::run_in_distro(&distro, &format!("rm -rf {}", crate::wsl::sh_quote(&env)))?;
         Ok(())
     })
     .await

@@ -249,21 +249,17 @@ async fn spawn_trainer(
     channel: &Channel<TrainEvent>,
 ) -> Result<(), String> {
     use tokio::io::AsyncBufReadExt;
-    use tokio::process::Command;
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    let mut cmd = Command::new(python_exe);
-    cmd.args(argv)
-        .stdout(std::process::Stdio::piped())
+    // On Windows the fine-tuning env lives INSIDE WSL (env_manager hands
+    // back a POSIX python path); the trainer must therefore run in-distro,
+    // with Windows path args translated to /mnt. build_trainer_command
+    // handles that; on native Linux it's a plain local spawn.
+    let mut cmd = build_trainer_command(python_exe, argv, cuda_visible_devices)?;
+    cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
-    if !cuda_visible_devices.is_empty() {
-        cmd.env("CUDA_VISIBLE_DEVICES", cuda_visible_devices);
-    }
-    // Force unbuffered stdout so progress lines appear in real time
-    // (Python aggressively buffers when stdout isn't a tty).
-    cmd.env("PYTHONUNBUFFERED", "1");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -297,6 +293,66 @@ async fn spawn_trainer(
         ));
     }
     Ok(())
+}
+
+/// Build the trainer subprocess. Native Linux (and a Windows host
+/// python, if ever used) → spawn the interpreter directly. Windows with
+/// a WSL env (POSIX python path) → run it inside the distro via
+/// `wsl.exe -- bash -lc`, exporting CUDA_VISIBLE_DEVICES / PYTHONUNBUFFERED
+/// and translating Windows path arguments to their /mnt mounts.
+fn build_trainer_command(
+    python_exe: &str,
+    argv: &[String],
+    cuda_visible_devices: &str,
+) -> Result<tokio::process::Command, String> {
+    use tokio::process::Command;
+    #[cfg(windows)]
+    if python_exe.starts_with('/') {
+        let distro = crate::wsl::wsl_status().default_distro.ok_or_else(|| {
+            "fine-tuning env is in WSL but no WSL distro is available".to_string()
+        })?;
+        let q = crate::wsl::sh_quote;
+        let mut script = String::new();
+        if !cuda_visible_devices.is_empty() {
+            script.push_str(&format!("export CUDA_VISIBLE_DEVICES={}; ", q(cuda_visible_devices)));
+        }
+        script.push_str("export PYTHONUNBUFFERED=1; exec ");
+        script.push_str(&q(python_exe));
+        for a in argv {
+            script.push(' ');
+            script.push_str(&q(&win_arg_to_mnt(a)));
+        }
+        let mut c = Command::new("wsl.exe");
+        c.arg("-d").arg(&distro).arg("--").arg("bash").arg("-lc").arg(&script);
+        return Ok(c);
+    }
+    // Host path: spawn the interpreter directly.
+    let mut c = Command::new(python_exe);
+    c.args(argv);
+    if !cuda_visible_devices.is_empty() {
+        c.env("CUDA_VISIBLE_DEVICES", cuda_visible_devices);
+    }
+    c.env("PYTHONUNBUFFERED", "1");
+    Ok(c)
+}
+
+/// Translate a Windows absolute path (`C:\a\b`) to its WSL mount
+/// (`/mnt/c/a/b`). Anything that isn't a drive-letter path — flags,
+/// numbers, already-POSIX paths — is returned unchanged.
+#[cfg(windows)]
+fn win_arg_to_mnt(s: &str) -> String {
+    let b = s.as_bytes();
+    if b.len() >= 3
+        && (b[0] as char).is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b[2] == b'\\' || b[2] == b'/')
+    {
+        let drive = (b[0] as char).to_ascii_lowercase();
+        let rest = s[2..].replace('\\', "/");
+        format!("/mnt/{drive}{rest}")
+    } else {
+        s.to_string()
+    }
 }
 
 /// Process one log line: always emit as TrainEvent::Log + update the

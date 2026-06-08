@@ -531,6 +531,7 @@ export default function CodePage() {
   const [npFolder, setNpFolder] = useState("");
   const [npBusy, setNpBusy] = useState(false);
   const [npLogins, setNpLogins] = useState<string[]>([]); // providers present in the sandbox
+  const [npSyncing, setNpSyncing] = useState(false);
 
   const openNewProject = () => {
     setNpName("");
@@ -1023,10 +1024,23 @@ export default function CodePage() {
                         </div>
                       )}
                       <button
-                        onClick={async () => { const s = await sandboxSyncLogins(wslStat?.defaultDistro ?? null); setNpLogins(await sandboxLoginStatus(wslStat?.defaultDistro ?? null)); setStatus(s.length ? `🔑 Synced: ${s.join(", ")}.` : "No host logins found to sync."); }}
+                        disabled={npSyncing}
+                        onClick={async () => {
+                          setNpSyncing(true);
+                          setStatus("🔑 Syncing cloud logins into the sandbox…");
+                          try {
+                            const s = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
+                            setNpLogins(await sandboxLoginStatus(wslStat?.defaultDistro ?? null));
+                            setStatus(s.length ? `🔑 Synced: ${s.join(", ")}.` : "No host logins found to sync (no CLI is logged in / no API keys saved on this PC).");
+                          } catch (e) {
+                            setStatus(`⚠ Login sync failed: ${e}`);
+                          } finally {
+                            setNpSyncing(false);
+                          }
+                        }}
                         style={{ ...btn, height: 30, justifyContent: "center", color: "var(--fg-strong)" }}
                       >
-                        🔑 Sync my cloud logins now
+                        {npSyncing ? "Syncing…" : "🔑 Sync my cloud logins now"}
                       </button>
                       <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>
                         Your Accounts logins are mirrored into the sandbox once and persist — isolated agents use them automatically.

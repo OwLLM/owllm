@@ -594,13 +594,15 @@ fn sync_logins_impl(distro: Option<String>) -> Result<Vec<String>, String> {
         }
     }
     let env_quoted = crate::wsl::sh_quote(&env_lines);
-    // Convert the Windows home to /mnt via wslpath INSIDE the distro — canonical,
-    // avoids any hand-rolled path quirk. Copy unconditionally (best-effort), then
-    // report `syn` from what actually LANDED in the distro home, so the status is
-    // always truthful (never claims a sync that didn't copy).
-    let up = crate::wsl::sh_quote(&home);
+    // Convert the Windows home to /mnt in Rust via win_to_mnt (same helper
+    // convert_impl uses, unit-tested). The previous in-bash `wslpath -u
+    // 'C:\Users\..'` returned EMPTY for a backslash Windows path, so WH was ""
+    // and every cp failed silently — the sync "did nothing". Copy
+    // unconditionally (best-effort), then report `syn` from what actually
+    // LANDED in the distro home, so the status is always truthful.
+    let wh = crate::wsl::sh_quote(&win_to_mnt(&home)?);
     let script = format!(
-        "WH=$(wslpath -u {up} 2>/dev/null); \
+        "WH={wh}; \
          mkdir -p ~/.codex ~/.claude ~/.gemini ~/.kimi ~/.owllm; \
          cp -f \"$WH/.codex/auth.json\" ~/.codex/ 2>/dev/null; cp -f \"$WH/.codex/config.toml\" ~/.codex/ 2>/dev/null; \
          cp -f \"$WH/.claude/.credentials.json\" ~/.claude/.credentials.json 2>/dev/null; cp -f \"$WH/.claude.json\" ~/.claude.json 2>/dev/null; \

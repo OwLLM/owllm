@@ -65,16 +65,6 @@ on:
         options:
           - 'true'
           - 'false'
-      platforms:
-        description: 'Platforms to build — run them separately so you never wait on the slow Mac leg: windows | linux | macos | all'
-        required: false
-        default: 'windows'
-        type: choice
-        options:
-          - 'windows'
-          - 'linux'
-          - 'macos'
-          - 'all'
 
 # Cancel any in-flight release for the same ref so a quick re-tag
 # doesn't waste minutes on a stale build.
@@ -87,47 +77,38 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------
-  # Pick the build matrix. Routine dispatch defaults to Windows-only (fast,
-  # cached, no macOS-Intel queue). 'all' (or a tag push) builds every OS.
-  # This is the big time/CI-minutes saver: we only ship Windows day to day.
-  # ---------------------------------------------------------------------
-  setup:
-    name: Select platforms
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
-    steps:
-      - id: pick
-        shell: bash
-        run: |
-          WIN='{"label":"Windows x64","os":"windows-latest","rust_target":"x86_64-pc-windows-msvc","tauri_args":"--target x86_64-pc-windows-msvc","artifact":"owllm-desktop-windows-x64"}'
-          MAC1='{"label":"macOS Apple Silicon","os":"macos-latest","rust_target":"aarch64-apple-darwin","tauri_args":"--target aarch64-apple-darwin","artifact":"owllm-desktop-macos-arm64"}'
-          MAC2='{"label":"macOS Intel","os":"macos-13","rust_target":"x86_64-apple-darwin","tauri_args":"--target x86_64-apple-darwin","artifact":"owllm-desktop-macos-x64"}'
-          LIN='{"label":"Linux x64","os":"ubuntu-22.04","rust_target":"x86_64-unknown-linux-gnu","tauri_args":"","artifact":"owllm-desktop-linux-x64"}'
-          PLAT="${{ github.event.inputs.platforms }}"
-          # Tag pushes carry no input → build everything. Dispatch defaults to windows.
-          if [ -z "$PLAT" ]; then PLAT="all"; fi
-          case "$PLAT" in
-            windows) INC="$WIN" ;;
-            linux)   INC="$LIN" ;;
-            macos)   INC="$MAC1,$MAC2" ;;
-            *)       INC="$WIN,$MAC1,$MAC2,$LIN" ;;   # 'all' (and tag pushes)
-          esac
-          echo "matrix={\"include\":[$INC]}" >> "$GITHUB_OUTPUT"
-          echo "Building platforms: $PLAT"
-
-  # ---------------------------------------------------------------------
-  # Build matrix — platforms chosen by `setup`. fail-fast: false so one
-  # platform failure doesn't cancel the others.
+  # Build matrix — every platform runs in parallel. fail-fast: false so a
+  # single platform failure doesn't cancel the others and you can still
+  # ship the working installers while you triage.
   # ---------------------------------------------------------------------
   build:
     name: Build ${{ matrix.label }}
-    needs: setup
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+      matrix:
+        include:
+          - label: 'Windows x64'
+            os: 'windows-latest'
+            rust_target: 'x86_64-pc-windows-msvc'
+            tauri_args: '--target x86_64-pc-windows-msvc'
+            artifact: 'owllm-desktop-windows-x64'
+          - label: 'macOS Apple Silicon'
+            os: 'macos-latest'
+            rust_target: 'aarch64-apple-darwin'
+            tauri_args: '--target aarch64-apple-darwin'
+            artifact: 'owllm-desktop-macos-arm64'
+          - label: 'macOS Intel'
+            os: 'macos-13'
+            rust_target: 'x86_64-apple-darwin'
+            tauri_args: '--target x86_64-apple-darwin'
+            artifact: 'owllm-desktop-macos-x64'
+          - label: 'Linux x64'
+            os: 'ubuntu-22.04'
+            rust_target: 'x86_64-unknown-linux-gnu'
+            tauri_args: ''
+            artifact: 'owllm-desktop-linux-x64'
 
     steps:
       - name: Checkout

@@ -171,7 +171,14 @@ fn run_wsl_user(distro: &str, user: Option<&str>, script: &str) -> Result<String
 }
 
 fn run_wsl_capture(distro: &str, script: &str) -> Result<String, String> {
-    run_wsl_user(distro, None, script)
+    // Pipe the script to bash over STDIN rather than passing it as a
+    // `-lc "<script>"` argument. Any script with nested quotes (the login
+    // sync, the login-status read, the project create/list printf) was being
+    // mangled by the Windows→wsl.exe command-line handoff — which is why the
+    // Accounts page (a simple `if [ -f ]` probe that survived) and the
+    // New-project dialog (this complex read) disagreed about the same files.
+    // stdin is immune and behaves identically for our non-interactive scripts.
+    run_in_distro_script(distro, script)
 }
 
 /// Public wrapper: run a bash script in the distro as the normal user and

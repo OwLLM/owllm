@@ -23,6 +23,7 @@ import {
   MistralLogo, TogetherLogo,
 } from "./brandLogos";
 import PtyTerminal from "./PtyTerminal";
+import { sandboxSyncLogins } from "../agentic/isolation";
 
 // VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
 // transcription pipeline (binary + ggml-base.bin model) and exposes an
@@ -998,6 +999,23 @@ export default function AccountsPage() {
     LOG_HUB.push({ ts: Date.now(), stream: "info", text, backend });
   }
 
+  // Mirror host logins/keys into the WSL sandbox so isolated agents are
+  // authenticated AUTOMATICALLY at registration — no manual "Sync" step. Runs
+  // after a CLI login terminal closes, after an API key is saved, and once on
+  // page load (to propagate anything already logged in). Best-effort: silently
+  // no-ops on a machine without WSL.
+  async function mirrorToSandbox(backend?: string) {
+    try {
+      const r = await sandboxSyncLogins(null);
+      if (r.synced.length && backend) {
+        logInfo(backend, `🔑 Now available to isolated agents in WSL: ${r.synced.join(", ")}.`);
+      }
+    } catch { /* no WSL on this machine — nothing to mirror into */ }
+  }
+
+  // Propagate any already-connected accounts into the sandbox once on load.
+  useEffect(() => { mirrorToSandbox(); }, []);
+
   function handleConnect(route: RouteSpec, provider: ProviderSpec) {
     if (route.kind === "subscription") {
       if (route.webOnly) {
@@ -1034,8 +1052,12 @@ export default function AccountsPage() {
   }
 
   function handleCloseTerm() {
+    const backend = activeTerm?.backend;
     setActiveTerm(null);
     setRailTab("log");
+    // A login likely just completed in the terminal → mirror it into the
+    // sandbox immediately so isolated agents are authenticated, no manual sync.
+    mirrorToSandbox(backend);
   }
 
   function handleInstall(route: RouteSpec, provider: ProviderSpec) {
@@ -1138,6 +1160,9 @@ export default function AccountsPage() {
       await invoke("accounts_save_api_key", { name: route.envName, value });
       setCardState(route.key, { connected: true, testText: "", testOk: null });
       logInfo(route.backend, `Saved ${provider.name} API key locally.`);
+      // Push the key into the sandbox too, so isolated agents can use it — at
+      // registration, automatically.
+      mirrorToSandbox(route.backend);
     } catch (e: any) {
       logInfo(route.backend, `[error] save failed: ${e?.message ?? e}`);
     }

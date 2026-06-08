@@ -547,7 +547,6 @@ export default function CodePage() {
   const [npFolder, setNpFolder] = useState("");
   const [npBusy, setNpBusy] = useState(false);
   const [npLogins, setNpLogins] = useState<string[]>([]); // providers present in the sandbox
-  const [npSyncing, setNpSyncing] = useState(false);
 
   const openNewProject = () => {
     setNpName("");
@@ -555,9 +554,15 @@ export default function CodePage() {
     setNpIsolate(!!sbox?.available); // default isolated whenever an engine exists
     setNpBusy(false);
     setNpOpen(true);
-    // Account status inside the sandbox (which logins are synced).
-    if (sbox?.available) sandboxLoginStatus(wslStat?.defaultDistro ?? null).then(setNpLogins).catch(() => setNpLogins([]));
-    else setNpLogins([]);
+    // Mirror Accounts logins into the sandbox, THEN show what's available —
+    // automatically, no manual button. (No-op/instant if already synced.)
+    if (sbox?.available) {
+      sandboxSyncLogins(wslStat?.defaultDistro ?? null)
+        .catch(() => {})
+        .finally(() => {
+          sandboxLoginStatus(wslStat?.defaultDistro ?? null).then(setNpLogins).catch(() => setNpLogins([]));
+        });
+    } else setNpLogins([]);
   };
   const npBrowseFolder = async () => {
     try {
@@ -1034,46 +1039,25 @@ export default function CodePage() {
                     <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>Lets the agent clone private repos and push from inside the sandbox.</div>
                   </div>
 
-                  {/* Cloud account status inside the sandbox (#8) */}
+                  {/* Cloud accounts inside the sandbox — mirrored AUTOMATICALLY
+                      from your Accounts logins when you connect them. No manual
+                      sync step. */}
                   {sbox?.available && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                       <label style={{ fontSize: 11, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.5 }}>Cloud accounts in sandbox</label>
                       {npLogins.filter((l) => l !== "keys").length > 0 ? (
                         <div style={{ fontSize: 12, color: "#7ff0c5" }}>
-                          ✓ {npLogins.filter((l) => l !== "keys").join(", ")} synced{npLogins.includes("keys") ? " · API keys synced" : ""}
+                          ✓ {npLogins.filter((l) => l !== "keys").join(", ")} available{npLogins.includes("keys") ? " · API keys" : ""} — isolated agents are authenticated.
                         </div>
+                      ) : npLogins.includes("keys") ? (
+                        <div style={{ fontSize: 12, color: "#7ff0c5" }}>✓ API keys available to isolated agents.</div>
                       ) : (
                         <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>
-                          {npLogins.includes("keys") ? "API keys synced — no CLI logins yet." : "No cloud logins synced yet."}
+                          No cloud accounts connected yet — connect one on the <b>Accounts</b> page and it's mirrored here automatically.
                         </div>
                       )}
-                      <button
-                        disabled={npSyncing}
-                        onClick={async () => {
-                          setNpSyncing(true);
-                          setStatus("🔑 Syncing cloud logins into the sandbox…");
-                          try {
-                            const r = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
-                            setNpLogins(await sandboxLoginStatus(wslStat?.defaultDistro ?? null));
-                            setStatus(
-                              r.synced.length
-                                ? `🔑 Synced into sandbox: ${r.synced.join(", ")}.`
-                                : r.found_on_host.length
-                                  ? `Found ${r.found_on_host.join(", ")} on Windows but the copy into WSL produced nothing — is Ubuntu set up? Try reinstalling the toolchain.`
-                                  : "Nothing to sync — no CLI is logged in and no API keys saved on Windows (Accounts → Connect first)."
-                            );
-                          } catch (e) {
-                            setStatus(`⚠ Login sync failed: ${e}`);
-                          } finally {
-                            setNpSyncing(false);
-                          }
-                        }}
-                        style={{ ...btn, height: 30, justifyContent: "center", color: "var(--fg-strong)" }}
-                      >
-                        {npSyncing ? "Syncing…" : "🔑 Sync my cloud logins now"}
-                      </button>
                       <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>
-                        Your Accounts logins are mirrored into the sandbox once and persist — isolated agents use them automatically.
+                        Your Accounts logins sync into the sandbox automatically and persist.
                       </div>
                     </div>
                   )}

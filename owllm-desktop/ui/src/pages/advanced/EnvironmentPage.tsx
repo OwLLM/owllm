@@ -1,15 +1,19 @@
 ﻿import StubPage from "../../core/StubPage";
 
-// Qt: main.py::_build_environment_management_page (line 25680) +
-// _build_environments_subtab (25728). Per-model virtual environments:
-// list, repair, recreate, inspect pip freeze, switch active env.
+// The legacy Qt "Environment" page managed one Python venv PER MODEL —
+// obsolete under GGUF inference (no per-model Python). The live concept is
+// per-SCENARIO fine-tuning envs (pinned torch/CUDA/peft), and they're now
+// managed where they're used: the Train page's "Environment" card (pick +
+// install/repair, streamed logs). On Windows they build + run inside WSL.
+// Backend: src-tauri/src/env_manager.rs (env_profiles_list / _status /
+// _install / _uninstall). This page is kept only as a signpost.
 export default function EnvironmentPage() {
   return (
     <StubPage spec={{
-      icon: "⚙️",
+      icon: "🐧",
       title: "Environment",
-      blurb: "Manage per-model Python virtualenvs. Each model variant has its own env (specific torch/cuda/llama-cpp wheels). Native impl scans LLM/.envs/ + LLM/python_runtime/ and exposes 'repair env' / 'recreate env' as Tauri commands that shell pip in a non-window subprocess.",
-      qtRef: "LLM/desktop_app/main.py:25680 _build_environment_management_page",
+      blurb: "Fine-tuning Python environments moved to the Train page → the “🐧 Environment” card, where you pick a profile and Install/Repair it (live log). On Windows they’re built and run inside WSL, and torch auto-matches your GPU’s CUDA. There’s no longer a per-model venv to manage here.",
+      qtRef: "owllm-desktop/src-tauri/src/env_manager.rs (env_profile_install/status)",
     }} />
   );
 }

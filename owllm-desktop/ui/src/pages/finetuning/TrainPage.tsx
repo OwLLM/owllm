@@ -14,6 +14,14 @@ import {
   StartTrainingPanel,
   StatusKind,
 } from "./widgets/TrainingWidgets";
+import {
+  type EnvProfile,
+  type EnvProfileState,
+  listEnvProfiles,
+  envProfileStatus,
+  installEnvProfile,
+  envStateLabel,
+} from "./envProfiles";
 
 // Mirrors Rust TrainStatus (finetuning.rs). All numeric fields can be
 // null when the run hasn't reported them yet — every read site must
@@ -364,6 +372,15 @@ export default function TrainPage() {
   // download (or fail) at train time. (huggingface.rs::hf_cache_list)
   const [downloadedBases, setDownloadedBases] = React.useState<string[]>([]);
   const [customBase, setCustomBase] = React.useState(false);
+
+  // Fine-tuning Python environment (built/run in WSL on Windows). A run
+  // can't start until its env is installed (Ready). env_manager.rs.
+  const [envProfiles, setEnvProfiles] = React.useState<EnvProfile[]>([]);
+  const [envProfile, setEnvProfile] = React.useState<string>("");
+  const [envState, setEnvState] = React.useState<EnvProfileState | null>(null);
+  const [envBusy, setEnvBusy] = React.useState(false);
+  const [envLog, setEnvLog] = React.useState<string[]>([]);
+  const [showEnvLog, setShowEnvLog] = React.useState(false);
   const downloadedLower = React.useMemo(
     () => new Set(downloadedBases.map((b) => b.toLowerCase())),
     [downloadedBases],
@@ -410,7 +427,55 @@ export default function TrainPage() {
     return () => { dead = true; window.clearInterval(id); };
   }, []);
 
+  // Load env profiles once; default the selection to the first one.
+  React.useEffect(() => {
+    let dead = false;
+    listEnvProfiles()
+      .then((ps) => {
+        if (dead) return;
+        setEnvProfiles(ps);
+        if (ps.length > 0) setEnvProfile((cur) => cur || ps[0].name);
+      })
+      .catch(() => { /* picker just stays empty */ });
+    return () => { dead = true; };
+  }, []);
+
+  // Refresh the selected env's status whenever it changes.
+  const refreshEnvStatus = React.useCallback(async (name: string) => {
+    if (!name) { setEnvState(null); return; }
+    try { setEnvState(await envProfileStatus(name)); }
+    catch { setEnvState(null); }
+  }, []);
+  React.useEffect(() => { refreshEnvStatus(envProfile); }, [envProfile, refreshEnvStatus]);
+
+  const installEnv = async () => {
+    if (!envProfile || envBusy) return;
+    setEnvBusy(true);
+    setShowEnvLog(true);
+    setEnvLog([`Installing ${envProfile}…`]);
+    setEnvState({ kind: "installing" });
+    try {
+      await installEnvProfile(envProfile, (ev) => {
+        if (ev.kind === "step") setEnvLog((l) => [...l, `▸ ${ev.label}`].slice(-400));
+        else if (ev.kind === "log") setEnvLog((l) => [...l, ev.line].slice(-400));
+        else if (ev.kind === "failed") setEnvLog((l) => [...l, `✖ ${ev.error}`].slice(-400));
+        else if (ev.kind === "finished") setEnvLog((l) => [...l, "✓ done"].slice(-400));
+      });
+    } catch (e) {
+      setEnvLog((l) => [...l, `✖ ${e}`].slice(-400));
+    } finally {
+      setEnvBusy(false);
+      await refreshEnvStatus(envProfile);
+    }
+  };
+
   const start = async () => {
+    if (envState?.kind !== "ready") {
+      setStatus({ ...EMPTY_STATUS, state: "idle", running: false,
+        message: "Install the fine-tuning environment first (Environment card)." });
+      setShowEnvLog(true);
+      return;
+    }
     setStatus({ ...EMPTY_STATUS, state: "running", running: true, message: "Starting…" });
     // Open a Tauri Channel — finetuning::train_start sends TrainEvents
     // (Started / Log / Metric / Finished / Failed) through it. Without
@@ -445,7 +510,7 @@ export default function TrainPage() {
     try {
       await invoke<void>("train_start", {
         config: {
-          envProfile: "tf-cu121-t25-base-stable",
+          envProfile,
           baseModel,
           dataset: datasetPath,
           outputDir,
@@ -610,6 +675,63 @@ export default function TrainPage() {
               wordBreak: "break-all",
             }}>{datasetStatus}</div>
           </div>
+        </div>
+
+        {/* Card 2.5: Environment — the Python env the trainer runs in.
+            On Windows it's built + run inside WSL; torch auto-matches the
+            GPU's CUDA. A run can't start until this is Ready. */}
+        <div data-ui="cfgCard" style={cfgCard}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            <div style={cardTitle}>🐧  ENVIRONMENT</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: envStateLabel(envState).color }}>
+              {envStateLabel(envState).text}
+            </div>
+          </div>
+          <select
+            data-ui="train_env_profile"
+            style={inputStyle}
+            value={envProfile}
+            disabled={envBusy}
+            onChange={(e) => setEnvProfile(e.target.value)}
+          >
+            {envProfiles.length === 0 && <option value="">No environments available</option>}
+            {envProfiles.map((p) => (
+              <option key={p.name} value={p.name}>{p.display}</option>
+            ))}
+          </select>
+          <div style={{ fontSize: 11, color: "#8595ad", lineHeight: 1.5, marginTop: 4 }}>
+            {envProfiles.find((p) => p.name === envProfile)?.description
+              || "Pick the training environment."}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+            <button
+              style={{ ...cardBtn, opacity: envBusy || !envProfile ? 0.5 : 1 }}
+              disabled={envBusy || !envProfile}
+              onClick={installEnv}
+            >
+              {envBusy ? "⏳ Installing…"
+                : envState?.kind === "ready" ? "↻ Reinstall"
+                : envState?.kind === "stale" ? "⟳ Update"
+                : envState?.kind === "broken" ? "🔧 Repair"
+                : "⬇ Install"}
+            </button>
+            {envLog.length > 0 && (
+              <button style={cardBtn} onClick={() => setShowEnvLog((v) => !v)}>
+                {showEnvLog ? "Hide log" : "Show log"}
+              </button>
+            )}
+            <div style={{ flex: 1, fontSize: 11, color: "#8595ad", textAlign: "right" }}>
+              Builds &amp; runs in WSL · torch auto-CUDA
+            </div>
+          </div>
+          {showEnvLog && envLog.length > 0 && (
+            <pre style={{
+              marginTop: 6, maxHeight: 160, overflow: "auto",
+              background: "var(--bg-input)", border: "1px solid rgba(var(--accent-rgb),0.2)",
+              borderRadius: 6, padding: "6px 8px", fontSize: 10.5, lineHeight: 1.45,
+              color: "#b8c4d6", whiteSpace: "pre-wrap", wordBreak: "break-all",
+            }}>{envLog.join("\n")}</pre>
+          )}
         </div>
 
         {/* Card 3: Training parameters — main.py:14747-14908 */}

@@ -66,12 +66,14 @@ on:
           - 'true'
           - 'false'
       platforms:
-        description: 'Platforms to build. "windows" = fast routine release; "all" = also macOS + Linux (slow, queues).'
+        description: 'Platforms to build — run them separately so you never wait on the slow Mac leg: windows | linux | macos | all'
         required: false
         default: 'windows'
         type: choice
         options:
           - 'windows'
+          - 'linux'
+          - 'macos'
           - 'all'
 
 # Cancel any in-flight release for the same ref so a quick re-tag
@@ -105,11 +107,14 @@ jobs:
           PLAT="${{ github.event.inputs.platforms }}"
           # Tag pushes carry no input → build everything. Dispatch defaults to windows.
           if [ -z "$PLAT" ]; then PLAT="all"; fi
-          if [ "$PLAT" = "all" ]; then
-            echo "matrix={\"include\":[$WIN,$MAC1,$MAC2,$LIN]}" >> "$GITHUB_OUTPUT"
-          else
-            echo "matrix={\"include\":[$WIN]}" >> "$GITHUB_OUTPUT"
-          fi
+          case "$PLAT" in
+            windows) INC="$WIN" ;;
+            linux)   INC="$LIN" ;;
+            macos)   INC="$MAC1,$MAC2" ;;
+            *)       INC="$WIN,$MAC1,$MAC2,$LIN" ;;   # 'all' (and tag pushes)
+          esac
+          echo "matrix={\"include\":[$INC]}" >> "$GITHUB_OUTPUT"
+          echo "Building platforms: $PLAT"
 
   # ---------------------------------------------------------------------
   # Build matrix — platforms chosen by `setup`. fail-fast: false so one

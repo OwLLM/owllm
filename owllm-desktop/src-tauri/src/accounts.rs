@@ -1571,8 +1571,17 @@ pub async fn codex_cli_stream(
             "--skip-git-repo-check".into(),
             "--color".into(),
             "never".into(),
+            // WRITABLE workspace — this is the coding/agentic stream (the Code
+            // page + agentic teams), not the read-only chat (codex_cli_complete).
+            // `read-only` here made the Coder unable to create dirs / write files
+            // ("mkdir: Read-only file system"); it could only rationalise the
+            // failure. workspace-write confines writes to the project cwd, and
+            // for isolated projects the WSL/Lima/bwrap sandbox is the outer
+            // boundary, so nothing escapes the workspace either way. In `codex
+            // exec` the approval policy already defaults to never, so writes in
+            // the workspace proceed without a prompt.
             "--sandbox".into(),
-            "read-only".into(),
+            "workspace-write".into(),
             // Positional prompt (older codex reads it here); stdin carries it
             // too (newer codex reads it there).
             prompt.clone(),

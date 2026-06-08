@@ -43,7 +43,7 @@ You compose teams of specialised agents — an orchestrator that plans, a coder 
 | 🔬 **Abliterate for safety research** | Orthogonalise weights against refusal directions. Generate adversarial datasets. Train better safety classifiers. The honest tools the field actually needs. |
 | 🛠 **GGUF + quantization built-in** | Convert HF safetensors → GGUF, quantize Q4/Q5/Q6/Q8/F16. Ship custom models anyone with llama.cpp can run. |
 | 🛡 **Red-team capable** | Compose adversarial agent teams whose *job* is to find vulnerabilities — in models, code, apps. Pair with fine-tuning to train defenders. |
-| 🔒 **OS-level isolation (Win/Mac/Linux)** | Flip it on and every tool your agents run — shell, file writes, edits, search, **and the cloud CLIs (Claude/Codex/Gemini/Kimi)** — runs **inside a real Linux sandbox**: WSL2 on Windows, a Lima VM on macOS, bubblewrap on Linux *(Mac/Linux beta)*. The project lives on the sandbox filesystem, so a model that runs `rm -rf` or writes outside it **cannot touch your real drive or home**. The toolchain **auto-installs**; **connect GitHub** and isolated agents clone private repos + push. Code page, agentic teams, **and** the fine-tuning chat are all covered; the rest of the app stays native. |
+| 🔒 **OS-level isolation (Win/Mac/Linux)** | Flip it on and every tool your agents run — shell, file writes, edits, search, **and the cloud CLIs (Claude/Codex/Gemini/Kimi)** — runs **inside a real Linux sandbox**: WSL2 on Windows, a Lima VM on macOS, bubblewrap on Linux *(Mac/Linux beta)*. The project lives on the sandbox filesystem, so a model that runs `rm -rf` or writes outside it **cannot touch your real drive or home**. Projects are **isolated by default** and the toolchain **auto-installs**. Your provider logins — the CLIs **and** every API key — **auto-sync** into the sandbox, so isolated cloud agents just work; the Accounts page tests each provider on **both** host and sandbox. **Connect GitHub** to clone/push private repos from inside; **convert** a project isolated↔not anytime. Code page, agentic teams, **and** the fine-tuning chat are all covered; the rest stays native. |
 | 🔌 **MCP-first tooling** | Plug in any Model Context Protocol server (filesystem, git, browser, Postgres, GitHub…). **Keyless DuckDuckGo web search is auto-installed on first run** — no API key, no card. Engine-agnostic: any search MCP you add is used automatically. Curated packs per team. |
 | 🏠 **Run anywhere** | Desktop today. **Headless on a $5/mo VPS, 24/7** — on the roadmap. Containerised / VM — on the roadmap. Your agents, your hardware, your terms. |
 
@@ -148,6 +148,8 @@ That's why the data/ tree is open and community-driven even though the app binar
 - [x] **WSL tool isolation** — agents run their tools inside Ubuntu, off your Windows drive
 - [x] **Cloud CLIs inside the sandbox** — Claude/Codex/Gemini/Kimi run isolated too
 - [x] **Connect GitHub** — isolated agents clone private repos + push from inside the sandbox
+- [x] **Auto login-sync** — codex/claude/gemini/kimi + every API key mirrored into the sandbox
+- [x] **Convert projects** isolated↔not from the header; **Accounts tests host + sandbox**
 - [~] **Mac/Linux isolation (beta)** — Lima VM (macOS) + bubblewrap (Linux), same model as WSL
 - [ ] **Visual team builder** — Q3 2026
 - [ ] **macOS + Linux desktop** — Q3 2026

@@ -26,8 +26,10 @@ Autonomous agents that edit files and run shell commands are powerful and risky 
   - **Windows → WSL2** *(shipping)* — a real Linux VM. Tools run inside Ubuntu; nothing touches `C:`.
   - **macOS → Lima** *(beta)* — a lightweight Linux VM on Apple's Virtualization.framework, the same VM-grade boundary as WSL.
   - **Linux → bubblewrap** *(beta)* — namespace sandbox with a private filesystem view + a dedicated sandbox-home, so the rest of `~` (`~/.ssh`, `~/.aws`) is invisible.
-- **Auto-provisioning.** With isolation on, OwLLM installs the in-sandbox toolchain (node, uv, git, the agent CLIs, `gh`) for you in the background — no manual setup. On a PC without WSL, one-click `wsl --install`.
+- **On by default, zero setup.** With a sandbox engine present, **new projects are isolated automatically** and the in-sandbox toolchain (node, uv, git, the agent CLIs, `gh`) installs itself in the background — no manual step. On a PC without WSL, one-click `wsl --install`.
+- **🔑 Your logins come with you.** Every provider login is mirrored into the sandbox automatically — the subscription CLIs (**Claude/Codex/Gemini/Kimi**) *and* every API key (OpenAI, Anthropic, Moonshot, DeepSeek, xAI, Groq, Perplexity, Mistral, Together, Gemini, HF). Isolated cloud agents are authenticated with zero extra steps; the **Accounts** page tests each provider on **both** the host **and** inside the sandbox so you can see exactly what an isolated agent can use.
 - **🐙 Connect GitHub.** Because the agents run *inside* the sandbox, your host git credentials don't reach them — so OwLLM writes your connected GitHub token into the **sandbox's** git + `gh` credential store. Isolated agents clone private repos and push commits, with nothing leaking to the host.
+- **Convert any time.** Flip a project **isolated ↔ not** from the header — OwLLM copies it across the boundary and reopens the copy; the original stays put.
 - **Graceful fallback.** No sandbox engine present (locked-down PC, virtualization off)? The app stays fully usable on the host with the guard rails below and a loud "not isolated" warning — your call.
 
 And the guard rails apply on the host path too:

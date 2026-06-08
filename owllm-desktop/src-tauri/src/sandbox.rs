@@ -570,11 +570,20 @@ fn win_to_mnt(p: &str) -> Result<String, String> {
 /// isolated agents are authenticated without a separate in-sandbox login —
 /// the same consented host→sandbox bridge as GitHub connect. Windows copies
 /// the auth files from the Windows home (reached via /mnt) into the distro home.
+/// Result of a login sync: what was synced INTO the sandbox, and what was
+/// FOUND on the Windows host (the source). Reporting both makes the outcome
+/// self-explaining instead of a silent "nothing happened".
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct SyncResult {
+    pub synced: Vec<String>,
+    pub found_on_host: Vec<String>,
+}
+
 #[cfg(windows)]
-fn sync_logins_impl(distro: Option<String>) -> Result<Vec<String>, String> {
+fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
     let distro = distro
         .or_else(|| crate::wsl::wsl_status().default_distro)
-        .ok_or_else(|| "no WSL distro".to_string())?;
+        .ok_or_else(|| "no WSL distro installed — isolation needs Ubuntu (run `wsl --install`).".to_string())?;
     let home = std::env::var("USERPROFILE").map_err(|_| "no USERPROFILE".to_string())?;
 
     // Build the API-key env file: every saved provider key becomes an
@@ -601,9 +610,18 @@ fn sync_logins_impl(distro: Option<String>) -> Result<Vec<String>, String> {
     // unconditionally (best-effort), then report `syn` from what actually
     // LANDED in the distro home, so the status is always truthful.
     let wh = crate::wsl::sh_quote(&win_to_mnt(&home)?);
+    // FOUND = what exists on the Windows side (the source, via /mnt); SYNCED =
+    // what actually landed in the distro home. Reporting both makes the result
+    // self-explaining: "Windows has codex but nothing synced" vs "nothing on
+    // Windows to sync" are now distinguishable instead of a silent no-op.
     let script = format!(
         "WH={wh}; \
          mkdir -p ~/.codex ~/.claude ~/.gemini ~/.kimi ~/.owllm; \
+         found=''; \
+         [ -f \"$WH/.codex/auth.json\" ] && found=\"$found codex\"; \
+         [ -f \"$WH/.claude/.credentials.json\" ] && found=\"$found claude\"; \
+         [ -d \"$WH/.gemini\" ] && [ -n \"$(ls -A \"$WH/.gemini\" 2>/dev/null)\" ] && found=\"$found gemini\"; \
+         [ -f \"$WH/.kimi/config.toml\" ] && found=\"$found kimi\"; \
          cp -f \"$WH/.codex/auth.json\" ~/.codex/ 2>/dev/null; cp -f \"$WH/.codex/config.toml\" ~/.codex/ 2>/dev/null; \
          cp -f \"$WH/.claude/.credentials.json\" ~/.claude/.credentials.json 2>/dev/null; cp -f \"$WH/.claude.json\" ~/.claude.json 2>/dev/null; \
          cp -rf \"$WH/.gemini/.\" ~/.gemini/ 2>/dev/null; \
@@ -617,16 +635,24 @@ fn sync_logins_impl(distro: Option<String>) -> Result<Vec<String>, String> {
          [ -f ~/.kimi/config.toml ] && syn=\"$syn kimi\"; \
          [ -s ~/.owllm/agent_env.sh ] && syn=\"$syn keys\"; \
          grep -q 'owllm/agent_env.sh' ~/.profile 2>/dev/null || echo '[ -f \"$HOME/.owllm/agent_env.sh\" ] && . \"$HOME/.owllm/agent_env.sh\"' >> ~/.profile; \
-         echo \"SYNCED:$syn\""
+         echo \"FOUND:$found\"; echo \"SYNCED:$syn\""
     );
     let out = crate::wsl::run_in_distro(&distro, &script)?;
-    Ok(out
-        .lines()
-        .find_map(|l| l.strip_prefix("SYNCED:"))
-        .unwrap_or("")
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect())
+    let parse = |key: &str| -> Vec<String> {
+        out.lines()
+            .find_map(|l| l.strip_prefix(key))
+            .unwrap_or("")
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect()
+    };
+    let mut found_on_host = parse("FOUND:");
+    // Host API keys live in agent_secrets (not on the /mnt path the script
+    // sees), so add "keys" to the host-found set when any are saved.
+    if !env_lines.trim().is_empty() {
+        found_on_host.push("keys".into());
+    }
+    Ok(SyncResult { synced: parse("SYNCED:"), found_on_host })
 }
 
 /// Which provider logins are present INSIDE the sandbox right now (codex/claude/
@@ -707,13 +733,21 @@ pub fn sandbox_convert_project(current: String) -> Result<SandboxProject, String
 }
 
 #[cfg(not(windows))]
-fn sync_logins_impl(_distro: Option<String>) -> Result<Vec<String>, String> {
+fn sync_logins_impl(_distro: Option<String>) -> Result<SyncResult, String> {
     Err("login sync is currently implemented for WSL (Windows) only".to_string())
 }
 
-/// Returns the list of providers whose login was mirrored (e.g. ["codex","claude"]).
+#[cfg(not(windows))]
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct SyncResult {
+    pub synced: Vec<String>,
+    pub found_on_host: Vec<String>,
+}
+
+/// Mirror host logins into the sandbox. Returns what synced AND what was
+/// found on the Windows host, so the UI can explain the outcome precisely.
 #[tauri::command]
-pub fn sandbox_sync_logins(distro: Option<String>) -> Result<Vec<String>, String> {
+pub fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, String> {
     sync_logins_impl(distro)
 }
 

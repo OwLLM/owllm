@@ -35,9 +35,7 @@ import ArenaPage from "../pages/gamify/ArenaPage";
 
 // Advanced toggle (not a mode — independent reveal):
 import MCPPage from "../pages/advanced/MCPPage";
-import EnvironmentPage from "../pages/advanced/EnvironmentPage";
 import AccountsPage from "../pages/advanced/AccountsPage";
-import LogsPage from "../pages/advanced/LogsPage";
 
 // ---------------------------------------------------------------------
 // Schema
@@ -133,17 +131,16 @@ export const GAMIFY: ModuleDef = {
   firstTab: "gamify",  // Qt _GROUP_FIRST_TAB["gamify"] = "gamify"
 };
 
-/** Advanced — MCP + Environment + Accounts + Logs.
- *  Qt: `_ADVANCED_BUTTONS = ("mcp_btn", "envs_btn", "accounts_btn", "logs_btn")`.
- *  Independent of the mode toggles; revealed by the ⚙ Advanced toggle. */
+/** Advanced — MCP + Accounts.
+ *  Environment moved into the Train page's "🐧 Environment" card (the only
+ *  place a fine-tuning env is used); Logs was a never-ported Python-era stub
+ *  with nothing to show in the Rust/React app — both removed. */
 export const ADVANCED: ModuleDef = {
   id: "advanced",
   toggleLabel: "⚙\nAdvanced",
   pages: [
     { key: "mcp",         label: "🧩 MCP",         component: MCPPage         },
-    { key: "environment", label: "⚙️ Environment", component: EnvironmentPage },
     { key: "accounts",    label: "🔐 Accounts",    component: AccountsPage    },
-    { key: "logs",        label: "📊 Logs",        component: LogsPage        },
   ],
   firstTab: "mcp",
 };

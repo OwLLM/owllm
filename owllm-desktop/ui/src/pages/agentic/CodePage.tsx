@@ -397,10 +397,12 @@ export default function CodePage() {
       // Auto-mirror host CLI logins so cloud agents are authenticated inside
       // the sandbox without a separate login (best-effort, WSL only for now).
       try {
-        const synced = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
-        setStatus(synced.length
-          ? `Agent tools installed; synced logins: ${synced.join(", ")}.`
-          : (log && !isWsl ? log : "Agent tools installed. Log in via Accounts, then click 'Sync logins'."));
+        const r = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
+        setStatus(r.synced.length
+          ? `Agent tools installed; synced logins: ${r.synced.join(", ")}.`
+          : r.found_on_host.length
+            ? `Agent tools installed. Found ${r.found_on_host.join(", ")} on Windows but couldn't copy into the sandbox — click 'Sync logins' to retry.`
+            : (log && !isWsl ? log : "Agent tools installed. Log in via Accounts, then click 'Sync logins'."));
       } catch {
         setStatus(log && !isWsl ? log : `Agent tools installed in ${eng}.`);
       }
@@ -415,10 +417,14 @@ export default function CodePage() {
   const syncLogins = async () => {
     setStatus("Mirroring your Windows logins into the sandbox…");
     try {
-      const synced = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
-      setStatus(synced.length
-        ? `✓ Synced logins: ${synced.join(", ")} — isolated agents are authenticated.`
-        : "No host logins found. Log in to a provider via Accounts first, then retry.");
+      const r = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
+      setStatus(
+        r.synced.length
+          ? `✓ Synced into sandbox: ${r.synced.join(", ")} — isolated agents are authenticated.`
+          : r.found_on_host.length
+            ? `Found on Windows: ${r.found_on_host.join(", ")}, but nothing landed in the sandbox. Is the WSL Ubuntu set up? Try again or reinstall the toolchain.`
+            : "Nothing to sync — no CLI is logged in and no API keys are saved on this PC's Windows side (Accounts → Connect)."
+      );
     } catch (e) {
       setStatus(`Login sync failed: ${e}`);
     }
@@ -587,8 +593,8 @@ export default function CodePage() {
     if (!should) return;
     autoSyncedRef.current = true;
     sandboxSyncLogins(wslStat?.defaultDistro ?? null)
-      .then((s) => {
-        if (s.length) setStatus(`🔑 Synced cloud logins into the sandbox: ${s.join(", ")}.`);
+      .then((r) => {
+        if (r.synced.length) setStatus(`🔑 Synced cloud logins into the sandbox: ${r.synced.join(", ")}.`);
         // Refresh the dialog's status if it's open.
         sandboxLoginStatus(wslStat?.defaultDistro ?? null).then(setNpLogins).catch(() => {});
       })
@@ -1029,9 +1035,15 @@ export default function CodePage() {
                           setNpSyncing(true);
                           setStatus("🔑 Syncing cloud logins into the sandbox…");
                           try {
-                            const s = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
+                            const r = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
                             setNpLogins(await sandboxLoginStatus(wslStat?.defaultDistro ?? null));
-                            setStatus(s.length ? `🔑 Synced: ${s.join(", ")}.` : "No host logins found to sync (no CLI is logged in / no API keys saved on this PC).");
+                            setStatus(
+                              r.synced.length
+                                ? `🔑 Synced into sandbox: ${r.synced.join(", ")}.`
+                                : r.found_on_host.length
+                                  ? `Found ${r.found_on_host.join(", ")} on Windows but the copy into WSL produced nothing — is Ubuntu set up? Try reinstalling the toolchain.`
+                                  : "Nothing to sync — no CLI is logged in and no API keys saved on Windows (Accounts → Connect first)."
+                            );
                           } catch (e) {
                             setStatus(`⚠ Login sync failed: ${e}`);
                           } finally {

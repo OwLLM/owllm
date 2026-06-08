@@ -52,11 +52,15 @@ export async function sandboxProvision(): Promise<string> {
   return invoke<string>("sandbox_provision");
 }
 
-/// Mirror the host's CLI logins (codex/claude/gemini) into the sandbox so
-/// isolated agents are authenticated — without a separate in-sandbox login.
-/// Returns the providers that were synced. WSL (Windows) only for now.
-export async function sandboxSyncLogins(distro?: string | null): Promise<string[]> {
-  return invoke<string[]>("sandbox_sync_logins", { distro: distro ?? null });
+/// What a login sync did: `synced` = providers now present INSIDE the
+/// sandbox; `found_on_host` = providers detected on the Windows side (the
+/// source). Both reported so the UI can explain the outcome precisely.
+export type SyncResult = { synced: string[]; found_on_host: string[] };
+
+/// Mirror the host's CLI logins (codex/claude/gemini) + API keys into the
+/// sandbox so isolated agents are authenticated. WSL (Windows) only for now.
+export async function sandboxSyncLogins(distro?: string | null): Promise<SyncResult> {
+  return invoke<SyncResult>("sandbox_sync_logins", { distro: distro ?? null });
 }
 
 /// Which provider logins are present INSIDE the sandbox now (e.g.

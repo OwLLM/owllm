@@ -182,6 +182,43 @@ pub fn run_in_distro(distro: &str, script: &str) -> Result<String, String> {
     run_wsl_capture(distro, script)
 }
 
+/// Run a bash script in the distro by piping it to `bash -s` over STDIN
+/// instead of passing it as a `-lc "<script>"` argument. This avoids the
+/// Windows→wsl.exe→bash command-line quoting hazards entirely — the script
+/// bytes reach bash untouched, so a complex multi-step script with nested
+/// quotes (the login sync) can't be mangled into an empty/garbled command.
+/// Returns combined stdout(+stderr). Errors on nonzero exit.
+pub fn run_in_distro_script(distro: &str, script: &str) -> Result<String, String> {
+    use std::io::Write;
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.arg("-d").arg(distro).arg("--").arg("bash").arg("-ls");
+    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("spawn wsl: {e}"))?;
+    {
+        let mut stdin = child.stdin.take().ok_or_else(|| "no stdin".to_string())?;
+        stdin
+            .write_all(script.as_bytes())
+            .map_err(|e| format!("write script to wsl stdin: {e}"))?;
+        // stdin dropped here → EOF so bash runs the script and exits.
+    }
+    let out = child.wait_with_output().map_err(|e| format!("wait wsl: {e}"))?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    if !out.status.success() {
+        return Err(format!(
+            "wsl exited {}: {}",
+            out.status.code().unwrap_or(-1),
+            if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
+        ));
+    }
+    Ok(if stderr.trim().is_empty() { stdout } else { format!("{stdout}\n{stderr}") })
+}
+
 /// List installed distros. `wsl.exe -l -q` emits UTF-16LE; we strip null
 /// bytes to recover the ASCII names rather than pulling in a UTF-16 decoder.
 fn list_distros_once() -> Vec<String> {

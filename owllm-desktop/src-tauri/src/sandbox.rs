@@ -637,7 +637,11 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
          grep -q 'owllm/agent_env.sh' ~/.profile 2>/dev/null || echo '[ -f \"$HOME/.owllm/agent_env.sh\" ] && . \"$HOME/.owllm/agent_env.sh\"' >> ~/.profile; \
          echo \"FOUND:$found\"; echo \"SYNCED:$syn\""
     );
-    let out = crate::wsl::run_in_distro(&distro, &script)?;
+    // Pipe via STDIN (run_in_distro_script), NOT as a `-lc "<script>"` arg —
+    // this complex nested-quote script was getting mangled by the Windows
+    // command-line handoff, which is why the copy "did nothing" even though the
+    // bash logic + the /mnt source are both correct (proven by hand).
+    let out = crate::wsl::run_in_distro_script(&distro, &script)?;
     let parse = |key: &str| -> Vec<String> {
         out.lines()
             .find_map(|l| l.strip_prefix(key))

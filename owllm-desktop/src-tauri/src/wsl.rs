@@ -184,7 +184,7 @@ pub fn run_in_distro(distro: &str, script: &str) -> Result<String, String> {
 
 /// List installed distros. `wsl.exe -l -q` emits UTF-16LE; we strip null
 /// bytes to recover the ASCII names rather than pulling in a UTF-16 decoder.
-fn list_distros() -> Vec<String> {
+fn list_distros_once() -> Vec<String> {
     let mut cmd = std::process::Command::new("wsl.exe");
     cmd.arg("-l").arg("-q");
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -200,6 +200,20 @@ fn list_distros() -> Vec<String> {
         .map(|l| l.trim().trim_end_matches('\r').to_string())
         .filter(|l| !l.is_empty())
         .collect()
+}
+
+/// Robust distro list. The FIRST `wsl.exe` call after a reboot can transiently
+/// fail (the WSL service is cold-starting), returning an empty list even though
+/// distros are installed — which made the Code page flash "no isolation engine".
+/// Retry once on empty before believing WSL is absent. If wsl.exe genuinely
+/// isn't installed, both calls return fast (no process), so the cost is nil.
+fn list_distros() -> Vec<String> {
+    let first = list_distros_once();
+    if !first.is_empty() {
+        return first;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    list_distros_once()
 }
 
 /// The default distro's name, read from inside it ($WSL_DISTRO_NAME) so it's
@@ -241,7 +255,10 @@ pub fn wsl_status() -> WslStatus {
     let distros = list_distros();
     let default_distro = default_distro_name().or_else(|| distros.first().cloned());
     WslStatus {
-        available: !distros.is_empty(),
+        // Either probe is enough: `-l -q` listed a distro, OR a distro actually
+        // ran (`$WSL_DISTRO_NAME` via bash). Using both avoids a false "absent"
+        // when one of the two wsl.exe calls hiccups on a cold service.
+        available: !distros.is_empty() || default_distro.is_some(),
         distros,
         default_distro,
     }

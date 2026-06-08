@@ -352,7 +352,17 @@ export default function CodePage() {
   useEffect(() => {
     let dead = false;
     (async () => {
-      const [st, iso0, s] = await Promise.all([wslStatus(), wslIsolationGet(), sandboxStatus()]);
+      const [st, iso0] = await Promise.all([wslStatus(), wslIsolationGet()]);
+      if (dead) return;
+      // Probe the sandbox, retrying while it reports "not available" — the first
+      // wsl.exe call after boot can transiently miss the distro while the WSL
+      // service warms up. `sbox` stays null (UI shows "Checking…") until a
+      // definitive answer, so we never flash the "not installed" warning.
+      let s = await sandboxStatus();
+      for (let i = 0; i < 3 && !s.available && !dead; i++) {
+        await new Promise((r) => setTimeout(r, 800));
+        s = await sandboxStatus();
+      }
       if (dead) return;
       // If a sandbox engine is present, isolation is ON by default — every new
       // project is isolated automatically (the user can still opt out per
@@ -823,7 +833,15 @@ export default function CodePage() {
             {/* Isolation is automatic when an engine is present; the toolchain
                 installs itself in the background. A manual prompt appears only
                 when no engine exists. */}
-            {sbox?.available ? (
+            {sbox === null ? (
+              // STILL CHECKING — never show the "not installed" verdict until the
+              // probe has actually returned. The WSL probe (wsl.exe) can be slow on
+              // a cold first call; showing the alarming yellow box during that window
+              // wrongly told users WSL was missing when it was just being detected.
+              <div style={{ fontSize: 12, color: "var(--fg-muted)", textAlign: "center", lineHeight: 1.5 }}>
+                ⏳ Checking isolation requirements (WSL)…
+              </div>
+            ) : sbox.available ? (
               <div style={{ fontSize: 12, color: "#7ff0c5", textAlign: "center", lineHeight: 1.5 }}>
                 🛡 Isolation on — new projects run inside {engineLabel(sbox.kind)}{sbox.strong ? " (VM)" : ""}{sbox.beta ? " · beta" : ""}, off your {isWsl ? "Windows" : "host"} files.
                 {isWsl && provisionLog === "running" ? " Installing agent tools…" : ""}

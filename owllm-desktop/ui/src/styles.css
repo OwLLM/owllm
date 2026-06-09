@@ -106,14 +106,14 @@
    clearly against either backdrop, so the only tweak is that on
    light mode we shift --accent-fg to ensure contrast. */
 :root[data-theme="light"] {
-  /* Header text colour for this theme — see dark-mode comment. The
-     light-mode header is mostly grey with a 35 % accent tint, so bright
-     accents (amber, blue) force black labels via JS-computed value. */
-  --bg-header-fg: var(--bg-header-fg-light, #06080d);
-  /* headerPill light-mode base — a slightly off-white so the pill
-     reads as raised against the more-saturated header band instead of
-     looking like a dark hole. */
-  --header-pill-base: #d4d8e0;
+  /* The header CHROME is always the dark navy band (the metallic OwLLM
+     frame + title are built for dark), in BOTH themes — so its text and
+     pills must stay WHITE-on-dark in light mode too. The previous
+     light-grey header / black-label recipe assumed the band went light,
+     which it doesn't — producing black text on the dark band (unreadable)
+     and a mismatched theme toggle. Only the BODY goes light below. */
+  --bg-header-fg: #ffffff;
+  --header-pill-base: #14172a;
 
   /* Same idea as dark mode — every surface mixes ~4–10 % of the accent
      into the neutral white/grey so light mode also reads "tinted amber"
@@ -129,7 +129,7 @@
   --bg-panel:    color-mix(in srgb, var(--accent) 12%, #ffffff);
   --bg-elevated: color-mix(in srgb, var(--accent) 18%, #f7f8fa);
   --bg-card:     color-mix(in srgb, var(--accent) 12%, #ffffff);
-  --bg-header:   color-mix(in srgb, var(--accent) 35%, #e4e7ec);
+  --bg-header:   color-mix(in srgb, var(--accent) 70%, #1c2244);  /* dark chrome in both themes */
   --bg-input:    color-mix(in srgb, var(--accent) 10%, #ffffff);
   --bg-surface: rgba(0, 0, 0, 0.04);
   --bg-surface-hover: rgba(0, 0, 0, 0.08);

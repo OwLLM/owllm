@@ -321,8 +321,10 @@ function GridPanel({ children, accent }: {
 // header. Now it greets on mount, then fades + scales away and
 // unmounts after ~2.4s so it never obscures the live panels. Always
 // pointer-events:none so it can't eat clicks even mid-fade.
+//
+// The greeting is the owl_hero.png art (full 500-px resolution) instead
+// of the old text circle — same timing/behaviour, just the brand image.
 function WelcomeCircle() {
-  const D = 240;  // circle_d in main.py:7969
   const [phase, setPhase] = useState<"shown" | "fading" | "gone">("shown");
   useEffect(() => {
     const t1 = setTimeout(() => setPhase("fading"), 1600);
@@ -332,37 +334,26 @@ function WelcomeCircle() {
   if (phase === "gone") return null;
   const fading = phase === "fading";
   return (
-    <div style={{
-      position: "absolute",
-      left: "50%",
-      top: "50%",
-      transform: fading
-        ? "translate(-50%, -50%) scale(1.08)"
-        : "translate(-50%, -50%) scale(1)",
-      opacity: fading ? 0 : 1,
-      transition: "opacity 0.8s ease, transform 0.8s ease",
-      width: D,
-      height: D,
-      borderRadius: D / 2,
-      // Welcome circle ring follows the accent picker — same colour the
-      // active tab and primary action buttons use, so the user's
-      // chosen palette shows here as a brand accent.
-      border: "3px solid var(--accent)",
-      background: "radial-gradient(circle at 50% 50%, rgba(var(--accent-rgb),0.55) 0%, rgba(28,38,72,0.96) 70%, rgba(10,14,28,0.98) 100%)",
-      color: "var(--fg-strong)",
-      fontSize: 30,
-      fontWeight: 700,
-      letterSpacing: 1,
-      textAlign: "center",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      whiteSpace: "pre-line",
-      pointerEvents: "none",
-      zIndex: 2,
-    }}>
-      {"Welcome\nto\nOWLLM"}
-    </div>
+    <img
+      src={`${ICONS}/owl_hero.png`}
+      alt="Welcome to OWLLM"
+      style={{
+        position: "absolute",
+        left: "50%",
+        top: "50%",
+        transform: fading
+          ? "translate(-50%, -50%) scale(1.08)"
+          : "translate(-50%, -50%) scale(1)",
+        opacity: fading ? 0 : 1,
+        transition: "opacity 0.8s ease, transform 0.8s ease",
+        // Full native resolution (owl_hero.png is 500×500).
+        width: 500,
+        height: "auto",
+        maxWidth: "70%",
+        pointerEvents: "none",
+        zIndex: 2,
+      }}
+    />
   );
 }
 

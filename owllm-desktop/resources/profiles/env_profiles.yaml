@@ -72,8 +72,10 @@
       version: "1.1.0"
     - name: bitsandbytes
       version: "0.44.1"
-      # Blackwell 4-bit kernels (sm_120) landed in bitsandbytes 0.45.
-      version_blackwell: "0.45.0"
+      # Blackwell sm_120 4-bit kernels first SHIP in bitsandbytes 0.45.3
+      # (the cu128 build); 0.45.0/0.45.1 had build-system support but NO
+      # Blackwell binaries. Verified: bitsandbytes releases + issue #1642.
+      version_blackwell: "0.45.3"
     - name: datasets
       version: "3.0.1"
     - name: sentencepiece
@@ -103,26 +105,35 @@
   display: "Unsloth (fast) · auto-CUDA"
   description: >-
     Unsloth-accelerated LoRA — 2-5× faster than the vanilla transformers
-    loop, with a different training backend (its own patched kernels).
-    Same family coverage; pick this for the quickest experimentation
-    cycle. Linux-first, so on Windows it runs in WSL.
+    loop, with its own patched kernels. Installed via Unsloth's OFFICIAL
+    `uv --torch-backend=auto` path: uv detects your GPU/driver and pulls a
+    coherent stack (the right torch CUDA wheel — cu124 on RTX 20xx-40xx,
+    cu128 on RTX 50xx/Blackwell — plus matching unsloth / unsloth-zoo /
+    transformers / triton / xformers / bitsandbytes). Avoids the version-skew
+    breakage from forcing an off-matrix torch under a pinned unsloth.
+    Linux-first, so on Windows it runs in WSL.
   python: "3.11"
+  # Let uv resolve a coherent, GPU-matched stack itself (verified live:
+  # picks torch 2.10+cu129 on a 4090; cu128 on Blackwell). See env_manager
+  # run_install torch_backend branch. unsloth has NO version-matched extra
+  # for torch 2.5.1, so hand-pinning it was the root of the install failures.
+  torch_backend: auto
   packages:
-    - name: torch
-      version: "2.5.1"
-      cuda_wheel: true
-      version_blackwell: "2.7.1"
-      index_blackwell: "https://download.pytorch.org/whl/cu128"
+    # Names only — `version` is IGNORED when torch_backend is set; uv resolves
+    # mutually-compatible versions for the detected GPU. unsloth pulls
+    # unsloth-zoo/transformers/triton/xformers itself; bitsandbytes listed so
+    # 4-bit loading is present (and gets the Blackwell build on RTX 50xx).
     - name: unsloth
-      version: "2024.11.10"
-    - name: peft
-      version: "0.13.0"
-    - name: datasets
-      version: "3.0.1"
-    - name: trl
-      version: "0.11.4"
+      version: "latest"
+    - name: unsloth_zoo
+      version: "latest"
+    - name: bitsandbytes
+      version: "latest"
   probe: |
     import unsloth, torch
     assert torch.cuda.is_available(), "torch built without CUDA"
-    print(f"unsloth {unsloth.__version__} · torch {torch.__version__}")
+    # NOTE: the `unsloth` module has no __version__ attribute — referencing it
+    # was a false-negative in an earlier probe. Just confirm the import + CUDA.
+    print(f"torch {torch.__version__} · cuda {torch.version.cuda} · device {torch.cuda.get_device_name(0)}")
+    print("unsloth ready")
     print("OK")

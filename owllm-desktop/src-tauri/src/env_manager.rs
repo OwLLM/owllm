@@ -104,6 +104,18 @@ pub struct EnvProfile {
     /// failure. The probe stdout is captured and shown verbatim to
     /// the user when it fails — write helpful error messages here.
     pub probe: String,
+    /// When set (e.g. "auto"), packages are installed in ONE
+    /// `uv pip install --torch-backend=<value> <names>` command and uv
+    /// resolves a coherent, GPU-matched stack itself — instead of our
+    /// per-package pinned loop. This is Unsloth's official recommended
+    /// install: uv detects the driver and picks the right torch CUDA wheel
+    /// (cu124 on Ada/Ampere, cu128 on Blackwell, …) plus matching
+    /// unsloth/unsloth-zoo/transformers/triton, avoiding the version-skew
+    /// breakage that comes from forcing an off-matrix torch under a pinned
+    /// unsloth. `version` fields are ignored for these profiles (names
+    /// only). Requires uv. None → use the normal pinned per-package loop.
+    #[serde(default)]
+    pub torch_backend: Option<String>,
 }
 
 /// State of one profile on the user's machine. Returned by
@@ -167,6 +179,10 @@ fn profile_hash(p: &EnvProfile) -> String {
             h.update(b"opt");
         }
         h.update(b"\n");
+    }
+    if let Some(b) = &p.torch_backend {
+        h.update(b"torch_backend:");
+        h.update(b.as_bytes());
     }
     format!("{:x}", h.finalize())
 }
@@ -586,7 +602,33 @@ async fn run_install(
             format!("seeding setuptools/wheel failed: {e}")
         })?;
 
-    // 2) Install each package in declared order.
+    // 2) Install packages. Two strategies:
+    //    (a) torch_backend set → ONE `uv pip install --torch-backend=<b> <names>`
+    //        and let uv resolve a coherent, GPU-matched stack (Unsloth's path:
+    //        uv picks the right torch CUDA wheel + matching unsloth/zoo/etc.,
+    //        cu124 on Ada/Ampere, cu128 on Blackwell, …).
+    //    (b) else → the pinned per-package loop (CUDA/Blackwell resolution +
+    //        optional-package tolerance).
+    if let Some(backend) = &profile.torch_backend {
+        let names = profile.packages.iter().map(|p| q(&p.name)).collect::<Vec<_>>().join(" ");
+        let pretty = profile.packages.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(" ");
+        let _ = channel.send(InstallEvent::Step {
+            label: format!("Installing {pretty} via uv --torch-backend={backend} (GPU-matched stack)"),
+        });
+        let install = format!(
+            "command -v uv >/dev/null 2>&1 || {{ echo 'uv is required for this environment'; exit 1; }}; \
+             uv pip install --python {py} --torch-backend={b} {names}",
+            py = q(&venv_py),
+            b = q(backend),
+            names = names,
+        );
+        run_subprocess(channel, wsl, &wsl_invocation(&distro, &install), None)
+            .await
+            .map_err(|e| {
+                let _ = crate::wsl::run_in_distro(&distro, &format!("rm -rf {}", q(&tmp)));
+                format!("uv --torch-backend install failed: {e}")
+            })?;
+    } else {
     for pkg in &profile.packages {
         // Pick the Blackwell build when present and a Blackwell GPU is here;
         // otherwise the normal pinned version. Same for the wheel index.
@@ -633,6 +675,7 @@ async fn run_install(
             }
         }
     }
+    } // end else (pinned per-package loop)
 
     // 3) Probe (must print "OK").
     let _ = channel.send(InstallEvent::Step { label: "Running verification probe".into() });

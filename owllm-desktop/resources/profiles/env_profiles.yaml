@@ -14,6 +14,13 @@
 #     (driver) and installs the matching cu118 / cu121 / cu124 build —
 #     so one profile fits every NVIDIA card instead of a per-CUDA copy.
 #     (Use `index_url:` instead only for a fixed non-PyPI wheel.)
+#   * Architecture coverage: a package may carry `version_blackwell:` (and
+#     optional `index_blackwell:`) — the build used INSTEAD when a
+#     Blackwell-class GPU (RTX 50xx, compute >= 12.0) is detected. The
+#     default pins stay for older cards. This keeps ONE profile working
+#     across the whole NVIDIA range; add a row for the next generation
+#     instead of locking anyone out. (Engine: env_manager resolve +
+#     max_compute_cap.)
 #   * Order matters — torch (with its resolved index) installs before
 #     transformers, which would otherwise pull a CPU torch transitively.
 #   * `probe:` must print "OK\n" on success. The probe stdout is
@@ -29,14 +36,18 @@
   description: >-
     Gemma 2 base models (2B / 9B / 27B). LoRA via peft + transformers,
     4-bit loading through bitsandbytes. Runs on any CUDA NVIDIA GPU —
-    torch auto-matches your driver's CUDA (RTX 20xx/30xx/40xx, plus pro
-    cards like A2000 / A100). RTX 50xx (Blackwell) needs a newer torch
-    than the pinned 2.5.1.
+    torch auto-matches your hardware: RTX 20xx/30xx/40xx and pro cards
+    (A2000 / A100) get the cu118/121/124 build; RTX 50xx / Blackwell
+    automatically gets the cu128 torch 2.7 build.
   python: "3.11"
   packages:
     - name: torch
       version: "2.5.1"
       cuda_wheel: true
+      # Blackwell (RTX 50xx, sm_120) isn't in torch 2.5.1; cu128 + torch 2.7
+      # is the first build that supports it. Applied only on a Blackwell GPU.
+      version_blackwell: "2.7.1"
+      index_blackwell: "https://download.pytorch.org/whl/cu128"
     - name: transformers
       version: "4.46.0"
     - name: peft
@@ -45,6 +56,8 @@
       version: "1.1.0"
     - name: bitsandbytes
       version: "0.44.1"
+      # Blackwell 4-bit kernels (sm_120) landed in bitsandbytes 0.45.
+      version_blackwell: "0.45.0"
     - name: datasets
       version: "3.0.1"
     - name: sentencepiece
@@ -69,6 +82,10 @@
     - name: torch
       version: "2.5.1"
       cuda_wheel: true
+      # Blackwell (RTX 50xx, sm_120) isn't in torch 2.5.1; cu128 + torch 2.7
+      # is the first build that supports it. Applied only on a Blackwell GPU.
+      version_blackwell: "2.7.1"
+      index_blackwell: "https://download.pytorch.org/whl/cu128"
     - name: transformers
       version: "4.46.0"
     - name: peft
@@ -77,6 +94,8 @@
       version: "1.1.0"
     - name: bitsandbytes
       version: "0.44.1"
+      # Blackwell 4-bit kernels (sm_120) landed in bitsandbytes 0.45.
+      version_blackwell: "0.45.0"
     - name: datasets
       version: "3.0.1"
     - name: sentencepiece
@@ -112,6 +131,10 @@
     - name: torch
       version: "2.5.1"
       cuda_wheel: true
+      # Blackwell (RTX 50xx, sm_120) isn't in torch 2.5.1; cu128 + torch 2.7
+      # is the first build that supports it. Applied only on a Blackwell GPU.
+      version_blackwell: "2.7.1"
+      index_blackwell: "https://download.pytorch.org/whl/cu128"
     - name: unsloth
       version: "2024.11.10"
     - name: peft

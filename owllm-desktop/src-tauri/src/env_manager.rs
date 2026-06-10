@@ -55,6 +55,21 @@ pub struct PackageSpec {
     /// machine with no detectable NVIDIA CUDA (falls back to cu121).
     #[serde(default)]
     pub cuda_wheel: bool,
+    /// Version to install INSTEAD of `version` when a Blackwell-class GPU
+    /// (compute capability ≥ 12.0 — the RTX 50xx generation) is detected.
+    /// The default pins predate Blackwell support for some packages (torch
+    /// < 2.7, bitsandbytes < 0.45), so newer silicon needs a newer build.
+    /// None → use `version` on every GPU. Lives in env_profiles.yaml so the
+    /// coverage table is hot-updatable — a new GPU generation is one row,
+    /// not an app rebuild. (Companion `index_blackwell` overrides the wheel
+    /// index for that build, e.g. the cu128 torch index.)
+    #[serde(default)]
+    pub version_blackwell: Option<String>,
+    /// `--index-url` to use for the Blackwell build of this package (e.g.
+    /// the cu128 torch wheel index). Applied only when a Blackwell GPU is
+    /// detected AND this is set; otherwise normal index/cuda_wheel rules.
+    #[serde(default)]
+    pub index_blackwell: Option<String>,
 }
 
 /// One declarative environment profile. Lives in env_profiles.yaml
@@ -130,6 +145,14 @@ fn profile_hash(p: &EnvProfile) -> String {
         h.update(b"\0");
         if pkg.cuda_wheel {
             h.update(b"cuda");
+        }
+        h.update(b"\0");
+        if let Some(v) = &pkg.version_blackwell {
+            h.update(v.as_bytes());
+        }
+        h.update(b"\0");
+        if let Some(i) = &pkg.index_blackwell {
+            h.update(i.as_bytes());
         }
         h.update(b"\n");
     }
@@ -398,7 +421,42 @@ mod wsl_backend {
         };
         Some(format!("https://download.pytorch.org/whl/{cu}"))
     }
+
+    /// Highest GPU compute capability visible in the distro, as
+    /// major*10+minor (e.g. 89 for a 4090, 86 for an A2000, 120 for a
+    /// Blackwell RTX 50xx). None when no NVIDIA GPU is visible. We take the
+    /// MAX across cards because a newer torch supports older arches too, so
+    /// the most-capable card decides the build — that way a mixed rig still
+    /// gets one env that runs on every installed GPU. Drives the
+    /// Blackwell-aware package selection in run_install.
+    pub fn max_compute_cap(distro: &str) -> Option<u32> {
+        let out = crate::wsl::run_in_distro(
+            distro,
+            "nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null",
+        )
+        .ok()?;
+        let mut best: Option<u32> = None;
+        for line in out.lines() {
+            let l = line.trim();
+            if l.is_empty() {
+                continue;
+            }
+            let mut it = l.split('.');
+            if let (Some(maj), Some(min)) = (it.next(), it.next()) {
+                if let (Ok(a), Ok(b)) = (maj.trim().parse::<u32>(), min.trim().parse::<u32>()) {
+                    let v = a * 10 + b;
+                    best = Some(best.map_or(v, |c| c.max(v)));
+                }
+            }
+        }
+        best
+    }
 }
+
+/// Compute capability at/above which we treat a GPU as "Blackwell-class"
+/// (RTX 50xx, sm_120) and prefer each package's `version_blackwell` build.
+#[cfg(windows)]
+const BLACKWELL_MIN_CC: u32 = 120;
 
 /// `wsl.exe` argv to run a bash login-shell script in `distro`.
 #[cfg(windows)]
@@ -455,6 +513,32 @@ async fn run_install(
         None
     };
 
+    // Architecture-aware coverage: a Blackwell-class card (RTX 50xx,
+    // compute ≥ 12.0) can't run the default torch 2.5.1 / older bitsandbytes,
+    // so we prefer each package's `version_blackwell` (+ `index_blackwell`)
+    // build when one's visible. Older arches are untouched. The version table
+    // lives in env_profiles.yaml → hot-updatable for future GPU generations.
+    let is_blackwell = {
+        let d = distro.clone();
+        let cc = tokio::task::spawn_blocking(move || wsl_backend::max_compute_cap(&d))
+            .await
+            .map_err(|e| format!("join: {e}"))?;
+        let bw = cc.map(|c| c >= BLACKWELL_MIN_CC).unwrap_or(false);
+        if bw {
+            if let Some(c) = cc {
+                let _ = channel.send(InstallEvent::Log {
+                    stream: "info".into(),
+                    line: format!(
+                        "Detected Blackwell-class GPU (compute {}.{}) — using Blackwell package builds.",
+                        c / 10,
+                        c % 10
+                    ),
+                });
+            }
+        }
+        bw
+    };
+
     // 1) Create the venv (uv preferred, python3-venv fallback).
     let _ = channel.send(InstallEvent::Step { label: format!("Creating venv in WSL: {env}") });
     let mk = format!(
@@ -474,8 +558,21 @@ async fn run_install(
 
     // 2) Install each package in declared order.
     for pkg in &profile.packages {
-        let spec = format!("{}=={}", pkg.name, pkg.version);
-        let index = if pkg.cuda_wheel { cuda_index.clone() } else { pkg.index_url.clone() };
+        // Pick the Blackwell build when present and a Blackwell GPU is here;
+        // otherwise the normal pinned version. Same for the wheel index.
+        let version = if is_blackwell {
+            pkg.version_blackwell.clone().unwrap_or_else(|| pkg.version.clone())
+        } else {
+            pkg.version.clone()
+        };
+        let spec = format!("{}=={}", pkg.name, version);
+        let index = if is_blackwell && pkg.index_blackwell.is_some() {
+            pkg.index_blackwell.clone()
+        } else if pkg.cuda_wheel {
+            cuda_index.clone()
+        } else {
+            pkg.index_url.clone()
+        };
         let _ = channel.send(InstallEvent::Step {
             label: format!("Installing {spec}{}", index.as_ref().map(|u| format!(" (index {u})")).unwrap_or_default()),
         });

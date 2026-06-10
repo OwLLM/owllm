@@ -897,6 +897,36 @@ fn hf_cache_roots() -> Vec<PathBuf> {
             push_if(&mut candidates, PathBuf::from(format!("C:\\hf\\{sub}")));
         }
     }
+    // WSL HuggingFace cache. Fine-tuning runs INSIDE the distro now, so
+    // transformers downloads base models into the distro's
+    // ~/.cache/huggingface — which the Windows-side scan above can't see.
+    // The result: the Train "Downloaded (ready to train)" list stayed empty
+    // even after a base had been fetched. Reach the distro cache over the
+    // \\wsl.localhost UNC path (std::fs reads it directly — no need to shell
+    // into WSL) so downloaded bases actually show as downloaded.
+    #[cfg(windows)]
+    {
+        if let Some(distro) = crate::wsl::wsl_status().default_distro {
+            if let Ok(out) = crate::wsl::run_in_distro(&distro, "printf %s \"$HOME\"") {
+                // run_in_distro may prepend login-shell chatter; take the
+                // first line that looks like an absolute POSIX path.
+                if let Some(home) = out
+                    .lines()
+                    .map(|l| l.trim())
+                    .find(|l| l.starts_with('/') && !l.is_empty())
+                {
+                    let win_home = home.trim_start_matches('/').replace('/', "\\");
+                    let base = format!("\\\\wsl.localhost\\{distro}\\{win_home}");
+                    for sub in &[
+                        ".cache\\huggingface\\hub",
+                        ".cache\\huggingface\\transformers",
+                    ] {
+                        push_if(&mut candidates, PathBuf::from(format!("{base}\\{sub}")));
+                    }
+                }
+            }
+        }
+    }
     // Canonicalize so we don't double-count via different relative
     // forms. Fall back to the original path if canonicalize fails.
     candidates

@@ -27,9 +27,11 @@
 - name: gemma-finetune
   display: "Gemma fine-tuning · auto-CUDA"
   description: >-
-    Compatible with Gemma 2 / 2B / 9B base models on RTX 30xx / 40xx
-    GPUs. Uses peft + transformers for LoRA training, bitsandbytes
-    for 4-bit quantised loading. torch matches your driver's CUDA.
+    Gemma 2 base models (2B / 9B / 27B). LoRA via peft + transformers,
+    4-bit loading through bitsandbytes. Runs on any CUDA NVIDIA GPU —
+    torch auto-matches your driver's CUDA (RTX 20xx/30xx/40xx, plus pro
+    cards like A2000 / A100). RTX 50xx (Blackwell) needs a newer torch
+    than the pinned 2.5.1.
   python: "3.11"
   packages:
     - name: torch

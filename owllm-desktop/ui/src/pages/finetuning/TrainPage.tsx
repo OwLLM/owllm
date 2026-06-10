@@ -596,6 +596,11 @@ export default function TrainPage() {
         {/* Card 1: Base Model — main.py:14651-14695 */}
         <div data-ui="cfgCard" style={cfgCard}>
           <div style={cardTitle}>🤖  BASE MODEL</div>
+          <div style={{ color: "#8595ad", fontSize: 11, lineHeight: 1.4, marginBottom: 4 }}>
+            These are HuggingFace <b>training</b> bases — a different format from your
+            Chat/Server <b>GGUF</b> models, which can't be fine-tuned directly. Pick one;
+            it downloads automatically when you press Start.
+          </div>
           <select
             data-ui="train_base_model"
             value={customBase ? "__custom__" : baseModel}

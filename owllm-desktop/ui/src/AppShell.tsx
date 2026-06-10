@@ -595,10 +595,11 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
 // SubTabs — composed dynamically from the visible page list.
 // ---------------------------------------------------------------------
 // Page keys that should be right-aligned in the SubTabs row: Info
-// (from CORE) plus everything contributed by ADVANCED. They're the
-// "utility" pages, visually separated from the work surfaces by a
+// (from CORE), Server (a modal trigger the user wants parked on the
+// right next to Info), plus everything contributed by ADVANCED. They're
+// the "utility" pages, visually separated from the work surfaces by a
 // flex spacer.
-const RIGHT_ALIGNED_KEYS = new Set(["info", "mcp", "environment", "accounts", "logs"]);
+const RIGHT_ALIGNED_KEYS = new Set(["info", "server", "mcp", "environment", "accounts", "logs"]);
 
 function SubTabs({
   pages, activeKey, onChange,
@@ -631,10 +632,12 @@ function SubTabs({
 
   const leftTabs  = pages.filter(p => !RIGHT_ALIGNED_KEYS.has(p.key));
   const rightRaw  = pages.filter(p =>  RIGHT_ALIGNED_KEYS.has(p.key));
-  // Info is ALWAYS the rightmost item; the rest (MCP, Accounts) keep order.
-  // Final right cluster: ● Record · MCP · Accounts · Info.
+  // Fixed right-cluster order: utilities (MCP, Accounts) first, then
+  // Server, then Info pinned last. Final cluster: ● Record · MCP ·
+  // Accounts · Server · Info.
   const rightTabs = [
-    ...rightRaw.filter(p => p.key !== "info"),
+    ...rightRaw.filter(p => p.key !== "info" && p.key !== "server"),
+    ...rightRaw.filter(p => p.key === "server"),
     ...rightRaw.filter(p => p.key === "info"),
   ];
 

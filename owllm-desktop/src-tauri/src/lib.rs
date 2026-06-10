@@ -38,6 +38,7 @@ mod overlay_frame;
 mod paths;
 mod projects;
 mod pty;
+mod readiness;
 mod recommendations;
 mod server;
 mod skill_library;
@@ -247,6 +248,7 @@ pub fn run() {
             paths::shell_open_url,
             paths::paths_debug,
             paths::llama_server_path,
+            readiness::app_readiness,
             env_manager::env_profiles_list,
             env_manager::env_profile_status,
             env_manager::env_profile_install,

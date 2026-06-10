@@ -96,6 +96,51 @@ async fn vram_via_nvidia_smi() -> Option<Vec<VramGpu>> {
     None
 }
 
+/// Max CUDA version the installed NVIDIA driver supports, parsed from the
+/// `nvidia-smi` banner line ("... CUDA Version: 12.6 ..."). Returns None
+/// when nvidia-smi is missing (no NVIDIA driver). This is the *driver's*
+/// CUDA, not a toolkit install — it's what gates which torch wheel the
+/// fine-tuning env can use. Used by the Home readiness panel.
+#[cfg(windows)]
+pub async fn cuda_driver_version() -> Option<String> {
+    use tokio::process::Command;
+    let mut cmd = Command::new("nvidia-smi");
+    cmd.creation_flags(0x08000000);
+    let out = cmd.output().await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_cuda_banner(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(not(windows))]
+pub async fn cuda_driver_version() -> Option<String> {
+    use tokio::process::Command;
+    let out = Command::new("nvidia-smi").output().await.ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_cuda_banner(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Extract "12.6" from a line containing "CUDA Version: 12.6".
+fn parse_cuda_banner(text: &str) -> Option<String> {
+    const KEY: &str = "CUDA Version:";
+    for line in text.lines() {
+        if let Some(idx) = line.find(KEY) {
+            let rest = line[idx + KEY.len()..].trim_start();
+            let ver: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            if !ver.is_empty() {
+                return Some(ver);
+            }
+        }
+    }
+    None
+}
+
 /// Parse the `nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits`
 /// output: one line per GPU, comma-separated MiB values, e.g.
 ///

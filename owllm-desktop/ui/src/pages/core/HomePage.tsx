@@ -35,119 +35,180 @@ type HardwareInfo = {
   gpus: GpuInfo[];
 };
 
+// Mirrors src-tauri/src/readiness.rs. ok=false + warn=true → ⚠️ orange
+// (optional/degraded); ok=false + warn=false → ❌ red (missing + needed).
+type ReadinessRow = { ok: boolean; warn: boolean; detail: string };
+type AppReadiness = {
+  wsl: ReadinessRow;
+  gpu: ReadinessRow;
+  env: ReadinessRow;
+  runtime: ReadinessRow;
+};
+
 const ICONS = "/Page_icons";
+
+// One of the four quick-actions revealed in the 2x2 hover overlay.
+// `icon` is a placeholder glyph for now — the user is supplying real
+// icon art later; swap the emoji for an <img> when those arrive.
+type TileAction = {
+  label: string;
+  // Page key dispatched via owllm:navigate — AppShell flips the
+  // matching ModeBar toggle AND switches the SubTab in one step.
+  targetPage: string;
+  icon: string;
+};
 
 type LauncherSpec = {
   key: string;
-  // Page key to navigate to (matches modules.ts firstTab so the
-  // ModeBar lights up the corresponding mode toggle automatically
-  // via AppShell's owllm:navigate handler).
-  targetPage: string;
   title: string;
   iconPng: string;
-  tagline: string;
-  blurb: string;
-  accentTop: string;
-  accentBottom: string;
   accentLine: string;
+  // Four quick-actions shown in a 2x2 grid when the tile is hovered.
+  actions: TileAction[];
 };
 
-// Verbatim from main.py:4143-4166.
 const LAUNCHERS: LauncherSpec[] = [
   {
     key: "finetuning",
-    targetPage: "models",
     title: "Fine Tuning",
-    iconPng: "owl_FineTuning.png",
-    tagline: "Models · Train · Test",
-    blurb: "Download base models, fine-tune adapters, and test prompts.",
-    accentTop: "#23304a",
-    accentBottom: "#161c2c",
+    iconPng: "owl_fine_tuning_home.png",
     accentLine: "#7989ff",
+    // TODO(icons): replace `icon` emojis with the supplied art.
+    actions: [
+      { label: "Browse Models", targetPage: "models", icon: "📦" },
+      { label: "Fine Tune",     targetPage: "train",  icon: "🎯" },
+      { label: "Abliterate",    targetPage: "models", icon: "🚫" },
+      { label: "Chat",          targetPage: "chat",   icon: "💬" },
+    ],
   },
   {
     key: "agentic",
-    targetPage: "agents",
     title: "Agentic Team",
-    iconPng: "owl_AgenticTeam.png",
-    tagline: "Agents · Studio · Code · Characters",
-    blurb: "Design agents, give them models and tools, and run multi-agent projects.",
-    accentTop: "#1f3a3a",
-    accentBottom: "#16252a",
+    iconPng: "owl_agentic_team_home.png",
     accentLine: "#56d3c8",
+    // TODO(icons): replace `icon` emojis with the supplied art, and
+    // confirm the Personal Assistant / Red Team target pages once those
+    // surfaces exist (currently pointed at the closest live page).
+    actions: [
+      { label: "Coding Agent",      targetPage: "code",    icon: "💻" },
+      { label: "Orchestrated Team", targetPage: "agents",  icon: "🤖" },
+      { label: "Personal Assistant", targetPage: "bridges", icon: "📱" },
+      { label: "Red Team",          targetPage: "studio",  icon: "🛡️" },
+    ],
+  },
+  {
+    key: "gamify",
+    title: "Gamify",
+    iconPng: "owl_Gamify.png",
+    accentLine: "#c084fc",
+    // TODO(icons): real art + final 2x2 labels/targets from the user.
+    // Placeholders wired to the three live Gamify pages for now.
+    actions: [
+      { label: "Play",       targetPage: "gamify",     icon: "🎮" },
+      { label: "Characters", targetPage: "characters", icon: "🧙" },
+      { label: "Arena",      targetPage: "arena",      icon: "🏟" },
+      { label: "Quests",     targetPage: "gamify",     icon: "⭐" },
+    ],
   },
 ];
 
-function LauncherCard({ spec }: { spec: LauncherSpec }) {
-  // Card sized minimally to fit the 270-px PNG (main.py:4187,4234).
-  // onClick dispatches the same owllm:navigate event StudioPage uses
-  // to jump between tabs — AppShell's listener flips the matching
-  // ModeBar toggle on AND switches the active SubTab in one step.
-  const onClick = () => {
-    window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: spec.targetPage } }));
-  };
-  // Mix the per-launcher brand gradient (Fine Tuning = blue, Agentic
-  // Team = teal) with the picked accent. 60 % accent / 40 % brand so
-  // the identity hue stays recognisable but the picker visibly
-  // repaints these too. Was 100 % brand → dark navy/teal regardless
-  // of accent, which the user (rightly) called "old color".
-  const bgTop    = `color-mix(in srgb, var(--accent) 60%, ${spec.accentTop})`;
-  const bgBottom = `color-mix(in srgb, var(--accent) 60%, ${spec.accentBottom})`;
-  const bgHover  = `color-mix(in srgb, var(--accent) 70%, ${spec.accentTop})`;
+function navTo(key: string) {
+  window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key } }));
+}
+
+// Square, image-only launcher tile. At rest it shows just the owl art
+// with a soft drop shadow. On hover the shadow turns off, the art dims,
+// and a 2x2 matrix of quick-action buttons fades in over it. Each cell
+// is a placeholder (emoji + label) until the real icon art lands.
+function LauncherTile({ spec }: { spec: LauncherSpec }) {
+  const [hover, setHover] = useState(false);
   return (
     <div
-      data-ui={`LauncherCard:${spec.key}`}
-      onClick={onClick}
+      data-ui={`LauncherTile:${spec.key}`}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
       style={{
-        background: `linear-gradient(180deg, ${bgTop} 0%, ${bgBottom} 100%)`,
-        borderLeft: `6px solid ${spec.accentLine}`,
+        position: "relative",
+        aspectRatio: "1 / 1",
+        width: "100%",
         borderRadius: 18,
-        padding: "26px 34px",
-        minHeight: 290,
-        display: "flex",
-        alignItems: "center",
-        gap: 26,
-        cursor: "pointer",
-        transition: "background 0.15s",
-      }}
-      onMouseEnter={(e) => {
-        (e.currentTarget as HTMLDivElement).style.background =
-          `linear-gradient(180deg, ${bgHover}, ${bgHover})`;
-      }}
-      onMouseLeave={(e) => {
-        (e.currentTarget as HTMLDivElement).style.background =
-          `linear-gradient(180deg, ${bgTop} 0%, ${bgBottom} 100%)`;
+        overflow: "hidden",
+        border: `1px solid ${hover ? spec.accentLine : "var(--border-strong)"}`,
+        // Shadow ON at rest, OFF on hover (per the spec).
+        boxShadow: hover ? "none" : "var(--shadow-lg)",
+        background: "var(--bg-elevated)",
+        transition: "box-shadow 0.2s, border-color 0.2s",
+        cursor: "default",
       }}
     >
       <img
         src={`${ICONS}/${spec.iconPng}`}
-        style={{ height: 270, width: "auto", flexShrink: 0 }}
         alt={spec.title}
+        style={{
+          position: "absolute",
+          inset: 0,
+          width: "100%",
+          height: "100%",
+          objectFit: "cover",
+          // Dim the art on hover so the action grid reads clearly.
+          filter: hover ? "brightness(0.32) saturate(0.85)" : "none",
+          transition: "filter 0.2s",
+          pointerEvents: "none",
+        }}
       />
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
-        <div style={{
-          color: spec.accentLine,
-          fontSize: 26,
-          fontWeight: 700,
-        }}>
-          {spec.title}
-        </div>
-        <div style={{
-          color: "rgba(255,255,255,0.82)",
-          fontSize: 12,
-          letterSpacing: 0.6,
-          textTransform: "uppercase",
-        }}>
-          {spec.tagline}
-        </div>
-        <div style={{
-          color: "#fafafa",
-          fontSize: 14,
-          lineHeight: 1.5,
-          marginTop: 4,
-        }}>
-          {spec.blurb}
-        </div>
+      {/* 2x2 action matrix — fades/scales in on hover. pointer-events
+          gated so it can't intercept anything while invisible. */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gridTemplateRows: "1fr 1fr",
+          gap: 14,
+          padding: 18,
+          opacity: hover ? 1 : 0,
+          transform: hover ? "scale(1)" : "scale(0.96)",
+          transition: "opacity 0.18s ease, transform 0.18s ease",
+          pointerEvents: hover ? "auto" : "none",
+        }}
+      >
+        {spec.actions.map((a) => (
+          <button
+            key={a.label}
+            data-ui={`TileAction:${spec.key}:${a.targetPage}`}
+            onClick={() => navTo(a.targetPage)}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 8,
+              borderRadius: 14,
+              border: `1px solid ${spec.accentLine}`,
+              background: "rgba(10,14,28,0.62)",
+              color: "#fafafa",
+              cursor: "pointer",
+              transition: "background 0.12s, transform 0.12s",
+            }}
+            onMouseEnter={(e) => {
+              const b = e.currentTarget as HTMLButtonElement;
+              b.style.background = `color-mix(in srgb, ${spec.accentLine} 38%, rgba(10,14,28,0.62))`;
+              b.style.transform = "translateY(-2px)";
+            }}
+            onMouseLeave={(e) => {
+              const b = e.currentTarget as HTMLButtonElement;
+              b.style.background = "rgba(10,14,28,0.62)";
+              b.style.transform = "translateY(0)";
+            }}
+          >
+            {/* Placeholder glyph — replaced by supplied icon art later. */}
+            <span style={{ fontSize: 30, lineHeight: 1 }}>{a.icon}</span>
+            <span style={{ fontSize: 14, fontWeight: 700, textAlign: "center", padding: "0 6px" }}>
+              {a.label}
+            </span>
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -276,17 +337,19 @@ function PanelHeader({ icon, label, action }: {
 // main.py:7739-7758. "Status:" in normal weight + "Ready" in large
 // bold green (16pt) on the right.
 function ReadyRow() {
+  // "Ready" now matches the "Status:" label size (was an oversized 22px
+  // that dominated the panel) — same 14px, just green + bold.
   return (
     <div style={{
       display: "flex",
       alignItems: "center",
       gap: 8,
       marginTop: 6,
+      fontSize: 14,
     }}>
       <span style={{ color: "var(--fg)", fontWeight: 700 }}>Status:</span>
       <span style={{
         color: "#22c55e", // _get_status_color(True) — main.py:7748
-        fontSize: 22,     // 16pt ≈ 22 px (main.py:7749)
         fontWeight: 700,
       }}>
         Ready
@@ -322,7 +385,7 @@ function GridPanel({ children, accent }: {
 // unmounts after ~2.4s so it never obscures the live panels. Always
 // pointer-events:none so it can't eat clicks even mid-fade.
 //
-// The greeting is the owl_hero.png art (full 500-px resolution) instead
+// The greeting is the owllm_main.png brand art (full resolution) instead
 // of the old text circle — same timing/behaviour, just the brand image.
 function WelcomeCircle() {
   const [phase, setPhase] = useState<"shown" | "fading" | "gone">("shown");
@@ -335,7 +398,7 @@ function WelcomeCircle() {
   const fading = phase === "fading";
   return (
     <img
-      src={`${ICONS}/owl_hero.png`}
+      src={`${ICONS}/owllm_main.png`}
       alt="Welcome to OWLLM"
       style={{
         position: "absolute",
@@ -408,22 +471,37 @@ export default function HomePage() {
   const cpuCores = hw?.cpu_threads || hw?.cpu_cores || 0;
   const ramGb = hw ? Math.round(hw.ram_total_gb) : 0;
 
-  // Software requirements — Qt builds exactly four rows:
-  //   Python 3.8+  / PyTorch (CUDA) / CUDA Drivers / Dependencies
-  // (main.py:7788-7873). The Fix Issues button only renders when
-  // pytorch_ok is False OR deps_ok is False (main.py:7876).
-  const pythonOk = true;
-  const pythonVer = "3.11.13";
-  const pytorchOk = true;
-  const pytorchVer = "2.5.1+cu121";
-  const cudaOk = true;
-  const cudaVer = "12.6";
-  const depsOk = true;
-  const depsMsg = depsOk
-    ? "Core packages found (full validation runs via Fix Issues)" // main.py:7862
-    : "Missing: torch, transformers"; // main.py:7864 shape
+  // Software requirements — REAL readiness from the native app_readiness
+  // command (src-tauri/src/readiness.rs). Replaces the old hardcoded
+  // Python/PyTorch/CUDA/Deps rows that printed the same fake versions on
+  // every machine and described a host-Python world the app no longer
+  // uses (fine-tuning runs in a WSL/uv env now).
+  const [ready, setReady] = useState<AppReadiness | null>(null);
+  useEffect(() => {
+    invoke<AppReadiness>("app_readiness")
+      .then(setReady)
+      .catch(() => setReady(null));
+  }, []);
+  // Build the four display rows from the live signal. While loading
+  // (ready === null) show neutral "Checking…" rows.
+  const reqRows: StatusRow[] = ready
+    ? [
+        { icon: "🐧", name: "WSL / Ubuntu",     ok: ready.wsl.warn ? "warn" : ready.wsl.ok,         value: ready.wsl.detail },
+        { icon: "🎮", name: "GPU & CUDA driver", ok: ready.gpu.warn ? "warn" : ready.gpu.ok,         value: ready.gpu.detail },
+        { icon: "🐍", name: "Fine-tuning env",   ok: ready.env.warn ? "warn" : ready.env.ok,         value: ready.env.detail },
+        { icon: "🦙", name: "Local LLM runtime", ok: ready.runtime.warn ? "warn" : ready.runtime.ok, value: ready.runtime.detail },
+      ]
+    : [
+        { icon: "🐧", name: "WSL / Ubuntu",     ok: "warn", value: "Checking…" },
+        { icon: "🎮", name: "GPU & CUDA driver", ok: "warn", value: "Checking…" },
+        { icon: "🐍", name: "Fine-tuning env",   ok: "warn", value: "Checking…" },
+        { icon: "🦙", name: "Local LLM runtime", ok: "warn", value: "Checking…" },
+      ];
 
-  const showFixBtn = !pytorchOk || !depsOk;
+  // The fine-tuning env is the one row a user can act on from here —
+  // surface a "Set up" button that jumps to the Train page when it's
+  // not ready yet.
+  const envNeedsSetup = !!ready && !ready.env.ok;
 
   return (
     <div style={{ padding: "30px 40px", height: "100%", overflow: "auto" }}>
@@ -431,15 +509,34 @@ export default function HomePage() {
         data-ui="HomeGrid"
         style={{
           position: "relative",
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gridTemplateRows: "auto 1fr",
+          display: "flex",
+          flexDirection: "column",
           gap: 28,
-          minHeight: 720,
         }}
       >
-        <LauncherCard spec={LAUNCHERS[0]} />
-        <LauncherCard spec={LAUNCHERS[1]} />
+        {/* Square, image-only launcher tiles. Three equal columns that
+            stretch to the full window width (1fr each) so the row never
+            leaves dead space on the sides; each tile stays square via
+            aspectRatio and reveals a 2x2 quick-action matrix on hover. */}
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 1fr)",
+          gap: 28,
+        }}>
+          <LauncherTile spec={LAUNCHERS[0]} />
+          <LauncherTile spec={LAUNCHERS[1]} />
+          <LauncherTile spec={LAUNCHERS[2]} />
+        </div>
+
+        {/* Status panels — equal height (alignItems:stretch makes both
+            match the taller one) so the row reads as a balanced pair
+            instead of two mismatched boxes. */}
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: 28,
+          alignItems: "stretch",
+        }}>
 
         <GridPanel accent="var(--accent-strong)">
           <PanelHeader
@@ -521,59 +618,35 @@ export default function HomePage() {
 
         <GridPanel accent="var(--accent-strong)">
           <PanelHeader icon="⚙️" label="Software Requirements & Setup" />
-          {/* Four rows in Qt order — main.py:7788-7873.
-              Detail strings reproduce Qt's f-strings verbatim. */}
-          <StatusList rows={[
-            {
-              icon: "🐍",
-              name: "Python 3.8+",
-              ok: pythonOk,
-              value: pythonOk ? `Version ${pythonVer}` : "Not found",
-            },
-            {
-              icon: "🔥",
-              name: "PyTorch (CUDA)",
-              ok: pytorchOk,
-              value: pytorchOk
-                ? `Version ${pytorchVer}`
-                : "CPU-only version installed", // or "Not installed"
-            },
-            {
-              icon: "🎮",
-              name: "CUDA Drivers",
-              ok: cudaOk,
-              value: cudaOk ? `Version ${cudaVer}` : "Not found",
-            },
-            {
-              icon: "📦",
-              name: "Dependencies",
-              ok: depsOk,
-              value: depsMsg,
-            },
-          ]} />
+          {/* Four LIVE readiness signals (readiness.rs): WSL, GPU+CUDA
+              driver, fine-tuning env, llama runtime. ⚠️ = optional/degraded
+              (e.g. CPU-only, env not set up yet); ❌ = missing + needed. */}
+          <StatusList rows={reqRows} />
           <div style={{ flex: 1 }} />
-          {showFixBtn && (
+          {envNeedsSetup && (
             <button
-              data-ui="FixIssuesBtn"
+              data-ui="SetupEnvBtn"
+              onClick={() => navTo("train")}
+              title="Open the Train page to install the fine-tuning environment"
               style={{
-                // Magenta gradient from main.py:7878-7900.
                 marginTop: 12,
                 minHeight: 42,
                 padding: "10px 18px",
                 borderRadius: 12,
-                border: "2px solid #f093fb",
-                background: "linear-gradient(180deg, rgba(240,147,251,0.6), rgba(245,87,108,0.6))",
+                border: "2px solid var(--accent-strong)",
+                background: "var(--bg-elevated)",
                 color: "var(--fg-strong)",
-                fontSize: 17, // 13pt ≈ 17 px (main.py:7886)
+                fontSize: 15,
                 fontWeight: 700,
                 alignSelf: "flex-start",
                 cursor: "pointer",
               }}
             >
-              🛠️ Fix Issues (Recommended)
+              🛠️ Set up Fine-tuning Environment
             </button>
           )}
         </GridPanel>
+        </div>
 
         <WelcomeCircle />
       </div>

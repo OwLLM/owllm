@@ -234,6 +234,81 @@ pub async fn tool_create_dir(path: String, cwd: Option<String>) -> Result<(), St
 /// can use familiar pipes/redirects without us writing a parser.
 /// CREATE_NO_WINDOW keeps the popup invisible (saved memory constraint:
 /// All Windows subprocesses MUST use CREATE_NO_WINDOW 0x08000000).
+/// Directories to PREPEND to PATH when running an agent shell command on
+/// the Windows host (i.e. NOT inside a WSL sandbox). Without this, the
+/// agent's `python …` runs against the Microsoft Store alias stub that
+/// Windows seeds into `%LOCALAPPDATA%\Microsoft\WindowsApps` — which exits
+/// 9009 with "Python was not found", even when Python IS installed. We put
+/// a real interpreter first so `python` / `python3` / `pip` resolve.
+///
+/// Priority: the app's bundled runtime / python-3.11 module first (always
+/// correct, ships with OwLLM), then any per-user or system Python install
+/// the user added themselves. Each dir that holds python.exe also gets a
+/// best-effort `python3.exe` alias copied in-place (same folder ⇒ the
+/// required DLLs/Lib are present) so agents that call `python3` work too.
+#[cfg(windows)]
+fn host_python_path_dirs() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    fn add_python_dir(out: &mut Vec<PathBuf>, python_exe: PathBuf) {
+        let Some(dir) = python_exe.parent().map(|p| p.to_path_buf()) else { return };
+        if !dir.join("python.exe").is_file() || out.contains(&dir) {
+            return;
+        }
+        // Best-effort `python3.exe` alias next to python.exe (writable dirs
+        // only — Program Files copies just fail silently, leaving `python`
+        // working). Skip if it already exists.
+        let py3 = dir.join("python3.exe");
+        if !py3.exists() {
+            let _ = std::fs::copy(dir.join("python.exe"), &py3);
+        }
+        let scripts = dir.join("Scripts");
+        out.push(dir);
+        if scripts.is_dir() {
+            out.push(scripts);
+        }
+    }
+
+    // 1. App-controlled interpreters (OWLLM_PYTHON override is honoured
+    //    inside bundled_python_exe()).
+    if let Some(p) = crate::paths::bundled_python_exe() {
+        add_python_dir(&mut out, p);
+    }
+    if let Some(p) = crate::paths::module_python_exe() {
+        add_python_dir(&mut out, p);
+    }
+
+    // 2. Per-user installs (python.org "for me", no admin / no PATH).
+    if let Ok(lad) = std::env::var("LOCALAPPDATA") {
+        let root = PathBuf::from(&lad).join("Programs").join("Python");
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for e in entries.flatten() {
+                add_python_dir(&mut out, e.path().join("python.exe"));
+            }
+        }
+    }
+
+    // 3. System-wide installs — C:\Python3NN and Program Files\Python3NN.
+    let mut system_roots: Vec<PathBuf> = vec![PathBuf::from("C:\\")];
+    for pf in ["C:\\Program Files", "C:\\Program Files (x86)"] {
+        system_roots.push(PathBuf::from(pf));
+    }
+    for root in system_roots {
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for e in entries.flatten() {
+                if let Some(s) = e.file_name().to_str() {
+                    if s.starts_with("Python3") {
+                        add_python_dir(&mut out, e.path().join("python.exe"));
+                    }
+                }
+            }
+        }
+    }
+
+    out
+}
+
 #[tauri::command]
 pub async fn tool_shell_exec(
     command: String,
@@ -298,6 +373,26 @@ pub async fn tool_shell_exec(
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
+
+        // Make `python` actually resolve on the Windows host — prepend a
+        // real interpreter ahead of the Microsoft Store alias stub (which
+        // otherwise wins and exits 9009 "Python was not found"). No WSL
+        // needed; WSL-isolated projects already returned above.
+        let prefix = host_python_path_dirs();
+        if !prefix.is_empty() {
+            let existing = std::env::var("PATH").unwrap_or_default();
+            let prefix_str = prefix
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(";");
+            let new_path = if existing.is_empty() {
+                prefix_str
+            } else {
+                format!("{prefix_str};{existing}")
+            };
+            cmd.env("PATH", new_path);
+        }
     }
     let output = cmd
         .output()

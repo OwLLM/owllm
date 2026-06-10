@@ -568,6 +568,24 @@ async fn run_install(
             format!("venv creation failed in WSL: {e}")
         })?;
 
+    // 1b) Seed setuptools + wheel. `uv venv` builds a MINIMAL venv with no
+    //     setuptools, but runtime deps pulled in by torch (triton) do
+    //     `import setuptools` at import time — without it the probe dies with
+    //     "No module named 'setuptools'" and the whole env is discarded. The
+    //     native-Linux path already seeds these; the WSL path was missing it.
+    let _ = channel.send(InstallEvent::Step { label: "Seeding setuptools + wheel".into() });
+    let seed = format!(
+        "if command -v uv >/dev/null 2>&1; then uv pip install --python {py} setuptools wheel; \
+         else {py} -m pip install --upgrade setuptools wheel; fi",
+        py = q(&venv_py),
+    );
+    run_subprocess(channel, wsl, &wsl_invocation(&distro, &seed), None)
+        .await
+        .map_err(|e| {
+            let _ = crate::wsl::run_in_distro(&distro, &format!("rm -rf {}", q(&tmp)));
+            format!("seeding setuptools/wheel failed: {e}")
+        })?;
+
     // 2) Install each package in declared order.
     for pkg in &profile.packages {
         // Pick the Blackwell build when present and a Blackwell GPU is here;

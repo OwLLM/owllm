@@ -70,6 +70,14 @@ pub struct PackageSpec {
     /// detected AND this is set; otherwise normal index/cuda_wheel rules.
     #[serde(default)]
     pub index_blackwell: Option<String>,
+    /// When true, a failed install of THIS package is non-fatal: the env
+    /// install logs a warning and continues instead of aborting. For
+    /// best-effort accelerators like flash-attn, whose prebuilt wheel only
+    /// exists for exact torch×CUDA×python combos and otherwise tries a slow
+    /// source build that often fails — we never want that to block the
+    /// whole environment. The probe should treat such packages as optional.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 /// One declarative environment profile. Lives in env_profiles.yaml
@@ -153,6 +161,10 @@ fn profile_hash(p: &EnvProfile) -> String {
         h.update(b"\0");
         if let Some(i) = &pkg.index_blackwell {
             h.update(i.as_bytes());
+        }
+        h.update(b"\0");
+        if pkg.optional {
+            h.update(b"opt");
         }
         h.update(b"\n");
     }
@@ -584,12 +596,24 @@ async fn run_install(
             idx = idx_arg,
             spec = q(&spec),
         );
-        run_subprocess(channel, wsl, &wsl_invocation(&distro, &install), None)
-            .await
-            .map_err(|e| {
+        let install_res =
+            run_subprocess(channel, wsl, &wsl_invocation(&distro, &install), None).await;
+        if let Err(e) = install_res {
+            if pkg.optional {
+                // Best-effort package (e.g. flash-attn): don't abort the
+                // whole env — warn and keep going. The probe treats it as
+                // optional, so the env is still usable without it.
+                let _ = channel.send(InstallEvent::Log {
+                    stream: "warn".into(),
+                    line: format!(
+                        "Optional package {spec} didn't install ({e}) — skipping it; the environment still works without it."
+                    ),
+                });
+            } else {
                 let _ = crate::wsl::run_in_distro(&distro, &format!("rm -rf {}", q(&tmp)));
-                format!("pip install {spec} failed: {e}")
-            })?;
+                return Err(format!("pip install {spec} failed: {e}"));
+            }
+        }
     }
 
     // 3) Probe (must print "OK").
@@ -728,12 +752,20 @@ async fn run_install(
             args.push(idx.clone());
         }
         args.push(spec.clone());
-        run_subprocess(channel, &venv_python, &args, None)
-            .await
-            .map_err(|e| {
+        let install_res = run_subprocess(channel, &venv_python, &args, None).await;
+        if let Err(e) = install_res {
+            if pkg.optional {
+                let _ = channel.send(InstallEvent::Log {
+                    stream: "warn".into(),
+                    line: format!(
+                        "Optional package {spec} didn't install ({e}) — skipping it; the environment still works without it."
+                    ),
+                });
+            } else {
                 let _ = std::fs::remove_dir_all(&tmp_dir);
-                format!("pip install {spec} failed: {e}")
-            })?;
+                return Err(format!("pip install {spec} failed: {e}"));
+            }
+        }
     }
 
     // 5) Probe — must print "OK" on the last line. The probe script

@@ -48,6 +48,7 @@ mod slack;
 mod telegram;
 mod webhook;
 mod wsl;
+mod wsl_setup;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -280,6 +281,10 @@ pub fn run() {
             wsl::wsl_toolchain_status,
             wsl::wsl_provision,
             wsl::wsl_install,
+            wsl_setup::wsl_setup_status,
+            wsl_setup::wsl_setup_install,
+            wsl_setup::wsl_setup_provision_python,
+            wsl_setup::wsl_reboot,
             github::github_status,
             github::github_connect,
             github::github_disconnect,

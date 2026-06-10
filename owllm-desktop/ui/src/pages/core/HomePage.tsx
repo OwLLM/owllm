@@ -18,6 +18,7 @@
 // own native probes (Python interpreter / PyTorch / CUDA / deps).
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import WslSetupModal from "./WslSetupModal";
 
 type GpuInfo = {
   index: number;
@@ -477,11 +478,14 @@ export default function HomePage() {
   // every machine and described a host-Python world the app no longer
   // uses (fine-tuning runs in a WSL/uv env now).
   const [ready, setReady] = useState<AppReadiness | null>(null);
-  useEffect(() => {
+  const refreshReady = () => {
     invoke<AppReadiness>("app_readiness")
       .then(setReady)
       .catch(() => setReady(null));
-  }, []);
+  };
+  useEffect(() => { refreshReady(); }, []);
+  // Guided WSL setup modal — opened from the WSL row when it's not ready.
+  const [wslSetupOpen, setWslSetupOpen] = useState(false);
   // Build the four display rows from the live signal. While loading
   // (ready === null) show neutral "Checking…" rows.
   const reqRows: StatusRow[] = ready
@@ -502,6 +506,9 @@ export default function HomePage() {
   // surface a "Set up" button that jumps to the Train page when it's
   // not ready yet.
   const envNeedsSetup = !!ready && !ready.env.ok;
+  // WSL not ready → offer the guided setup (install Ubuntu + Python, or
+  // the one-time BIOS step). The Coder still works on the host meanwhile.
+  const wslNeedsSetup = !!ready && !ready.wsl.ok;
 
   return (
     <div style={{ padding: "30px 40px", height: "100%", overflow: "auto" }}>
@@ -623,33 +630,59 @@ export default function HomePage() {
               (e.g. CPU-only, env not set up yet); ❌ = missing + needed. */}
           <StatusList rows={reqRows} />
           <div style={{ flex: 1 }} />
-          {envNeedsSetup && (
-            <button
-              data-ui="SetupEnvBtn"
-              onClick={() => navTo("train")}
-              title="Open the Train page to install the fine-tuning environment"
-              style={{
-                marginTop: 12,
-                minHeight: 42,
-                padding: "10px 18px",
-                borderRadius: 12,
-                border: "2px solid var(--accent-strong)",
-                background: "var(--bg-elevated)",
-                color: "var(--fg-strong)",
-                fontSize: 15,
-                fontWeight: 700,
-                alignSelf: "flex-start",
-                cursor: "pointer",
-              }}
-            >
-              🛠️ Set up Fine-tuning Environment
-            </button>
-          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 12 }}>
+            {wslNeedsSetup && (
+              <button
+                data-ui="SetupWslBtn"
+                onClick={() => setWslSetupOpen(true)}
+                title="Guided WSL setup — install Ubuntu + Python automatically"
+                style={{
+                  minHeight: 42,
+                  padding: "10px 18px",
+                  borderRadius: 12,
+                  border: "2px solid var(--accent-strong)",
+                  background: "var(--bg-elevated)",
+                  color: "var(--fg-strong)",
+                  fontSize: 15,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                🐧 Set up WSL
+              </button>
+            )}
+            {envNeedsSetup && (
+              <button
+                data-ui="SetupEnvBtn"
+                onClick={() => navTo("train")}
+                title="Open the Train page to install the fine-tuning environment"
+                style={{
+                  minHeight: 42,
+                  padding: "10px 18px",
+                  borderRadius: 12,
+                  border: "2px solid var(--accent-strong)",
+                  background: "var(--bg-elevated)",
+                  color: "var(--fg-strong)",
+                  fontSize: 15,
+                  fontWeight: 700,
+                  cursor: "pointer",
+                }}
+              >
+                🛠️ Set up Fine-tuning Environment
+              </button>
+            )}
+          </div>
         </GridPanel>
         </div>
 
         <WelcomeCircle />
       </div>
+
+      <WslSetupModal
+        open={wslSetupOpen}
+        onClose={() => setWslSetupOpen(false)}
+        onChanged={refreshReady}
+      />
     </div>
   );
 }

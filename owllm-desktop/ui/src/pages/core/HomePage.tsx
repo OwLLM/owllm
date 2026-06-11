@@ -654,8 +654,13 @@ export default function HomePage() {
             {envNeedsSetup && (
               <button
                 data-ui="SetupEnvBtn"
-                onClick={() => navTo("train")}
-                title="Open the Train page to install the fine-tuning environment"
+                onClick={() => {
+                  // Jump to Train, then pop the Environment dialog open (small
+                  // delay so TrainPage has mounted + attached its listener).
+                  navTo("train");
+                  setTimeout(() => window.dispatchEvent(new CustomEvent("owllm:open-env")), 180);
+                }}
+                title="Open the fine-tuning environments dialog"
                 style={{
                   minHeight: 42,
                   padding: "10px 18px",

@@ -19,9 +19,10 @@ import {
   type EnvProfileState,
   listEnvProfiles,
   envProfileStatus,
-  installEnvProfile,
   envStateLabel,
 } from "./envProfiles";
+import EnvironmentModal from "./EnvironmentModal";
+import { isInstalling, subscribeEnvInstall } from "./envInstall";
 
 // Mirrors Rust TrainStatus (finetuning.rs). All numeric fields can be
 // null when the run hasn't reported them yet — every read site must
@@ -378,9 +379,10 @@ export default function TrainPage() {
   const [envProfiles, setEnvProfiles] = React.useState<EnvProfile[]>([]);
   const [envProfile, setEnvProfile] = React.useState<string>("");
   const [envState, setEnvState] = React.useState<EnvProfileState | null>(null);
-  const [envBusy, setEnvBusy] = React.useState(false);
-  const [envLog, setEnvLog] = React.useState<string[]>([]);
-  const [showEnvLog, setShowEnvLog] = React.useState(false);
+  // Environment management now lives in a popup (EnvironmentModal), opened
+  // from the big button next to the model picker (and from Home's Set-up
+  // button via the `owllm:open-env` event).
+  const [envModalOpen, setEnvModalOpen] = React.useState(false);
   const downloadedLower = React.useMemo(
     () => new Set(downloadedBases.map((b) => b.toLowerCase())),
     [downloadedBases],
@@ -448,32 +450,32 @@ export default function TrainPage() {
   }, []);
   React.useEffect(() => { refreshEnvStatus(envProfile); }, [envProfile, refreshEnvStatus]);
 
-  const installEnv = async () => {
-    if (!envProfile || envBusy) return;
-    setEnvBusy(true);
-    setShowEnvLog(true);
-    setEnvLog([`Installing ${envProfile}…`]);
-    setEnvState({ kind: "installing" });
-    try {
-      await installEnvProfile(envProfile, (ev) => {
-        if (ev.kind === "step") setEnvLog((l) => [...l, `▸ ${ev.label}`].slice(-400));
-        else if (ev.kind === "log") setEnvLog((l) => [...l, ev.line].slice(-400));
-        else if (ev.kind === "failed") setEnvLog((l) => [...l, `✖ ${ev.error}`].slice(-400));
-        else if (ev.kind === "finished") setEnvLog((l) => [...l, "✓ done"].slice(-400));
-      });
-    } catch (e) {
-      setEnvLog((l) => [...l, `✖ ${e}`].slice(-400));
-    } finally {
-      setEnvBusy(false);
-      await refreshEnvStatus(envProfile);
-    }
-  };
+  // Open the Environment popup on demand — e.g. Home's "Set up Fine-tuning
+  // Environment" button dispatches `owllm:open-env` after navigating here.
+  React.useEffect(() => {
+    const openEnv = () => setEnvModalOpen(true);
+    window.addEventListener("owllm:open-env", openEnv);
+    return () => window.removeEventListener("owllm:open-env", openEnv);
+  }, []);
+
+  // Re-render when the persistent install store changes so the Environment
+  // button reflects "installing…" even while the dialog is closed AND after
+  // navigating away and back (the install survives the page unmount). Also
+  // refresh the selected env's status as installs progress/finish.
+  const [, forceEnv] = React.useReducer((x: number) => x + 1, 0);
+  React.useEffect(() => subscribeEnvInstall(() => {
+    forceEnv();
+    if (envProfile && !isInstalling(envProfile)) refreshEnvStatus(envProfile);
+  }), [envProfile, refreshEnvStatus]);
+  const envPill = isInstalling(envProfile)
+    ? { text: "installing…", color: "#d9b24a" }
+    : envStateLabel(envState);
 
   const start = async () => {
     if (envState?.kind !== "ready") {
       setStatus({ ...EMPTY_STATUS, state: "idle", running: false,
-        message: "Install the fine-tuning environment first (Environment card)." });
-      setShowEnvLog(true);
+        message: "Install the fine-tuning environment first — open Environment (button next to the model)." });
+      setEnvModalOpen(true);
       return;
     }
     setStatus({ ...EMPTY_STATUS, state: "running", running: true, message: "Starting…" });
@@ -601,6 +603,7 @@ export default function TrainPage() {
             Chat/Server <b>GGUF</b> models, which can't be fine-tuned directly. Pick one;
             it downloads automatically when you press Start.
           </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
           <select
             data-ui="train_base_model"
             value={customBase ? "__custom__" : baseModel}
@@ -609,7 +612,7 @@ export default function TrainPage() {
               if (v === "__custom__") { setCustomBase(true); }
               else { setCustomBase(false); setBaseModel(v); }
             }}
-            style={inputStyle}
+            style={{ ...inputStyle, flex: 1 }}
           >
             <optgroup label="Downloaded (ready to train)">
               {baseOptions.filter((m) => isDownloaded(m)).map((m) => (
@@ -626,6 +629,26 @@ export default function TrainPage() {
             </optgroup>
             <option value="__custom__">✏️ Custom HuggingFace id…</option>
           </select>
+          <button
+            data-ui="train_open_env"
+            onClick={() => setEnvModalOpen(true)}
+            title="Fine-tuning environments — install / check what's ready"
+            style={{
+              flexShrink: 0, width: 142,
+              display: "flex", flexDirection: "column",
+              alignItems: "center", justifyContent: "center", gap: 2,
+              borderRadius: 10, border: "1px solid var(--accent-strong)",
+              background: "var(--bg-elevated)", color: "var(--fg-strong)",
+              cursor: "pointer", padding: "8px",
+            }}
+          >
+            <span style={{ fontSize: 20, lineHeight: 1 }}>🐧</span>
+            <span style={{ fontSize: 12.5, fontWeight: 700 }}>Environment</span>
+            <span style={{ fontSize: 10.5, fontWeight: 700, color: envPill.color }}>
+              {envPill.text}
+            </span>
+          </button>
+          </div>
           {customBase && (
             <input
               data-ui="train_base_model_custom"
@@ -682,62 +705,8 @@ export default function TrainPage() {
           </div>
         </div>
 
-        {/* Card 2.5: Environment — the Python env the trainer runs in.
-            On Windows it's built + run inside WSL; torch auto-matches the
-            GPU's CUDA. A run can't start until this is Ready. */}
-        <div data-ui="cfgCard" style={cfgCard}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-            <div style={cardTitle}>🐧  ENVIRONMENT</div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: envStateLabel(envState).color }}>
-              {envStateLabel(envState).text}
-            </div>
-          </div>
-          <select
-            data-ui="train_env_profile"
-            style={inputStyle}
-            value={envProfile}
-            disabled={envBusy}
-            onChange={(e) => setEnvProfile(e.target.value)}
-          >
-            {envProfiles.length === 0 && <option value="">No environments available</option>}
-            {envProfiles.map((p) => (
-              <option key={p.name} value={p.name}>{p.display}</option>
-            ))}
-          </select>
-          <div style={{ fontSize: 11, color: "#8595ad", lineHeight: 1.5, marginTop: 4 }}>
-            {envProfiles.find((p) => p.name === envProfile)?.description
-              || "Pick the training environment."}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
-            <button
-              style={{ ...cardBtn, opacity: envBusy || !envProfile ? 0.5 : 1 }}
-              disabled={envBusy || !envProfile}
-              onClick={installEnv}
-            >
-              {envBusy ? "⏳ Installing…"
-                : envState?.kind === "ready" ? "↻ Reinstall"
-                : envState?.kind === "stale" ? "⟳ Update"
-                : envState?.kind === "broken" ? "🔧 Repair"
-                : "⬇ Install"}
-            </button>
-            {envLog.length > 0 && (
-              <button style={cardBtn} onClick={() => setShowEnvLog((v) => !v)}>
-                {showEnvLog ? "Hide log" : "Show log"}
-              </button>
-            )}
-            <div style={{ flex: 1, fontSize: 11, color: "#8595ad", textAlign: "right" }}>
-              Builds &amp; runs in WSL · torch auto-CUDA
-            </div>
-          </div>
-          {showEnvLog && envLog.length > 0 && (
-            <pre style={{
-              marginTop: 6, maxHeight: 160, overflow: "auto",
-              background: "var(--bg-input)", border: "1px solid rgba(var(--accent-rgb),0.2)",
-              borderRadius: 6, padding: "6px 8px", fontSize: 10.5, lineHeight: 1.45,
-              color: "#b8c4d6", whiteSpace: "pre-wrap", wordBreak: "break-all",
-            }}>{envLog.join("\n")}</pre>
-          )}
-        </div>
+        {/* Environment now lives in the popup opened by the 🐧 button next to
+            the Base Model picker (above) — no inline card. */}
 
         {/* Card 3: Training parameters — main.py:14747-14908 */}
         <div data-ui="cfgCard" style={cfgCard}>
@@ -948,6 +917,14 @@ export default function TrainPage() {
         <AbliterateSection baseModel={baseModel} />
         <TrainingHistory />
       </div>
+
+      <EnvironmentModal
+        open={envModalOpen}
+        onClose={() => setEnvModalOpen(false)}
+        selected={envProfile}
+        onSelect={(name) => { setEnvProfile(name); refreshEnvStatus(name); }}
+        onChanged={() => refreshEnvStatus(envProfile)}
+      />
     </div>
   );
 }

@@ -200,9 +200,11 @@ mod imp {
         // out: "virtualization is not enabled on this machine".
         let virtualization_enabled = !lower.contains("virtualization is not enabled");
 
-        let ws = crate::wsl::wsl_status();
-        let distro_installed = !ws.distros.is_empty() || ws.default_distro.is_some();
-        let default_distro = ws.default_distro.clone().or_else(|| ws.distros.first().cloned());
+        // Resolve through best_linux_distro: a Docker/system distro (no bash)
+        // doesn't count as a usable fine-tuning/sandbox distro. If only those
+        // exist we treat it as "not installed" so the flow offers Ubuntu.
+        let default_distro = crate::wsl::best_linux_distro();
+        let distro_installed = default_distro.is_some();
         let awaiting_reboot = super::install_marker_present();
 
         // Can we actually RUN a command in the distro? A distro can be
@@ -525,9 +527,8 @@ fn sanitize_username(raw: &str) -> String {
 pub async fn wsl_setup_ensure_user(username: String, password: String) -> Result<WslAccount, String> {
     #[cfg(windows)]
     {
-        let distro = crate::wsl::wsl_status()
-            .default_distro
-            .ok_or_else(|| "No WSL distro installed yet — install Ubuntu first.".to_string())?;
+        let distro = crate::wsl::best_linux_distro()
+            .ok_or_else(|| "No Ubuntu/Linux distro in WSL yet — install Ubuntu first (a Docker/system distro doesn't count).".to_string())?;
         let user = sanitize_username(&username);
         if password.trim().is_empty() {
             return Err("Please choose a password for the Linux account.".to_string());
@@ -584,9 +585,8 @@ pub async fn wsl_setup_provision_python(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let distro = crate::wsl::wsl_status()
-            .default_distro
-            .ok_or_else(|| "No WSL distro installed yet — install Ubuntu first.".to_string())?;
+        let distro = crate::wsl::best_linux_distro()
+            .ok_or_else(|| "No Ubuntu/Linux distro in WSL yet — install Ubuntu first (a Docker/system distro doesn't count).".to_string())?;
         let _ = channel.send(SetupEvent::Started);
         let ch = channel.clone();
         let res = tokio::task::spawn_blocking(move || imp::provision_python(&distro, &ch))

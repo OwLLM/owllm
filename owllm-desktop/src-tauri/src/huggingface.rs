@@ -906,7 +906,7 @@ fn hf_cache_roots() -> Vec<PathBuf> {
     // into WSL) so downloaded bases actually show as downloaded.
     #[cfg(windows)]
     {
-        if let Some(distro) = crate::wsl::wsl_status().default_distro {
+        if let Some(distro) = crate::wsl::best_linux_distro() {
             if let Ok(out) = crate::wsl::run_in_distro(&distro, "printf %s \"$HOME\"") {
                 // run_in_distro may prepend login-shell chatter; take the
                 // first line that looks like an absolute POSIX path.

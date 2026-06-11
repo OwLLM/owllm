@@ -308,8 +308,8 @@ fn build_trainer_command(
     use tokio::process::Command;
     #[cfg(windows)]
     if python_exe.starts_with('/') {
-        let distro = crate::wsl::wsl_status().default_distro.ok_or_else(|| {
-            "fine-tuning env is in WSL but no WSL distro is available".to_string()
+        let distro = crate::wsl::best_linux_distro().ok_or_else(|| {
+            "fine-tuning env is in WSL but no real Linux distro is available".to_string()
         })?;
         let q = crate::wsl::sh_quote;
         let mut script = String::new();

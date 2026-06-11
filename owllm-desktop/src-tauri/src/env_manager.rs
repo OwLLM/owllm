@@ -304,7 +304,9 @@ async fn status_impl(profile: EnvProfile) -> Result<EnvProfileState, String> {
 #[cfg(windows)]
 async fn status_impl(profile: EnvProfile) -> Result<EnvProfileState, String> {
     tokio::task::spawn_blocking(move || -> Result<EnvProfileState, String> {
-        let Some(distro) = crate::wsl::wsl_status().default_distro else {
+        // Resolve the SAME real-Linux distro the installer uses, so status
+        // reflects where the env actually lives (not a Docker/system distro).
+        let Some(distro) = crate::wsl::best_linux_distro() else {
             return Ok(EnvProfileState::NotInstalled);
         };
         let Ok(home) = wsl_backend::wsl_home(&distro) else {
@@ -404,10 +406,12 @@ pub async fn env_profile_install(
 
 #[cfg(windows)]
 mod wsl_backend {
-    /// Default distro, or an actionable error pointing at provisioning.
+    /// Best general-purpose distro, or an actionable error. Resolves through
+    /// `best_linux_distro` so a Docker/system distro that happens to be the
+    /// WSL default (no bash → exit 127) is skipped in favour of a real Ubuntu.
     pub fn default_distro() -> Result<String, String> {
-        crate::wsl::wsl_status().default_distro.ok_or_else(|| {
-            "Fine-tuning runs inside WSL, but no WSL distro is installed. Install Ubuntu first (Code page → enable isolation, or run `wsl --install`).".to_string()
+        crate::wsl::best_linux_distro().ok_or_else(|| {
+            "Fine-tuning needs a real Linux distro in WSL (e.g. Ubuntu). Only a Docker/system WSL distro was found. Open “Set up WSL” on the Home page to install Ubuntu.".to_string()
         })
     }
     /// Absolute `$HOME` inside the distro (e.g. /home/mc) — so the env
@@ -1078,7 +1082,7 @@ async fn uninstall_impl(name: String) -> Result<(), String> {
 #[cfg(windows)]
 async fn uninstall_impl(name: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let Some(distro) = crate::wsl::wsl_status().default_distro else {
+        let Some(distro) = crate::wsl::best_linux_distro() else {
             return Ok(());
         };
         let home = wsl_backend::wsl_home(&distro)?;

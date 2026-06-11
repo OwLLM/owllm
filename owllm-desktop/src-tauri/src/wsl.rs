@@ -294,6 +294,32 @@ fn sanitize_project_name(name: &str) -> String {
 
 // ---- Tauri commands -------------------------------------------------------
 
+/// Distros that are NOT general-purpose Linux environments — they ship a
+/// busybox-style userland with no bash / apt / useradd, so fine-tuning
+/// (which needs `bash -lc`, apt, uv) can't run in them. Docker Desktop and
+/// Rancher/Podman register these as the *default* WSL distro on many PCs,
+/// which made the env install die with `/bin/sh: bash: not found` (exit 127).
+fn is_system_distro(name: &str) -> bool {
+    let l = name.to_lowercase();
+    l.contains("docker-desktop") || l.starts_with("rancher") || l.contains("podman")
+}
+
+/// The best distro to run fine-tuning / the agent sandbox in: the user's
+/// default if it's a real Linux distro, otherwise the first installed
+/// non-system distro. Returns None when only Docker/system distros exist
+/// (→ the caller should prompt to install Ubuntu). This is what every
+/// fine-tuning path should resolve through instead of the raw default,
+/// which can be `docker-desktop`.
+pub fn best_linux_distro() -> Option<String> {
+    let s = wsl_status();
+    if let Some(d) = &s.default_distro {
+        if !is_system_distro(d) {
+            return Some(d.clone());
+        }
+    }
+    s.distros.into_iter().find(|d| !is_system_distro(d))
+}
+
 #[tauri::command]
 pub fn wsl_status() -> WslStatus {
     let distros = list_distros();

@@ -161,19 +161,36 @@ mod imp {
 
     /// The default user's uid inside the distro (`id -u`). 0 = root, which on
     /// a fresh Ubuntu means no Linux user was ever created (the first-run
-    /// window was closed). Returns None if the distro can't be reached.
+    /// window was closed). Returns None ONLY if the distro genuinely can't be
+    /// reached after a retry.
+    ///
+    /// Robust parsing: a login shell can print MOTD / profile.d banner lines
+    /// before the command output, so we DON'T trust the first line — `id -u`
+    /// emits a bare integer on its own line, so we scan from the END for the
+    /// first line that parses as a number. We also retry once: the first
+    /// wsl.exe call right after a reboot often hits the cold WSL service and
+    /// transiently fails, which previously got misread as "needs reboot".
     fn default_uid(distro: &str) -> Option<u32> {
-        crate::wsl::run_in_distro(distro, "id -u")
-            .ok()
-            .and_then(|o| o.lines().next().map(str::trim).and_then(|s| s.parse().ok()))
+        for attempt in 0..2 {
+            if let Ok(o) = crate::wsl::run_in_distro(distro, "id -u") {
+                if let Some(u) = o.lines().rev().find_map(|l| l.trim().parse::<u32>().ok()) {
+                    return Some(u);
+                }
+            }
+            if attempt == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(600));
+            }
+        }
+        None
     }
 
-    /// The default user's name inside the distro (`whoami`). None for root.
+    /// The default user's name inside the distro (`id -un`). None for root or
+    /// when unreadable. Last non-empty line, to skip any login banner.
     fn default_user_name(distro: &str) -> Option<String> {
-        crate::wsl::run_in_distro(distro, "whoami")
+        crate::wsl::run_in_distro(distro, "id -un")
             .ok()
-            .map(|o| o.lines().next().unwrap_or("").trim().to_string())
-            .filter(|s| !s.is_empty() && s != "root")
+            .and_then(|o| o.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(String::from))
+            .filter(|s| s != "root")
     }
 
     pub fn status() -> WslSetupStatus {
@@ -224,9 +241,9 @@ mod imp {
                 "virtualizationOff",
                 "CPU virtualization is OFF in your BIOS/firmware — the one thing no app can change. Enable it once, then re-check.".to_string(),
             )
-        } else if (awaiting_reboot || distro_installed) && !distro_runnable {
-            // Registered but won't run yet → almost always the pending reboot
-            // that turns on the Virtual Machine Platform.
+        } else if !distro_installed && awaiting_reboot {
+            // We launched the installer; the distro isn't registered yet —
+            // Windows needs the reboot that enables the VM platform.
             (
                 "needsReboot",
                 "WSL was installed but Windows needs a restart to turn on the Virtual Machine Platform. Reboot, then re-check.".to_string(),
@@ -236,12 +253,22 @@ mod imp {
                 "needsInstall",
                 "Ready to install WSL + Ubuntu automatically.".to_string(),
             )
-        } else if !user_ready {
+        } else if awaiting_reboot && !distro_runnable {
+            // Our installer ran AND the distro still won't execute a command →
+            // genuinely pending the post-install reboot. We DON'T trigger this
+            // on a plain probe failure (no marker): a working WSL that hiccups
+            // must never be forced into a reboot loop.
+            (
+                "needsReboot",
+                "WSL was installed but Windows needs a restart to turn on the Virtual Machine Platform. Reboot, then re-check.".to_string(),
+            )
+        } else if uid == Some(0) {
+            // CONFIRMED root (distro ran `id -u` → 0): no Linux user yet.
             (
                 "needsUser",
                 "Ubuntu is installed but has no Linux user yet (the first-run window was likely closed). Create one — it takes a second.".to_string(),
             )
-        } else if !python_ready {
+        } else if distro_runnable && !python_ready {
             (
                 "needsPython",
                 format!(

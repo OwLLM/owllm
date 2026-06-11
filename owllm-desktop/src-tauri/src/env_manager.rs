@@ -567,18 +567,20 @@ async fn run_install(
         bw
     };
 
-    // 0) Make sure Python/uv exist in the distro. On a fresh Ubuntu (or one
-    //    where the user never ran the guided setup) neither is present and
-    //    venv creation would die with a cryptic "python3 not found". Detect
-    //    it and apt-install python3-venv + uv AS ROOT, streamed, before
-    //    going further — so the env install is self-sufficient instead of
-    //    sending the user back to a separate setup step.
-    let have_py = {
+    // 0) Make sure `uv` exists in the distro — and gate on UV SPECIFICALLY,
+    //    not "is python3 present". uv is the load-bearing tool: it fetches
+    //    its OWN managed CPython ({profile.python}, e.g. 3.11), so it works
+    //    even when the distro's system python is a bleeding-edge 3.14 with no
+    //    `python3-venv`/ensurepip (Ubuntu 25.x ships exactly that — the
+    //    `python3 -m venv` fallback then dies with "ensurepip is not
+    //    available"). If uv is missing we apt-install the basics + uv AS ROOT,
+    //    streamed, so the env install is self-sufficient.
+    let have_uv = {
         let d = distro.clone();
         tokio::task::spawn_blocking(move || {
             crate::wsl::run_in_distro(
                 &d,
-                "if command -v uv >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then echo HAVE; else echo MISSING; fi",
+                "command -v uv >/dev/null 2>&1 && echo HAVE || echo MISSING",
             )
         })
         .await
@@ -586,16 +588,20 @@ async fn run_install(
         .map(|o| o.contains("HAVE"))
         .unwrap_or(false)
     };
-    if !have_py {
+    if !have_uv {
         let _ = channel.send(InstallEvent::Step {
-            label: "Preparing Python in WSL (first-time setup — apt + uv)".into(),
+            label: "Preparing toolchain in WSL (installing uv — it brings its own Python, no system conflicts)".into(),
         });
+        // Install uv to /usr/local/bin (on every user's PATH). Also pull
+        // python3-venv/pip so the rare uv-less fallback still has a chance,
+        // but uv is what we rely on. Verify uv landed or fail loudly.
         let provision = "set -e; export DEBIAN_FRONTEND=noninteractive; \
-             apt-get update -y; \
-             apt-get install -y python3 python3-pip python3-venv curl ca-certificates; \
+             apt-get update -y || true; \
+             apt-get install -y python3 python3-pip python3-venv curl ca-certificates || true; \
              export UV_INSTALL_DIR=/usr/local/bin; \
-             (curl -LsSf https://astral.sh/uv/install.sh | sh) || echo '(uv install skipped — offline?)'; \
-             python3 --version"
+             curl -LsSf https://astral.sh/uv/install.sh | sh; \
+             command -v uv >/dev/null 2>&1 || { echo 'uv did not install (no internet?)'; exit 1; }; \
+             uv --version"
             .to_string();
         let argv = vec![
             "-d".into(), distro.clone(), "-u".into(), "root".into(), "--".into(),
@@ -603,15 +609,18 @@ async fn run_install(
         ];
         run_subprocess(channel, wsl, &argv, None)
             .await
-            .map_err(|e| format!("preparing Python in WSL failed: {e}. Open Set up WSL on the Home page to finish provisioning."))?;
+            .map_err(|e| format!("preparing the WSL toolchain failed: {e}. Check the WSL has internet, then retry."))?;
     }
 
-    // 1) Create the venv (uv preferred, python3-venv fallback).
+    // 1) Create the venv with uv (which fetches managed CPython {pyv} if the
+    //    distro lacks it). We DON'T fall back to `python3 -m venv` anymore:
+    //    on Ubuntu 25.x that picks system 3.14 and fails on missing ensurepip.
+    //    uv is guaranteed present by step 0.
     let _ = channel.send(InstallEvent::Step { label: format!("Creating venv in WSL: {env}") });
     let mk = format!(
         "set -e; mkdir -p {root}; rm -rf {t}; \
-         if command -v uv >/dev/null 2>&1; then uv venv --python {pyv} {t}; \
-         else python3 -m venv {t}; fi",
+         command -v uv >/dev/null 2>&1 || {{ echo 'uv missing after provisioning'; exit 1; }}; \
+         uv venv --python {pyv} {t}",
         root = q(&format!("{home}/.owllm/envs")),
         t = q(&tmp),
         pyv = q(&profile.python),
